@@ -23,7 +23,7 @@
   "environmentDescription": "Assistant · Built with macOS 27.2",
   "expectedFailures": 0,
   "failedTests": 0,
-  "finishTime": 1791085725.318,
+  "finishTime": 1791087294.155,
   "passedTests": 379,
   "result": "Passed",
   "runtimeWarnings": [
@@ -39,7 +39,7 @@
     }
   ],
   "skippedTests": 1,
-  "startTime": 1791085446.395,
+  "startTime": 1791086892.189,
   "statistics": [],
   "testFailures": [],
   "title": "Test - Assistant",
@@ -47,7 +47,7 @@
     {
       "category": "Longest Test Runs",
       "impact": "71% of duration",
-      "text": "2 longest test runs with outlier durations exceeding 25.38s (three standard deviations)"
+      "text": "2 longest test runs with outlier durations exceeding 24.93s (three standard deviations)"
     }
   ],
   "totalTestCount": 380

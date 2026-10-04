@@ -347,6 +347,19 @@ struct ChatView: View {
     let safeAreaLeadingInset: CGFloat
     let safeAreaTrailingInset: CGFloat
 
+    // Keep private DEBUG fixture storage out of the synthesized initializer API.
+    init(
+        safeAreaTopInset: CGFloat,
+        safeAreaBottomInset: CGFloat,
+        safeAreaLeadingInset: CGFloat,
+        safeAreaTrailingInset: CGFloat
+    ) {
+        self.safeAreaTopInset = safeAreaTopInset
+        self.safeAreaBottomInset = safeAreaBottomInset
+        self.safeAreaLeadingInset = safeAreaLeadingInset
+        self.safeAreaTrailingInset = safeAreaTrailingInset
+    }
+
     @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
