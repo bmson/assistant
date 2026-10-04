@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import SwiftUI
 import UIKit
 
@@ -115,9 +116,12 @@ struct NotificationTurnSettlements {
     }
 }
 
+/// One model observed per property; unrelated projection refreshes do not
+/// invalidate a screen that only reads its conversation or draft state.
 @MainActor
-final class AppModel: ObservableObject {
-    @Published var navigationPath: [AssistantDestination] = [] {
+@Observable
+final class AppModel {
+    var navigationPath: [AssistantDestination] = [] {
         didSet {
             // Includes page selection, person links, and native back gestures.
             // A slow notice must not replace the owner's newer navigation.
@@ -134,107 +138,109 @@ final class AppModel: ObservableObject {
             navigationPath = newValue.map { $0 == .chat ? [] : [.route($0)] } ?? []
         }
     }
-    @Published private(set) var bootstrap: BootstrapResponse?
-    @Published private(set) var overview: OverviewResponse?
-    @Published private(set) var archivedActivity: ActivityList?
-    @Published private(set) var archivedGoals: GoalsDashboard?
-    @Published private(set) var workspace: WorkspaceResponse?
-    @Published private(set) var memoryReviewCount = 0
-    @Published private(set) var mcpConnections: [McpConnection] = []
-    @Published private(set) var modelProviders: ModelProviderSettings?
-    @Published private(set) var savedCards: [SavedCardRecord] = []
-    @Published private(set) var activeConversation: ConversationView?
-    @Published private(set) var personProfiles: [String: PersonProfileResponse] = [:]
+    private(set) var bootstrap: BootstrapResponse?
+    private(set) var overview: OverviewResponse?
+    private(set) var archivedActivity: ActivityList?
+    private(set) var archivedGoals: GoalsDashboard?
+    private(set) var workspace: WorkspaceResponse?
+    private(set) var memoryReviewCount = 0
+    private(set) var mcpConnections: [McpConnection] = []
+    private(set) var modelProviders: ModelProviderSettings?
+    private(set) var savedCards: [SavedCardRecord] = []
+    private(set) var activeConversation: ConversationView?
+    private(set) var personProfiles: [String: PersonProfileResponse] = [:]
     /// The People directory, loaded when that screen opens.
-    @Published private(set) var people: [PersonSummary] = []
-    @Published private(set) var peopleLoaded = false
+    private(set) var people: [PersonSummary] = []
+    private(set) var peopleLoaded = false
     /// Cards keyed by contact id, so reopening a person is instant and a
     /// tapped relationship can push straight through to the other person.
-    @Published private(set) var personCards: [String: PersonCard] = [:]
-    @Published private(set) var messages: [ChatMessage] = []
-    @Published private(set) var isLoading = false
-    @Published private(set) var isSending = false {
+    private(set) var personCards: [String: PersonCard] = [:]
+    private(set) var messages: [ChatMessage] = []
+    private(set) var isLoading = false
+    private(set) var isSending = false {
         didSet {
             if !isSending, pendingNotificationDestination != nil {
                 Task { [weak self] in await self?.resolvePendingNotificationDestination() }
             }
         }
     }
-    @Published private(set) var toolActivity: [ToolActivity] = []
-    @Published private(set) var activityThought: AssistantThought?
-    @Published private(set) var activityDetail: String?
+    private(set) var toolActivity: [ToolActivity] = []
+    private(set) var activityThought: AssistantThought?
+    private(set) var activityDetail: String?
     /// Setting a message always retires the previous retry: an error that
     /// arrives from somewhere else must not inherit the last one's action.
     /// `reportError(_:retry:)` sets the message first, then the retry.
-    @Published var errorMessage: String? {
+    var errorMessage: String? {
         didSet {
             errorRetry = nil
             errorSource = nil
             errorNotice = errorMessage.map { AssistantErrorNotice(message: $0) }
         }
     }
-    @Published private(set) var errorNotice: AssistantErrorNotice?
-    private var errorSource: AssistantErrorSource?
+    private(set) var errorNotice: AssistantErrorNotice?
+    @ObservationIgnored private var errorSource: AssistantErrorSource?
     /// Offered by the banner when the failure was the network rather than the
     /// server's answer. Re-running a request the server rejected on its merits
     /// would only reproduce the rejection, so those get no retry.
-    @Published var errorRetry: RetryAction?
+    var errorRetry: RetryAction?
     /// The one hidden message that can still be put back, offered by a bar
     /// above the composer until it expires. Nil the rest of the time — hiding
     /// is otherwise silent, which is the point of it.
-    @Published private(set) var hiddenMessageUndo: HiddenMessageUndo?
-    private var hiddenMessageUndoExpiry: Task<Void, Never>?
+    private(set) var hiddenMessageUndo: HiddenMessageUndo?
+    @ObservationIgnored private var hiddenMessageUndoExpiry: Task<Void, Never>?
     private static let hiddenMessageUndoSeconds: TimeInterval = 6
     /// Text of a turn that failed to send, handed back to the composer so the
     /// words are never lost to a network or server failure. ChatView consumes it.
-    @Published private(set) var restorableDraft: String?
-    @Published private(set) var composerRecoveryRevision = 0
+    private(set) var restorableDraft: String?
+    private(set) var composerRecoveryRevision = 0
+    // Its session and recovery are read through composerDraftScope/helpers.
+    // Keep this tracked even though the storage itself is private.
     private var conversationDrafts = ConversationDrafts()
-    @Published private(set) var packDiscussionDraft: String?
-    @Published var showingConnection = false
+    private(set) var packDiscussionDraft: String?
+    var showingConnection = false
     /// One-shot intent shared by every user-facing way to send a message,
     /// including quick replies and document shortcuts.
-    @Published var nextMessageAutonomous = false
-    @Published private(set) var hasSavedConnection: Bool
+    var nextMessageAutonomous = false
+    private(set) var hasSavedConnection: Bool
 
     private(set) var serverURL: String
-    private var client: APIClient?
-    private var connectionVersion = 0
-    private var pairingAttemptVersion = 0
-    private var cursor: String?
+    @ObservationIgnored private var client: APIClient?
+    @ObservationIgnored private var connectionVersion = 0
+    @ObservationIgnored private var pairingAttemptVersion = 0
+    @ObservationIgnored private var cursor: String?
     /// Sequence for the rendered log. A merge can only add or replace by id —
     /// where a message belongs is decided here, once per id.
-    private var logOrder = ChatLogOrder()
+    @ObservationIgnored private var logOrder = ChatLogOrder()
     /// An in-flight poll may predate a successful POST. Terminal decisions
     /// cannot be undone by that older snapshot; reset on server/account change.
-    private var acceptedApprovalDecisions: [String: String] = [:]
+    @ObservationIgnored private var acceptedApprovalDecisions: [String: String] = [:]
     /// Decisions whose request is still in flight. The card has already left
     /// the local inbox; an overview read that started before the tap must not
     /// bring it back — nor, with it, the Island.
-    private var approvalsBeingDecided: Set<String> = []
+    @ObservationIgnored private var approvalsBeingDecided: Set<String> = []
     /// The re-read that follows a decision. It runs behind the control rather
     /// than in front of it: the server has already said yes.
-    private var approvalReconciliation: Task<Void, Never>?
+    @ObservationIgnored private var approvalReconciliation: Task<Void, Never>?
     /// The same guard for suggestion cards, set once an answer is confirmed. An
     /// accept or dismiss is final and stays; a snooze is protected until its
     /// deadline, so an older poll cannot make Later immediately reappear.
-    private var suggestionAnswers: [String: SuggestionAnswer] = [:]
-    private var suggestionsBeingAnswered: Set<String> = []
-    private var pendingNotificationDestination: AssistantNotificationDestination?
-    private var notificationNavigationVersion = 0
-    private var isResolvingNotification = false
-    private var notificationTurnSettlements = NotificationTurnSettlements()
-    private var cardsBeingRefreshed: Set<String> = []
-    private var cardRefreshMarkers: [String: CardRefreshMarker] = [:]
-    private var pollTask: Task<Void, Never>?
-    private var idleTask: Task<Void, Never>?
-    private var idlePollingVersion = 0
+    @ObservationIgnored private var suggestionAnswers: [String: SuggestionAnswer] = [:]
+    @ObservationIgnored private var suggestionsBeingAnswered: Set<String> = []
+    @ObservationIgnored private var pendingNotificationDestination: AssistantNotificationDestination?
+    @ObservationIgnored private var notificationNavigationVersion = 0
+    @ObservationIgnored private var isResolvingNotification = false
+    @ObservationIgnored private var notificationTurnSettlements = NotificationTurnSettlements()
+    @ObservationIgnored private var cardsBeingRefreshed: Set<String> = []
+    @ObservationIgnored private var cardRefreshMarkers: [String: CardRefreshMarker] = [:]
+    @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var idleTask: Task<Void, Never>?
+    @ObservationIgnored private var idlePollingVersion = 0
     /// The turn in flight, kept so returning to the foreground can pick the
     /// reply back up. Backgrounding cancels `pollTask`; the server carries on.
-    private var resumableTurn: (taskId: String?, streamID: String)?
+    @ObservationIgnored private var resumableTurn: (taskId: String?, streamID: String)?
     /// When the app was last backgrounded, for deciding whether the connection
     /// pool has had time to go stale.
-    private var backgroundedAt: Date?
+    @ObservationIgnored private var backgroundedAt: Date?
     /// How long backgrounded before the pool is assumed dead. Short, because
     /// being wrong costs one TCP handshake and being right saves the owner a
     /// full inactivity timeout staring at a spinner.
@@ -242,13 +248,13 @@ final class AppModel: ObservableObject {
     /// Idle polling is an in-app freshness affordance, never background work.
     /// Scene transitions cancel it so the OS can suspend the app cleanly and
     /// we do not wake the server while the owner cannot see a response.
-    private var isSceneActive = true
-    private var thoughtClearTask: Task<Void, Never>?
-    private var lastNotifiedTaskState: String?
+    @ObservationIgnored private var isSceneActive = true
+    @ObservationIgnored private var thoughtClearTask: Task<Void, Never>?
+    @ObservationIgnored private var lastNotifiedTaskState: String?
     /// How much of the reply in flight has been read aloud. Only a turn the
     /// owner started speaks: a proactive notice arriving while the phone is on
     /// a table is not something to announce to the room.
-    private var spokenTurn: SpokenTurn?
+    @ObservationIgnored private var spokenTurn: SpokenTurn?
     /// Talk mode reads every reply whether or not the setting is on — with no
     /// transcript on screen, speech is the only thing there to answer with.
     var speechAlwaysOn = false
@@ -263,8 +269,8 @@ final class AppModel: ObservableObject {
     static let shareLocationBackgroundKey = "assistant.share-location-background"
     /// One-time notification ask after a successful pairing (APNs opt-in).
     private let pushPromptedKey = "assistant.push-prompted"
-    private var lastLocationPostAt: Date?
-    private var lastForegroundReportAt: Date?
+    @ObservationIgnored private var lastLocationPostAt: Date?
+    @ObservationIgnored private var lastForegroundReportAt: Date?
 
     init(
         apiClient: APIClient? = nil,
@@ -575,6 +581,7 @@ final class AppModel: ObservableObject {
         isLoading = true
         errorMessage = nil
         var version = connectionVersion
+        let overviewVersion = version
         defer {
             // Cancellation ends the loading state too, but an old connection
             // must not dismiss a newer connection's loading indicator.
@@ -589,12 +596,20 @@ final class AppModel: ObservableObject {
             // — approvals, activity, goals — and fetching both in one
             // `try await` meant a single failing dashboard query rejected an
             // otherwise valid connection outright.
+            // Start the supplementary read alongside authentication, but keep
+            // its original scope. A replacement owner needs a new read.
+            async let overviewResult = fetchOverview(client)
             let response = try await client.bootstrap()
             guard connectionIsCurrent(client, version: version) else { return }
             apply(response)
             version = connectionVersion
             clearRecoveredError(from: .bootstrap)
-            await finishConnectionSetup(using: client, version: version)
+            await resolvePendingNotificationDestination()
+            guard connectionIsCurrent(client, version: version) else { return }
+            let result = version == overviewVersion
+                ? await overviewResult : await fetchOverview(client)
+            guard connectionIsCurrent(client, version: version) else { return }
+            await finishConnectionSetup(using: client, version: version, prefetchedOverview: result)
         } catch {
             guard connectionIsCurrent(client, version: version) else { return }
             reportError(error, source: .bootstrap, retry: { [weak self] in
@@ -614,13 +629,22 @@ final class AppModel: ObservableObject {
 
     /// Supplementary reads and device setup follow an authenticated bootstrap.
     /// They cannot reject a usable pairing or publish into a newer session.
-    private func finishConnectionSetup(using client: APIClient, version: Int) async {
+    private func finishConnectionSetup(using client: APIClient, version: Int,
+                                       prefetchedOverview: Result<OverviewResponse, Error>? = nil) async {
         guard connectionIsCurrent(client, version: version) else { return }
         hasSavedConnection = true
         defaults.set(true, forKey: configuredKey)
         await resolvePendingNotificationDestination()
         guard connectionIsCurrent(client, version: version) else { return }
-        await refreshOverview()
+        if let prefetchedOverview {
+            applyOverviewResult(prefetchedOverview, using: client, version: version, reportFailure: true)
+            guard connectionIsCurrent(client, version: version) else { return }
+            await reconcileBaselineActivity()
+            guard connectionIsCurrent(client, version: version) else { return }
+            await syncNotificationBadge()
+        } else {
+            await refreshOverview()
+        }
         guard connectionIsCurrent(client, version: version) else { return }
         if isSceneActive { startIdlePolling() }
         await shareLocationIfEnabled(force: true)
@@ -797,9 +821,13 @@ final class AppModel: ObservableObject {
     func refreshAll(reportFailure: Bool = true) async {
         guard let client else { return }
         var version = connectionVersion
+        let overviewVersion = version
         // Kept separate for the same reason `connect()` separates them: these
         // fetch different things, and a failing dashboard query should not
         // throw away a bootstrap that arrived perfectly well.
+        // Started together, handled separately: a failing dashboard query still
+        // does not throw away a bootstrap that arrived perfectly well.
+        async let overviewResult = fetchOverview(client)
         do {
             let response = try await client.bootstrap()
             guard connectionIsCurrent(client, version: version) else { return }
@@ -818,13 +846,30 @@ final class AppModel: ObservableObject {
             return
         }
         guard connectionIsCurrent(client, version: version) else { return }
+        // Authentication may have replaced the owner behind an unchanged key.
+        // Never promote the old speculative read into the replacement scope.
+        let result = version == overviewVersion
+            ? await overviewResult : await fetchOverview(client)
+        applyOverviewResult(result, using: client, version: version, reportFailure: reportFailure)
+        guard connectionIsCurrent(client, version: version) else { return }
+        await reconcileBaselineActivity()
+        guard connectionIsCurrent(client, version: version) else { return }
+        await syncNotificationBadge()
+    }
+
+    /// One overview read as a value, so it can run beside another request and be
+    /// judged on its own once the other has landed.
+    private func fetchOverview(_ client: APIClient) async -> Result<OverviewResponse, Error> {
+        do { return .success(try await client.overview()) } catch { return .failure(error) }
+    }
+
+    private func applyOverviewResult(_ result: Result<OverviewResponse, Error>,
+                                     using client: APIClient, version: Int, reportFailure: Bool) {
+        guard connectionIsCurrent(client, version: version) else { return }
         do {
-            let response = try await client.overview()
-            guard connectionIsCurrent(client, version: version) else { return }
-            overview = withLocalApprovalDecisions(response)
+            overview = withLocalApprovalDecisions(try result.get())
             clearRecoveredError(from: .overview)
         } catch {
-            guard connectionIsCurrent(client, version: version) else { return }
             if reportFailure {
                 reportError(error, source: .overview, retry: { [weak self] in
                     guard let self else { return }
@@ -832,10 +877,6 @@ final class AppModel: ObservableObject {
                 })
             }
         }
-        guard connectionIsCurrent(client, version: version) else { return }
-        await reconcileBaselineActivity()
-        guard connectionIsCurrent(client, version: version) else { return }
-        await syncNotificationBadge()
     }
 
     func scenePhaseDidChange(_ phase: ScenePhase) {
@@ -1297,7 +1338,7 @@ final class AppModel: ObservableObject {
 
     /// Requests currently out for the workspace projection, so a prefetch never
     /// duplicates the read a screen has just started.
-    private var workspaceRequestsInFlight: [Int: Int] = [:]
+    @ObservationIgnored private var workspaceRequestsInFlight: [Int: Int] = [:]
 
     /// Warm the workspace once the conversation is up. Memory, Settings, Costs,
     /// Skills and the rest all draw on this one large projection, and the first

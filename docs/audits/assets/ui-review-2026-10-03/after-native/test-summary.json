@@ -1,0 +1,54 @@
+{
+  "devicesAndConfigurations": [
+    {
+      "device": {
+        "architecture": "arm64",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "modelName": "iPhone 17 Pro",
+        "osBuildNumber": "24A5355p",
+        "osVersion": "27.0",
+        "platform": "iOS Simulator"
+      },
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "passedTests": 379,
+      "skippedTests": 1,
+      "testPlanConfiguration": {
+        "configurationId": "1",
+        "configurationName": "Test Scheme Action"
+      }
+    }
+  ],
+  "environmentDescription": "Assistant · Built with macOS 27.2",
+  "expectedFailures": 0,
+  "failedTests": 0,
+  "finishTime": 1791085725.318,
+  "passedTests": 379,
+  "result": "Passed",
+  "runtimeWarnings": [
+    {
+      "issueType": "Runtime Warning",
+      "message": "    AVAudioSession_iOS.mm:975   This method can lead to UI unresponsiveness if called on the main thread. Consider using the asynchronous activate/deactivate API instead for calls from the main thread.",
+      "sourceURL": "file:///Users/baldvinsmarason/Code/Personal/assistant/apps/ios/AssistantTests/SpeechVoiceTests.swift"
+    },
+    {
+      "issueType": "Runtime Warning",
+      "message": "    AVAudioSession_iOS.mm:975   This method can lead to UI unresponsiveness if called on the main thread. Consider using the asynchronous activate/deactivate API instead for calls from the main thread.",
+      "sourceURL": "file:///Users/baldvinsmarason/Code/Personal/assistant/apps/ios/AssistantTests/SpeechVoiceTests.swift"
+    }
+  ],
+  "skippedTests": 1,
+  "startTime": 1791085446.395,
+  "statistics": [],
+  "testFailures": [],
+  "title": "Test - Assistant",
+  "topInsights": [
+    {
+      "category": "Longest Test Runs",
+      "impact": "71% of duration",
+      "text": "2 longest test runs with outlier durations exceeding 25.38s (three standard deviations)"
+    }
+  ],
+  "totalTestCount": 380
+}

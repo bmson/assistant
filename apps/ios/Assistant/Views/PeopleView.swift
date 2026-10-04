@@ -9,7 +9,7 @@ import SwiftUI
 /// application layer, so this screen and the web read identically and cannot
 /// drift apart. Nothing here formats a date or infers a fact.
 struct PeopleView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @State private var query = ""
     @State private var showsVisualGraph = false
     @State private var showsPersonCreator = false
@@ -168,7 +168,7 @@ struct PeopleView: View {
 
 /// Connection exploration stays available without taking over the directory.
 private struct PeopleConnectionsScreen: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @State private var query = ""
     @State private var focusedPersonID: String?
 
@@ -420,7 +420,7 @@ struct PersonRelationGroupCard: View {
 
 /// Inspect one exact source-backed claim, not every claim about the same person.
 struct PersonRelationshipEvidenceScreen: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     let evidence: PersonRelationSummary
@@ -524,7 +524,7 @@ struct PersonRelationshipEvidenceScreen: View {
 /// One person, in full: identity, birthday and how you met, grouped connections,
 /// and recent happenings, with direct access to relationship evidence.
 struct PersonCardScreen: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     let personId: String
     @State private var inspectingEvidence: PersonRelationSummary?

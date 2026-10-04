@@ -8,7 +8,7 @@ import UIKit
 /// assistant at all, and no way to erase it, which is not a thing that should
 /// depend on owning a laptop.
 struct MemoryDataScreen: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @State private var exporting = false
     @State private var exported: ExportedFile?
@@ -131,7 +131,7 @@ private struct ShareSheet: UIViewControllerRepresentable {
 /// iOS could upload sent messages and clear them, but the profile those samples
 /// produce — the description the drafting step actually reads — was web-only.
 struct VoiceProfileEditor: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 

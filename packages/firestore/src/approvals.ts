@@ -121,6 +121,8 @@ async function ownedTask(
     : null;
 }
 
+const INBOX_ACCEPT_BATCH = 10;
+
 async function collectInboxCandidates<T>(
   baseQuery: import('@google-cloud/firestore').Query,
   target: number,
@@ -135,10 +137,15 @@ async function collectInboxCandidates<T>(
       .limit(INBOX_PAGE_SIZE)
       .get();
     scanned += page.size;
-    for (const candidate of page.docs) {
-      const item = await accept(candidate);
-      if (item !== null) accepted.push(item);
-      if (accepted.length >= target) return accepted;
+    // Each candidate needs its own task lookup. Ten at a time, in order: far
+    // fewer round trips than one by one, without reading a whole page the
+    // target will never reach.
+    for (let at = 0; at < page.docs.length; at += INBOX_ACCEPT_BATCH) {
+      const items = await Promise.all(page.docs.slice(at, at + INBOX_ACCEPT_BATCH).map(accept));
+      for (const item of items) {
+        if (item !== null) accepted.push(item);
+        if (accepted.length >= target) return accepted;
+      }
     }
     if (page.size < INBOX_PAGE_SIZE) return accepted;
     if (scanned >= INBOX_SCAN_LIMIT) throw new Error(errorMessage);
@@ -194,7 +201,7 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
       .where('status', '==', 'pending')
       .orderBy('requestedAt', 'asc')
       .orderBy('id', 'asc');
-    const pending = await collectInboxCandidates(
+    const pendingRead = collectInboxCandidates(
       pendingQuery,
       INBOX_PENDING_LIMIT,
       async (candidate) => {
@@ -236,7 +243,7 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
       .where('resolvedAt', '!=', null)
       .orderBy('resolvedAt', 'desc')
       .orderBy('id', 'desc');
-    const dated = await collectInboxCandidates(
+    const datedRead = collectInboxCandidates(
       terminalQuery,
       recentLimit,
       async (candidate) => this.resolvedInboxItem(candidate, agentId),
@@ -249,7 +256,7 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
       .where('resolvedAt', '==', null)
       .orderBy('expiresAt', 'desc')
       .orderBy('id', 'desc');
-    const nullResolved = await collectInboxCandidates(
+    const nullResolvedRead = collectInboxCandidates(
       nullResolvedTerminalQuery,
       recentLimit,
       async (candidate) => this.resolvedInboxItem(candidate, agentId),
@@ -262,7 +269,7 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
       .where('expiresAt', '<=', now)
       .orderBy('expiresAt', 'desc')
       .orderBy('id', 'desc');
-    const expired = await collectInboxCandidates(
+    const expiredRead = collectInboxCandidates(
       expiredPendingQuery,
       recentLimit,
       async (candidate) => {
@@ -278,6 +285,15 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
       },
       'Approval inbox expired scan exceeded its safety bound',
     );
+
+    // Four independent reads, started together. They used to run one after
+    // another, each waiting on every approval's task lookup in turn.
+    const [pending, dated, nullResolved, expired] = await Promise.all([
+      pendingRead,
+      datedRead,
+      nullResolvedRead,
+      expiredRead,
+    ]);
 
     const resolved = [...dated, ...nullResolved, ...expired];
     resolved.sort(historyOrder);

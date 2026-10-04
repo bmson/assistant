@@ -490,7 +490,7 @@ final class AssistantMarkdownTests: XCTestCase {
         window.rootViewController = UIHostingController(rootView:
             ChatView(safeAreaTopInset: 62, safeAreaBottomInset: 34,
                 safeAreaLeadingInset: 0, safeAreaTrailingInset: 0)
-                .environmentObject(model).environment(\.colorScheme, .light))
+                .environment(model).environment(\.colorScheme, .light))
         window.makeKeyAndVisible()
         defer {
             window.endEditing(true)

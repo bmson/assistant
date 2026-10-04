@@ -10,7 +10,7 @@ private enum ActivityFilter: String, CaseIterable, Identifiable {
 }
 
 struct ActivityView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.verticalSizeClass) private var verticalSizeClass

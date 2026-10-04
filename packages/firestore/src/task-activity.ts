@@ -4,11 +4,11 @@ import type {
   TaskActivityDetailRepository,
   TaskActivityRepository,
 } from '@assistant/persistence';
-import { FieldPath, type QueryDocumentSnapshot } from '@google-cloud/firestore';
+import { FieldPath, type Query, type QueryDocumentSnapshot } from '@google-cloud/firestore';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
-const PAGE_SIZE = 250;
+const PAGE_SIZE = 100;
 const MAX_OWNER_TASKS = 25_000;
 const MAX_APPROVALS_PER_TASK = 500;
 const MAX_FILES_PER_TASK = 5_000;
@@ -84,66 +84,98 @@ export class FirestoreTaskActivityRepository
     )
       throw new Error('Activity requires one matching configured agent');
     const fence = await readPrivacyErasureFence(this.store, agentId);
-    const rows: ActivityTaskRecord[] = [];
-    let cursor: QueryDocumentSnapshot | undefined;
-    for (;;) {
-      let query = this.store
-        .collection('tasks')
-        .where('agentId', '==', agentId)
-        .select(...FIELDS)
-        .orderBy(FieldPath.documentId())
-        .limit(PAGE_SIZE);
-      if (cursor) query = query.startAfter(cursor);
-      const page = await query.get();
-      for (const doc of page.docs) {
-        rows.push(taskFromDocument(doc.data(), doc.id, agentId));
-        if (rows.length > MAX_OWNER_TASKS)
-          throw new Error('Owner activity exceeds the bounded task scan');
-      }
-      if (page.size < PAGE_SIZE) break;
-      cursor = page.docs.at(-1);
-    }
-
-    const archivedCount = rows.filter((row) => row.archivedAt !== null).length;
     const statuses = input.statuses ? new Set(input.statuses) : null;
-    const tasks = rows
-      .filter(
-        (row) =>
-          (input.archived ? row.archivedAt !== null : row.archivedAt === null) &&
-          !isCanary(row.trigger) &&
-          (!statuses || statuses.has(row.status)),
-      )
+    const owned = this.store.collection('tasks').where('agentId', '==', agentId);
+
+    // The list is the newest `limit` tasks, so it is read newest-first and the
+    // read stops as soon as it has them. It used to read every task the
+    // assistant had ever created (15,000+ in production, in pages of 250) just to
+    // keep fifty, which made every refresh of the app wait several seconds.
+    // `agentId ASC, updatedAt DESC` and `agentId, status, updatedAt DESC` already
+    // exist, so this needs no new index.
+    const wanted = (row: ActivityTaskRecord) =>
+      (input.archived ? row.archivedAt !== null : row.archivedAt === null) &&
+      !isCanary(row.trigger) &&
+      (!statuses || statuses.has(row.status));
+    const newestFirst = async (query: Query): Promise<ActivityTaskRecord[]> => {
+      const found: ActivityTaskRecord[] = [];
+      // Once `limit` rows are in hand, keep reading only through rows that share
+      // the last one's timestamp, so the id tie-break below picks the same rows a
+      // full read would (a bulk archive stamps hundreds of tasks with one instant).
+      let boundary: number | null = null;
+      let scanned = 0;
+      let cursor: QueryDocumentSnapshot | undefined;
+      for (;;) {
+        let page = query
+          .orderBy('updatedAt', 'desc')
+          .select(...FIELDS)
+          .limit(PAGE_SIZE);
+        if (cursor) page = page.startAfter(cursor);
+        const snapshot = await page.get();
+        for (const doc of snapshot.docs) {
+          const row = taskFromDocument(doc.data(), doc.id, agentId);
+          if (boundary !== null && row.updatedAt.getTime() < boundary) return found;
+          if (wanted(row)) {
+            found.push(row);
+            if (boundary === null && found.length >= input.limit)
+              boundary = row.updatedAt.getTime();
+          }
+        }
+        scanned += snapshot.size;
+        if (scanned > MAX_OWNER_TASKS)
+          throw new Error('Owner activity exceeds the bounded task scan');
+        if (snapshot.size < PAGE_SIZE) return found;
+        cursor = snapshot.docs.at(-1);
+      }
+    };
+
+    // A status filter reads each status through its own ordered index so a rare
+    // status (needs_attention) is not found by walking past every done task.
+    const [candidates, total, live] = await Promise.all([
+      statuses
+        ? Promise.all(
+            [...statuses].map((status) => newestFirst(owned.where('status', '==', status))),
+          ).then((lists) => lists.flat())
+        : newestFirst(owned),
+      owned.count().get(),
+      owned.where('archivedAt', '==', null).count().get(),
+    ]);
+    const archivedCount = total.data().count - live.data().count;
+    const tasks = candidates
       .sort(
         (left, right) =>
           right.updatedAt.getTime() - left.updatedAt.getTime() || left.id.localeCompare(right.id),
       )
       .slice(0, input.limit);
 
-    const pendingApprovalTaskIds: string[] = [];
-    for (const task of tasks.filter((row) => row.status === 'waiting_approval')) {
-      const approvals = await this.store
-        .collection('approvals')
-        .where('taskId', '==', task.id)
-        .select('id', 'taskId', 'status')
-        .limit(MAX_APPROVALS_PER_TASK + 1)
-        .get();
-      if (approvals.size > MAX_APPROVALS_PER_TASK)
-        throw new Error('Activity approval history exceeds the bounded scan');
-      if (
-        approvals.docs.some((doc) => {
-          const row = decodeRecord<Record<string, unknown>>(doc.data());
-          if (
-            row.taskId !== task.id ||
-            typeof row.id !== 'string' ||
-            documentKey(row.id) !== doc.id ||
-            typeof row.status !== 'string'
-          )
-            throw new Error('Invalid activity approval');
-          return row.status === 'pending';
-        })
+    // One lookup per task waiting on approval, side by side rather than in turn.
+    const waiting = tasks.filter((row) => row.status === 'waiting_approval');
+    const pendingApprovalTaskIds = (
+      await Promise.all(
+        waiting.map(async (task) => {
+          const approvals = await this.store
+            .collection('approvals')
+            .where('taskId', '==', task.id)
+            .select('id', 'taskId', 'status')
+            .limit(MAX_APPROVALS_PER_TASK + 1)
+            .get();
+          if (approvals.size > MAX_APPROVALS_PER_TASK)
+            throw new Error('Activity approval history exceeds the bounded scan');
+          const hasPending = approvals.docs.some((doc) => {
+            const row = decodeRecord<Record<string, unknown>>(doc.data());
+            if (
+              row.taskId !== task.id ||
+              typeof row.id !== 'string' ||
+              documentKey(row.id) !== doc.id ||
+              typeof row.status !== 'string'
+            )
+              throw new Error('Invalid activity approval');
+            return row.status === 'pending';
+          });
+          return hasPending ? task.id : null;
+        }),
       )
-        pendingApprovalTaskIds.push(task.id);
-    }
+    ).filter((id): id is string => id !== null);
     await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
     return { tasks, archivedCount, pendingApprovalTaskIds };
   }

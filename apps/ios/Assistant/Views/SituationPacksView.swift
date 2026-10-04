@@ -37,7 +37,7 @@ enum SituationPackLoadFailure {
 }
 
 struct SituationPacksView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @State private var overview: SituationOverview?
     @State private var title = ""
@@ -167,7 +167,7 @@ struct SituationPacksView: View {
 
 struct SituationPackDetail: View {
     let packId: String
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var overview: SituationOverview?

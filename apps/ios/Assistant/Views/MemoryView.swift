@@ -9,7 +9,7 @@ import UniformTypeIdentifiers
 /// read and act on it, swipe for the common moves — rather than a card
 /// carrying three buttons, which is what made the old page a wall of controls.
 struct MemoryView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -377,7 +377,7 @@ struct MemoryView: View {
 struct MemoryFactSheet: View {
     let fact: WorkspaceMemoryFact
     var onReviewCompleted: (() -> Void)? = nil
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var working = false
@@ -529,7 +529,7 @@ struct MemoryFactSheet: View {
 /// The short summary that rides along in every conversation, and the
 /// organizer that keeps the memory behind it tidy.
 struct MemoryProfileScreen: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @State private var inFlight: String?
 
@@ -593,7 +593,7 @@ struct MemoryProfileScreen: View {
 /// How the assistant writes when it drafts for the owner, and the samples it
 /// learned that from.
 struct WritingVoiceScreen: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var register = "email_casual"
@@ -879,7 +879,7 @@ struct PersonDetailsView: View {
     let personId: String
     let personName: String
 
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var showingOccasionEditor = false
@@ -1111,7 +1111,7 @@ struct OccasionEditor: View {
     let personId: String
     let occasion: PersonOccasion?
 
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var kind = "birthday"
@@ -1202,7 +1202,7 @@ struct PersonEditor: View {
     /// The id being edited; nil creates a new person.
     private let personId: String?
 
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
     @State private var relationship: String
@@ -1271,7 +1271,7 @@ struct MemoryEditor: View {
     /// The fact being corrected; nil creates a new one.
     private let factId: String?
 
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var content: String
     @State private var domain: String
@@ -1360,7 +1360,7 @@ struct MemoryEditor: View {
 /// Dates are editable where people are read, without a detour through Memory.
 struct PersonDatesScreen: View {
     let personId: String
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var editing: PersonOccasion?
     @State private var adding = false

@@ -1,10 +1,10 @@
 {
-  "resultBundle": "/private/tmp/assistant-native-ui-complete-scroll.xcresult",
+  "resultBundle": "/private/tmp/assistant-native-ui-release-final-retry.xcresult",
   "runtime": "iOS 27.0 (24A5355p), arm64",
   "method": "UIKit UIHostingController capture with isolated read-only fixture URLProtocol",
   "sourceSha256": {
-    "AppModel.swift": "000fed6488f69063d677c0dfd7bfeed56c9de77cf4ccd1fef932d04df1fada3e",
-    "AssistantApp.swift": "4525b6377b9225c323660453e0bbaddd2169232db5faeefd31ebb3dc7bec916b",
+    "AppModel.swift": "899b127881c39bf5a026420edcfad3b0661a8e43a692f30c4c32c8e29d5df99e",
+    "AssistantApp.swift": "367437a2a6dbf66e735547eb5f2dac86172bd035c8872c9a07fb5ef85f405818",
     "Components/ActivityCrown.swift": "f179b0e233129233145c280421842a0c6a4e773876106ff55882d392dd1da88f",
     "Components/BriefingCardView.swift": "f4bf6709f798da715fd897cbaaca40110c22641bceadafe05d04aed748888611",
     "Components/CardActions.swift": "5b99abb1390d95235d2956defd8f4469a62cd2d92b16d3fc698f071bd09a758e",
@@ -31,27 +31,27 @@
     "System/RenderMemo.swift": "5f392f2c5146d2e367f5d0f63e48e5b85ae0977e86ef5ec7d2c4255fe1796532",
     "System/SpeechListener.swift": "b7e9189bd35251f69b53bc16d3d3be8a43d484727296058d43141799791b6a42",
     "System/SpeechPlayer.swift": "e36e7d000b7382e243342fd642300ff39a682d6c40cfbb291318639e94d06be4",
-    "Views/AIProvidersView.swift": "9a13887d6f811916b3533b4af7376fe0ccdb2c85ac29e220ad3876abf01c99e5",
-    "Views/ActivityView.swift": "c43fb59c33f09055dc54b78edad9fad62f3e3f8ffe7ab30f32562b3e0cb143a3",
-    "Views/ApprovalsView.swift": "14680ee34dbe4b8eb0860728289db1d1ce366fff931f87e7440de2e43f1f0625",
-    "Views/CallsView.swift": "6ce719620ce8c5409993e29b56d8191802d70fd28dc39fb115119a2a438f22b8",
-    "Views/ChatView.swift": "cd28dc59b7bd7ae4ae4c246f22b60786ee792b69e708558ea5e884da0776cc44",
-    "Views/CommitmentsView.swift": "e3516e57261b6a5782ddca5da71a3428abe5ec2f358e920efe94df41dcb50a79",
-    "Views/ConnectionView.swift": "1c840952f3aa4aea2f368a3cc6379038efb2ea5633f89003b8f3fac5dd60834e",
-    "Views/GoalsView.swift": "7d937a8485eae3841b1ebdb8a6ad2b0b404560eb8178171414c6a8d0d7c5851e",
-    "Views/KnowledgeView.swift": "4efb80849232342ff8db2f778c255c3ce2c6609d526167e2b453e6e08923ad3f",
-    "Views/MemoryDataView.swift": "a254d56cfaa0e3c2ed972a1f0129919a29ff2bc44bbf14b6631fb19174fb51c3",
-    "Views/MemoryLibraryView.swift": "bcabaf892c32c2b6fe41bfb97ad825f3c07cb3d41e7176277557cd974827cf6e",
-    "Views/MemoryView.swift": "ede606e98981ee53dc8d6e56c2fb00a143728a25c5c1fe3fa103a28eef6ce837",
-    "Views/MoreView.swift": "e0ad89b88fbaa59c0d9d5396b42af2f4e91bf17cfbcfcff1787b44bcdf8ba080",
-    "Views/PeopleConnectionsView.swift": "a24e4d899f59fa2016a0cd5014edc8e942f0affbefcb2743e82033e446c333e6",
-    "Views/PeopleView.swift": "f38006151c36fbdc0c6cf7dc001f0dac36966fb64b17b58ba8b5d522c98e9449",
+    "Views/AIProvidersView.swift": "0cde85c7b2d8bbc77c7c002f7dc5d159655a911c72fb3705e92f77b94e44d42b",
+    "Views/ActivityView.swift": "cdb20dc8c2e82a16054d291c5fa92d4ad91dcb3142a4dc9e4e9fc682d7f3209c",
+    "Views/ApprovalsView.swift": "514188ebd2217e1fa571d6527ae9af23290570469b3edc963b6243aa13f02452",
+    "Views/CallsView.swift": "248acd1c3da6d44b70c8c9c6329c91c7d768e48259bc4b724ebe7bbb0de80acf",
+    "Views/ChatView.swift": "805f545768cdd6d70f72cc0a8a6536f4e17dd48d391d61f079c37606536d5007",
+    "Views/CommitmentsView.swift": "b9c49a21bac06eb2b0534260ff0aa6120617223a6528c95c7bc24a1a3f4148fe",
+    "Views/ConnectionView.swift": "f3199d4f4495648d84134d2b66efbdf97f0a54e178b661dc484d1c3975a8bc63",
+    "Views/GoalsView.swift": "4dc03c1549dd813f6f07396eb82d10b911940f5c909a8fb8095103255312bab6",
+    "Views/KnowledgeView.swift": "46972e44af94578b5596a5d3185d1db45ec9c0483e3fc055186ba1735976ddd4",
+    "Views/MemoryDataView.swift": "9ff4167c91aad2f2eaa5cd38e4c74b60c8707a164e73f70556c56e2f99ced97e",
+    "Views/MemoryLibraryView.swift": "72372bc420f4c2ac2802a0fc17a7574a494bffdd4632ebf08c09cabab5ae58b5",
+    "Views/MemoryView.swift": "2a3c64aecd12e27aa687f8037094e0d39fba10c5d87ab1c9f671abafd8c26896",
+    "Views/MoreView.swift": "48c790d85348cbb91882111f73bbca99901402f6ca389aeab7afc711595f8c98",
+    "Views/PeopleConnectionsView.swift": "a23b32f21f5c74e850e61f413c9d19eed8848e6633ec5f662d9378cefc53775d",
+    "Views/PeopleView.swift": "2b57e23ab3e5f72acab72e57cf977a83324839e3784b2188406c3cc90fb4ac12",
     "Views/RelationshipGraphCanvas.swift": "d40b2b27344efa0b1bf4d043e04f6a260486c5b960535dd8956300188ea0bda9",
-    "Views/RelationshipGraphScreen.swift": "be3d4f8cc96abf93c7ab6204b7a178d157fb1a40c99c09aafda07a03ec467b22",
-    "Views/RootView.swift": "8b62f020b784c97efb5d122655fc4af900bef1ad468ceb080ff470b0a667bd98",
-    "Views/SituationPacksView.swift": "df4a89ef26a820368f63bde0336c08381e40cf661c47f89b18b81be668d379fa",
-    "Views/TalkView.swift": "02f28d1aa46a560a7c5c2eec4be7f72094253ec2b8fa13d7dcb1b260827dee6b",
-    "Views/WorkspaceView.swift": "93960f856bbb1796240da1f26ed20eec8d56c8a5f72edf2ea0d78e6a0958c5af"
+    "Views/RelationshipGraphScreen.swift": "bf344ac799cdf321fafdea77f0f7f6abbb657fc80407dafe18fd9d5ca126e1ed",
+    "Views/RootView.swift": "1ecf289fb8832a1d3e453e6ee9eafc9d6916c8e2fd8b6f4be368f07478aa97df",
+    "Views/SituationPacksView.swift": "6364100be762b3997bd359396b4f157f270f7145c89f8e95b9470cbfd1f06eb7",
+    "Views/TalkView.swift": "e260b759f899a1541c56e4b1c3e6b5edcbebf4f873aafeaf953543c928723dce",
+    "Views/WorkspaceView.swift": "26e800ccd85e321df7bf70b24256450682e4368f3d0652c7af0333ac98f87afd"
   },
   "captures": [
     {
@@ -73,7 +73,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "scroll-05",
-      "sha256": "dd8bc194f6b5dc4220744c73dbe1ed912285092444c96093a1e2698228beecca",
+      "sha256": "7b18320a7e461f19586b0b8877c4823e29c9e2b76623ebb8cd2708ad369d94f2",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -85,7 +85,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "scroll-04",
-      "sha256": "04d069577dda7f95aa94e57cbdd0e8ddaaab38c9cfb7c239f733ae1eb1034fe8",
+      "sha256": "dded3dda2e5d4169526246c991aabe4962937a458715c88f78263e2ea2e09ebb",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -109,7 +109,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "scroll-02",
-      "sha256": "dabe7c17ce5521686e5f2dcea3020030a70bf9c5c167cffde260072f458b505f",
+      "sha256": "363fadf01ab4582ea59e1149033e6dda3490a32dbdabf807ecd413b49968b03f",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -181,7 +181,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "top",
-      "sha256": "f7eabad5223e53f54a68972ef49e02bd011a1fef78823b7e3d6b148134ea0537",
+      "sha256": "66652a4e053a85fb4054fc3ab3d43a96f479e4f17efa511785f599daacd0ccc1",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -277,7 +277,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "top",
-      "sha256": "92c01a45fc167fad199d1c9b6d8508e656b2577fa0f80b46c0f4977db30f872d",
+      "sha256": "eb4a5a0eb46a5ee1fc2755f781511e36c604dfb02ec6805c8cf1f5616f0e6d82",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -289,7 +289,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "c97fa7f37aefa82c4d21c4add9bab64ac154698d4d0ba8079caec53893f39b0b",
+      "sha256": "4c038979b8a3f885b5e45ff75ab47786c0e0ade34086b4421b4086471359cca4",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -301,7 +301,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "scroll-01",
-      "sha256": "bf72abd90b2dacda636f3ea6d360275a50e158a6886f5f2d9ca80a9ac2690e15",
+      "sha256": "1f8c757bdcd950f8c261298af9906d47d6aec49926989f3d874d9bec4e0b8abb",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -313,7 +313,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "db759550605d070e196023638c1d05dd3f6253b4db3e807bc05f7cc35643f666",
+      "sha256": "b632731ae458cc49c87187d9aa7716a109803dbee9abd711b495724872e32f93",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -337,7 +337,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "4c88b93f993f08ce54007f01ccc4d0a4c4d4307c27440c58120f977ff16ec3da",
+      "sha256": "492480cb0161f977f493b2f640d8705cacf4d654da1512db893ba1458e2512fc",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -349,7 +349,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "scroll-03",
-      "sha256": "bacb5e8fd994a2b7af0c73557cc1e4201c479913fdc60725789470cf38b6354f",
+      "sha256": "b569ebbc2dac1fc1c3267877b624b5809a06e5e294f1289c4b017fc4c255f318",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -361,7 +361,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "scroll-02",
-      "sha256": "0048a2f50b5abbb3a9ce2732d165a45df2035cfe0b545fd2775dc08e4d7e8a81",
+      "sha256": "b504042af7a7f0f68e6d1a6bd902ac7353189b65f4617e4c76d7d12aaf1a0c3f",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -397,7 +397,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "8c0f1bbe322479d75243aafd31e282b15e26bd7e19fe2f66cbc1f32f4494b983",
+      "sha256": "3332eb79ac0abd5ab98e10f76b898074f9173bf01b1411ec98d42ab12036f083",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -409,7 +409,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "scroll-01",
-      "sha256": "7161321afe145cd5b64adc2f94768fdf5207a478cb9dfc672425eb4333976929",
+      "sha256": "38fec181e3b1752632563e73e2de029475264aa591f42874954cb488f06f2369",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -421,7 +421,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "59c3c00e08bd02e1a33dc99840f9e19557588fb1c43f48944aedf8f4faf69fc7",
+      "sha256": "3cc4b55b5077269dcdad0e739ed6f611928728195453518d723f43111a41dc75",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -613,7 +613,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "scroll-02",
-      "sha256": "0645dafde157f7c8770a9613d23e6e8a43afba6e4b46d04009953e294cf3fde6",
+      "sha256": "b360ca7e403718c14459dee0762335de7783b9ceae959f64f13f4d0cb007641d",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -673,7 +673,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "scroll-03",
-      "sha256": "1eb1097b31739dd9a28fd0578827006b4453a671324dcbd0b1d3e6f697ab6959",
+      "sha256": "6311a022db19093d99148ea1ae56922fcf4c458e01a89ca3c865da588f987051",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -697,7 +697,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "scroll-01",
-      "sha256": "2163f7f62ecd69f4001020b627c4fb903ce4df24712b2491a9ef543afe615baa",
+      "sha256": "06a197095914a0e24e301b8c472ea569293c1206091d6b141994c45a8521e45b",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -769,7 +769,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "scroll-04",
-      "sha256": "5809913c317d66ea071c30fd14bb38f8e56b8fa30416b0d1089e5b8e604c652e",
+      "sha256": "ca91edca3543eb389af5cad5cc9869338c8ce38ddb7e92b310998bcf2a777f5f",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -781,7 +781,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "scroll-03",
-      "sha256": "424ddde222b1f46d9c24139d2ab739f92ef363fc7b7bad6dffb633cd8308df55",
+      "sha256": "57476d0975f2cbb35e54e071c2a6f5e991f1ccd6b411b2bf033b7c5fdda5e437",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -793,7 +793,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "scroll-02",
-      "sha256": "a8a77550aacdfafb45046d8229d7eea59d90eaf00eca21c1721b6d8c1b2e920c",
+      "sha256": "7e5d4b47303bd79aff642429f056abbbcd3035ebe7deb7130db2aa236303b878",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -805,7 +805,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "scroll-01",
-      "sha256": "7333451caede7c5a2fb662fac0b9e0e7236b2bf9439b659b3ac858c6e15cd00c",
+      "sha256": "0eec1a953e66b62acd62bfdb457abf6ea6d61ae808dd4ccd11eec24a5b215180",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -817,7 +817,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "top",
-      "sha256": "bb2b93b94c5f0d1e9a2350641fa06cb0998c18aced64836ac862a46bd51bd9c3",
+      "sha256": "c5439ee1e87a2380cb5a07ba8ace1341fa8e319a7f91364a5e64e6ef1a7562de",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -829,7 +829,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "scroll-03",
-      "sha256": "6afad64acf4358edf57cd9459ce7dc2784cecb45519ce6018aec3122e797610f",
+      "sha256": "0fef5520ded4fe0e4a04b8e10ca739652550da3035a9b0cddd49c568d066d455",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -841,7 +841,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "scroll-02",
-      "sha256": "5b6cce56ff6989d6c50edfb4965b27d53c3c39a8707a554c456976805e6c7a73",
+      "sha256": "cba0eb0ce51ed33154d5950fcd486b4c73f8c5c5dfbf3933d576fd5615c9e69a",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -853,7 +853,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "scroll-01",
-      "sha256": "eb6307faf62b3dd81d3c7d26d8f0de4c632704106a4823a76227e57c7977621c",
+      "sha256": "6e414cffacf808776aafb2f5900b44073ad147671cb16188427ef1618bee6aa4",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -865,7 +865,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "top",
-      "sha256": "876e5348d53d7763f822e9381258e6a934b74e77a622878fdb2282c81c97e394",
+      "sha256": "12a9d5daac87d93a8e28fc16aa925423753227b7ca53a9c8234032f53c493d37",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -997,7 +997,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "top",
-      "sha256": "8763bd86aa32c0c10df5accb842e19669f72c1b2a1b4cf5c620f67bc917a2fc9",
+      "sha256": "d9ecd79e192b694c9901053cf5c481dd744a10afb809ef0a2cb174593d6f10b7",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1009,7 +1009,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "scroll-01",
-      "sha256": "ad1f996117978c5ca73e55072404b875c9ef8b612d9bab37abc316ad79f6bd4b",
+      "sha256": "717f45f8c058b6b0d0f4e49291d3c6ec247a37701b1676a03b7d2014875dcbf5",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1021,7 +1021,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "top",
-      "sha256": "e5276a57f1d6890fa8918e1ab338af4473ebfb706d6b916f00a9faa03ca8caf7",
+      "sha256": "7e58672d57370ddab10e4f2be3cfb7648bd8bafeac8554393cfb5e5ad8648a52",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1033,7 +1033,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "scroll-02",
-      "sha256": "e5b3f9d70ea22ab1787b92b1e2977f95b03667e72df47bed6156b0c10983aeb5",
+      "sha256": "f7eca26357e70c90632fc709ab6329a7e0e4625e3f9b6f45319bd7f563c961f8",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1045,7 +1045,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "scroll-01",
-      "sha256": "2571d9939d9ad143d30b663ff4218f9a0016bb1168d149f1e22ac17036d0d9fe",
+      "sha256": "1cc8352808dec950a2313eded0ad4d3d46440167605acab9e220cd55cf2a87df",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1057,7 +1057,7 @@
       "widthPoints": 402,
       "largeText": true,
       "position": "top",
-      "sha256": "225e9dea6356ba4946ede24c3f6c33f4c5fe72b6b3d0ece8f5cc08ecf733aa9a",
+      "sha256": "83183129fe4afcdb37c21c3a4931314a0176c5f515685eeb535fea73f2738dc6",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1153,7 +1153,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "10892e60cf568138e0776639cf953c67cfc7f35274d3faa6cc73da8e3fb383e4",
+      "sha256": "728efe09c6873a1c6c722c3a2b992ed392f6a14e81c5d99b7fbe03dff1bb13e5",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1189,7 +1189,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "7724ba799ab21872f7b1f73147728a71a32b442fd14f59d3e6daa8eb30c2da6f",
+      "sha256": "056956bdf3bcf04f493190c2a95c1bdd92a179f1907e3510ee71b26aba2e3ff3",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1201,7 +1201,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "775f4e3bcfd5f3d960dc684c743f1c914c7ea4126e583f39b924c82c172bd8a3",
+      "sha256": "c7932ba07aa240c382704301e9ff275b6e515303ca4106a67a907af6b75203a6",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1321,7 +1321,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "scroll-01",
-      "sha256": "58a2fd615a4d2c689ceee9c578bc1bd48c456e64957717cd0c97ebbf475043e2",
+      "sha256": "9150c09aafabd76f8190b2d7fd52f255f3eb4029a2747e6ad5741e5b500a2420",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1333,7 +1333,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "174a1a0b258e337bbac649afe970ca48b2a6573605e8ad03f2f2cac8316a22ba",
+      "sha256": "590813914e92788c45abe3e0e6382e0b411ed37e30b12d5a5fe33a688a291d83",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1345,7 +1345,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "b8951bfbc79505f44f3ba4410a31982edaba644a20a233c2c69ed222784833b7",
+      "sha256": "c08a555ec7af86ee9dc72c94211b0e95d9a4bb6a630d63f92d579f49bfe47cdb",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1369,7 +1369,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "1e6507e5e3c53dcd92a6c7bca79ecb784bdc5607a2cb0972941e57b00ad1e5c8",
+      "sha256": "c2cf326f2d685fa5f4a70f9aae5b7185b4c16558b2a2c6d0d207687e0cc843a5",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1405,7 +1405,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "cd7340d75186fa0450d7f0b92023431066f05741a6eb35f940dc07a5640296e3",
+      "sha256": "9a8a525249f7a80be8faa8105aac932b38bd1f9fe4fff997db26aae96f032185",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1513,7 +1513,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "9b40bf553779804f7e41740f9cd8f4ee381a5a8f94b616f5f3b087f69fb68807",
+      "sha256": "a8a8079419a5574f82f3d5d8ffc2fd883e1ed3f0bbceb6f39a34ba96fa1e9d7d",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1549,7 +1549,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "scroll-01",
-      "sha256": "abfc84aaa2e7baf82699b3adb7c8b46aca6124a5490e236f9dbd58822c02808e",
+      "sha256": "efa4459ff34b30069e51ede266fd5cebf65818947b5a54918bac6fee91f2a425",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1585,7 +1585,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "scroll-02",
-      "sha256": "4dd30be8cb8fcd001d658b16e7bc6f66a28d9b540c48dcf68da688738f735054",
+      "sha256": "756378e729a9b6f4c75a43c55500b0ad87dc63cb2fd57823aaf460709df5e4cc",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1609,7 +1609,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "1f3e84abbfd845811fc274f6b727e27c57aeb0a61d084c8e57bec641e94cc394",
+      "sha256": "0d6166bbe8e66363ad1d9b836bf7b1a50eb6989c24f862ccd55731439a6edd98",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1621,7 +1621,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "d86092f503724e63227d7916c680d3e03e8f1d7f614d708d303e5d7781250832",
+      "sha256": "0cd99b5e3ec1f5902ec01649ff6390f5a949095248c0bf78442c40eb640705b4",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1633,7 +1633,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "542399506546eea027bf5b8c41ad5d898455dbcc624826d551ac198c1be355ca",
+      "sha256": "476604dfdb56db64dbec992006ea31d1556937ee729ccd271695efde6bce6828",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1693,7 +1693,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "0c01483a2557a2e20da9a975a6ba40ef8eb521c9501d1e1f9cb04302617f3d57",
+      "sha256": "a949dc80b29548b02a1faecd00e10c9f92b4e4f2ced8248bd0af4f79020f340b",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1741,7 +1741,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "a70fed1bdac851c5a7a5804eb16d00954e9f2d607ab40035a619e58459127a5e",
+      "sha256": "ac47a38001e1cab3900c8761782bffeacdaa8a6a3a600e63871f197618a83b36",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1825,7 +1825,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "6e470a3a937d9c2937b4582c41ebf34035785508ed14fb603f4a28070de91f4d",
+      "sha256": "1ec0c15f3c7915bfe494dfce5f28d73261bbd54207d5810e6dadad165f69525d",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1861,7 +1861,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "1911a215b53deffa6a15ea742e0645110bb145afa2f5a282599dd1455e487ce6",
+      "sha256": "793765543646473aaca241b44e58e4b6844ecd4abad4c89ecc8a9f185f80ffa5",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1897,7 +1897,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "ebd18f853ddd462ce1b4e2afc6d5826a378ebdb130a6f7800bf5106b269a190c",
+      "sha256": "9cc96009f9090bcea88f1770c86ceb43aedc3a481402a5a4a2a681dfbcc16ae9",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1945,7 +1945,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "14b2090f5dd65d76d56105c8fb66222e650a196a77e89b6203f73f80f9bb835c",
+      "sha256": "61ba79f36c974bdd8d746d7577022ca2db685126d6999ee21f3cd1dc9700cfe5",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1957,7 +1957,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "e8d6ef1984e5c2b956e311838a586c7256a2ba2725610d0a55e90f8d2df739ea",
+      "sha256": "8e00bae51a5ee3231df35cfd8e8e50654dfd3a316253e7b4af512009566a1410",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -1993,7 +1993,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "c743d0c9bbc223d4a93b6108e767e9ae3154889f1cc0bd8986c12c1644803714",
+      "sha256": "19fb6e8fa2a6360892234a1236b2b22f31a62afd183cdc96b6ca13504244c784",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2029,7 +2029,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "scroll-02",
-      "sha256": "639167a7b395ef8ef13b34491d14f7e48d82e357354d9a54232bae02cc966bf6",
+      "sha256": "a3c52b58e8750c584a768a3fe44faf9ea00cddca3c24d357291fd13cb24240e8",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2053,7 +2053,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "f949f80adc0e39cbe5423cc02ae7ab7115f10b20dab63a414a4be4433db3561b",
+      "sha256": "0bfc751aa0a5e7a0d8af301b7d6c6f3d97e580478ccff443973300c79c239b5b",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2077,7 +2077,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "9a40a24dc5c5fc768a2461772b7187404aa821ff2146cf842216f1688ada3c47",
+      "sha256": "1c0011d8a9dc5d301bc2f6909fe63e21d49d5bbc595b19e185c98f9d123e3aa8",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2113,7 +2113,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "d1ee94d8841e0f0f2a04d5b15effa98fc2f2382b673986e721aff4feca794503",
+      "sha256": "85e46c63825c2cc1146c1288b4a9ba72ee8c4dadb406f001fd0ee512c7356992",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2137,7 +2137,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "cb68b6c15f9f2fc1f9b2a36589b3eaa96449a8e748b385c4831fc4f6c86359ba",
+      "sha256": "4e4e92e88febfbbc3845b836119b995231295bd0e180c5b509e7e9595a92abfb",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2161,7 +2161,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "633a2d75c60bd831ceb05190de36a24746371cd24620912d5c1ecb334d582af2",
+      "sha256": "5be44f83e80ec1994849f623eb03b6ff5fa9efea5c0cdb328fe33a4a93a99ac6",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2185,7 +2185,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "058294c83ef61e70a619a31108bb0c75342a5d948ac7d3466e4e74196d625e12",
+      "sha256": "d7e97b76ba4f221456716b63baf66fd6e1f21db46134fd7f8c92e6514f8b0745",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2245,7 +2245,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "a7b90e159777303bb86ace75d3798b57ce4bd64e3f1a2af04cfe92e101f6275e",
+      "sha256": "3c223918ed4c1bdc5c7e0e2d7fa57fc9494d3a2cdb1b12cdc1cd53a00dd3794b",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2269,7 +2269,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "scroll-01",
-      "sha256": "6308b123854e9d206d017d0566ca27c04a70942abbae68327c8f6c5e27e3ca46",
+      "sha256": "742dc81d9293f0a333fb070a002bd9db339733f0c4bf003b0ff62703f682ade3",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2281,7 +2281,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "bfbb3e9e0d0841c44c083bca8d536ed93a2150cea57df904e732a8d61bf041d8",
+      "sha256": "43279cb3de3264a51b893d240ecd0422e3b204041c7c1ba92cc69e24f8ff98a9",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2317,7 +2317,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "3b3ad84faa5f02235d03de9b1c0d4b99ef55cf310e1ad2a5c8f698bab8778e7f",
+      "sha256": "9fb01394d89547535626f0772dcd3d9fa648db838e0a3e2f4d4179f51aa6f706",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2413,7 +2413,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "3557724cd7b968644f9978cfd51854fb917e0abfdfa9aa159134ef5e49eb1665",
+      "sha256": "2ea6994126c9faf77c206d8ef85a5cee290476dcb79063a983a76e27b2b90b28",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2449,7 +2449,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "scroll-01",
-      "sha256": "5615b07c47da603f9810360653e92d28af390fb0822ff11018c1f8fc5bd1ef03",
+      "sha256": "703721b18e3b2575de48933c6ce028679cae54173757bbb58eddef8796623229",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2461,7 +2461,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "ff9cef6b1ed2f5f9230e348b44bd7bebd796924372d4d8effd8e2be08ae31a41",
+      "sha256": "746835b39aba95d211f21992b46d80ada9a59718820ee295cf21c3f65a58ff4a",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2473,7 +2473,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "ba090673c54b562ba7c217f35be16655bf05a0e49a2f47afb46f328b856c3eab",
+      "sha256": "40137f7c30fce5e6a1f4807cd9e7cb06bafce2a1eb63f20f17c087a45006743c",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2533,7 +2533,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "66cb394850f7f5e4771e2dc2b8a51cbb0ac862e2c9e374de15b27768106e1724",
+      "sha256": "c78ce1e52d0ade99910f9ae4f22c33b55a92d35ed5d910bf04bc1b6c56adaaef",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2545,7 +2545,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "f2a2691532860cb03c05a80ce49edafd5379391b4e63e48d8014de436226729a",
+      "sha256": "8d4fd2588c4ab3bdb4b40c914a0c0ab3252d70fa85118333d32c7e918cdd17bc",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2641,7 +2641,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "aed93ecadc4f1f5b37fc231c92608df44cf94d670d6ece79649e011e35f6e335",
+      "sha256": "8ebdb6551221281419a147196e6aa25b157d2835149e8b9cd7ee728832895c70",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2701,7 +2701,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "scroll-03",
-      "sha256": "c0d0cf6c441c02e7d8c6358d22aaaceca42eedd67d65b4fb951a429446546931",
+      "sha256": "c59a1ee4cd1e117521d89fa5f23b27ff2153cfbd7e4714cede3dca6cd59672ed",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2713,7 +2713,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "scroll-02",
-      "sha256": "af409322010f98c8bcd280361434bf3e81cc760a55d42bafe63e64f18c226439",
+      "sha256": "5e4ce0f73293371ce5176eee2ea963613f1fbe866858b52bfd7c964b29a94d2f",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2725,7 +2725,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "scroll-01",
-      "sha256": "2a9ff27ee220d9d9f3ed2712b5c3ccedf76a29fe4bb572f12ae3150d8ebb3204",
+      "sha256": "732f690efc3c1719deba006a950338b92d578ee7cba3bcaae917c278620b9ed7",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2737,7 +2737,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "3e6495482a28f00664c66033ecc2bba45f902a0aa2b99d638f12254edf4b83f2",
+      "sha256": "e4e30e0dca3bf454404c0cabf42d9b17ab31897504ca8a9e14cb2fed5881eb98",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2749,7 +2749,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "4e844b88c21dc53e77e476dccc63bf1f061e2460665389cc0b7c19a4d0855b40",
+      "sha256": "4de193d51a5f1265ab3a9e8828fc24784815e2ee2bf26fc6a718709094972bc2",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2857,7 +2857,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "0cd690a7498cca541cac1d29a4c576c1190645b87d725a9ce2debe99367fe25e",
+      "sha256": "4c663602c32196f0d5d85ee87ac48ed9731de8eea343e5e5661fb543d7b563be",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2953,7 +2953,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "f6b8c534d36f29df80cb7c084e4c0b08c74e9f38a069b97ed6313068597c8a83",
+      "sha256": "0fc113b6121a3b8df46ee3c2d982b3fa19904bfd9b782872a06254c5f04ef94c",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2965,7 +2965,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "9ef88681d0bf96f3a2b352d8d7f6ce9ebfbfd43a8fc1aacf1e883a2dcb1ab1e3",
+      "sha256": "4b531d9092a2a414a1349f9af2cf526062b8e2c0324d1e4649e0cf305cdc2125",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -2977,7 +2977,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "899549816cbd16cc71cb822b6d048ab52cd53d712acddf4ee7c017029bcfdd32",
+      "sha256": "cb99af11256da8071b3a54c19a41745f5e761cd349dab518dc0dccf4c86496c3",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -3025,7 +3025,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "0f8084e1f902cd07ff0e88c649944b5a4bedb3b09b7e035f8986fcd3ffd6d8a8",
+      "sha256": "0e594e7e1520ba2edaa91c1b2a080d15d5d7f6e70d8d1e18b1dcd2f8ed3796c5",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -3049,7 +3049,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "d53eb09ce4362459c138b12967eb4631810b0f067632b92916bb4e90761c76a6",
+      "sha256": "ae02286f0b1b65b4b4e149f618c28768955a5a1a08d9c175904015521ae8d492",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -3097,7 +3097,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "6c2be84bc196ddaa2400159c93bbe55e49a73a7b84a96f810511de2b4388101c",
+      "sha256": "52f908dbbcca59716eced73bc5be903c87ae08cfd87599baec0ad6daf87ffa48",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -3193,7 +3193,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "013428e18c58f628cb35e2ec9c4e8d1cb3f32b6424c1a1783c0266a3b4d9c1cb",
+      "sha256": "8d6daaf04e4d95826c1a15b027d9f6cd8912fd5fe905e655005e79d174e9882b",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -3205,7 +3205,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "7f73638751277b38b6b8c3d3d257ac9c9a76ae839026e9cc2214f9d9ef31299b",
+      "sha256": "02ba630929691b2bc4fa12014f1d223a5d5ff26522d2fad7b3ac48532770a20a",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -3217,7 +3217,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "90652e846a3d363df99ffa11c06d2374ab0d2a44a93694f587154664eabb32d9",
+      "sha256": "4f1d19d7cacf10997e4224b27caab414ff7ceb0069f66041aefa56221582aaf6",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -3241,7 +3241,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "f7b8f551c2ed42f84467a3e353d0cafa326421bfbfce2d149cee34bfa1375be7",
+      "sha256": "81773e3011f32fa60494afce25e1add7c4a37b4ce67b32a58c0832ec47c4a151",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -3265,7 +3265,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "6772e0d3f7d2e8088e22c50a390ffe1ea4015f48e597c69493e23c4eb257b462",
+      "sha256": "1222a95d59f7c37102d79fcda8c1aaa04a1b91df8e465c753972ae3705d3c78f",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false
@@ -3289,7 +3289,7 @@
       "widthPoints": 402,
       "largeText": false,
       "position": "top",
-      "sha256": "4d51ec82afc921fced190ff30196678aaf966aca79c1d773815a4b0a8af50e7d",
+      "sha256": "612543c188a98480ab8e738400fe0c2126d0f75935afdf3403309e533a574b9d",
       "device": "Assistant UI Review 2026-10-03",
       "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
       "associatedWithFailure": false

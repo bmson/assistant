@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Open follow-ups, with one primary action and shared overflow controls.
 struct CommitmentsScreen: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @State private var rows: [Commitment] = []
     @State private var loaded = false
@@ -227,7 +227,7 @@ struct CommitmentEditor: View {
     let commitment: Commitment
     let onSaved: () -> Void
 
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var title: String
     @State private var details: String

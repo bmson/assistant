@@ -5,7 +5,7 @@ import SwiftUI
 /// Browsing and editing connections happens on the map itself; this is the
 /// short list of things that need a decision.
 struct KnowledgeCleanupScreen: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @State private var cleanup: KnowledgeCleanupResponse?
     @State private var pendingIDs: Set<String> = []
@@ -148,7 +148,7 @@ struct KnowledgeCleanupScreen: View {
 }
 
 struct KnowledgeConnectionEditor: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var subject: KnowledgeEntity
@@ -438,7 +438,7 @@ struct KnowledgeConnectionEditor: View {
 }
 
 struct KnowledgeItemEditor: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let item: KnowledgeEntity
     let duplicates: [KnowledgeDuplicate]
@@ -608,7 +608,7 @@ struct KnowledgeItemEditor: View {
 private struct KnowledgeForgetReview: View {
     let memoryId: String
     let didForget: () async -> Void
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var impact: KnowledgeSourceImpact?
     @State private var loading = true
@@ -706,7 +706,7 @@ enum GraphFamilySuggestionDismissals {
 }
 
 struct GraphFamilySuggestionsSheet: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
     @State private var suggestions: [GraphFamilySuggestion]

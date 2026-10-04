@@ -1,5 +1,6 @@
 import XCTest
 import SwiftUI
+import Observation
 @testable import Assistant
 
 /// Stands in for the network so a dead pooled connection can be reproduced
@@ -16,19 +17,30 @@ final class StubURLProtocol: URLProtocol {
 
     private static let lock = NSLock()
     private static var outcomes: [Outcome] = []
+    private static var pathOutcomes: [String: [Outcome]] = [:]
     private static var recordedMethods: [String] = []
     private static var recordedURLs: [URL] = []
     private static var recordedBodies: [Data] = []
     private static weak var activeStream: StubURLProtocol?
 
-    static func prime(_ queued: [Outcome]) {
+    static func prime(_ queued: [Outcome], paths: [String: [Outcome]] = [:]) {
         lock.withLock {
             outcomes = queued
+            pathOutcomes = paths
             recordedMethods = []
             recordedURLs = []
             recordedBodies = []
             activeStream = nil
         }
+    }
+
+    /// Parallel startup reads must not consume each other's response bodies.
+    static func primeBootstrap(_ body: Data, overview: [Outcome] = [.success(status: 401, body: Data())],
+                               queued: [Outcome] = []) {
+        prime(queued, paths: [
+            "/api/mobile/v1/bootstrap": [.success(status: 200, body: body)],
+            "/api/mobile/v1/overview": overview,
+        ])
     }
 
     /// One entry per attempt that reached the network — the assertion that
@@ -53,6 +65,11 @@ final class StubURLProtocol: URLProtocol {
             recordedMethods.append(method)
             if let url { recordedURLs.append(url) }
             recordedBodies.append(body)
+            if let path = url?.path, var queued = pathOutcomes[path], !queued.isEmpty {
+                let result = queued.removeFirst()
+                pathOutcomes[path] = queued
+                return result
+            }
             return outcomes.isEmpty ? .success(status: 200, body: Data()) : outcomes.removeFirst()
         }
     }
@@ -496,7 +513,7 @@ final class APIClientRetryTests: XCTestCase {
                         .navigationTitle("Edit details")
                     }
                 }
-                .environmentObject(model).environment(\.colorScheme, scheme)
+                .environment(model).environment(\.colorScheme, scheme)
                 .environment(\.dynamicTypeSize, size)
                 window.rootViewController = UIHostingController(rootView: content)
                 window.isHidden = false
@@ -556,7 +573,7 @@ final class APIClientRetryTests: XCTestCase {
             window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
             window.overrideUserInterfaceStyle = scheme == .light ? .light : .dark
             window.rootViewController = UIHostingController(rootView:
-                NavigationStack { MemoryView() }.environmentObject(model)
+                NavigationStack { MemoryView() }.environment(model)
                     .environment(\.colorScheme, scheme).environment(\.dynamicTypeSize, size))
             window.isHidden = false
             defer { window.isHidden = true; window.rootViewController = nil }
@@ -846,7 +863,7 @@ final class APIClientRetryTests: XCTestCase {
             window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
             window.overrideUserInterfaceStyle = scheme == .light ? .light : .dark
             window.rootViewController = UIHostingController(rootView:
-                NavigationStack { RelationshipGraphScreen() }.environmentObject(model)
+                NavigationStack { RelationshipGraphScreen() }.environment(model)
                     .environment(\.colorScheme, scheme).environment(\.dynamicTypeSize, size))
             window.isHidden = false
             defer { window.isHidden = true; window.rootViewController = nil }
@@ -876,7 +893,7 @@ final class APIClientRetryTests: XCTestCase {
             window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
             window.overrideUserInterfaceStyle = scheme == .light ? .light : .dark
             window.rootViewController = UIHostingController(rootView:
-                NavigationStack { RelationshipGraphScreen(entityID: "node-2") }.environmentObject(model)
+                NavigationStack { RelationshipGraphScreen(entityID: "node-2") }.environment(model)
                     .environment(\.colorScheme, scheme))
             window.isHidden = false
             defer { window.isHidden = true; window.rootViewController = nil }
@@ -909,7 +926,7 @@ final class APIClientRetryTests: XCTestCase {
                 let window = UIWindow(windowScene: scene)
                 window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
                 window.overrideUserInterfaceStyle = scheme == .light ? .light : .dark
-                window.rootViewController = UIHostingController(rootView: NavigationStack { content }.environmentObject(model).environment(\.colorScheme, scheme))
+                window.rootViewController = UIHostingController(rootView: NavigationStack { content }.environment(model).environment(\.colorScheme, scheme))
                 window.isHidden = false
                 defer { window.isHidden = true; window.rootViewController = nil }
                 try await Task.sleep(for: .milliseconds(350))
@@ -939,7 +956,7 @@ final class APIClientRetryTests: XCTestCase {
             window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
             window.overrideUserInterfaceStyle = .light
             window.rootViewController = UIHostingController(rootView:
-                NavigationStack { PeopleView() }.environmentObject(model)
+                NavigationStack { PeopleView() }.environment(model)
                     .environment(\.colorScheme, .light).environment(\.dynamicTypeSize, size))
             window.isHidden = false
             defer { window.isHidden = true; window.rootViewController = nil }
@@ -977,7 +994,7 @@ final class APIClientRetryTests: XCTestCase {
                         } else {
                             ScrollView { PersonConnectionOutline(personId: card.id, ancestors: [card.id]).padding(16) }.navigationTitle("Connections")
                         }
-                    }.environmentObject(model).environment(\.colorScheme, scheme))
+                    }.environment(model).environment(\.colorScheme, scheme))
                 window.isHidden = false
                 defer { window.isHidden = true; window.rootViewController = nil }
                 try await Task.sleep(for: .milliseconds(350))
@@ -1047,7 +1064,7 @@ final class APIClientRetryTests: XCTestCase {
                 let content = NavigationStack {
                     GoalEditor(goal: editing ? goal : nil)
                 }
-                .environmentObject(AppModel(apiClient: makeClient()))
+                .environment(AppModel(apiClient: makeClient()))
                 .environment(\.colorScheme, scheme)
                 window.rootViewController = UIHostingController(rootView: content)
                 window.isHidden = false
@@ -1116,7 +1133,7 @@ final class APIClientRetryTests: XCTestCase {
                         SituationPacksView()
                     }
                 }
-                .environmentObject(model)
+                .environment(model)
                 .environment(\.colorScheme, scheme)
                 window.rootViewController = UIHostingController(rootView: content)
                 window.isHidden = false
@@ -1508,14 +1525,25 @@ final class APIClientRetryTests: XCTestCase {
             let original = model.errorMessage
             let notice = model.errorNotice
             for read in 0..<4 {
-                StubURLProtocol.prime([.failure(URLError(.cancelled))])
+                // A cancelled bootstrap can end the operation before the
+                // parallel overview child starts. Every endpoint that did
+                // start still makes one attempt and cannot trigger a retry.
+                let requests = read == 0 ? 2 : 1
+                StubURLProtocol.prime(Array(repeating: .failure(URLError(.cancelled)), count: requests))
                 switch read {
                 case 0: await model.refreshAll()
                 case 1: await model.refreshOverview()
                 case 2: await model.refreshWorkspace()
                 default: _ = await model.knowledge()
                 }
-                XCTAssertEqual(StubURLProtocol.attempts, ["GET"], "Cancellation must not trigger a transport retry")
+                XCTAssertTrue((1...requests).contains(StubURLProtocol.attempts.count))
+                XCTAssertTrue(StubURLProtocol.attempts.allSatisfy { $0 == "GET" })
+                XCTAssertEqual(Set(StubURLProtocol.urls.map(\.path)).count, StubURLProtocol.attempts.count,
+                    "Cancellation must not trigger a second attempt for an endpoint")
+                if read == 0 {
+                    XCTAssertTrue(Set(StubURLProtocol.urls.map(\.path)).isSubset(of:
+                        ["/api/mobile/v1/bootstrap", "/api/mobile/v1/overview"]))
+                }
                 XCTAssertEqual(model.errorMessage, original)
                 XCTAssertEqual(model.errorNotice, notice)
                 XCTAssertEqual(model.errorRetry != nil, hasExistingError)
@@ -1525,7 +1553,8 @@ final class APIClientRetryTests: XCTestCase {
 
     @MainActor
     func testCancelledConnectionDoesNotOpenPairingOrOfferRetry() async {
-        StubURLProtocol.prime([.failure(URLError(.cancelled))])
+        // The bootstrap and the overview leave together, so both are cancelled.
+        StubURLProtocol.prime([.failure(URLError(.cancelled)), .failure(URLError(.cancelled))])
         let model = AppModel(apiClient: makeClient())
         await model.connect()
         XCTAssertFalse(model.showingConnection)
@@ -1654,8 +1683,7 @@ final class APIClientRetryTests: XCTestCase {
     func testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom() async throws {
         let model = AppModel(apiClient: makeClient())
         // A chat read alone is not an authenticated composer session.
-        StubURLProtocol.prime([.success(status: 200, body: try notificationBootstrap()),
-                               .success(status: 401, body: Data())])
+        StubURLProtocol.primeBootstrap(try notificationBootstrap())
         await model.refreshAll()
         XCTAssertNotNil(model.composerDraftScope)
         var messages = (0..<16).map { index in
@@ -1680,7 +1708,7 @@ final class APIClientRetryTests: XCTestCase {
         window.rootViewController = UIHostingController(rootView:
             ChatView(safeAreaTopInset: 62, safeAreaBottomInset: 34,
                 safeAreaLeadingInset: 0, safeAreaTrailingInset: 0)
-                .environmentObject(model))
+                .environment(model))
         window.makeKeyAndVisible()
         defer {
             model.cancelSend()
@@ -2039,7 +2067,7 @@ extension APIClientRetryTests {
     private func notificationModel() async throws -> AppModel {
         let model = AppModel(apiClient: makeClient())
         model.scenePhaseDidChange(.background)
-        StubURLProtocol.prime([.success(status: 200, body: try notificationBootstrap()), .success(status: 401, body: Data())])
+        StubURLProtocol.primeBootstrap(try notificationBootstrap())
         await model.refreshAll(reportFailure: false)
         XCTAssertNotNil(model.bootstrap)
         return model
@@ -2078,14 +2106,18 @@ extension APIClientRetryTests {
         StubURLProtocol.prime([])
         await model.openNotificationDestination(try notificationDestination(conversation: notificationSideID, owner: notificationOwner))
         XCTAssertTrue(StubURLProtocol.attempts.isEmpty, "No unverified destination is fetched before owner bootstrap")
-        StubURLProtocol.prime([
-            .success(status: 200, body: try notificationBootstrap()),
-            .success(status: 200, body: try JSONEncoder().encode(notificationConversation(notificationSideID))),
-            .success(status: 401, body: Data()),
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/bootstrap": [.delayed(after: 0.04, status: 200, body: try notificationBootstrap())],
+            "/api/mobile/v1/chats/\(notificationSideID)": [.success(status: 200, body: try JSONEncoder().encode(notificationConversation(notificationSideID)))],
+            "/api/mobile/v1/overview": [.success(status: 401, body: Data())],
         ])
         await model.refreshAll(reportFailure: false)
         XCTAssertEqual(model.conversationId, notificationSideID)
-        XCTAssertEqual(StubURLProtocol.urls.map(\.path), ["/api/mobile/v1/bootstrap", "/api/mobile/v1/chats/\(notificationSideID)", "/api/mobile/v1/overview"])
+        let paths = StubURLProtocol.urls.map(\.path)
+        XCTAssertEqual(paths.count, 3)
+        XCTAssertEqual(Set(paths.prefix(2)), ["/api/mobile/v1/bootstrap", "/api/mobile/v1/overview"],
+            "Both startup reads leave together; navigation still waits for authenticated bootstrap")
+        XCTAssertEqual(paths.last, "/api/mobile/v1/chats/\(notificationSideID)")
     }
 
     @MainActor
@@ -2406,11 +2438,9 @@ extension APIClientRetryTests {
                 identity: .init(id: "replacement-owner", name: "Robin", avatarUrl: nil),
                 shell: try JSONDecoder().decode(BootstrapResponse.self, from: notificationBootstrap()).shell,
                 conversation: notificationConversation(notificationPrimaryID))
-            StubURLProtocol.prime([
-                .delayed(after: 0.05, status: 200, body: oldBody),
-                .success(status: 200, body: try JSONEncoder().encode(replacement)),
-                .success(status: 401, body: Data()),
-            ])
+            StubURLProtocol.primeBootstrap(try JSONEncoder().encode(replacement),
+                overview: [.success(status: 401, body: Data()), .success(status: 401, body: Data())],
+                queued: [.delayed(after: 0.05, status: 200, body: oldBody)])
             let mutation = Task {
                 switch action {
                 case "hide": await model.hideMessage(original)
@@ -2425,7 +2455,12 @@ extension APIClientRetryTests {
             XCTAssertEqual(model.conversationId, notificationPrimaryID)
             XCTAssertNil(model.hiddenMessageUndo)
             XCTAssertNil(model.errorMessage)
-            XCTAssertEqual(StubURLProtocol.attempts, ["POST", "GET", "GET"], "The old result cannot issue a conversation read through the replacement owner")
+            XCTAssertEqual(StubURLProtocol.attempts.filter { $0 == "POST" }.count, 1)
+            let reads = StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/bootstrap" || $0.path == "/api/mobile/v1/overview" }
+            XCTAssertEqual(reads.filter { $0.path == "/api/mobile/v1/bootstrap" }.count, 1)
+            XCTAssertTrue((1...2).contains(reads.filter { $0.path == "/api/mobile/v1/overview" }.count))
+            XCTAssertEqual(StubURLProtocol.attempts.count, reads.count + 1,
+                "The old result cannot issue a conversation read; a replaced owner needs a fresh overview")
         }
     }
 
@@ -2447,9 +2482,9 @@ extension APIClientRetryTests {
             identity: .init(id: "replacement-owner", name: "Robin", avatarUrl: nil),
             shell: try JSONDecoder().decode(BootstrapResponse.self, from: notificationBootstrap()).shell,
             conversation: notificationConversation(notificationPrimaryID))
-        StubURLProtocol.prime([
+        StubURLProtocol.primeBootstrap(try JSONEncoder().encode(replacement), overview: [
             .delayed(after: 0.05, status: 200, body: oldOverview),
-            .success(status: 200, body: try JSONEncoder().encode(replacement)),
+            .success(status: 401, body: Data()),
             .success(status: 401, body: Data()),
         ])
         let oldProjection = Task { await model.refreshOverview(reportFailure: false) }
@@ -2468,13 +2503,62 @@ extension APIClientRetryTests {
         XCTAssertNil(model.archivedActivity)
         XCTAssertEqual(model.pendingApprovalCount, 0)
         XCTAssertNil(model.errorMessage)
-        StubURLProtocol.prime([
-            .success(status: 200, body: try JSONEncoder().encode(replacement)),
-            .success(status: 401, body: Data()),
-        ])
+        StubURLProtocol.primeBootstrap(try JSONEncoder().encode(replacement))
         await model.refreshAll(reportFailure: false)
         XCTAssertEqual(model.composerDraftScope?.session, newScope.session, "The same replacement identity must not reset twice")
     }
+
+    @MainActor
+    func testReplacementBootstrapDiscardsItsSpeculativeOverviewAndReadsTheNewOwner() async throws {
+        let model = try await notificationModel()
+        let oldScope = try XCTUnwrap(model.composerDraftScope)
+        let replacement = BootstrapResponse(generatedAt: "2026-10-03T00:00:01Z",
+            identity: .init(id: "replacement-owner", name: "Robin", avatarUrl: nil),
+            shell: try JSONDecoder().decode(BootstrapResponse.self, from: notificationBootstrap()).shell,
+            conversation: notificationConversation(notificationPrimaryID))
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/bootstrap": [.delayed(after: 0.04, status: 200, body: try JSONEncoder().encode(replacement))],
+            "/api/mobile/v1/overview": [
+                .success(status: 200, body: try overviewBody(pending: [pendingApproval(id: "old-owner-approval")])),
+                .success(status: 200, body: try overviewBody(pending: [pendingApproval(id: "replacement-owner-approval")])),
+            ],
+        ])
+        await model.refreshAll(reportFailure: false)
+        XCTAssertEqual(model.bootstrap?.identity.id, "replacement-owner")
+        XCTAssertEqual(model.composerDraftScope?.session, oldScope.session + 1)
+        XCTAssertEqual(model.overview?.approvals.pending.map(\.approval.id), ["replacement-owner-approval"],
+            "Updating the bootstrap ticket cannot bless a projection requested for the previous owner")
+        let paths = StubURLProtocol.urls.map(\.path)
+        XCTAssertEqual(Set(paths.prefix(2)), ["/api/mobile/v1/bootstrap", "/api/mobile/v1/overview"])
+        XCTAssertEqual(paths.filter { $0 == "/api/mobile/v1/overview" }.count, 2,
+            "Only owner replacement needs another read; ordinary startup remains parallel")
+    }
+
+    @MainActor
+    func testObservationTracksPrivateDraftScopeAndSeparatesUnrelatedScreenState() async throws {
+        let model = try await notificationModel()
+        let scope = try XCTUnwrap(model.composerDraftScope)
+        let draftChanged = NativeObservationSignal()
+        let messagesChanged = NativeObservationSignal()
+        withObservationTracking { _ = model.composerDraftScope } onChange: { draftChanged.mark() }
+        withObservationTracking { _ = model.messages } onChange: { messagesChanged.mark() }
+        model.saveComposerDraft("Unsent words", in: scope)
+        XCTAssertTrue(draftChanged.changed, "A private stored property can still supply a visible computed scope")
+        XCTAssertFalse(messagesChanged.changed, "Saving a draft must not invalidate an unchanged transcript")
+        let errorChanged = NativeObservationSignal()
+        withObservationTracking { _ = model.errorMessage } onChange: { errorChanged.mark() }
+        model.reportError(APIError.transport(URLError(.notConnectedToInternet)))
+        XCTAssertTrue(errorChanged.changed)
+        XCTAssertFalse(messagesChanged.changed, "An unrelated error is observed separately from message contents")
+        XCTAssertEqual(model.composerDraft(in: scope), "Unsent words")
+    }
+}
+
+private final class NativeObservationSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var changed: Bool { lock.withLock { value } }
+    func mark() { lock.withLock { value = true } }
 }
 
 extension APIClientRetryTests {
@@ -2509,8 +2593,8 @@ extension APIClientRetryTests {
         while StubURLProtocol.attempts.isEmpty { await Task.yield() }
         var replacement = try XCTUnwrap(JSONSerialization.jsonObject(with: notificationBootstrap()) as? [String: Any])
         replacement["identity"] = ["id": "replacement-owner", "name": "New assistant"]
-        StubURLProtocol.prime([.success(status: 200, body: try JSONSerialization.data(withJSONObject: replacement)),
-                               .success(status: 401, body: Data())])
+        StubURLProtocol.primeBootstrap(try JSONSerialization.data(withJSONObject: replacement),
+            overview: [.success(status: 401, body: Data()), .success(status: 401, body: Data())])
         await model.refreshAll()
         let failure = await request.value
         XCTAssertEqual(model.bootstrap?.identity.id, "replacement-owner")

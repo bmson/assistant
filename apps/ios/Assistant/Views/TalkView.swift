@@ -28,7 +28,7 @@ enum TalkInteractionPolicy {
 /// consent, and a misrecognition on an outward action is not recoverable the
 /// way a mistyped message is.
 struct TalkView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion

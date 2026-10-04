@@ -55,6 +55,18 @@ class FakeQuery {
     return new FakeQuery(this.rows, this.stats, this.filters, this.pageSize, cursor.id);
   }
 
+  count(): { get: () => Promise<{ data: () => { count: number } }> } {
+    return {
+      get: async () => ({
+        data: () => ({
+          count: this.rows.filter(({ row }) =>
+            this.filters.every(([field, value]) => row[field] === value),
+          ).length,
+        }),
+      }),
+    };
+  }
+
   async get(): Promise<{ size: number; docs: FakeDocument[] }> {
     this.stats.pages += 1;
     const matching = this.rows
@@ -129,7 +141,18 @@ it('pages imported-size source collections and preserves exact shell counts', as
     doc(collection: string, id: string) {
       const row = data[collection]?.find((entry) => entry.id === documentKey(id))?.row;
       const doc = new FakeDocument(documentKey(id), row);
-      return { get: async () => doc };
+      return { id: doc.id, collection, get: async () => doc };
+    },
+    db: {
+      // Pending approvals' tasks are read in one batch, one or two fields each.
+      async getAll(...args: Array<{ id: string; collection?: string }>) {
+        return args
+          .filter((arg) => arg.collection === 'tasks')
+          .map((ref) => {
+            const row = data.tasks?.find((entry) => entry.id === ref.id)?.row;
+            return new FakeDocument(ref.id, row);
+          });
+      },
     },
     now: () => now,
   } as unknown as InstallationStore;
@@ -153,9 +176,13 @@ it('pages imported-size source collections and preserves exact shell counts', as
       lastOrganizedAt: now,
     },
   });
-  expect(stats.largestPage).toBe(500);
-  expect(stats.pages).toBeGreaterThan(30);
-  expect(stats.projections).toContainEqual(['id', 'agentId', 'status']);
+  expect(stats.largestPage).toBe(1000);
+  // The memories and the pending approvals are paged; the 12,945 tasks are not
+  // read at all — their statuses are counted, which used to take more than
+  // twenty-five pages of every task the assistant had created.
+  expect(stats.pages).toBeGreaterThanOrEqual(6);
+  expect(stats.pages).toBeLessThan(12);
+  expect(stats.projections).not.toContainEqual(['id', 'agentId', 'status']);
   expect(stats.projections).toContainEqual([
     'id',
     'agentId',
@@ -187,6 +214,9 @@ it('rechecks the privacy erasure fence after the approval scan', async () => {
     },
     startAfter() {
       return this;
+    },
+    count() {
+      return { get: async () => ({ data: () => ({ count: 0 }) }) };
     },
     async get() {
       return { size: 0, docs: [] };

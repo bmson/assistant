@@ -32,3 +32,4 @@ the living references in the parent folder instead:
 | [Behavior verification record](assets/assistant-behavior-2026-10-03.json) | 2026-10-03 | 4,600 repository checks, 67 retained scripted replies, source hashes and native validation limits |
 | [Screenshot-led UI review](ui-review-2026-10-03.md) | 2026-10-03 | Browser and native before/after captures, shared visual foundations, forms, recovery and current validation boundaries |
 | [Console usability review](console-ui-review-2026-10-03.md) | 2026-10-03 | Owner access, pairing, audit hierarchy and credential receipts after failed refreshes |
+| [Release integration verification](release-2026-10-03.md) | 2026-10-03 | Combined-source checks, merge repairs, release proof and distribution boundary |

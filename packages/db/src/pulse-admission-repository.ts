@@ -30,7 +30,11 @@ export function createPostgresPulseAdmissionRepository(
           .select({ id: agents.id })
           .from(agents)
           .where(eq(agents.id, input.agentId))
-          .for('update');
+          // Admissions and erasure must serialize, while another notifier may
+          // insert its fallback chat with an owner FK under the shared advisory
+          // lock. KEY SHARE is compatible with this lock, avoiding the reverse
+          // owner/advisory lock cycle without weakening erasure's UPDATE lock.
+          .for('no key update');
         if (!owner) throw new Error('Pulse owner row gone');
         const fence = await postgresPrivacyObservationFence(tx as unknown as Db, input.agentId);
         if (fence !== input.observationFence)

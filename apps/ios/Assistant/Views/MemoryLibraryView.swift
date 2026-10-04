@@ -8,7 +8,7 @@ import SwiftUI
 /// way to look. This screen runs the same query the web library runs, so both
 /// clients reach the same rows through the same filters.
 struct MemoryLibraryScreen: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var query = MemoryLibraryQuery()

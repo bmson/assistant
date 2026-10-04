@@ -35,7 +35,7 @@ struct PeopleConnectionBranch: Identifiable {
 }
 
 struct PeopleConnectionsExplorer: View {
-  @EnvironmentObject private var model: AppModel
+  @Environment(AppModel.self) private var model
   @Environment(\.colorScheme) private var colorScheme
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   let people: [PersonSummary]
@@ -366,7 +366,7 @@ private struct PeopleNodeAnchors: PreferenceKey {
 struct PersonConnectionOutline: View {
   let personId: String
   let ancestors: [String]
-  @EnvironmentObject private var model: AppModel
+  @Environment(AppModel.self) private var model
   @Environment(\.colorScheme) private var colorScheme
   @State private var expanded: Set<String> = []
   @State private var inspecting: PersonRelationSummary?

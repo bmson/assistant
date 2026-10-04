@@ -13,7 +13,7 @@ struct RelationshipGraphScreen: View {
     /// A snapshot already on hand — the Memory home's preview — so the map
     /// opens drawn instead of blank while it refreshes.
     var initialGraph: RelationshipGraphSnapshot? = nil
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -699,7 +699,7 @@ struct GraphQuickConnectSheet: View {
     /// The presenting screen closes the sheet after the server accepts it,
     /// draws this line at once, then fetches the real one (nil for a new end).
     let saved: (RelationshipGraphEdge?) async -> Void
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var reversed = false
@@ -877,7 +877,7 @@ private struct GraphConnectionsSheet: View {
     let explore: (String) -> Void
     let removed: (String) -> Void
     let refresh: () async -> Void
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var failure: String?
@@ -951,7 +951,7 @@ private struct GraphEdgeDetail: View {
     let explore: (String) -> Void
     let removed: (String) -> Void
     let refresh: () async -> Void
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var working = false
@@ -1093,7 +1093,7 @@ struct GraphConnectSheet: View {
     let source: RelationshipGraphNode
     let graph: RelationshipGraphSnapshot
     let saved: (RelationshipGraphEdge?) async -> Void
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @State private var search = ""
     @State private var results: [KnowledgeEntity] = []
     @State private var searching = false

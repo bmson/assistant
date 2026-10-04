@@ -387,7 +387,7 @@ Releases reconcile schema/seed/configuration and build verified images. Backup, 
 
 PostgreSQL is the default persistence driver. Firestore has substantial transactional/read/recall/application adapters, migration tools, an index manifest, deny-all client rules, emulator contracts, and real-cloud rehearsal evidence. This is an in-progress migration, not a new default declared by this guide.
 
-The latest dedicated status document reports production remaining on PostgreSQL at its dated checkpoint. This documentation task did not query live production. Complete activation requires current coverage of startup, enabled modules, management and context writers, asset parity, backup/restore, an offline-PostgreSQL rehearsal, fencing, and customer onboarding. A successful health endpoint or a portable reminder implementation does not satisfy those gates.
+Earlier status documentation reports production remaining on PostgreSQL at its dated checkpoint. The 3 October release preparation verified that the hosted workflow now expects `PERSISTENCE_DRIVER=firestore`; its release script checks both live service templates before rollout. The architecture audit did not query live production, and a workflow expectation alone is not a cutover receipt. See the [release verification record](audits/release-2026-10-03.md) for the evidence and delivery boundary. Complete activation requires current coverage of startup, enabled modules, management and context writers, asset parity, backup/restore, an offline-PostgreSQL rehearsal, fencing, and customer onboarding. A successful health endpoint or a portable reminder implementation does not satisfy those gates.
 
 ### Customer-owned installation
 

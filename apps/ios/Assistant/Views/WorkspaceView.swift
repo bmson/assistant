@@ -57,7 +57,7 @@ enum WorkspaceArea {
 struct WorkspaceView: View {
     let area: WorkspaceArea
 
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -2002,7 +2002,7 @@ struct SpendingBreakdownCard: View {
 private struct SkillEditor: View {
     let skill: WorkspaceSkill?
 
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
     @State private var preconditions: String
@@ -2136,7 +2136,7 @@ private enum SkillEditorField: Hashable {
 }
 
 private struct CostLimitsEditor: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var taskDefault: String
     @State private var daily: String
@@ -2206,7 +2206,7 @@ private struct CostLimitsEditor: View {
 
 private struct IssueReportForm: View {
     let onReported: () -> Void
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
     @State private var sourceTaskId: String?

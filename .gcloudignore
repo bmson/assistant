@@ -13,3 +13,5 @@ coverage/
 .workspace/
 seed-data/
 *.log
+# Screenshot evidence is retained in Git, not image build inputs.
+docs/audits/assets/

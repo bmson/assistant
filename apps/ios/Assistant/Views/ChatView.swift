@@ -347,7 +347,7 @@ struct ChatView: View {
     let safeAreaLeadingInset: CGFloat
     let safeAreaTrailingInset: CGFloat
 
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -914,7 +914,7 @@ struct ChatView: View {
         // Talk mode takes the whole screen because it is the whole interface:
         // no transcript, no composer, nothing to look at while it is in use.
         .fullScreenCover(isPresented: $showingTalk) {
-            TalkView().environmentObject(model)
+            TalkView().environment(model)
         }
     }
 

@@ -1,5 +1,5 @@
 /** Package isolated UI screenshots into a browsable, before/after review. */
-import { copyFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
 
@@ -18,9 +18,13 @@ await mkdir(destination, { recursive: true });
 for (const group of ['console', 'products', 'native']) {
   for (const phase of ['before', 'after'] as const) {
     const directory = path.join(source, `${phase}-${group}`);
-    const files = await readdir(directory).catch(() => []);
+    const files: string[] = await readdir(directory).catch(() => []);
     if (!files.length) continue;
     await mkdir(path.join(destination, `${phase}-${group}`), { recursive: true });
+    const packaged = path.join(destination, `${phase}-${group}`);
+    for (const file of await readdir(packaged)) {
+      if (file.endsWith('.png') && !files.includes(file)) await unlink(path.join(packaged, file));
+    }
     for (const file of files.filter((file) => file.endsWith('.png')).sort()) {
       const relative = `${phase}-${group}/${file}`;
       await copyFile(path.join(directory, file), path.join(destination, relative));
@@ -31,7 +35,7 @@ for (const group of ['console', 'products', 'native']) {
     }
     // Keep measurements and inventories beside the exact captures they describe.
     for (const file of files.filter((file) =>
-      /(?:manifest|measurements|inventory|security-receipts)\.json$/.test(file),
+      /(?:manifest|measurements|inventory|security-receipts|test-summary)\.json$/.test(file),
     )) {
       await copyFile(path.join(directory, file), path.join(destination, `${phase}-${group}`, file));
     }

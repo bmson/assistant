@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ApprovalsView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -333,7 +333,7 @@ struct ApprovalsView: View {
 private struct ApprovalPayloadEditor: View {
     let item: PendingApproval
 
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var payload: String
     @State private var error: String?

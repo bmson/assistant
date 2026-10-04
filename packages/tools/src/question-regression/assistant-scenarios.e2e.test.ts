@@ -16,6 +16,9 @@ afterAll(async () => {
 });
 
 describe('assistant interaction scenarios through the actual executor and dispatcher', () => {
+  // Travel and 56-person replay fixtures exceeded Vitest's 5s default under
+  // measured DB load. Match their verified 30s integration deadline in plain
+  // `pnpm test` too; the executor/effect/output assertions remain unchanged.
   for (const fixture of ASSISTANT_SCENARIOS)
     it(fixture.id, async () => {
       const result = await runQuestion(db, fixture);
@@ -35,5 +38,5 @@ describe('assistant interaction scenarios through the actual executor and dispat
           2,
         ),
       ).toEqual([]);
-    });
+    }, 30_000);
 });

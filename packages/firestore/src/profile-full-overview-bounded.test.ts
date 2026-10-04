@@ -58,7 +58,14 @@ class FakeQuery {
   async get(): Promise<{ size: number; docs: FakeDocument[] }> {
     this.stats.pages += 1;
     const matching = this.rows
-      .filter(({ row }) => this.filters.every(([field, value]) => row[field] === value))
+      .filter(({ row }) =>
+        this.filters.every(
+          ([field, value]) =>
+            String(field)
+              .split('.')
+              .reduce<unknown>((at, key) => (at as Row | undefined)?.[key], row) === value,
+        ),
+      )
       .sort((left, right) => left.id.localeCompare(right.id));
     const after = this.cursor ? matching.findIndex((entry) => entry.id === this.cursor) + 1 : 0;
     const docs = matching
@@ -131,6 +138,7 @@ it('streams canary-sized workspace collections while preserving the full profile
     importSources: [],
   };
   const stats = { largestPage: 0, pages: 0, projections: [] as string[][] };
+  const getAllMasks: string[][] = [];
   const store = {
     collection(name: string) {
       return new FakeQuery(data[name] ?? [], stats);
@@ -141,7 +149,12 @@ it('streams canary-sized workspace collections while preserving the full profile
       return { id: doc.id, get: async () => doc };
     },
     db: {
-      async getAll(...refs: Array<{ id: string }>) {
+      async getAll(...args: Array<{ id: string } | { fieldMask: string[] }>) {
+        const options = args.find((arg) => 'fieldMask' in arg) as
+          | { fieldMask: string[] }
+          | undefined;
+        if (options) getAllMasks.push(options.fieldMask);
+        const refs = args.filter((arg): arg is { id: string } => 'id' in arg);
         return refs.map((ref) => {
           const row = data.memories?.find((entry) => entry.id === ref.id)?.row;
           return new FakeDocument(ref.id, row);
@@ -201,8 +214,18 @@ it('streams canary-sized workspace collections while preserving the full profile
   });
   expect(profile.voiceStats).toEqual({ total: 0, auto: 0, uploaded: 0 });
   expect(profile.card).toBeNull();
-  expect(stats.largestPage).toBe(500);
-  expect(stats.pages).toBeGreaterThan(30);
+  expect(stats.largestPage).toBe(1000);
+  // The memories are read in a handful of pages. The 12,945 tasks are not read at
+  // all: the newest consolidation run comes from one targeted query, where it used
+  // to take more than thirty pages of every task the assistant had created.
+  expect(stats.pages).toBeGreaterThanOrEqual(6);
+  expect(stats.pages).toBeLessThan(12);
+  // Owner facts are fetched without their embeddings, in one read per hundred.
+  expect(getAllMasks.length).toBeGreaterThan(0);
+  for (const mask of getAllMasks) {
+    expect(mask).toContain('content');
+    expect(mask).not.toContain('embedding');
+  }
   const memoryProjection = stats.projections.find((fields) => fields.includes('subjectContactId'));
   expect(memoryProjection).toBeDefined();
   expect(memoryProjection).not.toContain('content');

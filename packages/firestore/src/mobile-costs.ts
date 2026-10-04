@@ -12,7 +12,7 @@ import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './p
 import { FirestoreSettingsRepository } from './settings.js';
 import { decodeRecord, type InstallationStore } from './store.js';
 
-const PAGE_SIZE = 500;
+const PAGE_SIZE = 1000;
 
 interface CostEvent {
   evidence?: CostEvidence;
@@ -74,7 +74,12 @@ export async function getFirestoreMobileCosts(store: InstallationStore, agentId:
 
   await Promise.all([
     scan<CostEvent>(
-      store.collection('costEvents').where('createdAt', '>=', since).orderBy('createdAt'),
+      store
+        .collection('costEvents')
+        .where('createdAt', '>=', since)
+        .orderBy('createdAt')
+        // Only the fields the totals read; a month of events used to come back in full.
+        .select('createdAt', 'usd', 'source', 'evidence', 'taskId'),
       (event) => {
         if (!(event.createdAt instanceof Date) || event.createdAt < since)
           throw new Error('Invalid cost event timestamp');
@@ -93,7 +98,11 @@ export async function getFirestoreMobileCosts(store: InstallationStore, agentId:
       },
     ),
     scan<ModelCall>(
-      store.collection('modelCalls').where('createdAt', '>=', since).orderBy('createdAt'),
+      store
+        .collection('modelCalls')
+        .where('createdAt', '>=', since)
+        .orderBy('createdAt')
+        .select('createdAt', 'model', 'costUsd'),
       (call) => {
         if (!(call.createdAt instanceof Date) || call.createdAt < since)
           throw new Error('Invalid model call timestamp');

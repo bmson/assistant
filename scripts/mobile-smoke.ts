@@ -24,7 +24,7 @@ try {
     await page.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded' });
     await page.waitForURL(`${baseUrl}/settings`);
     await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
-    await page.getByRole('heading', { name: 'Mobile API access token' }).waitFor();
+    await page.getByRole('heading', { name: 'Mobile app connection', exact: true }).waitFor();
     for (const name of ['Settings', 'Audit trail']) {
       const link = page
         .getByRole('navigation', { name: 'Administration' })
@@ -42,7 +42,7 @@ try {
     await page.getByRole('heading', { name: 'Audit trail', exact: true }).waitFor();
     await page.getByLabel('Search recent records').fill('smoke-no-matching-record');
     await page.getByRole('button', { name: 'Filter', exact: true }).click();
-    await page.getByText('No matching records.', { exact: false }).waitFor();
+    await page.getByText('No records match these filters.', { exact: false }).waitFor();
     const overflowing = await page.evaluate(
       () => document.documentElement.scrollWidth > window.innerWidth,
     );

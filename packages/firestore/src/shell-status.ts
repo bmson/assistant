@@ -3,18 +3,17 @@ import { FieldPath, type Query, type QueryDocumentSnapshot } from '@google-cloud
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
-const PAGE_SIZE = 500;
-const MAX_TASK_SCAN = 100_000;
+const PAGE_SIZE = 1000;
 const MAX_MEMORY_SCAN = 100_000;
 const APPROVAL_PAGE_SIZE = 500;
 const MAX_PENDING_APPROVAL_SCAN = 100_000;
 
 async function scanPages(
   query: Query,
-  collection: 'tasks' | 'memories',
+  collection: 'memories',
   visit: (doc: QueryDocumentSnapshot) => void,
 ): Promise<void> {
-  const max = collection === 'tasks' ? MAX_TASK_SCAN : MAX_MEMORY_SCAN;
+  const max = MAX_MEMORY_SCAN;
   let cursor: QueryDocumentSnapshot | undefined;
   let scanned = 0;
   while (true) {
@@ -32,12 +31,12 @@ async function scanPages(
 
 async function countPendingApprovals(
   store: InstallationStore,
-  ownerTaskIds: Set<string>,
+  ownerAgentId: string,
   now: Date,
 ): Promise<number> {
   let cursor: QueryDocumentSnapshot | undefined;
   let scanned = 0;
-  let pending = 0;
+  const live: Array<{ id: string; taskId: string }> = [];
   const base = store
     .collection('approvals')
     .where('status', '==', 'pending')
@@ -61,13 +60,25 @@ async function countPendingApprovals(
       if (!(approval.expiresAt instanceof Date) || !Number.isFinite(approval.expiresAt.getTime()))
         throw new Error('Malformed shell status approval expiry');
       if (!approval.taskId) throw new Error('Malformed shell status approval task reference');
-      if (approval.expiresAt > now && ownerTaskIds.has(approval.taskId)) pending += 1;
+      if (approval.expiresAt > now) live.push({ id: approval.id, taskId: approval.taskId });
     }
     if (snapshot.size < APPROVAL_PAGE_SIZE) break;
     cursor = snapshot.docs.at(-1);
   }
 
-  return pending;
+  // An approval counts when its task is the owner's. Pending approvals are few, so
+  // the owner check reads just their tasks (batched, one field each) instead of
+  // holding the id of every task the assistant has ever created.
+  const taskIds = [...new Set(live.map((approval) => approval.taskId))];
+  const owned = new Set<string>();
+  for (let offset = 0; offset < taskIds.length; offset += 100) {
+    const refs = taskIds.slice(offset, offset + 100).map((id) => store.doc('tasks', id));
+    for (const snapshot of await store.db.getAll(...refs, { fieldMask: ['id', 'agentId'] })) {
+      if (snapshot.exists && snapshot.get('agentId') === ownerAgentId)
+        owned.add(String(snapshot.get('id')));
+    }
+  }
+  return live.filter((approval) => owned.has(approval.taskId)).length;
 }
 
 async function resolveShellAgent(
@@ -92,9 +103,9 @@ async function resolveShellAgent(
 }
 
 /**
- * Exact owner-facing shell counts, scanned a page at a time without retaining record bodies.
- * This remains an exact full scan, so Firestore read cost and latency grow with source size;
- * durable aggregate counters can replace it once their write coverage is reliable.
+ * Exact owner-facing shell counts. Task counts come from count queries; the memory
+ * health figures still scan the owner's memories a page at a time, so that read grows
+ * with the number of memories until durable aggregate counters replace it.
  */
 export class FirestoreShellStatusRepository implements ShellStatusRepository {
   readonly kind = 'shell-status-repository' as const;
@@ -113,30 +124,47 @@ export class FirestoreShellStatusRepository implements ShellStatusRepository {
 
     const fence = await readPrivacyErasureFence(this.store, ownerAgentId);
     const now = this.store.now();
-    const ownerTaskIds = new Set<string>();
-    let needsAttention = 0;
-    let running = 0;
+    // Counted, not scanned. This used to read every task the assistant had ever
+    // created (15,000+ in production) just to count two statuses, and it ran
+    // on every cache miss of the very first request the app makes. `agentId` and
+    // `status` equality is served by the existing indexes.
+    const owned = this.store.collection('tasks').where('agentId', '==', ownerAgentId);
+    const [needsAttentionCount, runningCount, memoryHealth] = await Promise.all([
+      owned.where('status', '==', 'needs_attention').count().get(),
+      owned.where('status', '==', 'running').count().get(),
+      this.readMemoryHealth(ownerAgentId, now),
+    ]);
+    const needsAttention = needsAttentionCount.data().count;
+    const running = runningCount.data().count;
+    await assertPrivacyErasureFenceUnchanged(this.store, ownerAgentId, fence);
+
+    const pendingApprovals = await countPendingApprovals(this.store, ownerAgentId, now);
+    await assertPrivacyErasureFenceUnchanged(this.store, ownerAgentId, fence);
+    return {
+      dashboard: {
+        pendingApprovals,
+        needsAttention,
+        presence:
+          pendingApprovals > 0 || needsAttention > 0
+            ? 'attention'
+            : running > 0
+              ? 'working'
+              : 'idle',
+      },
+      memoryHealth,
+    };
+  }
+
+  /** The one remaining scan: usable-memory counts need per-document expiry and quarantine checks. */
+  private async readMemoryHealth(
+    ownerAgentId: string,
+    now: Date,
+  ): Promise<ShellStatusProjection['memoryHealth']> {
     let totalUsable = 0;
     let notYetOrganized = 0;
     let awaitingReview = 0;
     let ownerConfirmed = 0;
     let lastOrganizedAt: Date | null = null;
-
-    await scanPages(
-      this.store
-        .collection('tasks')
-        .where('agentId', '==', ownerAgentId)
-        .select('id', 'agentId', 'status') as Query,
-      'tasks',
-      (doc) => {
-        const task = decodeRecord<Records['tasks']>(doc.data());
-        if (!task.id || documentKey(task.id) !== doc.id || task.agentId !== ownerAgentId)
-          throw new Error('Malformed or foreign shell status task');
-        ownerTaskIds.add(task.id);
-        if (task.status === 'needs_attention') needsAttention += 1;
-        if (task.status === 'running') running += 1;
-      },
-    );
     await scanPages(
       this.store
         .collection('memories')
@@ -171,28 +199,6 @@ export class FirestoreShellStatusRepository implements ShellStatusRepository {
         }
       },
     );
-    await assertPrivacyErasureFenceUnchanged(this.store, ownerAgentId, fence);
-
-    const pendingApprovals = await countPendingApprovals(this.store, ownerTaskIds, now);
-    await assertPrivacyErasureFenceUnchanged(this.store, ownerAgentId, fence);
-    return {
-      dashboard: {
-        pendingApprovals,
-        needsAttention,
-        presence:
-          pendingApprovals > 0 || needsAttention > 0
-            ? 'attention'
-            : running > 0
-              ? 'working'
-              : 'idle',
-      },
-      memoryHealth: {
-        totalUsable,
-        notYetOrganized,
-        awaitingReview,
-        ownerConfirmed,
-        lastOrganizedAt,
-      },
-    };
+    return { totalUsable, notYetOrganized, awaitingReview, ownerConfirmed, lastOrganizedAt };
   }
 }

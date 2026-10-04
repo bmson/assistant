@@ -8,7 +8,7 @@ import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './p
 import { FirestoreProfileVoiceOverviewRepository } from './profile-overview.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
-const PAGE_SIZE = 500;
+const PAGE_SIZE = 1000;
 const MAX_SCAN = 100_000;
 const PROFILE_CONTACT_LIMIT = 500;
 const PROFILE_FACT_LIMIT = 250;
@@ -80,15 +80,21 @@ async function hydrateMemories(
 ): Promise<Map<string, Records['memories']>> {
   const hydrated = new Map<string, Records['memories']>();
   const refs = rows.map((row) => store.doc('memories', row.id));
-  for (let offset = 0; offset < refs.length; offset += 100) {
-    const snapshots = await store.db.getAll(...refs.slice(offset, offset + 100));
-    for (const snapshot of snapshots) {
-      if (!snapshot.exists) throw new Error('Profile memory changed during read');
-      const row = decodeRecord<Records['memories']>(snapshot.data());
-      if (!row.id || documentKey(row.id) !== snapshot.id || row.agentId !== agentId)
-        throw new Error('Malformed or foreign Profile memory');
-      hydrated.set(row.id, row);
-    }
+  const batches: (typeof refs)[] = [];
+  for (let offset = 0; offset < refs.length; offset += 100)
+    batches.push(refs.slice(offset, offset + 100));
+  // Only the fields the Profile shows and the change check compares. A memory
+  // document also carries its embedding (1,536 numbers), which this view never
+  // reads and which made 250 facts several megabytes to fetch. Batches run side
+  // by side instead of in turn.
+  const fieldMask = ['id', 'content', ...PROFILE_MEMORY_FIELDS];
+  const read = await Promise.all(batches.map((batch) => store.db.getAll(...batch, { fieldMask })));
+  for (const snapshot of read.flat()) {
+    if (!snapshot.exists) throw new Error('Profile memory changed during read');
+    const row = decodeRecord<Records['memories']>(snapshot.data());
+    if (!row.id || documentKey(row.id) !== snapshot.id || row.agentId !== agentId)
+      throw new Error('Malformed or foreign Profile memory');
+    hydrated.set(row.id, row);
   }
   return hydrated;
 }
@@ -157,6 +163,24 @@ export class FirestoreProfileOverviewRepository implements ProfileOverviewReposi
     const agentId = await configuredAgent(this.store, this.configuredAgentId);
     const fence = await readPrivacyErasureFence(this.store, agentId);
     const now = this.store.now();
+
+    // These do not depend on the contact or memory scans, so they run beside
+    // them instead of after them. The overview used to wait for four reads in
+    // turn, one of them over every task the assistant had ever created.
+    const organizerRead = this.store
+      .collection('tasks')
+      .where('agentId', '==', agentId)
+      .where('trigger.payload.job', '==', 'memory.consolidate')
+      .select('id', 'agentId', 'trigger', 'createdAt', 'status', 'progress', 'updatedAt')
+      .get();
+    const cardRead = this.store.doc('ownerCards', agentId).get();
+    const voiceRead = new FirestoreProfileVoiceOverviewRepository(
+      this.store,
+      this.configuredAgentId,
+    ).load();
+    // Awaited below; if an earlier read throws first, these must not surface as
+    // unhandled rejections on their own.
+    for (const pending of [organizerRead, cardRead, voiceRead]) pending.catch(() => {});
 
     const contacts: Records['contacts'][] = [];
     await scanPages(
@@ -265,46 +289,29 @@ export class FirestoreProfileOverviewRepository implements ProfileOverviewReposi
       return hydrated;
     });
 
-    const latestOrganizerSource: Array<{
+    // The newest consolidation run, from the few tasks that are one, not from a
+    // scan of every task.
+    let latestOrganizerSource: {
       createdAt: Date;
       projection: NonNullable<ProfileOverviewRead['latestOrganizer']>;
-    } | null> = [null];
-    await scanPages(
-      this.store
-        .collection('tasks')
-        .where('agentId', '==', agentId)
-        .select(
-          'id',
-          'agentId',
-          'trigger',
-          'createdAt',
-          'status',
-          'progress',
-          'updatedAt',
-        ) as Query,
-      'task',
-      (doc) => {
-        const row = decodeRecord<Records['tasks']>(doc.data());
-        if (!row.id || documentKey(row.id) !== doc.id || row.agentId !== agentId)
-          throw new Error('Malformed or foreign Memory hub record');
-        const trigger = row.trigger as { payload?: { job?: unknown } } | null;
-        if (
-          trigger?.payload?.job === 'memory.consolidate' &&
-          (!latestOrganizerSource[0] || row.createdAt > latestOrganizerSource[0].createdAt)
-        )
-          latestOrganizerSource[0] = {
-            createdAt: row.createdAt,
-            projection: {
-              id: row.id,
-              status: row.status,
-              progress: row.progress,
-              updatedAt: row.updatedAt,
-            },
-          };
-      },
-    );
+    } | null = null;
+    for (const doc of (await organizerRead).docs) {
+      const row = decodeRecord<Records['tasks']>(doc.data());
+      if (!row.id || documentKey(row.id) !== doc.id || row.agentId !== agentId)
+        throw new Error('Malformed or foreign Memory hub record');
+      if (!latestOrganizerSource || row.createdAt > latestOrganizerSource.createdAt)
+        latestOrganizerSource = {
+          createdAt: row.createdAt,
+          projection: {
+            id: row.id,
+            status: row.status,
+            progress: row.progress,
+            updatedAt: row.updatedAt,
+          },
+        };
+    }
 
-    const cardDoc = await this.store.doc('ownerCards', agentId).get();
+    const cardDoc = await cardRead;
     const rawCard = cardDoc.exists
       ? decodeRecord<{ agentId?: unknown; content?: unknown; compiledAt?: unknown }>(cardDoc.data())
       : null;
@@ -315,10 +322,7 @@ export class FirestoreProfileOverviewRepository implements ProfileOverviewReposi
         !(rawCard.compiledAt instanceof Date))
     )
       throw new Error('Malformed Memory hub owner card');
-    const voice = await new FirestoreProfileVoiceOverviewRepository(
-      this.store,
-      this.configuredAgentId,
-    ).load();
+    const voice = await voiceRead;
     await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
 
     return {
@@ -342,7 +346,7 @@ export class FirestoreProfileOverviewRepository implements ProfileOverviewReposi
         ownerConfirmed,
         lastOrganizedAt,
       },
-      latestOrganizer: latestOrganizerSource[0]?.projection ?? null,
+      latestOrganizer: latestOrganizerSource?.projection ?? null,
     };
   }
 }

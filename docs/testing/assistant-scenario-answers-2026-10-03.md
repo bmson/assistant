@@ -296,7 +296,7 @@ Server-produced response cards: calendar-event, weather.
 
 > Here's what the calendar has for tomorrow:
 > - **02:00–03:00** — Design review — Oracle Park
-> 
+>
 > I couldn't retrieve current weather data for this request, so I can't confirm temperatures or a forecast. Earlier weather replies are not a current reading.
 
 Status: `needs_attention`; assertions: **passed**; approvals created: **0**.
@@ -318,7 +318,7 @@ Server-produced response cards: calendar-event.
 **Delivered reply**
 
 > The Giants lead the Twins 5-2 in the top of the 7th.
-> 
+>
 > Saved “Twins at Giants” to your Cards page; the scoreboard here stays live while the game is on.
 
 Status: `done`; assertions: **passed**; approvals created: **0**.
@@ -731,7 +731,7 @@ Intercepted tool bodies: none.
 
 > Saved 1 entry to long-term memory.
 > - The owner wants a reminder about Example Brunch on a future visit to San Jose.
-> 
+>
 > No reminder has been scheduled for this request, so I cannot promise an automatic alert.
 
 Status: `needs_attention`; assertions: **passed**; approvals created: **0**.
@@ -1288,7 +1288,7 @@ Continuation: sleeping → done.
 **Delivered reply**
 
 > Confirmed: the reminder was scheduled.
-> 
+>
 > I couldn't finish the reply. Check Activity for anything that already ran before trying again.
 
 Status: `needs_attention`; assertions: **passed**; approvals created: **0**.

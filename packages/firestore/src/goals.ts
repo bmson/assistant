@@ -34,15 +34,19 @@ export class FirestoreGoalReadRepository implements GoalReadRepository {
       throw new Error('Goal read is outside the configured installation');
     await assertConfiguredOwner(this.store, agentId);
     const fence = await readPrivacyErasureFence(this.store, agentId);
-    const [goals, conversations, tasks, schedules] = await Promise.all([
+    const [goals, conversations, schedules] = await Promise.all([
       this.store.collection('goals').where('agentId', '==', agentId).get(),
       this.store
         .collection('conversations')
         .where('agentId', '==', agentId)
         .where('channel', '==', 'chat')
+        .select('id', 'agentId', 'updatedAt', 'metadata')
         .get(),
-      this.store.collection('tasks').where('agentId', '==', agentId).get(),
-      this.store.collection('schedules').where('agentId', '==', agentId).get(),
+      this.store
+        .collection('schedules')
+        .where('agentId', '==', agentId)
+        .select('id', 'agentId', 'name', 'enabled', 'nextRunAt')
+        .get(),
     ]);
     const owned = <T extends { id: string; agentId: string }>(
       docs: FirebaseFirestore.QuerySnapshot,
@@ -51,10 +55,26 @@ export class FirestoreGoalReadRepository implements GoalReadRepository {
         const row = decodeRecord<T>(doc.data());
         return row.agentId === agentId && documentKey(row.id) === doc.id ? [row] : [];
       });
+    const goalRows = owned<Records['goals']>(goals);
+    // The dashboard only reads the sessions bound to a goal, and only four
+    // fields of each. This used to load every task the assistant had ever
+    // created, in full (15,000+ documents in production) and filter them in
+    // memory, which made the goals dashboard — and with it every refresh of the
+    // app — take seconds. `agentId + goalId` is served by the existing indexes.
+    const taskSnapshots = await Promise.all(
+      goalRows.map((goal) =>
+        this.store
+          .collection('tasks')
+          .where('agentId', '==', agentId)
+          .where('goalId', '==', goal.id)
+          .select('id', 'agentId', 'goalId', 'status', 'updatedAt')
+          .get(),
+      ),
+    );
     const result = {
-      goals: owned<Records['goals']>(goals),
+      goals: goalRows,
       conversations: owned<Records['conversations']>(conversations),
-      tasks: owned<Records['tasks']>(tasks),
+      tasks: taskSnapshots.flatMap((snapshot) => owned<Records['tasks']>(snapshot)),
       schedules: owned<Records['schedules']>(schedules),
     };
     await assertConfiguredOwner(this.store, agentId);

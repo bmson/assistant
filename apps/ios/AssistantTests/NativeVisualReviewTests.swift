@@ -171,7 +171,7 @@ final class NativeVisualReviewTests: XCTestCase {
                         .navigationDestination(for: String.self) { _ in page.content }
                 }
             }
-        }.environmentObject(model).environment(\.colorScheme, scheme)
+        }.environment(model).environment(\.colorScheme, scheme)
             .environment(\.dynamicTypeSize, size).transaction { $0.animation = nil; $0.disablesAnimations = true }
             .environment(\.scenePhase, .active))
         window.rootViewController = host

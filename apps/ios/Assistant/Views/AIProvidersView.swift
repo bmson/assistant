@@ -4,7 +4,7 @@ import SwiftUI
 /// their models it uses. The same server actions back the web Settings page,
 /// so either surface can be used and the other shows the result.
 struct AIProvidersView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @State private var mainModel = ""
     @State private var fastModel = ""
@@ -280,7 +280,7 @@ private struct ModelChoiceList: View {
 
 /// One connection: its status, its models, and the controls that change it.
 private struct ModelConnectionDetailView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
     let connectionID: String
@@ -463,7 +463,7 @@ private struct ModelConnectionDetailView: View {
 
 /// Connect OpenAI, OpenRouter, Vertex, or any OpenAI-compatible gateway.
 private struct ConnectProviderView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
     @State private var kind = "openai"

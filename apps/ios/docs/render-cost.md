@@ -25,6 +25,32 @@ bindings throughout a screen's lifetime.
 
 That is the whole shape of the problem. Three things keep it in budget.
 
+## 0. The model is observed per property
+
+`AppModel` is `@Observable`, not an `ObservableObject`. As an `ObservableObject`
+it published through a single channel: any of its thirty properties changing
+re-rendered every view that held the model — fifty-five of them, including the
+chat transcript left alive underneath whichever page was open. A refresh landing
+on Approvals rebuilt the whole conversation behind it. With Observation a view
+re-renders only when a property it actually read changes.
+
+Two rules follow:
+
+- **State no view reads is `@ObservationIgnored`.** Tasks, caches and flags
+  used only by model operations cost nothing to track and cannot invalidate
+  anything. Privacy alone is not the criterion: `conversationDrafts` stays
+  tracked because visible computed draft scope and recovery depend on it.
+- **Read what you need in the body, not a copy of everything.** A view that
+  reads `model.messages` is invalidated by messages; one that reads
+  `model.overview` is not. Passing a derived value down to a child is cheaper
+  than letting the child read the whole model.
+
+Bootstrap and overview reads start together. A bootstrap that replaces the
+authenticated owner invalidates the speculative overview and requires a fresh
+read in the new connection generation; it cannot promote old private data by
+updating the ticket after authentication. The regression fixtures route those
+concurrent reads by path, rather than relying on network arrival order.
+
 ## 1. A row that has not changed is not rebuilt
 
 `ChatTranscriptRows` compares messages and `isSending`. If you add another

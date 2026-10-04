@@ -249,6 +249,10 @@ describe('Firestore approval inbox scan guard', () => {
     await expect(repository.listInbox(owner, { now })).rejects.toThrow(
       'Approval inbox pending scan exceeded its safety bound',
     );
-    expect(pages).toBe(10);
+    // The four inbox reads start together and share this fake query, so the
+    // count is the pending scan's ten pages plus whatever the others read
+    // before it failed: bounded, not exact.
+    expect(pages).toBeGreaterThanOrEqual(10);
+    expect(pages).toBeLessThanOrEqual(40);
   });
 });

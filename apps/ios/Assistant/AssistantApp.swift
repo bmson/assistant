@@ -26,7 +26,7 @@ final class AssistantAppDelegate: NSObject, UIApplicationDelegate {
 @main
 struct AssistantApp: App {
     @UIApplicationDelegateAdaptor(AssistantAppDelegate.self) private var appDelegate
-    @StateObject private var model = AppModel()
+    @State private var model = AppModel()
     // Dark by default: the owner expects the conversation stage day and
     // night, and a silently followed system appearance read as a bug.
     @AppStorage(AssistantAppearance.defaultsKey) private var appearance = AssistantAppearance.dark
@@ -44,7 +44,7 @@ struct AssistantApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
-                .environmentObject(model)
+                .environment(model)
                 .preferredColorScheme(appearance.colorScheme)
         }
     }

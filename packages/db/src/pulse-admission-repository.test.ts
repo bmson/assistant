@@ -3,6 +3,7 @@ import type { PulseNoticeInput } from '@assistant/persistence';
 import { and, eq, inArray } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, type Db } from './client.js';
+import { createPostgresNotificationsConversationRepository } from './notifications-conversation-repository.js';
 import { createPostgresPulseAdmissionRepository } from './pulse-admission-repository.js';
 import {
   agents,
@@ -16,6 +17,39 @@ import {
 } from './schema.js';
 
 const now = new Date('2026-10-03T12:00:00Z');
+
+function signal() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+type Transaction = Parameters<Parameters<Db['transaction']>[0]>[0];
+/** Pause the actual advisory-lock boundary while all SQL and writes still run. */
+function withExecuteHook(
+  database: Db,
+  hook: (execute: () => Promise<unknown>) => Promise<unknown>,
+): Db {
+  return new Proxy(database, {
+    get(target, property, receiver) {
+      if (property !== 'transaction') return Reflect.get(target, property, receiver);
+      return (callback: (tx: Transaction) => Promise<unknown>) =>
+        target.transaction((tx) =>
+          callback(
+            new Proxy(tx, {
+              get(transaction, key, transactionReceiver) {
+                if (key !== 'execute') return Reflect.get(transaction, key, transactionReceiver);
+                return (...args: Parameters<Transaction['execute']>) =>
+                  hook(() => transaction.execute(...args));
+              },
+            }),
+          ),
+        );
+    },
+  });
+}
 describe('PostgreSQL atomic pulse admission', () => {
   let db: Db;
   let agentId: string;
@@ -133,6 +167,53 @@ describe('PostgreSQL atomic pulse admission', () => {
     expect(outcomes.filter((outcome) => outcome.status === 'persisted')).toHaveLength(1);
     expect(outcomes.filter((outcome) => outcome.status === 'min-gap')).toHaveLength(2);
     expect((await rows()).messages).toHaveLength(1);
+  });
+  it('converges a concurrent fallback creator while pulse admission holds the owner lock', async () => {
+    const notificationsLocked = signal();
+    const allowNotificationsInsert = signal();
+    const pulseAtFallback = signal();
+    const notifications = createPostgresNotificationsConversationRepository(
+      withExecuteHook(db, async (execute) => {
+        const result = await execute();
+        notificationsLocked.resolve();
+        await allowNotificationsInsert.promise;
+        return result;
+      }),
+    ).getOrCreate(agentId);
+    let admitted:
+      | ReturnType<ReturnType<typeof createPostgresPulseAdmissionRepository>['admitNotice']>
+      | undefined;
+    try {
+      await notificationsLocked.promise;
+      admitted = createPostgresPulseAdmissionRepository(
+        withExecuteHook(db, async (execute) => {
+          // Admission has acquired its owner lock and is about to wait on the
+          // other creator's advisory lock. Its FK insert must still succeed.
+          pulseAtFallback.resolve();
+          return execute();
+        }),
+      ).admitNotice(input('concurrent-fallback'));
+      await Promise.race([
+        pulseAtFallback.promise,
+        admitted.then(() => {
+          throw new Error('Admission did not reach the fallback lock');
+        }),
+      ]);
+      allowNotificationsInsert.resolve();
+      const [conversationId, outcome] = await Promise.all([notifications, admitted]);
+      expect(outcome).toMatchObject({ status: 'persisted', conversationId });
+      const stored = await rows();
+      expect(stored.chats).toHaveLength(1);
+      expect(stored.chats[0]).toMatchObject({ id: conversationId, title: 'Notifications' });
+      expect(stored.messages).toHaveLength(1);
+      expect(stored.messages[0]?.conversationId).toBe(conversationId);
+      expect(stored.suggestions).toHaveLength(1);
+      expect(stored.suggestions[0]?.conversationId).toBe(conversationId);
+      expect(stored.moments).toHaveLength(1);
+    } finally {
+      allowNotificationsInsert.resolve();
+      await Promise.allSettled([notifications, ...(admitted ? [admitted] : [])]);
+    }
   });
   it('admits only one final daily slot even when candidates pass the gap', async () => {
     await db.insert(proactiveMoments).values({

@@ -4,11 +4,15 @@ type Goal = Records['goals'];
 type Task = Records['tasks'];
 
 export interface GoalReadRepository {
+  /**
+   * What the goals dashboard reads, and no more: the sessions bound to a goal and
+   * the few fields of each that the dashboard shows, not every task in full.
+   */
   list(agentId: string): Promise<{
     goals: Records['goals'][];
-    conversations: Records['conversations'][];
-    tasks: Records['tasks'][];
-    schedules: Records['schedules'][];
+    conversations: Array<Pick<Records['conversations'], 'id' | 'updatedAt' | 'metadata'>>;
+    tasks: Array<Pick<Records['tasks'], 'id' | 'goalId' | 'status' | 'updatedAt'>>;
+    schedules: Array<Pick<Records['schedules'], 'name' | 'enabled' | 'nextRunAt'>>;
   }>;
   get(agentId: string, id: string): Promise<Records['goals'] | null>;
 }

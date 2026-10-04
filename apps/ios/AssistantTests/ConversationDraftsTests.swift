@@ -97,7 +97,7 @@ extension ConversationDraftsTests {
         defaults.set(true, forKey: "assistant.push-prompted")
         let model = AppModel(apiClient: client(), defaults: defaults, storeConnectionToken: tokenWriter)
         model.scenePhaseDidChange(.background)
-        StubURLProtocol.prime([.success(status: 200, body: try bootstrap()), .success(status: 401, body: Data())])
+        StubURLProtocol.primeBootstrap(try bootstrap())
         await model.refreshAll(reportFailure: false)
         XCTAssertNotNil(model.bootstrap)
         return (model, defaults, suite)
@@ -158,7 +158,10 @@ extension ConversationDraftsTests {
     func testCancelledConnectClearsItsOwnLoadingIndicator() async throws {
         let (model, defaults, suite) = try await pairedModel()
         defer { defaults.removePersistentDomain(forName: suite) }
-        StubURLProtocol.prime([.delayed(after: 0.2, status: 200, body: try bootstrap())])
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/bootstrap": [.delayed(after: 0.2, status: 200, body: try bootstrap())],
+            "/api/mobile/v1/overview": [.success(status: 401, body: Data())],
+        ])
         let connect = Task { await model.connect() }
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
         while StubURLProtocol.attempts.isEmpty, ContinuousClock.now < deadline { await Task.yield() }

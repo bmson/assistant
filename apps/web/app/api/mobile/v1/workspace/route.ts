@@ -8,6 +8,7 @@ import { assistantModuleMetas } from '@assistant/modules/meta';
 import { policyLabels, policyScope, scheduleLabels } from '@/app/settings/labels';
 import { getAgentReadinessSource } from '@/lib/agent-readiness-source';
 import { capabilityStatus, getCapabilityDiagnostics } from '@/lib/capabilities';
+import { coalesce } from '@/lib/coalesce';
 import { getFirestoreMobileWorkspace } from '@/lib/firestore-mobile-workspace';
 import { getSelfRepairOverview } from '@/lib/self-repair-server';
 import {
@@ -30,7 +31,11 @@ export async function GET(request: Request): Promise<Response> {
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
 
   if (loadConfig().PERSISTENCE_DRIVER === 'firestore')
-    return mobileJson(await getFirestoreMobileWorkspace(getAgentReadinessSource()));
+    return mobileJson(
+      await coalesce('mobile-workspace', () =>
+        getFirestoreMobileWorkspace(getAgentReadinessSource()),
+      ),
+    );
 
   const application = getApplication();
   const db = getDb();

@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct RootView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -57,7 +57,7 @@ struct RootView: View {
                         .transition(.opacity)
                         .onAppear { hasPresentedConnection = true }
                 } else {
-                    NavigationStack(path: $model.navigationPath) {
+                    NavigationStack(path: Binding(get: { model.navigationPath }, set: { model.navigationPath = $0 })) {
                         ChatView(
                             safeAreaTopInset: safeAreaTopInset,
                             safeAreaBottomInset: safeAreaBottomInset,
@@ -350,7 +350,7 @@ private struct ActivityCrownPlacement: ViewModifier {
 }
 
 struct CardsView: View {
-    @EnvironmentObject private var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.scenePhase) private var scenePhase
