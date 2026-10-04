@@ -24,6 +24,7 @@ These guides document implemented source separately from product direction and d
 - [Native relationship-map preparation and performance checks](../apps/ios/docs/graph-performance.md)
 - [Session architecture and interface cleanup](ui-simplification-2026-10-03.md)
 - [Message scenarios, truthful outputs, and improvement decisions](behavior-review-2026-10-03.md)
+- [Owner screenshot review: reminders, conflicts, errors and Activity (October 4)](audits/owner-screenshot-review-2026-10-04.md)
 
 ## Architecture and extension
 
