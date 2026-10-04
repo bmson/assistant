@@ -97,6 +97,10 @@ export function isRoutableModel(model: Records['models'] | null | undefined): bo
   return (
     model.promptCostPerMTok !== null &&
     model.completionCostPerMTok !== null &&
+    !(typeof model.promptCostPerMTok === 'string' && model.promptCostPerMTok.trim() === '') &&
+    !(
+      typeof model.completionCostPerMTok === 'string' && model.completionCostPerMTok.trim() === ''
+    ) &&
     Number.isFinite(prompt) &&
     Number.isFinite(completion) &&
     prompt >= 0 &&

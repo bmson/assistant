@@ -11,6 +11,7 @@ import UniformTypeIdentifiers
 struct MemoryView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showingCreateMemory = false
     @State private var openFact: WorkspaceMemoryFact?
@@ -30,7 +31,7 @@ struct MemoryView: View {
     private let factPreviewCount = 5
 
     var body: some View {
-        List {
+        AssistantSettingsList {
             if let memory = model.workspace?.memory {
                 content(memory)
             } else {
@@ -164,44 +165,42 @@ struct MemoryView: View {
 
     private var mapCard: some View {
         Button { showsMap = true } label: {
-            ZStack(alignment: .bottomLeading) {
-                if let graph, !graph.nodes.isEmpty {
-                    let settings = GraphSettings(data: graphSettingsData)
-                    let shown = graph.filtered(by: settings)
-                    RelationshipGraphCanvas(snapshot: shown.nodes.isEmpty ? graph : shown, selectedID: nil, interactive: false,
-                                            insets: UIEdgeInsets(top: 8, left: 0, bottom: 56, right: 0),
-                                            settings: settings)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                } else {
-                    AssistantTheme.raised(for: colorScheme)
-                    Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .font(.system(size: 44, weight: .light))
-                        .foregroundStyle(AssistantTheme.accent(for: colorScheme).opacity(0.5))
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .accessibilityHidden(true)
-                }
-                LinearGradient(
-                    colors: [AssistantTheme.canvas(for: colorScheme).opacity(0), AssistantTheme.canvas(for: colorScheme).opacity(0.92)],
-                    startPoint: .center, endPoint: .bottom
-                )
-                .allowsHitTesting(false)
-                HStack(alignment: .bottom) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Your map").font(.headline).foregroundStyle(.primary)
-                        Text(mapSubtitle).font(.footnote).foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                ZStack {
+                    if let graph, !graph.nodes.isEmpty {
+                        let settings = GraphSettings(data: graphSettingsData)
+                        let shown = graph.filtered(by: settings)
+                        RelationshipGraphCanvas(snapshot: shown.nodes.isEmpty ? graph : shown, selectedID: nil, interactive: false,
+                                                insets: UIEdgeInsets(top: 8, left: 0, bottom: 8, right: 0),
+                                                settings: settings)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    } else {
+                        AssistantTheme.sunken(for: colorScheme)
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                            .font(.system(size: 44, weight: .light))
+                            .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                            .accessibilityHidden(true)
                     }
+                }
+                .frame(height: 170)
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Your map").font(.headline).foregroundStyle(AssistantTheme.ink(for: colorScheme))
+                        Text(mapSubtitle).font(.footnote).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                         .font(.footnote.weight(.bold))
-                        .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+                        .foregroundStyle(AssistantTheme.accent(for: colorScheme))
                         .frame(width: 36, height: 36)
-                        .glassEffect(.regular, in: Circle())
+                        .background(AssistantTheme.sunken(for: colorScheme), in: Circle())
                         .accessibilityHidden(true)
                 }
                 .padding(16)
             }
-            .frame(height: 220)
+            .background(AssistantTheme.raised(for: colorScheme))
             .clipShape(RoundedRectangle(cornerRadius: AssistantTheme.cardCornerRadius, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: AssistantTheme.cardCornerRadius, style: .continuous)
@@ -317,7 +316,7 @@ struct MemoryView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(fact.content)
                         .foregroundStyle(.primary)
-                        .lineLimit(3)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 3)
                         .multilineTextAlignment(.leading)
                     Text(factMeta(fact, review: review))
                         .font(.caption)
@@ -1229,10 +1228,16 @@ struct PersonEditor: View {
     var body: some View {
         AssistantForm {
             Section("Person") {
-                TextField("Name", text: $name)
-                TextField("Relationship", text: $relationship)
-                TextField("Aliases, separated by commas", text: $aliases, axis: .vertical)
-                    .lineLimit(2...5)
+                AssistantField("Name") {
+                    TextField("Name", text: $name)
+                }
+                AssistantField("Relationship") {
+                    TextField("Relationship", text: $relationship)
+                }
+                AssistantField("Aliases") {
+                    TextField("Aliases, separated by commas", text: $aliases, axis: .vertical)
+                        .lineLimit(2...5)
+                }
             }
         }
         .navigationTitle(personId == nil ? "Add person" : "Edit person")

@@ -78,6 +78,58 @@ beforeEach(() => {
 });
 
 describe('reasoning is spent only where it earns its latency', () => {
+  it('rejects two truncated structured responses instead of exposing a partial value', async () => {
+    const router = routerWith(provider(), false);
+    stubs.generateObject.mockResolvedValue({
+      object: { needsAction: false },
+      finishReason: 'length',
+    });
+    await expect(
+      router.object('classify', {
+        prompt: 'x',
+        maxRetries: 0,
+        schema: z.object({ needsAction: z.boolean() }),
+      }),
+    ).rejects.toMatchObject({ name: 'TruncatedObjectError' });
+    expect(stubs.generateObject).toHaveBeenCalledTimes(2);
+    expect(stubs.releaseReservation).not.toHaveBeenCalled();
+  });
+  it('preserves a transport error when retrying a schema-valid truncated object', async () => {
+    const router = routerWith(provider(), false);
+    const transportError = new Error('Provider connection failed');
+    stubs.generateObject
+      .mockResolvedValueOnce({ object: { needsAction: false }, finishReason: 'length' })
+      .mockRejectedValueOnce(transportError);
+    await expect(
+      router.object('classify', {
+        prompt: 'x',
+        maxRetries: 0,
+        schema: z.object({ needsAction: z.boolean() }),
+      }),
+    ).rejects.toBe(transportError);
+    expect(stubs.generateObject).toHaveBeenCalledTimes(2);
+    expect(stubs.releaseReservation).toHaveBeenCalledOnce();
+  });
+  it('reserves schema/tool overhead and disables implicit transport retries for screening', async () => {
+    const router = routerWith(provider(), false);
+    await router.generate('draft', {
+      prompt: 'x',
+      additionalInputTokens: 2_048,
+      maxRetries: 0,
+    });
+    expect(stubs.generateText.mock.calls[0]?.[0].maxRetries).toBe(0);
+    expect(stubs.reserveCost).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ estimatedUsd: ((1 + 2_048 + 2_048) / 1_000_000) * 1.25 }),
+    );
+    await expect(
+      router.generate('draft', { prompt: 'x', additionalInputTokens: -1 }),
+    ).rejects.toThrow('additionalInputTokens');
+    await expect(router.generate('draft', { prompt: 'x', maxRetries: 3 })).rejects.toThrow(
+      'maxRetries',
+    );
+    expect(stubs.generateText).toHaveBeenCalledTimes(1);
+  });
   it('turns reasoning off for a classifier, and does not reserve headroom it will not use', async () => {
     const optionsFor = vi.fn(() => undefined);
     const router = routerWith(provider({ optionsFor }));
@@ -194,6 +246,7 @@ describe('OpenRouter reasoning parameters', () => {
     'moonshotai/kimi-k2.5',
     'moonshotai/kimi-k2.6',
     'moonshotai/kimi-k3',
+    'openai/gpt-6-luna',
   ])('disables optional reasoning on lightweight calls to %s', async (modelId) => {
     const router = routerWith(createOpenRouterModelProvider('unused'), true, modelId);
     await router.generate('draft', { prompt: 'hello' });
@@ -201,6 +254,30 @@ describe('OpenRouter reasoning parameters', () => {
       maxOutputTokens: 2_048,
       providerOptions: { openrouter: { reasoning: { enabled: false } } },
     });
+  });
+
+  it.each(['openai/gpt-6.1-sol', 'openai/gpt-6-luna'])(
+    'uses supported effort and bills reasoning headroom for tool calls on %s',
+    async (modelId) => {
+      const router = routerWith(createOpenRouterModelProvider('unused'), true, modelId);
+      await router.step('reason', { prompt: 'check the calendar', tools: {} });
+      expect(stubs.generateText.mock.calls[0]?.[0]).toMatchObject({
+        providerOptions: { openrouter: { reasoning: { effort: 'medium' } } },
+      });
+      expect(stubs.generateText.mock.calls[0]?.[0].maxOutputTokens).toBeGreaterThan(4_096);
+    },
+  );
+
+  it('never disables mandatory Sol reasoning for a lightweight reply', async () => {
+    const openrouter = createOpenRouterModelProvider('unused');
+    expect(openrouter.canDisableReasoning?.('openai/gpt-6.1-sol')).toBe(false);
+    const router = routerWith(openrouter, true, 'openai/gpt-6.1-sol');
+    await router.generate('draft', { prompt: 'hello' });
+    expect(stubs.generateText.mock.calls[0]?.[0]).toMatchObject({
+      maxOutputTokens: 2_048 + 4_096,
+      providerOptions: { openrouter: { reasoning: { effort: 'medium' } } },
+    });
+    expect(openrouter.canDisableReasoning?.('openai/gpt-6-luna:unknown-variant')).toBe(false);
   });
 
   it('keeps reasoning when a provider has not declared an off switch', async () => {

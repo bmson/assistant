@@ -187,18 +187,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore pulse job', () 
     });
     await mail('mail-open', 5);
 
-    // The imported moment is outside the gap but inside the day: the mail is
-    // the stronger candidate, yet it was already said, so the pulse stands down.
-    expect(await runJob()).toBe('pulse: quiet (already-said)');
-
-    // With the mail gone, the commitment is the only candidate left.
-    await store
-      .collection('emailIngest')
-      .get()
-      .then(async (rows) => {
-        for (const doc of rows.docs) await doc.ref.delete();
-      });
-    expect(await runJob()).toBe('pulse: commitment-due delivered, 1 candidate(s)');
+    // The stronger mail candidate was already said outside the gap. It must
+    // not hide the new commitment, and it must not be announced again.
+    expect(await runJob()).toBe('pulse: commitment-due delivered, 2 candidate(s)');
     expect((await notices()).map((row) => row.text)).toEqual([
       expect.stringMatching(/^"Quarterly report" is due .* — next: Send the draft\.$/),
     ]);
@@ -213,20 +204,23 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore pulse job', () 
 
   // Two transactions contend for one moment; the emulator's shared lock manager
   // can take several seconds to settle them, as in the Notifications race test.
-  it('claims each moment once under concurrency', { timeout: 30_000 }, async () => {
-    const claim = {
+  it('admits each owner notice once under concurrency', { timeout: 30_000 }, async () => {
+    const notice = {
       agentId,
-      kind: 'commitment-due',
-      momentKey: 'commitment-due:x',
-      summary: 'x',
-      deliveredAt: new Date(now),
+      now: new Date(now),
+      observationFence: await pulse.observationFence(agentId),
+      pacing: { gapSince: at(-1), windowSince: at(-24), dailyCap: 6 },
+      moment: { kind: 'commitment-due', key: 'commitment-due:x', summary: 'x' },
+      notice: { text: 'x', extraParts: [] },
     };
-    const claims = await Promise.all([pulse.claimMoment(claim), pulse.claimMoment(claim)]);
-    expect(claims.filter(Boolean)).toHaveLength(1);
-    const id = claims.find(Boolean) as string;
-    await pulse.markPinged(agentId, id, true);
+    const admitted = await Promise.all([pulse.admitNotice(notice), pulse.admitNotice(notice)]);
+    expect(admitted.map((row) => row.status).sort()).toEqual(['already-said', 'persisted']);
+    const persisted = admitted.find((row) => row.status === 'persisted');
+    if (persisted?.status !== 'persisted') throw new Error('Fixture admission failed');
+    await pulse.markPinged(agentId, persisted.momentId, true);
     expect(await pulse.deliveredSince(agentId, at(-1))).toBe(1);
     expect(await pulse.momentKeys(agentId, 'commitment-due')).toEqual(['commitment-due:x']);
+    expect(await notices()).toHaveLength(1);
   });
 
   it('keeps the calendar snapshot in step with successful reads', async () => {

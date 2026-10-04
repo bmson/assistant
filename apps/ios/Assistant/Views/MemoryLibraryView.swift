@@ -14,10 +14,13 @@ struct MemoryLibraryScreen: View {
     @State private var query = MemoryLibraryQuery()
     @State private var search = ""
     @State private var response = MemoryLibraryResponse.empty
+    @State private var responseQuery = MemoryLibraryQuery()
     @State private var loading = false
     @State private var loaded = false
-    @State private var pendingRowID: String?
+    @State private var loadFailed = false
+    @State private var pendingRowIDs: Set<String> = []
     @State private var loadTask: Task<Void, Never>?
+    @State private var requestID = UUID()
     @State private var correctingRow: MemoryLibraryRow?
 
     /// The domains the extractor assigns. Fixed rather than derived so the
@@ -37,9 +40,15 @@ struct MemoryLibraryScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 filters
+                if loadFailed {
+                    AssistantLoadFailureState(
+                        title: "Your memory library couldn’t be loaded",
+                        message: response.rows.isEmpty ? "Try again to see your saved memories." : "Your previous results are shown below."
+                    ) { reload() }
+                }
                 if loading && response.rows.isEmpty {
                     AssistantLoadingState(title: "Loading your memory library")
-                } else if response.rows.isEmpty {
+                } else if response.rows.isEmpty && !loadFailed {
                     AssistantEmptyState(
                         loaded ? "Nothing matches those filters" : "Memory library",
                         systemImage: "tray",
@@ -60,8 +69,18 @@ struct MemoryLibraryScreen: View {
         .assistantSubmenuChrome()
         .searchable(text: $search, prompt: "Search saved memories")
         .onSubmit(of: .search) { apply { $0.search = search } }
+        .onChange(of: search) { _, value in
+            // Clearing the native search field also clears the applied query;
+            // otherwise it looked empty while the old search still filtered.
+            if value.isEmpty { apply { $0.search = "" } }
+        }
         .refreshable { await load() }
-        .task { if !loaded { await load() } }
+        .task { if !loaded || responseQuery != query || loadFailed { await load() } }
+        .onDisappear {
+            loadTask?.cancel()
+            requestID = UUID()
+            loading = false
+        }
         .sheet(item: $correctingRow, onDismiss: { reload() }) { row in
             NavigationStack { MemoryEditor(row: row) }
         }
@@ -150,7 +169,7 @@ struct MemoryLibraryScreen: View {
     @ViewBuilder
     private func actions(_ row: MemoryLibraryRow) -> some View {
         AssistantFlowLayout(spacing: 9) {
-            if query.state == "review" {
+            if responseQuery.state == "review" {
                 Button("Remember", systemImage: "checkmark") { perform(row, action: "approve") }
                     .buttonStyle(AssistantActionButtonStyle(kind: .primary, compact: true))
                 Button("Don’t remember", systemImage: "xmark") { perform(row, action: "reject") }
@@ -192,7 +211,7 @@ struct MemoryLibraryScreen: View {
             }
         }
         .font(.subheadline)
-        .disabled(pendingRowID == row.id)
+        .disabled(loading || loadFailed || pendingRowIDs.contains(row.id))
     }
 
     private func perform(_ row: MemoryLibraryRow, action: String, prominence: String? = nil) {
@@ -202,10 +221,11 @@ struct MemoryLibraryScreen: View {
     /// Acting on a row changes what the current page contains, so the list is
     /// reloaded rather than left showing a row that no longer qualifies.
     private func act(_ row: MemoryLibraryRow, action: String, prominence: String? = nil) async {
-        pendingRowID = row.id
-        _ = await model.updateMemory(id: row.id, action: action, prominence: prominence)
-        pendingRowID = nil
-        await load()
+        guard pendingRowIDs.insert(row.id).inserted else { return }
+        defer { pendingRowIDs.remove(row.id) }
+        if await model.updateMemory(id: row.id, action: action, prominence: prominence) {
+            await load()
+        }
     }
 
     private func memoryTag(_ text: String) -> some View {
@@ -225,14 +245,14 @@ struct MemoryLibraryScreen: View {
         if response.totalPages > 1 {
             HStack {
                 Button("Previous") { apply { $0.page = max(1, $0.page - 1) } }
-                    .disabled(response.page <= 1 || loading)
+                    .disabled(response.page <= 1 || loading || loadFailed)
                 Spacer(minLength: 8)
                 Text("Page \(response.page) of \(response.totalPages)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 8)
                 Button("Next") { apply { $0.page = min(response.totalPages, $0.page + 1) } }
-                    .disabled(response.page >= response.totalPages || loading)
+                    .disabled(response.page >= response.totalPages || loading || loadFailed)
             }
             .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: true))
         }
@@ -277,11 +297,17 @@ struct MemoryLibraryScreen: View {
 
     private func load() async {
         loading = true
+        let requestID = UUID()
+        self.requestID = requestID
         let requested = query
         let result = await model.memoryLibrary(requested)
         // Only the request that still matches the current filters may publish.
-        guard !Task.isCancelled, requested == query else { return }
-        if let result { response = result }
+        guard !Task.isCancelled, requestID == self.requestID, requested == query else { return }
+        if let result {
+            response = result
+            responseQuery = requested
+        }
+        loadFailed = result == nil
         loading = false
         loaded = true
     }

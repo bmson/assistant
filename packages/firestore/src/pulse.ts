@@ -1,16 +1,27 @@
 import { createHash } from 'node:crypto';
-import type {
-  PulseCalendarSnapshot,
-  PulseCommitment,
-  PulseMail,
-  PulseRepository,
-  Records,
+import {
+  type PulseCalendarSnapshot,
+  type PulseCommitment,
+  type PulseMail,
+  type PulseNoticeInput,
+  type PulseNoticeOutcome,
+  type PulseRepository,
+  pulseDailyCap,
+  type Records,
+  type SuggestionRecord,
+  validatePulseNotice,
 } from '@assistant/persistence';
 import type { SituationPackView } from '@assistant/persistence/situations';
-import type { DocumentReference, QueryDocumentSnapshot } from '@google-cloud/firestore';
-import { assertPrivacyErasureInactiveInTransaction } from './privacy-erasure.js';
+import type {
+  DocumentReference,
+  DocumentSnapshot,
+  QueryDocumentSnapshot,
+} from '@google-cloud/firestore';
+import { FirestoreOwnerNoticeRepository } from './owner-notices.js';
+import { privacyErasureIsActive } from './privacy-erasure.js';
 import { FirestoreSituationPackReadRepository } from './situation-packs.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
+import { suggestionIdFor } from './suggestions.js';
 
 /** Stored calendar events per owner: a day and a half of events plus a day of stale ones. */
 const SNAPSHOT_LIMIT = 2_000;
@@ -39,10 +50,44 @@ function momentIdFor(agentId: string, momentKey: string): string {
     .digest('hex')}`;
 }
 
+/** UUID-shaped notice identity remains fixed across transaction and task retries. */
+function messageIdFor(agentId: string, momentKey: string): string {
+  const hex = createHash('sha256')
+    .update(JSON.stringify(['pulse-notice', agentId, momentKey]))
+    .digest('hex');
+  const variant = ((Number.parseInt(hex[16] ?? '0', 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+function erasureGeneration(snapshot: DocumentSnapshot, agentId: string): string | null {
+  if (!snapshot.exists) return null;
+  const generation = snapshot.get('generation');
+  if (
+    snapshot.get('agentId') !== agentId ||
+    privacyErasureIsActive(snapshot.get('status')) ||
+    typeof generation !== 'string' ||
+    !generation
+  )
+    throw new Error('Privacy erasure is in progress or malformed');
+  return generation;
+}
+
+function assertOwnedIdentity(snapshot: DocumentSnapshot, agentId: string): void {
+  const id = snapshot.get('id');
+  if (
+    typeof id !== 'string' ||
+    documentKey(id) !== snapshot.id ||
+    snapshot.get('agentId') !== agentId
+  )
+    throw new Error('Pulse record ownership or identity mismatch');
+}
+
 /**
  * The pulse on Firestore. The moment ledger is keyed by `(agentId, momentKey)`
  * like the PostgreSQL unique index; imported moments keep their random ids and
- * are found by query inside the claiming transaction.
+ * are found by query inside the admission transaction. A per-owner coordination
+ * document serializes different moment keys as well as identical ones, and the
+ * ledger, owner message and new suggestion commit together.
  */
 export class FirestorePulseRepository implements PulseRepository {
   readonly kind = 'pulse-repository' as const;
@@ -246,29 +291,154 @@ export class FirestorePulseRepository implements PulseRepository {
       .slice(0, input.limit);
   }
 
-  async claimMoment(input: Parameters<PulseRepository['claimMoment']>[0]): Promise<string | null> {
-    const id = momentIdFor(input.agentId, input.momentKey);
+  async observationFence(agentId: string): Promise<string | null> {
+    return erasureGeneration(await this.store.doc('privacyErasureJobs', agentId).get(), agentId);
+  }
+
+  async admitNotice(input: PulseNoticeInput): Promise<PulseNoticeOutcome> {
+    validatePulseNotice(input);
+    const id = momentIdFor(input.agentId, input.moment.key);
     const ref = this.store.doc('proactiveMoments', id);
+    const messageId = messageIdFor(input.agentId, input.moment.key);
+    const messageRef = this.store.doc('messages', messageId);
+    const coordinationRef = this.store.doc('coordination', `pulse-admission:${input.agentId}`);
     const imported = this.store
       .collection('proactiveMoments')
       .where('agentId', '==', input.agentId)
-      .where('momentKey', '==', input.momentKey)
-      .limit(1);
+      .where('momentKey', '==', input.moment.key)
+      .limit(2);
+    const notices = new FirestoreOwnerNoticeRepository(this.store, input.agentId);
     return this.store.db.runTransaction(async (tx) => {
-      await assertPrivacyErasureInactiveInTransaction(tx, this.store, input.agentId);
+      // A point read/write makes distinct candidates contend; query-only
+      // deduplication would not serialize two previously absent moment keys.
+      const coordination = await tx.get(coordinationRef);
+      if (coordination.exists && coordination.get('agentId') !== input.agentId)
+        throw new Error('Pulse coordination belongs to another owner');
+      const erasure = await tx.get(this.store.doc('privacyErasureJobs', input.agentId));
+      if (erasureGeneration(erasure, input.agentId) !== input.observationFence)
+        throw new Error('Privacy erasure changed during pulse observation');
+      // Scope checks also apply to retries and suppressed candidates. Routing
+      // resolves a destination without staging a marker or conversation write.
+      const destination = await notices.prepareNoticeInTransaction(tx, input.taskId);
       const [byId, byKey] = await Promise.all([tx.get(ref), tx.get(imported)]);
-      if (byId.exists || !byKey.empty) return null;
+      for (const existing of [byId, ...byKey.docs]) {
+        if (!existing.exists) continue;
+        assertOwnedIdentity(existing, input.agentId);
+        if (existing.get('momentKey') !== input.moment.key)
+          throw new Error('Pulse moment identity collision');
+      }
+      // Imported ledger-only claims are inert: their notice history is unknown.
+      if (byId.exists || !byKey.empty) return { status: 'already-said' };
+      const prefs = await tx.get(this.store.doc('notificationPrefs', input.agentId));
+      if (prefs.exists && prefs.get('agentId') !== input.agentId)
+        throw new Error('Notification preferences belong to another owner');
+      const dailyCap = pulseDailyCap(
+        input.pacing.dailyCap,
+        (prefs.exists ? (prefs.get('ambientDailyCap') ?? null) : null) as number | null,
+      );
+      if (dailyCap === 0) return { status: 'daily-cap' };
+      const used = await tx.get(
+        this.store
+          .collection('proactiveMoments')
+          .where('agentId', '==', input.agentId)
+          .where('deliveredAt', '>=', input.pacing.windowSince)
+          .limit(dailyCap)
+          .count(),
+      );
+      if (used.data().count >= dailyCap) return { status: 'daily-cap' };
+      const recent = await tx.get(
+        this.store
+          .collection('proactiveMoments')
+          .where('agentId', '==', input.agentId)
+          .where('deliveredAt', '>=', input.pacing.gapSince)
+          .limit(1),
+      );
+      if (!recent.empty) return { status: 'min-gap' };
+
+      const existingMessage = await tx.get(messageRef);
+      if (existingMessage.exists)
+        throw new Error('Pulse notice exists without its admission ledger');
+      let suggestion: SuggestionRecord | null = null;
+      if (input.suggestion) {
+        const proposal = input.suggestion;
+        const suggestionId = suggestionIdFor(input.agentId, proposal.sourceRef);
+        const suggestionRef = this.store.doc('suggestions', suggestionId);
+        const existingSource = this.store
+          .collection('suggestions')
+          .where('agentId', '==', input.agentId)
+          .where('sourceRef', '==', proposal.sourceRef)
+          .limit(2);
+        const [byProposalId, bySource] = await Promise.all([
+          tx.get(suggestionRef),
+          tx.get(existingSource),
+        ]);
+        for (const existing of [byProposalId, ...bySource.docs]) {
+          if (!existing.exists) continue;
+          assertOwnedIdentity(existing, input.agentId);
+          if (existing.get('sourceRef') !== proposal.sourceRef)
+            throw new Error('Pulse suggestion identity collision');
+        }
+        if (!byProposalId.exists && bySource.empty)
+          suggestion = {
+            id: suggestionId,
+            agentId: input.agentId,
+            conversationId: destination.row.id,
+            summary: proposal.summary,
+            proposedAction: proposal.proposedAction,
+            sourceRef: proposal.sourceRef,
+            origin: proposal.origin,
+            status: 'pending',
+            expiresAt: proposal.expiresAt,
+            snoozedUntil: null,
+            acceptedTaskId: null,
+            createdAt: input.now,
+            updatedAt: input.now,
+          };
+      }
       const row: Records['proactiveMoments'] = {
         id,
         agentId: input.agentId,
-        kind: input.kind,
-        summary: input.summary,
-        momentKey: input.momentKey,
+        kind: input.moment.kind,
+        summary: input.moment.summary,
+        momentKey: input.moment.key,
         pinged: false,
-        deliveredAt: input.deliveredAt,
+        deliveredAt: input.now,
       };
+      // No transaction reads or external work follow this point.
+      tx.set(coordinationRef, {
+        agentId: input.agentId,
+        momentId: id,
+        updatedAt: input.now,
+      });
       tx.create(ref, encodeRecord(row));
-      return id;
+      if (suggestion)
+        tx.create(this.store.doc('suggestions', suggestion.id), encodeRecord(suggestion));
+      notices.appendNoticeInTransaction(tx, destination, {
+        id: messageId,
+        text: input.notice.text,
+        ...(input.taskId ? { taskId: input.taskId } : {}),
+        now: input.now,
+        extraParts: [
+          ...input.notice.extraParts,
+          ...(suggestion
+            ? [
+                {
+                  type: 'suggestion',
+                  suggestionId: suggestion.id,
+                  summary: suggestion.summary,
+                  proposedAction: suggestion.proposedAction,
+                },
+              ]
+            : []),
+        ],
+      });
+      return {
+        status: 'persisted',
+        momentId: id,
+        messageId,
+        conversationId: destination.row.id,
+        suggestionCreated: suggestion !== null,
+      };
     });
   }
 

@@ -73,20 +73,34 @@ struct WorkspaceView: View {
     @State private var showingIssueReporter = false
     @State private var issueReported = false
     @State private var workspaceActionInFlight: String?
+    @State private var isLoading = false
+    @State private var loadFailed = false
+    @State private var improvementReceipt: ImprovementDecisionResult?
+    @State private var improvementFailureID: String?
+    @State private var improvementFailureDetail: String?
+    @State private var recordedImprovementIDs: Set<String> = []
+    @State private var repairFailureID: String?
+    @State private var repairAcknowledgedRevisions: [String: String] = [:]
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
 
+                if loadFailed {
+                    AssistantLoadFailureState(
+                        title: "Couldn’t refresh \(area.title.lowercased())",
+                        message: model.workspace == nil ? "Try again to load this workspace." : "Previous information is shown. Refresh before making changes.",
+                        retry: { Task { await refresh() } }
+                    )
+                }
+
                 if area == .documents {
                     documentsContent
                 } else if let workspace = model.workspace {
                     workspaceContent(workspace)
-                } else {
-                    ProgressView()
-                        .frame(maxWidth: .infinity, minHeight: 180)
-                        .accessibilityLabel("Loading \(area.title.lowercased())")
+                } else if !loadFailed {
+                    AssistantLoadingState(title: "Loading \(area.title.lowercased())")
                 }
             }
             .padding(16)
@@ -105,8 +119,18 @@ struct WorkspaceView: View {
                 do { try await Task.sleep(for: .seconds(30)) }
                 catch { return }
                 guard !Task.isCancelled else { return }
-                await model.refreshWorkspace()
+                await refresh()
             }
+        }
+        .onChange(of: model.composerDraftScope?.session) { _, _ in
+            // The presentation belongs to the authenticated session too.
+            improvementReceipt = nil
+            improvementFailureID = nil
+            improvementFailureDetail = nil
+            recordedImprovementIDs = []
+            repairFailureID = nil
+            repairAcknowledgedRevisions = [:]
+            workspaceActionInFlight = nil
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -121,12 +145,15 @@ struct WorkspaceView: View {
                     } label: {
                         Label("Document actions", systemImage: "ellipsis.circle")
                     }
+                    .disabled(actionsUnavailable)
                 } else if area == .skills {
                     Button("Add skill", systemImage: "plus") { showingSkillCreator = true }
+                        .disabled(actionsUnavailable)
                 } else if area == .costs {
                     Button("Edit limits", systemImage: "slider.horizontal.3") {
                         showingCostEditor = true
                     }
+                    .disabled(model.workspace == nil || actionsUnavailable)
                 }
             }
         }
@@ -191,43 +218,16 @@ struct WorkspaceView: View {
         }
     }
 
-    @ViewBuilder
     private var header: some View {
-        if usesAccessibilityLayout {
-            VStack(alignment: .leading, spacing: 11) {
-                headerIcon
-                headerIntroduction
-            }
-            .assistantPanel(in: colorScheme)
-        } else {
-            HStack(alignment: .top, spacing: 13) {
-                headerIcon
-                headerIntroduction
-                Spacer(minLength: 0)
-            }
-            .assistantPanel(in: colorScheme)
-        }
-    }
-
-    private var headerIcon: some View {
-        Image(systemName: area.icon)
-            .font(.system(size: 18, weight: .semibold))
-            .foregroundStyle(AssistantTheme.accent(for: colorScheme))
-            .frame(width: isLandscape ? 40 : 46, height: isLandscape ? 40 : 46)
-            .background(
-                AssistantTheme.accent(for: colorScheme).opacity(0.12),
-                in: RoundedRectangle(cornerRadius: AssistantTheme.panelCornerRadius - 3, style: .continuous)
-            )
-    }
-
-    private var headerIntroduction: some View {
         Text(area.introduction)
             .font(.subheadline)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
             .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var isLandscape: Bool { verticalSizeClass == .compact }
+    private var actionsUnavailable: Bool { workspaceActionInFlight != nil || isLoading || loadFailed }
 
     @ViewBuilder
     private func workspaceContent(_ workspace: WorkspaceResponse) -> some View {
@@ -255,6 +255,7 @@ struct WorkspaceView: View {
                 sectionHeading("Current chats", count: chats.current.count)
                 Spacer()
                 Button {
+                    guard !actionsUnavailable, !model.isSending else { return }
                     workspaceActionInFlight = "new-chat"
                     Task {
                         _ = await model.createConversation()
@@ -264,7 +265,8 @@ struct WorkspaceView: View {
                     Label("New chat", systemImage: "plus")
                 }
                 .buttonStyle(AssistantActionButtonStyle(kind: .primary))
-                .disabled(workspaceActionInFlight != nil)
+                .disabled(actionsUnavailable || model.isSending)
+                .accessibilityHint(model.isSending ? "Finish or stop the current reply before opening another chat." : "")
                 Menu {
                     Button("Archive inactive chats", systemImage: "archivebox") {
                         workspaceActionInFlight = "archive-inactive"
@@ -277,7 +279,14 @@ struct WorkspaceView: View {
                     Image(systemName: "ellipsis.circle")
                 }
                 .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: true))
-                .disabled(workspaceActionInFlight != nil)
+                .disabled(actionsUnavailable)
+            }
+
+            if model.isSending {
+                Text("Finish or stop the current reply before opening another chat.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if chats.current.isEmpty {
@@ -298,6 +307,8 @@ struct WorkspaceView: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        .disabled(actionsUnavailable || model.isSending)
+                        .accessibilityHint(model.isSending ? "Finish or stop the current reply before opening another chat." : "")
                         Spacer(minLength: 0)
                         if !chat.isPrimary {
                             Menu {
@@ -309,7 +320,7 @@ struct WorkspaceView: View {
                                 Image(systemName: "ellipsis.circle")
                             }
                             .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: true))
-                            .disabled(workspaceActionInFlight != nil)
+                            .disabled(actionsUnavailable)
                         }
                     }
                     .assistantCard(in: colorScheme)
@@ -342,13 +353,15 @@ struct WorkspaceView: View {
                                 }
                                 }
                                 .buttonStyle(.plain)
+                                .disabled(actionsUnavailable || model.isSending)
+                                .accessibilityHint(model.isSending ? "Finish or stop the current reply before opening another chat." : "")
                                 Spacer()
                                 Button("Restore", systemImage: "tray.and.arrow.up") {
                                     updateChat(chat, action: "restore")
                                 }
                                 .labelStyle(.iconOnly)
                                 .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: true))
-                                .disabled(workspaceActionInFlight != nil)
+                                .disabled(actionsUnavailable)
                             }
                             .padding(.vertical, 10)
                             if chat.id != chats.archived.last?.id { Divider() }
@@ -383,9 +396,8 @@ struct WorkspaceView: View {
                 if let imports = model.workspace?.imports {
                     backstoryImports(imports)
                 }
-            } else {
-                ProgressView()
-                    .frame(maxWidth: .infinity, minHeight: 180)
+            } else if !loadFailed {
+                AssistantLoadingState(title: "Loading documents")
             }
         }
     }
@@ -677,7 +689,7 @@ struct WorkspaceView: View {
                             }
                             .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
                         }
-                        .disabled(workspaceActionInFlight != nil)
+                        .disabled(actionsUnavailable)
                     }
                     .assistantCard(in: colorScheme)
                 }
@@ -690,11 +702,31 @@ struct WorkspaceView: View {
         let advisory = improvements.filter { !$0.applyable }
 
         return VStack(alignment: .leading, spacing: 16) {
-            Button("Report an issue", systemImage: "plus.bubble") {
+            Button {
                 issueReported = false
                 showingIssueReporter = true
+            } label: {
+                HStack(spacing: 10) {
+                    Label("Report an issue", systemImage: "plus.bubble")
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").font(.caption.weight(.semibold)).accessibilityHidden(true)
+                }
             }
-            .buttonStyle(AssistantActionButtonStyle(kind: .primary))
+            .buttonStyle(AssistantActionButtonStyle(kind: .secondary, fillsWidth: true))
+            .disabled(actionsUnavailable)
+
+            if let receipt = improvementReceipt {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(receipt.receiptTitle, systemImage: "checkmark.circle")
+                        .font(.subheadline.weight(.semibold))
+                    Text(receipt.receiptDetail)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .assistantPanel(in: colorScheme)
+                .accessibilityElement(children: .combine)
+            }
 
             if issueReported {
                 Label("Issue reported. Follow its progress under Code fixes.", systemImage: "checkmark.circle")
@@ -712,7 +744,7 @@ struct WorkspaceView: View {
                 improvementReviewSummary(improvements, applyableCount: directlyApplyable.count)
 
                 if !directlyApplyable.isEmpty {
-                    sectionHeading("Ready to apply", count: directlyApplyable.count)
+                    sectionHeading("Model routing proposals", count: directlyApplyable.count)
                     ForEach(directlyApplyable) { improvement in
                         improvementCard(improvement)
                     }
@@ -729,69 +761,143 @@ struct WorkspaceView: View {
     }
 
     private func repairIssues(_ repairs: WorkspaceRepairs) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Code fixes").font(.headline)
+        let active = repairs.issues.filter { !RepairPresentation(status: $0.status).isClosed }
+        let closed = repairs.issues.filter { RepairPresentation(status: $0.status).isClosed }
+        return VStack(alignment: .leading, spacing: 12) {
+            sectionHeading("Code fixes", count: active.count)
             Text(repairs.enabled && repairs.configured
-                 ? "Automatic investigation is on. You review and merge every PR."
+                 ? "Investigation is on. Review code before merging, then confirm the original problem is fixed."
                  : "Automatic coding is not configured yet. Reports are saved for review.")
                 .font(.subheadline).foregroundStyle(.secondary)
-            ForEach(repairs.issues.filter { !["dismissed", "resolved"].contains($0.status) }) { issue in
+            if active.isEmpty {
+                AssistantEmptyState("No active code fixes", systemImage: "wrench.and.screwdriver",
+                    description: "Report a problem above, or request a code fix from a proposal.")
+            }
+            ForEach(active) { issue in
+                repairIssueCard(issue, repairs: repairs)
+            }
+            if !closed.isEmpty {
+                DisclosureGroup("Past reports (\(closed.count))") {
+                    VStack(spacing: 12) {
+                        ForEach(closed) { issue in
+                            repairIssueCard(issue, repairs: repairs)
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+                .font(.subheadline.weight(.semibold))
+                .assistantPanel(in: colorScheme)
+            }
+        }
+    }
+
+    private func repairIssueCard(_ issue: WorkspaceRepairIssue, repairs: WorkspaceRepairs) -> some View {
+        let presentation = RepairPresentation(status: issue.status, manualRunRequested: issue.manualRunRequested == true)
+        let waitingForRefresh = repairAcknowledgedRevisions[issue.id] == issue.actionRevision
+        return VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(repairStatusLabel(issue.status)).font(.caption).foregroundStyle(.secondary)
+                    if workspaceActionInFlight == issue.id {
+                        ProgressView("Updating report").font(.caption)
+                    } else {
+                        Text(presentation.title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    }
                     Text(issue.title).font(.headline)
+                        .accessibilityAddTraits(.isHeader)
+                    Text(presentation.detail).font(.subheadline).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(issue.diagnosis.isEmpty ? issue.summary : issue.diagnosis).font(.subheadline)
+                    Text("Updated \(relative(issue.updatedAt))").font(.caption).foregroundStyle(.secondary)
                     if let position = issue.queuePosition {
                         Text("Queue position: \(position)").font(.caption).foregroundStyle(.secondary)
                     }
                     if let reason = issue.waitingReason {
                         Text(reason).font(.caption).foregroundStyle(.secondary)
                     }
-                    if !issue.lastError.isEmpty { Text(issue.lastError).font(.caption).foregroundStyle(.secondary) }
+                    if !issue.lastError.isEmpty { AssistantInlineFailure(message: issue.lastError) }
+                    if repairFailureID == issue.id {
+                        AssistantInlineFailure(message: "Couldn’t confirm that request. Refresh the report before trying again.")
+                    }
+                    if waitingForRefresh {
+                        Text("Request saved. Refresh to see the report’s current state.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     if let link = issue.prUrl, let url = URL(string: link), url.scheme == "https", url.host == "github.com" {
                         Link("Review pull request", destination: url).font(.subheadline.weight(.semibold))
                     }
                     if let link = issue.runUrl, let url = URL(string: link), url.scheme == "https", url.host == "github.com" {
                         Link("View coding run", destination: url).font(.subheadline)
                     }
-                    if repairs.enabled && repairs.configured && issue.manualRunRequested != true && ["reported", "failed", "blocked"].contains(issue.status) {
-                        Button("Run now") { updateRepair(issue, action: "run_now") }
-                        Text("One manual attempt beyond the automatic daily limit.").font(.caption).foregroundStyle(.secondary)
+                    Group {
+                    if presentation.canRetry && repairs.enabled && repairs.configured {
+                        Button("Retry within daily allowance", systemImage: "arrow.clockwise") {
+                            updateRepair(issue, action: "retry")
+                        }
+                        .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
                     }
-                    if issue.status == "monitoring" {
-                        Button("Confirm fixed") { updateRepair(issue, action: "resolve") }
+                    if repairs.enabled && repairs.configured && presentation.canRequestManualRun {
+                        AssistantConfirmationButton("Run now", confirmationTitle: "Start an extra coding attempt?", systemImage: "play",
+                            kind: .primary, hint: "Authorizes one manual attempt beyond the automatic daily coding allowance. Provider usage may be billed.") {
+                            updateRepair(issue, action: "run_now")
+                        }
                     }
-                    if !["investigating", "fixing", "testing", "pr_open"].contains(issue.status) {
-                        Button("Dismiss", role: .destructive) { updateRepair(issue, action: "dismiss") }
+                    if presentation.canConfirmFixed {
+                        AssistantConfirmationButton("Confirm fixed", confirmationTitle: "Is the original problem fixed?", systemImage: "checkmark",
+                            kind: .primary, hint: "Confirm after checking the original behavior. Deployment alone does not confirm the fix.") {
+                            updateRepair(issue, action: "resolve")
+                        }
                     }
+                    if presentation.canDismiss {
+                        AssistantConfirmationButton("Dismiss report", hint: "Removes this report from the active queue.") {
+                            updateRepair(issue, action: "dismiss")
+                        }
+                    }
+                    }
+                    .disabled(actionsUnavailable || waitingForRefresh)
+                    repairEvidence(issue)
                 }
-                .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18))
-                .disabled(workspaceActionInFlight == issue.id)
-            }
+                .assistantCard(in: colorScheme)
         }
     }
 
-    private func repairStatusLabel(_ status: String) -> String {
-        switch status {
-        case "reported": "Queued"
-        case "investigating": "Investigating"
-        case "fixing": "Preparing fix"
-        case "testing": "Testing"
-        case "pr_open": "PR ready to review"
-        case "merged": "Awaiting deployment"
-        case "monitoring": "Deployed · confirm fix"
-        case "blocked": "Needs your attention"
-        case "failed": "Fix attempt failed"
-        default: status.sentenceCaseIdentifier
+    @ViewBuilder
+    private func repairEvidence(_ issue: WorkspaceRepairIssue) -> some View {
+        if issue.mergeSha != nil || !(issue.history ?? []).isEmpty {
+            DisclosureGroup("Evidence and history") {
+                VStack(alignment: .leading, spacing: 10) {
+                    if let sha = issue.mergeSha, !sha.isEmpty {
+                        LabeledContent("Merged revision", value: String(sha.prefix(12)))
+                            .font(.caption.monospaced())
+                    }
+                    ForEach(Array((issue.history ?? []).enumerated()), id: \.offset) { _, entry in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(RepairPresentation(status: entry.status).title).font(.caption.weight(.semibold))
+                            Text(relative(entry.at)).font(.caption).foregroundStyle(.secondary)
+                            if !entry.detail.isEmpty {
+                                Text(entry.detail).font(.caption).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+                .padding(.top, 8)
+            }
+            .font(.subheadline)
         }
     }
 
     private func updateRepair(_ issue: WorkspaceRepairIssue, action: String) {
+        guard !actionsUnavailable, repairAcknowledgedRevisions[issue.id] != issue.actionRevision else { return }
+        repairFailureID = nil
         workspaceActionInFlight = issue.id
+        let session = model.composerDraftScope?.session
         Task {
-            _ = await model.updateRepair(issue, action: action)
+            let confirmed = await model.updateRepair(issue, action: action)
+            guard model.composerDraftScope?.session == session else { return }
+            if confirmed { repairAcknowledgedRevisions[issue.id] = issue.actionRevision }
+            else { repairFailureID = issue.id }
             workspaceActionInFlight = nil
+            AccessibilityNotification.Announcement(confirmed ? "Request saved" : "Request couldn’t be confirmed").post()
         }
     }
 
@@ -821,68 +927,16 @@ struct WorkspaceView: View {
         applyableCount: Int
     ) -> some View {
         let evidenceCount = improvements.reduce(0) { $0 + max(0, $1.evidenceCount) }
-
-        return VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 11) {
-                AssistantGlyph(
-                    systemName: "arrow.triangle.2.circlepath.circle.fill",
-                    tint: AssistantTheme.accent(for: colorScheme)
-                )
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Review queue")
-                        .font(.headline)
-                    Text("Evidence-backed changes waiting for your decision.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
+        return AssistantFlowLayout(spacing: 12) {
+            Label("\(improvements.count) open", systemImage: "tray")
+            if applyableCount > 0 {
+                Text("\(applyableCount) routing \(applyableCount == 1 ? "proposal" : "proposals")")
             }
-
-            if usesAccessibilityLayout {
-                VStack(alignment: .leading, spacing: 11) {
-                    summaryMetric(
-                        "\(improvements.count)",
-                        label: "open",
-                        tint: AssistantTheme.ink(for: colorScheme)
-                    )
-                    Divider()
-                    summaryMetric(
-                        "\(applyableCount)",
-                        label: "ready to apply",
-                        tint: AssistantTheme.success(for: colorScheme)
-                    )
-                    Divider()
-                    summaryMetric(
-                        "\(evidenceCount)",
-                        label: "evidence signals",
-                        tint: AssistantTheme.accent(for: colorScheme)
-                    )
-                }
-            } else {
-                HStack(spacing: 14) {
-                    summaryMetric(
-                        "\(improvements.count)",
-                        label: "open",
-                        tint: AssistantTheme.ink(for: colorScheme)
-                    )
-                    Divider().frame(height: 34)
-                    summaryMetric(
-                        "\(applyableCount)",
-                        label: "ready",
-                        tint: AssistantTheme.success(for: colorScheme)
-                    )
-                    Divider().frame(height: 34)
-                    summaryMetric(
-                        "\(evidenceCount)",
-                        label: "signals",
-                        tint: AssistantTheme.accent(for: colorScheme)
-                    )
-                    Spacer(minLength: 0)
-                }
-            }
+            if evidenceCount > 0 { Text("\(evidenceCount) evidence signals") }
         }
-        .assistantPanel(in: colorScheme)
+        .font(.subheadline)
+        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+        .accessibilityElement(children: .combine)
     }
 
     private func improvementCard(_ improvement: WorkspaceImprovement) -> some View {
@@ -906,7 +960,7 @@ struct WorkspaceView: View {
 
             if !improvement.suggestion.isEmpty {
                 detailPill(
-                    improvement.applyable ? "Change to apply" : "Suggested direction",
+                    improvement.applyable ? "Proposed routing change" : "Suggested direction",
                     systemImage: improvement.applyable ? "wand.and.stars" : "lightbulb",
                     detail: improvement.suggestion,
                     tint: improvement.applyable
@@ -916,6 +970,13 @@ struct WorkspaceView: View {
             }
 
             improvementEvidenceLedger(improvement)
+            if improvementFailureID == improvement.id {
+                AssistantInlineFailure(message: improvementFailureDetail ?? "Couldn’t confirm that decision. Check the proposal and refresh before trying again.")
+            }
+            if recordedImprovementIDs.contains(improvement.id) {
+                Text("Decision saved. Refresh to update the proposal queue.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Divider()
             improvementActions(improvement)
         }
@@ -963,12 +1024,12 @@ struct WorkspaceView: View {
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
             .accessibilityElement(children: .combine)
+        } else if recordedImprovementIDs.contains(improvement.id) {
+            workspaceTag("Decision recorded", tint: AssistantTheme.inkMuted(for: colorScheme))
         } else {
             workspaceTag(
-                improvement.applyable ? "Ready to apply" : canRequestCodeFix ? "Can request a fix" : "Review only",
-                tint: improvement.applyable
-                    ? AssistantTheme.success(for: colorScheme)
-                    : .secondary
+                improvement.applyable ? "Proposed routing change" : "Guidance",
+                tint: AssistantTheme.inkMuted(for: colorScheme)
             )
         }
     }
@@ -1002,29 +1063,33 @@ struct WorkspaceView: View {
     }
 
     private func improvementActions(_ improvement: WorkspaceImprovement) -> some View {
-        let requestFix = !improvement.applyable && canRequestCodeFix
+        let presentation = ImprovementActionPresentation(applyable: improvement.applyable, canRequestCodeFix: canRequestCodeFix)
         return AssistantFlowLayout(spacing: AssistantTheme.actionSpacing) {
-            Button {
-                updateImprovement(improvement, action: requestFix ? "request_fix" : "apply")
-            } label: {
-                Label(
-                    requestFix ? "Request code fix" : improvement.applyable ? "Apply change" : "Mark reviewed",
-                    systemImage: requestFix ? "hammer" : improvement.applyable ? "checkmark.circle.fill" : "checkmark"
-                )
+            if improvement.applyable {
+                AssistantConfirmationButton(presentation.primaryTitle, confirmationTitle: "Apply this routing change?",
+                    systemImage: presentation.primarySymbol, kind: .primary,
+                    hint: "Changes live model routing after the server validates the proposal. Review the evidence and expected behavior first.", compact: true) {
+                    updateImprovement(improvement, action: presentation.primaryAction)
+                }
+            } else {
+                Button(presentation.primaryTitle, systemImage: presentation.primarySymbol) {
+                    updateImprovement(improvement, action: presentation.primaryAction)
+                }
+                .buttonStyle(AssistantActionButtonStyle(kind: .primary, compact: true))
             }
-            .buttonStyle(AssistantActionButtonStyle(kind: .primary, compact: true))
-
-            Button("Request code fix", systemImage: "wrench.and.screwdriver") {
-                updateImprovement(improvement, action: "request_code_fix")
+            if presentation.offersAcknowledgment {
+                Button("Mark reviewed", systemImage: "checkmark") {
+                    updateImprovement(improvement, action: .apply)
+                }
+                .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: true))
+                .accessibilityHint("Records that you reviewed the guidance. Does not change code.")
             }
-            .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: true))
-
             Button("Dismiss", systemImage: "xmark") {
-                updateImprovement(improvement, action: "dismiss")
+                updateImprovement(improvement, action: .dismiss)
             }
             .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: true))
         }
-        .disabled(workspaceActionInFlight != nil)
+        .disabled(actionsUnavailable || recordedImprovementIDs.contains(improvement.id))
     }
 
     private func documentCard(_ document: DocumentRecord) -> some View {
@@ -1049,7 +1114,7 @@ struct WorkspaceView: View {
                         _ = await model.deleteDocument(document)
                         workspaceActionInFlight = nil
                     }
-                    .disabled(workspaceActionInFlight != nil)
+                    .disabled(actionsUnavailable)
                 }
                 .accessibilityHint(
                     model.isSending
@@ -1068,7 +1133,7 @@ struct WorkspaceView: View {
                     _ = await model.deleteDocument(document)
                     workspaceActionInFlight = nil
                 }
-                .disabled(workspaceActionInFlight != nil)
+                .disabled(actionsUnavailable)
             }
         }
         .assistantCard(in: colorScheme)
@@ -1159,7 +1224,7 @@ struct WorkspaceView: View {
                 importDeleteButton(source)
             }
         }
-        .disabled(workspaceActionInFlight != nil)
+        .disabled(actionsUnavailable)
     }
 
     @ViewBuilder
@@ -1571,7 +1636,7 @@ struct WorkspaceView: View {
         }
         .buttonStyle(.borderless)
         .accessibilityLabel("Actions for \(skill.name)")
-        .disabled(workspaceActionInFlight != nil)
+        .disabled(actionsUnavailable)
     }
 
     private func retiredSkills(_ skills: [WorkspaceSkill]) -> some View {
@@ -1689,6 +1754,7 @@ struct WorkspaceView: View {
     private var usesAccessibilityLayout: Bool { dynamicTypeSize.isAccessibilitySize }
 
     private func openChat(_ chat: WorkspaceChat) {
+        guard !actionsUnavailable, !model.isSending else { return }
         workspaceActionInFlight = chat.id
         Task {
             _ = await model.openConversation(id: chat.id)
@@ -1712,10 +1778,27 @@ struct WorkspaceView: View {
         }
     }
 
-    private func updateImprovement(_ improvement: WorkspaceImprovement, action: String) {
+    private func updateImprovement(_ improvement: WorkspaceImprovement, action: WorkspaceImprovementAction) {
+        guard !actionsUnavailable, !recordedImprovementIDs.contains(improvement.id) else { return }
+        improvementFailureID = nil
+        improvementFailureDetail = nil
+        improvementReceipt = nil
         workspaceActionInFlight = improvement.id
+        let session = model.composerDraftScope?.session
         Task {
-            _ = await model.updateImprovement(improvement, action: action)
+            let result = await model.updateImprovement(improvement, action: action.rawValue)
+            guard model.composerDraftScope?.session == session else { return }
+            if let result, result.ok {
+                improvementReceipt = result
+                recordedImprovementIDs.insert(improvement.id)
+                AccessibilityNotification.Announcement(result.receiptTitle).post()
+            } else {
+                improvementFailureID = improvement.id
+                if let detail = result?.detail, !detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    improvementFailureDetail = detail
+                }
+                AccessibilityNotification.Announcement("Decision couldn’t be confirmed").post()
+            }
             workspaceActionInFlight = nil
         }
     }
@@ -1785,22 +1868,26 @@ struct WorkspaceView: View {
     }
 
     private func load() async {
-        if area == .documents {
-            if model.overview == nil { await model.refreshOverview() }
-            if model.workspace == nil { await model.refreshWorkspace() }
-        } else if model.workspace == nil || area == .improvements {
-            await model.refreshWorkspace()
+        if loadFailed || model.workspace == nil || (area == .documents && model.overview == nil) || area == .improvements {
+            await refresh()
         }
     }
 
     private func refresh() async {
+        guard !isLoading, workspaceActionInFlight == nil else { return }
+        isLoading = true
+        let refreshed: Bool
         if area == .documents {
             async let overviewRefresh: Void = model.refreshOverview()
-            async let workspaceRefresh: Void = model.refreshWorkspace()
-            _ = await (overviewRefresh, workspaceRefresh)
+            async let workspaceRefresh: Bool = model.refreshWorkspace()
+            let (_, workspaceLoaded) = await (overviewRefresh, workspaceRefresh)
+            refreshed = workspaceLoaded && model.overview?.documents != nil
         } else {
-            await model.refreshWorkspace()
+            refreshed = await model.refreshWorkspace()
         }
+        isLoading = false
+        guard !Task.isCancelled else { return }
+        loadFailed = !refreshed
     }
 }
 
@@ -1922,6 +2009,7 @@ private struct SkillEditor: View {
     @State private var steps: String
     @State private var gotchas: String
     @State private var isSaving = false
+    @State private var saveFailed = false
     @FocusState private var focusedField: SkillEditorField?
 
     init(skill: WorkspaceSkill?) {
@@ -1987,6 +2075,9 @@ private struct SkillEditor: View {
             } footer: {
                 Text("Optional. Name the edge cases that make this procedure safer.")
             }
+            if saveFailed {
+                Section { AssistantInlineFailure(message: "Couldn’t save this skill. Your entries are kept; try again.") }
+            }
         }
         .disabled(isSaving)
         .scrollDismissesKeyboard(.interactively)
@@ -1995,7 +2086,7 @@ private struct SkillEditor: View {
         .interactiveDismissDisabled(isSaving)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") { dismiss() }
+                Button("Cancel") { dismiss() }.disabled(isSaving)
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button { save() } label: {
@@ -2017,7 +2108,9 @@ private struct SkillEditor: View {
     }
 
     private func save() {
+        guard !isSaving else { return }
         isSaving = true
+        saveFailed = false
         Task {
             let saved = await model.saveSkill(
                 id: skill?.id,
@@ -2029,6 +2122,7 @@ private struct SkillEditor: View {
                 )
             )
             isSaving = false
+            saveFailed = !saved
             if saved { dismiss() }
         }
     }
@@ -2048,6 +2142,7 @@ private struct CostLimitsEditor: View {
     @State private var daily: String
     @State private var monthly: String
     @State private var isSaving = false
+    @State private var saveFailed = false
 
     init(costs: WorkspaceCosts) {
         _taskDefault = State(initialValue: costs.taskDefaultLimit ?? "")
@@ -2058,23 +2153,34 @@ private struct CostLimitsEditor: View {
     var body: some View {
         AssistantForm {
             Section {
-                TextField("Default task limit", text: $taskDefault)
-                    .keyboardType(.decimalPad)
-                TextField("Daily limit", text: $daily)
-                    .keyboardType(.decimalPad)
-                TextField("Monthly limit", text: $monthly)
-                    .keyboardType(.decimalPad)
+                AssistantField("Default task limit (USD)") {
+                    TextField("Default task limit", text: $taskDefault)
+                        .keyboardType(.decimalPad)
+                }
+                AssistantField("Daily limit (USD)") {
+                    TextField("Daily limit", text: $daily)
+                        .keyboardType(.decimalPad)
+                }
+                AssistantField("Monthly limit (USD)") {
+                    TextField("Monthly limit", text: $monthly)
+                        .keyboardType(.decimalPad)
+                }
             } header: {
                 Text("Assistant limits in USD")
             } footer: {
                 Text("These limits pause assistant work using its usage ledger. They do not cap Google Cloud billing or stop hosting and storage charges. Limits must be between $0.01 and $10,000. Blank fields keep their current value.")
             }
+            if saveFailed {
+                Section { AssistantInlineFailure(message: "Couldn’t save these limits. Check the amounts and try again; your entries are kept.") }
+            }
         }
+        .disabled(isSaving)
         .navigationTitle("Assistant limits")
         .navigationBarTitleDisplayMode(.inline)
+        .interactiveDismissDisabled(isSaving)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") { dismiss() }
+                Button("Cancel") { dismiss() }.disabled(isSaving)
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button(isSaving ? "Saving…" : "Save") { save() }
@@ -2084,12 +2190,15 @@ private struct CostLimitsEditor: View {
     }
 
     private func save() {
+        guard !isSaving else { return }
         isSaving = true
+        saveFailed = false
         Task {
             let saved = await model.updateCostLimits(
                 .init(taskDefault: taskDefault, daily: daily, monthly: monthly)
             )
             isSaving = false
+            saveFailed = !saved
             if saved { dismiss() }
         }
     }
@@ -2118,7 +2227,7 @@ private struct IssueReportForm: View {
     }
 
     var body: some View {
-        Form {
+        AssistantForm {
             Section {
                 TextField("Short title", text: $title)
                     .accessibilityIdentifier("issue-report-title")
@@ -2207,3 +2316,17 @@ private struct IssueReportForm: View {
         }
     }
 }
+
+#if DEBUG
+extension WorkspaceView {
+    @MainActor static func visualReviewScreen(_ name: String, workspace: WorkspaceResponse) -> AnyView? {
+        switch name {
+        case "new-skill": return AnyView(SkillEditor(skill: nil))
+        case "edit-skill": return AnyView(SkillEditor(skill: workspace.skills.first))
+        case "cost-limits": return AnyView(CostLimitsEditor(costs: workspace.costs))
+        case "report-issue": return AnyView(IssueReportForm(onReported: {}))
+        default: return nil
+        }
+    }
+}
+#endif

@@ -114,6 +114,47 @@ final class StubURLProtocol: URLProtocol {
 }
 
 final class APIClientRetryTests: XCTestCase {
+    func testImprovementDecisionPreservesAdvisoryAcknowledgment() async throws {
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(#"{"ok":true,"outcome":"acknowledged","enacted":false,"detail":"Reviewed; no live settings changed."}"#.utf8))
+        ])
+        let result = try await makeClient().updateImprovement(id: "proposal-1", action: "apply")
+        XCTAssertEqual(result.outcome, "acknowledged")
+        XCTAssertEqual(result.enacted, false)
+        XCTAssertEqual(result.receiptTitle, "Marked reviewed")
+        XCTAssertEqual(result.receiptDetail, "Reviewed; no live settings changed.")
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        XCTAssertEqual(StubURLProtocol.urls.first?.path, "/api/mobile/v1/improvements/proposal-1")
+        let body = try XCTUnwrap(StubURLProtocol.bodies.first)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: body) as? [String: String], ["action": "apply"])
+    }
+
+    func testImprovementCodeFixRequestCarriesInvestigationIdentity() async throws {
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(#"{"ok":true,"repairIssueId":"repair-1"}"#.utf8))
+        ])
+        let result = try await makeClient().updateImprovement(id: "proposal-1", action: "request_fix")
+        XCTAssertEqual(result.repairIssueId, "repair-1")
+        XCTAssertEqual(result.receiptTitle, "Code-fix report linked", "An older response identifies a report without promising a new coding run")
+        XCTAssertNil(result.enacted, "Requesting an investigation is not a settings change")
+        let body = try XCTUnwrap(StubURLProtocol.bodies.first)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: body) as? [String: String], ["action": "request_fix"])
+    }
+
+    @MainActor
+    func testRejectedImprovementDecisionDoesNotRefreshOrConfirm() async {
+        StubURLProtocol.prime([
+            .success(status: 409, body: Data(#"{"error":"The requested model is unavailable."}"#.utf8))
+        ])
+        let model = AppModel(apiClient: makeClient())
+        let proposal = WorkspaceImprovement(id: "proposal-1", kind: "model_role", title: "Swap model", rationale: "Evaluate cost", suggestion: "Try another model", evidenceCount: 3, applyable: true, createdAt: "2026-10-03")
+        let result = await model.updateImprovement(proposal, action: "apply")
+        XCTAssertEqual(result?.ok, false)
+        XCTAssertEqual(result?.detail, "The requested model is unavailable.")
+        XCTAssertEqual(model.errorMessage, "The requested model is unavailable.")
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+    }
+
     func testIssueReportSendsDetailsToRepairEndpoint() async throws {
         StubURLProtocol.prime([
             .success(status: 200, body: Data(#"{"ok":true,"issueId":"repair-1"}"#.utf8))
@@ -722,10 +763,11 @@ final class APIClientRetryTests: XCTestCase {
     }
 
     @MainActor
-    func testReducedMotionConnectionStillRegroupsWhileKeepingSelectionAndCamera() {
+    func testReducedMotionConnectionStillRegroupsWhileKeepingSelectionAndCamera() async throws {
         let view = RelationshipGraphCanvasView(frame: CGRect(x: 0, y: 0, width: 393, height: 620))
         var graph = RelationshipGraphFixture.snapshot()
         view.configure(snapshot: graph, selectedID: "node-7", dark: false, reduceMotion: true)
+        try await waitForGraphPreparation(view)
         view.layoutIfNeeded()
         view.beginDrag(at: CGPoint(x: 2, y: 2))
         view.drag(to: CGPoint(x: 22, y: 14)); view.endDrag(cancelled: false)
@@ -737,6 +779,7 @@ final class APIClientRetryTests: XCTestCase {
         let before = gap()
         graph.edges.append(RelationshipGraphFixture.edge("new-connection", from: "node-7", to: "node-15"))
         view.configure(snapshot: graph, selectedID: "node-7", dark: false, reduceMotion: true)
+        try await waitForGraphPreparation(view)
         XCTAssertLessThan(gap(), before, "Reduce Motion must not freeze a new connection's geometry")
         XCTAssertEqual(view.selectedID, "node-7")
         XCTAssertEqual(view.viewport, camera)
@@ -1610,6 +1653,11 @@ final class APIClientRetryTests: XCTestCase {
     @MainActor
     func testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom() async throws {
         let model = AppModel(apiClient: makeClient())
+        // A chat read alone is not an authenticated composer session.
+        StubURLProtocol.prime([.success(status: 200, body: try notificationBootstrap()),
+                               .success(status: 401, body: Data())])
+        await model.refreshAll()
+        XCTAssertNotNil(model.composerDraftScope)
         var messages = (0..<16).map { index in
             ChatMessage(id: "follow-\(index)", role: .assistant,
                 parts: [.init(type: "text", text: "Earlier message \(index).\nKeep the latest response above the input.")])
@@ -1822,14 +1870,18 @@ extension APIClientRetryTests {
     }
 
     @MainActor
-    func testOverviewNamesItsBiggestHubRatherThanNothing() throws {
+    func testOverviewNamesItsBiggestHubRatherThanNothing() async throws {
         // A real graph never fits above the zoom the old label gate required,
         // so it arrived as two hundred anonymous dots with nowhere to start.
         let view = RelationshipGraphCanvasView(frame: CGRect(x: 0, y: 0, width: 393, height: 470))
         let graph = RelationshipGraphFixture.snapshot(count: 200)
         view.configure(snapshot: graph, selectedID: nil, dark: false, reduceMotion: true)
+        try await waitForGraphPreparation(view)
         view.layoutIfNeeded()
-        XCTAssertLessThan(view.viewport.scale, 0.5, "This fixture only fits zoomed well out")
+        XCTAssertEqual(Set(view.layout.ids), Set(graph.nodes.map(\.id)))
+        XCTAssertTrue(view.layout.positions.allSatisfy {
+            view.bounds.insetBy(dx: 1, dy: 1).contains(view.viewport.screen($0, size: view.bounds.size))
+        }, "Every prepared node must fit the overview's current viewport")
         _ = UIGraphicsImageRenderer(bounds: view.bounds).image { _ in
             view.drawHierarchy(in: view.bounds, afterScreenUpdates: true)
         }
@@ -1841,5 +1893,629 @@ extension APIClientRetryTests {
         XCTAssertTrue(named.contains("node-0"), "The biggest hub is named even where the canvas is busiest")
         XCTAssertLessThanOrEqual(named.count, 20, "Names stay rationed rather than covering the map")
         XCTAssertTrue(named.isSubset(of: Set(graph.nodes.map(\.id))))
+    }
+}
+
+extension APIClientRetryTests {
+    @MainActor
+    private func waitForGraphPreparation(_ view: RelationshipGraphCanvasView) async throws {
+        let deadline = Date().addingTimeInterval(10)
+        while view.isPreparingLayout && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertFalse(view.isPreparingLayout, "Graph preparation must finish or cancel")
+    }
+
+    @MainActor
+    func testGraphStartupReturnsItsSeedBeforePreparingForces() async throws {
+        let graph = RelationshipGraphFixture.snapshot()
+        var seed = RelationshipGraphLayout()
+        seed.update(nodes: graph.nodes, links: graph.links)
+        let view = RelationshipGraphCanvasView(frame: CGRect(x: 0, y: 0, width: 390, height: 640))
+        view.configure(snapshot: graph, selectedID: nil, dark: false, reduceMotion: true)
+        XCTAssertEqual(view.layout.positions, seed.positions, "configure must not run the 400-step batch on the UI thread")
+        XCTAssertTrue(view.isPreparingLayout)
+        try await waitForGraphPreparation(view)
+        seed.settle()
+        XCTAssertEqual(view.layout.positions, seed.positions)
+        XCTAssertTrue(view.layout.isSettled, "Reduce Motion publishes one still layout")
+    }
+
+    @MainActor
+    func testGraphPreparationRejectsAnOlderSnapshotAndKeepsCurrentDisplaySettings() async throws {
+        let view = RelationshipGraphCanvasView(frame: CGRect(x: 0, y: 0, width: 390, height: 640))
+        view.configure(snapshot: RelationshipGraphFixture.snapshot(count: 60), selectedID: nil, dark: false, reduceMotion: true)
+        let graph = RelationshipGraphFixture.snapshot(count: 18)
+        view.configure(snapshot: graph, selectedID: nil, dark: false, reduceMotion: true)
+        var settings = GraphSettings()
+        settings.arrows = false
+        settings.textFade = 1
+        view.settings = settings
+        var expected = RelationshipGraphLayout()
+        // Updates preserve positions; a stale result must not reintroduce the
+        // removed nodes, even when both preparations finish close together.
+        expected = view.layout
+        expected.settle()
+        try await waitForGraphPreparation(view)
+        XCTAssertEqual(view.layout.ids, graph.nodes.map(\.id).sorted())
+        XCTAssertEqual(view.layout.positions, expected.positions)
+        XCTAssertEqual(view.layout.settings, settings, "A worker cannot revert current display-only settings")
+    }
+
+    @MainActor
+    func testGraphTouchNavigationCancelsLateWarmupAndPreservesTheFingerViewport() async throws {
+        let view = RelationshipGraphCanvasView(frame: CGRect(x: 0, y: 0, width: 390, height: 640))
+        view.configure(snapshot: RelationshipGraphFixture.snapshot(count: 60), selectedID: nil, dark: false, reduceMotion: false)
+        let positions = view.layout.positions
+        view.beginDrag(at: CGPoint(x: 20, y: 50))
+        view.drag(to: CGPoint(x: 80, y: 75))
+        let viewport = view.viewport
+        XCTAssertFalse(view.isPreparingLayout, "The finger owns normal-motion layout once navigation starts")
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(view.layout.positions, positions)
+        XCTAssertEqual(view.viewport, viewport)
+        view.endDrag(cancelled: true)
+    }
+
+    @MainActor
+    func testGraphForceChangeInvalidatesPreparationAndUsesLatestTuning() async throws {
+        let view = RelationshipGraphCanvasView(frame: CGRect(x: 0, y: 0, width: 390, height: 640))
+        view.configure(snapshot: RelationshipGraphFixture.snapshot(), selectedID: nil, dark: false, reduceMotion: true)
+        var settings = GraphSettings()
+        settings.nodeSize = 1.5
+        settings.repelForce = 0.7
+        view.settings = settings
+        var expected = view.layout
+        expected.settle()
+        try await waitForGraphPreparation(view)
+        XCTAssertEqual(view.layout.positions, expected.positions)
+        XCTAssertEqual(view.layout.radii, expected.radii)
+        XCTAssertEqual(view.layout.settings, settings)
+    }
+
+    @MainActor
+    func testReducedMotionPreparationWaitsForNavigationToRelease() async throws {
+        let view = RelationshipGraphCanvasView(frame: CGRect(x: 0, y: 0, width: 390, height: 640))
+        var graph = RelationshipGraphFixture.snapshot()
+        view.configure(snapshot: graph, selectedID: nil, dark: false, reduceMotion: true)
+        try await waitForGraphPreparation(view)
+        view.beginDrag(at: CGPoint(x: 20, y: 50))
+        view.drag(to: CGPoint(x: 80, y: 75))
+        graph.edges.append(RelationshipGraphFixture.edge("during-pan", from: "node-7", to: "node-15"))
+        view.configure(snapshot: graph, selectedID: nil, dark: false, reduceMotion: true)
+        let positions = view.layout.positions
+        let viewport = view.viewport
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(view.layout.positions, positions, "A topology refresh cannot move the map under a finger")
+        XCTAssertEqual(view.viewport, viewport)
+        view.endDrag(cancelled: false)
+        try await waitForGraphPreparation(view)
+        XCTAssertTrue(view.layout.isSettled)
+        XCTAssertEqual(view.viewport, viewport, "Still replacement after release preserves the owner's camera")
+    }
+
+    @MainActor
+    func testGraphRemovalCancelsPreparationWithoutPublishing() async throws {
+        let view = RelationshipGraphCanvasView(frame: CGRect(x: 0, y: 0, width: 390, height: 640))
+        view.configure(snapshot: RelationshipGraphFixture.snapshot(count: 60), selectedID: nil, dark: false, reduceMotion: true)
+        let positions = view.layout.positions
+        view.stopPreparingLayout()
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertFalse(view.isPreparingLayout)
+        XCTAssertEqual(view.layout.positions, positions, "A removed canvas must not receive a stale completion")
+    }
+}
+
+// Notification routing is separate from graph and transcript presentation.
+extension APIClientRetryTests {
+    private var notificationOwner: String { "notification-owner" }
+    private var notificationPrimaryID: String { "00000000-0000-4000-8000-000000000001" }
+    private var notificationSideID: String { "00000000-0000-4000-8000-000000000002" }
+    private var notificationOtherID: String { "00000000-0000-4000-8000-000000000003" }
+
+    private func notificationConversation(_ id: String) -> ConversationView {
+        ConversationView(conversation: .init(id: id, title: "Notification destination", modelOverride: nil,
+            archivedAt: nil, isPrimary: id == notificationPrimaryID), agentName: "Ada", agentTimezone: "UTC",
+            messages: [.init(id: "message-\(id)", role: .assistant, parts: [.init(type: "text", text: "Update for \(id)")])],
+            models: [], goalTitle: nil, canArchive: id != notificationPrimaryID, cursor: nil, asyncTurn: nil)
+    }
+
+    private func notificationBootstrap() throws -> Data {
+        try JSONEncoder().encode(BootstrapResponse(generatedAt: "2026-10-03T00:00:00Z",
+            identity: .init(id: notificationOwner, name: "Ada", avatarUrl: nil),
+            shell: .init(dashboard: .init(pendingApprovals: 0, needsAttention: 0, presence: .idle),
+                memoryHealth: .init(totalUsable: 0, notYetOrganized: 0, awaitingReview: 0, ownerConfirmed: 0, lastOrganizedAt: nil)),
+            conversation: notificationConversation(notificationPrimaryID)))
+    }
+
+    private func notificationDestination(conversation: String? = nil, owner: String? = nil) throws -> AssistantNotificationDestination {
+        var info: [AnyHashable: Any] = ["route": "chat"]
+        if let conversation { info["conversationId"] = conversation }
+        if let owner { info["agentId"] = owner }
+        return try XCTUnwrap(AssistantNotificationDestination(userInfo: info))
+    }
+
+    @MainActor
+    private func notificationModel() async throws -> AppModel {
+        let model = AppModel(apiClient: makeClient())
+        model.scenePhaseDidChange(.background)
+        StubURLProtocol.prime([.success(status: 200, body: try notificationBootstrap()), .success(status: 401, body: Data())])
+        await model.refreshAll(reportFailure: false)
+        XCTAssertNotNil(model.bootstrap)
+        return model
+    }
+
+    func testNotificationDestinationRejectsMalformedOwnerAndNeverTreatsPathsAsConversationIDs() throws {
+        XCTAssertNil(AssistantNotificationDestination(userInfo: ["route": "unknown"]))
+        XCTAssertNil(AssistantNotificationDestination(userInfo: ["route": "chat", "agentId": 42]))
+        XCTAssertNil(AssistantNotificationDestination(userInfo: ["route": "chat", "agentId": ""]))
+        for invalid in ["../private", "https://other.example", "not-an-id"] {
+            XCTAssertNil(try notificationDestination(conversation: invalid).conversationID)
+        }
+        let scoped = try notificationDestination(conversation: notificationSideID.uppercased(), owner: notificationOwner)
+        XCTAssertEqual(scoped.conversationID, notificationSideID)
+        XCTAssertTrue(scoped.belongsTo(ownerID: notificationOwner))
+        XCTAssertFalse(scoped.belongsTo(ownerID: "other-owner"))
+        XCTAssertTrue(try notificationDestination().belongsTo(ownerID: notificationOwner), "Route-only legacy notifications remain usable")
+    }
+
+    func testOverlappingNotificationTurnCleanupKeepsTheNewerTurnGuarded() {
+        var settlements = NotificationTurnSettlements()
+        let cancelledTurn = settlements.begin()
+        let completedNewerTurn = settlements.begin()
+        settlements.finish(cancelledTurn)
+        XCTAssertTrue(settlements.isSettling, "An older cancellation cannot release a newer turn's settlement")
+        settlements.finish(cancelledTurn)
+        XCTAssertTrue(settlements.isSettling, "Repeated older cleanup cannot release another token")
+        settlements.finish(completedNewerTurn)
+        XCTAssertFalse(settlements.isSettling)
+    }
+
+    @MainActor
+    func testColdLaunchNotificationWaitsForBootstrapAndOpensItsAuthenticatedConversation() async throws {
+        let model = AppModel(apiClient: makeClient())
+        model.scenePhaseDidChange(.background)
+        StubURLProtocol.prime([])
+        await model.openNotificationDestination(try notificationDestination(conversation: notificationSideID, owner: notificationOwner))
+        XCTAssertTrue(StubURLProtocol.attempts.isEmpty, "No unverified destination is fetched before owner bootstrap")
+        StubURLProtocol.prime([
+            .success(status: 200, body: try notificationBootstrap()),
+            .success(status: 200, body: try JSONEncoder().encode(notificationConversation(notificationSideID))),
+            .success(status: 401, body: Data()),
+        ])
+        await model.refreshAll(reportFailure: false)
+        XCTAssertEqual(model.conversationId, notificationSideID)
+        XCTAssertEqual(StubURLProtocol.urls.map(\.path), ["/api/mobile/v1/bootstrap", "/api/mobile/v1/chats/\(notificationSideID)", "/api/mobile/v1/overview"])
+    }
+
+    @MainActor
+    func testLegacyChatNotificationReturnsToMainConversationFromASideChat() async throws {
+        let model = try await notificationModel()
+        StubURLProtocol.prime([.success(status: 200, body: try JSONEncoder().encode(notificationConversation(notificationSideID)))])
+        let opened = await model.openConversation(id: notificationSideID)
+        XCTAssertTrue(opened)
+        StubURLProtocol.prime([.success(status: 200, body: try JSONEncoder().encode(notificationConversation(notificationPrimaryID)))])
+        await model.openNotificationDestination(try notificationDestination())
+        XCTAssertEqual(model.conversationId, notificationPrimaryID)
+        XCTAssertEqual(StubURLProtocol.urls.first?.path, "/api/mobile/v1/chats/\(notificationPrimaryID)")
+    }
+
+    @MainActor
+    func testNotificationFromAnotherOwnerDoesNotFetchOrNavigate() async throws {
+        let model = try await notificationModel()
+        model.present(.settings)
+        StubURLProtocol.prime([])
+        await model.openNotificationDestination(try notificationDestination(conversation: notificationSideID, owner: "foreign-owner"))
+        XCTAssertTrue(StubURLProtocol.attempts.isEmpty)
+        XCTAssertEqual(model.presentedRoute, .settings)
+        XCTAssertEqual(model.conversationId, notificationPrimaryID)
+    }
+
+    @MainActor
+    func testMissingForeignAndMismatchedNotificationConversationFallsBackToAuthenticatedMainThread() async throws {
+        for response in [
+            StubURLProtocol.Outcome.success(status: 404, body: Data(#"{"error":"Conversation not found"}"#.utf8)),
+            .success(status: 200, body: try JSONEncoder().encode(notificationConversation(notificationOtherID))),
+        ] {
+            let model = try await notificationModel()
+            StubURLProtocol.prime([response])
+            await model.openNotificationDestination(try notificationDestination(conversation: notificationSideID, owner: notificationOwner))
+            XCTAssertEqual(model.conversationId, notificationPrimaryID)
+            XCTAssertEqual(model.errorMessage, "Couldn’t open that conversation. Showing your main conversation.")
+            XCTAssertEqual(StubURLProtocol.urls.first?.path, "/api/mobile/v1/chats/\(notificationSideID)")
+        }
+    }
+
+    @MainActor
+    func testNewerNotificationWinsOverASlowEarlierDestination() async throws {
+        let model = try await notificationModel()
+        StubURLProtocol.prime([
+            .delayed(after: 0.05, status: 200, body: try JSONEncoder().encode(notificationConversation(notificationSideID))),
+            .success(status: 200, body: try JSONEncoder().encode(notificationConversation(notificationOtherID))),
+        ])
+        let first = try notificationDestination(conversation: notificationSideID, owner: notificationOwner)
+        let earlier = Task { await model.openNotificationDestination(first) }
+        while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+        await model.openNotificationDestination(try notificationDestination(conversation: notificationOtherID, owner: notificationOwner))
+        await earlier.value
+        XCTAssertEqual(model.conversationId, notificationOtherID)
+        XCTAssertEqual(StubURLProtocol.urls.map(\.path), ["/api/mobile/v1/chats/\(notificationSideID)", "/api/mobile/v1/chats/\(notificationOtherID)"])
+    }
+
+    @MainActor
+    func testExplicitChatSelectionWinsOverASlowNotification() async throws {
+        let model = try await notificationModel()
+        StubURLProtocol.prime([
+            .delayed(after: 0.05, status: 200, body: try JSONEncoder().encode(notificationConversation(notificationSideID))),
+            .success(status: 200, body: try JSONEncoder().encode(notificationConversation(notificationOtherID))),
+        ])
+        let destination = try notificationDestination(conversation: notificationSideID, owner: notificationOwner)
+        let opening = Task { await model.openNotificationDestination(destination) }
+        while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+        let opened = await model.openConversation(id: notificationOtherID)
+        XCTAssertTrue(opened)
+        await opening.value
+        XCTAssertEqual(model.conversationId, notificationOtherID)
+    }
+
+    @MainActor
+    func testManualPageAndBackNavigationWinOverASlowNotification() async throws {
+        for returnToChat in [false, true] {
+            let model = try await notificationModel()
+            model.present(.activity)
+            StubURLProtocol.prime([
+                .delayed(after: 0.05, status: 200, body: try JSONEncoder().encode(notificationConversation(notificationSideID))),
+            ])
+            let destination = try notificationDestination(conversation: notificationSideID, owner: notificationOwner)
+            let opening = Task { await model.openNotificationDestination(destination) }
+            while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+            if returnToChat {
+                model.navigationPath.removeLast()
+            } else {
+                model.present(.settings)
+            }
+            await opening.value
+            XCTAssertEqual(model.conversationId, notificationPrimaryID, "A delayed notice cannot change the owner's current thread")
+            XCTAssertEqual(model.presentedRoute, returnToChat ? nil : .settings)
+        }
+    }
+
+    @MainActor
+    func testOldIdleReplyCannotMergeRowsOrCursorIntoANotificationConversation() async throws {
+        let model = try await notificationModel()
+        model.scenePhaseDidChange(.active)
+        defer { model.scenePhaseDidChange(.background) }
+        let oldReply = ChatMessage(id: "old-thread-reply", role: .assistant,
+            parts: [.init(type: "text", text: "This belongs to the old thread")])
+        let updates = ChatUpdates(taskStatus: nil, messages: [oldReply], refreshed: [], superseded: nil,
+            nextCursor: "old-thread-cursor", hasMore: false, activity: [])
+        StubURLProtocol.prime([
+            .delayed(after: 0.05, status: 200, body: try JSONEncoder().encode(updates)),
+            .success(status: 200, body: try JSONEncoder().encode(notificationConversation(notificationSideID))),
+        ])
+        // This separate task deliberately remains uncancelled. The result
+        // fence must protect a changed thread even if cancellation loses.
+        let heldRead = Task { await model.refreshIdleConversation() }
+        while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+        await model.openNotificationDestination(try notificationDestination(conversation: notificationSideID, owner: notificationOwner))
+        let changed = await heldRead.value
+        XCTAssertNil(changed)
+        XCTAssertEqual(model.conversationId, notificationSideID)
+        XCTAssertFalse(model.messages.contains(where: { $0.id == oldReply.id }))
+
+        let quiet = ChatUpdates(taskStatus: nil, messages: [], refreshed: [], superseded: nil,
+            nextCursor: nil, hasMore: false, activity: [])
+        StubURLProtocol.prime([.success(status: 200, body: try JSONEncoder().encode(quiet))])
+        let currentChanged = await model.refreshIdleConversation()
+        XCTAssertEqual(currentChanged, false)
+        let components = try XCTUnwrap(URLComponents(url: XCTUnwrap(StubURLProtocol.urls.first), resolvingAgainstBaseURL: false))
+        XCTAssertEqual(components.queryItems?.first(where: { $0.name == "conversationId" })?.value, notificationSideID)
+        XCTAssertNil(components.queryItems?.first(where: { $0.name == "cursor" }), "An old poll cannot replace the new thread's cursor")
+    }
+
+    @MainActor
+    func testSlowManualConversationCannotReplaceANewerNoticePageOrBackAction() async throws {
+        for newerAction in ["notice", "page", "back"] {
+            let model = try await notificationModel()
+            model.present(.activity)
+            StubURLProtocol.prime([
+                .delayed(after: 0.05, status: 200, body: try JSONEncoder().encode(notificationConversation(notificationSideID))),
+                .success(status: 200, body: try JSONEncoder().encode(notificationConversation(notificationOtherID))),
+            ])
+            let manualOpen = Task { await model.openConversation(id: notificationSideID) }
+            while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+            switch newerAction {
+            case "notice":
+                await model.openNotificationDestination(try notificationDestination(conversation: notificationOtherID, owner: notificationOwner))
+            case "page": model.present(.settings)
+            default: model.navigationPath.removeLast()
+            }
+            let opened = await manualOpen.value
+            XCTAssertFalse(opened, "A superseded manual request must not report an applied destination")
+            XCTAssertEqual(model.conversationId, newerAction == "notice" ? notificationOtherID : notificationPrimaryID)
+            XCTAssertEqual(model.presentedRoute, newerAction == "page" ? .settings : nil)
+            XCTAssertNil(model.errorMessage)
+        }
+    }
+}
+
+// A completed mutation may still belong to a conversation the owner has left.
+extension APIClientRetryTests {
+    @MainActor
+    func testActiveReplyBlocksCreationAndModelChangeBeforeNetworkWork() async throws {
+        let model = try await notificationModel()
+        StubURLProtocol.prime([.stream(body: Data())])
+        model.send("Keep working on this")
+        while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+        XCTAssertTrue(model.isSending)
+        let created = await model.createConversation()
+        let changed = await model.changeConversationModel("candidate-model")
+        XCTAssertFalse(created)
+        XCTAssertFalse(changed)
+        XCTAssertEqual(model.conversationId, notificationPrimaryID)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"], "The active reply is the only request; no stranded chat or model mutation is created")
+        model.cancelSend()
+    }
+
+    @MainActor
+    func testLateHideCannotRestoreOldTextOrUndoIntoAnotherConversation() async throws {
+        for status in [200, 500] {
+            let model = try await notificationModel()
+            let original = try XCTUnwrap(model.messages.first)
+            let body = Data((status == 200 ? #"{"ok":true}"# : #"{"error":"Hide failed"}"#).utf8)
+            StubURLProtocol.prime([
+                .delayed(after: 0.05, status: status, body: body),
+                .success(status: 200, body: try JSONEncoder().encode(notificationConversation(notificationSideID))),
+            ])
+            let hiding = Task { await model.hideMessage(original) }
+            while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+            XCTAssertFalse(model.messages.contains(where: { $0.id == original.id }))
+            let opened = await model.openConversation(id: notificationSideID)
+            XCTAssertTrue(opened)
+            await hiding.value
+            XCTAssertEqual(model.conversationId, notificationSideID)
+            XCTAssertEqual(model.messages.map(\.id), notificationConversation(notificationSideID).messages.map(\.id))
+            XCTAssertNil(model.hiddenMessageUndo, "An old successful hide cannot offer undo in the new conversation")
+            XCTAssertNil(model.errorMessage, "An old failure cannot become the new conversation’s error")
+            XCTAssertEqual(StubURLProtocol.attempts, ["POST", "GET"])
+        }
+    }
+
+    @MainActor
+    func testRejectedHideStillRestoresTheCurrentConversation() async throws {
+        let model = try await notificationModel()
+        let original = model.messages
+        StubURLProtocol.prime([.success(status: 500, body: Data(#"{"error":"Hide failed"}"#.utf8))])
+        await model.hideMessage(try XCTUnwrap(original.first))
+        XCTAssertEqual(model.messages, original)
+        XCTAssertNil(model.hiddenMessageUndo)
+        XCTAssertNotNil(model.errorMessage)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+    }
+
+    @MainActor
+    func testSlowModelChangeCannotReopenAConversationAfterEitherNetworkPhase() async throws {
+        for slowPhase in ["write", "read"] {
+            let model = try await notificationModel()
+            var outcomes: [StubURLProtocol.Outcome] = slowPhase == "write"
+                ? [.delayed(after: 0.05, status: 200, body: Data(#"{"ok":true}"#.utf8))]
+                : [.success(status: 200, body: Data(#"{"ok":true}"#.utf8)),
+                   .delayed(after: 0.05, status: 200, body: try JSONEncoder().encode(notificationConversation(notificationPrimaryID)))]
+            outcomes.append(.success(status: 200, body: try JSONEncoder().encode(notificationConversation(notificationSideID))))
+            StubURLProtocol.prime(outcomes)
+            let changing = Task { await model.changeConversationModel("candidate-model") }
+            let expectedRequests = slowPhase == "write" ? 1 : 2
+            while StubURLProtocol.attempts.count < expectedRequests { await Task.yield() }
+            let opened = await model.openConversation(id: notificationSideID)
+            XCTAssertTrue(opened)
+            let changed = await changing.value
+            XCTAssertFalse(changed, "A committed old mutation cannot report a newly applied view")
+            XCTAssertEqual(model.conversationId, notificationSideID)
+            XCTAssertEqual(model.messages.map(\.id), notificationConversation(notificationSideID).messages.map(\.id))
+            XCTAssertNil(model.errorMessage)
+            XCTAssertEqual(StubURLProtocol.attempts, slowPhase == "write" ? ["POST", "GET"] : ["POST", "GET", "GET"])
+        }
+    }
+
+    @MainActor
+    func testAReplyStartedDuringAModelChangeKeepsItsStream() async throws {
+        for slowPhase in ["write", "read"] {
+            let model = try await notificationModel()
+            let outcomes: [StubURLProtocol.Outcome] = slowPhase == "write"
+                ? [.delayed(after: 0.05, status: 200, body: Data(#"{"ok":true}"#.utf8)), .stream(body: Data())]
+                : [.success(status: 200, body: Data(#"{"ok":true}"#.utf8)),
+                   .delayed(after: 0.05, status: 200, body: try JSONEncoder().encode(notificationConversation(notificationPrimaryID))),
+                   .stream(body: Data())]
+            StubURLProtocol.prime(outcomes)
+            let changing = Task { await model.changeConversationModel("candidate-model") }
+            while StubURLProtocol.attempts.count < (slowPhase == "write" ? 1 : 2) { await Task.yield() }
+            model.send("A new request while the picker is waiting")
+            let changed = await changing.value
+            XCTAssertFalse(changed)
+            XCTAssertTrue(model.isSending)
+            XCTAssertTrue(model.messages.contains(where: { $0.id.hasPrefix("stream-") }), "A late model refresh cannot throw away the new stream")
+            XCTAssertTrue(model.messages.contains(where: { $0.role == .user && $0.text == "A new request while the picker is waiting" }))
+            XCTAssertNil(model.errorMessage)
+            model.cancelSend()
+        }
+    }
+
+    @MainActor
+    func testAReplyStartedDuringConversationOpeningOrCreationKeepsItsThread() async throws {
+        for action in ["open", "create"] {
+            for status in [200, 500] {
+                let model = try await notificationModel()
+                let body = status == 500 ? Data(#"{"error":"Request failed"}"#.utf8)
+                    : action == "create" ? Data("{\"conversationId\":\"\(notificationSideID)\"}".utf8)
+                    : try JSONEncoder().encode(notificationConversation(notificationSideID))
+                StubURLProtocol.prime([.delayed(after: 0.05, status: status, body: body), .stream(body: Data())])
+                let opening = Task {
+                    action == "open" ? await model.openConversation(id: notificationSideID) : await model.createConversation()
+                }
+                while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+                model.send("Keep this reply in the original conversation")
+                let opened = await opening.value
+                XCTAssertFalse(opened)
+                XCTAssertTrue(model.isSending)
+                XCTAssertEqual(model.conversationId, notificationPrimaryID)
+                XCTAssertTrue(model.messages.contains(where: { $0.id.hasPrefix("stream-") }))
+                XCTAssertTrue(model.messages.contains(where: { $0.role == .user && $0.text == "Keep this reply in the original conversation" }))
+                XCTAssertNil(model.errorMessage, "An older success or failure cannot interrupt the new reply")
+                model.cancelSend()
+            }
+        }
+    }
+
+    @MainActor
+    func testSlowConversationCreationCannotReplaceNewerNavigationOrItsError() async throws {
+        for newerAction in ["conversation", "page"] {
+            for status in [200, 500] {
+                let model = try await notificationModel()
+                let body = status == 200
+                    ? Data("{\"conversationId\":\"\(notificationOtherID)\"}".utf8)
+                    : Data(#"{"error":"Create failed"}"#.utf8)
+                StubURLProtocol.prime([
+                    .delayed(after: 0.05, status: status, body: body),
+                    .success(status: 200, body: try JSONEncoder().encode(notificationConversation(notificationSideID))),
+                ])
+                let creating = Task { await model.createConversation() }
+                while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+                if newerAction == "conversation" {
+                    let opened = await model.openConversation(id: notificationSideID)
+                    XCTAssertTrue(opened)
+                } else { model.present(.settings) }
+                let created = await creating.value
+                XCTAssertFalse(created)
+                XCTAssertEqual(model.conversationId, newerAction == "conversation" ? notificationSideID : notificationPrimaryID)
+                XCTAssertEqual(model.presentedRoute, newerAction == "page" ? .settings : nil)
+                XCTAssertNil(model.errorMessage)
+                XCTAssertEqual(StubURLProtocol.attempts, newerAction == "conversation" ? ["POST", "GET"] : ["POST"])
+            }
+        }
+    }
+
+    @MainActor
+    func testLateConversationMutationsCannotPublishIntoAReplacementOwner() async throws {
+        for action in ["hide", "create", "model"] {
+            let model = try await notificationModel()
+            let original = try XCTUnwrap(model.messages.first)
+            let oldBody = action == "create"
+                ? Data("{\"conversationId\":\"\(notificationOtherID)\"}".utf8)
+                : Data(#"{"ok":true}"#.utf8)
+            let replacement = BootstrapResponse(generatedAt: "2026-10-03T00:00:01Z",
+                identity: .init(id: "replacement-owner", name: "Robin", avatarUrl: nil),
+                shell: try JSONDecoder().decode(BootstrapResponse.self, from: notificationBootstrap()).shell,
+                conversation: notificationConversation(notificationPrimaryID))
+            StubURLProtocol.prime([
+                .delayed(after: 0.05, status: 200, body: oldBody),
+                .success(status: 200, body: try JSONEncoder().encode(replacement)),
+                .success(status: 401, body: Data()),
+            ])
+            let mutation = Task {
+                switch action {
+                case "hide": await model.hideMessage(original)
+                case "create": _ = await model.createConversation()
+                default: _ = await model.changeConversationModel("candidate-model")
+                }
+            }
+            while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+            await model.refreshAll(reportFailure: false)
+            await mutation.value
+            XCTAssertEqual(model.bootstrap?.identity.id, "replacement-owner")
+            XCTAssertEqual(model.conversationId, notificationPrimaryID)
+            XCTAssertNil(model.hiddenMessageUndo)
+            XCTAssertNil(model.errorMessage)
+            XCTAssertEqual(StubURLProtocol.attempts, ["POST", "GET", "GET"], "The old result cannot issue a conversation read through the replacement owner")
+        }
+    }
+
+    @MainActor
+    func testReplacementBootstrapResetsPrivateDraftsCachesAndRejectsOlderProjections() async throws {
+        let model = try await notificationModel()
+        let oldScope = try XCTUnwrap(model.composerDraftScope)
+        model.saveComposerDraft("Private unsent text for the old owner", in: oldScope)
+        let oldOverview = try overviewBody(pending: [pendingApproval(id: "old-owner-approval")])
+        StubURLProtocol.prime([
+            .success(status: 200, body: oldOverview),
+            .success(status: 200, body: try JSONEncoder().encode(ActivityList(items: [], archivedCount: 1))),
+        ])
+        await model.refreshOverview(reportFailure: false)
+        await model.refreshArchivedActivity(reportFailure: false)
+        XCTAssertNotNil(model.overview)
+        XCTAssertNotNil(model.archivedActivity)
+        let replacement = BootstrapResponse(generatedAt: "2026-10-03T00:00:01Z",
+            identity: .init(id: "replacement-owner", name: "Robin", avatarUrl: nil),
+            shell: try JSONDecoder().decode(BootstrapResponse.self, from: notificationBootstrap()).shell,
+            conversation: notificationConversation(notificationPrimaryID))
+        StubURLProtocol.prime([
+            .delayed(after: 0.05, status: 200, body: oldOverview),
+            .success(status: 200, body: try JSONEncoder().encode(replacement)),
+            .success(status: 401, body: Data()),
+        ])
+        let oldProjection = Task { await model.refreshOverview(reportFailure: false) }
+        while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+        await model.refreshAll(reportFailure: false)
+        await oldProjection.value
+        let newScope = try XCTUnwrap(model.composerDraftScope)
+        XCTAssertEqual(model.bootstrap?.identity.id, "replacement-owner")
+        XCTAssertEqual(newScope.session, oldScope.session + 1, "Owner replacement creates a new draft session even with the same URL/key/conversation")
+        XCTAssertEqual(newScope.conversationID, oldScope.conversationID)
+        XCTAssertEqual(model.composerDraft(in: oldScope), "")
+        XCTAssertEqual(model.composerDraft(in: newScope), "")
+        model.saveComposerDraft("Late disappearing view text", in: oldScope)
+        XCTAssertEqual(model.composerDraft(in: newScope), "", "The previous view cannot save into the replacement owner")
+        XCTAssertNil(model.overview, "The old projection must be cleared and its late response fenced out")
+        XCTAssertNil(model.archivedActivity)
+        XCTAssertEqual(model.pendingApprovalCount, 0)
+        XCTAssertNil(model.errorMessage)
+        StubURLProtocol.prime([
+            .success(status: 200, body: try JSONEncoder().encode(replacement)),
+            .success(status: 401, body: Data()),
+        ])
+        await model.refreshAll(reportFailure: false)
+        XCTAssertEqual(model.composerDraftScope?.session, newScope.session, "The same replacement identity must not reset twice")
+    }
+}
+
+extension APIClientRetryTests {
+    @MainActor
+    func testCancelledCardRefreshKeepsTheOriginalReceiptAndConnection() async {
+        let model = AppModel(apiClient: makeClient(), initialMessages: [
+            ChatMessage(id: "card-message", role: .assistant, parts: [RichMessageFixture.generated()])
+        ])
+        StubURLProtocol.prime([.stream(body: Data())])
+        let request = Task { await model.refreshSavedCard(id: "saved-1") }
+        while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+        request.cancel()
+        let failure = await request.value
+        XCTAssertEqual(failure, "The refresh could not be confirmed. Try again.")
+        XCTAssertFalse(model.messages[0].hasRefreshingCard, "A cancelled request cannot publish an optimistic refresh receipt")
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+    }
+
+    @MainActor
+    func testSuggestionReceiptCannotCrossAnAuthenticatedOwnerReplacement() async throws {
+        let model = try await notificationModel()
+        let oldConversation = ConversationView(conversation: .init(id: notificationPrimaryID,
+            title: "Original owner", modelOverride: nil, archivedAt: nil, isPrimary: true),
+            agentName: "Ada", agentTimezone: "UTC", messages: [suggestionMessage()], models: [],
+            goalTitle: nil, canArchive: false, cursor: nil, asyncTurn: nil)
+        StubURLProtocol.prime([.success(status: 200, body: try JSONEncoder().encode(oldConversation))])
+        let opened = await model.openConversation(id: notificationPrimaryID)
+        XCTAssertTrue(opened)
+        StubURLProtocol.prime([.delayed(after: 0.2, status: 200,
+            body: Data(#"{"ok":true,"decision":"accepted","taskId":"old-owner-task"}"#.utf8))])
+        let request = Task { await model.decideSuggestion(id: "s1", decision: .accepted) }
+        while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+        var replacement = try XCTUnwrap(JSONSerialization.jsonObject(with: notificationBootstrap()) as? [String: Any])
+        replacement["identity"] = ["id": "replacement-owner", "name": "New assistant"]
+        StubURLProtocol.prime([.success(status: 200, body: try JSONSerialization.data(withJSONObject: replacement)),
+                               .success(status: 401, body: Data())])
+        await model.refreshAll()
+        let failure = await request.value
+        XCTAssertEqual(model.bootstrap?.identity.id, "replacement-owner")
+        XCTAssertEqual(failure, "Your connection changed. Check this suggestion on its original assistant.")
+        XCTAssertTrue(model.messages.flatMap(\.suggestionParts).isEmpty,
+            "An old assistant's receipt cannot enter the replacement owner's transcript")
     }
 }

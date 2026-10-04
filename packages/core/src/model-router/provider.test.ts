@@ -10,6 +10,7 @@ import {
 import { EMBEDDING_DIMENSIONS, ModelRouter } from './router.js';
 
 const stubs = vi.hoisted(() => ({
+  openRouterChat: vi.fn(),
   createVertex: vi.fn(),
   embedMany: vi.fn(),
   generateObject: vi.fn(),
@@ -20,7 +21,7 @@ const stubs = vi.hoisted(() => ({
 }));
 
 vi.mock('@openrouter/ai-sdk-provider', () => ({
-  createOpenRouter: () => ({ chat: vi.fn(), textEmbeddingModel: vi.fn() }),
+  createOpenRouter: () => ({ chat: stubs.openRouterChat, textEmbeddingModel: vi.fn() }),
 }));
 
 vi.mock('@ai-sdk/google-vertex', () => ({
@@ -82,6 +83,23 @@ beforeEach(() => {
 });
 
 describe('injected model providers', () => {
+  it('adds evaluation price ceilings without changing normal provider routing', () => {
+    const normal = createOpenRouterModelProvider('unused');
+    normal.chat('openai/gpt-6.1-sol', { interactive: true });
+    expect(stubs.openRouterChat).toHaveBeenLastCalledWith('openai/gpt-6.1-sol', {
+      provider: { require_parameters: true, sort: 'latency' },
+    });
+    const evaluation = createOpenRouterModelProvider('unused', {
+      maxPrice: { prompt: 2, completion: 10, request: 0 },
+    });
+    evaluation.chat('openai/gpt-6.1-sol');
+    expect(stubs.openRouterChat).toHaveBeenLastCalledWith('openai/gpt-6.1-sol', {
+      provider: { require_parameters: true, max_price: { prompt: 2, completion: 10, request: 0 } },
+    });
+    expect(() =>
+      createOpenRouterModelProvider('unused', { maxPrice: { prompt: NaN, completion: 10 } }),
+    ).toThrow('price ceilings');
+  });
   it('composes only the explicitly selected application provider', () => {
     const config = {
       LLM_PROVIDER: 'openrouter' as const,

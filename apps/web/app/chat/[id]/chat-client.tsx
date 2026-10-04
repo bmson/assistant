@@ -831,13 +831,9 @@ export function ChatClient({
   };
 
   return (
-    // The log is the full height of the screen, not a panel inset within it.
-    // The negative margins cancel the page shell's vertical padding, which was
-    // otherwise dead space the log could not use: messages clipped at a line
-    // ~4rem below the top of the window instead of at the window itself, so
-    // text vanished mid-scroll with visible emptiness above it. Anything that
-    // needs breathing room (the header, the log's own opening air) supplies it
-    // from the inside, where it scrolls.
+    // Conversation CSS gives the log the space remaining below the real app
+    // header. The log and composer share this flexible column; internal
+    // padding supplies their breathing room without assuming a chrome height.
     //
     // The column widens on larger screens so the header/composer use the
     // space a floating rail plus a wide canvas otherwise leaves empty — but
@@ -847,7 +843,7 @@ export function ChatClient({
     // aligned with one another.
     <div
       data-chat-theme={chatTheme !== 'default' ? chatTheme : undefined}
-      className="chat-viewport relative mx-auto -my-5 flex h-[calc(100dvh-1rem-var(--app-chrome,0px))] w-full min-w-0 max-w-3xl flex-col lg:-my-7 lg:h-[calc(100dvh-var(--app-chrome,0px))] lg:max-w-4xl 2xl:max-w-[56rem]"
+      className="chat-viewport relative mx-auto flex min-h-0 w-full min-w-0 max-w-3xl flex-1 flex-col lg:max-w-4xl 2xl:max-w-[56rem]"
     >
       {/* The primary thread is the whole surface — it needs no title. Side and
           goal chats keep a slim header so you know which one you're in. */}
@@ -855,7 +851,7 @@ export function ChatClient({
         // A side thread is a subpage like any other: it gets back to its parent
         // list, which gets back to the main thread. The "/" palette only exists
         // in the composer below, so this is the way out that is always visible.
-        <header className="border-b border-white/15 pt-7 pb-3 lg:pt-10">
+        <header className="chat-heading border-b border-white/15 pt-7 pb-3 lg:pt-10">
           <BackLink href="/chat/all">All chats</BackLink>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
@@ -910,7 +906,7 @@ export function ChatClient({
         role="log"
         aria-label="Conversation"
         style={{ paddingBottom: `calc(5rem + ${composerHeight}px)` }}
-        className="scroll-subtle min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto pt-20"
+        className={`scroll-subtle min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto ${log.length === 0 ? 'pt-6' : 'pt-20'}`}
       >
         {/* A short thread rests on the composer instead of hanging from the top
             of the window with a void beneath it — `mt-auto` on the log (and
@@ -919,24 +915,35 @@ export function ChatClient({
         <div className="flex min-h-full min-w-0 flex-col">
           {log.length === 0 ? (
             <div className="mx-auto flex max-w-xl flex-col items-center text-center my-auto">
-              <span className="inline-flex size-14 items-center justify-center rounded-2xl">
-                <Sparkles className="size-5" aria-hidden="true" />
-              </span>
-              <p className="mt-5 font-display text-2xl leading-8 font-semibold tracking-[-0.025em] text-balance">
+              {isPrimary ? (
+                <span className="inline-flex size-14 items-center justify-center rounded-2xl">
+                  <Sparkles className="size-5" aria-hidden="true" />
+                </span>
+              ) : null}
+              <p
+                className={`${isPrimary ? 'mt-5' : ''} font-display text-2xl leading-8 font-semibold tracking-[-0.025em] text-balance`}
+              >
                 What should we move forward?
               </p>
               {/* A small hand-drawn stroke that sketches itself in under the
                 greeting — the page's one flourish. Static for reduced motion. */}
-              <svg aria-hidden="true" viewBox="0 0 140 10" fill="none" className="mt-2 h-2.5 w-36">
-                <path
-                  d="M3 7 C 28 3, 55 8.5, 82 5 S 125 3.5, 137 5.5"
-                  stroke="currentColor"
-                  strokeOpacity="0.45"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                  className="[stroke-dasharray:160] [stroke-dashoffset:160] motion-safe:animate-[draw-in_700ms_ease-out_250ms_forwards] motion-reduce:[stroke-dashoffset:0]"
-                />
-              </svg>
+              {isPrimary ? (
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 140 10"
+                  fill="none"
+                  className="mt-2 h-2.5 w-36"
+                >
+                  <path
+                    d="M3 7 C 28 3, 55 8.5, 82 5 S 125 3.5, 137 5.5"
+                    stroke="currentColor"
+                    strokeOpacity="0.45"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    className="[stroke-dasharray:160] [stroke-dashoffset:160] motion-safe:animate-[draw-in_700ms_ease-out_250ms_forwards] motion-reduce:[stroke-dashoffset:0]"
+                  />
+                </svg>
+              ) : null}
               <p className="mt-2 max-w-md text-base leading-6 text-pretty text-stage-muted">
                 Start with an outcome. {agentName} can research, plan, draft, schedule, and keep
                 following up when the work takes time.
@@ -1004,7 +1011,10 @@ export function ChatClient({
                *
                * An error is one of those things, so it still lands here. */}
               {asyncTurn && asyncActionError ? (
-                <p role="alert" className="mt-6 text-xs text-red-200">
+                <p
+                  role="alert"
+                  className="chat-action-error mt-6 rounded-xl border px-4 py-3 text-sm leading-6"
+                >
                   {asyncActionError}
                 </p>
               ) : null}

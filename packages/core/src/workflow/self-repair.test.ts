@@ -16,6 +16,35 @@ import {
 } from './self-repair.js';
 
 const now = new Date('2026-09-30T00:00:00Z');
+
+describe('owner correction detection', () => {
+  it.each([
+    "That's wrong.",
+    'No, that’s incorrect.',
+    "That didn't save.",
+    'You made that up.',
+    "I don't see the change you said you made.",
+    'Please fix this bug.',
+    'Could you fix the issue?',
+    'Report a bug in reminders.',
+    'Thanks for checking. That did not work.',
+    'Why did not the reminder send?',
+  ])('records direct owner feedback: %s', (text) => expect(isRepairFeedback(text)).toBe(true));
+  it.each([
+    'Explain how to report a bug.',
+    'How should I say "That\'s wrong" politely?',
+    'My coworker wrote "That did not work" in an email.',
+    '> That did not work\nSummarize this feedback.',
+    'Example:\n```text\nReport a bug\n```',
+    'Discuss when an assistant should fix this bug automatically.',
+    'You were right.',
+    'That saved correctly.',
+    "That's wrong, don't report it.",
+    "That didn't save; please don't open an issue.",
+  ])('does not treat quoted examples or discussion as authorization: %s', (text) =>
+    expect(isRepairFeedback(text)).toBe(false),
+  );
+});
 function fixture(status: RepairIssue['status'] = 'reported'): RepairIssue {
   return {
     id: randomUUID(),

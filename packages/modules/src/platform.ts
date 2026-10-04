@@ -57,7 +57,8 @@ export interface OwnerNotifier {
     /**
      * The dashboard thread that already owns this notice, when one exists.
      * The dashboard notifier uses it to avoid mirroring a second copy into
-     * the same primary conversation; phone/SMS notifiers ignore it.
+     * the same primary conversation; phone notifications use it as their
+     * authenticated navigation destination, while SMS ignores it.
      */
     conversationId?: string | null;
     urgency?: OwnerNoticeUrgency;

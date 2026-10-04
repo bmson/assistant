@@ -47,6 +47,7 @@ export { createPostgresProfileMemoryMaintenance } from './profile-memory-mainten
 export { createPostgresProfileMemoryManagementRepository } from './profile-memory-management-repository.js';
 export { createPostgresProfileVoiceOverviewRepository } from './profile-overview-repository.js';
 export { createPostgresProfilePeopleReadRepository } from './profile-people-read-repository.js';
+export { createPostgresPulseAdmissionRepository } from './pulse-admission-repository.js';
 export { createPostgresRecallFeedbackRepository } from './recall-feedback-repository.js';
 export { createPostgresRecallMetricsRepository } from './recall-metrics-repository.js';
 export { createPostgresReminderRepository } from './reminder-repository.js';

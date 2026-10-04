@@ -369,7 +369,7 @@ struct GraphSettings: Codable, Equatable, Sendable {
 /// Deterministic: the same nodes and links always settle the same way, and
 /// positions survive an update, so expanding a neighbourhood grows the map
 /// around what is already there rather than reshuffling it.
-struct RelationshipGraphLayout {
+struct RelationshipGraphLayout: Sendable {
     private(set) var ids: [String] = []
     private(set) var positions: [CGPoint] = []
     /// Each item's world radius: how connected it is, as a size.
@@ -599,6 +599,30 @@ struct RelationshipGraphLayout {
     mutating func settle(maxSteps: Int = 400) {
         var steps = 0
         while !isSettled && steps < maxSteps { step(); steps += 1 }
+    }
+
+    /// Prepare a value-copy away from the UI thread. Cancellation is checked
+    /// between force steps and before publication; the caller's live layout
+    /// is never partly advanced by an abandoned preparation.
+    func prepared(maxSteps: Int, isCancelled: () -> Bool) -> Self? {
+        var result = self
+        for _ in 0..<max(0, maxSteps) {
+            guard !isCancelled() else { return nil }
+            if result.isSettled { break }
+            result.step()
+        }
+        return isCancelled() ? nil : result
+    }
+
+    /// Adopt a prepared force state through the existing position transition,
+    /// so a visible cold-start seed does not jump when its worker finishes.
+    /// Matching identity is required; topology updates keep their own seeds.
+    func transitioning(from previous: Self) -> Self {
+        guard ids == previous.ids, positions != previous.positions else { return self }
+        var result = self
+        result.untangleTargets = positions
+        result.positions = previous.positions
+        return result
     }
 
     /// Keep unrelated bubbles out of a connection's corridor. Spatial buckets

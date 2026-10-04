@@ -47,6 +47,10 @@ export function startPoller(deps: AgentDeps): () => void {
   let sweeping = false;
   let running = 0;
   let tick = 0;
+  // Module ticks can perform slow provider reads. Keep one run of each tick
+  // in flight so recurring mail sync cannot stack up and monopolize the
+  // database/provider connection pools during an outage.
+  const activeTicks = new Set<AgentDeps['modules']['ticks'][number]>();
 
   /** One maintenance pass, guarded so a slow sweep never overlaps itself. */
   const sweep = async () => {
@@ -178,10 +182,12 @@ export function startPoller(deps: AgentDeps): () => void {
     for (const moduleTick of deps.modules.ticks) {
       // A tick that still needs PostgreSQL must not run against the tripwire.
       if (firestore && !moduleTick.portable) continue;
-      if (tick % moduleTick.everyTicks === 0) {
-        void moduleTick
-          .run(agentServices(deps))
-          .catch((err) => console.error(`${moduleTick.name} error`, err));
+      if (tick % moduleTick.everyTicks === 0 && !activeTicks.has(moduleTick)) {
+        activeTicks.add(moduleTick);
+        void Promise.resolve()
+          .then(() => moduleTick.run(agentServices(deps)))
+          .catch((err) => console.error(`${moduleTick.name} error`, err))
+          .finally(() => activeTicks.delete(moduleTick));
       }
     }
     void drain().catch((err) => console.error('poller error', err));

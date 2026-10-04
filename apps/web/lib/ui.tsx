@@ -18,6 +18,9 @@ import type { ReactNode } from 'react';
 export const focusRing =
   'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent';
 
+/** Quiet utility action; its accessible label must name what the icon opens. */
+export const iconButtonClass = `mobile-touch-target inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-muted hover:bg-sunken hover:text-strong active:bg-sunken/80 ${focusRing}`;
+
 /*
  * The action vocabulary. Every button in the app picks its variant by what the
  * action *means*, never by the screen it sits on, so "Approve" looks and
@@ -46,13 +49,12 @@ export const focusRing =
  * Icons inside a button are sized by the scale, not by the caller — callers
  * had drifted between size-3, size-3.5 and size-4 inside identical buttons.
  */
-const btnBase = `mobile-touch-target inline-flex shrink-0 items-center justify-center gap-2 whitespace-normal text-center font-medium select-none motion-safe:transition-[background-color,border-color,color,box-shadow] disabled:cursor-not-allowed disabled:opacity-50 [&_svg]:shrink-0 ${focusRing}`;
+const btnBase = `mobile-touch-target inline-flex min-w-0 max-w-full shrink-0 items-center justify-center gap-2 whitespace-normal text-center font-medium select-none motion-safe:transition-[background-color,border-color,color,box-shadow] disabled:cursor-not-allowed disabled:opacity-50 [&_svg]:shrink-0 ${focusRing}`;
 const btnMd = 'min-h-11 rounded-lg px-5 py-2.5 text-sm [&_svg]:size-4';
 const btnXs = 'min-h-9 rounded-lg px-4 py-2 text-xs [&_svg]:size-3.5';
 
 const btnVariants = {
-  outline:
-    'border border-edge text-zinc-700 hover:bg-sunken/70 hover:text-strong active:bg-sunken dark:text-zinc-300',
+  outline: 'border border-edge text-strong hover:bg-sunken/70 active:bg-sunken',
   dangerOutline:
     'border border-red-300 text-red-700 hover:bg-red-50 active:bg-red-100 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950/40 dark:active:bg-red-950/70',
   // Flat: the accent plane is the emphasis. The old hover glow read as a
@@ -108,19 +110,12 @@ export const chip = {
   neutral: `${chipBase} border-edge text-strong hover:bg-sunken active:bg-sunken/80`,
 } as const;
 
-/**
- * The app's structural voice: every micro-label that names a *part of the
- * interface* rather than saying something (eyebrow headings, group labels,
- * uppercase badges, the keys in fact grids) is set in the mono face and
- * letterspaced. Content and titles use the platform system face; mono is kept
- * only where the text is genuinely structural or data-like. Colour stays with
- * the caller — most compose this with text-muted, a few with a status colour.
- */
-export const microLabelClass = 'font-mono text-xs font-medium tracking-[0.08em] uppercase';
+/** Supporting labels use the interface voice; monospace belongs to actual data. */
+export const microLabelClass = 'text-xs leading-5 font-medium';
 
 /** Neutral count-pill as a raw class string, for spans that can't use <CountBadge>. */
 export const countBadgeClass =
-  'rounded-full bg-sunken px-1.5 py-0.5 font-mono text-xs font-medium text-muted whitespace-nowrap';
+  'rounded-full bg-sunken px-2 py-0.5 text-xs font-medium tabular-nums text-muted whitespace-nowrap';
 
 /** A loading placeholder block — used by route-level loading.tsx skeletons.
  *  A light sheen sweeps across it while motion is allowed; reduced-motion
@@ -134,7 +129,7 @@ export function Skeleton({ className = '' }: { className?: string }) {
 }
 
 export const inputClass =
-  'h-9 rounded-lg border border-edge bg-raised px-3 text-base text-strong outline-none placeholder:text-muted/70 motion-safe:transition-shadow focus:border-accent focus:ring-2 focus:ring-accent/20 sm:text-sm';
+  'min-h-11 min-w-0 rounded-lg border border-edge bg-raised px-3 py-2 text-base text-strong outline-none placeholder:text-muted motion-safe:transition-shadow focus:border-accent focus:ring-2 focus:ring-accent/20 sm:text-sm';
 
 /**
  * Native <select>, sharing inputClass's metrics and focus treatment. The UA's
@@ -151,7 +146,7 @@ export const selectClass = `${inputClass} cursor-pointer appearance-none bg-[ima
 export const textareaClass =
   'rounded-lg border border-edge bg-raised px-3 py-2.5 text-base text-strong outline-none resize-none [field-sizing:content] min-h-20 max-h-80 placeholder:text-muted/70 motion-safe:transition-shadow focus:border-accent focus:ring-2 focus:ring-accent/20 sm:text-sm';
 
-export const labelClass = 'text-sm font-medium text-muted';
+export const labelClass = 'text-sm font-medium text-strong';
 
 /**
  * Native file input, with its ::file-selector-button dressed to match the
@@ -175,7 +170,7 @@ export const fileInputClass =
  * it.
  */
 export const cardShellClass =
-  'reveal min-w-0 overflow-hidden rounded-[var(--radius-card)] bg-raised ring-1 ring-edge/70';
+  'min-w-0 overflow-hidden rounded-[var(--radius-card)] bg-raised ring-1 ring-edge/70';
 export const cardBodyClass = 'grid min-w-0 gap-4 p-4 sm:p-5';
 export const cardHeaderClass = 'grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3';
 /** Footer chrome (divider + tonal well + padding), shared by the button-row
@@ -201,7 +196,7 @@ export const cardGridClass = 'grid min-w-0 items-stretch gap-4 lg:grid-cols-2';
  *  draws the rotating chevron and globals.css animates the panel itself, so
  *  every section built from this opens the same way. */
 export const summaryClass =
-  'disclosure flex cursor-pointer list-none items-center gap-2 text-sm font-medium';
+  'disclosure flex min-h-11 cursor-pointer list-none items-center gap-2 text-sm font-medium';
 
 /**
  * "Back to the parent surface" link above a detail page's title.
@@ -214,7 +209,7 @@ export function BackLink({ href, children }: { href: string; children: ReactNode
   return (
     <Link
       href={href}
-      className={`mobile-touch-target mb-5 inline-flex items-center gap-1.5 rounded-md text-sm font-medium text-muted motion-safe:transition-colors hover:text-strong ${focusRing}`}
+      className={`mobile-touch-target mb-3 inline-flex min-h-11 items-center gap-2 rounded-md text-sm font-medium text-muted motion-safe:transition-colors hover:text-strong ${focusRing}`}
     >
       <ArrowLeft className="size-3.5 shrink-0" aria-hidden="true" />
       {children}
@@ -225,17 +220,12 @@ export function BackLink({ href, children }: { href: string; children: ReactNode
 /**
  * Page title, optional intro, and optional page-level actions.
  *
- * `actions` pairs with the *title*, not with the whole header. Pages used to
- * wrap this in `flex flex-wrap justify-between` alongside their buttons, which
- * meant the long intro forced a wrap on narrow screens and dumped the button on
- * its own line under the paragraph, left-aligned and orphaned. Titles are short,
- * so keeping the action beside the title fits at every width and lets the intro
- * run the full measure beneath both.
+ * Actions stay beside the title on wide screens and get their own full row on
+ * phones. Long object names must never be squeezed by a fixed-width action.
  *
- * `back` is not optional in spirit. The app has no navigation chrome — you get
- * anywhere by typing "/" in the chat composer — so a page that does not name
- * its parent here is a page with no way out. Detail pages point at their list;
- * everything else points at the chat.
+ * Back links retain context: details point at their list, retained product
+ * pages point at the conversation, and console details identify their parent
+ * even when the shared navigation also provides that destination.
  */
 export function PageHeader({
   title,
@@ -251,24 +241,21 @@ export function PageHeader({
   // text-balance/text-pretty stop a wrapped title or intro from stranding a
   // single word on its own last line.
   return (
-    <header>
+    <header className="grid min-w-0 gap-3">
       {back ? <BackLink href={back.href}>{back.label}</BackLink> : null}
-      <div className="flex min-w-0 items-start justify-between gap-3">
-        {/* One stable page-title size on every viewport. The system display face
-            already adapts optically, so it does not need a second mobile/desktop
-            size or display-font-specific tracking. */}
-        <h1 className="min-w-0 font-display text-3xl leading-9 font-semibold tracking-[-0.025em] text-balance text-strong">
-          {title}
-        </h1>
+      <div className="grid min-w-0 gap-x-6 gap-y-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+        <div className="min-w-0">
+          <h1 className="min-w-0 font-display text-[1.75rem] leading-tight font-semibold tracking-[-0.025em] text-balance text-strong [overflow-wrap:anywhere] sm:text-3xl">
+            {title}
+          </h1>
+          {intro ? (
+            <p className="mt-3 max-w-[65ch] text-base leading-6 text-pretty text-muted">{intro}</p>
+          ) : null}
+        </div>
         {actions ? (
-          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 pt-1">
-            {actions}
-          </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">{actions}</div>
         ) : null}
       </div>
-      {intro ? (
-        <p className="mt-2 max-w-[68ch] text-base leading-6 text-pretty text-muted">{intro}</p>
-      ) : null}
     </header>
   );
 }
@@ -283,14 +270,16 @@ export function PageShell({
   className?: string;
 }) {
   return (
-    <div className={`mx-auto w-full ${size === 'wide' ? 'max-w-6xl' : 'max-w-4xl'} ${className}`}>
+    <div
+      className={`mx-auto min-w-0 w-full ${size === 'wide' ? 'max-w-6xl' : 'max-w-4xl'} ${className}`}
+    >
       {children}
     </div>
   );
 }
 
 export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
-  return <div className={`${cardShellClass} p-5 ${className}`}>{children}</div>;
+  return <div className={`${cardShellClass} p-4 sm:p-5 ${className}`}>{children}</div>;
 }
 
 export function InfoGrid({
@@ -304,9 +293,9 @@ export function InfoGrid({
 }) {
   const columnClass = {
     1: 'grid-cols-1',
-    2: 'grid-cols-2',
-    3: 'grid-cols-3',
-    4: 'grid-cols-4',
+    2: 'grid-cols-1 sm:grid-cols-2',
+    3: 'grid-cols-1 min-[400px]:grid-cols-2 sm:grid-cols-3',
+    4: 'grid-cols-2 sm:grid-cols-4',
   }[columns];
   return (
     <dl
@@ -347,7 +336,7 @@ export function Panel({
 }) {
   return (
     <section
-      className={`rounded-xl p-5 sm:p-6 ${
+      className={`min-w-0 rounded-[var(--radius-card)] p-4 sm:p-6 ${
         tone === 'raised' ? 'bg-raised ring-1 ring-edge/70' : 'bg-sunken/70'
       } ${className}`}
     >
@@ -388,26 +377,20 @@ export function Badge({
   children,
   tone = 'neutral',
   size = 'sm',
-  uppercase = false,
   title,
 }: {
   children: ReactNode;
   tone?: BadgeTone;
   size?: 'sm' | 'xs';
+  /** Retained for callers; status labels now share sentence-case typography. */
   uppercase?: boolean;
   title?: string;
 }) {
-  // Uppercase pills join the mono micro-label voice — a status label is
-  // structure, not prose (weight comes from the shared font-medium below).
-  const sizeClass = uppercase
-    ? 'px-2 py-0.5 font-mono text-xs tracking-[0.08em] uppercase'
-    : size === 'xs'
-      ? 'px-1.5 py-0.5 text-xs'
-      : 'px-2 py-0.5 text-xs';
+  const sizeClass = size === 'xs' ? 'px-1.5 py-0.5 text-xs' : 'px-2 py-0.5 text-xs';
   return (
     <span
       title={title}
-      className={`inline-flex max-w-full items-center gap-1 rounded-full font-medium whitespace-nowrap ${sizeClass} ${pillTones[tone]}`}
+      className={`inline-flex max-w-full shrink-0 items-center gap-1 rounded-full font-medium leading-5 whitespace-normal [overflow-wrap:anywhere] ${sizeClass} ${pillTones[tone]}`}
     >
       {children}
     </span>
@@ -434,7 +417,7 @@ export function CountBadge({
 }) {
   return (
     <span
-      className={`rounded-full px-1.5 py-0.5 font-mono text-xs font-medium whitespace-nowrap ${badgeTones[tone]}`}
+      className={`rounded-full px-2 py-0.5 text-xs font-medium tabular-nums whitespace-nowrap ${badgeTones[tone]}`}
     >
       {children}
     </span>
@@ -481,13 +464,8 @@ export function MetaLine({
 }
 
 /**
- * Section headings are the page's grid armature: a mono micro-label with a
- * hairline rule running out to the full measure, so every section boundary
- * lands on the same visible line no matter what content follows. The label
- * is deliberately quiet — the big display title at the top of the page is
- * the only heading that speaks at content volume; everything below it just
- * names its region. (The rule is aria-hidden decoration; the h2 semantics
- * are unchanged.)
+ * Section titles carry reading hierarchy rather than diagnostic label styling.
+ * Supporting hints wrap below the title when space is limited.
  */
 export function SectionHeading({
   title,
@@ -499,13 +477,12 @@ export function SectionHeading({
   hint?: string;
 }) {
   return (
-    <h2 className="flex min-w-0 items-center gap-3">
-      <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-        <span className={`${microLabelClass} text-muted`}>{title}</span>
+    <h2 className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 text-lg leading-7 font-semibold text-strong">
+      <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+        <span>{title}</span>
         {count !== undefined ? <CountBadge>{count}</CountBadge> : null}
-        {hint ? <span className="text-xs font-normal text-muted/80">{hint}</span> : null}
+        {hint ? <span className="text-sm font-normal text-muted">{hint}</span> : null}
       </span>
-      <span aria-hidden="true" className="h-px min-w-6 flex-1 bg-edge/80" />
     </h2>
   );
 }

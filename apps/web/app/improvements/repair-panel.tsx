@@ -1,5 +1,16 @@
 'use client';
-import { useState, useTransition } from 'react';
+import { useEffect, useId, useRef, useState, useTransition } from 'react';
+import {
+  Badge,
+  btn,
+  cardBodyClass,
+  cardShellClass,
+  EmptyState,
+  focusRing,
+  inputClass,
+  labelClass,
+  textareaClass,
+} from '@/lib/ui';
 import { ActionButton } from '@/lib/ui-client';
 import { repairDecisionAction, reportRepairAction } from './repair-actions';
 
@@ -38,6 +49,19 @@ export function RepairPanel({
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState('');
   const [showReport, setShowReport] = useState(false);
+  const [draft, setDraft] = useState({ title: '', summary: '', sourceTaskId: '' });
+  const reportId = useId();
+  const reportButton = useRef<HTMLButtonElement>(null);
+  const titleInput = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (showReport) titleInput.current?.focus();
+  }, [showReport]);
+  const closeReport = () => {
+    setShowReport(false);
+    setError('');
+    setDraft({ title: '', summary: '', sourceTaskId: '' });
+    reportButton.current?.focus();
+  };
   const run = (fn: () => Promise<void>) => {
     setError('');
     startTransition(async () => {
@@ -51,7 +75,7 @@ export function RepairPanel({
   const open = overview.issues.filter((issue) => !['dismissed', 'resolved'].includes(issue.status));
   return (
     <section className="mt-8 space-y-4" aria-label="Code fixes">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between sm:gap-4">
         <div>
           <h2 className="text-lg font-semibold">Code fixes</h2>
           <p className="mt-1 text-sm text-muted">
@@ -61,73 +85,98 @@ export function RepairPanel({
             You review and merge every PR.
           </p>
         </div>
-        <ActionButton onClick={() => setShowReport(!showReport)}>Report an issue</ActionButton>
+        <button
+          ref={reportButton}
+          type="button"
+          aria-expanded={showReport}
+          aria-controls={reportId}
+          onClick={() => (showReport ? closeReport() : setShowReport(true))}
+          className={`${btn.outline} shrink-0`}
+        >
+          Report an issue
+        </button>
       </div>
       {error && (
-        <p role="alert" className="text-sm text-red-600">
+        <p role="alert" className="text-sm text-red-600 dark:text-red-400">
           {error}
         </p>
       )}
       {showReport && (
         <form
-          className="space-y-3 rounded-2xl border border-border bg-surface p-4"
+          id={reportId}
+          className={`${cardShellClass} ${cardBodyClass}`}
           action={(form) =>
             run(async () => {
               await reportRepairAction(form);
-              setShowReport(false);
+              closeReport();
             })
           }
         >
-          <label className="block text-sm">
-            Issue title
+          <label className="flex flex-col gap-1.5">
+            <span className={labelClass}>Issue title</span>
             <input
+              ref={titleInput}
               name="title"
+              value={draft.title}
+              onChange={(event) => setDraft({ ...draft, title: event.target.value })}
               required
               minLength={3}
               maxLength={200}
-              className="mt-1 block w-full rounded-lg border border-border bg-surface p-2"
+              className={`${inputClass} w-full`}
             />
           </label>
-          <label className="block text-sm">
-            What went wrong
+          <label className="flex flex-col gap-1.5">
+            <span className={labelClass}>What went wrong</span>
             <textarea
               name="summary"
+              value={draft.summary}
+              onChange={(event) => setDraft({ ...draft, summary: event.target.value })}
               required
               minLength={5}
               maxLength={3000}
               rows={3}
-              className="mt-1 block w-full rounded-lg border border-border bg-surface p-2"
+              className={`${textareaClass} w-full`}
             />
           </label>
-          <label className="block text-sm">
-            Failed task ID (optional)
+          <label className="flex flex-col gap-1.5">
+            <span className={labelClass}>Failed task ID (optional)</span>
             <input
               name="sourceTaskId"
-              className="mt-1 block w-full rounded-lg border border-border bg-surface p-2"
+              value={draft.sourceTaskId}
+              onChange={(event) => setDraft({ ...draft, sourceTaskId: event.target.value })}
+              className={`${inputClass} w-full`}
             />
           </label>
-          <button
-            type="submit"
-            disabled={pending}
-            className="rounded-lg bg-strong px-4 py-2 text-sm text-surface disabled:opacity-50"
-          >
-            {pending ? 'Saving…' : 'Save report'}
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button type="submit" disabled={pending} className={btn.primary}>
+              {pending ? 'Saving…' : 'Save report'}
+            </button>
+            <button type="button" disabled={pending} className={btn.outline} onClick={closeReport}>
+              Cancel
+            </button>
+          </div>
         </form>
       )}
       {open.length === 0 && (
-        <p className="rounded-2xl border border-border p-4 text-sm text-muted">
+        <EmptyState>
           No active code fixes. Failed flows and your corrections appear here when automatic
           investigation is enabled.
-        </p>
+        </EmptyState>
       )}
       {open.map((issue) => (
-        <article
-          key={issue.id}
-          className="space-y-3 rounded-2xl border border-border bg-surface p-4"
-        >
-          <div className="text-xs font-medium text-muted">
-            {labels[issue.status] ?? issue.status}
+        <article key={issue.id} className={`${cardShellClass} ${cardBodyClass}`}>
+          <div>
+            <Badge
+              tone={
+                ['blocked', 'failed'].includes(issue.status)
+                  ? 'amber'
+                  : issue.status === 'monitoring'
+                    ? 'green'
+                    : 'neutral'
+              }
+            >
+              {labels[issue.status] ?? issue.status}
+            </Badge>
           </div>
           <h3 className="font-semibold">{issue.title}</h3>
           <p className="text-sm text-muted">{issue.diagnosis || issue.summary}</p>
@@ -135,17 +184,27 @@ export function RepairPanel({
           {issue.lastError && <p className="text-sm">{issue.lastError}</p>}
           <div className="flex flex-wrap items-center gap-3 text-sm">
             {issue.prUrl && (
-              <a className="underline" href={issue.prUrl} target="_blank" rel="noreferrer">
+              <a
+                className={`underline ${focusRing}`}
+                href={issue.prUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
                 Review pull request ↗
               </a>
             )}
             {issue.sourceTaskId && (
-              <a className="underline" href={`/audit/${issue.sourceTaskId}`}>
+              <a className={`underline ${focusRing}`} href={`/audit/${issue.sourceTaskId}`}>
                 View evidence
               </a>
             )}
             {issue.runUrl && (
-              <a className="underline" href={issue.runUrl} target="_blank" rel="noreferrer">
+              <a
+                className={`underline ${focusRing}`}
+                href={issue.runUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
                 View coding run ↗
               </a>
             )}
@@ -186,7 +245,10 @@ export function RepairPanel({
               </p>
             )}
           <details className="text-xs text-muted">
-            <summary className="cursor-pointer">Progress history</summary>
+            <summary className={`cursor-pointer ${focusRing}`}>Progress history</summary>
+            {issue.history.length === 0 ? (
+              <p className="mt-2">No progress updates recorded yet.</p>
+            ) : null}
             <ol className="mt-2 space-y-1">
               {issue.history.map((entry) => (
                 <li key={`${entry.at}-${entry.status}`}>

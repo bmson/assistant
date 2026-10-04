@@ -1,0 +1,1139 @@
+{
+  "before": false,
+  "hydrateChat": true,
+  "boundary": {
+    "client": "Actual ChatClient, AI SDK useChat, useChatPolling and composer layout effects",
+    "mocks": ["Next navigation", "server actions", "local empty GET chat-status responses"],
+    "serverActions": 0,
+    "externalRequestsAttempted": 0,
+    "simulatedCancellationFailures": 0,
+    "syntheticStatusReads": 8,
+    "ownerReads": 0,
+    "providerCalls": 0,
+    "sendsOrVoiceExercised": false,
+    "liveRouteAdmissionExercised": false
+  },
+  "sourceSha256": {
+    "apps/web/app/chat/[id]/chat-client.tsx": "2218e2444579b0831339b5a1bd09ef9c4b1b2c66134500b98f205ae8390a69ab",
+    "apps/web/app/chat/[id]/message-view.tsx": "002f9039aceb1159b3d5ff2c11a957c55f431e983b40b7a00db1434699e8a097",
+    "apps/web/app/chat/[id]/use-chat-polling.ts": "7ff7d315a140f6adee290bdb9707fba3e56eee1abf0865768fa6564b88347b96",
+    "apps/web/app/chat/conversation-page.tsx": "9d7598d1f2f70ecb3c0364438a74abcb2f1a57c8e0abf9a0dd62e1704168bdd1",
+    "apps/web/app/conversation.css": "401ed014d60a43c034a0c84d9a7dc8f987aca6f774905d28fa7f139debc78271",
+    "apps/web/app/globals.css": "af94a8b1e84e22ea9e3e079a1635f5aa1dd149f322e7685c202b11692721bdbd",
+    "apps/web/app/layout.tsx": "632a56c65c1643c7ed32f334b2e1d7741f8ab0da1450669af53a2ad45d371be5",
+    "apps/web/lib/ui.tsx": "546cdac465e419c69463e25c6e8231e875228d6da397042d05b7caec53f26289",
+    "apps/web/app/product-visual-fixture.test.tsx": "5673307a5e3e6843ed533825763166883d8b9ada21cdfe9bb41904407c2fe5fb",
+    "scripts/product-visual-qa.ts": "bb0ebb6c04687732e0adfbd2296783b644fdbb8455a143038d36da161d9edcc1"
+  },
+  "fixturePages": 4,
+  "matrixScreenshotCount": 8,
+  "screenshotCount": 8,
+  "stylesheetSha256": "af94a8b1e84e22ea9e3e079a1635f5aa1dd149f322e7685c202b11692721bdbd",
+  "stylesheetBytes": 117961,
+  "conversationStylesheetSha256": "401ed014d60a43c034a0c84d9a7dc8f987aca6f774905d28fa7f139debc78271",
+  "conversationStylesheetBytes": 17154,
+  "blockedRequests": 0,
+  "syntheticApiRequests": [
+    {
+      "fixture": "chat",
+      "scheme": "light",
+      "path": "/api/chat/status",
+      "method": "GET"
+    },
+    {
+      "fixture": "chat-empty",
+      "scheme": "light",
+      "path": "/api/chat/status",
+      "method": "GET"
+    },
+    {
+      "fixture": "side-chat",
+      "scheme": "light",
+      "path": "/api/chat/status",
+      "method": "GET"
+    },
+    {
+      "fixture": "side-chat-empty",
+      "scheme": "light",
+      "path": "/api/chat/status",
+      "method": "GET"
+    },
+    {
+      "fixture": "chat",
+      "scheme": "dark",
+      "path": "/api/chat/status",
+      "method": "GET"
+    },
+    {
+      "fixture": "chat-empty",
+      "scheme": "dark",
+      "path": "/api/chat/status",
+      "method": "GET"
+    },
+    {
+      "fixture": "side-chat",
+      "scheme": "dark",
+      "path": "/api/chat/status",
+      "method": "GET"
+    },
+    {
+      "fixture": "side-chat-empty",
+      "scheme": "dark",
+      "path": "/api/chat/status",
+      "method": "GET"
+    }
+  ],
+  "measurements": [
+    {
+      "name": "chat",
+      "route": "/chat",
+      "source": "apps/web/app/chat/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual ChatClient and layout effects hydrated with mocked navigation/server actions and synthetic local status reads. No owner reads, provider calls, sends or voice.",
+      "persistenceFixture": "PostgreSQL presentation branch",
+      "screenshot": "chat-390-light.png",
+      "width": 390,
+      "screenshotWidth": 390,
+      "screenshotHeight": 844,
+      "scheme": "light",
+      "documentWidth": 390,
+      "viewportWidth": 390,
+      "height": 844,
+      "mainWidth": 390,
+      "overflow": [],
+      "errors": [],
+      "conversationStylesheet": "apps/web/app/conversation.css",
+      "conversationPresentation": {
+        "stagePainted": true,
+        "bodyColor": "rgb(43, 130, 83)",
+        "stageColor": "rgb(43, 130, 83)",
+        "composerBorderStyle": "solid",
+        "composerBorderColor": "rgba(255, 255, 255, 0.22)",
+        "assistantSurface": "rgb(255, 255, 255)",
+        "viewportHeight": 844,
+        "chatTop": 109,
+        "chatBottom": 844,
+        "bodyScrollHeight": 844,
+        "formHeight": 70,
+        "reservedComposerHeight": 70,
+        "composerTop": 774,
+        "lastSuggestionBottom": null,
+        "suggestionsClearComposer": true,
+        "transcriptClearComposer": true,
+        "recallSurfaces": [],
+        "asyncFailureBottom": null
+      },
+      "contrast": {
+        "headerOpaque": true,
+        "headerBackground": "rgb(255, 255, 255)",
+        "text": [
+          {
+            "target": "Header navigation",
+            "label": "Settings",
+            "color": "rgb(90, 109, 98)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [90, 109, 98],
+            "resolvedBackground": [255, 255, 255],
+            "ratio": 5.528416712442076
+          },
+          {
+            "target": "Header navigation",
+            "label": "Security",
+            "color": "rgb(90, 109, 98)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [90, 109, 98],
+            "resolvedBackground": [255, 255, 255],
+            "ratio": 5.528416712442076
+          },
+          {
+            "target": "Header navigation",
+            "label": "Audit trail",
+            "color": "rgb(90, 109, 98)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [90, 109, 98],
+            "resolvedBackground": [255, 255, 255],
+            "ratio": 5.528416712442076
+          },
+          {
+            "target": "Owner message",
+            "label": "What needs my attention this afternoon?",
+            "color": "rgb(244, 250, 245)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [244, 250, 245],
+            "resolvedBackground": [30, 97, 62],
+            "ratio": 6.998901138009656
+          },
+          {
+            "target": "Composer placeholder",
+            "label": "",
+            "color": "rgb(198, 221, 207)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [198, 221, 207],
+            "resolvedBackground": [30, 97, 62],
+            "ratio": 5.166343595877851
+          }
+        ],
+        "disabledControls": [
+          {
+            "label": "Send",
+            "note": "Disabled controls are excluded from ordinary text contrast assertions."
+          }
+        ],
+        "method": "Browser-computed sRGB ink and ancestor background layers resolved through canvas; includes ink alpha and ancestor opacity. Selected targets have flat opaque final backgrounds, clear of the bottom fade."
+      },
+      "hydratedChat": true,
+      "actionInvocations": 0,
+      "recoverableHydrationErrors": [],
+      "simulatedCancellationFailures": 0
+    },
+    {
+      "name": "chat-empty",
+      "route": "/chat",
+      "source": "apps/web/app/chat/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual ChatClient and layout effects hydrated with mocked navigation/server actions and synthetic local status reads. No owner reads, provider calls, sends or voice.",
+      "persistenceFixture": "PostgreSQL presentation branch",
+      "screenshot": "chat-empty-390-light.png",
+      "width": 390,
+      "screenshotWidth": 390,
+      "screenshotHeight": 844,
+      "scheme": "light",
+      "documentWidth": 390,
+      "viewportWidth": 390,
+      "height": 844,
+      "mainWidth": 390,
+      "overflow": [],
+      "errors": [],
+      "conversationStylesheet": "apps/web/app/conversation.css",
+      "conversationPresentation": {
+        "stagePainted": true,
+        "bodyColor": "rgb(43, 130, 83)",
+        "stageColor": "rgb(43, 130, 83)",
+        "composerBorderStyle": "solid",
+        "composerBorderColor": "rgba(255, 255, 255, 0.22)",
+        "assistantSurface": null,
+        "viewportHeight": 844,
+        "chatTop": 109,
+        "chatBottom": 844,
+        "bodyScrollHeight": 844,
+        "formHeight": 70,
+        "reservedComposerHeight": 70,
+        "composerTop": 774,
+        "lastSuggestionBottom": 637.5,
+        "suggestionsClearComposer": true,
+        "transcriptClearComposer": true,
+        "recallSurfaces": [],
+        "asyncFailureBottom": null
+      },
+      "contrast": {
+        "headerOpaque": true,
+        "headerBackground": "rgb(255, 255, 255)",
+        "text": [
+          {
+            "target": "Header navigation",
+            "label": "Settings",
+            "color": "rgb(90, 109, 98)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [90, 109, 98],
+            "resolvedBackground": [255, 255, 255],
+            "ratio": 5.528416712442076
+          },
+          {
+            "target": "Header navigation",
+            "label": "Security",
+            "color": "rgb(90, 109, 98)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [90, 109, 98],
+            "resolvedBackground": [255, 255, 255],
+            "ratio": 5.528416712442076
+          },
+          {
+            "target": "Header navigation",
+            "label": "Audit trail",
+            "color": "rgb(90, 109, 98)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [90, 109, 98],
+            "resolvedBackground": [255, 255, 255],
+            "ratio": 5.528416712442076
+          },
+          {
+            "target": "Welcome narrative",
+            "label": "Start with an outcome. Assistant can research, plan, draft, schedule, and keep f",
+            "color": "rgb(247, 255, 249)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [247, 255, 249],
+            "resolvedBackground": [43, 130, 83],
+            "ratio": 4.665968381653416
+          },
+          {
+            "target": "Suggestion label",
+            "label": "Clear the inbox",
+            "color": "rgb(244, 250, 245)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [244, 250, 245],
+            "resolvedBackground": [30, 97, 62],
+            "ratio": 6.998901138009656
+          },
+          {
+            "target": "Suggestion label",
+            "label": "Review the week",
+            "color": "rgb(244, 250, 245)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [244, 250, 245],
+            "resolvedBackground": [30, 97, 62],
+            "ratio": 6.998901138009656
+          },
+          {
+            "target": "Suggestion label",
+            "label": "Plan a trip",
+            "color": "rgb(244, 250, 245)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [244, 250, 245],
+            "resolvedBackground": [30, 97, 62],
+            "ratio": 6.998901138009656
+          },
+          {
+            "target": "Composer placeholder",
+            "label": "",
+            "color": "rgb(198, 221, 207)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [198, 221, 207],
+            "resolvedBackground": [30, 97, 62],
+            "ratio": 5.166343595877851
+          }
+        ],
+        "disabledControls": [
+          {
+            "label": "Send",
+            "note": "Disabled controls are excluded from ordinary text contrast assertions."
+          }
+        ],
+        "method": "Browser-computed sRGB ink and ancestor background layers resolved through canvas; includes ink alpha and ancestor opacity. Selected targets have flat opaque final backgrounds, clear of the bottom fade."
+      },
+      "hydratedChat": true,
+      "actionInvocations": 0,
+      "recoverableHydrationErrors": [],
+      "simulatedCancellationFailures": 0
+    },
+    {
+      "name": "side-chat",
+      "route": "/chat/00000000-0000-4000-8000-000000000001",
+      "source": "apps/web/app/chat/[id]/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual ChatClient and layout effects hydrated with mocked navigation/server actions and synthetic local status reads. No owner reads, provider calls, sends or voice.",
+      "persistenceFixture": "PostgreSQL presentation branch",
+      "screenshot": "side-chat-390-light.png",
+      "width": 390,
+      "screenshotWidth": 390,
+      "screenshotHeight": 844,
+      "scheme": "light",
+      "documentWidth": 390,
+      "viewportWidth": 390,
+      "height": 844,
+      "mainWidth": 390,
+      "heading": "Family weekend",
+      "overflow": [],
+      "errors": [],
+      "conversationStylesheet": "apps/web/app/conversation.css",
+      "conversationPresentation": {
+        "stagePainted": true,
+        "bodyColor": "rgb(43, 130, 83)",
+        "stageColor": "rgb(43, 130, 83)",
+        "composerBorderStyle": "solid",
+        "composerBorderColor": "rgba(255, 255, 255, 0.22)",
+        "assistantSurface": "rgb(255, 255, 255)",
+        "viewportHeight": 844,
+        "chatTop": 109,
+        "chatBottom": 844,
+        "bodyScrollHeight": 844,
+        "formHeight": 70,
+        "reservedComposerHeight": 70,
+        "composerTop": 774,
+        "lastSuggestionBottom": null,
+        "suggestionsClearComposer": true,
+        "transcriptClearComposer": true,
+        "recallSurfaces": [],
+        "asyncFailureBottom": null
+      },
+      "contrast": {
+        "headerOpaque": true,
+        "headerBackground": "rgb(255, 255, 255)",
+        "text": [
+          {
+            "target": "Header navigation",
+            "label": "Settings",
+            "color": "rgb(90, 109, 98)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [90, 109, 98],
+            "resolvedBackground": [255, 255, 255],
+            "ratio": 5.528416712442076
+          },
+          {
+            "target": "Header navigation",
+            "label": "Security",
+            "color": "rgb(90, 109, 98)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [90, 109, 98],
+            "resolvedBackground": [255, 255, 255],
+            "ratio": 5.528416712442076
+          },
+          {
+            "target": "Header navigation",
+            "label": "Audit trail",
+            "color": "rgb(90, 109, 98)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [90, 109, 98],
+            "resolvedBackground": [255, 255, 255],
+            "ratio": 5.528416712442076
+          },
+          {
+            "target": "Side navigation",
+            "label": "All chats",
+            "color": "rgb(247, 255, 249)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [247, 255, 249],
+            "resolvedBackground": [43, 130, 83],
+            "ratio": 4.665968381653416
+          },
+          {
+            "target": "Side navigation",
+            "label": "ArchiveArchiving…Archive",
+            "color": "rgb(255, 255, 255)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [255, 255, 255],
+            "resolvedBackground": [43, 130, 83],
+            "ratio": 4.750402946459345
+          },
+          {
+            "target": "Owner message",
+            "label": "What needs my attention this afternoon?",
+            "color": "rgb(244, 250, 245)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [244, 250, 245],
+            "resolvedBackground": [30, 97, 62],
+            "ratio": 6.998901138009656
+          },
+          {
+            "target": "Composer placeholder",
+            "label": "",
+            "color": "rgb(198, 221, 207)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [198, 221, 207],
+            "resolvedBackground": [30, 97, 62],
+            "ratio": 5.166343595877851
+          }
+        ],
+        "disabledControls": [
+          {
+            "label": "Send",
+            "note": "Disabled controls are excluded from ordinary text contrast assertions."
+          }
+        ],
+        "method": "Browser-computed sRGB ink and ancestor background layers resolved through canvas; includes ink alpha and ancestor opacity. Selected targets have flat opaque final backgrounds, clear of the bottom fade."
+      },
+      "hydratedChat": true,
+      "actionInvocations": 0,
+      "recoverableHydrationErrors": [],
+      "simulatedCancellationFailures": 0
+    },
+    {
+      "name": "side-chat-empty",
+      "route": "/chat/00000000-0000-4000-8000-000000000001",
+      "source": "apps/web/app/chat/[id]/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual ChatClient and layout effects hydrated with mocked navigation/server actions and synthetic local status reads. No owner reads, provider calls, sends or voice.",
+      "persistenceFixture": "PostgreSQL presentation branch",
+      "screenshot": "side-chat-empty-390-light.png",
+      "width": 390,
+      "screenshotWidth": 390,
+      "screenshotHeight": 844,
+      "scheme": "light",
+      "documentWidth": 390,
+      "viewportWidth": 390,
+      "height": 844,
+      "mainWidth": 390,
+      "heading": "Family weekend",
+      "overflow": [],
+      "errors": [],
+      "conversationStylesheet": "apps/web/app/conversation.css",
+      "conversationPresentation": {
+        "stagePainted": true,
+        "bodyColor": "rgb(43, 130, 83)",
+        "stageColor": "rgb(43, 130, 83)",
+        "composerBorderStyle": "solid",
+        "composerBorderColor": "rgba(255, 255, 255, 0.22)",
+        "assistantSurface": null,
+        "viewportHeight": 844,
+        "chatTop": 109,
+        "chatBottom": 844,
+        "bodyScrollHeight": 844,
+        "formHeight": 70,
+        "reservedComposerHeight": 70,
+        "composerTop": 774,
+        "lastSuggestionBottom": 661,
+        "suggestionsClearComposer": true,
+        "transcriptClearComposer": true,
+        "recallSurfaces": [],
+        "asyncFailureBottom": null
+      },
+      "contrast": {
+        "headerOpaque": true,
+        "headerBackground": "rgb(255, 255, 255)",
+        "text": [
+          {
+            "target": "Header navigation",
+            "label": "Settings",
+            "color": "rgb(90, 109, 98)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [90, 109, 98],
+            "resolvedBackground": [255, 255, 255],
+            "ratio": 5.528416712442076
+          },
+          {
+            "target": "Header navigation",
+            "label": "Security",
+            "color": "rgb(90, 109, 98)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [90, 109, 98],
+            "resolvedBackground": [255, 255, 255],
+            "ratio": 5.528416712442076
+          },
+          {
+            "target": "Header navigation",
+            "label": "Audit trail",
+            "color": "rgb(90, 109, 98)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [90, 109, 98],
+            "resolvedBackground": [255, 255, 255],
+            "ratio": 5.528416712442076
+          },
+          {
+            "target": "Welcome narrative",
+            "label": "Start with an outcome. Assistant can research, plan, draft, schedule, and keep f",
+            "color": "rgb(247, 255, 249)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [247, 255, 249],
+            "resolvedBackground": [43, 130, 83],
+            "ratio": 4.665968381653416
+          },
+          {
+            "target": "Suggestion label",
+            "label": "Clear the inbox",
+            "color": "rgb(244, 250, 245)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [244, 250, 245],
+            "resolvedBackground": [30, 97, 62],
+            "ratio": 6.998901138009656
+          },
+          {
+            "target": "Suggestion label",
+            "label": "Review the week",
+            "color": "rgb(244, 250, 245)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [244, 250, 245],
+            "resolvedBackground": [30, 97, 62],
+            "ratio": 6.998901138009656
+          },
+          {
+            "target": "Suggestion label",
+            "label": "Plan a trip",
+            "color": "rgb(244, 250, 245)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [244, 250, 245],
+            "resolvedBackground": [30, 97, 62],
+            "ratio": 6.998901138009656
+          },
+          {
+            "target": "Side navigation",
+            "label": "All chats",
+            "color": "rgb(247, 255, 249)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [247, 255, 249],
+            "resolvedBackground": [43, 130, 83],
+            "ratio": 4.665968381653416
+          },
+          {
+            "target": "Side navigation",
+            "label": "ArchiveArchiving…Archive",
+            "color": "rgb(255, 255, 255)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [255, 255, 255],
+            "resolvedBackground": [43, 130, 83],
+            "ratio": 4.750402946459345
+          },
+          {
+            "target": "Composer placeholder",
+            "label": "",
+            "color": "rgb(198, 221, 207)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [198, 221, 207],
+            "resolvedBackground": [30, 97, 62],
+            "ratio": 5.166343595877851
+          }
+        ],
+        "disabledControls": [
+          {
+            "label": "Send",
+            "note": "Disabled controls are excluded from ordinary text contrast assertions."
+          }
+        ],
+        "method": "Browser-computed sRGB ink and ancestor background layers resolved through canvas; includes ink alpha and ancestor opacity. Selected targets have flat opaque final backgrounds, clear of the bottom fade."
+      },
+      "hydratedChat": true,
+      "actionInvocations": 0,
+      "recoverableHydrationErrors": [],
+      "simulatedCancellationFailures": 0
+    },
+    {
+      "name": "chat",
+      "route": "/chat",
+      "source": "apps/web/app/chat/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual ChatClient and layout effects hydrated with mocked navigation/server actions and synthetic local status reads. No owner reads, provider calls, sends or voice.",
+      "persistenceFixture": "PostgreSQL presentation branch",
+      "screenshot": "chat-390-dark.png",
+      "width": 390,
+      "screenshotWidth": 390,
+      "screenshotHeight": 844,
+      "scheme": "dark",
+      "documentWidth": 390,
+      "viewportWidth": 390,
+      "height": 844,
+      "mainWidth": 390,
+      "overflow": [],
+      "errors": [],
+      "conversationStylesheet": "apps/web/app/conversation.css",
+      "conversationPresentation": {
+        "stagePainted": true,
+        "bodyColor": "rgb(27, 54, 38)",
+        "stageColor": "rgb(27, 54, 38)",
+        "composerBorderStyle": "solid",
+        "composerBorderColor": "rgba(255, 255, 255, 0.22)",
+        "assistantSurface": "rgb(255, 255, 255)",
+        "viewportHeight": 844,
+        "chatTop": 109,
+        "chatBottom": 844,
+        "bodyScrollHeight": 844,
+        "formHeight": 70,
+        "reservedComposerHeight": 70,
+        "composerTop": 774,
+        "lastSuggestionBottom": null,
+        "suggestionsClearComposer": true,
+        "transcriptClearComposer": true,
+        "recallSurfaces": [],
+        "asyncFailureBottom": null
+      },
+      "contrast": {
+        "headerOpaque": true,
+        "headerBackground": "rgb(25, 36, 29)",
+        "text": [
+          {
+            "target": "Header navigation",
+            "label": "Settings",
+            "color": "rgb(156, 176, 162)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [156, 176, 162],
+            "resolvedBackground": [25, 36, 29],
+            "ratio": 6.973659817945184
+          },
+          {
+            "target": "Header navigation",
+            "label": "Security",
+            "color": "rgb(156, 176, 162)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [156, 176, 162],
+            "resolvedBackground": [25, 36, 29],
+            "ratio": 6.973659817945184
+          },
+          {
+            "target": "Header navigation",
+            "label": "Audit trail",
+            "color": "rgb(156, 176, 162)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [156, 176, 162],
+            "resolvedBackground": [25, 36, 29],
+            "ratio": 6.973659817945184
+          },
+          {
+            "target": "Owner message",
+            "label": "What needs my attention this afternoon?",
+            "color": "rgb(244, 250, 245)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [244, 250, 245],
+            "resolvedBackground": [25, 52, 36],
+            "ratio": 12.733823958010268
+          },
+          {
+            "target": "Composer placeholder",
+            "label": "",
+            "color": "rgb(198, 221, 207)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [198, 221, 207],
+            "resolvedBackground": [25, 52, 36],
+            "ratio": 9.39966268407827
+          }
+        ],
+        "disabledControls": [
+          {
+            "label": "Send",
+            "note": "Disabled controls are excluded from ordinary text contrast assertions."
+          }
+        ],
+        "method": "Browser-computed sRGB ink and ancestor background layers resolved through canvas; includes ink alpha and ancestor opacity. Selected targets have flat opaque final backgrounds, clear of the bottom fade."
+      },
+      "hydratedChat": true,
+      "actionInvocations": 0,
+      "recoverableHydrationErrors": [],
+      "simulatedCancellationFailures": 0
+    },
+    {
+      "name": "chat-empty",
+      "route": "/chat",
+      "source": "apps/web/app/chat/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual ChatClient and layout effects hydrated with mocked navigation/server actions and synthetic local status reads. No owner reads, provider calls, sends or voice.",
+      "persistenceFixture": "PostgreSQL presentation branch",
+      "screenshot": "chat-empty-390-dark.png",
+      "width": 390,
+      "screenshotWidth": 390,
+      "screenshotHeight": 844,
+      "scheme": "dark",
+      "documentWidth": 390,
+      "viewportWidth": 390,
+      "height": 844,
+      "mainWidth": 390,
+      "overflow": [],
+      "errors": [],
+      "conversationStylesheet": "apps/web/app/conversation.css",
+      "conversationPresentation": {
+        "stagePainted": true,
+        "bodyColor": "rgb(27, 54, 38)",
+        "stageColor": "rgb(27, 54, 38)",
+        "composerBorderStyle": "solid",
+        "composerBorderColor": "rgba(255, 255, 255, 0.22)",
+        "assistantSurface": null,
+        "viewportHeight": 844,
+        "chatTop": 109,
+        "chatBottom": 844,
+        "bodyScrollHeight": 844,
+        "formHeight": 70,
+        "reservedComposerHeight": 70,
+        "composerTop": 774,
+        "lastSuggestionBottom": 637.5,
+        "suggestionsClearComposer": true,
+        "transcriptClearComposer": true,
+        "recallSurfaces": [],
+        "asyncFailureBottom": null
+      },
+      "contrast": {
+        "headerOpaque": true,
+        "headerBackground": "rgb(25, 36, 29)",
+        "text": [
+          {
+            "target": "Header navigation",
+            "label": "Settings",
+            "color": "rgb(156, 176, 162)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [156, 176, 162],
+            "resolvedBackground": [25, 36, 29],
+            "ratio": 6.973659817945184
+          },
+          {
+            "target": "Header navigation",
+            "label": "Security",
+            "color": "rgb(156, 176, 162)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [156, 176, 162],
+            "resolvedBackground": [25, 36, 29],
+            "ratio": 6.973659817945184
+          },
+          {
+            "target": "Header navigation",
+            "label": "Audit trail",
+            "color": "rgb(156, 176, 162)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [156, 176, 162],
+            "resolvedBackground": [25, 36, 29],
+            "ratio": 6.973659817945184
+          },
+          {
+            "target": "Welcome narrative",
+            "label": "Start with an outcome. Assistant can research, plan, draft, schedule, and keep f",
+            "color": "rgb(206, 223, 211)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [206, 223, 211],
+            "resolvedBackground": [27, 54, 38],
+            "ratio": 9.436726529669679
+          },
+          {
+            "target": "Suggestion label",
+            "label": "Clear the inbox",
+            "color": "rgb(244, 250, 245)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [244, 250, 245],
+            "resolvedBackground": [25, 52, 36],
+            "ratio": 12.733823958010268
+          },
+          {
+            "target": "Suggestion label",
+            "label": "Review the week",
+            "color": "rgb(244, 250, 245)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [244, 250, 245],
+            "resolvedBackground": [25, 52, 36],
+            "ratio": 12.733823958010268
+          },
+          {
+            "target": "Suggestion label",
+            "label": "Plan a trip",
+            "color": "rgb(244, 250, 245)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [244, 250, 245],
+            "resolvedBackground": [25, 52, 36],
+            "ratio": 12.733823958010268
+          },
+          {
+            "target": "Composer placeholder",
+            "label": "",
+            "color": "rgb(198, 221, 207)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [198, 221, 207],
+            "resolvedBackground": [25, 52, 36],
+            "ratio": 9.39966268407827
+          }
+        ],
+        "disabledControls": [
+          {
+            "label": "Send",
+            "note": "Disabled controls are excluded from ordinary text contrast assertions."
+          }
+        ],
+        "method": "Browser-computed sRGB ink and ancestor background layers resolved through canvas; includes ink alpha and ancestor opacity. Selected targets have flat opaque final backgrounds, clear of the bottom fade."
+      },
+      "hydratedChat": true,
+      "actionInvocations": 0,
+      "recoverableHydrationErrors": [],
+      "simulatedCancellationFailures": 0
+    },
+    {
+      "name": "side-chat",
+      "route": "/chat/00000000-0000-4000-8000-000000000001",
+      "source": "apps/web/app/chat/[id]/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual ChatClient and layout effects hydrated with mocked navigation/server actions and synthetic local status reads. No owner reads, provider calls, sends or voice.",
+      "persistenceFixture": "PostgreSQL presentation branch",
+      "screenshot": "side-chat-390-dark.png",
+      "width": 390,
+      "screenshotWidth": 390,
+      "screenshotHeight": 844,
+      "scheme": "dark",
+      "documentWidth": 390,
+      "viewportWidth": 390,
+      "height": 844,
+      "mainWidth": 390,
+      "heading": "Family weekend",
+      "overflow": [],
+      "errors": [],
+      "conversationStylesheet": "apps/web/app/conversation.css",
+      "conversationPresentation": {
+        "stagePainted": true,
+        "bodyColor": "rgb(27, 54, 38)",
+        "stageColor": "rgb(27, 54, 38)",
+        "composerBorderStyle": "solid",
+        "composerBorderColor": "rgba(255, 255, 255, 0.22)",
+        "assistantSurface": "rgb(255, 255, 255)",
+        "viewportHeight": 844,
+        "chatTop": 109,
+        "chatBottom": 844,
+        "bodyScrollHeight": 844,
+        "formHeight": 70,
+        "reservedComposerHeight": 70,
+        "composerTop": 774,
+        "lastSuggestionBottom": null,
+        "suggestionsClearComposer": true,
+        "transcriptClearComposer": true,
+        "recallSurfaces": [],
+        "asyncFailureBottom": null
+      },
+      "contrast": {
+        "headerOpaque": true,
+        "headerBackground": "rgb(25, 36, 29)",
+        "text": [
+          {
+            "target": "Header navigation",
+            "label": "Settings",
+            "color": "rgb(156, 176, 162)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [156, 176, 162],
+            "resolvedBackground": [25, 36, 29],
+            "ratio": 6.973659817945184
+          },
+          {
+            "target": "Header navigation",
+            "label": "Security",
+            "color": "rgb(156, 176, 162)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [156, 176, 162],
+            "resolvedBackground": [25, 36, 29],
+            "ratio": 6.973659817945184
+          },
+          {
+            "target": "Header navigation",
+            "label": "Audit trail",
+            "color": "rgb(156, 176, 162)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [156, 176, 162],
+            "resolvedBackground": [25, 36, 29],
+            "ratio": 6.973659817945184
+          },
+          {
+            "target": "Side navigation",
+            "label": "All chats",
+            "color": "rgb(206, 223, 211)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [206, 223, 211],
+            "resolvedBackground": [27, 54, 38],
+            "ratio": 9.436726529669679
+          },
+          {
+            "target": "Side navigation",
+            "label": "ArchiveArchiving…Archive",
+            "color": "rgb(240, 247, 241)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [240, 247, 241],
+            "resolvedBackground": [27, 54, 38],
+            "ratio": 12.03273362239462
+          },
+          {
+            "target": "Owner message",
+            "label": "What needs my attention this afternoon?",
+            "color": "rgb(244, 250, 245)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [244, 250, 245],
+            "resolvedBackground": [25, 52, 36],
+            "ratio": 12.733823958010268
+          },
+          {
+            "target": "Composer placeholder",
+            "label": "",
+            "color": "rgb(198, 221, 207)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [198, 221, 207],
+            "resolvedBackground": [25, 52, 36],
+            "ratio": 9.39966268407827
+          }
+        ],
+        "disabledControls": [
+          {
+            "label": "Send",
+            "note": "Disabled controls are excluded from ordinary text contrast assertions."
+          }
+        ],
+        "method": "Browser-computed sRGB ink and ancestor background layers resolved through canvas; includes ink alpha and ancestor opacity. Selected targets have flat opaque final backgrounds, clear of the bottom fade."
+      },
+      "hydratedChat": true,
+      "actionInvocations": 0,
+      "recoverableHydrationErrors": [],
+      "simulatedCancellationFailures": 0
+    },
+    {
+      "name": "side-chat-empty",
+      "route": "/chat/00000000-0000-4000-8000-000000000001",
+      "source": "apps/web/app/chat/[id]/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual ChatClient and layout effects hydrated with mocked navigation/server actions and synthetic local status reads. No owner reads, provider calls, sends or voice.",
+      "persistenceFixture": "PostgreSQL presentation branch",
+      "screenshot": "side-chat-empty-390-dark.png",
+      "width": 390,
+      "screenshotWidth": 390,
+      "screenshotHeight": 844,
+      "scheme": "dark",
+      "documentWidth": 390,
+      "viewportWidth": 390,
+      "height": 844,
+      "mainWidth": 390,
+      "heading": "Family weekend",
+      "overflow": [],
+      "errors": [],
+      "conversationStylesheet": "apps/web/app/conversation.css",
+      "conversationPresentation": {
+        "stagePainted": true,
+        "bodyColor": "rgb(27, 54, 38)",
+        "stageColor": "rgb(27, 54, 38)",
+        "composerBorderStyle": "solid",
+        "composerBorderColor": "rgba(255, 255, 255, 0.22)",
+        "assistantSurface": null,
+        "viewportHeight": 844,
+        "chatTop": 109,
+        "chatBottom": 844,
+        "bodyScrollHeight": 844,
+        "formHeight": 70,
+        "reservedComposerHeight": 70,
+        "composerTop": 774,
+        "lastSuggestionBottom": 661,
+        "suggestionsClearComposer": true,
+        "transcriptClearComposer": true,
+        "recallSurfaces": [],
+        "asyncFailureBottom": null
+      },
+      "contrast": {
+        "headerOpaque": true,
+        "headerBackground": "rgb(25, 36, 29)",
+        "text": [
+          {
+            "target": "Header navigation",
+            "label": "Settings",
+            "color": "rgb(156, 176, 162)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [156, 176, 162],
+            "resolvedBackground": [25, 36, 29],
+            "ratio": 6.973659817945184
+          },
+          {
+            "target": "Header navigation",
+            "label": "Security",
+            "color": "rgb(156, 176, 162)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [156, 176, 162],
+            "resolvedBackground": [25, 36, 29],
+            "ratio": 6.973659817945184
+          },
+          {
+            "target": "Header navigation",
+            "label": "Audit trail",
+            "color": "rgb(156, 176, 162)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [156, 176, 162],
+            "resolvedBackground": [25, 36, 29],
+            "ratio": 6.973659817945184
+          },
+          {
+            "target": "Welcome narrative",
+            "label": "Start with an outcome. Assistant can research, plan, draft, schedule, and keep f",
+            "color": "rgb(206, 223, 211)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [206, 223, 211],
+            "resolvedBackground": [27, 54, 38],
+            "ratio": 9.436726529669679
+          },
+          {
+            "target": "Suggestion label",
+            "label": "Clear the inbox",
+            "color": "rgb(244, 250, 245)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [244, 250, 245],
+            "resolvedBackground": [25, 52, 36],
+            "ratio": 12.733823958010268
+          },
+          {
+            "target": "Suggestion label",
+            "label": "Review the week",
+            "color": "rgb(244, 250, 245)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [244, 250, 245],
+            "resolvedBackground": [25, 52, 36],
+            "ratio": 12.733823958010268
+          },
+          {
+            "target": "Suggestion label",
+            "label": "Plan a trip",
+            "color": "rgb(244, 250, 245)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [244, 250, 245],
+            "resolvedBackground": [25, 52, 36],
+            "ratio": 12.733823958010268
+          },
+          {
+            "target": "Side navigation",
+            "label": "All chats",
+            "color": "rgb(206, 223, 211)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [206, 223, 211],
+            "resolvedBackground": [27, 54, 38],
+            "ratio": 9.436726529669679
+          },
+          {
+            "target": "Side navigation",
+            "label": "ArchiveArchiving…Archive",
+            "color": "rgb(240, 247, 241)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [240, 247, 241],
+            "resolvedBackground": [27, 54, 38],
+            "ratio": 12.03273362239462
+          },
+          {
+            "target": "Composer placeholder",
+            "label": "",
+            "color": "rgb(198, 221, 207)",
+            "effectiveOpacity": 1,
+            "resolvedForeground": [198, 221, 207],
+            "resolvedBackground": [25, 52, 36],
+            "ratio": 9.39966268407827
+          }
+        ],
+        "disabledControls": [
+          {
+            "label": "Send",
+            "note": "Disabled controls are excluded from ordinary text contrast assertions."
+          }
+        ],
+        "method": "Browser-computed sRGB ink and ancestor background layers resolved through canvas; includes ink alpha and ancestor opacity. Selected targets have flat opaque final backgrounds, clear of the bottom fade."
+      },
+      "hydratedChat": true,
+      "actionInvocations": 0,
+      "recoverableHydrationErrors": [],
+      "simulatedCancellationFailures": 0
+    }
+  ],
+  "interactions": [
+    {
+      "name": "chat",
+      "scheme": "light",
+      "check": "Actual ChatClient hydrated; measured composer matches reserved height; document fits viewport; suggestions/transcript clear composer; no actions or recoverable hydration errors."
+    },
+    {
+      "name": "chat-empty",
+      "scheme": "light",
+      "check": "Actual ChatClient hydrated; measured composer matches reserved height; document fits viewport; suggestions/transcript clear composer; no actions or recoverable hydration errors."
+    },
+    {
+      "name": "side-chat",
+      "scheme": "light",
+      "check": "Actual ChatClient hydrated; measured composer matches reserved height; document fits viewport; suggestions/transcript clear composer; no actions or recoverable hydration errors."
+    },
+    {
+      "name": "side-chat-empty",
+      "scheme": "light",
+      "check": "Actual ChatClient hydrated; measured composer matches reserved height; document fits viewport; suggestions/transcript clear composer; no actions or recoverable hydration errors."
+    },
+    {
+      "name": "chat",
+      "scheme": "dark",
+      "check": "Actual ChatClient hydrated; measured composer matches reserved height; document fits viewport; suggestions/transcript clear composer; no actions or recoverable hydration errors."
+    },
+    {
+      "name": "chat-empty",
+      "scheme": "dark",
+      "check": "Actual ChatClient hydrated; measured composer matches reserved height; document fits viewport; suggestions/transcript clear composer; no actions or recoverable hydration errors."
+    },
+    {
+      "name": "side-chat",
+      "scheme": "dark",
+      "check": "Actual ChatClient hydrated; measured composer matches reserved height; document fits viewport; suggestions/transcript clear composer; no actions or recoverable hydration errors."
+    },
+    {
+      "name": "side-chat-empty",
+      "scheme": "dark",
+      "check": "Actual ChatClient hydrated; measured composer matches reserved height; document fits viewport; suggestions/transcript clear composer; no actions or recoverable hydration errors."
+    }
+  ],
+  "recapturedPages": ["chat", "chat-empty", "side-chat", "side-chat-empty"]
+}

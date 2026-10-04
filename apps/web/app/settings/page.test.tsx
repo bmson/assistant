@@ -144,7 +144,7 @@ describe.skipIf(!localEmulator)('Firestore owner settings page with PostgreSQL o
       200,
     );
     const html = renderToStaticMarkup(await page.default());
-    expect(html).toContain('Mobile API access token');
+    expect(html).toContain('Mobile app connection');
     expect(html).toContain('https://assistant.test');
     expect(html).not.toContain('Recurring jobs');
   });

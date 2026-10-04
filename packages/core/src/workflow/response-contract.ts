@@ -43,6 +43,8 @@ type ActionKind =
   | 'inbox_write'
   | 'application'
   | 'calendar'
+  | 'reminder_create'
+  | 'reminder_cancel'
   | 'calendar_read'
   | 'inbox_read'
   | 'research'
@@ -301,6 +303,8 @@ const CURRENT_TASK_ONLY: ReadonlySet<ActionKind> = new Set([
   'inbox_write',
   'application',
   'calendar',
+  'reminder_create',
+  'reminder_cancel',
   // "I saved that to memory" is a claim about THIS turn — an earlier save
   // doesn't authorise narrating a fresh one.
   'memory',
@@ -363,6 +367,20 @@ function supports(kind: ActionKind, evidence: ActionEvidence[], currentTaskOnly 
       );
     case 'calendar':
       return names.some((name) => /^calendar\.(create|update|cancel|delete)/.test(name));
+    case 'reminder_create':
+      return usable.some((item) => {
+        const result = record(item.result);
+        return (
+          item.toolName === 'reminder.create' &&
+          result?.created !== false &&
+          typeof result?.reminderId === 'string' &&
+          result.reminderId.trim().length > 0
+        );
+      });
+    case 'reminder_cancel':
+      return usable.some(
+        (item) => item.toolName === 'reminder.cancel' && record(item.result)?.cancelled === true,
+      );
     // A write proves only that a write happened. It does not prove the assistant
     // inspected every calendar or knew what else was scheduled.
     case 'calendar_read':
@@ -550,6 +568,20 @@ function claimedKinds(text: string): ActionKind[] {
   ) {
     kinds.add('calendar_read');
   }
+  if (
+    completedActionClaim(
+      text,
+      'reminders?|alerts?',
+      'created|scheduled|saved|added|set|set up|rescheduled|updated',
+    )
+  ) {
+    kinds.add('reminder_create');
+  }
+  if (
+    completedActionClaim(text, 'reminders?|alerts?', 'cancelled|canceled|removed|deleted|stopped')
+  ) {
+    kinds.add('reminder_cancel');
+  }
   if (completedActionClaim(text, INBOX_READ_OBJECTS, READ_ACTIONS) || emptyInboxClaim.test(text)) {
     kinds.add('inbox_read');
   }
@@ -612,6 +644,8 @@ const PLAIN_STEP: Record<ActionKind, string> = {
   inbox_write: 'the inbox change',
   application: 'the application',
   calendar: 'the calendar change',
+  reminder_create: 'setting the reminder',
+  reminder_cancel: 'removing the reminder',
   calendar_read: 'the calendar lookup',
   inbox_read: 'the mailbox lookup',
   research: 'the web lookup',
@@ -668,6 +702,8 @@ const UNSUPPORTED_LABEL: Record<ActionKind, string> = {
   inbox_write: 'the claimed inbox change',
   application: 'the application submission',
   calendar: 'the requested calendar action',
+  reminder_create: 'the requested reminder',
+  reminder_cancel: 'the requested reminder removal',
   calendar_read: 'the claimed calendar check',
   inbox_read: 'the claimed inbox check',
   research: 'the requested research',
@@ -692,6 +728,8 @@ function toolKind(name: string): ActionKind | undefined {
   if (name === 'gmail.modify') return 'inbox_write';
   if (name === 'application.submit') return 'application';
   if (/^calendar\.(create|update|cancel|delete)/.test(name)) return 'calendar';
+  if (name === 'reminder.create') return 'reminder_create';
+  if (name === 'reminder.cancel') return 'reminder_cancel';
   if (/^calendar\.(?:list_calendars|list_events|search_events|availability)$/.test(name)) {
     return 'calendar_read';
   }
@@ -723,6 +761,8 @@ function describeTool(name: string): string | undefined {
   if (name === 'gmail.modify') return 'the inbox change completed';
   if (name === 'sms.send' || name === 'email.send') return 'the message was sent';
   if (/^calendar\.(create|update|cancel|delete)/.test(name)) return 'the calendar action completed';
+  if (name === 'reminder.create') return 'the reminder was scheduled';
+  if (name === 'reminder.cancel') return 'the reminder was removed';
   if (/^calendar\.(?:list_calendars|list_events|search_events|availability)$/.test(name)) {
     return 'the calendar was actually read';
   }
@@ -767,6 +807,15 @@ function verifiedActionDescriptions(
     }
   }
   return [...descriptions];
+}
+
+/** A partial receipt after interrupted prose, using only this task's ledger. */
+export function verifiedCurrentActionSummary(evidence: ActionEvidence[]): string | undefined {
+  const verified = verifiedActionDescriptions(
+    evidence.filter((item) => item.fromCurrentTask !== false),
+    new Set(),
+  );
+  return verified.length ? `Confirmed: ${verified.join('; ')}.` : undefined;
 }
 
 function partialFailureResponse(
@@ -1188,6 +1237,174 @@ function calendarFreeIntervals(
     });
   }
   return free;
+}
+
+/** Availability answers keep technical range identifiers in the ledger/card. */
+function calendarAvailabilityLines(
+  request: PersonalReadRequest,
+  calendarRows: ActionEvidence[],
+): string[] {
+  const window = request.timeWindow;
+  const windowStart = window ? Date.parse(window.timeMin) : Number.NaN;
+  const windowEnd = window ? Date.parse(window.timeMax) : Number.NaN;
+  const validWindow =
+    Number.isFinite(windowStart) && Number.isFinite(windowEnd) && windowEnd > windowStart;
+  const busy = uniqueRecords(
+    calendarRows.flatMap((row) => resultItems(row, 'busy')),
+    (slot) =>
+      [stringField(slot, 'calendar'), stringField(slot, 'start'), stringField(slot, 'end')].join(
+        '|',
+      ),
+  ).filter((slot) => {
+    const from = Date.parse(stringField(slot, 'start'));
+    const to = Date.parse(stringField(slot, 'end'));
+    // An extra provider block outside the exact checked range is not a
+    // conflict in that range. Malformed blocks remain visible and incomplete.
+    return (
+      !validWindow ||
+      !Number.isFinite(from) ||
+      !Number.isFinite(to) ||
+      to <= from ||
+      (from < windowEnd && to > windowStart)
+    );
+  });
+  const calendars = new Set<string>();
+  const unavailable = new Set<string>();
+  let complete = calendarRows.length > 0;
+  for (const row of calendarRows) {
+    const result = record(row.result);
+    if (result?.complete !== true) complete = false;
+    for (const value of Array.isArray(result?.calendarsChecked) ? result.calendarsChecked : [])
+      if (typeof value === 'string' && value.trim()) calendars.add(value.trim());
+    for (const value of Array.isArray(result?.unavailable) ? result.unavailable : [])
+      if (typeof value === 'string' && value.trim()) unavailable.add(value.trim());
+  }
+  if (unavailable.size > 0 || calendars.size === 0) complete = false;
+  if (window && !validWindow) complete = false;
+
+  const start = window ? zonedClock(window.timeMin, request.timeZone) : null;
+  const end = window ? zonedClock(window.timeMax, request.timeZone) : null;
+  const nextDay = start
+    ? new Date(Date.parse(`${start.day}T12:00:00.000Z`) + 86400000).toISOString().slice(0, 10)
+    : '';
+  const fullDay = Boolean(
+    window &&
+      request.timeZone &&
+      start &&
+      end &&
+      start.minutes === 0 &&
+      end.minutes === 0 &&
+      windowStart % 60000 === 0 &&
+      windowEnd % 60000 === 0 &&
+      end.day === nextDay,
+  );
+  const day =
+    window?.label || (window ? shortDate(window.timeMin, request.timeZone) : 'the checked day');
+  const period = fullDay ? day : 'the checked time range';
+  const named = [...calendars];
+  const joined =
+    named.length > 1 ? `${named.slice(0, -1).join(', ')} and ${named.at(-1)}` : named[0];
+  const scope = joined
+    ? `the ${joined} calendar${named.length === 1 ? '' : 's'} I checked`
+    : 'the checked calendars';
+
+  // Format only local wall-clock copy here; absent/invalid owner zones never
+  // turn an ISO timestamp into prose or imply a complete owner-local day.
+  let timeZone = request.timeZone ?? 'UTC';
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone }).format(0);
+  } catch {
+    timeZone = 'UTC';
+  }
+  const clock = new Intl.DateTimeFormat('en-US', { timeZone, hour: 'numeric', minute: '2-digit' });
+  const zonedTime = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  });
+  const zoneAt = (ms: number) =>
+    Number.isFinite(ms)
+      ? zonedTime.formatToParts(new Date(ms)).find((part) => part.type === 'timeZoneName')?.value
+      : undefined;
+  const dateTime = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  });
+  const time = (value: string, compact: boolean, includeZone = false) => {
+    const ms = Date.parse(value);
+    return Number.isFinite(ms)
+      ? (compact ? (includeZone ? zonedTime : clock) : dateTime).format(new Date(ms))
+      : '(time not returned)';
+  };
+  const malformedBusy = busy.some((slot) => {
+    const from = Date.parse(stringField(slot, 'start'));
+    const to = Date.parse(stringField(slot, 'end'));
+    return !Number.isFinite(from) || !Number.isFinite(to) || to <= from;
+  });
+  if (malformedBusy) complete = false;
+
+  const title = complete
+    ? busy.length === 0
+      ? `${period[0]?.toUpperCase()}${period.slice(1)} is clear on ${scope}.`
+      : `You have busy time ${fullDay ? day : 'within the checked time range'} on ${scope}.`
+    : busy.length > 0
+      ? `I found busy time ${fullDay ? day : 'within the checked time range'} on ${scope}, but I can’t confirm your full availability.`
+      : `I can’t confirm that ${period} is clear yet.`;
+  const lines = [request.verification ? `I rechecked it. ${title}` : title];
+  if (!fullDay && window)
+    lines.push(`Checked: ${time(window.timeMin, false)} to ${time(window.timeMax, false)}.`);
+  if (!complete && busy.length === 0 && calendars.size > 0)
+    lines.push(
+      `${scope[0]?.toUpperCase()}${scope.slice(1)} returned no busy blocks for ${fullDay ? day : 'that range'}.`,
+    );
+  if (!complete && calendars.size === 0)
+    lines.push('No calendars were listed as successfully checked.');
+  for (const slot of busy.slice(0, 50)) {
+    const calendar = stringField(slot, 'calendar');
+    const rawFrom = Date.parse(stringField(slot, 'start'));
+    const rawTo = Date.parse(stringField(slot, 'end'));
+    const from = validWindow && Number.isFinite(rawFrom) ? Math.max(windowStart, rawFrom) : rawFrom;
+    const to = validWindow && Number.isFinite(rawTo) ? Math.min(windowEnd, rawTo) : rawTo;
+    const zoneChanges = zoneAt(from) !== zoneAt(to);
+    const slotTime = (ms: number, isEnd: boolean) =>
+      fullDay && ms === (isEnd ? windowEnd : windowStart)
+        ? isEnd
+          ? 'the end of the day'
+          : 'the start of the day'
+        : Number.isFinite(ms)
+          ? time(new Date(ms).toISOString(), fullDay, zoneChanges)
+          : '(time not returned)';
+    const span =
+      fullDay && from === windowStart && to === windowEnd
+        ? 'all day'
+        : `${slotTime(from, false)} to ${slotTime(to, true)}`;
+    lines.push(`- Busy${calendar ? ` (${calendar})` : ''}: ${span}`);
+  }
+  if (complete && window && busy.length > 0) {
+    for (const free of calendarFreeIntervals(busy, window)) {
+      const zoneChanges = zoneAt(Date.parse(free.start)) !== zoneAt(Date.parse(free.end));
+      const from =
+        fullDay && Date.parse(free.start) === Date.parse(window.timeMin)
+          ? 'the start of the day'
+          : time(free.start, fullDay, zoneChanges);
+      const to =
+        fullDay && Date.parse(free.end) === Date.parse(window.timeMax)
+          ? 'the end of the day'
+          : time(free.end, fullDay, zoneChanges);
+      lines.push(`- Open according to the checked calendars: ${from} to ${to}`);
+    }
+  }
+  if (!complete)
+    lines.push(
+      `Calendar availability coverage was incomplete${unavailable.size > 0 ? `; unavailable: ${[...unavailable].join(', ')}` : ''}.`,
+    );
+  return lines;
 }
 
 function emailExcerpt(text: string, terms: string[]): string {
@@ -1700,65 +1917,9 @@ export function verifiedReadResponse(
   if (request.kind !== 'email') {
     const calendarRows = matchingCalendarRows(request, current);
     if (request.firstToolName === 'calendar.availability') {
-      const busy = uniqueRecords(
-        calendarRows.flatMap((row) => resultItems(row, 'busy')),
-        (slot) =>
-          [
-            stringField(slot, 'calendar'),
-            stringField(slot, 'start'),
-            stringField(slot, 'end'),
-          ].join('|'),
-      );
-      const calendars = new Set<string>();
-      const unavailable = new Set<string>();
-      let complete = calendarRows.length > 0;
-      for (const row of calendarRows) {
-        const result = record(row.result);
-        if (result?.complete === false) complete = false;
-        if (Array.isArray(result?.calendarsChecked)) {
-          for (const value of result.calendarsChecked) {
-            if (typeof value === 'string') calendars.add(value);
-          }
-        }
-        if (Array.isArray(result?.unavailable)) {
-          for (const value of result.unavailable) {
-            if (typeof value === 'string') unavailable.add(value);
-          }
-        }
-      }
-      if (request.timeWindow) {
-        lines.push(
-          `- Availability range checked: ${request.timeWindow.label} (${request.timeWindow.timeMin} to ${request.timeWindow.timeMax})`,
-        );
-      }
-      if (busy.length === 0) {
-        lines.push(
-          calendarRows.length > 0
-            ? `- Calendar availability returned no busy blocks${calendars.size > 0 ? ` across ${[...calendars].join(', ')}` : ''}.`
-            : '- Calendar: no successful availability read.',
-        );
-      } else {
-        for (const slot of busy.slice(0, 50)) {
-          const start = calendarTime(stringField(slot, 'start'), request.timeZone);
-          const end = calendarTime(stringField(slot, 'end'), request.timeZone);
-          const calendar = stringField(slot, 'calendar');
-          lines.push(
-            `- Busy${calendar ? ` (${calendar})` : ''}: ${start || '(start not returned)'}${end ? ` to ${end}` : ''}`,
-          );
-        }
-      }
-      if (complete && request.timeWindow) {
-        for (const free of calendarFreeIntervals(busy, request.timeWindow)) {
-          lines.push(
-            `- Open according to the checked calendars: ${calendarTime(free.start, request.timeZone)} to ${calendarTime(free.end, request.timeZone)}`,
-          );
-        }
-      }
-      if (!complete || unavailable.size > 0) {
-        lines.push(
-          `- Calendar availability coverage was incomplete${unavailable.size > 0 ? `; unavailable: ${[...unavailable].join(', ')}` : ''}.`,
-        );
-      }
+      const availability = calendarAvailabilityLines(request, calendarRows);
+      if (request.kind === 'calendar') lines.splice(0, lines.length, ...availability);
+      else lines.push(...availability);
     } else {
       const events = uniqueRecords(
         calendarRows.flatMap((row) => resultItems(row, 'events')),
@@ -2092,8 +2253,8 @@ export function enforceResponseContract(
     !evidence.some(
       (row) =>
         row.fromCurrentTask !== false &&
-        row.status === 'succeeded' &&
-        ((row.toolName === 'reminder.create' && Boolean(record(row.result)?.reminderId)) ||
+        successful(row) &&
+        (supports('reminder_create', [row]) ||
           (row.toolName === 'task.schedule' &&
             record(row.result)?.scheduled === true &&
             Boolean(record(row.result)?.taskId))),
@@ -2128,6 +2289,30 @@ export function enforceResponseContract(
       : readGrounding;
   }
   const claimed = claimedKinds(text);
+  // Short receipts and pronouns still claim the requested effect. Do not let
+  // "Done" or "I removed it" hide a false/ambiguous cancellation result.
+  const reminderRequest = /\b(?:cancel|remove|delete|stop)\b[^.\n]{0,80}\breminder\b/i.test(
+    opts?.requestText ?? '',
+  )
+    ? 'reminder_cancel'
+    : /\bremind me\b|\b(?:create|schedule|set|add)\b[^.\n]{0,80}\breminder\b/i.test(
+          opts?.requestText ?? '',
+        )
+      ? 'reminder_create'
+      : undefined;
+  if (
+    reminderRequest &&
+    (/^(?:done|all set|saved|scheduled|cancelled|canceled|removed|deleted)\b/i.test(text.trim()) ||
+      firstPersonCompletedAction(
+        text,
+        reminderRequest === 'reminder_cancel'
+          ? 'cancelled|canceled|removed|deleted|stopped'
+          : 'created|scheduled|saved|added|set',
+      )) &&
+    !claimed.includes(reminderRequest)
+  ) {
+    claimed.push(reminderRequest);
+  }
   const memoryRequest = isMemoryWriteRequest(opts?.requestText ?? '');
   if (
     memoryRequest &&
@@ -2186,7 +2371,40 @@ export function enforceResponseContract(
   }
   if (unsupported.includes('approval')) {
     return {
-      text: 'No approval request actually exists — I never created one, so nothing is waiting on the Approvals page. I stopped rather than hand you a code that goes nowhere. Tell me to go ahead and I will raise the real one.',
+      text: 'No approval request actually exists, so nothing is waiting on the Approvals page. I couldn’t finish this reply. Check Activity for anything that already ran before trying again.',
+      blocked: true,
+      unsupported,
+    };
+  }
+  if (unsupported.length === 1 && unsupported[0] === 'reminder_cancel') {
+    const cancellation = [...evidence]
+      .reverse()
+      .find((item) => item.fromCurrentTask !== false && item.toolName === 'reminder.cancel');
+    const result = cancellation && successful(cancellation) ? record(cancellation.result) : null;
+    const matches = Array.isArray(result?.matches)
+      ? result.matches
+          .flatMap((match) => {
+            const label = record(match)?.text;
+            return typeof label === 'string' && label.trim()
+              ? [label.replace(/\s+/g, ' ').trim().slice(0, 160)]
+              : [];
+          })
+          .slice(0, 5)
+      : [];
+    return {
+      text:
+        result?.cancelled === false && result.reason === 'ambiguous'
+          ? `More than one reminder matches, so I have not removed any.${matches.length ? `\n${matches.map((label) => `- ${label}`).join('\n')}` : ''}\nWhich reminder should I remove?`
+          : result?.cancelled === false && result.reason === 'not_found'
+            ? 'I could not find an active reminder matching that request, so I have not removed one. Tell me the reminder name or check Reminders.'
+            : 'I have not confirmed that the reminder was removed. Check Reminders or ask me to retry.',
+      blocked: true,
+      unsupported,
+    };
+  }
+  if (unsupported.length === 1 && unsupported[0] === 'reminder_create') {
+    return {
+      text: 'I have not confirmed a scheduled reminder for this request. Ask me to retry with the reminder and time you want.',
       blocked: true,
       unsupported,
     };

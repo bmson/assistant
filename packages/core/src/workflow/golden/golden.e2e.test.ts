@@ -1030,6 +1030,7 @@ describe('golden tasks', () => {
     expect(result.toolNames).toEqual([]);
     // The delivered text must not carry the unsupported claim verbatim.
     expect(result.finalText).not.toContain("I've sent the email");
+    expect(result.status).toBe('needs_attention');
 
     // The verdict is persisted for aggregation, not only rewritten.
     const [check] = await db
@@ -1066,6 +1067,7 @@ describe('golden tasks', () => {
     expect(result.finalText).not.toContain("I've sent the text");
     expect(result.finalText).toContain("I couldn't complete this because");
     expect(result.finalText).toContain('SMS provider rejected the request');
+    expect(result.status).toBe('needs_attention');
 
     const [check] = await db
       .select()
@@ -1094,6 +1096,7 @@ describe('golden tasks', () => {
     expect(check).toBeDefined();
     expect(check?.blocked).toBe(false);
     expect(check?.mustActRetries).toBe(0);
+    expect(result.status).toBe('done');
   });
 
   it('self-reviews a clean draft once, records the revision, and still delivers through the contract', async (ctx) => {
@@ -1115,6 +1118,7 @@ describe('golden tasks', () => {
     createdTaskIds.push(result.taskId);
 
     expect(result.finalText).toBe('Hi! What can I help with?');
+    expect(result.status).toBe('done');
     const [check] = await db
       .select()
       .from(responseChecks)
@@ -1174,16 +1178,52 @@ describe('golden tasks', () => {
     createdTaskIds.push(result.taskId);
 
     expect(result.finalText).not.toContain('I sent the email');
+    expect(result.finalText).toBe('Hi.');
+    expect(result.status).toBe('done');
     const [check] = await db
       .select()
       .from(responseChecks)
       .where(eq(responseChecks.taskId, result.taskId));
     expect(check).toMatchObject({
       blocked: true,
+      unsupportedCount: 1,
       outputVerificationAttempted: true,
       outputVerificationRevised: true,
     });
   });
+
+  it.for([
+    { name: 'invented-link', revision: 'Hi. Read https://invented.example/receipt.' },
+    { name: 'malformed-wording', revision: 'The reported temperature is 12°Chare.' },
+  ])(
+    'preserves the checked draft after a rejected $name review',
+    async ({ name, revision }, ctx) => {
+      if (!dbUp) return ctx.skip();
+      const fixture: GoldenFixture = {
+        name: `self-review-rejected-${name}`,
+        event: { source: 'chat', trust: 'owner', payload: { text: 'Say hi.' } },
+        taskType: 'adhoc',
+        plan: { ...workflowPlan, action: 'reply' as const },
+        script: [{ text: 'Hi.' }],
+        verification: { decision: 'revise', revisedText: revision, reasons: ['clarity_or_format'] },
+        tools: {},
+      };
+      const result = await runGoldenTask(db, agentId, fixture);
+      createdTaskIds.push(result.taskId);
+      expect(result.finalText).toBe('Hi.');
+      expect(result.status).toBe('done');
+      expect(result.toolNames).toEqual([]);
+      const [check] = await db
+        .select()
+        .from(responseChecks)
+        .where(eq(responseChecks.taskId, result.taskId));
+      expect(check).toMatchObject({
+        outputVerificationAttempted: true,
+        outputVerificationRevised: true,
+        outputVerificationUnavailable: false,
+      });
+    },
+  );
 
   it('lets an action claim WITH tool evidence through untouched', async (ctx) => {
     if (!dbUp) return ctx.skip();
@@ -1212,6 +1252,7 @@ describe('golden tasks', () => {
 
     expect(result.toolNames).toEqual(['sms.send']);
     expect(result.finalText).toContain("I've sent the text");
+    expect(result.status).toBe('done');
 
     const [check] = await db
       .select()
@@ -1243,6 +1284,7 @@ describe('golden tasks', () => {
 
     expect(result.finalText).not.toContain('https://acme.example/settings/9f3a2b');
     expect(result.finalText).toMatch(/removed a link/i);
+    expect(result.status).toBe('done');
 
     const [check] = await db
       .select()

@@ -67,6 +67,9 @@
 		B0000000000000000000008D /* Views/CallsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000008D /* Views/CallsView.swift */; };
 		B00000000000000000000086 /* System/RenderMemo.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000086 /* System/RenderMemo.swift */; };
 		B00000000000000000000087 /* RenderCostTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000087 /* RenderCostTests.swift */; };
+		B000000000000000000000A1 /* Models/ConversationDrafts.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A1 /* Models/ConversationDrafts.swift */; };
+		B000000000000000000000A2 /* ConversationDraftsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A2 /* ConversationDraftsTests.swift */; };
+		B000000000000000000000A3 /* NativeVisualReviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A3 /* NativeVisualReviewTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -140,6 +143,7 @@
 		C00000000000000000000052 /* Assistant.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Assistant.entitlements; sourceTree = "<group>"; };
 		C00000000000000000000054 /* Views/KnowledgeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/KnowledgeView.swift; sourceTree = "<group>"; };
 		C00000000000000000000055 /* Models/PollingPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/PollingPolicy.swift; sourceTree = "<group>"; };
+		C000000000000000000000A1 /* Models/ConversationDrafts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/ConversationDrafts.swift; sourceTree = "<group>"; };
 		C00000000000000000000056 /* Components/MermaidDiagramView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/MermaidDiagramView.swift; sourceTree = "<group>"; };
 		C00000000000000000000057 /* Resources/mermaid.min.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = Resources/mermaid.min.js; sourceTree = "<group>"; };
 		C00000000000000000000058 /* Resources/mermaid-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Resources/mermaid-LICENSE.txt"; sourceTree = "<group>"; };
@@ -165,6 +169,8 @@
 		C0000000000000000000008D /* Views/CallsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CallsView.swift; sourceTree = "<group>"; };
 		C00000000000000000000086 /* System/RenderMemo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = System/RenderMemo.swift; sourceTree = "<group>"; };
 		C00000000000000000000087 /* RenderCostTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RenderCostTests.swift; sourceTree = "<group>"; };
+		C000000000000000000000A2 /* ConversationDraftsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationDraftsTests.swift; sourceTree = "<group>"; };
+		C000000000000000000000A3 /* NativeVisualReviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeVisualReviewTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -220,6 +226,7 @@
 				C00000000000000000000003 /* Design/AssistantTheme.swift */,
 				C00000000000000000000004 /* Models/APIModels.swift */,
 				C00000000000000000000055 /* Models/PollingPolicy.swift */,
+				C000000000000000000000A1 /* Models/ConversationDrafts.swift */,
 				C00000000000000000000005 /* Networking/KeychainStore.swift */,
 				C00000000000000000000006 /* Networking/APIClient.swift */,
 				C00000000000000000000095 /* Components/CardActions.swift */,
@@ -276,6 +283,8 @@
 			isa = PBXGroup;
 			children = (
 				C00000000000000000000020 /* APIModelsTests.swift */,
+				C000000000000000000000A2 /* ConversationDraftsTests.swift */,
+				C000000000000000000000A3 /* NativeVisualReviewTests.swift */,
 				C00000000000000000000050 /* AssistantMarkdownTests.swift */,
 				C00000000000000000000082 /* SpeakableTextTests.swift */,
 				C00000000000000000000085 /* SpeechVoiceTests.swift */,
@@ -430,6 +439,7 @@
 				B00000000000000000000003 /* Design/AssistantTheme.swift in Sources */,
 				B00000000000000000000004 /* Models/APIModels.swift in Sources */,
 				B00000000000000000000055 /* Models/PollingPolicy.swift in Sources */,
+				B000000000000000000000A1 /* Models/ConversationDrafts.swift in Sources */,
 				B00000000000000000000056 /* Components/MermaidDiagramView.swift in Sources */,
 				B00000000000000000000005 /* Networking/KeychainStore.swift in Sources */,
 				B00000000000000000000006 /* Networking/APIClient.swift in Sources */,
@@ -481,6 +491,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				B00000000000000000000012 /* APIModelsTests.swift in Sources */,
+				B000000000000000000000A2 /* ConversationDraftsTests.swift in Sources */,
+				B000000000000000000000A3 /* NativeVisualReviewTests.swift in Sources */,
 				B00000000000000000000050 /* AssistantMarkdownTests.swift in Sources */,
 				B00000000000000000000060 /* APIClientRetryTests.swift in Sources */,
 				B00000000000000000000082 /* SpeakableTextTests.swift in Sources */,

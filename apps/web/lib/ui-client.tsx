@@ -2,7 +2,7 @@
 
 import { Check, LoaderCircle } from 'lucide-react';
 import type { ReactNode, ToggleEvent } from 'react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useFormStatus } from 'react-dom';
 import { btn, btnSm } from './ui';
 
@@ -67,21 +67,21 @@ function StableLabel({
   pendingLabel: ReactNode;
 }) {
   return (
-    <span className="grid items-center justify-items-center">
+    <span className="grid min-w-0 max-w-full grid-cols-[minmax(0,1fr)] items-center justify-items-center">
       <span
-        className="invisible col-start-1 row-start-1 inline-flex items-center gap-2"
+        className="invisible col-start-1 row-start-1 inline-flex min-w-0 max-w-full items-center gap-2 [overflow-wrap:anywhere]"
         aria-hidden="true"
       >
         {children}
       </span>
       <span
-        className="invisible col-start-1 row-start-1 inline-flex items-center gap-2"
+        className="invisible col-start-1 row-start-1 inline-flex min-w-0 max-w-full items-center gap-2 [overflow-wrap:anywhere]"
         aria-hidden="true"
       >
         <LoaderCircle />
         {pendingLabel}
       </span>
-      <span className="col-start-1 row-start-1 inline-flex items-center gap-2">
+      <span className="col-start-1 row-start-1 inline-flex min-w-0 max-w-full items-center gap-2 [overflow-wrap:anywhere]">
         {pending ? (
           <>
             <LoaderCircle className="motion-safe:animate-spin" aria-hidden="true" />
@@ -180,7 +180,9 @@ export function ActionMenu({
   children: ReactNode;
 }) {
   const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const panelRef = useRef<HTMLDivElement | null>(null);
+  const panelRef = useRef<HTMLElement | null>(null);
+  const panelId = useId();
+  const triggerId = useId();
   const [open, setOpen] = useState(false);
 
   const place = useCallback(() => {
@@ -191,7 +193,8 @@ export function ActionMenu({
     const rect = trigger.getBoundingClientRect();
     const fitsBelow = window.innerHeight - rect.bottom >= panel.offsetHeight + edge * 2;
     const flipUp = !fitsBelow && rect.top >= panel.offsetHeight + edge * 2;
-    panel.style.top = `${flipUp ? rect.top - panel.offsetHeight - edge : rect.bottom + edge}px`;
+    const preferredTop = flipUp ? rect.top - panel.offsetHeight - edge : rect.bottom + edge;
+    panel.style.top = `${Math.max(edge, Math.min(preferredTop, window.innerHeight - panel.offsetHeight - edge))}px`;
     panel.style.left = `${Math.max(
       edge,
       Math.min(rect.right - panel.offsetWidth, window.innerWidth - panel.offsetWidth - edge),
@@ -214,25 +217,29 @@ export function ActionMenu({
       <button
         type="button"
         ref={triggerRef}
-        aria-haspopup="true"
+        id={triggerId}
+        popoverTarget={panelId}
+        aria-controls={panelId}
         aria-expanded={open}
         title={triggerTitle}
         className={triggerClassName ?? `${btnScale[size][variant]} ${className}`}
         onClick={() => {
-          panelRef.current?.togglePopover();
-          place(); // togglePopover is synchronous; placing now avoids a first-frame jump
+          // The native invoker owns focus restoration and logical tab order.
+          // Position after its default toggle and before the next paint.
+          requestAnimationFrame(place);
         }}
       >
         {trigger ?? label}
       </button>
       {/* Click delegation, not an interactive element itself: menu items are real
           buttons/links (keyboard-activatable), and Escape closes via the popover. */}
-      {/* biome-ignore lint/a11y/noStaticElementInteractions: see above */}
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: Enter on items fires click; Escape is native */}
-      <div
+      <section
         ref={panelRef}
+        id={panelId}
+        aria-labelledby={triggerId}
         popover="auto"
-        onToggle={(event: ToggleEvent<HTMLDivElement>) => {
+        onToggle={(event: ToggleEvent<HTMLElement>) => {
           const isOpen = event.newState === 'open';
           setOpen(isOpen);
           if (isOpen) place();
@@ -244,10 +251,10 @@ export function ActionMenu({
         }}
         // Open/close motion lives in globals.css on [popover] — a keyframe here
         // would only play on enter and would fight the exit transition.
-        className={`scroll-subtle fixed inset-auto z-50 m-0 max-h-[min(24rem,calc(100vh-1rem))] flex-col gap-1 overflow-y-auto rounded-xl border border-edge bg-raised p-1.5 shadow-[var(--shadow-overlay)] [&:popover-open]:flex ${panelClassName}`}
+        className={`scroll-subtle fixed inset-auto z-50 m-0 max-h-[min(24rem,calc(100vh-1rem))] max-w-[calc(100vw-1rem)] flex-col gap-1 overflow-y-auto rounded-xl border border-edge bg-raised p-1.5 shadow-[var(--shadow-overlay)] [&:popover-open]:flex ${panelClassName}`}
       >
         {children}
-      </div>
+      </section>
     </>
   );
 }

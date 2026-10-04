@@ -1,11 +1,13 @@
 'use client';
 
+import type { ImprovementActionResult } from '@assistant/persistence';
 import { useState, useTransition } from 'react';
 import {
   applyProposalAction,
   dismissProposalAction,
   requestProposalCodeFixAction,
 } from '@/app/improvements/actions';
+import type { ProposalCodeFixReceipt } from '@/lib/proposal-code-fix';
 import {
   Badge,
   cardBodyClass,
@@ -14,6 +16,7 @@ import {
   cardShellClass,
   cardTitleClass,
   MetaLine,
+  microLabelClass,
 } from '@/lib/ui';
 import { ActionButton } from '@/lib/ui-client';
 
@@ -29,6 +32,7 @@ export interface ProposalView {
 }
 
 const kindLabels: Record<string, string> = {
+  behavior: 'Behavior',
   model_role: 'Model swap',
   policy: 'Policy',
   prompt: 'Prompt',
@@ -44,16 +48,27 @@ export function ProposalCard({
 }) {
   const requestFix = !proposal.applyable && canRequestFix;
   const [error, setError] = useState('');
+  const [receipt, setReceipt] = useState('');
   const [pending, startTransition] = useTransition();
-  const [pendingAction, setPendingAction] = useState<'apply' | 'dismiss' | null>(null);
-  const runAction = (name: 'apply' | 'dismiss', action: () => Promise<unknown>) => {
+  const [pendingAction, setPendingAction] = useState<'apply' | 'dismiss' | 'request_fix' | null>(
+    null,
+  );
+  const runAction = (
+    name: 'apply' | 'dismiss' | 'request_fix',
+    action: () => Promise<ImprovementActionResult | ProposalCodeFixReceipt>,
+  ) => {
     setError('');
     setPendingAction(name);
     startTransition(async () => {
       try {
-        await action();
-      } catch {
-        setError('Could not complete this request. Please try again.');
+        const result = await action();
+        setReceipt(result.detail);
+      } catch (error) {
+        setError(
+          error instanceof Error
+            ? error.message
+            : 'Could not complete this request. Please try again.',
+        );
       } finally {
         setPendingAction(null);
       }
@@ -63,16 +78,19 @@ export function ProposalCard({
   return (
     <article className={`${cardShellClass} flex h-full flex-col`}>
       {error && (
-        <p role="alert" className="px-5 pt-4 text-sm text-red-600">
+        <p role="alert" className="px-4 pt-4 text-sm text-red-600 sm:px-6 dark:text-red-400">
           {error}
+        </p>
+      )}
+      {receipt && (
+        <p role="status" className="px-4 pt-4 text-sm text-muted sm:px-6">
+          {receipt}
         </p>
       )}
       <div className={`${cardBodyClass} flex-1`}>
         <div className={cardHeaderClass}>
           <div className="min-w-0">
-            <Badge tone="neutral" uppercase>
-              {kindLabels[proposal.kind] ?? proposal.kind}
-            </Badge>
+            <Badge tone="neutral">{kindLabels[proposal.kind] ?? proposal.kind}</Badge>
             <h3 className={`mt-2 ${cardTitleClass}`}>{proposal.title}</h3>
           </div>
           <span className="shrink-0 text-xs text-muted">{proposal.createdLabel}</span>
@@ -84,9 +102,7 @@ export function ProposalCard({
           ].map(([label, text, className]) =>
             text ? (
               <section key={label} className={className}>
-                <h4 className="font-mono text-xs font-medium tracking-[0.08em] text-muted uppercase">
-                  {label}
-                </h4>
+                <h4 className={microLabelClass}>{label}</h4>
                 <p className="mt-1 text-sm leading-5 text-strong">{text}</p>
               </section>
             ) : null,
@@ -102,28 +118,33 @@ export function ProposalCard({
       <footer className={cardFooterClass}>
         <ActionButton
           variant="primary"
-          disabled={pending}
+          disabled={pending || Boolean(receipt)}
           pending={pendingAction === 'apply'}
-          pendingLabel={requestFix ? 'Queuing…' : 'Applying…'}
-          onClick={() =>
-            runAction('apply', () =>
-              requestFix
-                ? requestProposalCodeFixAction(proposal.id)
-                : applyProposalAction(proposal.id),
-            )
-          }
+          pendingLabel={proposal.applyable ? 'Applying…' : 'Noting…'}
+          onClick={() => runAction('apply', () => applyProposalAction(proposal.id))}
           title={
-            requestFix
-              ? 'Create a code-fix report for automatic investigation'
-              : proposal.applyable
-                ? 'Approve and enact this change'
-                : 'Acknowledge this advisory suggestion'
+            proposal.applyable
+              ? 'Approve and enact this change'
+              : 'Acknowledge this advisory suggestion'
           }
         >
-          {requestFix ? 'Request code fix' : proposal.applyable ? 'Approve & apply' : 'Acknowledge'}
+          {proposal.applyable ? 'Approve & apply' : 'Mark reviewed'}
         </ActionButton>
+        {requestFix && (
+          <ActionButton
+            disabled={pending || Boolean(receipt)}
+            pending={pendingAction === 'request_fix'}
+            pendingLabel="Queuing…"
+            onClick={() =>
+              runAction('request_fix', () => requestProposalCodeFixAction(proposal.id))
+            }
+            title="Create a code-fix report for investigation; no code changes until a fix is prepared and reviewed"
+          >
+            Request code fix
+          </ActionButton>
+        )}
         <ActionButton
-          disabled={pending}
+          disabled={pending || Boolean(receipt)}
           pending={pendingAction === 'dismiss'}
           pendingLabel="Dismissing…"
           onClick={() => runAction('dismiss', () => dismissProposalAction(proposal.id))}

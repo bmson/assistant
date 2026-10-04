@@ -132,6 +132,12 @@ struct APIClient: Sendable {
         self.sessionOverride = session
     }
 
+    /// Verify a candidate connection with the same transport. Production
+    /// continues to use the shared pool; injected sessions remain isolated.
+    func replacingConfiguration(_ configuration: APIConfiguration) -> APIClient {
+        APIClient(configuration: configuration, session: sessionOverride)
+    }
+
     private var session: URLSession { sessionOverride ?? Transport.shared.session }
 
     func bootstrap() async throws -> BootstrapResponse {
@@ -600,8 +606,12 @@ struct APIClient: Sendable {
         _ = try await perform(request, as: OkPayload.self)
     }
 
-    func updateImprovement(id: String, action: String) async throws {
-        try await postWorkspaceAction(path: "improvements/\(id)", action: action)
+    func updateImprovement(id: String, action: String) async throws -> ImprovementDecisionResult {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/improvements/\(id)"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(["action": action])
+        return try await perform(request, as: ImprovementDecisionResult.self)
     }
 
     func updateSettings(_ settings: AgentSettingsMutation) async throws {

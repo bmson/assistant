@@ -188,6 +188,8 @@ export const TaskStateSchema = z.object({
    */
   degradedSteps: z.number().int().default(0),
   mustActRetries: z.number().int().default(0),
+  /** One durable retry when a conceptual answer contains only a forbidden call. */
+  conceptualAnswerRetried: z.boolean().optional(),
   /** Skills whose advice was injected, so finalize can record their outcome. */
   usedSkillIds: z.array(z.string()).default([]),
 });

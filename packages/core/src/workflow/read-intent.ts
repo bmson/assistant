@@ -119,7 +119,7 @@ const MEMORY_SURFACE =
 const AUTOBIOGRAPHICAL_READ =
   /\b(?:when|where)\s+did\s+i\b|\bhave\s+i\s+ever\b|\bdid\s+i\s+(?:attend|visit|see|go|meet|live|work|travel)\b/i;
 const AVAILABILITY_SURFACE =
-  /\b(?:availability|available|busy|conflicts?|free|open\s+(?:time|slots?))\b/i;
+  /\b(?:availability|available|busy|conflicts?|free|open\s+(?:time|slots?)|(?:calendar|schedule|agenda)\s+(?:(?:is|looks|appears)\s+)?(?:clear|empty))\b/i;
 const CALENDAR_TIME_REFERENCE =
   /\b(?:today|tomorrow|weekends?|weeks?|months?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|20\d{2}-\d{2}-\d{2})\b/i;
 const SCHEDULED_THING =

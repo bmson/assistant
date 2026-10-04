@@ -159,6 +159,9 @@ struct MessagePart: Codable, Hashable, Sendable {
     var acceptedTaskId: String? = nil
     var acceptedTaskStatus: String? = nil
     var acceptedTaskSummary: String? = nil
+    /// Authoritative wake time, supplied when a snoozed suggestion is hydrated.
+    /// Keep the wire value optional so older servers remain decodable.
+    var snoozedUntil: String? = nil
     /// Explicit server pairing only; older clients keep rendering the sibling card.
     var contextCard: JSONValue? = nil
     var actionLabel: String? = nil
@@ -193,8 +196,7 @@ struct MessagePart: Codable, Hashable, Sendable {
 
 /// "I noticed X — want me to Y?" Deliberately not an approval: an approval
 /// holds work that is about to happen, a suggestion proposes work nobody has
-/// started. Accepting creates a task, which runs the normal pipeline and still
-/// raises its own approval for anything that reaches another person — so a
+/// started. Accepting creates a task under the normal action permissions — so a
 /// suggestion never counts toward the approval inbox, badge or Island.
 enum SuggestionStatus: String, Sendable {
     case pending
@@ -225,10 +227,158 @@ struct SuggestionAnswer: Hashable, Sendable {
     var snoozedUntil: Date? = nil
 }
 
+/// Accepted means work exists; completion comes from that task's actual state.
+enum SuggestionTaskReceipt {
+    static func title(for status: String?) -> String {
+        switch status {
+        case "done", "completed": "Completed"
+        case "failed", "dead", "dead_letter": "Couldn’t complete"
+        case "cancelled": "Cancelled"
+        case "pending", "queued": "Queued"
+        case "sleeping", "waiting_event": "Waiting"
+        case "running": "Working on it"
+        case let value? where value.hasPrefix("waiting_") || value == "needs_attention": "Needs attention"
+        default: "Accepted"
+        }
+    }
+
+    static func detail(for status: String?) -> String {
+        switch status {
+        case "done", "completed": "The task finished. View its status in Activity."
+        case "failed", "dead", "dead_letter": "The task did not finish. View the details in Activity."
+        case "cancelled": "The task was cancelled. View the details in Activity."
+        case "pending", "queued": "The task is waiting to start."
+        case "sleeping", "waiting_event": "The task is waiting to continue."
+        case "running": "The assistant is working on this task."
+        case let value? where value.hasPrefix("waiting_") || value == "needs_attention":
+            "The task needs attention. View the next step in Activity."
+        default: "The assistant accepted this as a task. View its status in Activity."
+        }
+    }
+}
+
+/// Plain state and scheduling copy, shared by the visible receipt and VoiceOver.
+/// A device clock cannot authorize reopening a suggestion: hydration owns that.
+struct SuggestionReceiptPresentation {
+    let title: String
+    let detail: String
+    let symbol: String
+    let returnDate: Date?
+    let isSnoozed: Bool
+
+    init(part: MessagePart) {
+        isSnoozed = part.suggestionStatus == .snoozed
+        returnDate = isSnoozed ? part.snoozedUntil.flatMap {
+            ISO8601DateFormatter.assistant.date(from: $0)
+                ?? AssistantFormatters.internetDateTime.date(from: $0)
+        } : nil
+        switch part.suggestionStatus {
+        case .accepted:
+            title = SuggestionTaskReceipt.title(for: part.acceptedTaskStatus)
+            detail = SuggestionTaskReceipt.detail(for: part.acceptedTaskStatus)
+            symbol = part.acceptedTaskStatus == "done" || part.acceptedTaskStatus == "completed" ? "checkmark.circle.fill" : "tray.full.fill"
+        case .dismissed:
+            title = "Dismissed"
+            detail = "You passed on this suggestion."
+            symbol = "xmark.circle.fill"
+        case .snoozed:
+            title = "Snoozed"
+            detail = returnDate == nil ? "A return time wasn’t provided." : "The suggestion reopens when the snooze ends."
+            symbol = "clock.fill"
+        case .expired:
+            title = "Expired"
+            detail = "This suggestion is no longer waiting for an answer."
+            symbol = "clock.badge.exclamationmark.fill"
+        case .pending:
+            title = "Suggested next step"
+            detail = "Accept to create a task, choose Later, or dismiss this suggestion."
+            symbol = "lightbulb.fill"
+        case .missing:
+            title = "No longer available"
+            detail = "This suggestion is no longer available."
+            symbol = "minus.circle.fill"
+        }
+    }
+
+    /// An absolute local date stays unambiguous across midnight, travel, and
+    /// delayed reads. Date.FormatStyle reuses its formatter infrastructure.
+    func returnLabel(locale: Locale = .autoupdatingCurrent, timeZone: TimeZone = .autoupdatingCurrent) -> String? {
+        guard isSnoozed else { return nil }
+        guard let returnDate else { return "Return time unavailable" }
+        let style = Date.FormatStyle(date: .abbreviated, time: .shortened, locale: locale, timeZone: timeZone)
+        return "Returns \(returnDate.formatted(style))"
+    }
+}
+
 struct ApprovalSummaryOutcome: Codable, Hashable, Sendable, Identifiable {
     let id: String
     let summary: String
     var status: String
+}
+
+/// Permission and execution are different receipts. A granted permission never
+/// claims the requested work succeeded, and an unknown status cannot invite a
+/// second decision against an unreadable request.
+struct DecisionReceiptPresentation: Equatable, Sendable {
+    enum Tone: Equatable, Sendable { case success, error, muted }
+    let title: String
+    let detail: String
+    let symbol: String
+    let tone: Tone
+    let reviewInActivity: Bool
+    let reviewInApprovals: Bool
+
+    init(part: MessagePart) {
+        reviewInActivity = ["failed", "expired"].contains(part.status ?? "")
+        reviewInApprovals = !["approved", "denied", "rejected", "expired", "failed", "cancelled", "resolved", "closed"].contains(part.status ?? "")
+        switch part.status {
+        case "approved":
+            title = part.type == "budget-request" ? "Budget approved" : "Approved"
+            detail = part.type == "budget-request"
+                ? "The budget change was approved. Check Activity for the task’s outcome."
+                : "Permission was granted for this request. Check Activity for the outcome."
+            symbol = "checkmark.circle.fill"
+            tone = .success
+        case "denied", "rejected":
+            title = "Declined"
+            detail = "Permission was declined for this request."
+            symbol = "xmark.circle.fill"
+            tone = .error
+        case "expired":
+            title = "Expired"
+            detail = "This decision expired. Review Activity if the task still needs attention."
+            symbol = "clock.badge.exclamationmark.fill"
+            tone = .muted
+        case "failed":
+            title = "Request failed"
+            detail = "Review Activity to understand the failure before retrying."
+            symbol = "exclamationmark.circle.fill"
+            tone = .error
+        case "cancelled":
+            title = "Cancelled"
+            detail = "This decision was cancelled."
+            symbol = "minus.circle.fill"
+            tone = .muted
+        case "resolved", "closed":
+            title = "Closed"
+            detail = "This decision is no longer waiting for a response."
+            symbol = "minus.circle.fill"
+            tone = .muted
+        default:
+            title = "Status unavailable"
+            detail = "Refresh Approvals to check the current decision."
+            symbol = "questionmark.circle"
+            tone = .muted
+        }
+    }
+}
+
+/// A finished row must remain readable even when a provider supplies no prose
+/// or a newer server sends a card this client cannot render. Never infer that a
+/// tool-only response means an action completed, or automatically repeat it.
+struct AssistantOutputFallback: Equatable, Sendable {
+    let title: String
+    let detail: String
 }
 
 struct ChatCardFact: Codable, Hashable, Sendable {
@@ -272,19 +422,34 @@ struct ChatMessage: Codable, Identifiable, Hashable, Sendable {
 
     /// Lay answers given here over a read that may predate them. Only the
     /// suggestions they name change; the rest of the row is the server's.
-    func applyingSuggestionAnswers(_ answers: [String: SuggestionAnswer], now: Date = Date()) -> Self {
+    func applyingSuggestionAnswers(_ answers: [String: SuggestionAnswer], now: Date = Date(), acknowledging: Bool = false) -> Self {
         guard !answers.isEmpty else { return self }
         var message = self
         for index in message.parts.indices where message.parts[index].type == "suggestion" {
             guard let id = message.parts[index].suggestionId, let answer = answers[id] else { continue }
+            let status = message.parts[index].suggestionStatus
+            // An acknowledged answer can cover a stale open read. It cannot
+            // replace a conflicting terminal decision or resurrect erased work.
+            guard [.pending, .snoozed].contains(status) || status.rawValue == answer.decision.rawValue else { continue }
             if answer.decision == .snoozed {
                 // A stale poll cannot wake a snooze, but its deadline can. A
                 // terminal decision from another device always takes precedence.
-                guard answer.snoozedUntil.map({ $0 > now }) ?? true,
-                      [.pending, .snoozed].contains(message.parts[index].suggestionStatus) else { continue }
+                // Only the immediate acknowledgement may settle an unknown-time
+                // legacy snooze. Later reads must let the server wake it.
+                guard answer.snoozedUntil.map({ $0 > now }) ?? acknowledging,
+                      [.pending, .snoozed].contains(status) else { continue }
+                // A hydrated snooze supplies the server's current deadline.
+                // Only an older open read needs this device's acknowledged one.
+                if status == .pending || message.parts[index].snoozedUntil == nil,
+                   let until = answer.snoozedUntil {
+                    message.parts[index].snoozedUntil = ISO8601DateFormatter.assistant.string(from: until)
+                }
             }
             message.parts[index].status = answer.decision.rawValue
-            if let taskId = answer.taskId { message.parts[index].acceptedTaskId = taskId }
+            if answer.decision == .accepted, let taskId = answer.taskId,
+               status != .accepted || message.parts[index].acceptedTaskId == nil {
+                message.parts[index].acceptedTaskId = taskId
+            }
         }
         return message
     }
@@ -417,6 +582,18 @@ struct ChatMessage: Codable, Identifiable, Hashable, Sendable {
     /// can change after the message itself was persisted.
     var visibleTextBubbles: [String] {
         decisionParts.isEmpty && approvalSummary == nil ? textBubbles : []
+    }
+
+    func outputFallback(isStreaming: Bool, hasRenderableCards: Bool) -> AssistantOutputFallback? {
+        guard role == .assistant, !isStreaming, visibleTextBubbles.isEmpty,
+              decisionParts.isEmpty, approvalSummary == nil, suggestionParts.isEmpty,
+              !hasRenderableCards, noticeKind == nil, !isOffCourse else { return nil }
+        if parts.contains(where: { $0.type == "data-card" }) {
+            return .init(title: "Card unavailable in this app",
+                detail: "This reply contains a card the app couldn’t display. Review Activity or open your assistant on the web.")
+        }
+        return .init(title: "No readable reply",
+            detail: "The assistant returned no readable answer. Review Activity before asking again, in case an action already ran.")
     }
 
     /// Runtime notices and proactive cards do not answer the nearest owner
@@ -1885,6 +2062,76 @@ struct WorkspaceImprovement: Codable, Identifiable, Sendable {
     let createdAt: String
 }
 
+enum WorkspaceImprovementAction: String, Equatable, Sendable {
+    case apply, dismiss
+    case requestFix = "request_fix"
+}
+
+struct ImprovementDecisionResult: Codable, Sendable {
+    let ok: Bool
+    var outcome: String? = nil
+    var enacted: Bool? = nil
+    var detail: String? = nil
+    var repairIssueId: String? = nil
+    var repairStatus: String? = nil
+
+    var receiptTitle: String {
+        guard ok else { return "Decision not confirmed" }
+        if let repairIssueId, !repairIssueId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            switch repairStatus {
+            case "reported": return "Code-fix report queued"
+            case "failed", "blocked": return "Code-fix report needs attention"
+            case "resolved": return "Code-fix report confirmed fixed"
+            default: return "Code-fix report linked"
+            }
+        }
+        switch outcome {
+        case "applied" where enacted == true: return "Change applied"
+        case "acknowledged" where enacted != true: return "Marked reviewed"
+        case "dismissed" where enacted != true: return "Dismissed"
+        case "already_current" where enacted != true: return "Already using this configuration"
+        case "already_decided" where enacted != true: return "Already decided"
+        default: return "Decision recorded"
+        }
+    }
+
+    var receiptDetail: String {
+        if let detail, !detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return detail }
+        if let repairIssueId, !repairIssueId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Follow the investigation under Code fixes."
+        }
+        return "Refresh to see the current proposal queue."
+    }
+}
+
+/// The primary choice and optional acknowledgment are distinct. The exact
+/// request_fix wire value prevents a second unsupported code-fix route.
+struct ImprovementActionPresentation: Equatable, Sendable {
+    let primaryAction: WorkspaceImprovementAction
+    let primaryTitle: String
+    let primarySymbol: String
+    let offersAcknowledgment: Bool
+
+    init(applyable: Bool, canRequestCodeFix: Bool) {
+        if applyable {
+            primaryAction = .apply
+            primaryTitle = "Apply routing change"
+            primarySymbol = "checkmark.circle.fill"
+            offersAcknowledgment = false
+        } else if canRequestCodeFix {
+            primaryAction = .requestFix
+            primaryTitle = "Request code fix"
+            primarySymbol = "hammer"
+            offersAcknowledgment = true
+        } else {
+            primaryAction = .apply
+            primaryTitle = "Mark reviewed"
+            primarySymbol = "checkmark"
+            offersAcknowledgment = false
+        }
+    }
+}
+
 struct McpConnectionsResponse: Codable, Sendable {
     let connections: [McpConnection]
 }
@@ -2425,4 +2672,73 @@ struct WorkspaceRepairIssue: Codable, Identifiable, Sendable {
     var queuePosition: Int? = nil
     var waitingReason: String? = nil
     let updatedAt: String
+    var mergeSha: String? = nil
+    var history: [WorkspaceRepairHistory]? = nil
+    var createdAt: String? = nil
+
+    var actionRevision: String { "\(status)|\(updatedAt)|\(manualRunRequested == true)" }
+}
+
+struct WorkspaceRepairHistory: Codable, Sendable {
+    let status: String
+    let at: String
+    let detail: String
+}
+
+/// Repair states describe different evidence milestones, not a progress score.
+/// Test execution, merge, deployment and owner confirmation are kept distinct.
+struct RepairPresentation: Equatable, Sendable {
+    let title: String
+    let detail: String
+    let isClosed: Bool
+    let canDismiss: Bool
+    let canRetry: Bool
+    let canRequestManualRun: Bool
+    let canConfirmFixed: Bool
+
+    init(status: String, manualRunRequested: Bool = false) {
+        isClosed = ["resolved", "dismissed"].contains(status)
+        canDismiss = ["reported", "merged", "monitoring", "blocked", "failed"].contains(status)
+        canRetry = ["failed", "blocked"].contains(status)
+        canRequestManualRun = ["reported", "failed", "blocked"].contains(status) && !manualRunRequested
+        canConfirmFixed = status == "monitoring"
+        switch status {
+        case "reported":
+            title = manualRunRequested ? "Manual run requested" : "Queued"
+            detail = "The report is waiting for investigation."
+        case "investigating":
+            title = "Investigating"
+            detail = "The assistant is checking the report and its evidence."
+        case "fixing":
+            title = "Preparing fix"
+            detail = "A coding attempt is in progress."
+        case "testing":
+            title = "Testing"
+            detail = "Checks are in progress. Results are not yet confirmed."
+        case "pr_open":
+            title = "Pull request ready for review"
+            detail = "Review the proposed code and its checks before merging."
+        case "merged":
+            title = "Awaiting deployment"
+            detail = "The code was merged. Deployment has not yet been observed."
+        case "monitoring":
+            title = "Deployed · needs confirmation"
+            detail = "Deployment was detected. Check the original problem before confirming it is fixed."
+        case "resolved":
+            title = "Confirmed fixed"
+            detail = "The owner marked the original problem as fixed."
+        case "blocked":
+            title = "Needs attention"
+            detail = "Review the reason before starting another attempt."
+        case "failed":
+            title = "Fix attempt failed"
+            detail = "Review the attempt and its error before retrying."
+        case "dismissed":
+            title = "Dismissed"
+            detail = "This report is no longer in the queue."
+        default:
+            title = "Status unavailable"
+            detail = "Refresh to check this report’s current state."
+        }
+    }
 }

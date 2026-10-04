@@ -1,5 +1,10 @@
 # Platform architecture
 
+For the complete runtime flows, memory layers, technology inventory, and decision register, see
+[System architecture and decisions](system-reference.md). For the product purpose and page-by-page
+experience, see [Product intent and page guide](product-guide.md). This document remains the focused
+package-boundary and module-extension reference.
+
 ## Design goals
 
 The platform follows four rules:

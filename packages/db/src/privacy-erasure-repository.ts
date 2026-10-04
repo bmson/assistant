@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { PrivacyErasureCounts, PrivacyErasureRepository } from '@assistant/persistence';
 import { and, asc, eq, inArray, like, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
@@ -21,6 +22,25 @@ import {
 
 const assetPrefix = (agentId: string) => `privacy-erasure-asset:${agentId}:`;
 const resultName = (agentId: string) => `privacy-erasure-result:${agentId}`;
+const generationName = (agentId: string) => `privacy-erasure-generation:${agentId}`;
+
+/** A completed erase still invalidates source reads begun before it. */
+export async function postgresPrivacyObservationFence(
+  db: Db,
+  agentId: string,
+): Promise<string | null> {
+  const rows = await db
+    .select()
+    .from(maintenanceCursors)
+    .where(inArray(maintenanceCursors.name, [resultName(agentId), generationName(agentId)]));
+  if (rows.some((row) => row.name === resultName(agentId)))
+    throw new Error('Privacy erasure is in progress');
+  const generation = rows.find((row) => row.name === generationName(agentId));
+  if (!generation) return null;
+  if (!generation.cursor || generation.cursor.length > 100)
+    throw new Error('Privacy erasure generation is malformed');
+  return generation.cursor;
+}
 
 function savedCounts(value: string | null): PrivacyErasureCounts {
   if (!value) return { memories: 0, graphRelations: 0, writingSamples: 0 };
@@ -59,6 +79,17 @@ export function createPostgresPrivacyErasureRepository(db: Db): PrivacyErasureRe
         if (owners.length !== 1 || !owners[0])
           throw new Error('Privacy erasure requires exactly one configured owner');
         const agentId = owners[0].id;
+        const generation = randomUUID();
+        await tx
+          .insert(maintenanceCursors)
+          .values({
+            name: generationName(agentId),
+            cursor: generation,
+          })
+          .onConflictDoUpdate({
+            target: maintenanceCursors.name,
+            set: { cursor: generation, updatedAt: new Date() },
+          });
         await tx.delete(selfRepairIssues).where(eq(selfRepairIssues.agentId, agentId));
         const [memoryRows, voiceImports, packs] = await Promise.all([
           tx

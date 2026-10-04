@@ -53,15 +53,64 @@
 body:has(.chat-viewport) {
   --status-ground: var(--stage);
   background: var(--stage);
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+/* The current console header owns its natural height. Conversation space is
+   the remaining row, rather than an assumed chrome height or negative gutter. */
+body:has(.chat-viewport) > header {
+  flex: none;
+  background: var(--surface-raised);
+}
+body:has(.chat-viewport) > main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  padding-block: 0;
 }
 
 /* Text and rules sitting DIRECTLY on the stage read in the stage's own ink,
    and the accent re-points at a tint that survives on green — chips, links,
    and focus rings inside the chat all read var(--accent). */
 .chat-viewport {
+  /* The brand stage leaves little contrast headroom in light appearance.
+     Ordinary text uses opaque ink; control wells add depth rather than white. */
+  --stage-strong: #ffffff;
+  --stage-muted: #f7fff9;
+  --conversation-well: #1e613e;
+  --stage-well: var(--conversation-well);
+  --chat-glass-fill: var(--conversation-well);
+  --chat-glass-fill-hover: var(--conversation-well);
   --accent: #9fe7c0;
   --accent-hover: #b8efd1;
   color: var(--stage-strong);
+}
+
+.dark .chat-viewport {
+  --stage-strong: #f0f7f1;
+  --stage-muted: #cedfd3;
+  --conversation-well: #193424;
+}
+
+/* The web and native conversation controls share the same legible well ink.
+   Supporting bare-stage text keeps its separate, brighter treatment above. */
+.chat-viewport
+:where(.bubble-owner, .scroll-subtle .my-auto > .grid, [data-testid="chat-composer-surface"]) {
+  --stage-strong: #f4faf5;
+  --stage-muted: #c6ddcf;
+}
+
+/* Utility controls above a side conversation belong to its stage. Paper ink
+   stays with actual reply/decision material rather than these navigation links. */
+.chat-viewport .chat-heading {
+  --content-strong: var(--stage-strong);
+  --content-muted: var(--stage-muted);
+  --edge: var(--stage-hairline);
+  --surface-sunken: var(--stage-well);
 }
 
 /* Keep the transcript fully clear at the top. The bottom fade remains so the
@@ -109,6 +158,30 @@ body:has(.chat-viewport) {
   color: var(--content-strong);
 }
 
+/* Recall provenance stays readable on each actual material. Muting the whole
+   row with opacity weakened required labels, dates and feedback controls. */
+.chat-viewport .recall-note {
+  color: var(--stage-muted);
+}
+
+.chat-viewport .paper .recall-note {
+  color: var(--content-muted);
+}
+
+/* A failed background-task action is persistent recovery information. An
+   opaque error well keeps it readable even over the moving conversation. */
+.chat-viewport .chat-action-error {
+  border-color: #fda4af;
+  background: #fff1f2;
+  color: #9f1239;
+}
+
+.dark .chat-viewport .chat-action-error {
+  border-color: #9f1239;
+  background: #4c0519;
+  color: #ffe4e6;
+}
+
 /* The opening state should read as an invitation, not a mini dashboard. */
 .scroll-subtle .my-auto {
   padding-inline: clamp(0.5rem, 4vw, 2rem);
@@ -140,7 +213,7 @@ body:has(.chat-viewport) {
   border-radius: 1.25rem;
   background: var(--stage-well);
   box-shadow: none;
-  backdrop-filter: blur(12px);
+  backdrop-filter: none;
 }
 
 .scroll-subtle .my-auto > .grid > button {
@@ -272,17 +345,12 @@ body:has(.chat-viewport) {
   text-align: left;
 }
 
-/* Your own voice: no fill at all, so the stage shows through it, and a white
-   hairline to hold the shape. Nothing is layered over the green, which is why
-   this one takes no shadow either — a shadow under a transparent shape is a
-   shadow with nothing casting it. */
+/* Your own voice stays close to the stage in a deeper well with a hairline.
+   Opaque ink keeps ordinary text readable in either appearance. */
 .bubble-owner {
   border: 1px solid rgb(255 255 255 / 0.25);
-  background: color-mix(in srgb, var(--stage-strong) 5%, transparent);
-  /* A shade under full strength. Your own words are the half of the thread you
-     already know; letting them sit back a step puts the reply in front without
-     changing the size or the position of anything. */
-  color: color-mix(in srgb, var(--stage-strong) 90%, transparent);
+  background: var(--stage-well);
+  color: var(--stage-strong);
   box-shadow: none;
   border-bottom-right-radius: 0.625rem;
 }
@@ -360,24 +428,17 @@ body:has(.chat-viewport) {
 }
 
 /* ── The composer ─────────────────────────────────────────────────────────────
-   On the stage the composer is not a white card sitting on green — it is a
-   well cut into the stage, with the send button as the one bright object in
-   it. The palettes above it stay paper, because those are lists to read.
-
-   Nothing may turn this element into a backdrop root — `isolation: isolate`,
-   `filter`, `opacity`, `mask` — on it or above it: Chromium gives an element
-   that is one an empty backdrop, and the blur below then frosts nothing at
-   all. An `isolation: isolate` in chrome.css did exactly that, which is why
-   the log used to scroll under sharp glass. The blur already makes this a
-   stacking context, so isolating it bought nothing and cost the material. */
+   The opaque well preserves text contrast over any scrolled reply. The send
+   button supplies the bright action; reading palettes keep their paper ink. */
 [data-testid="chat-composer-surface"] {
   position: relative;
   z-index: 1;
   border: 1px solid var(--chat-glass-border);
   background-color: var(--chat-glass-fill);
-  background-image: linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0.025));
+  background-image: none;
   box-shadow: var(--chat-glass-shadow);
-  backdrop-filter: blur(7px) saturate(1.05);
+  /* An opaque well keeps text contrast stable over any scrolled reply. */
+  backdrop-filter: none;
   transition:
     border-color var(--motion-fast) ease,
     background-color var(--motion-fast) ease,
@@ -397,7 +458,7 @@ body:has(.chat-viewport) {
 
 [data-testid="chat-composer-surface"]:hover:not(:focus-within) {
   border-color: rgb(255 255 255 / 0.28);
-  background-color: color-mix(in srgb, var(--stage) 70%, transparent);
+  background-color: var(--chat-glass-fill-hover);
 }
 
 [data-testid="chat-composer-surface"] textarea {

@@ -18,7 +18,7 @@ export function PrivacyControls() {
       <div className={cardBodyClass}>
         <div className={cardHeaderClass}>
           <div>
-            <h2 className={cardTitleClass}>Your data</h2>
+            <h2 className={cardTitleClass}>Export or erase saved memory</h2>
             <p className="mt-1 max-w-2xl text-xs leading-5 text-muted">
               Download the saved facts, knowledge-graph projections, people profiles, and writing
               voice that shape recall. The export never includes credentials or embeddings.
@@ -40,7 +40,7 @@ export function PrivacyControls() {
           </ConfirmButton>
         </form>
       </footer>
-      <p className="px-5 pb-5 text-xs leading-5 text-muted">
+      <p className="px-4 pb-4 text-xs leading-5 text-muted sm:px-6 sm:pb-6">
         Erasure preserves only anonymous content hashes to prevent forgotten facts from being
         re-ingested. Chats, goals, people records, and connected accounts are left intact.
       </p>

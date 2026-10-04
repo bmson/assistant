@@ -180,10 +180,11 @@ export function SuggestionCard({
           ) : null}
           {status === 'accepted' && taskId ? (
             <Link
-              href={`/tasks/${taskId}`}
+              href={`/audit/${taskId}`}
               className="shrink-0 text-xs text-muted underline underline-offset-2"
+              prefetch={false}
             >
-              View result
+              View task evidence
             </Link>
           ) : null}
           {status === 'accepted' && part.acceptedTaskSummary ? (

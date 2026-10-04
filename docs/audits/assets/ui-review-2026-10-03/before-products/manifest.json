@@ -1,0 +1,476 @@
+{
+  "sourcePageCount": 34,
+  "reachableConsolePages": 6,
+  "rootRedirect": "/settings",
+  "retainedProductSourcePages": 27,
+  "before": true,
+  "pages": [
+    {
+      "name": "anomalies",
+      "route": "/anomalies",
+      "source": "apps/web/app/anomalies/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "anomalies-empty",
+      "route": "/anomalies",
+      "source": "apps/web/app/anomalies/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "approvals",
+      "route": "/approvals",
+      "source": "apps/web/app/approvals/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "approvals-empty",
+      "route": "/approvals",
+      "source": "apps/web/app/approvals/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "calls",
+      "route": "/calls",
+      "source": "apps/web/app/calls/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "calls-empty",
+      "route": "/calls",
+      "source": "apps/web/app/calls/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "call-detail",
+      "route": "/calls/00000000-0000-4000-8000-000000000001",
+      "source": "apps/web/app/calls/[id]/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "capabilities",
+      "route": "/capabilities",
+      "source": "apps/web/app/capabilities/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "cards",
+      "route": "/cards",
+      "source": "apps/web/app/cards/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "cards-empty",
+      "route": "/cards",
+      "source": "apps/web/app/cards/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "chat",
+      "route": "/chat",
+      "source": "apps/web/app/chat/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "chat-empty",
+      "route": "/chat",
+      "source": "apps/web/app/chat/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "side-chat",
+      "route": "/chat/00000000-0000-4000-8000-000000000001",
+      "source": "apps/web/app/chat/[id]/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "side-chat-empty",
+      "route": "/chat/00000000-0000-4000-8000-000000000001",
+      "source": "apps/web/app/chat/[id]/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "chats",
+      "route": "/chat/all",
+      "source": "apps/web/app/chat/all/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "chats-empty",
+      "route": "/chat/all",
+      "source": "apps/web/app/chat/all/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "costs",
+      "route": "/costs",
+      "source": "apps/web/app/costs/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "costs-empty",
+      "route": "/costs",
+      "source": "apps/web/app/costs/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "documents",
+      "route": "/documents",
+      "source": "apps/web/app/documents/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "documents-empty",
+      "route": "/documents",
+      "source": "apps/web/app/documents/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "goals",
+      "route": "/goals",
+      "source": "apps/web/app/goals/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "goals-empty",
+      "route": "/goals",
+      "source": "apps/web/app/goals/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "import",
+      "route": "/import",
+      "source": "apps/web/app/import/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "import-empty",
+      "route": "/import",
+      "source": "apps/web/app/import/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "improvements",
+      "route": "/improvements",
+      "source": "apps/web/app/improvements/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "improvements-empty",
+      "route": "/improvements",
+      "source": "apps/web/app/improvements/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "packs",
+      "route": "/packs",
+      "source": "apps/web/app/packs/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "packs-empty",
+      "route": "/packs",
+      "source": "apps/web/app/packs/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "people",
+      "route": "/people",
+      "source": "apps/web/app/people/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "people-empty",
+      "route": "/people",
+      "source": "apps/web/app/people/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "person-detail",
+      "route": "/people/00000000-0000-4000-8000-000000000001",
+      "source": "apps/web/app/people/[id]/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "memory",
+      "route": "/profile",
+      "source": "apps/web/app/profile/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "memory-empty",
+      "route": "/profile",
+      "source": "apps/web/app/profile/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "about",
+      "route": "/profile/about",
+      "source": "apps/web/app/profile/about/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "about-empty",
+      "route": "/profile/about",
+      "source": "apps/web/app/profile/about/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "data",
+      "route": "/profile/data",
+      "source": "apps/web/app/profile/data/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "knowledge",
+      "route": "/profile/knowledge",
+      "source": "apps/web/app/profile/knowledge/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "knowledge-empty",
+      "route": "/profile/knowledge",
+      "source": "apps/web/app/profile/knowledge/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "knowledge-map",
+      "route": "/profile/knowledge?view=map",
+      "source": "apps/web/app/profile/knowledge/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "knowledge-map-empty",
+      "route": "/profile/knowledge?view=map",
+      "source": "apps/web/app/profile/knowledge/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "knowledge-cleanup",
+      "route": "/profile/knowledge?view=cleanup",
+      "source": "apps/web/app/profile/knowledge/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "knowledge-cleanup-empty",
+      "route": "/profile/knowledge?view=cleanup",
+      "source": "apps/web/app/profile/knowledge/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "memory-read-only",
+      "route": "/profile/memories",
+      "source": "apps/web/app/profile/memories/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "Firestore read-only branch"
+    },
+    {
+      "name": "memory-read-only-empty",
+      "route": "/profile/memories",
+      "source": "apps/web/app/profile/memories/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "Firestore read-only branch"
+    },
+    {
+      "name": "writing-voice",
+      "route": "/profile/voice",
+      "source": "apps/web/app/profile/voice/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "writing-voice-empty",
+      "route": "/profile/voice",
+      "source": "apps/web/app/profile/voice/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "skills",
+      "route": "/skills",
+      "source": "apps/web/app/skills/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "skills-empty",
+      "route": "/skills",
+      "source": "apps/web/app/skills/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "activity",
+      "route": "/tasks",
+      "source": "apps/web/app/tasks/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "activity-empty",
+      "route": "/tasks",
+      "source": "apps/web/app/tasks/page.tsx",
+      "state": "empty",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "activity-detail",
+      "route": "/tasks/00000000-0000-4000-8000-000000000001",
+      "source": "apps/web/app/tasks/[id]/page.tsx",
+      "state": "loaded",
+      "availability": "retained-product-redirected-by-proxy",
+      "evidence": "Actual source component with synthetic read dependencies; not a navigable product route.",
+      "persistenceFixture": "PostgreSQL presentation branch"
+    },
+    {
+      "name": "legacy-person",
+      "route": "/profile/people/[id]",
+      "source": "apps/web/app/profile/people/[id]/page.tsx",
+      "availability": "retained-redirect-only-alias",
+      "destination": "/people/[id]",
+      "evidence": "Redirect source asserted; destination screenshots are person-detail."
+    }
+  ]
+}

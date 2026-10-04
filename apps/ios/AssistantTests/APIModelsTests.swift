@@ -3,6 +3,154 @@ import XCTest
 import CoreLocation
 @testable import Assistant
 
+extension APIModelsTests {
+    func testDecisionReceiptsSeparatePermissionFromExecution() {
+        let approved = DecisionReceiptPresentation(part: .init(type: "approval", status: "approved"))
+        XCTAssertEqual(approved.title, "Approved")
+        XCTAssertEqual(approved.tone, .success)
+        XCTAssertTrue(approved.detail.contains("Permission"))
+        XCTAssertTrue(approved.detail.contains("Activity"))
+        XCTAssertFalse(approved.detail.contains("completed"))
+        let budget = DecisionReceiptPresentation(part: .init(type: "budget-request", status: "approved"))
+        XCTAssertEqual(budget.title, "Budget approved")
+        XCTAssertTrue(budget.detail.contains("task’s outcome"))
+        XCTAssertEqual(
+            DecisionReceiptPresentation(part: .init(type: "approval", status: "denied")),
+            DecisionReceiptPresentation(part: .init(type: "approval", status: "rejected"))
+        )
+    }
+
+    func testDecisionReceiptsExplainFailureExpiryAndUnknownStatus() {
+        for (status, title) in [
+            ("denied", "Declined"), ("rejected", "Declined"), ("failed", "Request failed"),
+            ("expired", "Expired"), ("cancelled", "Cancelled"), ("resolved", "Closed"),
+            ("future_status", "Status unavailable")
+        ] {
+            let receipt = DecisionReceiptPresentation(part: .init(type: "approval", status: status))
+            XCTAssertEqual(receipt.title, title)
+            XCTAssertNotEqual(receipt.tone, .success)
+        }
+        XCTAssertTrue(DecisionReceiptPresentation(part: .init(type: "approval", status: "failed")).reviewInActivity)
+        XCTAssertTrue(DecisionReceiptPresentation(part: .init(type: "approval", status: "expired")).reviewInActivity)
+        XCTAssertTrue(DecisionReceiptPresentation(part: .init(type: "approval", status: "future_status")).reviewInApprovals)
+        XCTAssertFalse(DecisionReceiptPresentation(part: .init(type: "approval", status: "approved")).reviewInActivity)
+    }
+
+    func testFinishedRowFallbackRequiresNoRenderableContent() {
+        let empty = ChatMessage(id: "empty", role: .assistant, parts: [.init(type: "text", text: " \n ")])
+        XCTAssertEqual(empty.outputFallback(isStreaming: false, hasRenderableCards: false)?.title, "No readable reply")
+        XCTAssertNil(empty.outputFallback(isStreaming: true, hasRenderableCards: false))
+        XCTAssertNil(empty.outputFallback(isStreaming: false, hasRenderableCards: true))
+        var toolOnly = empty
+        toolOnly.parts = [.init(type: "tool-result", data: .object(["result": .string("sensitive raw result")]))]
+        XCTAssertEqual(toolOnly.outputFallback(isStreaming: false, hasRenderableCards: false)?.title, "No readable reply")
+        XCTAssertFalse(toolOnly.outputFallback(isStreaming: false, hasRenderableCards: false)?.detail.contains("sensitive") ?? true)
+        for part in [
+            MessagePart(type: "approval", approvalId: "a1", status: "pending"),
+            .init(type: "approval", approvalId: "a1", status: "failed"),
+            .init(type: "suggestion", suggestionId: "s1", status: "accepted"),
+            .init(type: "notice", notice: "provider-failed")
+        ] {
+            var structured = empty
+            structured.parts = [part]
+            XCTAssertNil(structured.outputFallback(isStreaming: false, hasRenderableCards: false))
+        }
+        let user = ChatMessage(id: "user", role: .user, parts: [])
+        XCTAssertNil(user.outputFallback(isStreaming: false, hasRenderableCards: false))
+    }
+
+    func testUnknownCardFallbackPreservesReadableProseAndSupportedCards() {
+        var message = ChatMessage(id: "new-card", role: .assistant, parts: [
+            .init(type: "data-card", data: .object(["kind": .string("future-card")]))
+        ])
+        XCTAssertEqual(message.outputFallback(isStreaming: false, hasRenderableCards: false)?.title, "Card unavailable in this app")
+        XCTAssertNil(message.outputFallback(isStreaming: false, hasRenderableCards: true))
+        message.parts.append(.init(type: "text", text: "Here is the readable answer."))
+        XCTAssertNil(message.outputFallback(isStreaming: false, hasRenderableCards: false))
+    }
+
+    func testImprovementReceiptRequiresExplicitExecutionEvidence() throws {
+        let decoder = JSONDecoder()
+        let legacy = try decoder.decode(ImprovementDecisionResult.self, from: Data(#"{"ok":true}"#.utf8))
+        XCTAssertEqual(legacy.receiptTitle, "Decision recorded")
+        for (outcome, enacted, title) in [
+            ("applied", true, "Change applied"), ("acknowledged", false, "Marked reviewed"),
+            ("dismissed", false, "Dismissed"), ("already_current", false, "Already using this configuration"),
+            ("already_decided", false, "Already decided"), ("applied", false, "Decision recorded"),
+            ("unknown", true, "Decision recorded")
+        ] {
+            let result = ImprovementDecisionResult(ok: true, outcome: outcome, enacted: enacted, detail: "Server receipt")
+            XCTAssertEqual(result.receiptTitle, title)
+            XCTAssertEqual(result.receiptDetail, "Server receipt")
+        }
+        let requested = try decoder.decode(ImprovementDecisionResult.self,
+            from: Data(#"{"ok":true,"repairIssueId":"repair-1"}"#.utf8))
+        XCTAssertEqual(requested.receiptTitle, "Code-fix report linked")
+        XCTAssertTrue(requested.receiptDetail.contains("Code fixes"))
+        XCTAssertEqual(ImprovementDecisionResult(ok: true, repairIssueId: "repair-1", repairStatus: "reported").receiptTitle, "Code-fix report queued")
+        XCTAssertEqual(ImprovementDecisionResult(ok: true, repairIssueId: "repair-1", repairStatus: "failed").receiptTitle, "Code-fix report needs attention")
+        XCTAssertEqual(ImprovementDecisionResult(ok: true, repairIssueId: "repair-1", repairStatus: "resolved").receiptTitle, "Code-fix report confirmed fixed")
+        XCTAssertEqual(ImprovementDecisionResult(ok: false).receiptTitle, "Decision not confirmed")
+    }
+
+    func testImprovementActionsHaveOneSupportedCodeFixRoute() {
+        let routing = ImprovementActionPresentation(applyable: true, canRequestCodeFix: true)
+        XCTAssertEqual(routing.primaryAction, .apply)
+        XCTAssertFalse(routing.offersAcknowledgment)
+        let coding = ImprovementActionPresentation(applyable: false, canRequestCodeFix: true)
+        XCTAssertEqual(coding.primaryAction.rawValue, "request_fix")
+        XCTAssertTrue(coding.offersAcknowledgment)
+        let advisory = ImprovementActionPresentation(applyable: false, canRequestCodeFix: false)
+        XCTAssertEqual(advisory.primaryAction, .apply)
+        XCTAssertEqual(advisory.primaryTitle, "Mark reviewed")
+        XCTAssertFalse(advisory.offersAcknowledgment)
+    }
+
+    func testRepairMilestonesRequireDeploymentThenOwnerConfirmation() {
+        for status in ["investigating", "fixing", "testing", "pr_open"] {
+            let state = RepairPresentation(status: status)
+            XCTAssertFalse(state.canConfirmFixed)
+            XCTAssertFalse(state.canDismiss)
+            XCTAssertFalse(state.canRetry)
+        }
+        XCTAssertEqual(RepairPresentation(status: "testing").title, "Testing")
+        XCTAssertEqual(RepairPresentation(status: "merged").title, "Awaiting deployment")
+        XCTAssertFalse(RepairPresentation(status: "merged").canConfirmFixed)
+        let deployed = RepairPresentation(status: "monitoring")
+        XCTAssertEqual(deployed.title, "Deployed · needs confirmation")
+        XCTAssertTrue(deployed.canConfirmFixed)
+        XCTAssertFalse(deployed.isClosed)
+        let confirmed = RepairPresentation(status: "resolved")
+        XCTAssertEqual(confirmed.title, "Confirmed fixed")
+        XCTAssertTrue(confirmed.isClosed)
+        XCTAssertFalse(confirmed.canConfirmFixed)
+        XCTAssertFalse(confirmed.canDismiss)
+        XCTAssertTrue(RepairPresentation(status: "dismissed").isClosed)
+        for status in ["failed", "blocked"] {
+            XCTAssertTrue(RepairPresentation(status: status).canRetry)
+            XCTAssertTrue(RepairPresentation(status: status).canRequestManualRun)
+        }
+        XCTAssertFalse(RepairPresentation(status: "reported", manualRunRequested: true).canRequestManualRun)
+        let unknown = RepairPresentation(status: "future_state")
+        XCTAssertFalse(unknown.canDismiss || unknown.canRetry || unknown.canRequestManualRun || unknown.canConfirmFixed)
+    }
+
+    func testRepairProjectionSupportsLegacyAndEvidencePayloads() throws {
+        let data = Data(#"{"id":"issue","title":"Broken behavior","summary":"What happened","status":"reported","diagnosis":"","lastError":"","sourceTaskId":null,"prUrl":null,"runUrl":null,"updatedAt":"2026-10-03T19:00:00.000Z"}"#.utf8)
+        var issue = try JSONDecoder().decode(WorkspaceRepairIssue.self, from: data)
+        XCTAssertNil(issue.history)
+        XCTAssertNil(issue.mergeSha)
+        let oldRevision = issue.actionRevision
+        issue.manualRunRequested = true
+        XCTAssertNotEqual(issue.actionRevision, oldRevision, "A saved manual request changes action availability before investigation starts")
+        let enriched = Data(#"{"id":"issue","title":"Broken behavior","summary":"What happened","status":"monitoring","diagnosis":"Verified deployed revision","lastError":"","sourceTaskId":null,"prUrl":null,"runUrl":null,"updatedAt":"2026-10-03T19:00:00.000Z","mergeSha":"abc123","history":[{"status":"merged","at":"2026-10-03T18:00:00.000Z","detail":"Merged code"}]}"#.utf8)
+        let projected = try JSONDecoder().decode(WorkspaceRepairIssue.self, from: enriched)
+        XCTAssertEqual(projected.mergeSha, "abc123")
+        XCTAssertEqual(projected.history?.first?.status, "merged")
+        XCTAssertEqual(projected.history?.first?.detail, "Merged code")
+    }
+}
+
 enum RichMessageFixture {
     static let alert: JSONValue = .object([
         "kind": .string("proactive-alert"), "id": .string("email-report"),
@@ -467,6 +615,9 @@ final class APIModelsTests: XCTestCase {
     }
 
     func testPollingPolicyBacksOffWithoutMakingFreshRepliesFeelSlow() {
+        XCTAssertEqual(PollingPolicy.callIntervalSeconds(consecutiveFailures: 0), 2)
+        XCTAssertGreaterThan(PollingPolicy.callIntervalSeconds(consecutiveFailures: 1), 2)
+        XCTAssertEqual(PollingPolicy.callIntervalSeconds(consecutiveFailures: 100), 8)
         XCTAssertEqual(PollingPolicy.replyIntervalMilliseconds(attempt: 1, hasTaskID: false), 650)
         XCTAssertEqual(PollingPolicy.replyIntervalMilliseconds(attempt: 8, hasTaskID: false), 1_500)
         XCTAssertEqual(PollingPolicy.replyIntervalMilliseconds(attempt: 24, hasTaskID: false), 2_500)
@@ -475,6 +626,22 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(PollingPolicy.idleIntervalSeconds(unchangedPolls: 0), 12)
         XCTAssertEqual(PollingPolicy.idleIntervalSeconds(unchangedPolls: 6), 48)
         XCTAssertEqual(PollingPolicy.idleIntervalSeconds(unchangedPolls: 10), 90)
+    }
+
+    func testHandsFreeStopsForPendingDecisionsButAllowsResolvedReceiptsAndSuggestions() {
+        let pending = ChatMessage(id: "approval", role: .assistant, parts: [.init(type: "approval", status: "pending")])
+        var approved = pending
+        approved.parts[0].status = "approved"
+        XCTAssertTrue(TalkInteractionPolicy.requiresManualDecision(messages: [pending], pendingApprovals: 0))
+        XCTAssertEqual(TalkInteractionPolicy.decisionRoute(messages: [pending]), .approvals)
+        XCTAssertFalse(TalkInteractionPolicy.requiresManualDecision(messages: [approved], pendingApprovals: 0))
+        XCTAssertTrue(TalkInteractionPolicy.requiresManualDecision(messages: [], pendingApprovals: 1))
+
+        let suggestion = ChatMessage(id: "suggestion", role: .assistant, parts: [.init(type: "suggestion", suggestionId: "s1", status: "pending")])
+        XCTAssertFalse(TalkInteractionPolicy.requiresManualDecision(messages: [suggestion], pendingApprovals: 0))
+        let budget = ChatMessage(id: "budget", role: .assistant, parts: [.init(type: "budget-request", status: "pending")])
+        XCTAssertTrue(TalkInteractionPolicy.requiresManualDecision(messages: [budget], pendingApprovals: 0))
+        XCTAssertEqual(TalkInteractionPolicy.decisionRoute(messages: [pending, budget]), .activity)
     }
 
     func testHeldPollAsksAgainImmediatelyBecauseTheHoldWasTheWait() {
@@ -840,6 +1007,84 @@ final class APIModelsTests: XCTestCase {
         XCTAssertFalse(message.hasUnsettledSuggestion)
     }
 
+    func testHydratedSnoozeKeepsItsServerTimeAndFormatsItInTheReadersZone() throws {
+        for timestamp in ["2026-10-03T01:30:00.000Z", "2026-10-03T01:30:00Z", "2026-10-02T18:30:00-07:00"] {
+            let data = Data("""
+            {"id":"m","role":"assistant","parts":[
+              {"type":"suggestion","suggestionId":"s1","status":"snoozed","snoozedUntil":"\(timestamp)"}
+            ]}
+            """.utf8)
+            let message = try JSONDecoder().decode(ChatMessage.self, from: data)
+            let part = try XCTUnwrap(message.suggestionParts.first)
+            XCTAssertEqual(part.snoozedUntil, timestamp)
+            XCTAssertEqual(try JSONDecoder().decode(ChatMessage.self, from: JSONEncoder().encode(message)), message)
+            let receipt = SuggestionReceiptPresentation(part: part)
+            XCTAssertEqual(receipt.title, "Snoozed")
+            XCTAssertNotNil(receipt.returnDate)
+            let utc = try XCTUnwrap(receipt.returnLabel(locale: Locale(identifier: "en_US"), timeZone: TimeZone(secondsFromGMT: 0)!))
+            let local = try XCTUnwrap(receipt.returnLabel(locale: Locale(identifier: "en_US"), timeZone: TimeZone(identifier: "America/Los_Angeles")!))
+            XCTAssertTrue(utc.contains("Oct 3, 2026"), utc)
+            XCTAssertTrue(local.contains("Oct 2, 2026"), local)
+            XCTAssertTrue(local.contains("6:30"), local)
+            XCTAssertFalse(part.suggestionStatus.isOpen, "Only server hydration can reopen the suggestion")
+        }
+    }
+
+    func testMissingOrMalformedSnoozeTimeNeverInventsAReturnDate() throws {
+        for suffix in ["", ",\"snoozedUntil\":null", ",\"snoozedUntil\":\"not-a-date\""] {
+            let data = Data("{\"type\":\"suggestion\",\"suggestionId\":\"s1\",\"status\":\"snoozed\"\(suffix)}".utf8)
+            let part = try JSONDecoder().decode(MessagePart.self, from: data)
+            let receipt = SuggestionReceiptPresentation(part: part)
+            XCTAssertEqual(part.suggestionStatus, .snoozed)
+            XCTAssertNil(receipt.returnDate)
+            XCTAssertEqual(receipt.returnLabel(), "Return time unavailable")
+        }
+        for status in ["pending", "accepted", "dismissed", "expired", "missing"] {
+            let part = MessagePart(type: "suggestion", suggestionId: "s1", status: status, snoozedUntil: "2026-10-03T01:30:00Z")
+            XCTAssertNil(SuggestionReceiptPresentation(part: part).returnLabel(), "A stale deadline cannot give \(status) a return promise")
+        }
+        XCTAssertEqual(SuggestionReceiptPresentation(part: .init(type: "suggestion", status: "pending")).title, "Suggested next step")
+    }
+
+    func testUnknownSnoozeAcknowledgesOnceAndLetsLaterServerReadsPrevail() {
+        let message = ChatMessage(id: "m", role: .assistant, parts: [
+            .init(type: "suggestion", suggestionId: "s1", status: "pending")
+        ])
+        let answer = ["s1": SuggestionAnswer(decision: .snoozed)]
+        let acknowledged = message.applyingSuggestionAnswers(answer, acknowledging: true)
+        XCTAssertEqual(acknowledged.parts[0].suggestionStatus, .snoozed)
+        XCTAssertEqual(SuggestionReceiptPresentation(part: acknowledged.parts[0]).returnLabel(), "Return time unavailable")
+        XCTAssertEqual(message.applyingSuggestionAnswers(answer), message, "A legacy acknowledgement cannot mask later pending reads forever")
+    }
+
+    func testAcknowledgedSnoozeSuppliesOnlyMissingDeadlineAndRetainsSourceAuthority() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let until = now.addingTimeInterval(60)
+        let answer = ["s1": SuggestionAnswer(decision: .snoozed, snoozedUntil: until)]
+        let message = ChatMessage(id: "m", role: .assistant, parts: [RichMessageFixture.suggestion])
+        let overlaid = message.applyingSuggestionAnswers(answer, now: now)
+        XCTAssertEqual(SuggestionReceiptPresentation(part: overlaid.parts[0]).returnDate, until)
+        XCTAssertEqual(overlaid.parts[0].contextCard, message.parts[0].contextCard)
+        XCTAssertEqual(overlaid.parts[0].actionLabel, message.parts[0].actionLabel)
+        XCTAssertEqual(overlaid.parts[0].summary, message.parts[0].summary)
+        var hydrated = overlaid
+        hydrated.parts[0].snoozedUntil = ISO8601DateFormatter.assistant.string(from: until.addingTimeInterval(120))
+        XCTAssertEqual(hydrated.applyingSuggestionAnswers(answer, now: now), hydrated, "A hydrated current deadline wins over a device shadow")
+        XCTAssertEqual(message.applyingSuggestionAnswers(answer, now: until), message)
+    }
+
+    func testLocalAnswersCannotOverwriteConflictingTerminalServerState() {
+        for status in ["accepted", "dismissed", "expired", "missing", "future-status"] {
+            for decision in [SuggestionDecision.accepted, .dismissed, .snoozed] where status != decision.rawValue {
+                let message = ChatMessage(id: "m", role: .assistant, parts: [
+                    .init(type: "suggestion", suggestionId: "s1", status: status, acceptedTaskId: "server-task")
+                ])
+                let answer = SuggestionAnswer(decision: decision, taskId: "local-task", snoozedUntil: .distantFuture)
+                XCTAssertEqual(message.applyingSuggestionAnswers(["s1": answer]), message, "\(status) must prevail over local \(decision)")
+            }
+        }
+    }
+
     func testSuggestionReceiptReflectsActualTaskProgress() throws {
         let data = Data(#"{"id":"m","role":"assistant","parts":[{"type":"suggestion","suggestionId":"s1","status":"accepted","acceptedTaskId":"t1","acceptedTaskStatus":"completed","acceptedTaskSummary":"Reviewed the report; no reply was needed."}]}"#.utf8)
         let message = try JSONDecoder().decode(ChatMessage.self, from: data)
@@ -906,6 +1151,10 @@ final class APIModelsTests: XCTestCase {
         ])
         XCTAssertEqual(
             hydrated.applyingSuggestionAnswers(["s1": .init(decision: .accepted)]).parts[0].acceptedTaskId, "t1"
+        )
+        XCTAssertEqual(
+            hydrated.applyingSuggestionAnswers(["s1": .init(decision: .accepted, taskId: "older-task")]).parts[0].acceptedTaskId, "t1",
+            "Hydrated task identity wins over a device shadow"
         )
         XCTAssertEqual(stale.applyingSuggestionAnswers([:]), stale)
     }
@@ -2721,6 +2970,39 @@ extension APIModelsTests {
         let merged = map.merging(fresh, around: "a", nodeCap: 4)
         XCTAssertEqual(Set(merged.nodes.map(\.id)), ["a", "b", "c", "d"])
         XCTAssertFalse(map.merging(fresh, around: "a").truncated, "Under capacity nothing is let go")
+    }
+
+    func testGraphPreparationCancelsWithoutChangingItsSeed() throws {
+        let graph = RelationshipGraphFixture.snapshot()
+        var seed = RelationshipGraphLayout()
+        seed.update(nodes: graph.nodes, links: graph.links)
+        let original = seed.positions
+        var checkpoints = 0
+        let cancelled = seed.prepared(maxSteps: 150) {
+            checkpoints += 1
+            return checkpoints == 3
+        }
+        XCTAssertNil(cancelled, "An interrupted batch cannot publish a partial force state")
+        XCTAssertEqual(checkpoints, 3)
+        XCTAssertEqual(seed.positions, original, "Preparation operates on a value copy")
+        XCTAssertNil(seed.prepared(maxSteps: 0, isCancelled: { true }), "Cancellation also fences publication without a step")
+    }
+
+    func testGraphPreparationMatchesExistingPhysicsAndTransitionsWithoutAJump() throws {
+        let graph = RelationshipGraphFixture.snapshot()
+        var seed = RelationshipGraphLayout()
+        seed.update(nodes: graph.nodes, links: graph.links)
+        var expected = seed
+        for _ in 0..<150 where !expected.isSettled { expected.step() }
+        let prepared = try XCTUnwrap(seed.prepared(maxSteps: 150, isCancelled: { false }))
+        XCTAssertEqual(prepared.ids, expected.ids)
+        XCTAssertEqual(prepared.positions, expected.positions)
+        XCTAssertEqual(prepared.alpha, expected.alpha)
+        var transition = prepared.transitioning(from: seed)
+        XCTAssertEqual(transition.positions, seed.positions, "The visible seed stays in place at adoption")
+        for _ in 0..<100 where transition.positions != prepared.positions { transition.step() }
+        XCTAssertEqual(transition.positions, prepared.positions, "Existing position interpolation reaches the prepared state")
+        XCTAssertEqual(transition.ids, seed.ids)
     }
 
     func testForceLayoutKeepsExistingPositionsDuringExpansionAndRemainsFiniteAtCapacity() {

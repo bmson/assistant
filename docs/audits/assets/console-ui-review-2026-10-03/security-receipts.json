@@ -1,0 +1,16 @@
+{
+  "checks": [
+    "light: create confirmed → partial GET failure → failed read-only retry → successful read-only retry; token retained",
+    "light: recovery replacement requires no GET; subsequent confirmed revoke preserves both one-time secrets; retry makes no DELETE",
+    "light: passkey options + verify confirmed → partial GET failure; old lists retained; GET-only retry publishes added passkey",
+    "light: failed POST has real error, no success/secret/stale-success notice, no GET, draft preserved",
+    "light: Settings pairing receipt, device-only retry, retained token, 200% text without clipping",
+    "dark: create confirmed → partial GET failure → failed read-only retry → successful read-only retry; token retained",
+    "dark: recovery replacement requires no GET; subsequent confirmed revoke preserves both one-time secrets; retry makes no DELETE",
+    "dark: passkey options + verify confirmed → partial GET failure; old lists retained; GET-only retry publishes added passkey",
+    "dark: failed POST has real error, no success/secret/stale-success notice, no GET, draft preserved",
+    "dark: Settings pairing receipt, device-only retry, retained token, 200% text without clipping"
+  ],
+  "authBoundary": "Synthetic owner API and WebAuthn; actual hydrated SecurityClient + shared controls and CSS.",
+  "noLiveCredentials": true
+}

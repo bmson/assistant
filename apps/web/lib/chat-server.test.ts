@@ -15,6 +15,11 @@ vi.mock('@/auth', () => ({
 }));
 vi.mock('next/font/google', () => ({ JetBrains_Mono: () => ({ variable: '--test-mono' }) }));
 vi.mock('next/script', () => ({ default: () => null }));
+vi.mock('next/navigation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('next/navigation')>()),
+  // The integration renders the real shell outside Next's router context.
+  usePathname: () => '/settings',
+}));
 vi.mock('@/mobile-auth', () => ({
   isMobileAuthed: auth.mobile,
   mobileJson: (body: unknown, init?: ResponseInit) => Response.json(body, init),
@@ -269,6 +274,7 @@ describe.skipIf(!localEmulator)('Firestore web chat routes with PostgreSQL offli
     const layoutMarkup = renderToStaticMarkup(await RootLayout({ children: null }));
     expect(layoutMarkup).toContain('Audit trail');
     expect(layoutMarkup).toContain('href="/settings"');
+    expect(layoutMarkup).toContain('aria-current="page"');
     expect(layoutMarkup).not.toContain('notch-companion');
 
     const ChatIndexPage = (await import('../app/chat/page.js')).default;

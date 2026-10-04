@@ -1,5 +1,8 @@
 import {
-  MODEL_ROLE_NAMES,
+  type ImprovementActionResult,
+  improvementModelChange,
+  type Records,
+  validateImprovementModels,
   type WorkspaceImprovementRecord,
   type WorkspaceImprovementRepository,
 } from '@assistant/persistence';
@@ -74,13 +77,13 @@ export class FirestoreWorkspaceImprovementRepository implements WorkspaceImprove
     configuredAgentId: string,
     proposalId: string,
     action: 'apply' | 'dismiss',
-  ): Promise<void> {
+  ): Promise<ImprovementActionResult> {
     if (!configuredAgentId) throw new Error('agent is required');
     const proposalRef = this.store.doc('improvementProposals', proposalId);
     const ownerRef = this.store.doc('agents', configuredAgentId);
     const erasureRef = this.store.doc('privacyErasureJobs', configuredAgentId);
 
-    await this.store.db.runTransaction(async (tx) => {
+    return this.store.db.runTransaction(async (tx) => {
       const owners = await tx.get(this.store.collection('agents').limit(2));
       if (
         owners.size !== 1 ||
@@ -105,14 +108,16 @@ export class FirestoreWorkspaceImprovementRepository implements WorkspaceImprove
       if (!['open', 'applied', 'dismissed'].includes(String(row.status)))
         throw new Error('Invalid improvement proposal status');
 
+      if (row.status !== 'open')
+        return {
+          outcome: 'already_decided',
+          enacted: false,
+          detail: 'This proposal already has a recorded decision. No change was made.',
+        };
       if (action === 'dismiss') {
-        if (row.status !== 'dismissed')
-          tx.update(proposalRef, { status: 'dismissed', updatedAt: this.store.now() });
-        return;
+        tx.update(proposalRef, { status: 'dismissed', updatedAt: this.store.now() });
+        return { outcome: 'dismissed', enacted: false, detail: 'Proposal dismissed.' };
       }
-
-      // SQL applyProposal treats repeated/non-open approvals as a no-op.
-      if (row.status !== 'open') return;
       if (!['model_role', 'policy', 'prompt', 'note'].includes(String(row.kind)))
         throw new Error('Invalid improvement proposal kind');
       if (
@@ -125,60 +130,79 @@ export class FirestoreWorkspaceImprovementRepository implements WorkspaceImprove
         !row.evidenceIds.every((value) => typeof value === 'string')
       )
         throw new Error('Invalid improvement proposal');
+      let result: ImprovementActionResult = {
+        outcome: 'acknowledged',
+        enacted: false,
+        detail: 'Suggestion noted. No settings or code were changed.',
+      };
       if (row.kind === 'model_role') {
-        // A routing swap must cite the pattern it claims to fix; without
-        // evidence it stays open, exactly as the PostgreSQL workflow leaves it.
-        if (row.evidenceIds.length === 0) return;
-        const swap = await this.modelRoleSwap(tx, row.change as Record<string, unknown>);
-        if (swap) tx.update(swap.ref, { ...swap.patch, updatedAt: this.store.now() });
+        const change = improvementModelChange(
+          row.change as Record<string, unknown>,
+          row.evidenceIds as string[],
+        );
+        const swap = await this.modelRoleSwap(tx, change);
+        if (swap.changed) {
+          tx.update(swap.ref, { ...swap.patch, updatedAt: this.store.now() });
+          result = {
+            outcome: 'applied',
+            enacted: true,
+            detail: `Updated ${change.role} model routing. Future calls will use this configuration.`,
+          };
+        } else {
+          result = {
+            outcome: 'already_current',
+            enacted: false,
+            detail: `The ${change.role} role already uses the proposed models. No routing change was needed.`,
+          };
+        }
       }
       // Policy, prompt, and note proposals are advisory in the SQL workflow;
       // approval only acknowledges the proposal and changes its status.
       tx.update(proposalRef, { status: 'applied', updatedAt: this.store.now() });
+      return result;
     });
   }
 
   /**
-   * Resolve a proposed routing change to the enabled models it names. Unknown
-   * or disabled models and unknown roles are recorded only, as in PostgreSQL.
+   * Resolve the entire proposal; failed validation leaves both records intact.
    */
   private async modelRoleSwap(
     tx: FirebaseFirestore.Transaction,
-    change: Record<string, unknown>,
+    change: ReturnType<typeof improvementModelChange>,
   ): Promise<{
     ref: FirebaseFirestore.DocumentReference;
     patch: { primaryModel?: string; fallbackModel?: string };
-  } | null> {
-    const role = typeof change.role === 'string' ? change.role : '';
-    const primaryModel = typeof change.primaryModel === 'string' ? change.primaryModel : '';
-    const fallbackModel = typeof change.fallbackModel === 'string' ? change.fallbackModel : '';
-    if (!(MODEL_ROLE_NAMES as readonly string[]).includes(role)) return null;
-    const wanted = [...new Set([primaryModel, fallbackModel].filter(Boolean))];
-    if (!wanted.length) return null;
+    changed: boolean;
+  }> {
+    const { role, primaryModel, fallbackModel } = change;
+    const wanted = [
+      ...new Set([primaryModel, fallbackModel].filter((id): id is string => Boolean(id))),
+    ];
     const roleRef = this.store.doc('modelRoles', role);
     const [roleSnapshot, ...models] = await tx.getAll(
       roleRef,
       ...wanted.map((id) => this.store.doc('models', id)),
     );
-    const enabled = new Set(
-      models
-        .filter(
-          (model) =>
-            model?.exists &&
-            model.get('enabled') === true &&
-            typeof model.get('id') === 'string' &&
-            documentKey(model.get('id')) === model.id,
-        )
-        .map((model) => model?.get('id') as string),
-    );
+    const validModels = models
+      .filter(
+        (model) =>
+          model?.exists &&
+          typeof model.get('id') === 'string' &&
+          documentKey(model.get('id')) === model.id,
+      )
+      .map((model) => decodeRecord<Records['models']>(model?.data()));
+    validateImprovementModels(change, validModels);
     const patch: { primaryModel?: string; fallbackModel?: string } = {};
-    if (primaryModel && enabled.has(primaryModel)) patch.primaryModel = primaryModel;
-    if (fallbackModel && enabled.has(fallbackModel)) patch.fallbackModel = fallbackModel;
-    if (!patch.primaryModel && !patch.fallbackModel) return null;
-    // PostgreSQL updates by role and silently matches nothing for a missing row.
-    if (!roleSnapshot?.exists) return null;
+    if (primaryModel) patch.primaryModel = primaryModel;
+    if (fallbackModel) patch.fallbackModel = fallbackModel;
+    if (!roleSnapshot?.exists)
+      throw new Error('Proposed model role is not configured. Review or dismiss this proposal.');
     if (roleSnapshot.get('role') !== role) throw new Error('Model role identity mismatch');
-    return { ref: roleRef, patch };
+    const changed = Boolean(
+      (primaryModel && primaryModel !== roleSnapshot.get('primaryModel')) ||
+        (fallbackModel && fallbackModel !== roleSnapshot.get('fallbackModel')),
+    );
+    return { ref: roleRef, patch, changed };
   }
 
   async listOpen(agentId: string): Promise<WorkspaceImprovementRecord[]> {

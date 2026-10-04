@@ -44,7 +44,7 @@ struct ConnectionView: View {
                     VStack(alignment: .leading, spacing: 7) {
                         Text("Mobile access key").font(.subheadline.weight(.semibold))
                         connectionFieldSurface(isFocused: focusedField == .token) {
-                            SecureField("MOBILE_API_TOKEN", text: $token)
+                            SecureField("Paste your access key", text: $token)
                                 .textContentType(.password)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
@@ -52,7 +52,7 @@ struct ConnectionView: View {
                                 .focused($focusedField, equals: .token)
                                 .onSubmit(connect)
                         }
-                        Text("The key stays in this device’s Keychain. Local source development can leave it empty when AUTH_DEV_BYPASS is enabled.")
+                        Text("Generate a mobile access key in your assistant’s web Settings, then paste it here. It stays in this device’s Keychain.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -84,7 +84,7 @@ struct ConnectionView: View {
                 .tint(AssistantTheme.accent(for: colorScheme))
                 .disabled(connecting || serverURL.trimmingCharacters(in: .whitespaces).isEmpty)
 
-                Text("For production, set MOBILE_API_TOKEN on the server to a value generated with `openssl rand -hex 32`, then enter that value here once.")
+                Text("Open Settings → Mobile app on your assistant’s website to find the server address and generate an access key.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

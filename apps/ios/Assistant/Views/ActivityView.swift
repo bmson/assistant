@@ -143,27 +143,21 @@ struct ActivityView: View {
         let colors: [Color] = [AssistantTheme.warning(for: colorScheme),
             AssistantTheme.accent(for: colorScheme), AssistantTheme.inkMuted(for: colorScheme),
             AssistantTheme.success(for: colorScheme).opacity(0.4), AssistantTheme.errorInk(for: colorScheme), .secondary]
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(showingArchived ? "Archived activity" : "Loaded activity")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Text("\(items.count) tasks").font(.caption).foregroundStyle(.secondary)
-            }
-            AssistantDistributionBar(values: summary.counts.map(Double.init), colors: colors)
-            AssistantFlowLayout(spacing: 12) {
-                ForEach(Array(summary.counts.enumerated()), id: \.offset) { index, count in
-                    if count > 0 {
-                        HStack(spacing: 5) {
-                            Circle().fill(colors[index]).frame(width: 6, height: 6).accessibilityHidden(true)
-                            Text("\(count) \(ActivityVisualSummary.labels[index])")
-                                .font(.caption).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                        }
+        return AssistantFlowLayout(spacing: 12) {
+            Text("\(items.count) \(items.count == 1 ? "task" : "tasks")")
+                .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+            ForEach(Array(summary.counts.enumerated()), id: \.offset) { index, count in
+                if count > 0 {
+                    HStack(spacing: 5) {
+                        Circle().fill(colors[index]).frame(width: 6, height: 6).accessibilityHidden(true)
+                        Text("\(count) \(ActivityVisualSummary.labels[index])")
                     }
+                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                 }
             }
         }
-        .assistantPanel(in: colorScheme)
+        .font(.subheadline)
+        .padding(.horizontal, 2)
         .accessibilityElement(children: .combine)
     }
 

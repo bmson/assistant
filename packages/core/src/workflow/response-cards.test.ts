@@ -22,6 +22,95 @@ const request = {
 };
 
 describe('response cards', () => {
+  it.each([{ ok: false }, { status: 503 }, { deliveryStatus: 'unknown' }])(
+    'does not render failed result bodies as verified cards: %j',
+    (failure) => {
+      const result = responseCardsForFinal({
+        evidence: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            result: {
+              events: [{ summary: 'Lunch', start: '2026-09-08T19:00:00Z' }],
+              ...failure,
+            },
+          },
+          {
+            toolName: 'docs.create',
+            status: 'succeeded',
+            result: { documentId: 'doc-1', title: 'Plan', ...failure },
+          },
+        ],
+      });
+      expect(result).toEqual([]);
+    },
+  );
+
+  it('shows a fully opened mail result once through its thread card', () => {
+    const cards = responseCardsForFinal({
+      evidence: [
+        {
+          toolName: 'gmail.search',
+          status: 'succeeded',
+          args: { query: 'hotel' },
+          result: { complete: true, results: [{ threadId: 'hotel-1', subject: 'Hotel' }] },
+        },
+        {
+          toolName: 'gmail.read_thread',
+          status: 'succeeded',
+          args: { threadId: 'hotel-1' },
+          result: { messages: [{ subject: 'Hotel', text: 'Check in September 5.' }] },
+        },
+      ],
+    });
+    expect(cards.map((card) => card.kind)).toEqual(['email-thread']);
+    expect(cards[0]).toMatchObject({ messages: [{ excerpt: 'Check in September 5.' }] });
+  });
+
+  it.each([
+    { complete: false, threadId: 'hotel-1', readStatus: 'succeeded', readText: 'Check in.' },
+    { complete: true, threadId: 'unopened', readStatus: 'succeeded', readText: 'Check in.' },
+    { complete: true, threadId: '', readStatus: 'succeeded', readText: 'Check in.' },
+    { complete: true, threadId: 'hotel-1', readStatus: 'failed', readText: 'Check in.' },
+    { complete: true, threadId: 'hotel-1', readStatus: 'succeeded', readText: '' },
+  ])('preserves search coverage without a complete linked read: %j', (fixture) => {
+    const cards = responseCardsForFinal({
+      evidence: [
+        {
+          toolName: 'gmail.search',
+          status: 'succeeded',
+          result: {
+            complete: fixture.complete,
+            results: [{ threadId: fixture.threadId, subject: 'Hotel' }],
+          },
+        },
+        {
+          toolName: 'gmail.read_thread',
+          status: fixture.readStatus,
+          args: { threadId: 'hotel-1' },
+          result: { messages: [{ subject: 'Hotel', text: fixture.readText }] },
+        },
+      ],
+    });
+    expect(cards.some((card) => card.kind === 'email-results')).toBe(true);
+  });
+
+  it.each([{ created: false }, { ok: false }])(
+    'does not display a failed reminder creation as a saved reminder: %j',
+    (failure) => {
+      expect(
+        responseCardsForFinal({
+          evidence: [
+            {
+              toolName: 'reminder.create',
+              status: 'succeeded',
+              result: { reminderId: 'r1', text: 'Bring sunglasses', ...failure },
+            },
+          ],
+        }),
+      ).toEqual([]);
+    },
+  );
   it('merges obvious cross-calendar twins but keeps distinct appointments', () => {
     const result = calendarResponseCards(
       [

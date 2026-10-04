@@ -393,3 +393,9 @@ private struct ApprovalPayloadEditor: View {
         }
     }
 }
+
+#if DEBUG
+extension ApprovalsView {
+    @MainActor static func visualReviewEditor(_ item: PendingApproval) -> AnyView { AnyView(ApprovalPayloadEditor(item: item)) }
+}
+#endif

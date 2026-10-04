@@ -27,7 +27,7 @@ const nextConfig: NextConfig = {
   // with the CSS animation in template.tsx.
   experimental: { authInterrupts: true },
   async redirects() {
-    return [{ source: '/', destination: '/chat', permanent: false }];
+    return [{ source: '/', destination: '/settings', permanent: false }];
   },
   async headers() {
     // The one non-self origin is jelly-ui.com, the nav-widget script loaded in

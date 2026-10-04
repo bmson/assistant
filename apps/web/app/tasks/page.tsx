@@ -152,7 +152,7 @@ export default async function TasksPage({
           icon={<ListChecks className="size-5" />}
           action={
             archived || filter !== 'all' ? (
-              <Link href={archived ? '/tasks' : '/tasks'} className={btn.outline}>
+              <Link href="/tasks" className={btn.outline}>
                 {archived ? 'Current activity' : 'Clear filter'}
               </Link>
             ) : (
@@ -172,9 +172,7 @@ export default async function TasksPage({
         <div className="mt-8 flex flex-col gap-8">
           {groups.map((group) => (
             <section key={group.day}>
-              <h2 className="mb-3 font-mono text-xs font-medium tracking-[0.08em] text-muted uppercase">
-                {group.label}
-              </h2>
+              <h2 className="mb-3 text-lg font-semibold text-strong">{group.label}</h2>
               <div className={cardShellClass}>
                 {group.items.map((task, index) => {
                   const Icon = taskIcon[task.status as keyof typeof taskIcon] ?? Clock3;

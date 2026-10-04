@@ -13,6 +13,24 @@ const chat = (vision: boolean) => ({
 });
 
 export const modelDefaults = [
+  // Explicit conversation choices; role defaults below stay unchanged until
+  // this installation's task-level comparison establishes a better choice.
+  {
+    id: 'openai/gpt-6.1-sol',
+    label: 'GPT-6.1 Sol',
+    capabilities: chat(true),
+    promptCostPerMTok: '2.00',
+    completionCostPerMTok: '10.00',
+    latencyClass: 'medium',
+  },
+  {
+    id: 'openai/gpt-6-luna',
+    label: 'GPT-6 Luna',
+    capabilities: chat(true),
+    promptCostPerMTok: '0.10',
+    completionCostPerMTok: '0.50',
+    latencyClass: 'fast',
+  },
   {
     id: 'minimax/minimax-m2.7',
     label: 'MiniMax M2.7',

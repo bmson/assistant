@@ -104,6 +104,10 @@ export interface CallOptions {
   abortSignal?: AbortSignal;
   /** Reject before reservation/provider work if the estimated call cost exceeds this caller cap. */
   maxEstimatedCostUsd?: number;
+  /** Extra input tokens for tool/schema overhead absent from prompt text. */
+  additionalInputTokens?: number;
+  /** AI SDK transport retries. Evaluations use zero; normal calls retain SDK defaults. */
+  maxRetries?: number;
 }
 
 /** Keep optional per-call cost ceilings inside the reservation path. */
@@ -531,11 +535,21 @@ function promptArgs(opts: CallOptions): { messages: ModelMessage[] } | { prompt:
 }
 
 function estimatedInputTokens(opts: CallOptions): number {
+  const additional = opts.additionalInputTokens ?? 0;
+  if (!Number.isSafeInteger(additional) || additional < 0 || additional > 1_000_000) {
+    throw new Error('additionalInputTokens must be an integer from zero to one million');
+  }
+  if (
+    opts.maxRetries !== undefined &&
+    (!Number.isInteger(opts.maxRetries) || opts.maxRetries < 0 || opts.maxRetries > 2)
+  ) {
+    throw new Error('maxRetries must be an integer from zero to two');
+  }
   const content = opts.messages ? JSON.stringify(opts.messages) : (opts.prompt ?? '');
   // ~3.5 chars/token holds for English prose and JSON tool payloads. The old
   // /2 estimate was ~2x pessimistic, which inflated every reservation and
   // tripped the soft budget threshold on spend that never materialized.
-  return Math.max(1, Math.ceil(((opts.system?.length ?? 0) + content.length) / 3.5));
+  return Math.max(1, Math.ceil(((opts.system?.length ?? 0) + content.length) / 3.5)) + additional;
 }
 
 function reservationDecision(reason: string): Extract<BudgetDecision, { mode: 'park' | 'block' }> {
@@ -772,8 +786,9 @@ export class ModelRouter {
   /**
    * The completion budget to send the provider, plus any provider options.
    * A call that will reason gets bounded reasoning headroom on top of the
-   * visible answer budget (and OpenRouter is told to keep reasoning within it),
-   * so the answer never truncates at finishReason 'length'. The inflated total
+   * visible answer budget. Providers receive a token-budget hint or a supported
+   * effort level; effort-only models do not guarantee a separate reasoning cap.
+   * Callers must still handle finishReason 'length'. The inflated total
    * also flows into the cost reservation below — reasoning tokens are billed,
    * so reserving for them keeps the budget guard honest. Every other call gets
    * the visible limit alone.
@@ -1107,6 +1122,7 @@ export class ModelRouter {
       return await withSpan('model.generate', { role, model: route.modelId }, async () => {
         const result = await generateText({
           model: route.model,
+          maxRetries: opts.maxRetries,
           ...(opts.messages
             ? this.cacheHintedArgs(route.modelId, opts.system, opts.messages)
             : { system: opts.system, ...promptArgs(opts) }),
@@ -1172,6 +1188,7 @@ export class ModelRouter {
     let result: ReturnType<typeof streamText>;
     try {
       result = streamText({
+        maxRetries: opts.maxRetries,
         model: route.model,
         // Cache-hint the system prefix on the messages path (the owner's chat
         // turn is the highest-frequency call in the system, and re-billed the
@@ -1414,6 +1431,7 @@ export class ModelRouter {
       return await withSpan('model.step', { role, model: route.modelId }, async () => {
         const result = await generateText({
           model: route.model,
+          maxRetries: opts.maxRetries,
           ...(opts.messages
             ? this.cacheHintedArgs(
                 route.modelId,
@@ -1492,6 +1510,7 @@ export class ModelRouter {
       try {
         return await withSpan('model.object', { role, model: route.modelId }, async () => {
           const result = await generateObject({
+            maxRetries: opts.maxRetries,
             model: route.model,
             ...(opts.messages
               ? this.cacheHintedArgs(route.modelId, opts.system, opts.messages)
@@ -1596,12 +1615,9 @@ export class ModelRouter {
     // "Are you" clarify bug — the plan role's 1024-token default was the cause).
     if (outcome.ok && outcome.finishReason === 'length') {
       const retryTokens = Math.max(opts.maxOutputTokens ?? 0, HARD_MAX_OUTPUT_TOKENS);
-      let retried: ObjectOutcome<T> | undefined;
-      try {
-        retried = await attempt(true, retryTokens);
-      } catch {
-        throw new TruncatedObjectError(role);
-      }
+      // Preserve request/capability errors from the retry: a transport failure
+      // is not evidence that the larger response was also truncated.
+      const retried = await attempt(true, retryTokens);
       if (retried.ok && retried.finishReason !== 'length') return retried;
       if (!retried.ok) return retried; // budget park/block — let the caller handle it
       throw new TruncatedObjectError(role);

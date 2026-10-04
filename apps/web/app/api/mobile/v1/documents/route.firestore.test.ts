@@ -486,7 +486,9 @@ describe.skipIf(!emulator)('Firestore mobile Documents with PostgreSQL offline',
         await batch.commit();
       }
     }
-  });
+    // Creating and removing 5,000 emulator records is fixture setup, not a
+    // request-latency assertion. Keep the same overflow check under load.
+  }, 30_000);
 
   it('fails explicitly when a document detail exceeds its chunk bound', async () => {
     const chunkIds: string[] = [];

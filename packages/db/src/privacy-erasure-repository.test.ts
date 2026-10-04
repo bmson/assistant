@@ -3,7 +3,10 @@ import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import type { Db } from './client.js';
 import { createDb } from './client.js';
-import { createPostgresPrivacyErasureRepository } from './privacy-erasure-repository.js';
+import {
+  createPostgresPrivacyErasureRepository,
+  postgresPrivacyObservationFence,
+} from './privacy-erasure-repository.js';
 import {
   agents,
   importSources,
@@ -95,6 +98,7 @@ describe('PostgreSQL privacy erasure repository', () => {
             .insert(writingSamples)
             .values({ id: sampleId, register: 'chat', text: 'private' });
           const repository = createPostgresPrivacyErasureRepository(tx as unknown as Db);
+          const beforeErasure = await postgresPrivacyObservationFence(tx as unknown as Db, agentId);
           await expect(repository.erase()).resolves.toEqual({
             memories: 1,
             graphRelations: 1,
@@ -141,6 +145,9 @@ describe('PostgreSQL privacy erasure repository', () => {
           await expect(repository.complete()).rejects.toThrow('assets remain');
           await repository.assetDeleted(sourceId);
           await repository.complete();
+          const afterErasure = await postgresPrivacyObservationFence(tx as unknown as Db, agentId);
+          expect(afterErasure).toEqual(expect.any(String));
+          expect(afterErasure).not.toBe(beforeErasure);
           expect(
             (
               await tx

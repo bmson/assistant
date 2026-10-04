@@ -15,16 +15,23 @@ vending a row once it leaves the viewport, so a bubble on its way down was
 built, drawn under the glass, then dropped — blinking out a whole composer
 above the bottom of the screen.
 
-The cost of that choice is that **every row in the conversation is offered a
-rebuild whenever anything in `ChatView` changes**. And a great many things
-change: `draft` on every keystroke, `menuPullDistance` on every point of a
-drag, and the streamed message's text on every token. So the per-row cost is
-not paid once when a screen opens — it is paid on every frame of every
-interaction.
+The cost of that choice is that every row must exist when the log is first
+opened. `ChatTranscriptRows` now owns the eager stack behind an equatable
+boundary. Draft text, pull distance, and composer geometry stay in `ChatView`;
+they no longer regroup receipts or resolve preceding prompts in the rows view.
+The rows view changes when messages or send availability change, and directly
+observes Reduce Motion. Its action closures capture the same model and state
+bindings throughout a screen's lifetime.
 
 That is the whole shape of the problem. Three things keep it in budget.
 
 ## 1. A row that has not changed is not rebuilt
+
+`ChatTranscriptRows` compares messages and `isSending`. If you add another
+content input, include it in equality. Do not pass closures whose behavior
+changes with unrepresented state: the equality boundary would retain the old
+behavior. The transcript keeps its existing eager stack and viewport geometry;
+this boundary changes ownership of derivation work, not scroll behavior.
 
 `MessageBubble` and `ApprovedReceiptGroup` are `Equatable`, and the transcript
 attaches `.equatable()` to each. A token landing in the newest reply changes
@@ -110,16 +117,18 @@ did, that `TranscriptContext` agrees with the scans it replaced for every row,
 and that a row compares equal only while its content holds still — including
 that a landing token still makes it unequal.
 
-None of it measures frames. The remaining per-frame work in
-`conversationSurface` is linear in the length of the log —
-`transcriptItems()`, `TranscriptContext`, and one `==` per row — and whether
-that needs to move into an equatable child view of its own is a question for a
-profile on a device with a long conversation open, not for a reading of the
-code. The same goes for the other submenu screens: `ActivityView` and
-`RootView` use `LazyVStack`, but the memory library, Knowledge, Workspace and
-People screens still build their lists eagerly, and converting them has to
-clear the zero-height-proposal trap that `MessageBubble`'s code blocks
-document.
+None of it measures frames. Message changes still require linear transcript
+grouping/context work and one equality comparison per row. Typing/menu changes
+now compare the transcript's inputs before that work is offered. Profile a long
+conversation on a device to establish frame and launch costs before choosing
+virtualization; a smaller source body is not a frame-rate measurement.
+
+`ActivityView` and `CardsView` use lazy stacks; Memory home and People now use
+native `List`. The paged memory library, Knowledge cleanup, Goals, Approvals,
+packs and Workspace still build list content eagerly. Converting them needs
+runtime validation of height proposals, particularly nested geometry and
+Markdown/code blocks. See the current source audit in
+[`docs/audits/ios-experience-2026-10-02.md`](../../../docs/audits/ios-experience-2026-10-02.md).
 
 The server side of "the app feels slow" is a separate axis and is written up in
 [`docs/audits/performance-review.md`](../../../docs/audits/performance-review.md).

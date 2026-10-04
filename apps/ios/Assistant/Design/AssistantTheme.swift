@@ -59,7 +59,9 @@ enum AssistantTheme {
     static let sunkenDark = Color(hex: 0x152019)
     static let ink = Color(hex: 0x15201A)
     static let inkDark = Color(hex: 0xEDF6F0)
-    static let inkMuted = Color(hex: 0x5E7266)
+    // Shared secondary ink clears small-text contrast on opaque sunken panels:
+    // #5A6D62 on #E3EDE6 is 4.61:1; the former shade reached only 4.30:1.
+    static let inkMuted = Color(hex: 0x5A6D62)
     static let inkMutedDark = Color(hex: 0xA9BAAF)
     static let accent = Color(hex: 0x217A4B)
     static let accentLight = Color(hex: 0x6FCB9C)
@@ -70,6 +72,11 @@ enum AssistantTheme {
     static let stage = Color(hex: 0x2B8253)
     static let stageDark = Color(hex: 0x1B3626)
     static let stageStrong = Color(hex: 0xF4FAF5)
+    // Small conversation text needs a stable pair, including under the stage's
+    // bright washes and glass. Secondary #C6DDCF on #1E613E is 5.17:1.
+    static let stageWell = Color(hex: 0x1E613E)
+    static let stageWellDark = Color(hex: 0x193424)
+    static let stageSecondary = Color(hex: 0xC6DDCF)
     static let bubblePaper = Color(hex: 0xF5FAF6)
     // A paper surface needs to read as a distinct object on the dark green
     // stage. The old value was nearly iso-luminant with `stageDark`, so reply
@@ -160,6 +167,10 @@ enum AssistantTheme {
 
     static func stage(for scheme: ColorScheme) -> Color {
         scheme == .dark ? stageDark : stage
+    }
+
+    static func stageWell(for scheme: ColorScheme) -> Color {
+        scheme == .dark ? stageWellDark : stageWell
     }
 
     /// The chat's accent, tinted by the companion's color mood.
@@ -336,7 +347,36 @@ struct AssistantForm<Content: View>: View {
 
     var body: some View {
         Form { content.listRowBackground(AssistantTheme.raised(for: colorScheme)) }
+            .headerProminence(.increased)
+            .environment(\.defaultMinListRowHeight, 44)
+            .listSectionSpacing(20)
             .assistantEditorChrome()
+    }
+}
+
+/// Keep a field's purpose visible after its placeholder becomes a value.
+/// The native input supplies the accessibility label; the visual heading avoids
+/// a duplicate VoiceOver stop and never changes focus or selection behaviour.
+struct AssistantField<Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let title: String
+    @ViewBuilder let content: Content
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                .accessibilityHidden(true)
+            content.accessibilityLabel(title)
+        }
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -347,6 +387,9 @@ struct AssistantSettingsList<Content: View>: View {
     var body: some View {
         List { content.listRowBackground(AssistantTheme.raised(for: colorScheme)) }
             .listStyle(.insetGrouped)
+            .headerProminence(.increased)
+            .environment(\.defaultMinListRowHeight, 44)
+            .listSectionSpacing(20)
             .assistantEditorChrome()
     }
 }
@@ -472,12 +515,53 @@ struct AssistantEvidenceDisclosureStyle: DisclosureGroupStyle {
     }
 }
 
+/// A failed read is a recoverable state, never an endless loading indicator or
+/// an empty result. The last good content can remain below this quiet panel.
+struct AssistantLoadFailureState: View {
+    let title: String
+    let message: String
+    let retry: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AssistantTheme.cardContentSpacing) {
+            Label(title, systemImage: "exclamationmark.circle")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+            Text(message)
+                .font(.subheadline)
+                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Try again", systemImage: "arrow.clockwise", action: retry)
+                .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .assistantPanel(in: colorScheme)
+        .accessibilityElement(children: .contain)
+    }
+}
+
 struct AssistantLoadingState: View {
     let title: String
     var body: some View {
         ProgressView(title)
             .font(.subheadline)
             .frame(maxWidth: .infinity, minHeight: 190)
+    }
+}
+
+/// A recoverable form action keeps its fields and explains the failure inside
+/// the presented editor, where a root-level error banner may be covered.
+struct AssistantInlineFailure: View {
+    let message: String
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Label(message, systemImage: "exclamationmark.circle")
+            .font(.subheadline)
+            .foregroundStyle(AssistantTheme.errorInk(for: colorScheme))
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .combine)
     }
 }
 
@@ -699,6 +783,7 @@ struct AssistantActionButtonStyle: ButtonStyle {
         let shape = RoundedRectangle(cornerRadius: compact ? AssistantTheme.controlCornerRadius : 14, style: .continuous)
 
         configuration.label
+            .labelStyle(.titleAndIcon)
             .font(.subheadline.weight(.semibold))
             .padding(.horizontal, compact ? 12 : 20)
             .padding(.vertical, 10)

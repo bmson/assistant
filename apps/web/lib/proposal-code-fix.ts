@@ -1,7 +1,32 @@
 import { reportRepair } from '@assistant/application';
 import { loadConfig } from '@assistant/config';
+import type { RepairIssue } from '@assistant/persistence';
 import { getSelfRepairService } from './server';
 import { decideOwnerImprovement, listOpenImprovements } from './workspace-reviews';
+
+export interface ProposalCodeFixReceipt {
+  outcome: 'code_fix_requested';
+  enacted: false;
+  detail: string;
+  repairIssueId: string;
+  repairStatus: RepairIssue['status'];
+}
+
+/** Repeating conversion may return a settled report; it never authorizes a new run. */
+export function proposalCodeFixReceipt(
+  issue: Pick<RepairIssue, 'id' | 'status'>,
+): ProposalCodeFixReceipt {
+  return {
+    outcome: 'code_fix_requested',
+    enacted: false,
+    repairIssueId: issue.id,
+    repairStatus: issue.status,
+    detail:
+      issue.status === 'reported'
+        ? 'Code-fix report queued for investigation. No code has changed.'
+        : 'A code-fix report already exists for this proposal. Review its current progress in Code fixes. No new coding run was requested.',
+  };
+}
 
 /** Owner endpoints supply only an ID; the proposal content is always loaded from the owned store. */
 export async function requestOwnerProposalCodeFix(id: string) {

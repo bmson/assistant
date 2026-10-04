@@ -11,6 +11,13 @@ import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from 
 
 type Conversation = Records['conversations'];
 
+/** Resolved without writes so a producer can finish all transaction reads first. */
+interface OwnerNoticeDestination {
+  row: Conversation;
+  created: boolean;
+  createNotificationsMarker: boolean;
+}
+
 function ownedConversation(snapshot: DocumentSnapshot, agentId: string): Conversation {
   const row = decodeRecord<Conversation>(snapshot.data());
   if (
@@ -85,7 +92,7 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
     return result;
   }
 
-  private async notifications(tx: Transaction): Promise<{ row: Conversation; created: boolean }> {
+  private async resolveNotifications(tx: Transaction): Promise<OwnerNoticeDestination> {
     const markerRef = this.store.doc('notificationConversations', this.agentId);
     const marker = await tx.get(markerRef);
     if (marker.exists) {
@@ -97,7 +104,7 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
       const row = ownedConversation(snapshot, this.agentId);
       if (row.title !== 'Notifications' || row.isPrimary)
         throw new Error('Notifications conversation marker is stale');
-      return { row, created: false };
+      return { row, created: false, createNotificationsMarker: false };
     }
     const matches = await tx.get(
       this.store
@@ -111,12 +118,7 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
     if (snapshot) {
       const row = ownedConversation(snapshot, this.agentId);
       if (row.isPrimary) throw new Error('Notifications conversation is primary');
-      tx.create(markerRef, {
-        agentId: this.agentId,
-        conversationId: row.id,
-        createdAt: this.store.now(),
-      });
-      return { row, created: false };
+      return { row, created: false, createNotificationsMarker: true };
     }
     const now = this.store.now();
     const row: Conversation = {
@@ -133,8 +135,79 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
       createdAt: now,
       updatedAt: now,
     };
-    tx.create(markerRef, { agentId: this.agentId, conversationId: row.id, createdAt: now });
-    return { row, created: true };
+    return { row, created: true, createNotificationsMarker: true };
+  }
+
+  private async notifications(tx: Transaction): Promise<OwnerNoticeDestination> {
+    const destination = await this.resolveNotifications(tx);
+    if (destination.createNotificationsMarker)
+      tx.create(this.store.doc('notificationConversations', this.agentId), {
+        agentId: this.agentId,
+        conversationId: destination.row.id,
+        createdAt: this.store.now(),
+      });
+    return destination;
+  }
+
+  /** Read-only routing/ownership half of a producer's atomic notice admission. */
+  async prepareNoticeInTransaction(
+    tx: Transaction,
+    taskId?: string,
+  ): Promise<OwnerNoticeDestination> {
+    await this.owner(tx);
+    if (taskId) {
+      const task = await tx.get(this.store.doc('tasks', taskId));
+      if (!task.exists || task.get('id') !== taskId || task.get('agentId') !== this.agentId)
+        throw new Error('Owner notice task is outside the configured installation');
+    }
+    const primary = await this.primary(tx);
+    return primary
+      ? { row: primary, created: false, createNotificationsMarker: false }
+      : this.resolveNotifications(tx);
+  }
+
+  /** Write-only half; its caller has already checked the observation's privacy fence. */
+  appendNoticeInTransaction(
+    tx: Transaction,
+    destination: OwnerNoticeDestination,
+    input: {
+      id: string;
+      text: string;
+      taskId?: string;
+      extraParts: readonly unknown[];
+      now: Date;
+    },
+  ): void {
+    const message = messageRecord(
+      {
+        conversationId: destination.row.id,
+        ...(input.taskId ? { taskId: input.taskId } : {}),
+        role: 'assistant',
+        origin: 'assistant',
+        parts: [{ type: 'text', text: input.text }, ...input.extraParts],
+        text: input.text,
+      },
+      input.id,
+      input.now,
+    );
+    if (destination.createNotificationsMarker)
+      tx.create(this.store.doc('notificationConversations', this.agentId), {
+        agentId: this.agentId,
+        conversationId: destination.row.id,
+        createdAt: input.now,
+      });
+    const conversationRef = this.store.doc('conversations', destination.row.id);
+    if (destination.created)
+      tx.create(
+        conversationRef,
+        encodeRecord({ ...destination.row, updatedAt: input.now, archived: false }),
+      );
+    else
+      tx.update(conversationRef, {
+        updatedAt: input.now,
+        ...(destination.row.archivedAt ? { archivedAt: null, archived: false } : {}),
+      });
+    tx.create(this.store.doc('messages', input.id), encodeRecord(message));
   }
 
   /**

@@ -2,7 +2,7 @@ import Foundation
 import SwiftUI
 import UIKit
 
-enum AssistantRoute: String, Hashable, Identifiable, CaseIterable {
+enum AssistantRoute: String, Hashable, Identifiable, CaseIterable, Sendable {
     case chat
     case chats
     case activity
@@ -98,9 +98,33 @@ struct HiddenMessageUndo: Identifiable, Equatable {
     var id: String { messageId }
 }
 
+/// A cancelled turn may still be finishing while the next turn settles.
+/// Each cleanup owns one token; an older cleanup cannot release a newer one.
+struct NotificationTurnSettlements {
+    private var tokens: Set<UUID> = []
+    var isSettling: Bool { !tokens.isEmpty }
+
+    mutating func begin() -> UUID {
+        let token = UUID()
+        tokens.insert(token)
+        return token
+    }
+
+    mutating func finish(_ token: UUID) {
+        tokens.remove(token)
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
-    @Published var navigationPath: [AssistantDestination] = []
+    @Published var navigationPath: [AssistantDestination] = [] {
+        didSet {
+            // Includes page selection, person links, and native back gestures.
+            // A slow notice must not replace the owner's newer navigation.
+            notificationNavigationVersion += 1
+            pendingNotificationDestination = nil
+        }
+    }
     var presentedRoute: AssistantRoute? {
         get {
             guard case let .route(route) = navigationPath.first else { return nil }
@@ -129,7 +153,13 @@ final class AppModel: ObservableObject {
     @Published private(set) var personCards: [String: PersonCard] = [:]
     @Published private(set) var messages: [ChatMessage] = []
     @Published private(set) var isLoading = false
-    @Published private(set) var isSending = false
+    @Published private(set) var isSending = false {
+        didSet {
+            if !isSending, pendingNotificationDestination != nil {
+                Task { [weak self] in await self?.resolvePendingNotificationDestination() }
+            }
+        }
+    }
     @Published private(set) var toolActivity: [ToolActivity] = []
     @Published private(set) var activityThought: AssistantThought?
     @Published private(set) var activityDetail: String?
@@ -158,6 +188,8 @@ final class AppModel: ObservableObject {
     /// Text of a turn that failed to send, handed back to the composer so the
     /// words are never lost to a network or server failure. ChatView consumes it.
     @Published private(set) var restorableDraft: String?
+    @Published private(set) var composerRecoveryRevision = 0
+    private var conversationDrafts = ConversationDrafts()
     @Published private(set) var packDiscussionDraft: String?
     @Published var showingConnection = false
     /// One-shot intent shared by every user-facing way to send a message,
@@ -167,6 +199,8 @@ final class AppModel: ObservableObject {
 
     private(set) var serverURL: String
     private var client: APIClient?
+    private var connectionVersion = 0
+    private var pairingAttemptVersion = 0
     private var cursor: String?
     /// Sequence for the rendered log. A merge can only add or replace by id —
     /// where a message belongs is decided here, once per id.
@@ -186,10 +220,15 @@ final class AppModel: ObservableObject {
     /// deadline, so an older poll cannot make Later immediately reappear.
     private var suggestionAnswers: [String: SuggestionAnswer] = [:]
     private var suggestionsBeingAnswered: Set<String> = []
+    private var pendingNotificationDestination: AssistantNotificationDestination?
+    private var notificationNavigationVersion = 0
+    private var isResolvingNotification = false
+    private var notificationTurnSettlements = NotificationTurnSettlements()
     private var cardsBeingRefreshed: Set<String> = []
     private var cardRefreshMarkers: [String: CardRefreshMarker] = [:]
     private var pollTask: Task<Void, Never>?
     private var idleTask: Task<Void, Never>?
+    private var idlePollingVersion = 0
     /// The turn in flight, kept so returning to the foreground can pick the
     /// reply back up. Backgrounding cancels `pollTask`; the server carries on.
     private var resumableTurn: (taskId: String?, streamID: String)?
@@ -214,7 +253,8 @@ final class AppModel: ObservableObject {
     /// transcript on screen, speech is the only thing there to answer with.
     var speechAlwaysOn = false
 
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
+    private let storeConnectionToken: (String) throws -> Void
     private let serverKey = "assistant.server-url"
     private let configuredKey = "assistant.connection-configured"
     /// More → Assistant context owns this toggle; the model only reads it.
@@ -226,7 +266,14 @@ final class AppModel: ObservableObject {
     private var lastLocationPostAt: Date?
     private var lastForegroundReportAt: Date?
 
-    init(apiClient: APIClient? = nil, initialMessages: [ChatMessage] = []) {
+    init(
+        apiClient: APIClient? = nil,
+        initialMessages: [ChatMessage] = [],
+        defaults: UserDefaults = .standard,
+        storeConnectionToken: @escaping (String) throws -> Void = { try KeychainStore.saveToken($0) }
+    ) {
+        self.defaults = defaults
+        self.storeConnectionToken = storeConnectionToken
         messages = initialMessages
         serverURL = defaults.string(forKey: serverKey) ?? "http://localhost:3000"
         hasSavedConnection = defaults.bool(forKey: configuredKey)
@@ -290,6 +337,39 @@ final class AppModel: ObservableObject {
     var conversationId: String? {
         activeConversation?.conversation.id ?? bootstrap?.conversation.conversation.id
     }
+    var composerDraftScope: ComposerDraftScope? {
+        guard bootstrap != nil, let conversationId else { return nil }
+        return conversationDrafts.scope(conversationID: conversationId)
+    }
+
+    func composerDraft(in scope: ComposerDraftScope) -> String {
+        conversationDrafts.draft(in: scope)
+    }
+
+    func saveComposerDraft(_ text: String, in scope: ComposerDraftScope) {
+        conversationDrafts.save(text, in: scope)
+    }
+
+    func hasComposerRecovery(in scope: ComposerDraftScope) -> Bool {
+        conversationDrafts.hasRecovery(in: scope)
+    }
+
+    func restoreComposerRecovery(in scope: ComposerDraftScope, replacing draft: String) -> String? {
+        guard let restored = conversationDrafts.restore(in: scope, replacing: draft) else { return nil }
+        restorableDraft = nil
+        composerRecoveryRevision += 1
+        return restored
+    }
+
+    private func connectionIsCurrent(_ client: APIClient, version: Int) -> Bool {
+        !Task.isCancelled && connectionIdentityIsCurrent(client, version: version)
+    }
+
+    /// Cancellation prevents publishing a result, but does not mean the owner
+    /// changed assistants. Keep those recovery explanations distinct.
+    private func connectionIdentityIsCurrent(_ client: APIClient, version: Int) -> Bool {
+        connectionVersion == version && self.client?.configuration == client.configuration
+    }
     var latestMood: CompanionMood { CompanionMood.latest(in: messages) }
     /// The expression the runtime sent with the most recent reply. Unused by
     /// the transcript, which has the words; talk mode has nothing else.
@@ -310,6 +390,63 @@ final class AppModel: ObservableObject {
 
     func returnToChat() {
         presentedRoute = nil
+    }
+
+    /// Cold-launch taps wait for authenticated bootstrap. A tap during a turn
+    /// waits for that turn to settle instead of interrupting its reply.
+    func openNotificationDestination(_ destination: AssistantNotificationDestination) async {
+        notificationNavigationVersion += 1
+        pendingNotificationDestination = destination
+        await resolvePendingNotificationDestination()
+    }
+
+    private func resolvePendingNotificationDestination() async {
+        guard !isResolvingNotification else { return }
+        isResolvingNotification = true
+        defer { isResolvingNotification = false }
+        while let destination = pendingNotificationDestination,
+              let bootstrap, let client, !isSending, !notificationTurnSettlements.isSettling {
+            let version = notificationNavigationVersion
+            pendingNotificationDestination = nil
+            guard destination.belongsTo(ownerID: bootstrap.identity.id) else { continue }
+            guard destination.route == .chat else {
+                present(destination.route)
+                continue
+            }
+            // Route-only notifications from older servers belong to the main
+            // conversation, not whichever side chat happened to be selected.
+            let target = destination.conversationID ?? bootstrap.conversation.conversation.id
+            do {
+                let conversation = try await client.conversation(id: target)
+                guard version == notificationNavigationVersion,
+                      self.client?.configuration == client.configuration,
+                      self.bootstrap?.identity.id == bootstrap.identity.id else { continue }
+                guard conversation.conversation.id.lowercased() == target.lowercased() else {
+                    throw APIError.invalidResponse
+                }
+                if isSending || notificationTurnSettlements.isSettling {
+                    pendingNotificationDestination = destination
+                    continue
+                }
+                dismissHiddenMessageUndo()
+                setActiveConversation(conversation)
+                returnToChat()
+            } catch {
+                guard version == notificationNavigationVersion,
+                      self.client?.configuration == client.configuration,
+                      self.bootstrap?.identity.id == bootstrap.identity.id else { continue }
+                if isSending || notificationTurnSettlements.isSettling {
+                    pendingNotificationDestination = destination
+                    continue
+                }
+                // Missing or foreign IDs fail at the owner-scoped endpoint.
+                // Retain an authenticated escape rather than a dead-end tap.
+                dismissHiddenMessageUndo()
+                setActiveConversation(bootstrap.conversation)
+                returnToChat()
+                errorMessage = "Couldn’t open that conversation. Showing your main conversation."
+            }
+        }
     }
 
     /// Quiet on failure: a scoreboard keeps its last scores rather than raising
@@ -437,6 +574,14 @@ final class AppModel: ObservableObject {
         }
         isLoading = true
         errorMessage = nil
+        var version = connectionVersion
+        defer {
+            // Cancellation ends the loading state too, but an old connection
+            // must not dismiss a newer connection's loading indicator.
+            if connectionVersion == version, self.client?.configuration == client.configuration {
+                isLoading = false
+            }
+        }
         do {
             // Bootstrap alone decides whether the pairing is usable: it carries
             // the identity and the conversation the app opens onto, and it is
@@ -444,41 +589,14 @@ final class AppModel: ObservableObject {
             // — approvals, activity, goals — and fetching both in one
             // `try await` meant a single failing dashboard query rejected an
             // otherwise valid connection outright.
-            apply(try await client.bootstrap())
+            let response = try await client.bootstrap()
+            guard connectionIsCurrent(client, version: version) else { return }
+            apply(response)
+            version = connectionVersion
             clearRecoveredError(from: .bootstrap)
-            hasSavedConnection = true
-            defaults.set(true, forKey: configuredKey)
-
-            do {
-                overview = withLocalApprovalDecisions(try await client.overview())
-                clearRecoveredError(from: .overview)
-            } catch {
-                // Non-fatal: the app is connected and usable, the dashboard
-                // sections are just empty. Surfacing it keeps the failure
-                // visible instead of presenting stale counts as current.
-                reportError(error, source: .overview, retry: { [weak self] in
-                    guard let self else { return }
-                    await self.refreshOverview()
-                })
-            }
-
-            await reconcileBaselineActivity()
-            await syncNotificationBadge()
-            if isSceneActive { startIdlePolling() }
-            await shareLocationIfEnabled(force: true)
-
-            // Proactive outreach needs a way to reach the phone: ask for
-            // notification permission once, right after a pairing succeeds,
-            // and register with APNs whenever permission exists.
-            let notifications = NotificationManager.shared
-            if notifications.authorizationStatus == .notDetermined,
-               !defaults.bool(forKey: pushPromptedKey) {
-                defaults.set(true, forKey: pushPromptedKey)
-                await notifications.requestAuthorization()
-            }
-            await notifications.registerForRemoteNotificationsIfAuthorized()
-            await reportForegroundActivity()
+            await finishConnectionSetup(using: client, version: version)
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return }
             reportError(error, source: .bootstrap, retry: { [weak self] in
                 guard let self else { return }
                 await self.connect()
@@ -492,7 +610,31 @@ final class AppModel: ObservableObject {
                 showingConnection = true
             }
         }
-        isLoading = false
+    }
+
+    /// Supplementary reads and device setup follow an authenticated bootstrap.
+    /// They cannot reject a usable pairing or publish into a newer session.
+    private func finishConnectionSetup(using client: APIClient, version: Int) async {
+        guard connectionIsCurrent(client, version: version) else { return }
+        hasSavedConnection = true
+        defaults.set(true, forKey: configuredKey)
+        await resolvePendingNotificationDestination()
+        guard connectionIsCurrent(client, version: version) else { return }
+        await refreshOverview()
+        guard connectionIsCurrent(client, version: version) else { return }
+        if isSceneActive { startIdlePolling() }
+        await shareLocationIfEnabled(force: true)
+        guard connectionIsCurrent(client, version: version) else { return }
+        let notifications = NotificationManager.shared
+        if notifications.authorizationStatus == .notDetermined,
+           !defaults.bool(forKey: pushPromptedKey) {
+            defaults.set(true, forKey: pushPromptedKey)
+            await notifications.requestAuthorization()
+        }
+        guard connectionIsCurrent(client, version: version) else { return }
+        await notifications.registerForRemoteNotificationsIfAuthorized()
+        guard connectionIsCurrent(client, version: version) else { return }
+        await reportForegroundActivity()
     }
 
     /// The "woke up" signal the server's wake-up brief listens for. Throttled
@@ -511,10 +653,12 @@ final class AppModel: ObservableObject {
     /// app refreshes context without turning the radio into a tracker.
     func shareLocationIfEnabled(force: Bool = false) async {
         guard defaults.bool(forKey: Self.shareLocationKey), let client else { return }
+        let version = connectionVersion
         if !force,
            let last = lastLocationPostAt,
            Date().timeIntervalSince(last) < 15 * 60 { return }
         guard let place = await LocationManager.shared.captureCurrentPlace() else { return }
+        guard connectionIsCurrent(client, version: version) else { return }
         let ping = LocationPingBody(
             lat: place.location.coordinate.latitude,
             lng: place.location.coordinate.longitude,
@@ -528,6 +672,7 @@ final class AppModel: ObservableObject {
         )
         do {
             try await client.postLocationPing(ping)
+            guard connectionIsCurrent(client, version: version) else { return }
             lastLocationPostAt = Date()
         } catch {
             // Fire-and-forget: the next foreground refresh carries it.
@@ -535,37 +680,100 @@ final class AppModel: ObservableObject {
     }
 
     func saveConnection(serverURL: String, token: String) async -> Bool {
+        pairingAttemptVersion += 1
+        let attempt = pairingAttemptVersion
         do {
             let configuration = try Self.configuration(urlString: serverURL, token: token)
+            let candidate = client?.replacingConfiguration(configuration) ?? APIClient(configuration: configuration)
+            let verified = try await candidate.bootstrap()
+            guard !Task.isCancelled, attempt == pairingAttemptVersion else { return false }
+            // Verify first: a failed candidate must preserve the existing
+            // client, credential, owner state, and unsent conversation drafts.
             // A Keychain refusal must not reject a valid pairing. The token is
             // already held in the APIConfiguration for this session, so the
             // only real consequence is having to enter it again next launch —
             // reported after a successful connect rather than instead of one.
             var keychainWarning: String?
             do {
-                try KeychainStore.saveToken(token.trimmingCharacters(in: .whitespacesAndNewlines))
+                try storeConnectionToken(token.trimmingCharacters(in: .whitespacesAndNewlines))
             } catch {
                 keychainWarning = "Connected, but this device refused to store the key (\(error.localizedDescription)). You will need to enter it again next launch."
             }
             let normalized = configuration.baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let keepsCurrentSession = client?.configuration == configuration
+                && bootstrap?.identity.id == verified.identity.id
+            if !keepsCurrentSession {
+                connectionVersion += 1
+                resetConnectedState()
+            }
             self.serverURL = normalized
             defaults.set(normalized, forKey: serverKey)
-            client = APIClient(configuration: configuration)
-            acceptedApprovalDecisions.removeAll()
-            approvalsBeingDecided.removeAll()
-            approvalReconciliation?.cancel()
-            suggestionAnswers.removeAll()
-            cardRefreshMarkers.removeAll()
-            await connect()
-            if bootstrap != nil {
-                showingConnection = false
-                if let keychainWarning { errorMessage = keychainWarning }
-                return true
-            }
+            client = candidate
+            apply(verified, preservingLocalMessages: keepsCurrentSession && isSending)
+            showingConnection = false
+            let version = connectionVersion
+            await finishConnectionSetup(using: candidate, version: version)
+            guard connectionIsCurrent(candidate, version: version) else { return false }
+            if let keychainWarning { errorMessage = keychainWarning }
+            return true
         } catch {
+            guard !Task.isCancelled, attempt == pairingAttemptVersion else { return false }
             reportError(error)
         }
         return false
+    }
+
+    private func resetConnectedState() {
+        stopIdlePolling()
+        pollTask?.cancel()
+        pollTask = nil
+        resumableTurn = nil
+        pendingNotificationDestination = nil
+        notificationNavigationVersion += 1
+        notificationTurnSettlements = NotificationTurnSettlements()
+        approvalReconciliation?.cancel()
+        approvalReconciliation = nil
+        thoughtClearTask?.cancel()
+        dismissHiddenMessageUndo()
+        stopSpeaking()
+        isSending = false
+        isLoading = false
+        nextMessageAutonomous = false
+        activeConversation = nil
+        bootstrap = nil
+        overview = nil
+        archivedActivity = nil
+        archivedGoals = nil
+        workspace = nil
+        modelProviders = nil
+        mcpConnections = []
+        savedCards = []
+        memoryReviewCount = 0
+        people = []
+        peopleLoaded = false
+        personCards.removeAll()
+        personProfiles.removeAll()
+        acceptedApprovalDecisions.removeAll()
+        approvalsBeingDecided.removeAll()
+        suggestionsBeingAnswered.removeAll()
+        suggestionAnswers.removeAll()
+        cardsBeingRefreshed.removeAll()
+        cardRefreshMarkers.removeAll()
+        messages = []
+        logOrder.reset()
+        cursor = nil
+        activityThought = nil
+        activityDetail = nil
+        toolActivity = []
+        lastNotifiedTaskState = nil
+        lastLocationPostAt = nil
+        lastForegroundReportAt = nil
+        restorableDraft = nil
+        packDiscussionDraft = nil
+        conversationDrafts.reset()
+        composerRecoveryRevision += 1
+        navigationPath = []
+        dismissError()
     }
 
     /// Surface a failure, offering a retry only when the cause was the network.
@@ -588,13 +796,19 @@ final class AppModel: ObservableObject {
 
     func refreshAll(reportFailure: Bool = true) async {
         guard let client else { return }
+        var version = connectionVersion
         // Kept separate for the same reason `connect()` separates them: these
         // fetch different things, and a failing dashboard query should not
         // throw away a bootstrap that arrived perfectly well.
         do {
-            apply(try await client.bootstrap(), preservingLocalMessages: isSending)
+            let response = try await client.bootstrap()
+            guard connectionIsCurrent(client, version: version) else { return }
+            apply(response, preservingLocalMessages: isSending)
+            version = connectionVersion
             clearRecoveredError(from: .bootstrap)
+            await resolvePendingNotificationDestination()
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return }
             if reportFailure {
                 reportError(error, source: .bootstrap, retry: { [weak self] in
                     guard let self else { return }
@@ -603,10 +817,14 @@ final class AppModel: ObservableObject {
             }
             return
         }
+        guard connectionIsCurrent(client, version: version) else { return }
         do {
-            overview = withLocalApprovalDecisions(try await client.overview())
+            let response = try await client.overview()
+            guard connectionIsCurrent(client, version: version) else { return }
+            overview = withLocalApprovalDecisions(response)
             clearRecoveredError(from: .overview)
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return }
             if reportFailure {
                 reportError(error, source: .overview, retry: { [weak self] in
                     guard let self else { return }
@@ -614,7 +832,9 @@ final class AppModel: ObservableObject {
                 })
             }
         }
+        guard connectionIsCurrent(client, version: version) else { return }
         await reconcileBaselineActivity()
+        guard connectionIsCurrent(client, version: version) else { return }
         await syncNotificationBadge()
     }
 
@@ -632,8 +852,7 @@ final class AppModel: ObservableObject {
             if bootstrap != nil { startIdlePolling() }
             resumeInterruptedTurn()
         } else {
-            idleTask?.cancel()
-            idleTask = nil
+            stopIdlePolling()
         }
     }
 
@@ -671,13 +890,18 @@ final class AppModel: ObservableObject {
 
     func refreshOverview(reportFailure: Bool = true) async {
         guard let client else { return }
+        let version = connectionVersion
         do {
-            overview = withLocalApprovalDecisions(try await client.overview())
+            let response = try await client.overview()
+            guard connectionIsCurrent(client, version: version) else { return }
+            overview = withLocalApprovalDecisions(response)
             clearRecoveredError(from: .overview)
             await reconcileBaselineActivity()
+            guard connectionIsCurrent(client, version: version) else { return }
             await syncNotificationBadge()
         }
         catch where reportFailure {
+            guard connectionIsCurrent(client, version: version) else { return }
             reportError(error, source: .overview, retry: { [weak self] in
                 guard let self else { return }
                 await self.refreshOverview()
@@ -688,15 +912,31 @@ final class AppModel: ObservableObject {
 
     func refreshArchivedActivity(reportFailure: Bool = true) async {
         guard let client else { return }
-        do { archivedActivity = try await client.activity(archived: true) }
-        catch where reportFailure { reportError(error) }
+        let version = connectionVersion
+        do {
+            let result = try await client.activity(archived: true)
+            guard connectionIsCurrent(client, version: version) else { return }
+            archivedActivity = result
+        }
+        catch where reportFailure {
+            guard connectionIsCurrent(client, version: version) else { return }
+            reportError(error)
+        }
         catch { }
     }
 
     func refreshArchivedGoals(reportFailure: Bool = true) async {
         guard let client else { return }
-        do { archivedGoals = try await client.goals(archived: true) }
-        catch where reportFailure { reportError(error) }
+        let version = connectionVersion
+        do {
+            let result = try await client.goals(archived: true)
+            guard connectionIsCurrent(client, version: version) else { return }
+            archivedGoals = result
+        }
+        catch where reportFailure {
+            guard connectionIsCurrent(client, version: version) else { return }
+            reportError(error)
+        }
         catch { }
     }
 
@@ -853,14 +1093,31 @@ final class AppModel: ObservableObject {
 
     func openConversation(id: String) async -> Bool {
         guard let client else { return false }
+        guard !isSending, !notificationTurnSettlements.isSettling else {
+            errorMessage = "Let this reply finish or stop it before switching conversations."
+            return false
+        }
+        notificationNavigationVersion += 1
+        pendingNotificationDestination = nil
+        let version = notificationNavigationVersion
+        let ownerID = bootstrap?.identity.id
         errorMessage = nil
         // An undo offer belongs to the thread it was made in.
         dismissHiddenMessageUndo()
         do {
-            setActiveConversation(try await client.conversation(id: id))
+            let conversation = try await client.conversation(id: id)
+            guard !Task.isCancelled, version == notificationNavigationVersion,
+                  !isSending, !notificationTurnSettlements.isSettling,
+                  self.client?.configuration == client.configuration,
+                  bootstrap?.identity.id == ownerID else { return false }
+            setActiveConversation(conversation)
             returnToChat()
             return true
         } catch {
+            guard !Task.isCancelled, version == notificationNavigationVersion,
+                  !isSending, !notificationTurnSettlements.isSettling,
+                  self.client?.configuration == client.configuration,
+                  bootstrap?.identity.id == ownerID else { return false }
             reportError(error)
             return false
         }
@@ -868,11 +1125,28 @@ final class AppModel: ObservableObject {
 
     func createConversation() async -> Bool {
         guard let client else { return false }
+        guard !isSending, !notificationTurnSettlements.isSettling else {
+            errorMessage = "Let this reply finish or stop it before creating a conversation."
+            return false
+        }
+        let version = connectionVersion
+        let ownerID = bootstrap?.identity.id
+        notificationNavigationVersion += 1
+        pendingNotificationDestination = nil
+        let navigationVersion = notificationNavigationVersion
         errorMessage = nil
         do {
             let created = try await client.createChat()
+            guard connectionIsCurrent(client, version: version),
+                  !isSending, !notificationTurnSettlements.isSettling,
+                  bootstrap?.identity.id == ownerID,
+                  notificationNavigationVersion == navigationVersion else { return false }
             return await openConversation(id: created.conversationId)
         } catch {
+            guard connectionIsCurrent(client, version: version),
+                  !isSending, !notificationTurnSettlements.isSettling,
+                  bootstrap?.identity.id == ownerID,
+                  notificationNavigationVersion == navigationVersion else { return false }
             reportError(error)
             return false
         }
@@ -909,12 +1183,33 @@ final class AppModel: ObservableObject {
 
     func changeConversationModel(_ modelId: String?) async -> Bool {
         guard let client, let conversationId else { return false }
+        guard !isSending, !notificationTurnSettlements.isSettling else {
+            errorMessage = "Let this reply finish or stop it before changing models."
+            return false
+        }
+        let version = connectionVersion
+        let ownerID = bootstrap?.identity.id
+        let navigationVersion = notificationNavigationVersion
         errorMessage = nil
         do {
             try await client.updateChat(id: conversationId, action: "change-model", modelId: modelId)
-            setActiveConversation(try await client.conversation(id: conversationId))
+            guard connectionIsCurrent(client, version: version), !isSending, !notificationTurnSettlements.isSettling,
+                  bootstrap?.identity.id == ownerID,
+                  self.conversationId == conversationId,
+                  notificationNavigationVersion == navigationVersion else { return false }
+            let updated = try await client.conversation(id: conversationId)
+            guard connectionIsCurrent(client, version: version), !isSending, !notificationTurnSettlements.isSettling,
+                  bootstrap?.identity.id == ownerID,
+                  self.conversationId == conversationId,
+                  notificationNavigationVersion == navigationVersion else { return false }
+            guard updated.conversation.id.lowercased() == conversationId.lowercased() else { throw APIError.invalidResponse }
+            setActiveConversation(updated)
             return true
         } catch {
+            guard connectionIsCurrent(client, version: version), !isSending, !notificationTurnSettlements.isSettling,
+                  bootstrap?.identity.id == ownerID,
+                  self.conversationId == conversationId,
+                  notificationNavigationVersion == navigationVersion else { return false }
             reportError(error)
             return false
         }
@@ -928,6 +1223,8 @@ final class AppModel: ObservableObject {
     func hideMessage(_ message: ChatMessage) async {
         guard let client, let conversationId, message.isDurableLogRow else { return }
         guard let index = messages.firstIndex(where: { $0.id == message.id }) else { return }
+        let version = connectionVersion
+        let ownerID = bootstrap?.identity.id
         let removed = messages.remove(at: index)
         // A row taken out of the log should not keep talking from inside it.
         SpeechPlayer.shared.stop(messageID: message.id)
@@ -937,9 +1234,15 @@ final class AppModel: ObservableObject {
                 messageId: message.id,
                 hidden: true
             )
+            guard connectionVersion == version, self.client?.configuration == client.configuration,
+                  bootstrap?.identity.id == ownerID, self.conversationId == conversationId else { return }
             hiddenMessageUndo = HiddenMessageUndo(messageId: message.id, conversationId: conversationId)
             scheduleHiddenMessageUndoExpiry()
         } catch {
+            // Cancellation still restores an unconfirmed local removal, but
+            // only in the exact owner/session/conversation where it occurred.
+            guard connectionVersion == version, self.client?.configuration == client.configuration,
+                  bootstrap?.identity.id == ownerID, self.conversationId == conversationId else { return }
             // The log is the record; a hide the server never took must not
             // leave a hole in it. Back where it was, by id — an arriving poll
             // may have moved the rows either side of it in the meantime.
@@ -994,7 +1297,7 @@ final class AppModel: ObservableObject {
 
     /// Requests currently out for the workspace projection, so a prefetch never
     /// duplicates the read a screen has just started.
-    private var workspaceRequestsInFlight = 0
+    private var workspaceRequestsInFlight: [Int: Int] = [:]
 
     /// Warm the workspace once the conversation is up. Memory, Settings, Costs,
     /// Skills and the rest all draw on this one large projection, and the first
@@ -1002,31 +1305,46 @@ final class AppModel: ObservableObject {
     /// the heaviest read the app makes. A short delay keeps it behind the
     /// launch-critical requests; a screen that opens first simply wins.
     func prefetchSecondaryScreens() async {
-        guard workspace == nil, workspaceRequestsInFlight == 0 else { return }
+        guard let client, workspace == nil, workspaceRequestsInFlight[connectionVersion, default: 0] == 0 else { return }
+        let version = connectionVersion
         try? await Task.sleep(for: .seconds(1.5))
-        guard !Task.isCancelled, workspace == nil, workspaceRequestsInFlight == 0 else { return }
+        guard connectionIsCurrent(client, version: version),
+              workspace == nil, workspaceRequestsInFlight[version, default: 0] == 0 else { return }
         await refreshWorkspace(reportFailure: false)
     }
 
-    func refreshWorkspace(reportFailure: Bool = true) async {
-        guard let client else { return }
-        workspaceRequestsInFlight += 1
-        defer { workspaceRequestsInFlight -= 1 }
+    @discardableResult
+    func refreshWorkspace(reportFailure: Bool = true) async -> Bool {
+        guard let client else { return false }
+        let version = connectionVersion
+        workspaceRequestsInFlight[version, default: 0] += 1
+        defer {
+            let remaining = workspaceRequestsInFlight[version, default: 1] - 1
+            if remaining == 0 { workspaceRequestsInFlight.removeValue(forKey: version) }
+            else { workspaceRequestsInFlight[version] = remaining }
+        }
         do {
             let loaded = try await client.workspace()
+            guard connectionIsCurrent(client, version: version) else { return false }
             workspace = loaded
             clearRecoveredError(from: .workspace)
             applyMemoryHealth(loaded.memory.health)
+            return true
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return false }
             if reportFailure { reportError(error, source: .workspace) }
+            return false
         }
     }
 
     @discardableResult
     func refreshCards(reportFailure: Bool = true) async -> Bool {
         guard let client else { return false }
+        let version = connectionVersion
         do {
-            savedCards = try await client.cards().cards.map { card in
+            let result = try await client.cards()
+            guard connectionIsCurrent(client, version: version) else { return false }
+            savedCards = result.cards.map { card in
                 var result = card
                 if let marker = cardRefreshMarkers[card.id],
                    marker.holds(revisionId: card.revisionId, updatedAt: card.updatedAt, state: card.refreshState,
@@ -1038,6 +1356,7 @@ final class AppModel: ObservableObject {
             }
             return true
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return false }
             if reportFailure { reportError(error) }
             return false
         }
@@ -1045,8 +1364,9 @@ final class AppModel: ObservableObject {
 
     func refreshSavedCard(id: String) async -> String? {
         guard let client else { return "Connect to your assistant to refresh this card." }
+        let version = connectionVersion
         guard cardsBeingRefreshed.insert(id).inserted else { return "This card is already refreshing." }
-        defer { cardsBeingRefreshed.remove(id) }
+        defer { if connectionVersion == version { cardsBeingRefreshed.remove(id) } }
         let data = messages.lazy.flatMap(\.parts).compactMap { part -> [String: JSONValue]? in
             guard part.type == "data-card", case let .object(data)? = part.data,
                   data["kind"] == .string("generated-card"), data["id"] == .string(id) else { return nil }
@@ -1057,6 +1377,8 @@ final class AppModel: ObservableObject {
             updatedAt: data?["updatedAt"]?.string ?? saved?.updatedAt)
         do {
             let result = try await client.refreshCard(id: id)
+            guard connectionIdentityIsCurrent(client, version: version) else { return "Your connection changed. Check this card on its original assistant." }
+            guard !Task.isCancelled else { return "The refresh could not be confirmed. Try again." }
             guard result.ok else { return "The refresh could not be started. Try again." }
             marker.taskId = result.taskId
             cardRefreshMarkers[id] = marker
@@ -1066,10 +1388,12 @@ final class AppModel: ObservableObject {
                 savedCards[index].refreshError = nil
             }
             await refreshDecisionMessages(refreshingCard: id)
+            guard connectionIsCurrent(client, version: version) else { return nil }
             if !savedCards.isEmpty { await refreshCards(reportFailure: false) }
             return nil
         } catch {
-            return isRequestCancellation(error) ? "The refresh could not be confirmed. Try again." : error.localizedDescription
+            guard connectionIdentityIsCurrent(client, version: version) else { return "Your connection changed. Check this card on its original assistant." }
+            return Task.isCancelled || isRequestCancellation(error) ? "The refresh could not be confirmed. Try again." : error.localizedDescription
         }
     }
 
@@ -1250,12 +1574,15 @@ final class AppModel: ObservableObject {
             errorMessage = "Connect to your assistant before reporting an issue."
             return false
         }
+        let version = connectionVersion
         errorMessage = nil
         do {
             try await client.reportRepair(title: title, summary: summary, sourceTaskId: sourceTaskId)
+            guard connectionIsCurrent(client, version: version) else { return false }
             await refreshWorkspace(reportFailure: false)
-            return true
+            return connectionIsCurrent(client, version: version)
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return false }
             reportError(error)
             return false
         }
@@ -1263,38 +1590,48 @@ final class AppModel: ObservableObject {
 
     func updateRepair(_ issue: WorkspaceRepairIssue, action: String) async -> Bool {
         guard let client else { return false }
+        let version = connectionVersion
         errorMessage = nil
         do {
             try await client.updateRepair(id: issue.id, action: action)
+            guard connectionIsCurrent(client, version: version) else { return false }
             await refreshWorkspace(reportFailure: false)
-            return true
+            return connectionIsCurrent(client, version: version)
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return false }
             reportError(error)
             return false
         }
     }
 
-    func updateImprovement(_ improvement: WorkspaceImprovement, action: String) async -> Bool {
-        guard let client else { return false }
+    func updateImprovement(_ improvement: WorkspaceImprovement, action: String) async -> ImprovementDecisionResult? {
+        guard let client else { return nil }
+        let version = connectionVersion
         errorMessage = nil
         do {
-            try await client.updateImprovement(id: improvement.id, action: action)
+            let result = try await client.updateImprovement(id: improvement.id, action: action)
+            guard connectionIsCurrent(client, version: version) else { return nil }
             await refreshWorkspace(reportFailure: false)
-            return true
+            return connectionIsCurrent(client, version: version) ? result : nil
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return nil }
+            guard !(error is CancellationError), !Task.isCancelled else { return nil }
             reportError(error)
-            return false
+            return ImprovementDecisionResult(ok: false, detail: errorMessage)
         }
     }
 
     func updateAgentSettings(_ mutation: AgentSettingsMutation) async -> Bool {
         guard let client else { return false }
+        let version = connectionVersion
         errorMessage = nil
         do {
             try await client.updateSettings(mutation)
+            guard connectionIsCurrent(client, version: version) else { return false }
             await refreshWorkspace(reportFailure: false)
-            return true
+            return connectionIsCurrent(client, version: version)
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return false }
             reportError(error)
             return false
         }
@@ -1302,12 +1639,15 @@ final class AppModel: ObservableObject {
 
     func setSchedule(_ schedule: WorkspaceSchedule, enabled: Bool) async -> Bool {
         guard let client else { return false }
+        let version = connectionVersion
         errorMessage = nil
         do {
             try await client.setScheduleEnabled(id: schedule.id, enabled: enabled)
+            guard connectionIsCurrent(client, version: version) else { return false }
             await refreshWorkspace(reportFailure: false)
-            return true
+            return connectionIsCurrent(client, version: version)
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return false }
             reportError(error)
             return false
         }
@@ -1315,12 +1655,15 @@ final class AppModel: ObservableObject {
 
     func deleteReminder(_ reminder: WorkspaceReminder) async -> Bool {
         guard let client else { return false }
+        let version = connectionVersion
         errorMessage = nil
         do {
             try await client.deleteReminder(id: reminder.id)
+            guard connectionIsCurrent(client, version: version) else { return false }
             await refreshWorkspace(reportFailure: false)
-            return true
+            return connectionIsCurrent(client, version: version)
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return false }
             reportError(error)
             return false
         }
@@ -1328,12 +1671,15 @@ final class AppModel: ObservableObject {
 
     func setPolicy(_ policy: WorkspacePolicy, enabled: Bool) async -> Bool {
         guard let client else { return false }
+        let version = connectionVersion
         errorMessage = nil
         do {
             try await client.setPolicyEnabled(id: policy.id, enabled: enabled)
+            guard connectionIsCurrent(client, version: version) else { return false }
             await refreshWorkspace(reportFailure: false)
-            return true
+            return connectionIsCurrent(client, version: version)
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return false }
             reportError(error)
             return false
         }
@@ -1341,83 +1687,95 @@ final class AppModel: ObservableObject {
 
     func deletePolicy(_ policy: WorkspacePolicy) async -> Bool {
         guard let client else { return false }
+        let version = connectionVersion
         errorMessage = nil
         do {
             try await client.deletePolicy(id: policy.id)
+            guard connectionIsCurrent(client, version: version) else { return false }
             await refreshWorkspace(reportFailure: false)
-            return true
+            return connectionIsCurrent(client, version: version)
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return false }
             reportError(error)
             return false
         }
     }
 
-    func refreshMcpConnections() async {
-        guard let client else { return }
+    @discardableResult
+    func refreshMcpConnections() async -> Bool {
+        guard let client else { return false }
+        let version = connectionVersion
         do {
-            mcpConnections = try await client.mcpConnections().connections
+            let response = try await client.mcpConnections()
+            guard connectionIsCurrent(client, version: version) else { return false }
+            mcpConnections = response.connections
+            return true
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return false }
             reportError(error)
+            return false
         }
     }
 
     func createMcpConnection(name: String, endpoint: String, bearerToken: String?) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
-            try await client.createMcpConnection(name: name, endpoint: endpoint, bearerToken: bearerToken)
-            await refreshMcpConnections()
-            return true
-        } catch {
-            reportError(error)
-            return false
+        await mcpConnectionMutation {
+            try await $0.createMcpConnection(name: name, endpoint: endpoint, bearerToken: bearerToken)
         }
     }
 
     func updateMcpConnection(id: String, action: String) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
-            try await client.updateMcpConnection(id: id, action: action)
-            await refreshMcpConnections()
-            return true
-        } catch {
-            reportError(error)
-            return false
-        }
+        await mcpConnectionMutation { try await $0.updateMcpConnection(id: id, action: action) }
     }
 
     func deleteMcpConnection(id: String) async -> Bool {
+        await mcpConnectionMutation { try await $0.deleteMcpConnection(id: id) }
+    }
+
+    private func mcpConnectionMutation(_ operation: (APIClient) async throws -> Void) async -> Bool {
         guard let client else { return false }
+        let version = connectionVersion
         errorMessage = nil
         do {
-            try await client.deleteMcpConnection(id: id)
+            try await operation(client)
+            guard connectionIsCurrent(client, version: version) else { return false }
             await refreshMcpConnections()
-            return true
+            return connectionIsCurrent(client, version: version)
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return false }
             reportError(error)
             return false
         }
     }
 
-    func refreshModelProviders() async {
-        guard let client else { return }
+    @discardableResult
+    func refreshModelProviders() async -> Bool {
+        guard let client else { return false }
+        let version = connectionVersion
         do {
-            modelProviders = try await client.modelProviders()
+            let response = try await client.modelProviders()
+            guard connectionIsCurrent(client, version: version) else { return false }
+            modelProviders = response
+            return true
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return false }
             reportError(error)
+            return false
         }
     }
 
     /// Saves the connection, then returns the models it offers (or why the test failed).
     func connectModelProvider(_ input: ModelConnectionInput) async -> ProviderConnectResult? {
         guard let client else { return nil }
+        let version = connectionVersion
         errorMessage = nil
         do {
             let result = try await client.connectModelProvider(input)
+            guard connectionIsCurrent(client, version: version) else { return nil }
             await refreshModelProviders()
+            guard connectionIsCurrent(client, version: version) else { return nil }
             return result
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return nil }
             reportError(error)
             return nil
         }
@@ -1425,13 +1783,19 @@ final class AppModel: ObservableObject {
 
     func testModelProvider(id: String) async -> [ProviderModelListing]? {
         guard let client else { return nil }
+        let version = connectionVersion
         errorMessage = nil
         do {
             let result = try await client.testModelProvider(id: id)
+            guard connectionIsCurrent(client, version: version) else { return nil }
             await refreshModelProviders()
+            guard connectionIsCurrent(client, version: version) else { return nil }
             return result.models
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return nil }
+            guard connectionIsCurrent(client, version: version) else { return nil }
             await refreshModelProviders()
+            guard connectionIsCurrent(client, version: version) else { return nil }
             reportError(error)
             return nil
         }
@@ -1518,12 +1882,15 @@ final class AppModel: ObservableObject {
 
     private func modelProviderMutation(_ work: (APIClient) async throws -> Void) async -> Bool {
         guard let client else { return false }
+        let version = connectionVersion
         errorMessage = nil
         do {
             try await work(client)
+            guard connectionIsCurrent(client, version: version) else { return false }
             await refreshModelProviders()
-            return true
+            return connectionIsCurrent(client, version: version)
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return false }
             reportError(error)
             return false
         }
@@ -1617,9 +1984,13 @@ final class AppModel: ObservableObject {
 
     func voiceProfile() async -> VoiceProfileResponse? {
         guard let client else { return nil }
+        let version = connectionVersion
         do {
-            return try await client.voiceProfile()
+            let response = try await client.voiceProfile()
+            guard connectionIsCurrent(client, version: version) else { return nil }
+            return response
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return nil }
             reportError(error)
             return nil
         }
@@ -1627,12 +1998,15 @@ final class AppModel: ObservableObject {
 
     func saveVoiceProfile(_ profile: VoiceProfileMutation) async -> Bool {
         guard let client else { return false }
+        let version = connectionVersion
         errorMessage = nil
         do {
             try await client.updateVoiceProfile(profile)
+            guard connectionIsCurrent(client, version: version) else { return false }
             await refreshWorkspace(reportFailure: false)
-            return true
+            return connectionIsCurrent(client, version: version)
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return false }
             reportError(error)
             return false
         }
@@ -1640,12 +2014,15 @@ final class AppModel: ObservableObject {
 
     func forgetLongTermMemory() async -> Bool {
         guard let client else { return false }
+        let version = connectionVersion
         errorMessage = nil
         do {
             try await client.forgetLongTermMemory()
+            guard connectionIsCurrent(client, version: version) else { return false }
             await refreshWorkspace(reportFailure: false)
-            return true
+            return connectionIsCurrent(client, version: version)
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return false }
             reportError(error)
             return false
         }
@@ -1656,19 +2033,22 @@ final class AppModel: ObservableObject {
     /// taken so a folder of them stays readable.
     func exportMemoryFile() async -> URL? {
         guard let client else { return nil }
+        let version = connectionVersion
         errorMessage = nil
         do {
             let data = try await client.memoryExport()
+            guard connectionIsCurrent(client, version: version) else { return nil }
             let day = ISO8601DateFormatter.string(
                 from: Date(),
                 timeZone: .current,
                 formatOptions: [.withFullDate]
             )
             let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("assistant-long-term-memory-\(day).json")
+                .appendingPathComponent("assistant-long-term-memory-\(day)-\(UUID().uuidString).json")
             try data.write(to: url, options: .atomic)
             return url
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return nil }
             reportError(error)
             return nil
         }
@@ -1715,28 +2095,42 @@ final class AppModel: ObservableObject {
 
     func loadPeople() async {
         guard let client else { return }
+        let version = connectionVersion
         do {
-            people = try await client.people().people
+            let response = try await client.people()
+            guard connectionIsCurrent(client, version: version) else { return }
+            people = response.people
             peopleLoaded = true
         } catch where isRequestCancellation(error) {
             return
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return }
             reportError(error)
         }
     }
 
     func loadPersonCard(id: String) async {
         guard let client else { return }
-        do { personCards[id] = try await client.personCard(id: id) }
+        let version = connectionVersion
+        do {
+            let response = try await client.personCard(id: id)
+            guard connectionIsCurrent(client, version: version) else { return }
+            personCards[id] = response
+        }
         catch where isRequestCancellation(error) { return }
-        catch { reportError(error) }
+        catch { if connectionIsCurrent(client, version: version) { reportError(error) } }
     }
 
     func loadPersonProfile(id: String) async {
         guard let client else { return }
-        do { personProfiles[id] = try await client.personProfile(id: id) }
+        let version = connectionVersion
+        do {
+            let response = try await client.personProfile(id: id)
+            guard connectionIsCurrent(client, version: version) else { return }
+            personProfiles[id] = response
+        }
         catch where isRequestCancellation(error) { return }
-        catch { reportError(error) }
+        catch { if connectionIsCurrent(client, version: version) { reportError(error) } }
     }
 
     func addOccasion(personId: String, mutation: OccasionMutation, occasionId: String? = nil) async -> Bool {
@@ -1824,7 +2218,8 @@ final class AppModel: ObservableObject {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isSending,
               let client,
-              let conversationId else { return }
+              let conversationId, let draftScope = composerDraftScope else { return }
+        let version = connectionVersion
 
         let autonomous = override ?? nextMessageAutonomous
         nextMessageAutonomous = false
@@ -1857,6 +2252,8 @@ final class AppModel: ObservableObject {
                 thought: .thinking,
                 detail: text
             )
+            guard self.connectionIsCurrent(client, version: version),
+                  self.conversationId == conversationId else { return }
             do {
                 let receipt = try await client.sendMessage(
                     conversationId: conversationId,
@@ -1865,23 +2262,28 @@ final class AppModel: ObservableObject {
                     force: force,
                     spoken: spoken,
                     onDelta: { [weak self] delta in
-                        guard let self else { return }
-                        await self.receive(delta: delta, streamID: streamID)
+                        await self?.receive(delta: delta, streamID: streamID, client: client,
+                            version: version, conversationId: conversationId)
                     },
                     onCue: { [weak self] part in
-                        guard let self else { return }
-                        await self.append(cue: part, to: streamID)
+                        await self?.receive(cue: part, streamID: streamID, client: client,
+                            version: version, conversationId: conversationId)
                     }
                 )
+                guard self.connectionIsCurrent(client, version: version),
+                      self.conversationId == conversationId else { return }
                 if receipt.taskId != nil {
                     self.messages.removeAll { $0.id == streamID }
                     await self.publishThought(.startingWork, detail: text)
                 }
+                guard self.connectionIsCurrent(client, version: version),
+                      self.conversationId == conversationId else { return }
                 if let receiptCursor = receipt.cursor { self.cursor = receiptCursor }
                 self.resumableTurn = (taskId: receipt.taskId, streamID: streamID)
                 await self.pollForReply(taskId: receipt.taskId, streamID: streamID)
             } catch where isRequestCancellation(error) {
-                guard !Task.isCancelled else { return }
+                guard self.connectionIsCurrent(client, version: version),
+                      self.conversationId == conversationId else { return }
                 // A cancelled socket is not evidence the send failed. Recover
                 // via the saved cursor; never replay the message POST.
                 await self.pollForReply(taskId: self.resumableTurn?.taskId, streamID: streamID)
@@ -1890,12 +2292,17 @@ final class AppModel: ObservableObject {
                 // URLError.cancelled rather than CancellationError, so a turn
                 // stopped from the composer would otherwise surface as an error
                 // banner. cancelSend owns the UI state in that case.
-                guard !Task.isCancelled else { return }
+                guard self.connectionIsCurrent(client, version: version),
+                      self.conversationId == conversationId else { return }
                 self.messages.removeAll { $0.id == streamID && $0.text.isEmpty }
                 // The composer cleared the draft when it sent; a failed turn
                 // gives the words back rather than losing them to the failure.
                 self.restorableDraft = text
+                self.conversationDrafts.preserveUnsent(text, in: draftScope)
+                self.composerRecoveryRevision += 1
                 self.reportError(error)
+                let settlement = self.notificationTurnSettlements.begin()
+                defer { self.notificationTurnSettlements.finish(settlement) }
                 self.isSending = false
                 self.resumableTurn = nil
                 self.setActivityThought(.stopped, proposedDetail: error.localizedDescription)
@@ -1904,7 +2311,11 @@ final class AppModel: ObservableObject {
                     detail: error.localizedDescription,
                     succeeded: false
                 )
+                guard self.connectionIsCurrent(client, version: version),
+                      self.conversationId == conversationId else { return }
                 self.clearThought(after: 4)
+                self.notificationTurnSettlements.finish(settlement)
+                await self.resolvePendingNotificationDestination()
             }
         }
     }
@@ -1987,6 +2398,8 @@ final class AppModel: ObservableObject {
         refreshingWorkspace: Bool = false,
         operation: () async throws -> ApprovalResult
     ) async -> Bool {
+        guard let client else { return false }
+        let version = connectionVersion
         errorMessage = nil
         approvalsBeingDecided.insert(id)
         let removed = optimisticallyResolveApproval(id: id)
@@ -1995,9 +2408,13 @@ final class AppModel: ObservableObject {
         // activity is a round-trip to the system, and it used to sit in front
         // of the POST, which made every tap feel as slow as the Island is.
         // The manager serialises its own work, so firing it here is safe.
-        Task { [weak self] in await self?.syncApprovalSurfaces() }
+        Task { [weak self] in
+            guard let self, self.connectionIsCurrent(client, version: version) else { return }
+            await self.syncApprovalSurfaces()
+        }
         do {
             let result = try await operation()
+            guard connectionIsCurrent(client, version: version) else { return false }
             guard result.ok else { throw APIError.server(status: 409, message: "The approval decision was not accepted.") }
             setDecisionStatus(id: id, status: status)
             approvalsBeingDecided.remove(id)
@@ -2008,9 +2425,13 @@ final class AppModel: ObservableObject {
             scheduleApprovalReconciliation(refreshingWorkspace: refreshingWorkspace)
             return true
         } catch {
+            guard connectionIsCurrent(client, version: version) else { return false }
             approvalsBeingDecided.remove(id)
             if let removed { restorePendingApproval(removed) }
-            Task { [weak self] in await self?.syncApprovalSurfaces() }
+            Task { [weak self] in
+                guard let self, self.connectionIsCurrent(client, version: version) else { return }
+                await self.syncApprovalSurfaces()
+            }
             reportError(error)
             return false
         }
@@ -2020,16 +2441,18 @@ final class AppModel: ObservableObject {
         // Chained, not replaced: two quick decisions each get their re-read, and
         // a standing approval's Settings refresh is never cancelled by the next tap.
         let previous = approvalReconciliation
+        guard let client else { return }
+        let version = connectionVersion
         approvalReconciliation = Task { [weak self] in
             await previous?.value
-            guard let self, !Task.isCancelled else { return }
+            guard let self, self.connectionIsCurrent(client, version: version) else { return }
             async let inbox: Void = self.refreshOverview(reportFailure: false)
             async let decisions: Void = self.refreshDecisionMessages()
             // A standing approval adds a rule to Settings. That is the heaviest
             // read the app makes and nothing on the approval screen waits on it.
-            async let workspace: Void = refreshingWorkspace
+            async let workspace: Bool = refreshingWorkspace
                 ? self.refreshWorkspace(reportFailure: false)
-                : ()
+                : false
             _ = await (inbox, decisions, workspace)
         }
     }
@@ -2099,10 +2522,13 @@ final class AppModel: ObservableObject {
     /// there is nothing to say.
     func decideSuggestion(id: String, decision: SuggestionDecision) async -> String? {
         guard let client else { return "Connect to your assistant to answer this." }
+        let version = connectionVersion
         guard suggestionsBeingAnswered.insert(id).inserted else { return "Your answer is still being saved." }
-        defer { suggestionsBeingAnswered.remove(id) }
+        defer { if connectionVersion == version { suggestionsBeingAnswered.remove(id) } }
         do {
             let result = try await client.decideSuggestion(id: id, decision: decision)
+            guard connectionIdentityIsCurrent(client, version: version) else { return "Your connection changed. Check this suggestion on its original assistant." }
+            guard !Task.isCancelled else { return "Your answer could not be confirmed. Try again." }
             guard result.ok else {
                 throw APIError.server(status: 409, message: "This suggestion could not be updated.")
             }
@@ -2110,16 +2536,18 @@ final class AppModel: ObservableObject {
                 ? result.snoozedUntil.flatMap {
                     ISO8601DateFormatter.assistant.date(from: $0)
                         ?? AssistantFormatters.internetDateTime.date(from: $0)
-                } ?? Date().addingTimeInterval(24 * 3600)
+                }
                 : nil
             setSuggestionAnswer(.init(decision: decision, taskId: result.taskId, snoozedUntil: snoozedUntil), for: id)
             // Accepting creates work. Activity should already have it by the
             // time the owner goes looking.
             if decision == .accepted { await refreshOverview(reportFailure: false) }
+            guard connectionIsCurrent(client, version: version) else { return nil }
             await refreshDecisionMessages(answeringSuggestion: id)
             return nil
         } catch {
-            return isRequestCancellation(error)
+            guard connectionIdentityIsCurrent(client, version: version) else { return "Your connection changed. Check this suggestion on its original assistant." }
+            return Task.isCancelled || isRequestCancellation(error)
                 ? "Your answer could not be confirmed. Try again."
                 : error.localizedDescription
         }
@@ -2127,7 +2555,7 @@ final class AppModel: ObservableObject {
 
     private func setSuggestionAnswer(_ answer: SuggestionAnswer, for id: String) {
         suggestionAnswers[id] = answer
-        messages = messages.map { $0.applyingSuggestionAnswers([id: answer]) }
+        messages = messages.map { $0.applyingSuggestionAnswers([id: answer], acknowledging: true) }
     }
 
     /// Every read of the log passes through here, so an answer given on this
@@ -2146,6 +2574,7 @@ final class AppModel: ObservableObject {
     /// plenty of settled ones that must not crowd approvals out of the ten.
     private func refreshDecisionMessages(answeringSuggestion suggestionId: String? = nil, refreshingCard cardId: String? = nil) async {
         guard let client, let conversationId else { return }
+        let version = connectionVersion
         let targets = messages.reversed().filter { message in
             (suggestionId != nil && message.suggestionParts.contains { $0.suggestionId == suggestionId })
                 || (cardId != nil && message.parts.contains { part in
@@ -2158,7 +2587,8 @@ final class AppModel: ObservableObject {
         let ids = (targets + decisions).map(\.id).filter { seen.insert($0).inserted }.prefix(10)
         guard !ids.isEmpty else { return }
         guard let updates = try? await client.updates(conversationId: conversationId, taskId: nil,
-            cursor: cursor, refreshIds: Array(ids)), self.conversationId == conversationId else { return }
+            cursor: cursor, refreshIds: Array(ids)), connectionIsCurrent(client, version: version),
+            self.conversationId == conversationId else { return }
         merge(updates.refreshed)
     }
 
@@ -2168,6 +2598,7 @@ final class AppModel: ObservableObject {
         pollTask?.cancel()
         pollTask = nil
         resumableTurn = nil
+        let settlement = notificationTurnSettlements.begin()
         isSending = false
         // Stopping a turn stops its voice too — a reply the owner cut off
         // should not carry on talking.
@@ -2182,6 +2613,8 @@ final class AppModel: ObservableObject {
                 detail: detail,
                 succeeded: false
             )
+            notificationTurnSettlements.finish(settlement)
+            await resolvePendingNotificationDestination()
         }
         clearThought(after: 2)
     }
@@ -2224,6 +2657,14 @@ final class AppModel: ObservableObject {
 #endif
 
     private func apply(_ response: BootstrapResponse, preservingLocalMessages: Bool = false) {
+        let changedOwner = bootstrap.map { $0.identity.id != response.identity.id } ?? false
+        if changedOwner {
+            // An installation can be replaced behind the same URL and key.
+            // Authentication of the new bootstrap does not make old private
+            // caches or delayed responses belong to the new identity.
+            connectionVersion += 1
+            resetConnectedState()
+        }
         bootstrap = response
         applyMemoryHealth(response.shell.memoryHealth)
         if activeConversation == nil
@@ -2239,6 +2680,7 @@ final class AppModel: ObservableObject {
         if !isSending, activityThought == nil || activityThought == .backgroundWork || activityThought == .needsYou {
             setActivityThought(baselineThought, proposedDetail: baselineDetail(for: baselineThought))
         }
+        if changedOwner, isSceneActive { startIdlePolling() }
     }
 
     /// The badge appears in the chat directory while review mutations refresh
@@ -2250,6 +2692,7 @@ final class AppModel: ObservableObject {
     }
 
     private func setActiveConversation(_ conversation: ConversationView) {
+        stopIdlePolling()
         // Another conversation's reply has no business still being read here.
         stopSpeaking()
         activeConversation = conversation
@@ -2259,11 +2702,18 @@ final class AppModel: ObservableObject {
         messages = logOrder.ordered(conversation.messages.map { withLocalDecisions($0) })
         toolActivity = []
         activityThought = nil
+        if isSceneActive { startIdlePolling() }
     }
 
-    private func receive(delta: String, streamID: String) async {
+    private func receive(delta: String, streamID: String, client: APIClient, version: Int, conversationId: String) async {
+        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
         append(delta: delta, to: streamID)
         await publishThought(.replying, detail: "Writing a response")
+    }
+
+    private func receive(cue: MessagePart, streamID: String, client: APIClient, version: Int, conversationId: String) {
+        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+        append(cue: cue, to: streamID)
     }
 
     private func append(delta: String, to id: String) {
@@ -2337,6 +2787,7 @@ final class AppModel: ObservableObject {
 
     private func pollForReply(taskId: String?, streamID: String) async {
         guard let client, let conversationId else { return }
+        let version = connectionVersion
         let settled = Set(["done", "failed", "cancelled", "waiting_approval", "waiting_budget", "needs_attention"])
         let attention = Set(["waiting_approval", "waiting_budget", "needs_attention"])
         var grace = 0
@@ -2350,11 +2801,11 @@ final class AppModel: ObservableObject {
         var gapMilliseconds: Int64 = 0
         while Date() < deadline {
             attempt += 1
-            if Task.isCancelled { return }
+            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
             if gapMilliseconds > 0 {
                 try? await Task.sleep(for: .milliseconds(gapMilliseconds))
             }
-            if Task.isCancelled { return }
+            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
             do {
                 let startedAt = Date()
                 let updates = try await client.updates(
@@ -2364,6 +2815,7 @@ final class AppModel: ObservableObject {
                     refreshIds: unresolvedDecisionMessageIDs,
                     waitMilliseconds: PollingPolicy.holdMilliseconds
                 )
+                guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
                 let elapsedMilliseconds = Int64(Date().timeIntervalSince(startedAt) * 1_000)
                 let assistantBefore = messages.filter { !$0.id.hasPrefix("stream-") && $0.role == .assistant }.count
                 merge(updates.messages)
@@ -2376,6 +2828,7 @@ final class AppModel: ObservableObject {
                         detail: "Step \(latestTool.step)"
                     )
                 }
+                guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
                 if let nextCursor = updates.nextCursor { cursor = nextCursor }
                 let assistantAfter = messages.filter { !$0.id.hasPrefix("stream-") && $0.role == .assistant }.count
                 gapMilliseconds = PollingPolicy.gapMilliseconds(
@@ -2402,7 +2855,7 @@ final class AppModel: ObservableObject {
             } catch {
                 // Same as above: a poll interrupted by cancelSend must not
                 // report itself as a failure.
-                if Task.isCancelled { return }
+                guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
                 // A failed poll never held anything, so fall back to the timed
                 // cadence rather than retrying as fast as the network allows.
                 gapMilliseconds = PollingPolicy.replyIntervalMilliseconds(
@@ -2416,15 +2869,20 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
         toolActivity = []
+        let settlement = notificationTurnSettlements.begin()
+        defer { notificationTurnSettlements.finish(settlement) }
         isSending = false
         resumableTurn = nil
         await refreshOverview(reportFailure: false)
+        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
         // A completed turn may have created or cancelled a reminder. Refresh
         // the secondary workspace projection at the same authoritative
         // boundary as the overview so More → Reminders cannot show a stale
         // inventory after returning from Chat.
         await refreshWorkspace(reportFailure: false)
+        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
 
         let reply = messages.reversed().first(where: { $0.role == .assistant && !$0.text.isEmpty })?.text
         if let finalStatus, attention.contains(finalStatus) {
@@ -2436,6 +2894,7 @@ final class AppModel: ObservableObject {
                 detail: summary,
                 pendingCount: pendingApprovalCount
             )
+            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
             _ = await notifyOnce(
                 key: "\(taskId ?? streamID)-\(finalStatus)",
                 title: "\(agentName) needs you",
@@ -2443,6 +2902,7 @@ final class AppModel: ObservableObject {
                 route: .approvals,
                 approvalId: pendingApproval?.id
             )
+            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
             await syncNotificationBadge()
         } else {
             let succeeded = finalStatus != "failed" && finalStatus != "cancelled"
@@ -2455,13 +2915,18 @@ final class AppModel: ObservableObject {
                 body: succeeded ? "Your result is ready." : "Open the conversation for details.",
                 route: .chat
             )
+            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
             await LiveActivityManager.shared.finish(
                 thought: thought,
                 detail: detail,
                 succeeded: succeeded
             )
+            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
             clearThought(after: succeeded ? 1.8 : 4)
         }
+        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+        notificationTurnSettlements.finish(settlement)
+        await resolvePendingNotificationDestination()
     }
 
     /// The merge above can only add or replace by id. A state row delivered by
@@ -2500,8 +2965,14 @@ final class AppModel: ObservableObject {
         messages = logOrder.ordered(messages)
     }
 
-    private func startIdlePolling() {
+    private func stopIdlePolling() {
+        idlePollingVersion += 1
         idleTask?.cancel()
+        idleTask = nil
+    }
+
+    private func startIdlePolling() {
+        stopIdlePolling()
         idleTask = Task { [weak self] in
             var unchangedPolls = 0
             // The server holds this poll open, so the sleep below is only the
@@ -2513,47 +2984,8 @@ final class AppModel: ObservableObject {
                     try? await Task.sleep(for: .seconds(gapSeconds))
                 }
                 guard !Task.isCancelled, let self, self.isSceneActive else { return }
-                guard !self.isSending,
-                      let client = self.client,
-                      let conversationId = self.conversationId else {
-                    unchangedPolls += 1
-                    gapSeconds = PollingPolicy.idleIntervalSeconds(unchangedPolls: unchangedPolls)
-                    continue
-                }
                 let startedAt = Date()
-                if let updates = try? await client.updates(
-                    conversationId: conversationId,
-                    taskId: nil,
-                    cursor: self.cursor,
-                    refreshIds: self.unresolvedDecisionMessageIDs,
-                    waitMilliseconds: PollingPolicy.holdMilliseconds
-                ) {
-                    let changed = !updates.messages.isEmpty || !updates.refreshed.isEmpty ||
-                        !(updates.superseded?.isEmpty ?? true)
-                    let assistantBefore = self.messages.filter { $0.role == .assistant }.count
-                    let decisionsBefore = self.openDecisionSignature
-                    self.merge(updates.messages)
-                    self.merge(updates.refreshed)
-                    self.removeSuperseded(updates.superseded)
-                    if let cursor = updates.nextCursor { self.cursor = cursor }
-                    // The Island, the badge and the Approvals list all read the
-                    // overview, and nothing but a foreground or a local tap ever
-                    // refreshed it. A decision parked or settled elsewhere — the
-                    // web, an SMS reply, an expiry — reached the chat here and
-                    // stopped, so the phone kept asking for something already
-                    // answered until the app was next reopened.
-                    if self.openDecisionSignature != decisionsBefore {
-                        Task { [weak self] in await self?.refreshOverview(reportFailure: false) }
-                    }
-                    let assistantAfter = self.messages.filter { $0.role == .assistant }.count
-                    if assistantAfter > assistantBefore,
-                       self.messages.contains(where: { $0.role == .assistant && !$0.text.isEmpty }) {
-                        await NotificationManager.shared.schedule(
-                            title: "\(self.agentName) replied",
-                            body: "A new response is ready.",
-                            route: .chat
-                        )
-                    }
+                if let changed = await self.refreshIdleConversation() {
                     unchangedPolls = changed ? 0 : unchangedPolls + 1
                     gapSeconds = PollingPolicy.idleGapSeconds(
                         elapsedMilliseconds: Int64(Date().timeIntervalSince(startedAt) * 1_000),
@@ -2566,6 +2998,59 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    /// One held idle read, fenced to its original thread, owner, and cursor.
+    /// Cancellation can race a completed URLSession response, so cancelling
+    /// the task alone is insufficient to protect a newly opened conversation.
+    @discardableResult
+    func refreshIdleConversation() async -> Bool? {
+        guard !Task.isCancelled, isSceneActive, !isSending,
+              !notificationTurnSettlements.isSettling,
+              let client, let conversationId, let ownerID = bootstrap?.identity.id else { return nil }
+        let version = idlePollingVersion
+        let requestCursor = cursor
+        let notificationTitle = "\(agentName) replied"
+        guard let updates = try? await client.updates(
+            conversationId: conversationId,
+            taskId: nil,
+            cursor: requestCursor,
+            refreshIds: unresolvedDecisionMessageIDs,
+            waitMilliseconds: PollingPolicy.holdMilliseconds
+        ) else { return nil }
+        guard !Task.isCancelled, isSceneActive, !isSending,
+              !notificationTurnSettlements.isSettling,
+              idlePollingVersion == version,
+              self.client?.configuration == client.configuration,
+              self.conversationId == conversationId,
+              bootstrap?.identity.id == ownerID,
+              cursor == requestCursor else { return nil }
+
+        let changed = !updates.messages.isEmpty || !updates.refreshed.isEmpty ||
+            !(updates.superseded?.isEmpty ?? true)
+        let assistantBefore = messages.filter { $0.role == .assistant }.count
+        let decisionsBefore = openDecisionSignature
+        merge(updates.messages)
+        merge(updates.refreshed)
+        removeSuperseded(updates.superseded)
+        if let cursor = updates.nextCursor { self.cursor = cursor }
+        // Decisions resolved elsewhere must refresh the Island, badge, and
+        // inbox as well as the retained receipt in this conversation.
+        if openDecisionSignature != decisionsBefore {
+            Task { [weak self] in await self?.refreshOverview(reportFailure: false) }
+        }
+        let assistantAfter = messages.filter { $0.role == .assistant }.count
+        if assistantAfter > assistantBefore,
+           messages.contains(where: { $0.role == .assistant && !$0.text.isEmpty }) {
+            await NotificationManager.shared.schedule(
+                title: notificationTitle,
+                body: "A new response is ready.",
+                route: .chat,
+                agentID: ownerID,
+                conversationID: conversationId
+            )
+        }
+        return changed
     }
 
     /// Which messages still hold an open decision, and how many each. A change
@@ -2595,7 +3080,8 @@ final class AppModel: ObservableObject {
     private func notifyOnce(key: String, title: String, body: String, route: AssistantRoute?, approvalId: String? = nil) async -> Bool {
         guard key != lastNotifiedTaskState else { return false }
         lastNotifiedTaskState = key
-        return await NotificationManager.shared.schedule(title: title, body: body, route: route, approvalId: approvalId)
+        return await NotificationManager.shared.schedule(title: title, body: body, route: route,
+            approvalId: approvalId, agentID: bootstrap?.identity.id, conversationID: conversationId)
     }
 
     /// The app icon badge tracks exactly one thing: decisions waiting on the
@@ -2628,7 +3114,7 @@ final class AppModel: ObservableObject {
         thoughtClearTask?.cancel()
         thoughtClearTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
-            guard let self,
+            guard !Task.isCancelled, let self,
                   self.activityThought == settledThought,
                   self.activityDetail == settledDetail else { return }
             self.setActivityThought(

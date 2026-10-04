@@ -138,7 +138,13 @@ describe.skipIf(!localEmulator)(
 
     it('applies model routing changes and fails closed for foreign proposals and erasure', async () => {
       await store.doc('modelRoles', 'reason').set({ role: 'reason', primaryModel: 'old/model' });
-      await store.doc('models', 'new/model').set({ id: 'new/model', enabled: true });
+      await store.doc('models', 'new/model').set({
+        id: 'new/model',
+        enabled: true,
+        promptCostPerMTok: '0',
+        completionCostPerMTok: '0',
+        capabilities: {},
+      });
       const routingId = await seed('model_role', agentId, {
         role: 'reason',
         primaryModel: 'new/model',

@@ -37,7 +37,7 @@ beforeEach(() => {
 });
 it('shows mobile access immediately and sends only a masked credential', async () => {
   const html = renderToStaticMarkup(await SettingsPage());
-  expect(html).toContain('Mobile API access token');
+  expect(html).toContain('Mobile app connection');
   expect(html).toContain('https://bot.bmson.com');
   expect(html).toContain('abcdef…1234');
   expect(html).not.toContain('secret-token');

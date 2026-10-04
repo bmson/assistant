@@ -150,15 +150,31 @@ const OPENROUTER_OPTIONAL_REASONING = new Set([
   'moonshotai/kimi-k2.5',
   'moonshotai/kimi-k2.6',
   'moonshotai/kimi-k3',
+  // Catalog checked 2026-10-02: Luna supports `none`; Sol requires reasoning.
+  'openai/gpt-6-luna',
 ]);
 
-export function createOpenRouterModelProvider(apiKey: string): ModelProvider {
+export interface OpenRouterModelProviderOptions {
+  /** USD per million tokens. Used by isolated evaluations to bound upstream prices. */
+  maxPrice?: { prompt: number; completion: number; request?: number };
+}
+
+export function createOpenRouterModelProvider(
+  apiKey: string,
+  options: OpenRouterModelProviderOptions = {},
+): ModelProvider {
+  if (
+    options.maxPrice &&
+    Object.values(options.maxPrice).some((price) => !Number.isFinite(price) || price < 0)
+  ) {
+    throw new Error('OpenRouter price ceilings must be finite nonnegative rates');
+  }
   const provider = createOpenRouter({ apiKey });
   return {
     kind: 'openrouter',
     assertModelId: assertOpenRouterModelId,
     canDisableReasoning: (modelId) => OPENROUTER_OPTIONAL_REASONING.has(modelId),
-    chat(modelId, options) {
+    chat(modelId, callOptions) {
       assertOpenRouterModelId(modelId);
       return provider.chat(modelId, {
         provider: {
@@ -171,7 +187,8 @@ export function createOpenRouterModelProvider(apiKey: string): ModelProvider {
           // all healthy and avoids the tail when they are not. Only for calls
           // someone is waiting on — background work would rather have the
           // cheapest upstream than the quickest.
-          ...(options?.interactive ? { sort: 'latency' as const } : {}),
+          ...(callOptions?.interactive ? { sort: 'latency' as const } : {}),
+          ...(options.maxPrice ? { max_price: options.maxPrice } : {}),
         },
       });
     },
@@ -179,8 +196,14 @@ export function createOpenRouterModelProvider(apiKey: string): ModelProvider {
       assertOpenRouterModelId(modelId);
       return provider.textEmbeddingModel(modelId);
     },
-    optionsFor({ reasoning }) {
+    optionsFor({ reasoning, modelId }) {
       if (reasoning === 'unsupported') return undefined;
+      // GPT-6 accepts effort levels rather than a hard reasoning-token budget.
+      // Keep the router's billed output headroom, but do not imply that its
+      // 4096-token reasoning hint is an enforceable limit for these models.
+      if (reasoning === 'enabled' && /^openai\/gpt-6(?:\.1-sol|-luna)$/.test(modelId ?? '')) {
+        return { openrouter: { reasoning: { effort: 'medium' } } };
+      }
       return reasoning === 'enabled'
         ? { openrouter: { reasoning: { max_tokens: 4_096 } } }
         : { openrouter: { reasoning: { enabled: false } } };

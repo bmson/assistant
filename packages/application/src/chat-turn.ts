@@ -471,6 +471,16 @@ export async function handleChatTurn(
   const existingConversation = body.conversationId
     ? await chat.getConversation(agent.id, body.conversationId)
     : null;
+  if (body.conversationId && !existingConversation) {
+    return Response.json(
+      {
+        error:
+          'This chat is no longer available. Open an existing chat or start a new one before sending.',
+        code: 'conversation_unavailable',
+      },
+      { status: 404 },
+    );
+  }
   const conversation = existingConversation ?? (await chat.createConversation(agent.id));
 
   // Replying is an explicit choice to resume an archived chat. Preserve the
@@ -769,8 +779,16 @@ export async function handleChatTurn(
     taskPromise.then((created) =>
       chat.listConversationEvidence(agent.id, conversation.id, created.id),
     ),
-    getAmbientBlock(dependencies.persistence?.ownerContext ?? requireDb(), agent.id),
-    getOwnerCard(dependencies.persistence?.ownerContext ?? requireDb(), agent.id),
+    getAmbientBlock(dependencies.persistence?.ownerContext ?? requireDb(), agent.id).catch(
+      (err) => {
+        console.error('ambient context failed — continuing without it', err);
+        return undefined;
+      },
+    ),
+    getOwnerCard(dependencies.persistence?.ownerContext ?? requireDb(), agent.id).catch((err) => {
+      console.error('owner context failed — continuing without it', err);
+      return undefined;
+    }),
   ]);
   const recallBlock = recall.block;
   const recallSources = recall.sources;

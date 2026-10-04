@@ -13,6 +13,32 @@ const turn = (text: string, prior = '') => [
 ];
 
 describe('detectPersonalReadRequest', () => {
+  it.each([
+    'Is my calendar clear tomorrow?',
+    'Is our schedule empty on Monday?',
+    'Check whether my agenda is clear tomorrow.',
+  ])('checks all-calendar availability for %s', (text) => {
+    expect(
+      detectPersonalReadRequest(turn(text), {
+        now: new Date('2026-09-08T12:00:00Z'),
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toMatchObject({
+      kind: 'calendar',
+      firstToolName: 'calendar.availability',
+      timeWindow: { timeMin: expect.any(String), timeMax: expect.any(String) },
+    });
+  });
+
+  it.each(['Make this sentence clear.', 'Is the explanation clear?', 'Empty my inbox tomorrow.'])(
+    'does not confuse another clear or empty request with availability: %s',
+    (text) => {
+      expect(detectPersonalReadRequest(turn(text))?.firstToolName).not.toBe(
+        'calendar.availability',
+      );
+    },
+  );
+
   it('retains the original lookup on assent, but not when accepting a write or a different topic', () => {
     const history = [
       { role: 'user', content: 'Where are we staying?' },

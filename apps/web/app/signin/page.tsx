@@ -10,9 +10,14 @@ export default async function SignInPage() {
   if (authMode !== 'passkey') notFound();
   if (await isAuthed()) redirect('/settings');
   return (
-    <PageShell size="reading" className="grid gap-6">
-      <PageHeader title="Sign in" intro="This assistant is private. Use the owner passkey." />
-      <SignInClient />
+    <PageShell size="reading">
+      <div className="grid min-w-0 w-full max-w-lg grid-cols-[minmax(0,1fr)] gap-6">
+        <PageHeader
+          title="Sign in"
+          intro="Use your owner passkey to open this private assistant."
+        />
+        <SignInClient />
+      </div>
     </PageShell>
   );
 }

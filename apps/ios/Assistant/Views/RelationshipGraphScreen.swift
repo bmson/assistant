@@ -414,7 +414,7 @@ struct RelationshipGraphScreen: View {
 
     private var itemBrowser: some View {
         NavigationStack {
-            List {
+            AssistantSettingsList {
                 if search.isEmpty {
                     Section("On the map") {
                         ForEach(graph.nodes.sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending }) { node in
@@ -1311,3 +1311,20 @@ struct GraphKindCount: Identifiable, Hashable {
     let count: Int
     var id: String { kind }
 }
+
+#if DEBUG
+extension RelationshipGraphScreen {
+    @MainActor static func visualReviewScreen(_ name: String, graph: RelationshipGraphSnapshot) -> AnyView? {
+        guard let node = graph.nodes.first, let edge = graph.edges.first else { return nil }
+        switch name {
+        case "map-find":
+            var view = RelationshipGraphScreen(initialGraph: graph)
+            view._showSearch = State(initialValue: true)
+            return AnyView(view)
+        case "map-connections": return AnyView(GraphConnectionsSheet(node: node, edges: graph.edges, explore: { _ in }, removed: { _ in }, refresh: {}))
+        case "map-connection-detail": return AnyView(GraphEdgeDetail(edge: edge, node: node, explore: { _ in }, removed: { _ in }, refresh: {}))
+        default: return nil
+        }
+    }
+}
+#endif

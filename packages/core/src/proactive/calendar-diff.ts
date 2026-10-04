@@ -194,7 +194,7 @@ export function diffCalendarEvents(
 
     const match = currentByKey.get(eventKey(prev.calendarId, prev.eventId));
     if (!match || match.status === CANCELLED_STATUS) {
-      if (!complete) continue; // truncated read: absence proves nothing
+      if (!match && !complete) continue; // truncated read: absence proves nothing
       const prevStartMs = Date.parse(prev.start);
       // Only a still-upcoming event's disappearance is news. One that simply
       // finished and rolled out of the forward-looking window is routine —

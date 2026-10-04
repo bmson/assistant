@@ -87,13 +87,14 @@ const WEATHER_ELSEWHEN =
 // Matched against the original text — the capital is the signal.
 const WEATHER_ELSEWHERE = /\b(?:in|at|for|near|around)\s+(?:the\s+)?[A-Z][A-Za-z]/;
 
-// Only a question routes: "will it rain in Boston tomorrow?" is a lookup,
-// "ugh, rain all weekend" is conversation.
+// Questions and explicit checks route; casual weather comments remain
+// conversation. Imperatives need no question mark or named place.
 const QUESTION_OPENER =
   /^(?:how|what|when|where|will|is|are|any|do|does|should|can|could|gonna|going to)\b/;
 
 function looksLikeWeatherLookup(text: string, stripped: string): boolean {
   if (!WEATHER_SUBJECT.test(stripped)) return false;
+  if (/^(?:check|look up|find out|show me|tell me)\b/.test(stripped)) return true;
   if (!text.includes('?') && !QUESTION_OPENER.test(stripped)) return false;
   return WEATHER_ELSEWHEN.test(stripped) || WEATHER_ELSEWHERE.test(text);
 }

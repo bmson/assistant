@@ -163,7 +163,7 @@ struct RootView: View {
             model.scenePhaseDidChange(scenePhase)
             if model.hasSavedConnection && model.bootstrap == nil { await model.connect() }
         }
-        .task(id: model.bootstrap != nil) {
+        .task(id: model.composerDraftScope?.session) {
             guard model.bootstrap != nil else { return }
             await model.prefetchSecondaryScreens()
         }
@@ -205,9 +205,11 @@ struct RootView: View {
                 model.returnToChat()
             }
         }
-        .onReceive(NotificationManager.shared.$pendingRoute.compactMap { $0 }) { route in
-            model.present(route)
-            NotificationManager.shared.consumePendingRoute()
+        .onReceive(NotificationManager.shared.$pendingDestination.compactMap { $0 }) { destination in
+            Task {
+                await model.openNotificationDestination(destination)
+                NotificationManager.shared.consumePendingDestination(destination)
+            }
         }
     }
 

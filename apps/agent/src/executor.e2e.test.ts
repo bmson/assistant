@@ -924,13 +924,15 @@ describe('executor end-to-end (integration, scripted model)', () => {
     createdTaskIds.push(task.id);
 
     const outcome = await executeTask({ db, router, dispatcher }, task.id);
-    expect(outcome.outcome).toBe('done');
+    expect(outcome.outcome).toBe('needs_attention');
     const [reply] = await db
       .select()
       .from(messages)
       .where(sql`${messages.taskId} = ${task.id} and ${messages.role} = 'assistant'`);
     expect(reply?.text).toContain("I couldn't complete this because");
     expect(reply?.text).not.toContain('I created a shared spreadsheet');
+    const [unfinished] = await db.select().from(tasks).where(eq(tasks.id, task.id));
+    expect(unfinished?.status).toBe('needs_attention');
   });
 
   it('reads an owner-shared Google Doc before the model continues the chat', async (ctx) => {

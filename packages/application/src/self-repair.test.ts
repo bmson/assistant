@@ -52,6 +52,8 @@ it('retries join the back of the queue and clear the previous investigation', as
       diagnosis: 'Old diagnosis',
       category: 'unknown' as const,
       reproduction: 'Old steps',
+      mergeSha: 'a'.repeat(40),
+      monitoringAt: new Date(0).toISOString(),
     },
   };
   const fresh = { ...issue, id: 'fresh', status: 'reported' as const, updatedAt: new Date(1000) };
@@ -71,7 +73,9 @@ it('retries join the back of the queue and clear the previous investigation', as
     queuePosition: 2,
     diagnosis: '',
     lastError: '',
+    mergeSha: null,
   });
+  expect(rows.find((row) => row.id === 'old')?.data.monitoringAt).toBeUndefined();
   rows.push({ ...issue, status: 'pr_open' });
   expect(
     (await listRepairIssues(repository, 'owner')).find((row) => row.id === 'old')?.waitingReason,
@@ -134,4 +138,51 @@ it('prevents a retry from forgetting an active hosted session awaiting cleanup',
     'previous coding session',
   );
   expect(update).not.toHaveBeenCalled();
+});
+
+it.each(['retry', 'run_now'] as const)(
+  'does not reuse a prior GitHub PR for a new %s attempt',
+  async (action) => {
+    const old = {
+      ...issue,
+      status: 'failed' as const,
+      data: { ...issue.data, prNumber: 42, mergeSha: 'a'.repeat(40) },
+    };
+    const update = vi.fn();
+    const repository = { list: async () => [old], update } as unknown as SelfRepairRepository;
+    await expect(decideRepairIssue(repository, 'owner', old.id, action)).rejects.toThrow(
+      'already has a pull request',
+    );
+    expect(update).not.toHaveBeenCalled();
+  },
+);
+
+it('allows a cleaned-up hosted retry with a fresh branch and no previous deployment evidence', async () => {
+  const old = {
+    ...issue,
+    status: 'failed' as const,
+    data: {
+      ...issue.data,
+      workerProvider: 'openai_hosted' as const,
+      prNumber: 42,
+      prUrl: 'https://github.com/owner/repo/pull/42',
+      mergeSha: 'a'.repeat(40),
+      monitoringAt: new Date(0).toISOString(),
+      hostedCleanupPending: false,
+    },
+  };
+  const update = vi.fn(async () => old);
+  const repository = { list: async () => [old], update } as unknown as SelfRepairRepository;
+  await decideRepairIssue(repository, 'owner', old.id, 'retry');
+  expect(update).toHaveBeenCalledWith(
+    old,
+    'reported',
+    expect.objectContaining({
+      prNumber: undefined,
+      mergeSha: undefined,
+      monitoringAt: undefined,
+      dispatchedAt: undefined,
+    }),
+    expect.any(Date),
+  );
 });

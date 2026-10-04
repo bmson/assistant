@@ -1,0 +1,3558 @@
+[
+  {
+    "group": "console",
+    "name": "appearance-menu",
+    "before": "before-console/appearance-menu.png",
+    "after": "after-console/appearance-menu.png"
+  },
+  {
+    "group": "console",
+    "name": "appearance-short-viewport",
+    "before": "before-console/appearance-short-viewport.png",
+    "after": "after-console/appearance-short-viewport.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-1280-dark",
+    "before": "before-console/audit-1280-dark.png",
+    "after": "after-console/audit-1280-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-1280-light",
+    "before": "before-console/audit-1280-light.png",
+    "after": "after-console/audit-1280-light.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-320-dark",
+    "before": "before-console/audit-320-dark.png",
+    "after": "after-console/audit-320-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-320-light",
+    "before": "before-console/audit-320-light.png",
+    "after": "after-console/audit-320-light.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-390-dark",
+    "before": "before-console/audit-390-dark.png",
+    "after": "after-console/audit-390-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-390-light",
+    "before": "before-console/audit-390-light.png",
+    "after": "after-console/audit-390-light.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-640-dark",
+    "before": "before-console/audit-640-dark.png",
+    "after": "after-console/audit-640-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-640-light",
+    "before": "before-console/audit-640-light.png",
+    "after": "after-console/audit-640-light.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-copy-fallback",
+    "before": "before-console/audit-copy-fallback.png",
+    "after": "after-console/audit-copy-fallback.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-detail-1280-dark",
+    "before": "before-console/audit-detail-1280-dark.png",
+    "after": "after-console/audit-detail-1280-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-detail-1280-light",
+    "before": "before-console/audit-detail-1280-light.png",
+    "after": "after-console/audit-detail-1280-light.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-detail-320-dark",
+    "before": "before-console/audit-detail-320-dark.png",
+    "after": "after-console/audit-detail-320-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-detail-320-light",
+    "before": "before-console/audit-detail-320-light.png",
+    "after": "after-console/audit-detail-320-light.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-detail-390-dark",
+    "before": "before-console/audit-detail-390-dark.png",
+    "after": "after-console/audit-detail-390-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-detail-390-light",
+    "before": "before-console/audit-detail-390-light.png",
+    "after": "after-console/audit-detail-390-light.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-detail-640-dark",
+    "before": "before-console/audit-detail-640-dark.png",
+    "after": "after-console/audit-detail-640-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-detail-640-light",
+    "before": "before-console/audit-detail-640-light.png",
+    "after": "after-console/audit-detail-640-light.png"
+  },
+  {
+    "group": "console",
+    "name": "global-error-1280-dark",
+    "before": "before-console/global-error-1280-dark.png",
+    "after": "after-console/global-error-1280-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "global-error-1280-light",
+    "before": "before-console/global-error-1280-light.png",
+    "after": "after-console/global-error-1280-light.png"
+  },
+  {
+    "group": "console",
+    "name": "global-error-320-dark",
+    "before": "before-console/global-error-320-dark.png",
+    "after": "after-console/global-error-320-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "global-error-320-light",
+    "before": "before-console/global-error-320-light.png",
+    "after": "after-console/global-error-320-light.png"
+  },
+  {
+    "group": "console",
+    "name": "global-error-390-dark",
+    "before": "before-console/global-error-390-dark.png",
+    "after": "after-console/global-error-390-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "global-error-390-light",
+    "before": "before-console/global-error-390-light.png",
+    "after": "after-console/global-error-390-light.png"
+  },
+  {
+    "group": "console",
+    "name": "global-error-640-dark",
+    "before": "before-console/global-error-640-dark.png",
+    "after": "after-console/global-error-640-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "global-error-640-light",
+    "before": "before-console/global-error-640-light.png",
+    "after": "after-console/global-error-640-light.png"
+  },
+  {
+    "group": "console",
+    "name": "recovery-code-phone-dark",
+    "before": "before-console/recovery-code-phone-dark.png",
+    "after": "after-console/recovery-code-phone-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "recovery-copy-fallback",
+    "before": "before-console/recovery-copy-fallback.png",
+    "after": "after-console/recovery-copy-fallback.png"
+  },
+  {
+    "group": "console",
+    "name": "security-1280-dark",
+    "before": "before-console/security-1280-dark.png",
+    "after": "after-console/security-1280-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "security-1280-light",
+    "before": "before-console/security-1280-light.png",
+    "after": "after-console/security-1280-light.png"
+  },
+  {
+    "group": "console",
+    "name": "security-320-dark",
+    "before": "before-console/security-320-dark.png",
+    "after": "after-console/security-320-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "security-320-light",
+    "before": "before-console/security-320-light.png",
+    "after": "after-console/security-320-light.png"
+  },
+  {
+    "group": "console",
+    "name": "security-390-dark",
+    "before": "before-console/security-390-dark.png",
+    "after": "after-console/security-390-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "security-390-light",
+    "before": "before-console/security-390-light.png",
+    "after": "after-console/security-390-light.png"
+  },
+  {
+    "group": "console",
+    "name": "security-640-dark",
+    "before": "before-console/security-640-dark.png",
+    "after": "after-console/security-640-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "security-640-light",
+    "before": "before-console/security-640-light.png",
+    "after": "after-console/security-640-light.png"
+  },
+  {
+    "group": "console",
+    "name": "security-empty",
+    "before": "before-console/security-empty.png",
+    "after": "after-console/security-empty.png"
+  },
+  {
+    "group": "console",
+    "name": "security-error",
+    "before": "before-console/security-error.png",
+    "after": "after-console/security-error.png"
+  },
+  {
+    "group": "console",
+    "name": "security-new-device-key",
+    "before": "before-console/security-new-device-key.png",
+    "after": "after-console/security-new-device-key.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-1280-dark",
+    "before": "before-console/settings-1280-dark.png",
+    "after": "after-console/settings-1280-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-1280-light",
+    "before": "before-console/settings-1280-light.png",
+    "after": "after-console/settings-1280-light.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-320-dark",
+    "before": "before-console/settings-320-dark.png",
+    "after": "after-console/settings-320-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-320-light",
+    "before": "before-console/settings-320-light.png",
+    "after": "after-console/settings-320-light.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-390-dark",
+    "before": "before-console/settings-390-dark.png",
+    "after": "after-console/settings-390-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-390-light",
+    "before": "before-console/settings-390-light.png",
+    "after": "after-console/settings-390-light.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-640-dark",
+    "before": "before-console/settings-640-dark.png",
+    "after": "after-console/settings-640-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-640-light",
+    "before": "before-console/settings-640-light.png",
+    "after": "after-console/settings-640-light.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-replacement-key",
+    "before": "before-console/settings-replacement-key.png",
+    "after": "after-console/settings-replacement-key.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-token-1280-dark",
+    "before": "before-console/settings-token-1280-dark.png",
+    "after": "after-console/settings-token-1280-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-token-1280-light",
+    "before": "before-console/settings-token-1280-light.png",
+    "after": "after-console/settings-token-1280-light.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-token-320-dark",
+    "before": "before-console/settings-token-320-dark.png",
+    "after": "after-console/settings-token-320-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-token-320-light",
+    "before": "before-console/settings-token-320-light.png",
+    "after": "after-console/settings-token-320-light.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-token-390-dark",
+    "before": "before-console/settings-token-390-dark.png",
+    "after": "after-console/settings-token-390-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-token-390-light",
+    "before": "before-console/settings-token-390-light.png",
+    "after": "after-console/settings-token-390-light.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-token-640-dark",
+    "before": "before-console/settings-token-640-dark.png",
+    "after": "after-console/settings-token-640-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-token-640-light",
+    "before": "before-console/settings-token-640-light.png",
+    "after": "after-console/settings-token-640-light.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-token-rotate-1280-dark",
+    "before": "before-console/settings-token-rotate-1280-dark.png",
+    "after": "after-console/settings-token-rotate-1280-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-token-rotate-1280-light",
+    "before": "before-console/settings-token-rotate-1280-light.png",
+    "after": "after-console/settings-token-rotate-1280-light.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-token-rotate-320-dark",
+    "before": "before-console/settings-token-rotate-320-dark.png",
+    "after": "after-console/settings-token-rotate-320-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-token-rotate-320-light",
+    "before": "before-console/settings-token-rotate-320-light.png",
+    "after": "after-console/settings-token-rotate-320-light.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-token-rotate-390-dark",
+    "before": "before-console/settings-token-rotate-390-dark.png",
+    "after": "after-console/settings-token-rotate-390-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-token-rotate-390-light",
+    "before": "before-console/settings-token-rotate-390-light.png",
+    "after": "after-console/settings-token-rotate-390-light.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-token-rotate-640-dark",
+    "before": "before-console/settings-token-rotate-640-dark.png",
+    "after": "after-console/settings-token-rotate-640-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-token-rotate-640-light",
+    "before": "before-console/settings-token-rotate-640-light.png",
+    "after": "after-console/settings-token-rotate-640-light.png"
+  },
+  {
+    "group": "console",
+    "name": "setup-1280-dark",
+    "before": "before-console/setup-1280-dark.png",
+    "after": "after-console/setup-1280-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "setup-1280-light",
+    "before": "before-console/setup-1280-light.png",
+    "after": "after-console/setup-1280-light.png"
+  },
+  {
+    "group": "console",
+    "name": "setup-320-dark",
+    "before": "before-console/setup-320-dark.png",
+    "after": "after-console/setup-320-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "setup-320-light",
+    "before": "before-console/setup-320-light.png",
+    "after": "after-console/setup-320-light.png"
+  },
+  {
+    "group": "console",
+    "name": "setup-390-dark",
+    "before": "before-console/setup-390-dark.png",
+    "after": "after-console/setup-390-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "setup-390-light",
+    "before": "before-console/setup-390-light.png",
+    "after": "after-console/setup-390-light.png"
+  },
+  {
+    "group": "console",
+    "name": "setup-640-dark",
+    "before": "before-console/setup-640-dark.png",
+    "after": "after-console/setup-640-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "setup-640-light",
+    "before": "before-console/setup-640-light.png",
+    "after": "after-console/setup-640-light.png"
+  },
+  {
+    "group": "console",
+    "name": "signin-1280-dark",
+    "before": "before-console/signin-1280-dark.png",
+    "after": "after-console/signin-1280-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "signin-1280-light",
+    "before": "before-console/signin-1280-light.png",
+    "after": "after-console/signin-1280-light.png"
+  },
+  {
+    "group": "console",
+    "name": "signin-320-dark",
+    "before": "before-console/signin-320-dark.png",
+    "after": "after-console/signin-320-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "signin-320-light",
+    "before": "before-console/signin-320-light.png",
+    "after": "after-console/signin-320-light.png"
+  },
+  {
+    "group": "console",
+    "name": "signin-390-dark",
+    "before": "before-console/signin-390-dark.png",
+    "after": "after-console/signin-390-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "signin-390-light",
+    "before": "before-console/signin-390-light.png",
+    "after": "after-console/signin-390-light.png"
+  },
+  {
+    "group": "console",
+    "name": "signin-640-dark",
+    "before": "before-console/signin-640-dark.png",
+    "after": "after-console/signin-640-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "signin-640-light",
+    "before": "before-console/signin-640-light.png",
+    "after": "after-console/signin-640-light.png"
+  },
+  {
+    "group": "console",
+    "name": "signin-recovery-error",
+    "before": "before-console/signin-recovery-error.png",
+    "after": "after-console/signin-recovery-error.png"
+  },
+  {
+    "group": "console",
+    "name": "audit-320-large-text",
+    "after": "after-console/audit-320-large-text.png"
+  },
+  {
+    "group": "console",
+    "name": "long-content-1280-dark",
+    "after": "after-console/long-content-1280-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "long-content-1280-light",
+    "after": "after-console/long-content-1280-light.png"
+  },
+  {
+    "group": "console",
+    "name": "long-content-320-dark",
+    "after": "after-console/long-content-320-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "long-content-320-large-text",
+    "after": "after-console/long-content-320-large-text.png"
+  },
+  {
+    "group": "console",
+    "name": "long-content-320-light",
+    "after": "after-console/long-content-320-light.png"
+  },
+  {
+    "group": "console",
+    "name": "long-content-390-dark",
+    "after": "after-console/long-content-390-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "long-content-390-light",
+    "after": "after-console/long-content-390-light.png"
+  },
+  {
+    "group": "console",
+    "name": "long-content-640-dark",
+    "after": "after-console/long-content-640-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "long-content-640-light",
+    "after": "after-console/long-content-640-light.png"
+  },
+  {
+    "group": "console",
+    "name": "not-found-1280-dark",
+    "after": "after-console/not-found-1280-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "not-found-1280-light",
+    "after": "after-console/not-found-1280-light.png"
+  },
+  {
+    "group": "console",
+    "name": "not-found-320-dark",
+    "after": "after-console/not-found-320-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "not-found-320-light",
+    "after": "after-console/not-found-320-light.png"
+  },
+  {
+    "group": "console",
+    "name": "not-found-390-dark",
+    "after": "after-console/not-found-390-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "not-found-390-light",
+    "after": "after-console/not-found-390-light.png"
+  },
+  {
+    "group": "console",
+    "name": "not-found-640-dark",
+    "after": "after-console/not-found-640-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "not-found-640-light",
+    "after": "after-console/not-found-640-light.png"
+  },
+  {
+    "group": "console",
+    "name": "route-error-1280-dark",
+    "after": "after-console/route-error-1280-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "route-error-1280-light",
+    "after": "after-console/route-error-1280-light.png"
+  },
+  {
+    "group": "console",
+    "name": "route-error-320-dark",
+    "after": "after-console/route-error-320-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "route-error-320-light",
+    "after": "after-console/route-error-320-light.png"
+  },
+  {
+    "group": "console",
+    "name": "route-error-390-dark",
+    "after": "after-console/route-error-390-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "route-error-390-light",
+    "after": "after-console/route-error-390-light.png"
+  },
+  {
+    "group": "console",
+    "name": "route-error-640-dark",
+    "after": "after-console/route-error-640-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "route-error-640-light",
+    "after": "after-console/route-error-640-light.png"
+  },
+  {
+    "group": "console",
+    "name": "security-320-large-text",
+    "after": "after-console/security-320-large-text.png"
+  },
+  {
+    "group": "console",
+    "name": "security-created-refresh-failed-dark",
+    "after": "after-console/security-created-refresh-failed-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "security-created-refresh-failed-light",
+    "after": "after-console/security-created-refresh-failed-light.png"
+  },
+  {
+    "group": "console",
+    "name": "security-passkey-refresh-failed-dark",
+    "after": "after-console/security-passkey-refresh-failed-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "security-passkey-refresh-failed-light",
+    "after": "after-console/security-passkey-refresh-failed-light.png"
+  },
+  {
+    "group": "console",
+    "name": "security-revoked-refresh-failed-dark",
+    "after": "after-console/security-revoked-refresh-failed-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "security-revoked-refresh-failed-light",
+    "after": "after-console/security-revoked-refresh-failed-light.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-320-large-text",
+    "after": "after-console/settings-320-large-text.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-created-refresh-failed-large-dark",
+    "after": "after-console/settings-created-refresh-failed-large-dark.png"
+  },
+  {
+    "group": "console",
+    "name": "settings-created-refresh-failed-large-light",
+    "after": "after-console/settings-created-refresh-failed-large-light.png"
+  },
+  {
+    "group": "console",
+    "name": "setup-320-large-text",
+    "after": "after-console/setup-320-large-text.png"
+  },
+  {
+    "group": "console",
+    "name": "signin-320-large-text",
+    "after": "after-console/signin-320-large-text.png"
+  },
+  {
+    "group": "products",
+    "name": "about-1280-dark",
+    "before": "before-products/about-1280-dark.png",
+    "after": "after-products/about-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "about-1280-light",
+    "before": "before-products/about-1280-light.png",
+    "after": "after-products/about-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "about-390-dark",
+    "before": "before-products/about-390-dark.png",
+    "after": "after-products/about-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "about-390-light",
+    "before": "before-products/about-390-light.png",
+    "after": "after-products/about-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "about-empty-1280-dark",
+    "before": "before-products/about-empty-1280-dark.png",
+    "after": "after-products/about-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "about-empty-1280-light",
+    "before": "before-products/about-empty-1280-light.png",
+    "after": "after-products/about-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "about-empty-390-dark",
+    "before": "before-products/about-empty-390-dark.png",
+    "after": "after-products/about-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "about-empty-390-light",
+    "before": "before-products/about-empty-390-light.png",
+    "after": "after-products/about-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "activity-1280-dark",
+    "before": "before-products/activity-1280-dark.png",
+    "after": "after-products/activity-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "activity-1280-light",
+    "before": "before-products/activity-1280-light.png",
+    "after": "after-products/activity-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "activity-390-dark",
+    "before": "before-products/activity-390-dark.png",
+    "after": "after-products/activity-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "activity-390-light",
+    "before": "before-products/activity-390-light.png",
+    "after": "after-products/activity-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "activity-detail-1280-dark",
+    "before": "before-products/activity-detail-1280-dark.png",
+    "after": "after-products/activity-detail-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "activity-detail-1280-light",
+    "before": "before-products/activity-detail-1280-light.png",
+    "after": "after-products/activity-detail-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "activity-detail-390-dark",
+    "before": "before-products/activity-detail-390-dark.png",
+    "after": "after-products/activity-detail-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "activity-detail-390-light",
+    "before": "before-products/activity-detail-390-light.png",
+    "after": "after-products/activity-detail-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "activity-empty-1280-dark",
+    "before": "before-products/activity-empty-1280-dark.png",
+    "after": "after-products/activity-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "activity-empty-1280-light",
+    "before": "before-products/activity-empty-1280-light.png",
+    "after": "after-products/activity-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "activity-empty-390-dark",
+    "before": "before-products/activity-empty-390-dark.png",
+    "after": "after-products/activity-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "activity-empty-390-light",
+    "before": "before-products/activity-empty-390-light.png",
+    "after": "after-products/activity-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "anomalies-1280-dark",
+    "before": "before-products/anomalies-1280-dark.png",
+    "after": "after-products/anomalies-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "anomalies-1280-light",
+    "before": "before-products/anomalies-1280-light.png",
+    "after": "after-products/anomalies-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "anomalies-390-dark",
+    "before": "before-products/anomalies-390-dark.png",
+    "after": "after-products/anomalies-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "anomalies-390-light",
+    "before": "before-products/anomalies-390-light.png",
+    "after": "after-products/anomalies-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "anomalies-empty-1280-dark",
+    "before": "before-products/anomalies-empty-1280-dark.png",
+    "after": "after-products/anomalies-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "anomalies-empty-1280-light",
+    "before": "before-products/anomalies-empty-1280-light.png",
+    "after": "after-products/anomalies-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "anomalies-empty-390-dark",
+    "before": "before-products/anomalies-empty-390-dark.png",
+    "after": "after-products/anomalies-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "anomalies-empty-390-light",
+    "before": "before-products/anomalies-empty-390-light.png",
+    "after": "after-products/anomalies-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "approvals-1280-dark",
+    "before": "before-products/approvals-1280-dark.png",
+    "after": "after-products/approvals-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "approvals-1280-light",
+    "before": "before-products/approvals-1280-light.png",
+    "after": "after-products/approvals-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "approvals-390-dark",
+    "before": "before-products/approvals-390-dark.png",
+    "after": "after-products/approvals-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "approvals-390-light",
+    "before": "before-products/approvals-390-light.png",
+    "after": "after-products/approvals-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "approvals-empty-1280-dark",
+    "before": "before-products/approvals-empty-1280-dark.png",
+    "after": "after-products/approvals-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "approvals-empty-1280-light",
+    "before": "before-products/approvals-empty-1280-light.png",
+    "after": "after-products/approvals-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "approvals-empty-390-dark",
+    "before": "before-products/approvals-empty-390-dark.png",
+    "after": "after-products/approvals-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "approvals-empty-390-light",
+    "before": "before-products/approvals-empty-390-light.png",
+    "after": "after-products/approvals-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "call-detail-1280-dark",
+    "before": "before-products/call-detail-1280-dark.png",
+    "after": "after-products/call-detail-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "call-detail-1280-light",
+    "before": "before-products/call-detail-1280-light.png",
+    "after": "after-products/call-detail-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "call-detail-390-dark",
+    "before": "before-products/call-detail-390-dark.png",
+    "after": "after-products/call-detail-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "call-detail-390-light",
+    "before": "before-products/call-detail-390-light.png",
+    "after": "after-products/call-detail-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "calls-1280-dark",
+    "before": "before-products/calls-1280-dark.png",
+    "after": "after-products/calls-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "calls-1280-light",
+    "before": "before-products/calls-1280-light.png",
+    "after": "after-products/calls-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "calls-390-dark",
+    "before": "before-products/calls-390-dark.png",
+    "after": "after-products/calls-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "calls-390-light",
+    "before": "before-products/calls-390-light.png",
+    "after": "after-products/calls-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "calls-empty-1280-dark",
+    "before": "before-products/calls-empty-1280-dark.png",
+    "after": "after-products/calls-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "calls-empty-1280-light",
+    "before": "before-products/calls-empty-1280-light.png",
+    "after": "after-products/calls-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "calls-empty-390-dark",
+    "before": "before-products/calls-empty-390-dark.png",
+    "after": "after-products/calls-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "calls-empty-390-light",
+    "before": "before-products/calls-empty-390-light.png",
+    "after": "after-products/calls-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "capabilities-1280-dark",
+    "before": "before-products/capabilities-1280-dark.png",
+    "after": "after-products/capabilities-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "capabilities-1280-light",
+    "before": "before-products/capabilities-1280-light.png",
+    "after": "after-products/capabilities-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "capabilities-390-dark",
+    "before": "before-products/capabilities-390-dark.png",
+    "after": "after-products/capabilities-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "capabilities-390-light",
+    "before": "before-products/capabilities-390-light.png",
+    "after": "after-products/capabilities-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "cards-1280-dark",
+    "before": "before-products/cards-1280-dark.png",
+    "after": "after-products/cards-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "cards-1280-light",
+    "before": "before-products/cards-1280-light.png",
+    "after": "after-products/cards-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "cards-390-dark",
+    "before": "before-products/cards-390-dark.png",
+    "after": "after-products/cards-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "cards-390-light",
+    "before": "before-products/cards-390-light.png",
+    "after": "after-products/cards-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "cards-empty-1280-dark",
+    "before": "before-products/cards-empty-1280-dark.png",
+    "after": "after-products/cards-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "cards-empty-1280-light",
+    "before": "before-products/cards-empty-1280-light.png",
+    "after": "after-products/cards-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "cards-empty-390-dark",
+    "before": "before-products/cards-empty-390-dark.png",
+    "after": "after-products/cards-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "cards-empty-390-light",
+    "before": "before-products/cards-empty-390-light.png",
+    "after": "after-products/cards-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "chat-1280-dark",
+    "before": "before-products/chat-1280-dark.png",
+    "after": "after-products/chat-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "chat-1280-light",
+    "before": "before-products/chat-1280-light.png",
+    "after": "after-products/chat-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "chat-390-dark",
+    "before": "before-products/chat-390-dark.png",
+    "after": "after-products/chat-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "chat-390-light",
+    "before": "before-products/chat-390-light.png",
+    "after": "after-products/chat-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "chat-empty-1280-dark",
+    "before": "before-products/chat-empty-1280-dark.png",
+    "after": "after-products/chat-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "chat-empty-1280-light",
+    "before": "before-products/chat-empty-1280-light.png",
+    "after": "after-products/chat-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "chat-empty-390-dark",
+    "before": "before-products/chat-empty-390-dark.png",
+    "after": "after-products/chat-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "chat-empty-390-light",
+    "before": "before-products/chat-empty-390-light.png",
+    "after": "after-products/chat-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "chats-1280-dark",
+    "before": "before-products/chats-1280-dark.png",
+    "after": "after-products/chats-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "chats-1280-light",
+    "before": "before-products/chats-1280-light.png",
+    "after": "after-products/chats-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "chats-390-dark",
+    "before": "before-products/chats-390-dark.png",
+    "after": "after-products/chats-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "chats-390-light",
+    "before": "before-products/chats-390-light.png",
+    "after": "after-products/chats-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "chats-empty-1280-dark",
+    "before": "before-products/chats-empty-1280-dark.png",
+    "after": "after-products/chats-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "chats-empty-1280-light",
+    "before": "before-products/chats-empty-1280-light.png",
+    "after": "after-products/chats-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "chats-empty-390-dark",
+    "before": "before-products/chats-empty-390-dark.png",
+    "after": "after-products/chats-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "chats-empty-390-light",
+    "before": "before-products/chats-empty-390-light.png",
+    "after": "after-products/chats-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "costs-1280-dark",
+    "before": "before-products/costs-1280-dark.png",
+    "after": "after-products/costs-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "costs-1280-light",
+    "before": "before-products/costs-1280-light.png",
+    "after": "after-products/costs-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "costs-390-dark",
+    "before": "before-products/costs-390-dark.png",
+    "after": "after-products/costs-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "costs-390-light",
+    "before": "before-products/costs-390-light.png",
+    "after": "after-products/costs-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "costs-empty-1280-dark",
+    "before": "before-products/costs-empty-1280-dark.png",
+    "after": "after-products/costs-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "costs-empty-1280-light",
+    "before": "before-products/costs-empty-1280-light.png",
+    "after": "after-products/costs-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "costs-empty-390-dark",
+    "before": "before-products/costs-empty-390-dark.png",
+    "after": "after-products/costs-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "costs-empty-390-light",
+    "before": "before-products/costs-empty-390-light.png",
+    "after": "after-products/costs-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "data-1280-dark",
+    "before": "before-products/data-1280-dark.png",
+    "after": "after-products/data-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "data-1280-light",
+    "before": "before-products/data-1280-light.png",
+    "after": "after-products/data-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "data-390-dark",
+    "before": "before-products/data-390-dark.png",
+    "after": "after-products/data-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "data-390-light",
+    "before": "before-products/data-390-light.png",
+    "after": "after-products/data-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "documents-1280-dark",
+    "before": "before-products/documents-1280-dark.png",
+    "after": "after-products/documents-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "documents-1280-light",
+    "before": "before-products/documents-1280-light.png",
+    "after": "after-products/documents-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "documents-390-dark",
+    "before": "before-products/documents-390-dark.png",
+    "after": "after-products/documents-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "documents-390-light",
+    "before": "before-products/documents-390-light.png",
+    "after": "after-products/documents-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "documents-empty-1280-dark",
+    "before": "before-products/documents-empty-1280-dark.png",
+    "after": "after-products/documents-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "documents-empty-1280-light",
+    "before": "before-products/documents-empty-1280-light.png",
+    "after": "after-products/documents-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "documents-empty-390-dark",
+    "before": "before-products/documents-empty-390-dark.png",
+    "after": "after-products/documents-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "documents-empty-390-light",
+    "before": "before-products/documents-empty-390-light.png",
+    "after": "after-products/documents-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "goals-1280-dark",
+    "before": "before-products/goals-1280-dark.png",
+    "after": "after-products/goals-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "goals-1280-light",
+    "before": "before-products/goals-1280-light.png",
+    "after": "after-products/goals-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "goals-390-dark",
+    "before": "before-products/goals-390-dark.png",
+    "after": "after-products/goals-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "goals-390-light",
+    "before": "before-products/goals-390-light.png",
+    "after": "after-products/goals-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "goals-empty-1280-dark",
+    "before": "before-products/goals-empty-1280-dark.png",
+    "after": "after-products/goals-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "goals-empty-1280-light",
+    "before": "before-products/goals-empty-1280-light.png",
+    "after": "after-products/goals-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "goals-empty-390-dark",
+    "before": "before-products/goals-empty-390-dark.png",
+    "after": "after-products/goals-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "goals-empty-390-light",
+    "before": "before-products/goals-empty-390-light.png",
+    "after": "after-products/goals-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "import-1280-dark",
+    "before": "before-products/import-1280-dark.png",
+    "after": "after-products/import-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "import-1280-light",
+    "before": "before-products/import-1280-light.png",
+    "after": "after-products/import-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "import-390-dark",
+    "before": "before-products/import-390-dark.png",
+    "after": "after-products/import-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "import-390-light",
+    "before": "before-products/import-390-light.png",
+    "after": "after-products/import-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "import-empty-1280-dark",
+    "before": "before-products/import-empty-1280-dark.png",
+    "after": "after-products/import-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "import-empty-1280-light",
+    "before": "before-products/import-empty-1280-light.png",
+    "after": "after-products/import-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "import-empty-390-dark",
+    "before": "before-products/import-empty-390-dark.png",
+    "after": "after-products/import-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "import-empty-390-light",
+    "before": "before-products/import-empty-390-light.png",
+    "after": "after-products/import-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "improvements-1280-dark",
+    "before": "before-products/improvements-1280-dark.png",
+    "after": "after-products/improvements-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "improvements-1280-light",
+    "before": "before-products/improvements-1280-light.png",
+    "after": "after-products/improvements-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "improvements-390-dark",
+    "before": "before-products/improvements-390-dark.png",
+    "after": "after-products/improvements-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "improvements-390-light",
+    "before": "before-products/improvements-390-light.png",
+    "after": "after-products/improvements-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "improvements-empty-1280-dark",
+    "before": "before-products/improvements-empty-1280-dark.png",
+    "after": "after-products/improvements-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "improvements-empty-1280-light",
+    "before": "before-products/improvements-empty-1280-light.png",
+    "after": "after-products/improvements-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "improvements-empty-390-dark",
+    "before": "before-products/improvements-empty-390-dark.png",
+    "after": "after-products/improvements-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "improvements-empty-390-light",
+    "before": "before-products/improvements-empty-390-light.png",
+    "after": "after-products/improvements-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-1280-dark",
+    "before": "before-products/knowledge-1280-dark.png",
+    "after": "after-products/knowledge-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-1280-light",
+    "before": "before-products/knowledge-1280-light.png",
+    "after": "after-products/knowledge-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-390-dark",
+    "before": "before-products/knowledge-390-dark.png",
+    "after": "after-products/knowledge-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-390-light",
+    "before": "before-products/knowledge-390-light.png",
+    "after": "after-products/knowledge-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-cleanup-1280-dark",
+    "before": "before-products/knowledge-cleanup-1280-dark.png",
+    "after": "after-products/knowledge-cleanup-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-cleanup-1280-light",
+    "before": "before-products/knowledge-cleanup-1280-light.png",
+    "after": "after-products/knowledge-cleanup-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-cleanup-390-dark",
+    "before": "before-products/knowledge-cleanup-390-dark.png",
+    "after": "after-products/knowledge-cleanup-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-cleanup-390-light",
+    "before": "before-products/knowledge-cleanup-390-light.png",
+    "after": "after-products/knowledge-cleanup-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-cleanup-empty-1280-dark",
+    "before": "before-products/knowledge-cleanup-empty-1280-dark.png",
+    "after": "after-products/knowledge-cleanup-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-cleanup-empty-1280-light",
+    "before": "before-products/knowledge-cleanup-empty-1280-light.png",
+    "after": "after-products/knowledge-cleanup-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-cleanup-empty-390-dark",
+    "before": "before-products/knowledge-cleanup-empty-390-dark.png",
+    "after": "after-products/knowledge-cleanup-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-cleanup-empty-390-light",
+    "before": "before-products/knowledge-cleanup-empty-390-light.png",
+    "after": "after-products/knowledge-cleanup-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-empty-1280-dark",
+    "before": "before-products/knowledge-empty-1280-dark.png",
+    "after": "after-products/knowledge-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-empty-1280-light",
+    "before": "before-products/knowledge-empty-1280-light.png",
+    "after": "after-products/knowledge-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-empty-390-dark",
+    "before": "before-products/knowledge-empty-390-dark.png",
+    "after": "after-products/knowledge-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-empty-390-light",
+    "before": "before-products/knowledge-empty-390-light.png",
+    "after": "after-products/knowledge-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-map-1280-dark",
+    "before": "before-products/knowledge-map-1280-dark.png",
+    "after": "after-products/knowledge-map-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-map-1280-light",
+    "before": "before-products/knowledge-map-1280-light.png",
+    "after": "after-products/knowledge-map-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-map-390-dark",
+    "before": "before-products/knowledge-map-390-dark.png",
+    "after": "after-products/knowledge-map-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-map-390-light",
+    "before": "before-products/knowledge-map-390-light.png",
+    "after": "after-products/knowledge-map-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-map-empty-1280-dark",
+    "before": "before-products/knowledge-map-empty-1280-dark.png",
+    "after": "after-products/knowledge-map-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-map-empty-1280-light",
+    "before": "before-products/knowledge-map-empty-1280-light.png",
+    "after": "after-products/knowledge-map-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-map-empty-390-dark",
+    "before": "before-products/knowledge-map-empty-390-dark.png",
+    "after": "after-products/knowledge-map-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "knowledge-map-empty-390-light",
+    "before": "before-products/knowledge-map-empty-390-light.png",
+    "after": "after-products/knowledge-map-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "memory-1280-dark",
+    "before": "before-products/memory-1280-dark.png",
+    "after": "after-products/memory-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "memory-1280-light",
+    "before": "before-products/memory-1280-light.png",
+    "after": "after-products/memory-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "memory-390-dark",
+    "before": "before-products/memory-390-dark.png",
+    "after": "after-products/memory-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "memory-390-light",
+    "before": "before-products/memory-390-light.png",
+    "after": "after-products/memory-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "memory-empty-1280-dark",
+    "before": "before-products/memory-empty-1280-dark.png",
+    "after": "after-products/memory-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "memory-empty-1280-light",
+    "before": "before-products/memory-empty-1280-light.png",
+    "after": "after-products/memory-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "memory-empty-390-dark",
+    "before": "before-products/memory-empty-390-dark.png",
+    "after": "after-products/memory-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "memory-empty-390-light",
+    "before": "before-products/memory-empty-390-light.png",
+    "after": "after-products/memory-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "memory-read-only-1280-dark",
+    "before": "before-products/memory-read-only-1280-dark.png",
+    "after": "after-products/memory-read-only-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "memory-read-only-1280-light",
+    "before": "before-products/memory-read-only-1280-light.png",
+    "after": "after-products/memory-read-only-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "memory-read-only-390-dark",
+    "before": "before-products/memory-read-only-390-dark.png",
+    "after": "after-products/memory-read-only-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "memory-read-only-390-light",
+    "before": "before-products/memory-read-only-390-light.png",
+    "after": "after-products/memory-read-only-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "memory-read-only-empty-1280-dark",
+    "before": "before-products/memory-read-only-empty-1280-dark.png",
+    "after": "after-products/memory-read-only-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "memory-read-only-empty-1280-light",
+    "before": "before-products/memory-read-only-empty-1280-light.png",
+    "after": "after-products/memory-read-only-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "memory-read-only-empty-390-dark",
+    "before": "before-products/memory-read-only-empty-390-dark.png",
+    "after": "after-products/memory-read-only-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "memory-read-only-empty-390-light",
+    "before": "before-products/memory-read-only-empty-390-light.png",
+    "after": "after-products/memory-read-only-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "packs-1280-dark",
+    "before": "before-products/packs-1280-dark.png",
+    "after": "after-products/packs-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "packs-1280-light",
+    "before": "before-products/packs-1280-light.png",
+    "after": "after-products/packs-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "packs-390-dark",
+    "before": "before-products/packs-390-dark.png",
+    "after": "after-products/packs-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "packs-390-light",
+    "before": "before-products/packs-390-light.png",
+    "after": "after-products/packs-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "packs-empty-1280-dark",
+    "before": "before-products/packs-empty-1280-dark.png",
+    "after": "after-products/packs-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "packs-empty-1280-light",
+    "before": "before-products/packs-empty-1280-light.png",
+    "after": "after-products/packs-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "packs-empty-390-dark",
+    "before": "before-products/packs-empty-390-dark.png",
+    "after": "after-products/packs-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "packs-empty-390-light",
+    "before": "before-products/packs-empty-390-light.png",
+    "after": "after-products/packs-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "people-1280-dark",
+    "before": "before-products/people-1280-dark.png",
+    "after": "after-products/people-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "people-1280-light",
+    "before": "before-products/people-1280-light.png",
+    "after": "after-products/people-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "people-390-dark",
+    "before": "before-products/people-390-dark.png",
+    "after": "after-products/people-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "people-390-light",
+    "before": "before-products/people-390-light.png",
+    "after": "after-products/people-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "people-empty-1280-dark",
+    "before": "before-products/people-empty-1280-dark.png",
+    "after": "after-products/people-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "people-empty-1280-light",
+    "before": "before-products/people-empty-1280-light.png",
+    "after": "after-products/people-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "people-empty-390-dark",
+    "before": "before-products/people-empty-390-dark.png",
+    "after": "after-products/people-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "people-empty-390-light",
+    "before": "before-products/people-empty-390-light.png",
+    "after": "after-products/people-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "person-detail-1280-dark",
+    "before": "before-products/person-detail-1280-dark.png",
+    "after": "after-products/person-detail-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "person-detail-1280-light",
+    "before": "before-products/person-detail-1280-light.png",
+    "after": "after-products/person-detail-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "person-detail-390-dark",
+    "before": "before-products/person-detail-390-dark.png",
+    "after": "after-products/person-detail-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "person-detail-390-light",
+    "before": "before-products/person-detail-390-light.png",
+    "after": "after-products/person-detail-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "side-chat-1280-dark",
+    "before": "before-products/side-chat-1280-dark.png",
+    "after": "after-products/side-chat-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "side-chat-1280-light",
+    "before": "before-products/side-chat-1280-light.png",
+    "after": "after-products/side-chat-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "side-chat-390-dark",
+    "before": "before-products/side-chat-390-dark.png",
+    "after": "after-products/side-chat-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "side-chat-390-light",
+    "before": "before-products/side-chat-390-light.png",
+    "after": "after-products/side-chat-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "side-chat-empty-1280-dark",
+    "before": "before-products/side-chat-empty-1280-dark.png",
+    "after": "after-products/side-chat-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "side-chat-empty-1280-light",
+    "before": "before-products/side-chat-empty-1280-light.png",
+    "after": "after-products/side-chat-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "side-chat-empty-390-dark",
+    "before": "before-products/side-chat-empty-390-dark.png",
+    "after": "after-products/side-chat-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "side-chat-empty-390-light",
+    "before": "before-products/side-chat-empty-390-light.png",
+    "after": "after-products/side-chat-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "skills-1280-dark",
+    "before": "before-products/skills-1280-dark.png",
+    "after": "after-products/skills-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "skills-1280-light",
+    "before": "before-products/skills-1280-light.png",
+    "after": "after-products/skills-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "skills-390-dark",
+    "before": "before-products/skills-390-dark.png",
+    "after": "after-products/skills-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "skills-390-light",
+    "before": "before-products/skills-390-light.png",
+    "after": "after-products/skills-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "skills-empty-1280-dark",
+    "before": "before-products/skills-empty-1280-dark.png",
+    "after": "after-products/skills-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "skills-empty-1280-light",
+    "before": "before-products/skills-empty-1280-light.png",
+    "after": "after-products/skills-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "skills-empty-390-dark",
+    "before": "before-products/skills-empty-390-dark.png",
+    "after": "after-products/skills-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "skills-empty-390-light",
+    "before": "before-products/skills-empty-390-light.png",
+    "after": "after-products/skills-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "writing-voice-1280-dark",
+    "before": "before-products/writing-voice-1280-dark.png",
+    "after": "after-products/writing-voice-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "writing-voice-1280-light",
+    "before": "before-products/writing-voice-1280-light.png",
+    "after": "after-products/writing-voice-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "writing-voice-390-dark",
+    "before": "before-products/writing-voice-390-dark.png",
+    "after": "after-products/writing-voice-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "writing-voice-390-light",
+    "before": "before-products/writing-voice-390-light.png",
+    "after": "after-products/writing-voice-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "writing-voice-empty-1280-dark",
+    "before": "before-products/writing-voice-empty-1280-dark.png",
+    "after": "after-products/writing-voice-empty-1280-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "writing-voice-empty-1280-light",
+    "before": "before-products/writing-voice-empty-1280-light.png",
+    "after": "after-products/writing-voice-empty-1280-light.png"
+  },
+  {
+    "group": "products",
+    "name": "writing-voice-empty-390-dark",
+    "before": "before-products/writing-voice-empty-390-dark.png",
+    "after": "after-products/writing-voice-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "writing-voice-empty-390-light",
+    "before": "before-products/writing-voice-empty-390-light.png",
+    "after": "after-products/writing-voice-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "repair-form-error-390-dark",
+    "after": "after-products/repair-form-error-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "repair-form-error-390-light",
+    "after": "after-products/repair-form-error-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "skills-form-error-390-dark",
+    "after": "after-products/skills-form-error-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "skills-form-error-390-light",
+    "after": "after-products/skills-form-error-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "voice-form-error-390-dark",
+    "after": "after-products/voice-form-error-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "voice-form-error-390-light",
+    "after": "after-products/voice-form-error-390-light.png"
+  },
+  {
+    "group": "native",
+    "name": "about-open-loops-phone-dark-402-top",
+    "before": "before-native/about-open-loops-phone-dark-402-top.png",
+    "after": "after-native/about-open-loops-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "about-open-loops-phone-light-402-top",
+    "before": "before-native/about-open-loops-phone-light-402-top.png",
+    "after": "after-native/about-open-loops-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "activity-phone-dark-402-top",
+    "before": "before-native/activity-phone-dark-402-top.png",
+    "after": "after-native/activity-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "activity-phone-light-402-accessible-scroll-01",
+    "before": "before-native/activity-phone-light-402-accessible-scroll-01.png",
+    "after": "after-native/activity-phone-light-402-accessible-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "activity-phone-light-402-accessible-scroll-02",
+    "before": "before-native/activity-phone-light-402-accessible-scroll-02.png",
+    "after": "after-native/activity-phone-light-402-accessible-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "activity-phone-light-402-accessible-top",
+    "before": "before-native/activity-phone-light-402-accessible-top.png",
+    "after": "after-native/activity-phone-light-402-accessible-top.png"
+  },
+  {
+    "group": "native",
+    "name": "activity-phone-light-402-top",
+    "before": "before-native/activity-phone-light-402-top.png",
+    "after": "after-native/activity-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "ai-providers-phone-dark-402-top",
+    "before": "before-native/ai-providers-phone-dark-402-top.png",
+    "after": "after-native/ai-providers-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "ai-providers-phone-light-402-top",
+    "before": "before-native/ai-providers-phone-light-402-top.png",
+    "after": "after-native/ai-providers-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "anomalies-phone-dark-402-top",
+    "before": "before-native/anomalies-phone-dark-402-top.png",
+    "after": "after-native/anomalies-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "anomalies-phone-light-402-top",
+    "before": "before-native/anomalies-phone-light-402-top.png",
+    "after": "after-native/anomalies-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "approval-editor-phone-dark-402-top",
+    "before": "before-native/approval-editor-phone-dark-402-top.png",
+    "after": "after-native/approval-editor-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "approval-editor-phone-light-402-top",
+    "before": "before-native/approval-editor-phone-light-402-top.png",
+    "after": "after-native/approval-editor-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "approvals-phone-dark-402-top",
+    "before": "before-native/approvals-phone-dark-402-top.png",
+    "after": "after-native/approvals-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "approvals-phone-light-402-accessible-scroll-01",
+    "before": "before-native/approvals-phone-light-402-accessible-scroll-01.png",
+    "after": "after-native/approvals-phone-light-402-accessible-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "approvals-phone-light-402-accessible-top",
+    "before": "before-native/approvals-phone-light-402-accessible-top.png",
+    "after": "after-native/approvals-phone-light-402-accessible-top.png"
+  },
+  {
+    "group": "native",
+    "name": "approvals-phone-light-402-top",
+    "before": "before-native/approvals-phone-light-402-top.png",
+    "after": "after-native/approvals-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "assistant-settings-phone-dark-402-top",
+    "before": "before-native/assistant-settings-phone-dark-402-top.png",
+    "after": "after-native/assistant-settings-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "assistant-settings-phone-light-402-top",
+    "before": "before-native/assistant-settings-phone-light-402-top.png",
+    "after": "after-native/assistant-settings-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "call-detail-phone-dark-402-top",
+    "before": "before-native/call-detail-phone-dark-402-top.png",
+    "after": "after-native/call-detail-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "call-detail-phone-light-402-top",
+    "before": "before-native/call-detail-phone-light-402-top.png",
+    "after": "after-native/call-detail-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "calls-phone-dark-402-top",
+    "before": "before-native/calls-phone-dark-402-top.png",
+    "after": "after-native/calls-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "calls-phone-light-402-top",
+    "before": "before-native/calls-phone-light-402-top.png",
+    "after": "after-native/calls-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "capabilities-phone-dark-402-top",
+    "before": "before-native/capabilities-phone-dark-402-top.png",
+    "after": "after-native/capabilities-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "capabilities-phone-light-402-top",
+    "before": "before-native/capabilities-phone-light-402-top.png",
+    "after": "after-native/capabilities-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "cards-phone-dark-402-top",
+    "before": "before-native/cards-phone-dark-402-top.png",
+    "after": "after-native/cards-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "cards-phone-light-402-top",
+    "before": "before-native/cards-phone-light-402-top.png",
+    "after": "after-native/cards-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "chat-directory-phone-dark-402-top",
+    "before": "before-native/chat-directory-phone-dark-402-top.png",
+    "after": "after-native/chat-directory-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "chat-directory-phone-light-402-top",
+    "before": "before-native/chat-directory-phone-light-402-top.png",
+    "after": "after-native/chat-directory-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "chat-phone-dark-402-top",
+    "before": "before-native/chat-phone-dark-402-top.png",
+    "after": "after-native/chat-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "chat-phone-light-402-top",
+    "before": "before-native/chat-phone-light-402-top.png",
+    "after": "after-native/chat-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "chats-phone-dark-402-top",
+    "before": "before-native/chats-phone-dark-402-top.png",
+    "after": "after-native/chats-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "chats-phone-light-402-top",
+    "before": "before-native/chats-phone-light-402-top.png",
+    "after": "after-native/chats-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "choice-reason-phone-dark-402-top",
+    "before": "before-native/choice-reason-phone-dark-402-top.png",
+    "after": "after-native/choice-reason-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "choice-reason-phone-light-402-top",
+    "before": "before-native/choice-reason-phone-light-402-top.png",
+    "after": "after-native/choice-reason-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "choose-model-phone-dark-402-top",
+    "before": "before-native/choose-model-phone-dark-402-top.png",
+    "after": "after-native/choose-model-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "choose-model-phone-light-402-top",
+    "before": "before-native/choose-model-phone-light-402-top.png",
+    "after": "after-native/choose-model-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "connect-provider-phone-dark-402-top",
+    "before": "before-native/connect-provider-phone-dark-402-top.png",
+    "after": "after-native/connect-provider-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "connect-provider-phone-light-402-top",
+    "before": "before-native/connect-provider-phone-light-402-top.png",
+    "after": "after-native/connect-provider-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "connected-tools-phone-dark-402-top",
+    "before": "before-native/connected-tools-phone-dark-402-top.png",
+    "after": "after-native/connected-tools-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "connected-tools-phone-light-402-top",
+    "before": "before-native/connected-tools-phone-light-402-top.png",
+    "after": "after-native/connected-tools-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "connection-onboarding-phone-dark-402-top",
+    "before": "before-native/connection-onboarding-phone-dark-402-top.png",
+    "after": "after-native/connection-onboarding-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "connection-onboarding-phone-light-402-top",
+    "before": "before-native/connection-onboarding-phone-light-402-top.png",
+    "after": "after-native/connection-onboarding-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "connection-phone-dark-402-top",
+    "before": "before-native/connection-phone-dark-402-top.png",
+    "after": "after-native/connection-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "connection-phone-light-402-top",
+    "before": "before-native/connection-phone-light-402-top.png",
+    "after": "after-native/connection-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "correct-connection-phone-dark-402-top",
+    "before": "before-native/correct-connection-phone-dark-402-top.png",
+    "after": "after-native/correct-connection-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "correct-connection-phone-light-402-top",
+    "before": "before-native/correct-connection-phone-light-402-top.png",
+    "after": "after-native/correct-connection-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "correct-memory-phone-dark-402-top",
+    "before": "before-native/correct-memory-phone-dark-402-top.png",
+    "after": "after-native/correct-memory-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "correct-memory-phone-light-402-top",
+    "before": "before-native/correct-memory-phone-light-402-top.png",
+    "after": "after-native/correct-memory-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "cost-limits-phone-dark-402-top",
+    "before": "before-native/cost-limits-phone-dark-402-top.png",
+    "after": "after-native/cost-limits-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "cost-limits-phone-light-402-top",
+    "before": "before-native/cost-limits-phone-light-402-top.png",
+    "after": "after-native/cost-limits-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "costs-phone-dark-402-top",
+    "before": "before-native/costs-phone-dark-402-top.png",
+    "after": "after-native/costs-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "costs-phone-light-402-top",
+    "before": "before-native/costs-phone-light-402-top.png",
+    "after": "after-native/costs-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "documents-phone-dark-402-top",
+    "before": "before-native/documents-phone-dark-402-top.png",
+    "after": "after-native/documents-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "documents-phone-light-402-top",
+    "before": "before-native/documents-phone-light-402-top.png",
+    "after": "after-native/documents-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "edit-goal-phone-dark-402-top",
+    "before": "before-native/edit-goal-phone-dark-402-top.png",
+    "after": "after-native/edit-goal-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "edit-goal-phone-light-402-accessible-scroll-01",
+    "before": "before-native/edit-goal-phone-light-402-accessible-scroll-01.png",
+    "after": "after-native/edit-goal-phone-light-402-accessible-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "edit-goal-phone-light-402-accessible-top",
+    "before": "before-native/edit-goal-phone-light-402-accessible-top.png",
+    "after": "after-native/edit-goal-phone-light-402-accessible-top.png"
+  },
+  {
+    "group": "native",
+    "name": "edit-goal-phone-light-402-top",
+    "before": "before-native/edit-goal-phone-light-402-top.png",
+    "after": "after-native/edit-goal-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "edit-item-phone-dark-402-top",
+    "before": "before-native/edit-item-phone-dark-402-top.png",
+    "after": "after-native/edit-item-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "edit-item-phone-light-402-top",
+    "before": "before-native/edit-item-phone-light-402-top.png",
+    "after": "after-native/edit-item-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "edit-occasion-phone-dark-402-top",
+    "before": "before-native/edit-occasion-phone-dark-402-top.png",
+    "after": "after-native/edit-occasion-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "edit-occasion-phone-light-402-top",
+    "before": "before-native/edit-occasion-phone-light-402-top.png",
+    "after": "after-native/edit-occasion-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "edit-open-loop-phone-dark-402-top",
+    "before": "before-native/edit-open-loop-phone-dark-402-top.png",
+    "after": "after-native/edit-open-loop-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "edit-open-loop-phone-light-402-top",
+    "before": "before-native/edit-open-loop-phone-light-402-top.png",
+    "after": "after-native/edit-open-loop-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "edit-person-phone-dark-402-top",
+    "before": "before-native/edit-person-phone-dark-402-top.png",
+    "after": "after-native/edit-person-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "edit-person-phone-light-402-top",
+    "before": "before-native/edit-person-phone-light-402-top.png",
+    "after": "after-native/edit-person-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "edit-skill-phone-dark-402-top",
+    "before": "before-native/edit-skill-phone-dark-402-top.png",
+    "after": "after-native/edit-skill-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "edit-skill-phone-light-402-top",
+    "before": "before-native/edit-skill-phone-light-402-top.png",
+    "after": "after-native/edit-skill-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "family-suggestions-phone-dark-402-top",
+    "before": "before-native/family-suggestions-phone-dark-402-top.png",
+    "after": "after-native/family-suggestions-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "family-suggestions-phone-light-402-top",
+    "before": "before-native/family-suggestions-phone-light-402-top.png",
+    "after": "after-native/family-suggestions-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "forget-source-phone-dark-402-top",
+    "before": "before-native/forget-source-phone-dark-402-top.png",
+    "after": "after-native/forget-source-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "forget-source-phone-light-402-top",
+    "before": "before-native/forget-source-phone-light-402-top.png",
+    "after": "after-native/forget-source-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "goals-phone-dark-402-top",
+    "before": "before-native/goals-phone-dark-402-top.png",
+    "after": "after-native/goals-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "goals-phone-light-402-top",
+    "before": "before-native/goals-phone-light-402-top.png",
+    "after": "after-native/goals-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-phone-dark-402-scroll-01",
+    "before": "before-native/improvements-phone-dark-402-scroll-01.png",
+    "after": "after-native/improvements-phone-dark-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-phone-dark-402-top",
+    "before": "before-native/improvements-phone-dark-402-top.png",
+    "after": "after-native/improvements-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-phone-light-402-accessible-scroll-01",
+    "before": "before-native/improvements-phone-light-402-accessible-scroll-01.png",
+    "after": "after-native/improvements-phone-light-402-accessible-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-phone-light-402-accessible-scroll-02",
+    "before": "before-native/improvements-phone-light-402-accessible-scroll-02.png",
+    "after": "after-native/improvements-phone-light-402-accessible-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-phone-light-402-accessible-scroll-03",
+    "before": "before-native/improvements-phone-light-402-accessible-scroll-03.png",
+    "after": "after-native/improvements-phone-light-402-accessible-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-phone-light-402-accessible-scroll-04",
+    "before": "before-native/improvements-phone-light-402-accessible-scroll-04.png",
+    "after": "after-native/improvements-phone-light-402-accessible-scroll-04.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-phone-light-402-accessible-scroll-05",
+    "before": "before-native/improvements-phone-light-402-accessible-scroll-05.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-phone-light-402-accessible-top",
+    "before": "before-native/improvements-phone-light-402-accessible-top.png",
+    "after": "after-native/improvements-phone-light-402-accessible-top.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-phone-light-402-scroll-01",
+    "before": "before-native/improvements-phone-light-402-scroll-01.png",
+    "after": "after-native/improvements-phone-light-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-phone-light-402-top",
+    "before": "before-native/improvements-phone-light-402-top.png",
+    "after": "after-native/improvements-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "linked-item-phone-dark-402-top",
+    "before": "before-native/linked-item-phone-dark-402-top.png",
+    "after": "after-native/linked-item-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "linked-item-phone-light-402-top",
+    "before": "before-native/linked-item-phone-light-402-top.png",
+    "after": "after-native/linked-item-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-add-connection-phone-dark-402-scroll-01",
+    "before": "before-native/map-add-connection-phone-dark-402-scroll-01.png",
+    "after": "after-native/map-add-connection-phone-dark-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "map-add-connection-phone-dark-402-scroll-02",
+    "before": "before-native/map-add-connection-phone-dark-402-scroll-02.png",
+    "after": "after-native/map-add-connection-phone-dark-402-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "map-add-connection-phone-dark-402-top",
+    "before": "before-native/map-add-connection-phone-dark-402-top.png",
+    "after": "after-native/map-add-connection-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-add-connection-phone-light-402-scroll-01",
+    "before": "before-native/map-add-connection-phone-light-402-scroll-01.png",
+    "after": "after-native/map-add-connection-phone-light-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "map-add-connection-phone-light-402-scroll-02",
+    "before": "before-native/map-add-connection-phone-light-402-scroll-02.png",
+    "after": "after-native/map-add-connection-phone-light-402-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "map-add-connection-phone-light-402-top",
+    "before": "before-native/map-add-connection-phone-light-402-top.png",
+    "after": "after-native/map-add-connection-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-connection-detail-phone-dark-402-top",
+    "before": "before-native/map-connection-detail-phone-dark-402-top.png",
+    "after": "after-native/map-connection-detail-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-connection-detail-phone-light-402-top",
+    "before": "before-native/map-connection-detail-phone-light-402-top.png",
+    "after": "after-native/map-connection-detail-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-connections-phone-dark-402-scroll-01",
+    "before": "before-native/map-connections-phone-dark-402-scroll-01.png",
+    "after": "after-native/map-connections-phone-dark-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "map-connections-phone-dark-402-top",
+    "before": "before-native/map-connections-phone-dark-402-top.png",
+    "after": "after-native/map-connections-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-connections-phone-light-402-scroll-01",
+    "before": "before-native/map-connections-phone-light-402-scroll-01.png",
+    "after": "after-native/map-connections-phone-light-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "map-connections-phone-light-402-top",
+    "before": "before-native/map-connections-phone-light-402-top.png",
+    "after": "after-native/map-connections-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-find-phone-dark-402-top",
+    "before": "before-native/map-find-phone-dark-402-top.png",
+    "after": "after-native/map-find-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-find-phone-light-402-top",
+    "before": "before-native/map-find-phone-light-402-top.png",
+    "after": "after-native/map-find-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-groups-phone-dark-402-top",
+    "before": "before-native/map-groups-phone-dark-402-top.png",
+    "after": "after-native/map-groups-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-groups-phone-light-402-top",
+    "before": "before-native/map-groups-phone-light-402-top.png",
+    "after": "after-native/map-groups-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-phone-dark-402-top",
+    "before": "before-native/map-phone-dark-402-top.png",
+    "after": "after-native/map-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-phone-light-402-top",
+    "before": "before-native/map-phone-light-402-top.png",
+    "after": "after-native/map-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-quick-connect-phone-dark-402-scroll-01",
+    "before": "before-native/map-quick-connect-phone-dark-402-scroll-01.png",
+    "after": "after-native/map-quick-connect-phone-dark-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "map-quick-connect-phone-dark-402-scroll-02",
+    "before": "before-native/map-quick-connect-phone-dark-402-scroll-02.png",
+    "after": "after-native/map-quick-connect-phone-dark-402-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "map-quick-connect-phone-dark-402-top",
+    "before": "before-native/map-quick-connect-phone-dark-402-top.png",
+    "after": "after-native/map-quick-connect-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-quick-connect-phone-light-402-scroll-01",
+    "before": "before-native/map-quick-connect-phone-light-402-scroll-01.png",
+    "after": "after-native/map-quick-connect-phone-light-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "map-quick-connect-phone-light-402-scroll-02",
+    "before": "before-native/map-quick-connect-phone-light-402-scroll-02.png",
+    "after": "after-native/map-quick-connect-phone-light-402-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "map-quick-connect-phone-light-402-top",
+    "before": "before-native/map-quick-connect-phone-light-402-top.png",
+    "after": "after-native/map-quick-connect-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-settings-phone-dark-402-scroll-01",
+    "before": "before-native/map-settings-phone-dark-402-scroll-01.png",
+    "after": "after-native/map-settings-phone-dark-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "map-settings-phone-dark-402-top",
+    "before": "before-native/map-settings-phone-dark-402-top.png",
+    "after": "after-native/map-settings-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-settings-phone-light-402-scroll-01",
+    "before": "before-native/map-settings-phone-light-402-scroll-01.png",
+    "after": "after-native/map-settings-phone-light-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "map-settings-phone-light-402-top",
+    "before": "before-native/map-settings-phone-light-402-top.png",
+    "after": "after-native/map-settings-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "memory-fact-phone-dark-402-top",
+    "before": "before-native/memory-fact-phone-dark-402-top.png",
+    "after": "after-native/memory-fact-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "memory-fact-phone-light-402-top",
+    "before": "before-native/memory-fact-phone-light-402-top.png",
+    "after": "after-native/memory-fact-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "memory-library-phone-dark-402-top",
+    "before": "before-native/memory-library-phone-dark-402-top.png",
+    "after": "after-native/memory-library-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "memory-library-phone-light-402-top",
+    "before": "before-native/memory-library-phone-light-402-top.png",
+    "after": "after-native/memory-library-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "memory-phone-dark-402-top",
+    "before": "before-native/memory-phone-dark-402-top.png",
+    "after": "after-native/memory-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "memory-phone-light-402-accessible-scroll-01",
+    "before": "before-native/memory-phone-light-402-accessible-scroll-01.png",
+    "after": "after-native/memory-phone-light-402-accessible-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "memory-phone-light-402-accessible-top",
+    "before": "before-native/memory-phone-light-402-accessible-top.png",
+    "after": "after-native/memory-phone-light-402-accessible-top.png"
+  },
+  {
+    "group": "native",
+    "name": "memory-phone-light-402-top",
+    "before": "before-native/memory-phone-light-402-top.png",
+    "after": "after-native/memory-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-dark-402-scroll-01",
+    "before": "before-native/more-phone-dark-402-scroll-01.png",
+    "after": "after-native/more-phone-dark-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-dark-402-scroll-02",
+    "before": "before-native/more-phone-dark-402-scroll-02.png",
+    "after": "after-native/more-phone-dark-402-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-dark-402-top",
+    "before": "before-native/more-phone-dark-402-top.png",
+    "after": "after-native/more-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-light-402-accessible-scroll-01",
+    "before": "before-native/more-phone-light-402-accessible-scroll-01.png",
+    "after": "after-native/more-phone-light-402-accessible-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-light-402-accessible-scroll-02",
+    "before": "before-native/more-phone-light-402-accessible-scroll-02.png",
+    "after": "after-native/more-phone-light-402-accessible-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-light-402-accessible-scroll-03",
+    "before": "before-native/more-phone-light-402-accessible-scroll-03.png",
+    "after": "after-native/more-phone-light-402-accessible-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-light-402-accessible-top",
+    "before": "before-native/more-phone-light-402-accessible-top.png",
+    "after": "after-native/more-phone-light-402-accessible-top.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-light-402-scroll-01",
+    "before": "before-native/more-phone-light-402-scroll-01.png",
+    "after": "after-native/more-phone-light-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-light-402-scroll-02",
+    "before": "before-native/more-phone-light-402-scroll-02.png",
+    "after": "after-native/more-phone-light-402-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-light-402-top",
+    "before": "before-native/more-phone-light-402-top.png",
+    "after": "after-native/more-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "new-connection-phone-dark-402-top",
+    "before": "before-native/new-connection-phone-dark-402-top.png",
+    "after": "after-native/new-connection-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "new-connection-phone-light-402-top",
+    "before": "before-native/new-connection-phone-light-402-top.png",
+    "after": "after-native/new-connection-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "new-goal-phone-dark-402-top",
+    "before": "before-native/new-goal-phone-dark-402-top.png",
+    "after": "after-native/new-goal-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "new-goal-phone-light-402-top",
+    "before": "before-native/new-goal-phone-light-402-top.png",
+    "after": "after-native/new-goal-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "new-memory-phone-dark-402-top",
+    "before": "before-native/new-memory-phone-dark-402-top.png",
+    "after": "after-native/new-memory-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "new-memory-phone-light-402-top",
+    "before": "before-native/new-memory-phone-light-402-top.png",
+    "after": "after-native/new-memory-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "new-occasion-phone-dark-402-top",
+    "before": "before-native/new-occasion-phone-dark-402-top.png",
+    "after": "after-native/new-occasion-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "new-occasion-phone-light-402-top",
+    "before": "before-native/new-occasion-phone-light-402-top.png",
+    "after": "after-native/new-occasion-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "new-pack-phone-dark-402-top",
+    "before": "before-native/new-pack-phone-dark-402-top.png",
+    "after": "after-native/new-pack-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "new-pack-phone-light-402-top",
+    "before": "before-native/new-pack-phone-light-402-top.png",
+    "after": "after-native/new-pack-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "new-person-phone-dark-402-top",
+    "before": "before-native/new-person-phone-dark-402-top.png",
+    "after": "after-native/new-person-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "new-person-phone-light-402-top",
+    "before": "before-native/new-person-phone-light-402-top.png",
+    "after": "after-native/new-person-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "new-skill-phone-dark-402-top",
+    "before": "before-native/new-skill-phone-dark-402-top.png",
+    "after": "after-native/new-skill-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "new-skill-phone-light-402-top",
+    "before": "before-native/new-skill-phone-light-402-top.png",
+    "after": "after-native/new-skill-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "open-loops-phone-dark-402-top",
+    "before": "before-native/open-loops-phone-dark-402-top.png",
+    "after": "after-native/open-loops-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "open-loops-phone-light-402-top",
+    "before": "before-native/open-loops-phone-light-402-top.png",
+    "after": "after-native/open-loops-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "people-connections-phone-dark-402-top",
+    "before": "before-native/people-connections-phone-dark-402-top.png",
+    "after": "after-native/people-connections-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "people-connections-phone-light-402-top",
+    "before": "before-native/people-connections-phone-light-402-top.png",
+    "after": "after-native/people-connections-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "people-phone-dark-402-top",
+    "before": "before-native/people-phone-dark-402-top.png",
+    "after": "after-native/people-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "people-phone-light-402-accessible-top",
+    "before": "before-native/people-phone-light-402-accessible-top.png",
+    "after": "after-native/people-phone-light-402-accessible-top.png"
+  },
+  {
+    "group": "native",
+    "name": "people-phone-light-402-top",
+    "before": "before-native/people-phone-light-402-top.png",
+    "after": "after-native/people-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "person-dates-phone-dark-402-top",
+    "before": "before-native/person-dates-phone-dark-402-top.png",
+    "after": "after-native/person-dates-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "person-dates-phone-light-402-top",
+    "before": "before-native/person-dates-phone-light-402-top.png",
+    "after": "after-native/person-dates-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "person-details-phone-dark-402-top",
+    "before": "before-native/person-details-phone-dark-402-top.png",
+    "after": "after-native/person-details-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "person-details-phone-light-402-top",
+    "before": "before-native/person-details-phone-light-402-top.png",
+    "after": "after-native/person-details-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "person-phone-dark-402-scroll-01",
+    "before": "before-native/person-phone-dark-402-scroll-01.png",
+    "after": "after-native/person-phone-dark-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "person-phone-dark-402-top",
+    "before": "before-native/person-phone-dark-402-top.png",
+    "after": "after-native/person-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "person-phone-light-402-scroll-01",
+    "before": "before-native/person-phone-light-402-scroll-01.png",
+    "after": "after-native/person-phone-light-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "person-phone-light-402-top",
+    "before": "before-native/person-phone-light-402-top.png",
+    "after": "after-native/person-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "profile-summary-phone-dark-402-top",
+    "before": "before-native/profile-summary-phone-dark-402-top.png",
+    "after": "after-native/profile-summary-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "profile-summary-phone-light-402-top",
+    "before": "before-native/profile-summary-phone-light-402-top.png",
+    "after": "after-native/profile-summary-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "provider-detail-phone-dark-402-top",
+    "before": "before-native/provider-detail-phone-dark-402-top.png",
+    "after": "after-native/provider-detail-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "provider-detail-phone-light-402-accessible-scroll-01",
+    "before": "before-native/provider-detail-phone-light-402-accessible-scroll-01.png",
+    "after": "after-native/provider-detail-phone-light-402-accessible-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "provider-detail-phone-light-402-accessible-top",
+    "before": "before-native/provider-detail-phone-light-402-accessible-top.png",
+    "after": "after-native/provider-detail-phone-light-402-accessible-top.png"
+  },
+  {
+    "group": "native",
+    "name": "provider-detail-phone-light-402-top",
+    "before": "before-native/provider-detail-phone-light-402-top.png",
+    "after": "after-native/provider-detail-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "rehearse-change-phone-dark-402-top",
+    "before": "before-native/rehearse-change-phone-dark-402-top.png",
+    "after": "after-native/rehearse-change-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "rehearse-change-phone-light-402-top",
+    "before": "before-native/rehearse-change-phone-light-402-top.png",
+    "after": "after-native/rehearse-change-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "relationship-evidence-phone-dark-402-top",
+    "before": "before-native/relationship-evidence-phone-dark-402-top.png",
+    "after": "after-native/relationship-evidence-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "relationship-evidence-phone-light-402-top",
+    "before": "before-native/relationship-evidence-phone-light-402-top.png",
+    "after": "after-native/relationship-evidence-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "reminders-phone-dark-402-top",
+    "before": "before-native/reminders-phone-dark-402-top.png",
+    "after": "after-native/reminders-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "reminders-phone-light-402-top",
+    "before": "before-native/reminders-phone-light-402-top.png",
+    "after": "after-native/reminders-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "report-issue-phone-dark-402-top",
+    "before": "before-native/report-issue-phone-dark-402-top.png",
+    "after": "after-native/report-issue-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "report-issue-phone-light-402-accessible-scroll-01",
+    "before": "before-native/report-issue-phone-light-402-accessible-scroll-01.png",
+    "after": "after-native/report-issue-phone-light-402-accessible-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "report-issue-phone-light-402-accessible-top",
+    "before": "before-native/report-issue-phone-light-402-accessible-top.png",
+    "after": "after-native/report-issue-phone-light-402-accessible-top.png"
+  },
+  {
+    "group": "native",
+    "name": "report-issue-phone-light-402-top",
+    "before": "before-native/report-issue-phone-light-402-top.png",
+    "after": "after-native/report-issue-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "situation-pack-phone-dark-402-top",
+    "before": "before-native/situation-pack-phone-dark-402-top.png",
+    "after": "after-native/situation-pack-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "situation-pack-phone-light-402-top",
+    "before": "before-native/situation-pack-phone-light-402-top.png",
+    "after": "after-native/situation-pack-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "situation-packs-phone-dark-402-top",
+    "before": "before-native/situation-packs-phone-dark-402-top.png",
+    "after": "after-native/situation-packs-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "situation-packs-phone-light-402-top",
+    "before": "before-native/situation-packs-phone-light-402-top.png",
+    "after": "after-native/situation-packs-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "skills-phone-dark-402-top",
+    "before": "before-native/skills-phone-dark-402-top.png",
+    "after": "after-native/skills-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "skills-phone-light-402-top",
+    "before": "before-native/skills-phone-light-402-top.png",
+    "after": "after-native/skills-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "talk-paused-phone-dark-402-top",
+    "before": "before-native/talk-paused-phone-dark-402-top.png",
+    "after": "after-native/talk-paused-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "talk-paused-phone-light-402-top",
+    "before": "before-native/talk-paused-phone-light-402-top.png",
+    "after": "after-native/talk-paused-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "tidy-up-phone-dark-402-top",
+    "before": "before-native/tidy-up-phone-dark-402-top.png",
+    "after": "after-native/tidy-up-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "tidy-up-phone-light-402-top",
+    "before": "before-native/tidy-up-phone-light-402-top.png",
+    "after": "after-native/tidy-up-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "writing-voice-editor-phone-dark-402-top",
+    "before": "before-native/writing-voice-editor-phone-dark-402-top.png",
+    "after": "after-native/writing-voice-editor-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "writing-voice-editor-phone-light-402-accessible-scroll-01",
+    "before": "before-native/writing-voice-editor-phone-light-402-accessible-scroll-01.png",
+    "after": "after-native/writing-voice-editor-phone-light-402-accessible-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "writing-voice-editor-phone-light-402-accessible-top",
+    "before": "before-native/writing-voice-editor-phone-light-402-accessible-top.png",
+    "after": "after-native/writing-voice-editor-phone-light-402-accessible-top.png"
+  },
+  {
+    "group": "native",
+    "name": "writing-voice-editor-phone-light-402-top",
+    "before": "before-native/writing-voice-editor-phone-light-402-top.png",
+    "after": "after-native/writing-voice-editor-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "writing-voice-phone-dark-402-top",
+    "before": "before-native/writing-voice-phone-dark-402-top.png",
+    "after": "after-native/writing-voice-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "writing-voice-phone-light-402-top",
+    "before": "before-native/writing-voice-phone-light-402-top.png",
+    "after": "after-native/writing-voice-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "your-data-phone-dark-402-top",
+    "before": "before-native/your-data-phone-dark-402-top.png",
+    "after": "after-native/your-data-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "your-data-phone-light-402-top",
+    "before": "before-native/your-data-phone-light-402-top.png",
+    "after": "after-native/your-data-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "activity-empty-phone-dark-402-top",
+    "after": "after-native/activity-empty-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "activity-empty-phone-light-402-top",
+    "after": "after-native/activity-empty-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "approvals-empty-phone-dark-402-top",
+    "after": "after-native/approvals-empty-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "approvals-empty-phone-light-402-top",
+    "after": "after-native/approvals-empty-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "edit-goal-phone-light-402-accessible-scroll-02",
+    "after": "after-native/edit-goal-phone-light-402-accessible-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "edit-goal-phone-light-402-accessible-scroll-03",
+    "after": "after-native/edit-goal-phone-light-402-accessible-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "goals-empty-phone-dark-402-top",
+    "after": "after-native/goals-empty-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "goals-empty-phone-light-402-top",
+    "after": "after-native/goals-empty-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-refresh-failed-phone-dark-402-scroll-01",
+    "after": "after-native/improvements-refresh-failed-phone-dark-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-refresh-failed-phone-dark-402-top",
+    "after": "after-native/improvements-refresh-failed-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-refresh-failed-phone-light-402-accessible-scroll-01",
+    "after": "after-native/improvements-refresh-failed-phone-light-402-accessible-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-refresh-failed-phone-light-402-accessible-scroll-02",
+    "after": "after-native/improvements-refresh-failed-phone-light-402-accessible-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-refresh-failed-phone-light-402-accessible-scroll-03",
+    "after": "after-native/improvements-refresh-failed-phone-light-402-accessible-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-refresh-failed-phone-light-402-accessible-scroll-04",
+    "after": "after-native/improvements-refresh-failed-phone-light-402-accessible-scroll-04.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-refresh-failed-phone-light-402-accessible-scroll-05",
+    "after": "after-native/improvements-refresh-failed-phone-light-402-accessible-scroll-05.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-refresh-failed-phone-light-402-accessible-top",
+    "after": "after-native/improvements-refresh-failed-phone-light-402-accessible-top.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-refresh-failed-phone-light-402-scroll-01",
+    "after": "after-native/improvements-refresh-failed-phone-light-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "improvements-refresh-failed-phone-light-402-top",
+    "after": "after-native/improvements-refresh-failed-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "map-add-connection-phone-dark-402-scroll-03",
+    "after": "after-native/map-add-connection-phone-dark-402-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "map-add-connection-phone-light-402-scroll-03",
+    "after": "after-native/map-add-connection-phone-light-402-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "map-connections-phone-dark-402-scroll-02",
+    "after": "after-native/map-connections-phone-dark-402-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "map-connections-phone-light-402-scroll-02",
+    "after": "after-native/map-connections-phone-light-402-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "map-find-phone-dark-402-scroll-01",
+    "after": "after-native/map-find-phone-dark-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "map-find-phone-dark-402-scroll-02",
+    "after": "after-native/map-find-phone-dark-402-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "map-find-phone-light-402-scroll-01",
+    "after": "after-native/map-find-phone-light-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "map-find-phone-light-402-scroll-02",
+    "after": "after-native/map-find-phone-light-402-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "map-quick-connect-phone-dark-402-scroll-03",
+    "after": "after-native/map-quick-connect-phone-dark-402-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "map-quick-connect-phone-light-402-scroll-03",
+    "after": "after-native/map-quick-connect-phone-light-402-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "map-settings-phone-dark-402-scroll-02",
+    "after": "after-native/map-settings-phone-dark-402-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "map-settings-phone-dark-402-scroll-03",
+    "after": "after-native/map-settings-phone-dark-402-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "map-settings-phone-light-402-scroll-02",
+    "after": "after-native/map-settings-phone-light-402-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "map-settings-phone-light-402-scroll-03",
+    "after": "after-native/map-settings-phone-light-402-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "memory-phone-light-402-accessible-scroll-02",
+    "after": "after-native/memory-phone-light-402-accessible-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "memory-phone-light-402-accessible-scroll-03",
+    "after": "after-native/memory-phone-light-402-accessible-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "more-load-failed-phone-dark-402-scroll-01",
+    "after": "after-native/more-load-failed-phone-dark-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "more-load-failed-phone-dark-402-scroll-02",
+    "after": "after-native/more-load-failed-phone-dark-402-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "more-load-failed-phone-dark-402-scroll-03",
+    "after": "after-native/more-load-failed-phone-dark-402-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "more-load-failed-phone-dark-402-top",
+    "after": "after-native/more-load-failed-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "more-load-failed-phone-light-402-accessible-scroll-01",
+    "after": "after-native/more-load-failed-phone-light-402-accessible-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "more-load-failed-phone-light-402-accessible-scroll-02",
+    "after": "after-native/more-load-failed-phone-light-402-accessible-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "more-load-failed-phone-light-402-accessible-scroll-03",
+    "after": "after-native/more-load-failed-phone-light-402-accessible-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "more-load-failed-phone-light-402-accessible-scroll-04",
+    "after": "after-native/more-load-failed-phone-light-402-accessible-scroll-04.png"
+  },
+  {
+    "group": "native",
+    "name": "more-load-failed-phone-light-402-accessible-scroll-05",
+    "after": "after-native/more-load-failed-phone-light-402-accessible-scroll-05.png"
+  },
+  {
+    "group": "native",
+    "name": "more-load-failed-phone-light-402-accessible-scroll-06",
+    "after": "after-native/more-load-failed-phone-light-402-accessible-scroll-06.png"
+  },
+  {
+    "group": "native",
+    "name": "more-load-failed-phone-light-402-accessible-scroll-07",
+    "after": "after-native/more-load-failed-phone-light-402-accessible-scroll-07.png"
+  },
+  {
+    "group": "native",
+    "name": "more-load-failed-phone-light-402-accessible-top",
+    "after": "after-native/more-load-failed-phone-light-402-accessible-top.png"
+  },
+  {
+    "group": "native",
+    "name": "more-load-failed-phone-light-402-scroll-01",
+    "after": "after-native/more-load-failed-phone-light-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "more-load-failed-phone-light-402-scroll-02",
+    "after": "after-native/more-load-failed-phone-light-402-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "more-load-failed-phone-light-402-scroll-03",
+    "after": "after-native/more-load-failed-phone-light-402-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "more-load-failed-phone-light-402-top",
+    "after": "after-native/more-load-failed-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-dark-402-scroll-03",
+    "after": "after-native/more-phone-dark-402-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-dark-402-scroll-04",
+    "after": "after-native/more-phone-dark-402-scroll-04.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-light-402-accessible-scroll-04",
+    "after": "after-native/more-phone-light-402-accessible-scroll-04.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-light-402-accessible-scroll-05",
+    "after": "after-native/more-phone-light-402-accessible-scroll-05.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-light-402-accessible-scroll-06",
+    "after": "after-native/more-phone-light-402-accessible-scroll-06.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-light-402-accessible-scroll-07",
+    "after": "after-native/more-phone-light-402-accessible-scroll-07.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-light-402-accessible-scroll-08",
+    "after": "after-native/more-phone-light-402-accessible-scroll-08.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-light-402-accessible-scroll-09",
+    "after": "after-native/more-phone-light-402-accessible-scroll-09.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-light-402-scroll-03",
+    "after": "after-native/more-phone-light-402-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "more-phone-light-402-scroll-04",
+    "after": "after-native/more-phone-light-402-scroll-04.png"
+  },
+  {
+    "group": "native",
+    "name": "provider-detail-phone-light-402-accessible-scroll-02",
+    "after": "after-native/provider-detail-phone-light-402-accessible-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "provider-detail-phone-light-402-accessible-scroll-03",
+    "after": "after-native/provider-detail-phone-light-402-accessible-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "providers-refresh-failed-phone-dark-402-scroll-01",
+    "after": "after-native/providers-refresh-failed-phone-dark-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "providers-refresh-failed-phone-dark-402-top",
+    "after": "after-native/providers-refresh-failed-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "providers-refresh-failed-phone-light-402-accessible-scroll-01",
+    "after": "after-native/providers-refresh-failed-phone-light-402-accessible-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "providers-refresh-failed-phone-light-402-accessible-scroll-02",
+    "after": "after-native/providers-refresh-failed-phone-light-402-accessible-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "providers-refresh-failed-phone-light-402-accessible-scroll-03",
+    "after": "after-native/providers-refresh-failed-phone-light-402-accessible-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "providers-refresh-failed-phone-light-402-accessible-top",
+    "after": "after-native/providers-refresh-failed-phone-light-402-accessible-top.png"
+  },
+  {
+    "group": "native",
+    "name": "providers-refresh-failed-phone-light-402-scroll-01",
+    "after": "after-native/providers-refresh-failed-phone-light-402-scroll-01.png"
+  },
+  {
+    "group": "native",
+    "name": "providers-refresh-failed-phone-light-402-top",
+    "after": "after-native/providers-refresh-failed-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "report-issue-phone-light-402-accessible-scroll-02",
+    "after": "after-native/report-issue-phone-light-402-accessible-scroll-02.png"
+  },
+  {
+    "group": "native",
+    "name": "report-issue-phone-light-402-accessible-scroll-03",
+    "after": "after-native/report-issue-phone-light-402-accessible-scroll-03.png"
+  },
+  {
+    "group": "native",
+    "name": "skills-empty-phone-dark-402-top",
+    "after": "after-native/skills-empty-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "skills-empty-phone-light-402-top",
+    "after": "after-native/skills-empty-phone-light-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "tools-load-failed-phone-dark-402-top",
+    "after": "after-native/tools-load-failed-phone-dark-402-top.png"
+  },
+  {
+    "group": "native",
+    "name": "tools-load-failed-phone-light-402-accessible-top",
+    "after": "after-native/tools-load-failed-phone-light-402-accessible-top.png"
+  },
+  {
+    "group": "native",
+    "name": "tools-load-failed-phone-light-402-top",
+    "after": "after-native/tools-load-failed-phone-light-402-top.png"
+  },
+  {
+    "group": "products",
+    "name": "chat-390-dark-hydrated",
+    "after": "hydrated-chat/chat-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "chat-390-light-hydrated",
+    "after": "hydrated-chat/chat-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "chat-empty-390-dark-hydrated",
+    "after": "hydrated-chat/chat-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "chat-empty-390-light-hydrated",
+    "after": "hydrated-chat/chat-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "side-chat-390-dark-hydrated",
+    "after": "hydrated-chat/side-chat-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "side-chat-390-light-hydrated",
+    "after": "hydrated-chat/side-chat-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "side-chat-empty-390-dark-hydrated",
+    "after": "hydrated-chat/side-chat-empty-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "side-chat-empty-390-light-hydrated",
+    "after": "hydrated-chat/side-chat-empty-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "chat-recall-failure-390-dark-hydrated-state",
+    "after": "hydrated-chat-states/chat-recall-failure-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "chat-recall-failure-390-light-hydrated-state",
+    "after": "hydrated-chat-states/chat-recall-failure-390-light.png"
+  },
+  {
+    "group": "products",
+    "name": "notification-recall-failure-390-dark-hydrated-state",
+    "after": "hydrated-chat-states/notification-recall-failure-390-dark.png"
+  },
+  {
+    "group": "products",
+    "name": "notification-recall-failure-390-light-hydrated-state",
+    "after": "hydrated-chat-states/notification-recall-failure-390-light.png"
+  }
+]

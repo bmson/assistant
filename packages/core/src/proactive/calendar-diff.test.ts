@@ -110,6 +110,17 @@ describe('diffCalendarEvents — cancelled', () => {
     expect(changes[0]?.kind).toBe('cancelled');
   });
 
+  it('trusts an explicit cancellation even when unrelated events were truncated', () => {
+    const changes = diffCalendarEvents(
+      [event({ status: 'cancelled' })],
+      [snapshot(), snapshot({ eventId: 'not-returned' })],
+      NOW,
+      false,
+    );
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ kind: 'cancelled', eventId: 'evt-1' });
+  });
+
   it('does not flag a truncated read — absence proves nothing when the read was incomplete', () => {
     expect(diffCalendarEvents([], [snapshot()], NOW, false)).toEqual([]);
   });

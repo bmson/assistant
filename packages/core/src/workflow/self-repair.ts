@@ -12,8 +12,22 @@ import type { ModelRouter, ObjectOutcome } from '../model-router/router.js';
 import { RepairDispatchRejected, type RepairWorker, repairBranch } from './repair-github.js';
 
 export function isRepairFeedback(text: string): boolean {
-  return /\b(?:you (?:were|are|got (?:it|that)) (?:wrong|incorrect)|(?:that|this|it) (?:was|is) (?:wrong|incorrect)|(?:why|how come) (?:didn't|did not|doesn't|does not) (?:that|this|it|the .{1,40}) (?:work|succeed|save|send|update)|(?:that|this|it) (?:didn't|did not) (?:work|succeed)|fix (?:this|that|the) (?:bug|issue|failure)|report (?:a |this |that )?(?:bug|issue))\b/i.test(
-    text,
+  // Quoted examples, pasted messages and code are evidence, not an owner
+  // instruction to start a coding investigation. Match direct correction
+  // clauses instead of searching anywhere inside general discussion.
+  const ownerText = text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/^\s*>.*$/gm, ' ')
+    .replace(/`[^`\n]*`|"[^"\n]*"|“[^”\n]*”/g, ' ')
+    .replace(/[’‘]/g, "'");
+  if (
+    /\b(?:don't|do not|never|no need to)\s+(?:(?:file|open|create) (?:an? |any |this )?(?:bug|issue|report)|report (?:it|this|that|a bug|an issue)|investigate (?:it|this|that))\b/i.test(
+      ownerText,
+    )
+  )
+    return false;
+  return /(?:^|[.!?\n]\s*)(?:(?:no|actually|wait|sorry|hey|please)[,:]?\s+)?(?:you (?:were|are|got (?:it|that)) (?:wrong|incorrect)|(?:that|this|it)(?:'s| (?:was|is)) (?:wrong|incorrect)|you (?:made (?:that|this|it) up|invented (?:that|this|it))|(?:that|this|it) (?:didn't|did not|hasn't|has not|wasn't|was not) (?:work|succeed|save|send|update|change|create|schedule|book|cancel|arrive|deliver)|i (?:don't|do not|can't|cannot) see (?:the |any )?(?:change|update|event|reminder|booking)|(?:why|how come) (?:didn't|did not|doesn't|does not) (?:that|this|it|the .{1,40}) (?:work|succeed|save|send|update)|(?:(?:can|could|would) you (?:please )?)?fix (?:this|that|the) (?:bug|issue|failure)|report (?:a |this |that )?(?:bug|issue))\b/i.test(
+    ownerText,
   );
 }
 export function repairFingerprint(source: string, id: string, summary = ''): string {

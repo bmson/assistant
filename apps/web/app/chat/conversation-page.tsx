@@ -3,6 +3,7 @@ import { requireOwner } from '@/auth';
 import { chatNoticeMessage } from '@/lib/chat-notices';
 import { getChatApplication } from '@/lib/server';
 import { ChatClient } from './[id]/chat-client';
+import '../conversation.css';
 
 export interface ChatPageQuery {
   task?: string;

@@ -1,6 +1,6 @@
 # Model routing
 
-All models use the existing OpenRouter account. Defaults are declared in
+Seed defaults use OpenRouter; owner connections can mix providers as described below. Defaults are declared in
 `packages/db/src/model-config.ts` and reconciled when the database is seeded.
 
 | Work | Primary | Budget/provider fallback |
@@ -16,6 +16,13 @@ K3 explicitly for hard problems; it is never an automatic budget fallback.
 The selection applies to conversational replies and the conversation's agent
 tool loop. Internal planning and background roles retain their own defaults.
 All choices remain subject to the existing task/daily/monthly budget checks.
+
+GPT-6.1 Sol and GPT-6 Luna are also explicit catalog choices as of the October 2
+review. No automatic role defaults changed. Source reconciliation/seed is distinct
+from changing a deployed installation. Sol uses supported reasoning effort and
+requires reasoning; Luna can disable it for lightweight work. See the
+[model research and evaluation guide](model-evaluation.md) for current catalog
+rates, capability/transport limits, and `pnpm eval:models` synthetic screening.
 
 Anthropic models and the old Qwen/DeepSeek Chat defaults are disabled. Their
 historical usage records remain intact, and saved conversation overrides using
@@ -42,7 +49,8 @@ Reasoning support does not imply that reasoning can be disabled. Gemini 3.8
 Flash, MiniMax M2.7, and GPT-OSS 120B require it. The router keeps reasoning
 enabled, with output and cost headroom, for required and unrecognized models.
 Lightweight calls disable reasoning only for the exact OpenRouter models in
-the provider's verified optional-reasoning list (catalog checked 2026-09-19).
+the provider's verified optional-reasoning list (existing entries checked 2026-09-19;
+GPT-6 Luna checked 2026-10-02).
 New models or variants must be checked against the catalog's
 `reasoning.mandatory` field before being added to that list. Tool-calling and
 deliberating roles continue to request reasoning even when it is optional.

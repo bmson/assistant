@@ -5,11 +5,19 @@ import SwiftUI
 struct CallsView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     @State private var calls: [PhoneCall]?
+    @State private var loadFailed = false
 
     var body: some View {
-        Form {
+        AssistantForm {
             Group {
+                if loadFailed {
+                    AssistantLoadFailureState(
+                        title: "Calls couldn’t be loaded",
+                        message: calls == nil ? "Try again when your assistant is reachable." : "Your last loaded calls are shown below."
+                    ) { Task { await reload() } }
+                }
                 if let calls {
                     if calls.isEmpty {
                         Text("No calls yet. Ask the assistant in chat to call someone for you.")
@@ -24,7 +32,7 @@ struct CallsView: View {
                                     Text(call.title)
                                     if call.openCheckin != nil {
                                         Image(systemName: "questionmark.bubble.fill")
-                                            .foregroundStyle(.orange)
+                                            .foregroundStyle(AssistantTheme.warning(for: colorScheme))
                                             .accessibilityLabel("Needs your answer")
                                     }
                                 }
@@ -35,8 +43,8 @@ struct CallsView: View {
                             }
                         }
                     }
-                } else {
-                    ProgressView()
+                } else if !loadFailed {
+                    AssistantLoadingState(title: "Loading calls")
                 }
             }
             .listRowBackground(AssistantTheme.raised(for: colorScheme))
@@ -45,22 +53,41 @@ struct CallsView: View {
         .scrollContentBackground(.hidden)
         .navigationTitle("Calls")
         .assistantSubmenuChrome()
-        .task { calls = await model.loadPhoneCalls() }
-        .refreshable { calls = await model.loadPhoneCalls() }
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            await reload()
+        }
+        .refreshable { await reload() }
+    }
+
+    private func reload() async {
+        let result = await model.loadPhoneCalls()
+        guard !Task.isCancelled else { return }
+        if let result { calls = result }
+        loadFailed = result == nil
     }
 }
 
 private struct CallDetailView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     let callID: String
     @State private var call: PhoneCall?
     @State private var answer = ""
     @State private var sending = false
+    @State private var loadFailed = false
+    @State private var refreshGeneration = 0
 
     var body: some View {
-        Form {
+        AssistantForm {
             Group {
+                if loadFailed {
+                    AssistantLoadFailureState(
+                        title: "The call couldn’t be updated",
+                        message: call == nil ? "Try again to check the call." : "The last update is shown below. Try again to follow the call."
+                    ) { refreshGeneration += 1 }
+                }
                 if let call {
                     Section {
                         LabeledContent("Status", value: call.statusLabel)
@@ -82,16 +109,20 @@ private struct CallDetailView: View {
                                         await reload()
                                     }
                                 }
-                                .disabled(sending || answer.trimmingCharacters(in: .whitespaces).isEmpty)
+                                .disabled(sending || answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             }
                         }
                         Section {
                             Button("Hang up", role: .destructive) {
+                                guard !sending else { return }
+                                sending = true
                                 Task {
                                     _ = await model.hangUpCall(callId: call.id)
                                     await reload()
+                                    sending = false
                                 }
                             }
+                            .disabled(sending)
                         }
                     }
                     if !call.notes.isEmpty {
@@ -113,8 +144,8 @@ private struct CallDetailView: View {
                             }
                         }
                     }
-                } else {
-                    ProgressView()
+                } else if !loadFailed {
+                    AssistantLoadingState(title: "Loading the call")
                 }
             }
             .listRowBackground(AssistantTheme.raised(for: colorScheme))
@@ -123,17 +154,34 @@ private struct CallDetailView: View {
         .scrollContentBackground(.hidden)
         .navigationTitle(call?.title ?? "Call")
         .assistantSubmenuChrome()
-        .task {
+        .task(id: "\(scenePhase)-\(refreshGeneration)") {
+            guard scenePhase == .active else { return }
             await reload()
-            // Follow a live call: new lines and questions arrive every couple of seconds.
-            while !Task.isCancelled, call?.active != false {
-                try? await Task.sleep(for: .seconds(2))
+            guard call != nil else { return }
+            var failures = loadFailed ? 1 : 0
+            // Follow only a visible live call. Cancellation must end the wait,
+            // rather than falling through into one more network request.
+            while !Task.isCancelled, call?.active == true, failures < 3 {
+                do {
+                    try await Task.sleep(for: .seconds(PollingPolicy.callIntervalSeconds(consecutiveFailures: failures)))
+                } catch { return }
+                guard !Task.isCancelled, scenePhase == .active else { return }
                 await reload()
+                failures = loadFailed ? failures + 1 : 0
             }
         }
     }
 
     private func reload() async {
-        if let fresh = await model.loadPhoneCall(id: callID) { call = fresh }
+        let fresh = await model.loadPhoneCall(id: callID)
+        guard !Task.isCancelled else { return }
+        if let fresh { call = fresh }
+        loadFailed = fresh == nil
     }
 }
+
+#if DEBUG
+extension CallsView {
+    @MainActor static func visualReviewDetail() -> AnyView { AnyView(CallDetailView(callID: "call-1")) }
+}
+#endif

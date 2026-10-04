@@ -1,8 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { rotateMobileToken } from '@/app/settings/actions';
-import { btnSm } from '@/lib/ui';
+import { CopyButton } from '@/lib/copy-button';
+import { labelClass, summaryClass } from '@/lib/ui';
 import { ConfirmButton } from '@/lib/ui-client';
 
 /**
@@ -28,62 +29,55 @@ export function MobileTokenPanel({
   canRotate: boolean;
 }) {
   const [freshToken, setFreshToken] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const copy = async (value: string) => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard unavailable (insecure context, permission denied) — the
-      // field stays selectable for manual copy.
-    }
-  };
+  const keyHeading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (freshToken) keyHeading.current?.focus();
+  }, [freshToken]);
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <div className="grid min-w-0 gap-3 sm:grid-cols-2">
         <div className="flex min-w-0 flex-col gap-1.5">
-          <span className="text-sm font-medium text-muted">Assistant server</span>
-          <code className="min-w-0 truncate rounded-lg border border-edge bg-sunken px-3 py-2 font-mono text-sm text-strong select-all">
+          <span className={labelClass}>Server address</span>
+          <code className="min-w-0 rounded-lg border border-edge bg-sunken px-3 py-2 font-mono text-sm text-strong break-all select-all">
             {serverUrl}
           </code>
+          <CopyButton value={serverUrl} name="server address" />
         </div>
         <div className="flex min-w-0 flex-col gap-1.5">
-          <span className="text-sm font-medium text-muted">Mobile access key</span>
+          <span className={labelClass}>Current key</span>
           <code className="min-w-0 truncate rounded-lg border border-edge bg-sunken px-3 py-2 font-mono text-sm text-strong select-all">
             {maskedToken ?? 'Not configured'}
           </code>
+          <p className="text-xs leading-5 text-muted">
+            Hidden for security. This preview cannot connect a device.
+          </p>
         </div>
       </div>
 
-      <p className="text-xs leading-5 text-muted">
-        Enter these two values in the iPhone app’s Connection screen. The token is stored in the
-        device Keychain and sent only to this server. For security the stored key is never shown
-        here — rotating generates a new one you can copy once, and invalidates the old key within 30
-        seconds on all server instances.
+      <p className="text-sm leading-6 text-muted">
+        Enter the server address and a full access key in the mobile app’s Connection screen.
+        {canRotate
+          ? ' Create a new key below, then copy it into the app.'
+          : maskedToken
+            ? ' Use the full key you saved during setup, or ask the person who manages this server for a new one.'
+            : ' Ask the person who manages this server to set up an access key.'}
       </p>
 
       {freshToken ? (
         <div className="flex min-w-0 flex-col gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-3 dark:border-emerald-900 dark:bg-emerald-950/40">
-          <span className="text-sm font-medium text-emerald-800 dark:text-emerald-300">
+          <h3
+            ref={keyHeading}
+            tabIndex={-1}
+            className="text-sm font-medium text-emerald-800 dark:text-emerald-300"
+          >
             New key — copy it now. It won’t be shown again.
-          </span>
-          <div className="flex min-w-0 items-center gap-2">
-            <code className="min-w-0 flex-1 truncate rounded-md border border-emerald-300 bg-white px-3 py-2 font-mono text-sm text-strong select-all dark:border-emerald-800 dark:bg-emerald-950">
-              {freshToken}
-            </code>
-            <button
-              type="button"
-              onClick={() => copy(freshToken)}
-              className={btnSm.outline}
-              title="Copy the new key"
-            >
-              {copied ? 'Copied ✓' : 'Copy'}
-            </button>
-          </div>
+          </h3>
+          <code className="min-w-0 rounded-md border border-emerald-300 bg-white px-3 py-2 font-mono text-sm text-strong break-all select-all dark:border-emerald-800 dark:bg-emerald-950">
+            {freshToken}
+          </code>
+          <CopyButton value={freshToken} name="access key" />
           <span className="text-xs text-emerald-700 dark:text-emerald-400">
             Update the Connection screen on your phone — the previous key stops working within 30
             seconds.
@@ -92,11 +86,16 @@ export function MobileTokenPanel({
       ) : null}
 
       {canRotate ? (
-        <div>
+        <div className="grid gap-2">
+          {maskedToken ? (
+            <p className="text-sm leading-6 text-muted">
+              Creating a new key disconnects devices using the current key within 30 seconds. Update
+              each device with the new key.
+            </p>
+          ) : null}
           <form
             action={async () => {
               setError(null);
-              setFreshToken(null);
               try {
                 const result = await rotateMobileToken();
                 if (result.error) {
@@ -110,8 +109,7 @@ export function MobileTokenPanel({
             }}
           >
             <ConfirmButton
-              variant="dangerOutline"
-              size="sm"
+              variant={maskedToken ? 'dangerOutline' : 'primary'}
               pendingLabel={maskedToken ? 'Rotating…' : 'Generating…'}
               confirmLabel={maskedToken ? 'Confirm rotate' : 'Confirm generate'}
               title={
@@ -120,20 +118,26 @@ export function MobileTokenPanel({
                   : 'Generate a mobile access key'
               }
             >
-              {maskedToken ? 'Rotate key' : 'Generate key'}
+              {maskedToken ? 'Create a replacement key' : 'Create access key'}
             </ConfirmButton>
           </form>
         </div>
       ) : (
-        <p className="text-xs leading-5 text-muted">
-          This server has neither a writable <code>.env</code> nor a <code>GCP_PROJECT</code>, so
-          there is nowhere to persist a new key. Set <code>MOBILE_API_TOKEN</code> in the
-          environment directly.
-        </p>
+        <details className="rounded-lg border border-edge p-3 text-sm">
+          <summary className={summaryClass}>Server setup details</summary>
+          <p className="mt-3 text-xs leading-5 text-muted">
+            This server has neither a writable <code>.env</code> nor a <code>GCP_PROJECT</code>, so
+            this page cannot save a replacement key. Set <code>MOBILE_API_TOKEN</code> in the server
+            environment directly, then use that full value in the app.
+          </p>
+        </details>
       )}
 
       {error ? (
-        <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+        <p
+          role="alert"
+          className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm leading-6 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300"
+        >
           {error}
         </p>
       ) : null}

@@ -1,0 +1,74 @@
+{
+  "review_date": "2026-10-03",
+  "scope": "Local source verification for session ownership and interface cleanup; no deployment or paid inference.",
+  "repository_tests": {
+    "passed": 4406,
+    "files_passed": 610,
+    "skipped": 0,
+    "vitest_duration_seconds": 758.18,
+    "isolated_postgres_database": true,
+    "firestore_emulator": "127.0.0.1:8899",
+    "emulator_project": "demo-assistant-test",
+    "emulator_stopped_after_validation": true
+  },
+  "production_build": {
+    "passed": true,
+    "development_auth_bypass": false
+  },
+  "typecheck": {
+    "passed": true,
+    "packages": 14,
+    "scripts": true
+  },
+  "lint_and_boundaries": {
+    "passed": true,
+    "existing_warnings": 24,
+    "existing_information": 3
+  },
+  "browser": {
+    "actual_components_and_styles": true,
+    "synthetic_layouts_passed": 72,
+    "retained_screenshots": 17,
+    "focused_recovery_copy_focus_and_popover_checks": true,
+    "real_authenticator_or_owner_writes": false,
+    "production_latency_measured": false
+  },
+  "native": {
+    "generic_arm64_test_build_passed": true,
+    "targets": ["application", "activity extension", "test source"],
+    "xctest_cases_executed": 0,
+    "runnable_simulator_runtimes": 0,
+    "physical_render_audio_touch_checks": false
+  },
+  "foundation_host": {
+    "draft_methods": 5,
+    "draft_assertions": 22,
+    "suggestion_assertions": 121,
+    "conversation_pairing_assertions": 86,
+    "provider_default_checks": 6,
+    "writing_voice_read_checks": 6,
+    "scope": "Actual pure store/model and extracted method bodies; UI, credential/network and system effects substituted where applicable."
+  },
+  "source_sha256": {
+    "apps/ios/Assistant/AppModel.swift": "5b40dfa07e4dca47e9ac03689239d152069784fce4f99820f7508942aa7f6606",
+    "apps/ios/Assistant/Models/ConversationDrafts.swift": "c4973b667199a47678d995ffea0e203ebf5751e0c30160087183335f95d79f83",
+    "apps/ios/Assistant/Models/APIModels.swift": "388658e420759a70076b0223bffc5c2c43557fb0ae9b10dc05a156df7c3183c1",
+    "apps/ios/Assistant/Networking/APIClient.swift": "6f3f0ea7e20ca14d8899293a946d999b5ca77df44ee3fcee8b1a785ef7229c93",
+    "apps/ios/Assistant/Views/ChatView.swift": "ba5cb8a22fc46f21e9a345b6705ee8f23809d21e171bbfaf41dddb9b49f89a62",
+    "apps/ios/Assistant/Views/MoreView.swift": "3989bdcff4ec5f8c30b5639ef3b6878c416a5b954fd6306fa8822275fda2d577",
+    "apps/ios/Assistant/Views/AIProvidersView.swift": "ff7d19fa3ff4683074007aeedd890b6034a110d76f2c60da1d17b27da5e626b0",
+    "apps/ios/Assistant/Views/WorkspaceView.swift": "e2385ad7fc2729f67b719eb16c3fdce7c941580b6851916c7cb35aeb16e938f0",
+    "apps/ios/Assistant/Views/MemoryDataView.swift": "a254d56cfaa0e3c2ed972a1f0129919a29ff2bc44bbf14b6631fb19174fb51c3",
+    "apps/ios/AssistantTests/ConversationDraftsTests.swift": "a10678ce789064b5ffd210f7ee6e7f6c3c0e1127fbba358960708f459badaf2c",
+    "apps/ios/AssistantTests/APIClientRetryTests.swift": "5f0c612c4dd4c88c7b63c20ab7bd012a115f93253313380a0cf01c7c1955454a",
+    "apps/ios/AssistantTests/APIModelsTests.swift": "ea48f5710b05ddfe06d3fcb054a61801397ab855173298497a8d0bb6dd3cda8f",
+    "apps/web/lib/copy-button.tsx": "d1c049ef3886e8774537722f389aafed101314ac860e8c6738be5083d74e6dd3",
+    "apps/web/lib/ui-client.tsx": "19b6c0d91d5828bb8e6780bbf035c66a7ce16ec8f8b95767055f1018fc79ae89",
+    "apps/web/lib/owner-auth/client.ts": "0649a45aae0819e05b30a55040552bf5acf87b31efed41f807ec9ca5da7acb86",
+    "apps/web/app/setup/recovery-code.tsx": "3735afdf10bc97d407f2a9b0b9a905239542c4b2971d0d426735380b368c598c",
+    "apps/web/app/signin/signin-client.tsx": "734d46d70a3772ba6724841bf43ecf5f126be28185059c1d29935dece03f5c87",
+    "apps/web/app/security/security-client.tsx": "7f117910e8b7903972c2f6a01c988e38e3a031e7ea95f2e551e7f4cd2860f034",
+    "apps/web/app/settings/mobile-token.tsx": "5e8a6be941c29989cbed1b03a057b143bc0aacbf5399695d0e3c23317948bcde",
+    "scripts/web-experience-qa.ts": "296a77396ec3722f4d36a706dadb709b9d17aaa74245e37af0db3cb725720057"
+  }
+}

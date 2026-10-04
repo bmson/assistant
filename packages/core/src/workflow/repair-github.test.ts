@@ -112,6 +112,64 @@ it('reads exact PR merge state and never merges automatically', async () => {
   });
   expect(fetch.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true);
 });
+
+it('ignores an earlier attempt PR even when the legacy issue branch matches', async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(
+      Response.json([
+        {
+          number: 1,
+          created_at: '2026-09-01T00:00:00Z',
+          head: { ref: `codex/self-repair-${issue.id}`, repo: { full_name: 'owner/repo' } },
+        },
+      ]),
+    )
+    .mockResolvedValueOnce(
+      Response.json({
+        workflow_runs: [
+          {
+            id: 20,
+            display_title: `self-repair:${issue.id}`,
+            status: 'in_progress',
+            created_at: '2026-10-03T00:00:01Z',
+          },
+        ],
+      }),
+    )
+    .mockResolvedValueOnce(Response.json({ jobs: [{ name: 'code', status: 'in_progress' }] }));
+  const observed = await worker(fetch).inspect({
+    ...issue,
+    data: { ...issue.data, dispatchedAt: '2026-10-03T00:00:00.123Z' },
+  });
+  expect(observed).toMatchObject({ status: 'fixing', patch: { runId: 20 } });
+  expect(observed?.patch.mergeSha).toBeUndefined();
+  expect(observed?.patch.prNumber).toBeUndefined();
+  expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/pulls/1'))).toBe(false);
+});
+
+it('accepts a current PR created in the dispatch second despite GitHub timestamp precision', async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(
+      Response.json([
+        {
+          number: 2,
+          created_at: '2026-10-03T00:00:00Z',
+          head: { ref: `codex/self-repair-${issue.id}`, repo: { full_name: 'owner/repo' } },
+        },
+      ]),
+    )
+    .mockResolvedValueOnce(
+      Response.json({ number: 2, state: 'open', merged_at: null, merge_commit_sha: null }),
+    );
+  expect(
+    await worker(fetch).inspect({
+      ...issue,
+      data: { ...issue.data, dispatchedAt: '2026-10-03T00:00:00.123Z' },
+    }),
+  ).toMatchObject({ status: 'pr_open', patch: { prNumber: 2 } });
+});
 it('waits for successful health and verifies that deployment includes the merged commit', async () => {
   const fetch = vi
     .fn()

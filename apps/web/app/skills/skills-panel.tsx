@@ -1,7 +1,7 @@
 'use client';
 
 import { Lightbulb } from 'lucide-react';
-import { useState, useTransition } from 'react';
+import { useEffect, useId, useRef, useState, useTransition } from 'react';
 import {
   addSkillAction,
   deleteSkillAction,
@@ -17,9 +17,11 @@ import {
   cardShellClass,
   cardTitleClass,
   EmptyState,
+  labelClass,
   MetaLine,
   SectionHeading,
   inputClass as sharedInputClass,
+  textareaClass,
 } from '@/lib/ui';
 import { ConfirmButton } from '@/lib/ui-client';
 
@@ -39,7 +41,7 @@ export interface SkillView {
 
 const inputClass = `${sharedInputClass} w-full`;
 
-function SkillForm({
+export function SkillForm({
   initial,
   submitting,
   onSubmit,
@@ -52,46 +54,86 @@ function SkillForm({
   onCancel?: () => void;
   error?: string | null;
 }) {
+  const formId = useId();
+  const [draft, setDraft] = useState({
+    name: initial?.name ?? '',
+    preconditions: initial?.preconditions ?? '',
+    steps: initial?.steps ?? '',
+    gotchas: initial?.gotchas ?? '',
+  });
+  const nameInput = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    nameInput.current?.focus();
+  }, []);
   return (
-    <form action={onSubmit} className="flex flex-col gap-2">
-      <input
-        name="name"
-        defaultValue={initial?.name ?? ''}
-        placeholder="Name (e.g. Booking flights)"
-        required
-        className={inputClass}
-      />
-      <input
-        name="preconditions"
-        defaultValue={initial?.preconditions ?? ''}
-        placeholder="When it applies (optional)"
-        className={inputClass}
-      />
-      <textarea
-        name="steps"
-        defaultValue={initial?.steps ?? ''}
-        placeholder="Steps — the procedure, in plain language"
-        required
-        rows={3}
-        className={inputClass}
-      />
-      <input
-        name="gotchas"
-        defaultValue={initial?.gotchas ?? ''}
-        placeholder="Gotchas (optional)"
-        className={inputClass}
-      />
-      <div className="flex items-center gap-2">
+    <form
+      action={onSubmit}
+      className="flex min-w-0 flex-col gap-4"
+      aria-describedby={error ? `${formId}-error` : undefined}
+    >
+      <label className="flex flex-col gap-1.5" htmlFor={`${formId}-name`}>
+        <span className={labelClass}>Skill name</span>
+        <input
+          id={`${formId}-name`}
+          ref={nameInput}
+          name="name"
+          value={draft.name}
+          onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+          placeholder="For example, plan a weekend away"
+          required
+          className={inputClass}
+        />
+      </label>
+      <label className="flex flex-col gap-1.5" htmlFor={`${formId}-preconditions`}>
+        <span className={labelClass}>When to use it (optional)</span>
+        <input
+          id={`${formId}-preconditions`}
+          name="preconditions"
+          value={draft.preconditions}
+          onChange={(event) => setDraft({ ...draft, preconditions: event.target.value })}
+          placeholder="Describe the request or situation"
+          className={inputClass}
+        />
+      </label>
+      <label className="flex flex-col gap-1.5" htmlFor={`${formId}-steps`}>
+        <span className={labelClass}>Steps</span>
+        <textarea
+          id={`${formId}-steps`}
+          name="steps"
+          value={draft.steps}
+          onChange={(event) => setDraft({ ...draft, steps: event.target.value })}
+          placeholder="Describe the procedure in plain language"
+          required
+          rows={3}
+          className={`${textareaClass} w-full`}
+        />
+      </label>
+      <label className="flex flex-col gap-1.5" htmlFor={`${formId}-gotchas`}>
+        <span className={labelClass}>Watch for (optional)</span>
+        <input
+          id={`${formId}-gotchas`}
+          name="gotchas"
+          value={draft.gotchas}
+          onChange={(event) => setDraft({ ...draft, gotchas: event.target.value })}
+          placeholder="Exceptions or things to avoid"
+          className={inputClass}
+        />
+      </label>
+      <div className="flex flex-wrap items-center gap-2">
         <button type="submit" disabled={submitting} className={btn.primary}>
-          Save skill
+          {submitting ? 'Saving…' : 'Save skill'}
         </button>
         {onCancel ? (
           <button type="button" onClick={onCancel} className={btn.outline}>
             Cancel
           </button>
         ) : null}
-        {error ? <span className="text-xs text-red-600 dark:text-red-400">{error}</span> : null}
       </div>
+      {error ? (
+        <p id={`${formId}-error`} role="alert" className="text-sm text-red-600 dark:text-red-400">
+          {error}
+        </p>
+      ) : null}
     </form>
   );
 }
@@ -123,7 +165,14 @@ export function SkillsPanel({
       <div className="flex items-center justify-between gap-2">
         <SectionHeading title="Skills" count={skills.length} />
         {!readOnly && !adding ? (
-          <button type="button" onClick={() => setAdding(true)} className={btn.outline}>
+          <button
+            type="button"
+            onClick={() => {
+              setAdding(true);
+              setError(null);
+            }}
+            className={btn.outline}
+          >
             Add skill
           </button>
         ) : null}
@@ -141,9 +190,13 @@ export function SkillsPanel({
             onSubmit={(fd) =>
               startTransition(async () => {
                 setError(null);
-                const result = await addSkillAction(fields(fd));
-                if (result.error) setError(result.error);
-                else setAdding(false);
+                try {
+                  const result = await addSkillAction(fields(fd));
+                  if (result.error) setError(result.error);
+                  else setAdding(false);
+                } catch {
+                  setError('The skill could not be saved. Your changes are still here; try again.');
+                }
               })
             }
           />
@@ -176,9 +229,15 @@ export function SkillsPanel({
                     onSubmit={(fd) =>
                       startTransition(async () => {
                         setError(null);
-                        const result = await editSkillAction(s.id, fields(fd));
-                        if (result.error) setError(result.error);
-                        else setEditingId(null);
+                        try {
+                          const result = await editSkillAction(s.id, fields(fd));
+                          if (result.error) setError(result.error);
+                          else setEditingId(null);
+                        } catch {
+                          setError(
+                            'The skill could not be saved. Your changes are still here; try again.',
+                          );
+                        }
                       })
                     }
                   />
@@ -199,9 +258,7 @@ export function SkillsPanel({
                       {s.deprecated ? <Badge tone="muted">Retired</Badge> : null}
                     </div>
                     <section>
-                      <h4 className="font-mono text-xs font-medium tracking-[0.08em] text-muted uppercase">
-                        How it works
-                      </h4>
+                      <h4 className="text-sm font-medium text-muted">How it works</h4>
                       <p className="mt-1 text-sm leading-5 whitespace-pre-wrap text-strong">
                         {s.steps}
                       </p>
@@ -210,15 +267,13 @@ export function SkillsPanel({
                       <div className="grid gap-2 sm:grid-cols-2">
                         {s.preconditions ? (
                           <section className="rounded-xl bg-sunken/65 px-3 py-2.5">
-                            <h4 className="font-mono text-xs font-medium tracking-[0.08em] text-muted uppercase">
-                              When to use it
-                            </h4>
+                            <h4 className="text-xs font-medium text-muted">When to use it</h4>
                             <p className="mt-1 text-xs leading-5 text-strong">{s.preconditions}</p>
                           </section>
                         ) : null}
                         {s.gotchas ? (
                           <section className="rounded-xl bg-amber-50 px-3 py-2.5 dark:bg-amber-950/25">
-                            <h4 className="font-mono text-xs font-medium tracking-[0.08em] text-amber-800 uppercase dark:text-amber-300">
+                            <h4 className="text-xs font-medium text-amber-800 dark:text-amber-300">
                               Watch for
                             </h4>
                             <p className="mt-1 text-xs leading-5 text-amber-900 dark:text-amber-200">
@@ -261,7 +316,14 @@ export function SkillsPanel({
                         type="button"
                         disabled={pending}
                         onClick={() =>
-                          startTransition(() => toggleSkillDeprecatedAction(s.id, !s.deprecated))
+                          startTransition(async () => {
+                            setError(null);
+                            try {
+                              await toggleSkillDeprecatedAction(s.id, !s.deprecated);
+                            } catch {
+                              setError('The skill could not be updated. Try again.');
+                            }
+                          })
                         }
                         className={btn.outline}
                       >
@@ -277,6 +339,8 @@ export function SkillsPanel({
                           startTransition(async () => {
                             try {
                               await deleteSkillAction(s.id);
+                            } catch {
+                              setError('The skill could not be deleted. Try again.');
                             } finally {
                               setDeletingId(null);
                             }
@@ -293,6 +357,11 @@ export function SkillsPanel({
           ))}
         </div>
       )}
+      {error && !adding && editingId === null ? (
+        <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">
+          {error}
+        </p>
+      ) : null}
     </section>
   );
 }

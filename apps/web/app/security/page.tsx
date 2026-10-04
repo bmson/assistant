@@ -14,7 +14,7 @@ export default async function SecurityPage() {
     <PageShell size="reading" className="grid gap-6">
       <PageHeader
         title="Security"
-        intro="Passkeys, your offline recovery code, device keys for the iPhone app, and sessions."
+        intro="Control who can access your assistant and how you get back in."
         back={{ href: '/settings', label: 'Settings' }}
       />
       <SecurityClient serverUrl={loadConfig().AUTH_URL} />

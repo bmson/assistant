@@ -1,6 +1,7 @@
 import { createPostgresHistoryRecallRepository, type Db, messages } from '@assistant/db';
 import type { HistoryRecallRepository } from '@assistant/persistence';
 import { and, desc, eq, inArray } from 'drizzle-orm';
+import { createRecallBlock } from './recall-budget.js';
 
 /**
  * Automatic chat recall for the long-running-chat design
@@ -113,10 +114,6 @@ function clip(text: string, max: number): string {
   return trimmed.length > max ? `${trimmed.slice(0, max - 1)}…` : trimmed;
 }
 
-function formatBlock(blocks: string[]): string {
-  return [HEADER, '', ...blocks].join('\n');
-}
-
 function historyRepository(storage: Db | HistoryRecallRepository): HistoryRecallRepository {
   return 'kind' in storage && storage.kind === 'history-recall-repository'
     ? (storage as HistoryRecallRepository)
@@ -142,7 +139,7 @@ export async function recallRelevantContext(
 ): Promise<RecallResult> {
   const opts = { ...DEFAULTS, ...options };
   const query = args.queryText.replace(/\s+/g, ' ').trim();
-  if (query.length < 3) return EMPTY;
+  if (query.length < 3 || !createRecallBlock(HEADER, opts.maxChars).available) return EMPTY;
 
   const queryEmbedding =
     opts.queryEmbedding ?? (await args.embed([query], { taskId: opts.taskId }))[0];
@@ -174,10 +171,9 @@ async function recallFromSegments(
   const qualifying = rows.filter((r) => Number(r.similarity) >= opts.minSimilarity);
   if (qualifying.length === 0) return EMPTY;
 
-  const blocks: string[] = [];
+  const block = createRecallBlock(HEADER, opts.maxChars);
   const sources: RecallSource[] = [];
   let used = 0;
-  let chars = 0;
   for (const seg of qualifying) {
     if (used >= opts.limit) break;
     // One verbatim key line grounds the summary.
@@ -186,16 +182,16 @@ async function recallFromSegments(
       ? `\n  ${roleLabel(keyMessage.role)}: ${clip(keyMessage.text, opts.maxMessageChars)}`
       : '';
     const entry = `[${isoDate(seg.startedAt)}] ${clip(seg.summary, opts.maxMessageChars * 2)}${keyLine}`;
-    if (used > 0 && chars + entry.length > opts.maxChars) break;
-    blocks.push(entry);
+    // A large top match must not swallow the budget or hide smaller matches
+    // that fit. Source affordances describe only entries actually injected.
+    if (!block.add(entry)) continue;
     sources.push({ date: isoDate(seg.startedAt), label: clip(seg.summary, SOURCE_LABEL_CHARS) });
-    chars += entry.length + 1;
     used += 1;
   }
 
   if (used === 0) return { ...EMPTY, candidates: qualifying.length };
   return {
-    block: formatBlock(blocks),
+    block: block.text,
     used,
     candidates: qualifying.length,
     tier: 'segment',
@@ -221,10 +217,9 @@ async function recallFromMessages(
   if (qualifying.length === 0) return EMPTY;
 
   const includedIds = new Set<string>();
-  const blocks: string[] = [];
+  const block = createRecallBlock(HEADER, opts.maxChars);
   const sources: RecallSource[] = [];
   let used = 0;
-  let chars = 0;
 
   for (const anchor of qualifying) {
     if (used >= opts.limit) break;
@@ -236,24 +231,23 @@ async function recallFromMessages(
       radius: opts.neighborRadius,
       exclude,
     });
-    if (neighborhood.every((m) => includedIds.has(m.id))) continue;
+    const unseen = neighborhood.filter((m) => !includedIds.has(m.id));
+    if (unseen.length === 0) continue;
 
-    const lines = neighborhood.map(
+    const lines = unseen.map(
       (m) => `  ${roleLabel(m.role)}: ${clip(m.text, opts.maxMessageChars)}`,
     );
     const entry = `[${isoDate(anchor.createdAt)}]\n${lines.join('\n')}`;
-    if (used > 0 && chars + entry.length > opts.maxChars) break;
+    if (!block.add(entry)) continue;
 
-    for (const m of neighborhood) includedIds.add(m.id);
-    blocks.push(entry);
+    for (const m of unseen) includedIds.add(m.id);
     sources.push({ date: isoDate(anchor.createdAt), label: clip(anchor.text, SOURCE_LABEL_CHARS) });
-    chars += entry.length + 1;
     used += 1;
   }
 
   if (used === 0) return { ...EMPTY, candidates: qualifying.length };
   return {
-    block: formatBlock(blocks),
+    block: block.text,
     used,
     candidates: qualifying.length,
     tier: 'message',

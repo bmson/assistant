@@ -1,0 +1,45 @@
+{
+  "checkedAt": "2026-10-04T00:21:13.642Z",
+  "entries": 615,
+  "counts": {
+    "console": {
+      "entries": 120,
+      "before": 82,
+      "after": 120
+    },
+    "products": {
+      "entries": 222,
+      "before": 204,
+      "after": 222
+    },
+    "native": {
+      "entries": 273,
+      "before": 196,
+      "after": 272
+    }
+  },
+  "allLinkedImagesExist": true,
+  "verifiedSourceHashes": 69,
+  "verifiedNativeImageHashes": 272,
+  "layouts": [
+    {
+      "scrollWidth": 320,
+      "width": 320,
+      "articles": 615,
+      "count": "615 screenshot entries"
+    },
+    {
+      "scrollWidth": 1280,
+      "width": 1280,
+      "articles": 615,
+      "count": "615 screenshot entries"
+    }
+  ],
+  "filteredMoreEntries": 27,
+  "originalNativeResolution": {
+    "width": 1206,
+    "height": 2622
+  },
+  "browserErrors": [],
+  "scope": "Local gallery only; screenshot evidence boundaries are recorded in the page audits."
+}

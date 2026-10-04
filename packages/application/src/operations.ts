@@ -18,6 +18,7 @@ import {
   listOpenProposals,
 } from '@assistant/core/workflow/improve';
 import type { Db } from '@assistant/db';
+import type { ImprovementActionResult } from '@assistant/persistence';
 
 export async function listAnomalies(db: Db) {
   const agent = await getAgent(db);
@@ -37,12 +38,20 @@ export async function listImprovementProposals(db: Db) {
   return listOpenProposals(db, agent.id);
 }
 
-export async function applyImprovementProposal(db: Db, id: string): Promise<void> {
-  await applyProposal(db, id);
+export async function applyImprovementProposal(
+  db: Db,
+  id: string,
+): Promise<ImprovementActionResult> {
+  const agent = await getAgent(db);
+  return applyProposal(db, id, agent.id);
 }
 
-export function dismissImprovementProposal(db: Db, id: string): Promise<void> {
-  return dismissProposal(db, id);
+export async function dismissImprovementProposal(
+  db: Db,
+  id: string,
+): Promise<ImprovementActionResult> {
+  const agent = await getAgent(db);
+  return dismissProposal(db, id, agent.id);
 }
 
 export async function listAssistantSkills(db: Db) {

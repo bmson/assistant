@@ -103,6 +103,7 @@ export function createGitHubRepairWorker(input: {
         .array(
           z.object({
             number: z.number().int().positive(),
+            created_at: z.string().optional(),
             head: z.object({
               ref: z.string(),
               repo: z.object({ full_name: z.string() }).nullable(),
@@ -115,7 +116,16 @@ export function createGitHubRepairWorker(input: {
           ),
         );
       const match = pulls.find(
-        (row) => row.head?.ref === branch && row.head?.repo?.full_name === input.repo,
+        (row) =>
+          row.head?.ref === branch &&
+          row.head?.repo?.full_name === input.repo &&
+          // GitHub dates have second precision. A retry must not adopt an old
+          // PR from this legacy issue-scoped branch as evidence for new work.
+          (!issue.data.dispatchedAt ||
+            (row.created_at &&
+              Number.isFinite(Date.parse(row.created_at)) &&
+              Date.parse(row.created_at) >=
+                Math.floor(Date.parse(issue.data.dispatchedAt) / 1000) * 1000)),
       );
       if (match) {
         const pr = z

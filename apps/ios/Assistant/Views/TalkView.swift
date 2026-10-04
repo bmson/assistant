@@ -1,5 +1,20 @@
 import SwiftUI
 
+/// Voice can capture a request, but only an explicit on-screen decision can
+/// release a pending approval or budget gate. Suggestions do not stop a chat.
+enum TalkInteractionPolicy {
+    static func requiresManualDecision(messages: [ChatMessage], pendingApprovals: Int) -> Bool {
+        pendingApprovals > 0 || messages.contains(where: \.hasPendingDecision)
+    }
+
+    static func decisionRoute(messages: [ChatMessage]) -> AssistantRoute {
+        let latest = messages.last(where: \.hasPendingDecision)
+        return latest?.decisionParts.contains(where: { $0.type == "budget-request" }) == true
+            && latest?.decisionParts.contains(where: { $0.type == "approval" }) != true
+            ? .activity : .approvals
+    }
+}
+
 /// Hands-free. The conversation without the keyboard, the transcript, or the
 /// phone in your hand.
 ///
@@ -17,6 +32,7 @@ struct TalkView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
 
     @StateObject private var listener = SpeechListener()
     @ObservedObject private var player = SpeechPlayer.shared
@@ -34,6 +50,11 @@ struct TalkView: View {
         case listening
         case thinking
         case speaking
+        case needsDecision
+    }
+
+    private var requiresManualDecision: Bool {
+        TalkInteractionPolicy.requiresManualDecision(messages: model.messages, pendingApprovals: model.pendingApprovalCount)
     }
 
     var body: some View {
@@ -52,9 +73,10 @@ struct TalkView: View {
 
                 Text(statusLine)
                     .font(.footnote.weight(.semibold))
-                    .textCase(.uppercase)
-                    .tracking(0.6)
-                    .foregroundStyle(AssistantTheme.stageStrong.opacity(0.55))
+                    .foregroundStyle(AssistantTheme.stageSecondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(AssistantTheme.stageWell(for: colorScheme), in: Capsule())
 
                 Text(spokenLine)
                     .font(.title3.weight(.medium))
@@ -66,6 +88,22 @@ struct TalkView: View {
 
                 Spacer(minLength: 0)
 
+                if phase == .needsDecision {
+                    if requiresManualDecision {
+                        Button("Review decision", systemImage: "hand.raised") {
+                            Task {
+                                await leave()
+                                model.present(TalkInteractionPolicy.decisionRoute(messages: model.messages))
+                            }
+                        }
+                        .buttonStyle(AssistantActionButtonStyle(kind: .primary))
+                        .accessibilityIdentifier("assistant.talk.review-decision")
+                    } else {
+                        Button("Resume conversation", systemImage: "microphone") { Task { await enter() } }
+                            .buttonStyle(AssistantActionButtonStyle(kind: .primary))
+                    }
+                }
+
                 Button {
                     Task { await leave() }
                 } label: {
@@ -74,7 +112,7 @@ struct TalkView: View {
                         .foregroundStyle(AssistantTheme.stageStrong)
                         .padding(.horizontal, 22)
                         .frame(height: 50)
-                        .background(.white.opacity(0.1), in: Capsule())
+                        .background(AssistantTheme.stageWell(for: colorScheme), in: Capsule())
                         .overlay { Capsule().strokeBorder(.white.opacity(0.22), lineWidth: 0.8) }
                 }
                 .buttonStyle(.plain)
@@ -84,11 +122,24 @@ struct TalkView: View {
         }
         .task { await enter() }
         .onDisappear {
+            phase = .idle
             settleTask?.cancel()
             // The session is torn down by `leave()`; this covers a swipe-away
             // that never reached the button.
             Task { await listener.stop() }
             model.speechAlwaysOn = false
+            model.stopSpeaking()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Permission dialogs also make a scene inactive. Stop only when
+            // this conversation actually leaves the foreground, and return to
+            // chat so the microphone never silently reopens on the next visit.
+            guard phase == .background else { return }
+            Task { await leave() }
+        }
+        .onChange(of: requiresManualDecision) { _, needsDecision in
+            guard needsDecision else { return }
+            Task { await waitForDecision() }
         }
         .onChange(of: listener.transcript) { _, heard in
             heardSomething(heard)
@@ -102,7 +153,15 @@ struct TalkView: View {
             // The turn is answered. Whatever it had to say is already queued
             // with the player; talk mode's job is to wait for it to finish.
             guard wasSending, !isSending, phase == .thinking else { return }
+            if requiresManualDecision {
+                Task { await waitForDecision() }
+                return
+            }
             phase = .speaking
+            if player.speakingMessageID == nil {
+                Task { await listen() }
+                return
+            }
             // Anything said while the model was thinking is the owner already
             // talking over the answer. Let it interrupt as usual.
             heardSomething(listener.transcript)
@@ -117,6 +176,11 @@ struct TalkView: View {
 
     @MainActor
     private func enter() async {
+        guard scenePhase != .background else { return }
+        guard !requiresManualDecision else {
+            await waitForDecision()
+            return
+        }
         // Talk mode speaks every reply whether or not the setting is on: it is
         // the only thing here that can answer.
         model.speechAlwaysOn = true
@@ -134,14 +198,33 @@ struct TalkView: View {
         phase = .idle
         model.speechAlwaysOn = false
         await listener.stop()
-        SpeechPlayer.shared.stop()
+        model.stopSpeaking()
         dismiss()
+    }
+
+    @MainActor
+    private func waitForDecision() async {
+        guard phase != .needsDecision else { return }
+        phase = .needsDecision
+        settleTask?.cancel()
+        model.speechAlwaysOn = false
+        model.stopSpeaking()
+        await listener.stop()
+        guard phase == .needsDecision, scenePhase != .background else { return }
+        SpeechPlayer.shared.speak(["There’s a decision waiting for you. Open it on screen to review the next step."], for: "talk-decision")
     }
 
     /// Back to the owner's turn, with the tail of whatever leaked through the
     /// echo canceller cleared out.
     @MainActor
     private func listen() async {
+        // A completion callback may have queued this before the owner left or
+        // before a new turn began. It cannot restart an obsolete listening phase.
+        guard scenePhase != .background, phase == .speaking || phase == .listening else { return }
+        guard !requiresManualDecision else {
+            await waitForDecision()
+            return
+        }
         phase = .listening
         listener.reset()
         await listener.start(cancellingEcho: true)
@@ -175,7 +258,7 @@ struct TalkView: View {
     @MainActor
     private func submit() async {
         let text = listener.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, phase == .listening, !model.isSending else { return }
+        guard !text.isEmpty, phase == .listening, !model.isSending, !requiresManualDecision else { return }
 
         lastSent = text
         phase = .thinking
@@ -191,6 +274,7 @@ struct TalkView: View {
         case .listening: listener.isListening ? "Listening" : "Starting"
         case .thinking: "Thinking"
         case .speaking: "Speaking"
+        case .needsDecision: requiresManualDecision ? "Your decision is needed" : "Ready to talk"
         }
     }
 
@@ -207,6 +291,13 @@ struct TalkView: View {
             return lastSent
         case .speaking:
             return model.messages.last { $0.role == .assistant }?.text ?? ""
+        case .needsDecision:
+            guard requiresManualDecision else { return "The decision is resolved. Resume when you’re ready." }
+            let decision = model.messages.last(where: \.hasPendingDecision)
+            return decision?.approvalSummary?.purpose
+                ?? decision?.decisionParts.first(where: { $0.status == nil || $0.status == "pending" })?.summary
+                ?? model.overview?.approvals.pending.first?.approval.summary
+                ?? "Review the next step on screen before the assistant continues."
         }
     }
 }
@@ -259,6 +350,7 @@ private struct CompanionFaceView: View {
         case .listening: 0.75
         case .thinking: 0.4
         case .speaking: 0.9
+        case .needsDecision: 0.4
         }
     }
 
@@ -284,3 +376,14 @@ private extension CompanionFace {
         }
     }
 }
+
+#if DEBUG
+extension TalkView {
+    @MainActor static func visualReviewPaused() -> AnyView {
+        var view = TalkView()
+        view._phase = State(initialValue: .needsDecision)
+        // Fixture review never requests the microphone or speaks to the room.
+        return AnyView(view.environment(\.scenePhase, .background))
+    }
+}
+#endif

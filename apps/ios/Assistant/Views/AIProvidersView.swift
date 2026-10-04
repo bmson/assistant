@@ -11,15 +11,34 @@ struct AIProvidersView: View {
     @State private var isSaving = false
     @State private var savedNotice = false
     @State private var seeded = false
+    @State private var baselineMainModel = ""
+    @State private var baselineFastModel = ""
+    @State private var isLoading = false
+    @State private var loadFailed = false
+    @State private var actionFailed = false
 
     private var settings: ModelProviderSettings? { model.modelProviders }
 
     var body: some View {
-        Form {
+        AssistantForm {
             Group {
+                if loadFailed {
+                    Section {
+                        AssistantLoadFailureState(
+                            title: "Couldn’t refresh AI providers",
+                            message: settings == nil ? "Try again to load your providers and models." : "Previous providers are shown. Refresh before changing them.",
+                            retry: { Task { await load() } }
+                        )
+                    }
+                }
+                if actionFailed {
+                    Section { AssistantInlineFailure(message: "Couldn’t confirm that change. Your choices are kept; try again.") }
+                }
                 if let settings {
                     modelsSection(settings)
-                voiceSection(settings)
+                        .disabled(isSaving || isLoading || loadFailed)
+                    voiceSection(settings)
+                        .disabled(isSaving || isLoading || loadFailed)
                     Section {
                         ForEach(settings.connections) { connection in
                             NavigationLink {
@@ -38,8 +57,9 @@ struct AIProvidersView: View {
                     } footer: {
                         Text("API keys are encrypted on your server and never sent back to this phone.")
                     }
+                    .disabled(isSaving || isLoading || loadFailed)
                 } else {
-                    Section { ProgressView() }
+                    if !loadFailed { Section { ProgressView("Loading AI providers") } }
                 }
             }
             .listRowBackground(AssistantTheme.raised(for: colorScheme))
@@ -48,19 +68,39 @@ struct AIProvidersView: View {
         .scrollContentBackground(.hidden)
         .navigationTitle("AI providers")
         .assistantSubmenuChrome()
-        .task {
-            await model.refreshModelProviders()
-            // Seed once. Coming back from a model list re-runs this task, and
-            // reseeding then would throw away the choice just made.
-            guard !seeded, let settings else { return }
+        .task { await load() }
+        .refreshable { await load() }
+        // Follow server defaults while there is no local edit. A refresh must
+        // not silently replace a choice that is still waiting for Save.
+        .onChange(of: settings?.mainModel) { _, _ in acceptDefaults() }
+        .onChange(of: settings?.fastModel) { _, _ in acceptDefaults() }
+    }
+
+    private var hasUnsavedModels: Bool {
+        mainModel != baselineMainModel || fastModel != baselineFastModel
+    }
+
+    private func acceptDefaults() {
+        guard let settings else { return }
+        if !seeded || mainModel == baselineMainModel {
             mainModel = settings.mainModel ?? ""
-            fastModel = settings.fastModel ?? ""
-            seeded = true
         }
-        .refreshable { await model.refreshModelProviders() }
-        // A save (here or on the web) moves the server value: follow it.
-        .onChange(of: settings?.mainModel) { _, value in mainModel = value ?? "" }
-        .onChange(of: settings?.fastModel) { _, value in fastModel = value ?? "" }
+        if !seeded || fastModel == baselineFastModel {
+            fastModel = settings.fastModel ?? ""
+        }
+        baselineMainModel = settings.mainModel ?? ""
+        baselineFastModel = settings.fastModel ?? ""
+        seeded = true
+    }
+
+    private func load() async {
+        guard !isLoading, !isSaving else { return }
+        isLoading = true
+        let refreshed = await model.refreshModelProviders()
+        isLoading = false
+        guard !Task.isCancelled else { return }
+        loadFailed = !refreshed
+        if refreshed { acceptDefaults() }
     }
 
     private func modelsSection(_ settings: ModelProviderSettings) -> some View {
@@ -68,9 +108,17 @@ struct AIProvidersView: View {
             modelPicker("Main model", selection: $mainModel, settings: settings)
             modelPicker("Fast model", selection: $fastModel, settings: settings)
             Button {
+                guard !isSaving else { return }
                 isSaving = true
+                actionFailed = false
+                let selectedMain = mainModel, selectedFast = fastModel
                 Task {
-                    savedNotice = await model.chooseTextModels(main: mainModel, fast: fastModel)
+                    savedNotice = await model.chooseTextModels(main: selectedMain, fast: selectedFast)
+                    actionFailed = !savedNotice
+                    if savedNotice {
+                        baselineMainModel = selectedMain
+                        baselineFastModel = selectedFast
+                    }
                     isSaving = false
                 }
             } label: {
@@ -78,12 +126,12 @@ struct AIProvidersView: View {
                     Text(isSaving ? "Saving…" : "Use these models")
                     Spacer()
                     if isSaving { ProgressView() }
-                    else if savedNotice { Image(systemName: "checkmark").foregroundStyle(.green) }
+                    else if savedNotice && !hasUnsavedModels { Image(systemName: "checkmark").foregroundStyle(AssistantTheme.success(for: colorScheme)).accessibilityLabel("Saved") }
                 }
             }
             .disabled(
                 isSaving || mainModel.isEmpty || fastModel.isEmpty
-                    || (mainModel == settings.mainModel && fastModel == settings.fastModel)
+                    || !hasUnsavedModels
             )
         } header: {
             Text("Models")
@@ -103,7 +151,7 @@ struct AIProvidersView: View {
                         groups: settings.voiceGroups,
                         selection: Binding(
                             get: { settings.voiceModel ?? "" },
-                            set: { id in Task { _ = await model.chooseVoiceModel(id) } }
+                            set: { id in run { await model.chooseVoiceModel(id) } }
                         )
                     )
                 } label: {
@@ -112,7 +160,7 @@ struct AIProvidersView: View {
             }
             ForEach(presets) { preset in
                 Button {
-                    Task { _ = await model.addVoicePreset(connectionId: preset.connectionId, model: preset.model) }
+                    run { await model.addVoicePreset(connectionId: preset.connectionId, model: preset.model) }
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {
                         Label("Add \(preset.label)", systemImage: "plus.circle")
@@ -129,7 +177,17 @@ struct AIProvidersView: View {
         } header: {
             Text("Voice model (phone calls)")
         } footer: {
-            Text("The live speech model that holds phone conversations for you, billed per audio token by its provider.")
+            Text("Used for outgoing phone calls. Read-aloud voice and hands-free conversation are controlled in More → Speech.")
+        }
+    }
+
+    private func run(_ work: @escaping () async -> Bool) {
+        guard !isSaving, !isLoading, !loadFailed else { return }
+        isSaving = true
+        actionFailed = false
+        Task {
+            actionFailed = !(await work())
+            isSaving = false
         }
     }
 
@@ -157,7 +215,7 @@ struct AIProvidersView: View {
                 } else if connection.lastError != nil {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(AssistantTheme.warning(for: colorScheme))
                         .accessibilityLabel("Needs attention")
                 }
             }
@@ -177,8 +235,11 @@ private struct ModelChoiceList: View {
     @Binding var selection: String
 
     var body: some View {
-        Form {
+        AssistantForm {
             Group {
+                if groups.isEmpty {
+                    Section { Text("No enabled models are available. Connect a provider or add a model first.").foregroundStyle(.secondary) }
+                }
                 ForEach(groups, id: \.connection.id) { group in
                     Section(group.connection.label) {
                         ForEach(group.models) { catalogModel in
@@ -230,6 +291,8 @@ private struct ModelConnectionDetailView: View {
     @State private var newModel = ""
     @State private var inputPrice = ""
     @State private var outputPrice = ""
+    @State private var actionFailed = false
+    @State private var showingRemovalConfirmation = false
 
     private var connection: ModelConnection? {
         model.modelProviders?.connections.first { $0.id == connectionID }
@@ -240,8 +303,11 @@ private struct ModelConnectionDetailView: View {
     }
 
     var body: some View {
-        Form {
+        AssistantForm {
             Group {
+                if actionFailed {
+                    Section { AssistantInlineFailure(message: "Couldn’t confirm that change. Your entries are kept; try again.") }
+                }
                 if let connection {
                     Section {
                         LabeledContent("Type", value: connection.kindLabel)
@@ -256,12 +322,15 @@ private struct ModelConnectionDetailView: View {
                         )
                         if let error = connection.lastError {
                             Label(error, systemImage: "exclamationmark.triangle")
-                                .foregroundStyle(.orange)
+                                .foregroundStyle(AssistantTheme.warning(for: colorScheme))
                         }
                         Button {
+                            guard !isTesting, !isWorking else { return }
                             isTesting = true
+                            actionFailed = false
                             Task {
                                 listing = await model.testModelProvider(id: connectionID)
+                                actionFailed = listing == nil
                                 isTesting = false
                             }
                         } label: {
@@ -271,7 +340,7 @@ private struct ModelConnectionDetailView: View {
                                 if isTesting { ProgressView() }
                             }
                         }
-                        .disabled(isTesting)
+                        .disabled(isTesting || isWorking)
                     }
 
                     Section("Models") {
@@ -289,6 +358,7 @@ private struct ModelConnectionDetailView: View {
                     }
 
                     addModelSection
+                        .disabled(isTesting || isWorking)
 
                     Section {
                         Button(connection.enabled ? "Turn off" : "Turn on") {
@@ -296,15 +366,13 @@ private struct ModelConnectionDetailView: View {
                         }
                         if connection.source == "saved" {
                             Button("Remove connection", role: .destructive) {
-                                run {
-                                    let removed = await model.removeModelProvider(id: connectionID)
-                                    if removed { dismiss() }
-                                    return removed
-                                }
+                                showingRemovalConfirmation = true
                             }
                         }
                     }
-                    .disabled(isWorking)
+                    .disabled(isWorking || isTesting)
+                } else {
+                    Section { Text("This provider is no longer connected.").foregroundStyle(.secondary) }
                 }
             }
             .listRowBackground(AssistantTheme.raised(for: colorScheme))
@@ -313,11 +381,24 @@ private struct ModelConnectionDetailView: View {
         .scrollContentBackground(.hidden)
         .navigationTitle(connection?.label ?? "Provider")
         .assistantSubmenuChrome()
+        .confirmationDialog("Remove provider?", isPresented: $showingRemovalConfirmation, titleVisibility: .visible) {
+            Button("Remove provider", role: .destructive) {
+                run {
+                    let removed = await model.removeModelProvider(id: connectionID)
+                    if removed { dismiss() }
+                    return removed
+                }
+            }
+        } message: {
+            Text("This removes the connection and its saved credentials. Connect it again if you need its models later.")
+        }
     }
 
     private var addModelSection: some View {
         Section {
-            TextField("Model name", text: $newModel)
+            AssistantField("Model name") {
+                TextField("Model name", text: $newModel)
+            }
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .onChange(of: newModel) { _, value in
@@ -334,10 +415,14 @@ private struct ModelConnectionDetailView: View {
                         .font(.callout.monospaced())
                 }
             }
-            TextField("$ per million input tokens", text: $inputPrice)
-                .keyboardType(.decimalPad)
-            TextField("$ per million output tokens", text: $outputPrice)
-                .keyboardType(.decimalPad)
+            AssistantField("Input price (USD per million tokens)") {
+                TextField("$ per million input tokens", text: $inputPrice)
+                    .keyboardType(.decimalPad)
+            }
+            AssistantField("Output price (USD per million tokens)") {
+                TextField("$ per million output tokens", text: $outputPrice)
+                    .keyboardType(.decimalPad)
+            }
             Button("Add model") {
                 let chosen = listing?.first { $0.model == newModel }
                 run {
@@ -357,7 +442,7 @@ private struct ModelConnectionDetailView: View {
                     return added
                 }
             }
-            .disabled(isWorking || newModel.isEmpty || inputPrice.isEmpty || outputPrice.isEmpty)
+            .disabled(isWorking || newModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || inputPrice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || outputPrice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } header: {
             Text("Add a model")
         } footer: {
@@ -366,9 +451,11 @@ private struct ModelConnectionDetailView: View {
     }
 
     private func run(_ work: @escaping () async -> Bool) {
+        guard !isWorking, !isTesting else { return }
         isWorking = true
+        actionFailed = false
         Task {
-            _ = await work()
+            actionFailed = !(await work())
             isWorking = false
         }
     }
@@ -388,9 +475,11 @@ private struct ConnectProviderView: View {
     @State private var location = ""
     @State private var isSaving = false
     @State private var testError: String?
+    @State private var submissionFailed = false
+    @State private var savedProviderID: String?
 
     var body: some View {
-        Form {
+        AssistantForm {
             Group {
                 Section {
                     Picker("Provider", selection: $kind) {
@@ -398,47 +487,65 @@ private struct ConnectProviderView: View {
                             Text(ModelConnection.kindLabel(value)).tag(value)
                         }
                     }
-                    TextField("Name (optional)", text: $label)
+                    AssistantField("Name (optional)") {
+                        TextField("Name (optional)", text: $label)
+                    }
                 }
                 if kind == "openai_compatible" {
                     Section {
-                        TextField("Short id, e.g. groq", text: $gatewayID)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                        TextField("Base URL", text: $baseUrl)
-                            .keyboardType(.URL)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
+                        AssistantField("Provider ID") {
+                            TextField("Short id, e.g. groq", text: $gatewayID)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        }
+                        AssistantField("Base URL") {
+                            TextField("Base URL", text: $baseUrl)
+                                .keyboardType(.URL)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        }
                     }
                 }
                 if kind == "vertex" {
                     Section {
-                        TextField("Google Cloud project (optional)", text: $project)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                        TextField("Location, e.g. us-central1", text: $location)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
+                        AssistantField("Google Cloud project (optional)") {
+                            TextField("Google Cloud project (optional)", text: $project)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        }
+                        AssistantField("Location") {
+                            TextField("Location, e.g. us-central1", text: $location)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        }
                     } footer: {
                         Text("Vertex uses your server’s own Google Cloud credentials, so there’s no key to paste.")
                     }
                 } else {
                     Section {
-                        SecureField("API key", text: $apiKey)
-                            .textContentType(.password)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
+                        AssistantField("API key") {
+                            SecureField("API key", text: $apiKey)
+                                .textContentType(.password)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        }
                     } footer: {
                         Text("Stored encrypted on your server and never shown again.")
                     }
                 }
                 if let testError {
                     Section {
-                        Label("Saved, but the test failed: \(testError)", systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.orange)
+                        Label("Connected, but the test failed: \(testError)", systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(AssistantTheme.warning(for: colorScheme))
+                    } footer: {
+                        Text("Open this provider from the providers list to test it again or check its models.")
                     }
                 }
+                if submissionFailed {
+                    Section { AssistantInlineFailure(message: "Couldn’t connect this provider. Your entries are kept; try again.") }
+                }
             }
+            .disabled(isSaving || savedProviderID != nil)
             .listRowBackground(AssistantTheme.raised(for: colorScheme))
         }
         .listStyle(.insetGrouped)
@@ -447,30 +554,54 @@ private struct ConnectProviderView: View {
         .assistantSubmenuChrome()
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button(isSaving ? "Connecting…" : "Connect", action: connect)
-                    .disabled(isSaving || (kind == "openai_compatible" && (gatewayID.isEmpty || baseUrl.isEmpty)))
+                Button(savedProviderID != nil ? "Done" : isSaving ? "Connecting…" : "Connect") {
+                    if savedProviderID != nil { dismiss() } else { connect() }
+                }
+                .disabled(isSaving || (savedProviderID == nil && kind == "openai_compatible" && (gatewayID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || baseUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)))
             }
         }
     }
 
     private func connect() {
+        guard !isSaving, savedProviderID == nil else { return }
         isSaving = true
+        submissionFailed = false
         testError = nil
+        let cleanID = gatewayID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanURL = baseUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanProject = project.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanLocation = location.trimmingCharacters(in: .whitespacesAndNewlines)
         let input = ModelConnectionInput(
             kind: kind,
-            id: kind == "openai_compatible" ? gatewayID : nil,
-            label: label.isEmpty ? nil : label,
-            apiKey: apiKey.isEmpty ? nil : apiKey,
-            baseUrl: kind == "openai_compatible" ? baseUrl : nil,
-            vertexProject: kind == "vertex" && !project.isEmpty ? project : nil,
-            vertexLocation: kind == "vertex" && !location.isEmpty ? location : nil
+            id: kind == "openai_compatible" ? cleanID : nil,
+            label: cleanLabel.isEmpty ? nil : cleanLabel,
+            apiKey: cleanKey.isEmpty ? nil : cleanKey,
+            baseUrl: kind == "openai_compatible" ? cleanURL : nil,
+            vertexProject: kind == "vertex" && !cleanProject.isEmpty ? cleanProject : nil,
+            vertexLocation: kind == "vertex" && !cleanLocation.isEmpty ? cleanLocation : nil
         )
         Task {
             let result = await model.connectModelProvider(input)
             isSaving = false
+            guard let result else { submissionFailed = true; return }
             apiKey = ""
-            guard let result else { return }
+            savedProviderID = result.id
             if let error = result.testError { testError = error } else { dismiss() }
         }
     }
 }
+
+#if DEBUG
+extension AIProvidersView {
+    @MainActor static func visualReviewScreen(_ name: String, providers: ModelProviderSettings) -> AnyView? {
+        switch name {
+        case "connect-provider": return AnyView(ConnectProviderView())
+        case "provider-detail": return AnyView(ModelConnectionDetailView(connectionID: providers.connections.first?.id ?? "provider"))
+        case "choose-model": return AnyView(ModelChoiceList(title: "Default chat model", groups: providers.choosableGroups, selection: .constant(providers.mainModel ?? "")))
+        default: return nil
+        }
+    }
+}
+#endif

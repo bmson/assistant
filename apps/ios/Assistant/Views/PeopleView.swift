@@ -770,3 +770,9 @@ struct PersonCardScreen: View {
         }
     }
 }
+
+#if DEBUG
+extension PeopleView {
+    @MainActor static func visualReviewConnections() -> AnyView { AnyView(PeopleConnectionsScreen()) }
+}
+#endif

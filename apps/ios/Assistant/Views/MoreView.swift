@@ -14,8 +14,12 @@ struct MoreView: View {
     @AppStorage(SpeechSettings.voiceKey) private var speechVoice = ""
     @ObservedObject private var locations = LocationManager.shared
     @State private var showingAgentSettings = false
+    @State private var showingTalk = false
     @State private var settingsActionInFlight: String?
     @State private var policyPendingDeletion: WorkspacePolicy?
+    @State private var isLoadingSettings = false
+    @State private var settingsLoadFailed = false
+    @State private var settingsActionFailed = false
     /// The voices installed for this language, best first. Read once the screen
     /// appears rather than on every redraw — the answer only changes when the
     /// owner leaves for Settings and downloads one.
@@ -24,14 +28,27 @@ struct MoreView: View {
     var body: some View {
         AssistantSettingsList {
             Section {
-                assistantIdentity
-                .padding(.vertical, 6)
-                Button("Edit assistant settings", systemImage: "pencil") {
-                    showingAgentSettings = true
+                Button { showingAgentSettings = true } label: { assistantIdentity }
+                .disabled(model.workspace == nil || isLoadingSettings || settingsLoadFailed)
+                .accessibilityLabel("Edit preferences for \(model.agentName)")
+                .accessibilityHint("Language, time zone, and email signature")
+            }
+
+            if settingsLoadFailed {
+                AssistantLoadFailureState(
+                    title: "Couldn’t refresh assistant settings",
+                    message: model.workspace == nil ? "Try again to load your preferences and rules." : "Your previous settings are shown. Refresh before changing them.",
+                    retry: { Task { await reloadSettings() } }
+                )
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+            } else if model.workspace == nil {
+                Section { ProgressView("Loading assistant settings") }
+            }
+            if settingsActionFailed {
+                Section {
+                    AssistantInlineFailure(message: "Couldn’t confirm that change. Try again or pull to refresh your settings.")
                 }
-                Text("Identity, notifications, proactive jobs, and approval rules.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
 
             Section {
@@ -55,12 +72,11 @@ struct MoreView: View {
             }
 
             Section {
-                Picker("Appearance", selection: $appearance) {
-                    ForEach(AssistantAppearance.allCases) { option in
-                        Text(option.label).tag(option)
-                    }
+                if dynamicTypeSize.isAccessibilitySize {
+                    appearancePicker.pickerStyle(.menu)
+                } else {
+                    appearancePicker.pickerStyle(.segmented)
                 }
-                .pickerStyle(.segmented)
             } header: {
                 Text("Appearance")
             } footer: {
@@ -68,6 +84,9 @@ struct MoreView: View {
             }
 
             Section {
+                Button("Talk to the assistant", systemImage: "waveform") { showingTalk = true }
+                    .disabled(model.isSending)
+                    .accessibilityHint("Starts a hands-free conversation. You can interrupt the assistant while it speaks.")
                 Toggle("Speak replies aloud", isOn: $speakReplies)
                 speechPacePicker
                 if voiceChoices.count > 1 {
@@ -79,10 +98,10 @@ struct MoreView: View {
             } header: {
                 Text("Speech")
             } footer: {
-                Text("Long-press any reply to hear that one on its own. With this on, every reply to something you send is read as it arrives — out loud, through the speaker, even with the ringer off.")
+                Text("Speak replies aloud reads new replies through the speaker, even with the ringer off. Long-press a reply to hear it once.")
             }
 
-            Section("Connection") {
+            Section("Services") {
                 NavigationLink {
                     ConnectionView(isOnboarding: false)
                 } label: {
@@ -101,7 +120,7 @@ struct MoreView: View {
                 NavigationLink {
                     MCPConnectionsView()
                 } label: {
-                    Label("MCP connections", systemImage: "point.3.connected.trianglepath.dotted")
+                    Label("Connected tools", systemImage: "point.3.connected.trianglepath.dotted")
                 }
             }
 
@@ -113,10 +132,9 @@ struct MoreView: View {
                         selection: Binding(
                             get: { conversation.conversation.modelOverride ?? "" },
                             set: { value in
-                                settingsActionInFlight = "chat-model"
-                                Task {
-                                    _ = await model.changeConversationModel(value.isEmpty ? nil : value)
-                                    settingsActionInFlight = nil
+                                guard !model.isSending else { return }
+                                performSettingsAction("chat-model", requiresWorkspace: false) {
+                                    await model.changeConversationModel(value.isEmpty ? nil : value)
                                 }
                             }
                         )
@@ -126,7 +144,13 @@ struct MoreView: View {
                             Text(option.label).tag(option.id)
                         }
                     }
-                    .disabled(settingsActionInFlight != nil)
+                    .disabled(settingsActionInFlight != nil || model.isSending)
+                    .accessibilityHint(model.isSending ? "Finish or stop the current reply before changing its model." : "")
+                    if model.isSending {
+                        Text("Finish or stop the current reply before changing its model.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -168,7 +192,7 @@ struct MoreView: View {
             } header: {
                 Text("Assistant context")
             } footer: {
-                Text("Sent to your own server as a short-lived current-position ping (kept a few days, never stored as memory) with this iPhone’s time zone. It powers answers like “what can I eat around here?” — never shared with anyone else. Background nudges use coarse significant-change updates only, so a move can earn one considered tip (a lunch spot in a new area) — at most a few pings a day.")
+                Text("Share your current location with your own server for nearby answers. Arrival nudges use coarse location changes. You can turn either setting off at any time.")
             }
 
             // The lower-traffic work areas. The pull-up menu stays at eight
@@ -247,16 +271,11 @@ struct MoreView: View {
         .navigationTitle("More")
         .assistantSubmenuChrome()
         .toolbarBackground(.visible, for: .navigationBar)
-        .refreshable {
-            async let overviewRefresh: Void = model.refreshAll()
-            async let workspaceRefresh: Void = model.refreshWorkspace()
-            _ = await (overviewRefresh, workspaceRefresh)
-        }
+        .refreshable { await reloadSettings() }
         .task {
             refreshVoiceChoices()
             await notifications.refreshAuthorizationStatus()
-            if model.workspace == nil { await model.refreshWorkspace() }
-            await model.refreshMcpConnections()
+            if model.workspace == nil { await reloadSettings() }
         }
         // Downloading a voice happens in Settings, not here. Coming back to
         // this screen is the moment to notice that one arrived.
@@ -264,6 +283,7 @@ struct MoreView: View {
             guard phase == .active else { return }
             refreshVoiceChoices()
             SpeechPlayer.shared.voicePreferenceChanged()
+            Task { await notifications.refreshAuthorizationStatus() }
         }
         .confirmationDialog(
             "Delete standing approval?",
@@ -275,11 +295,7 @@ struct MoreView: View {
             presenting: policyPendingDeletion
         ) { policy in
             Button("Delete rule", role: .destructive) {
-                settingsActionInFlight = policy.id
-                Task {
-                    _ = await model.deletePolicy(policy)
-                    settingsActionInFlight = nil
-                }
+                performSettingsAction(policy.id) { await model.deletePolicy(policy) }
             }
         } message: { policy in
             Text("This removes “\(policy.displayName)”.")
@@ -288,6 +304,26 @@ struct MoreView: View {
             if let settings = model.workspace?.settings.agent {
                 NavigationStack { AgentSettingsEditor(settings: settings) }
             }
+        }
+        .fullScreenCover(isPresented: $showingTalk) { TalkView() }
+    }
+
+    private func reloadSettings() async {
+        guard !isLoadingSettings, settingsActionInFlight == nil else { return }
+        isLoadingSettings = true
+        let refreshed = await model.refreshWorkspace()
+        isLoadingSettings = false
+        guard !Task.isCancelled else { return }
+        settingsLoadFailed = !refreshed
+    }
+
+    private func performSettingsAction(_ id: String, requiresWorkspace: Bool = true, action: @escaping () async -> Bool) {
+        guard settingsActionInFlight == nil, !(requiresWorkspace && (settingsLoadFailed || isLoadingSettings)) else { return }
+        settingsActionFailed = false
+        settingsActionInFlight = id
+        Task {
+            settingsActionFailed = !(await action())
+            settingsActionInFlight = nil
         }
     }
 
@@ -301,23 +337,34 @@ struct MoreView: View {
         }
     }
 
-    /// The system's read-aloud rate is a dictation pace, and a reply in a chat
-    /// is conversation. The default sits above it; this is where someone who
-    /// disagrees says so, and hears the answer straight away.
-    private var speechPacePicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Speed")
-            Picker("Speed", selection: $speechPace) {
-                ForEach(SpeechPace.allCases) { pace in
-                    Text(pace.label).tag(pace)
-                }
+    private var appearancePicker: some View {
+        Picker("Appearance", selection: $appearance) {
+            ForEach(AssistantAppearance.allCases) { option in
+                Text(option.label).tag(option)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
         }
-        .padding(.vertical, 2)
-        .onChange(of: speechPace) { _, _ in
-            SpeechPlayer.shared.preview()
+    }
+
+    /// Segments are quick at ordinary sizes. A native menu keeps every label
+    /// and the current value readable when the owner enlarges text.
+    private var speechPacePicker: some View {
+        Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                pacePicker.pickerStyle(.menu)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Speed")
+                    pacePicker.pickerStyle(.segmented).labelsHidden()
+                }
+                .padding(.vertical, 2)
+            }
+        }
+        .onChange(of: speechPace) { _, _ in SpeechPlayer.shared.preview() }
+    }
+
+    private var pacePicker: some View {
+        Picker("Speed", selection: $speechPace) {
+            ForEach(SpeechPace.allCases) { pace in Text(pace.label).tag(pace) }
         }
     }
 
@@ -411,12 +458,16 @@ struct MoreView: View {
                 Text(model.agentName)
                     .font(.headline)
                     .fixedSize(horizontal: false, vertical: true)
-                Text(model.serverURL)
+                Text("Language, time zone, and signature")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(usesAccessibilityLayout ? 2 : 1)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
         }
     }
 
@@ -441,15 +492,11 @@ struct MoreView: View {
             isOn: Binding(
                 get: { schedule.enabled },
                 set: { enabled in
-                    settingsActionInFlight = schedule.id
-                    Task {
-                        _ = await model.setSchedule(schedule, enabled: enabled)
-                        settingsActionInFlight = nil
-                    }
+                    performSettingsAction(schedule.id) { await model.setSchedule(schedule, enabled: enabled) }
                 }
             )
         ) { detail }
-        .disabled(settingsActionInFlight != nil)
+        .disabled(settingsActionInFlight != nil || isLoadingSettings || settingsLoadFailed)
     }
 
     @ViewBuilder
@@ -486,16 +533,12 @@ struct MoreView: View {
         Toggle(isOn: Binding(
             get: { policy.enabled },
             set: { enabled in
-                settingsActionInFlight = policy.id
-                Task {
-                    _ = await model.setPolicy(policy, enabled: enabled)
-                    settingsActionInFlight = nil
-                }
+                performSettingsAction(policy.id) { await model.setPolicy(policy, enabled: enabled) }
             }
         ), label: label)
         .accessibilityLabel(policy.displayName)
         .accessibilityHint(policy.scope ?? policy.toolName.sentenceCaseIdentifier)
-        .disabled(settingsActionInFlight != nil)
+        .disabled(settingsActionInFlight != nil || isLoadingSettings || settingsLoadFailed)
     }
 
     private func policyActions(_ policy: WorkspacePolicy) -> some View {
@@ -508,7 +551,7 @@ struct MoreView: View {
         }
         .buttonStyle(.borderless)
         .accessibilityLabel("Actions for \(policy.displayName)")
-        .disabled(settingsActionInFlight != nil)
+        .disabled(settingsActionInFlight != nil || isLoadingSettings || settingsLoadFailed)
     }
 
 }
@@ -517,6 +560,9 @@ private struct RemindersView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.colorScheme) private var colorScheme
     @State private var removalInFlight: String?
+    @State private var isLoading = false
+    @State private var loadFailed = false
+    @State private var removalFailed = false
 
     private var reminders: [WorkspaceReminder] {
         model.workspace?.settings.reminders ?? []
@@ -524,7 +570,21 @@ private struct RemindersView: View {
 
     var body: some View {
         AssistantSettingsList {
-            if reminders.isEmpty {
+            if loadFailed {
+                AssistantLoadFailureState(
+                    title: "Couldn’t refresh reminders",
+                    message: model.workspace == nil ? "Try again to check your active reminders." : "Previous reminders are shown. Refresh before removing one.",
+                    retry: { Task { await load() } }
+                )
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+            }
+            if removalFailed {
+                Section { AssistantInlineFailure(message: "Couldn’t confirm removal. Refresh to check whether the reminder is still active.") }
+            }
+            if model.workspace == nil && !loadFailed {
+                Section { ProgressView("Loading reminders") }
+            } else if reminders.isEmpty && !loadFailed {
                 AssistantEmptyState(
                     "No active reminders",
                     systemImage: "bell.slash",
@@ -532,7 +592,7 @@ private struct RemindersView: View {
                 )
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
-            } else {
+            } else if !reminders.isEmpty {
                 Section {
                     ForEach(reminders) { reminder in
                         reminderRow(reminder)
@@ -547,11 +607,11 @@ private struct RemindersView: View {
         .scrollContentBackground(.hidden)
         .navigationTitle("Reminders")
         .assistantSubmenuChrome()
-        .refreshable { await model.refreshWorkspace() }
+        .refreshable { await load() }
         // Reminders are often created in Chat immediately before this route is
         // opened. Always refresh on appearance so the projection reflects the
         // server mutation rather than the last workspace snapshot.
-        .task { await model.refreshWorkspace() }
+        .task { await load() }
 
     }
 
@@ -573,14 +633,26 @@ private struct RemindersView: View {
             // compact secondary action rather than a left-hugging control
             // stranded under the full row width.
             AssistantConfirmationButton("Remove", hint: "Stops queued and future reminder alerts.", compact: true) {
+                guard removalInFlight == nil, !isLoading, !loadFailed else { return }
                 removalInFlight = reminder.id
-                _ = await model.deleteReminder(reminder)
+                removalFailed = !(await model.deleteReminder(reminder))
                 removalInFlight = nil
             }
-            .disabled(removalInFlight != nil)
+            .disabled(removalInFlight != nil || isLoading || loadFailed)
+            .accessibilityLabel("Remove reminder: \(reminder.text)")
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(.vertical, 4)
+    }
+
+    private func load() async {
+        guard !isLoading, removalInFlight == nil else { return }
+        isLoading = true
+        let refreshed = await model.refreshWorkspace()
+        isLoading = false
+        guard !Task.isCancelled else { return }
+        loadFailed = !refreshed
+        if refreshed { removalFailed = false }
     }
 
     private func reminderDetail(_ reminder: WorkspaceReminder) -> String {
@@ -598,6 +670,7 @@ private struct AgentSettingsEditor: View {
     @State private var locale: String
     @State private var signature: String
     @State private var isSaving = false
+    @State private var saveFailed = false
 
     init(settings: WorkspaceAgentSettings) {
         _timezone = State(initialValue: settings.timezone)
@@ -608,38 +681,54 @@ private struct AgentSettingsEditor: View {
     var body: some View {
         AssistantForm {
             Section("Language and time") {
-                TextField("Timezone", text: $timezone)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                TextField("Locale", text: $locale)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                AssistantField("Time zone") {
+                    TextField("Time zone", text: $timezone)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
+                AssistantField("Language and region") {
+                    TextField("Language and region", text: $locale)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
+                Button("Use this iPhone’s settings", systemImage: "iphone") {
+                    timezone = TimeZone.current.identifier
+                    locale = Locale.current.identifier(.bcp47)
+                }
             }
             Section("Signature") {
                 TextField("Email signature", text: $signature, axis: .vertical)
                     .lineLimit(2...6)
             }
+            if saveFailed {
+                Section { AssistantInlineFailure(message: "Couldn’t save your preferences. Your entries are kept; try again.") }
+            }
         }
+        .disabled(isSaving)
         .navigationTitle("Assistant settings")
         .navigationBarTitleDisplayMode(.inline)
+        .interactiveDismissDisabled(isSaving)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") { dismiss() }
+                Button("Cancel") { dismiss() }.disabled(isSaving)
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button(isSaving ? "Saving…" : "Save") { save() }
-                    .disabled(isSaving || timezone.isEmpty || locale.isEmpty)
+                    .disabled(isSaving || timezone.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || locale.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
     }
 
     private func save() {
+        guard !isSaving else { return }
         isSaving = true
+        saveFailed = false
         Task {
             let saved = await model.updateAgentSettings(
-                .init(timezone: timezone, locale: locale, signature: signature)
+                .init(timezone: timezone.trimmingCharacters(in: .whitespacesAndNewlines), locale: locale.trimmingCharacters(in: .whitespacesAndNewlines), signature: signature)
             )
             isSaving = false
+            saveFailed = !saved
             if saved { dismiss() }
         }
     }
@@ -647,7 +736,7 @@ private struct AgentSettingsEditor: View {
 
 /// Owner-managed remote tool servers. Connection discovery is intentionally
 /// separate from tool use: a server can describe its tools here, but every
-/// later invocation still becomes a normal approval-backed agent action.
+/// later invocation follows the owner's normal approval and autonomy policy.
 private struct MCPConnectionsView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.colorScheme) private var colorScheme
@@ -658,6 +747,11 @@ private struct MCPConnectionsView: View {
     @State private var bearerToken = ""
     @State private var isAdding = false
     @State private var workingConnectionID: String?
+    @State private var showingAddConnection = false
+    @State private var isLoading = false
+    @State private var loadFailed = false
+    @State private var hasLoaded = false
+    @State private var actionFailed = false
     @FocusState private var focusedField: MCPField?
 
     private var usesAccessibilityLayout: Bool { dynamicTypeSize.isAccessibilitySize }
@@ -666,19 +760,31 @@ private struct MCPConnectionsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 introduction
-                addConnection
-
-                if model.mcpConnections.isEmpty {
+                if loadFailed {
+                    AssistantLoadFailureState(
+                        title: "Couldn’t refresh connected tools",
+                        message: hasLoaded || !model.mcpConnections.isEmpty ? "Previous connections are shown. Refresh before changing them." : "Try again to check your connections.",
+                        retry: { Task { await load() } }
+                    )
+                }
+                if actionFailed {
+                    AssistantInlineFailure(message: "Couldn’t confirm that change. Your entries are kept. Try again or pull to refresh.")
+                        .assistantPanel(in: colorScheme)
+                }
+                if isLoading && !hasLoaded && model.mcpConnections.isEmpty {
+                    AssistantLoadingState(title: "Loading connected tools")
+                } else if model.mcpConnections.isEmpty && !loadFailed && hasLoaded {
                     AssistantEmptyState(
-                        "No MCP connections",
+                        "No connected tools",
                         systemImage: "point.3.connected.trianglepath.dotted",
-                        description: "Add a remote server to let the agent discover its tools."
+                        description: "Connect a tool service for your assistant to use."
                     )
                 } else {
                     ForEach(model.mcpConnections) { connection in
                         connectionCard(connection)
                     }
                 }
+                addConnection
             }
             .padding(16)
             .padding(.bottom, 28)
@@ -686,18 +792,18 @@ private struct MCPConnectionsView: View {
         .scrollBounceBehavior(.basedOnSize)
         .scrollDismissesKeyboard(.interactively)
         .background(AssistantTheme.canvas(for: colorScheme).ignoresSafeArea())
-        .navigationTitle("MCP connections")
-        .navigationBarTitleDisplayMode(usesAccessibilityLayout ? .inline : .large)
-        .refreshable { await model.refreshMcpConnections() }
-        .task { await model.refreshMcpConnections() }
+        .navigationTitle("Connected tools")
+        .assistantSubmenuChrome()
+        .refreshable { await load() }
+        .task { await load() }
     }
 
     private var introduction: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Tools, with a visible boundary", systemImage: "checkmark.shield")
+            Label("Connect services the assistant can use", systemImage: "checkmark.shield")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(AssistantTheme.accent(for: colorScheme))
-            Text("Connect a Streamable HTTP MCP server. The agent can inspect its tools, but it asks before every remote call.")
+            Text("MCP connects external tools to your assistant. Tool use follows your approval rules and autonomy settings.")
                 .font(.subheadline)
                 .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                 .fixedSize(horizontal: false, vertical: true)
@@ -706,42 +812,47 @@ private struct MCPConnectionsView: View {
     }
 
     private var addConnection: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            Text("Add a connection")
-                .font(.headline)
+        DisclosureGroup(isExpanded: $showingAddConnection) {
+            VStack(alignment: .leading, spacing: 13) {
 
-            mcpField("Name", placeholder: "e.g. Home Assistant", text: $name, field: .name)
-            mcpField("MCP endpoint", placeholder: "https://example.com/mcp", text: $endpoint, field: .endpoint)
-            SecureField("Bearer token (optional)", text: $bearerToken)
-                .textContentType(.password)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .submitLabel(.go)
-                .focused($focusedField, equals: .bearer)
-                .onSubmit(add)
-                .padding(.horizontal, 12)
-                .frame(minHeight: 46)
-                .background(AssistantTheme.sunken(for: colorScheme), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                mcpField("Name", placeholder: "e.g. Home Assistant", text: $name, field: .name)
+                mcpField("MCP endpoint", placeholder: "https://example.com/mcp", text: $endpoint, field: .endpoint)
+                SecureField("Bearer token (optional)", text: $bearerToken)
+                    .textContentType(.password)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.go)
+                    .focused($focusedField, equals: .bearer)
+                    .onSubmit(add)
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 46)
+                    .background(AssistantTheme.sunken(for: colorScheme), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
-            Button(action: add) {
-                HStack(spacing: 8) {
-                    if isAdding { ProgressView().controlSize(.small) }
-                    Text(isAdding ? "Checking connection…" : "Add and inspect")
-                    Spacer()
-                    Image(systemName: "arrow.right")
-                        .font(.caption.weight(.bold))
+                Button(action: add) {
+                    HStack(spacing: 8) {
+                        if isAdding { ProgressView().controlSize(.small) }
+                        Text(isAdding ? "Checking connection…" : "Add and inspect")
+                        Spacer()
+                        Image(systemName: "arrow.right")
+                            .font(.caption.weight(.bold))
+                    }
+                    .frame(minHeight: 40)
                 }
-                .frame(minHeight: 40)
-            }
-            .buttonStyle(AssistantActionButtonStyle(kind: .primary))
-            .tint(AssistantTheme.accent(for: colorScheme))
-            .disabled(isAdding || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .buttonStyle(AssistantTactileButtonStyle(reduceMotion: reduceMotion, pressedScale: 0.99))
+                .buttonStyle(AssistantActionButtonStyle(kind: .primary))
+                .tint(AssistantTheme.accent(for: colorScheme))
+                .disabled(isAdding || workingConnectionID != nil || isLoading || loadFailed || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .buttonStyle(AssistantTactileButtonStyle(reduceMotion: reduceMotion, pressedScale: 0.99))
 
-            Text("Only public HTTPS endpoints are accepted in production. Bearer tokens are encrypted on the server and never shown again.")
-                .font(.caption)
-                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                .fixedSize(horizontal: false, vertical: true)
+                Text("Only public HTTPS endpoints are accepted in production. Bearer tokens are encrypted on the server and never shown again.")
+                    .font(.caption)
+                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 8)
+            .disabled(isAdding)
+        } label: {
+            Label("Add a connection", systemImage: "plus.circle")
+                .font(.headline)
         }
         .assistantCard(in: colorScheme)
     }
@@ -871,14 +982,14 @@ private struct MCPConnectionsView: View {
             }
             .buttonStyle(AssistantActionButtonStyle(kind: .primary))
             .tint(AssistantTheme.accent(for: colorScheme))
-            .disabled(workingConnectionID != nil)
+            .disabled(workingConnectionID != nil || isAdding || isLoading || loadFailed)
         } else {
             Button { perform(connection, action: action) } label: {
                 actionButtonLabel(title, icon: icon, working: working)
             }
             .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
             .tint(AssistantTheme.inkMuted(for: colorScheme))
-            .disabled(workingConnectionID != nil)
+            .disabled(workingConnectionID != nil || isAdding || isLoading || loadFailed)
         }
     }
 
@@ -893,11 +1004,12 @@ private struct MCPConnectionsView: View {
 
     private func deleteButton(_ connection: McpConnection, working: Bool) -> some View {
         AssistantConfirmationButton("Remove", hint: "Deletes \(connection.name), its tools, and saved credential.") {
+            guard workingConnectionID == nil, !isAdding, !isLoading, !loadFailed else { return }
             workingConnectionID = connection.id
-            _ = await model.deleteMcpConnection(id: connection.id)
+            actionFailed = !(await model.deleteMcpConnection(id: connection.id))
             workingConnectionID = nil
         }
-        .disabled(workingConnectionID != nil || working)
+        .disabled(workingConnectionID != nil || working || isAdding || isLoading || loadFailed)
     }
 
     private func statusTag(_ connection: McpConnection) -> some View {
@@ -922,24 +1034,44 @@ private struct MCPConnectionsView: View {
     private func add() {
         let candidateName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let candidateEndpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isAdding, !candidateName.isEmpty, !candidateEndpoint.isEmpty else { return }
+        guard !isAdding, workingConnectionID == nil, !isLoading, !loadFailed, !candidateName.isEmpty, !candidateEndpoint.isEmpty else { return }
         focusedField = nil
         isAdding = true
+        actionFailed = false
         Task {
-            if await model.createMcpConnection(name: candidateName, endpoint: candidateEndpoint, bearerToken: bearerToken.isEmpty ? nil : bearerToken) {
+            let added = await model.createMcpConnection(name: candidateName, endpoint: candidateEndpoint, bearerToken: bearerToken.isEmpty ? nil : bearerToken)
+            if added {
                 name = ""
                 endpoint = ""
                 bearerToken = ""
+                showingAddConnection = false
             }
+            actionFailed = !added
             isAdding = false
         }
     }
 
     private func perform(_ connection: McpConnection, action: String) {
+        guard workingConnectionID == nil, !isAdding, !isLoading, !loadFailed else { return }
+        actionFailed = false
         workingConnectionID = connection.id
         Task {
-            _ = await model.updateMcpConnection(id: connection.id, action: action)
+            actionFailed = !(await model.updateMcpConnection(id: connection.id, action: action))
             workingConnectionID = nil
+        }
+    }
+
+    private func load() async {
+        guard !isLoading, !isAdding, workingConnectionID == nil else { return }
+        isLoading = true
+        let refreshed = await model.refreshMcpConnections()
+        isLoading = false
+        guard !Task.isCancelled else { return }
+        loadFailed = !refreshed
+        if refreshed {
+            if !hasLoaded && model.mcpConnections.isEmpty { showingAddConnection = true }
+            hasLoaded = true
+            actionFailed = false
         }
     }
 }
@@ -1003,3 +1135,17 @@ private struct FlowLayout: Layout {
         }
     }
 }
+
+#if DEBUG
+// Real private destinations exposed only to the isolated native screenshot suite.
+extension MoreView {
+    @MainActor static func visualReviewScreen(_ name: String, workspace: WorkspaceResponse) -> AnyView? {
+        switch name {
+        case "reminders": return AnyView(RemindersView())
+        case "assistant-settings": return AnyView(AgentSettingsEditor(settings: workspace.settings.agent))
+        case "connected-tools": return AnyView(MCPConnectionsView())
+        default: return nil
+        }
+    }
+}
+#endif

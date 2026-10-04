@@ -1,4 +1,4 @@
-import { requestOwnerProposalCodeFix } from '@/lib/proposal-code-fix';
+import { proposalCodeFixReceipt, requestOwnerProposalCodeFix } from '@/lib/proposal-code-fix';
 import { decideOwnerImprovement } from '@/lib/workspace-reviews';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -17,12 +17,12 @@ export async function POST(
   try {
     if (body?.action === 'request_fix') {
       const issue = await requestOwnerProposalCodeFix(id);
-      return mobileJson({ ok: true, repairIssueId: issue.id });
+      return mobileJson({ ok: true, ...proposalCodeFixReceipt(issue) });
     }
     if (body?.action !== 'apply' && body?.action !== 'dismiss')
       return mobileJson({ error: 'action must be apply, dismiss or request_fix' }, { status: 400 });
-    await decideOwnerImprovement(id, body.action);
-    return mobileJson({ ok: true });
+    const result = await decideOwnerImprovement(id, body.action);
+    return mobileJson({ ok: true, ...result });
   } catch (error) {
     return mobileJson(
       { error: error instanceof Error ? error.message : 'Proposal could not be updated.' },

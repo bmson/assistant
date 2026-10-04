@@ -8,6 +8,8 @@ struct GoalsView: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var showingGoalCreator = false
     @State private var editingGoal: GoalRecord?
+    @State private var stoppingGoal: GoalDashboardItem?
+    @State private var deletingGoal: GoalRecord?
     @State private var goalActionInFlight: String?
     @State private var showingArchived = false
 
@@ -78,6 +80,26 @@ struct GoalsView: View {
         }
         .sheet(item: $editingGoal) { goal in
             NavigationStack { GoalEditor(goal: goal) }
+        }
+        .confirmationDialog("Stop this goal?", isPresented: Binding(
+            get: { stoppingGoal != nil }, set: { if !$0 { stoppingGoal = nil } }
+        ), titleVisibility: .visible, presenting: stoppingGoal) { item in
+            Button("Stop goal", role: .destructive) { updateLifecycle(item, action: "status", status: "abandoned") }
+        } message: { item in
+            Text("Stops future work on “\(item.goal.title)”. Its chat and history are kept.")
+        }
+        .confirmationDialog("Archive this goal?", isPresented: Binding(
+            get: { deletingGoal != nil }, set: { if !$0 { deletingGoal = nil } }
+        ), titleVisibility: .visible, presenting: deletingGoal) { goal in
+            Button("Archive goal", role: .destructive) {
+                goalActionInFlight = goal.id
+                Task {
+                    _ = await model.deleteGoal(goal)
+                    goalActionInFlight = nil
+                }
+            }
+        } message: { _ in
+            Text("Archives the goal and keeps its work chat and history.")
         }
     }
 
@@ -151,6 +173,21 @@ struct GoalsView: View {
 
             goalCadence(item)
 
+            if let conversationId = item.conversationId {
+                Button {
+                    goalActionInFlight = item.goal.id
+                    Task {
+                        _ = await model.openConversation(id: conversationId)
+                        goalActionInFlight = nil
+                    }
+                } label: {
+                    Label("Continue in chat", systemImage: "bubble.left")
+                }
+                .buttonStyle(AssistantActionButtonStyle(kind: .primary, fillsWidth: true))
+                .disabled(goalActionInFlight != nil || model.isSending)
+                .accessibilityHint(model.isSending ? "Finish or stop the current reply before switching chats" : "Opens this goal’s work chat")
+            }
+
             if showingArchived {
                 Button {
                     goalActionInFlight = item.goal.id
@@ -204,47 +241,19 @@ struct GoalsView: View {
                             }
                         }
 
+                        Divider()
+                        if item.goal.status != "abandoned" {
+                            Button("Stop goal", systemImage: "stop", role: .destructive) { stoppingGoal = item }
+                        }
+                        Button("Archive goal", systemImage: "archivebox", role: .destructive) { deletingGoal = item.goal }
+                            .disabled(item.workActive)
                     } label: {
                         Label("More", systemImage: "ellipsis.circle")
                     }
                     .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
                     .disabled(goalActionInFlight != nil)
-                    if item.goal.status != "abandoned" {
-                        AssistantConfirmationButton("Stop goal", systemImage: "stop") {
-                            updateLifecycle(item, action: "status", status: "abandoned")
-                        }
-                        .disabled(goalActionInFlight != nil)
-                    }
-                    AssistantConfirmationButton("Delete", hint: "Archives the goal and keeps its work chat and history.") {
-                        goalActionInFlight = item.goal.id
-                        _ = await model.deleteGoal(item.goal)
-                        goalActionInFlight = nil
-                    }
-                    .disabled(item.workActive || goalActionInFlight != nil)
                 }
                 .font(.subheadline.weight(.semibold))
-            }
-
-            if let conversationId = item.conversationId {
-                Button {
-                    goalActionInFlight = item.goal.id
-                    Task {
-                        _ = await model.openConversation(id: conversationId)
-                        goalActionInFlight = nil
-                    }
-                } label: {
-                    Label("Continue in chat", systemImage: "bubble.left")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(AssistantTheme.accent(for: colorScheme))
-                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(
-                    AssistantTactileButtonStyle(
-                        reduceMotion: reduceMotion,
-                        pressedScale: 0.985
-                    )
-                )
             }
         }
         .assistantCard(in: colorScheme)
@@ -421,10 +430,14 @@ struct GoalEditor: View {
     var body: some View {
         AssistantForm {
             Section {
-                TextField("What should the assistant work toward?", text: $title, axis: .vertical)
-                    .lineLimit(1...3)
-                TextField("Context, constraints, definition of done", text: $description, axis: .vertical)
-                    .lineLimit(2...5)
+                AssistantField("Outcome") {
+                    TextField("What should the assistant work toward?", text: $title, axis: .vertical)
+                        .lineLimit(1...3)
+                }
+                AssistantField("Context and constraints") {
+                    TextField("Context, constraints, definition of done", text: $description, axis: .vertical)
+                        .lineLimit(2...5)
+                }
             } header: {
                 Text("Goal")
             }
@@ -438,18 +451,24 @@ struct GoalEditor: View {
                     Text("Gentle").tag(4)
                     Text("Low").tag(5)
                 }
-                TextField("Target date (YYYY-MM-DD)", text: $targetDate)
-                    .textInputAutocapitalization(.never)
-                    .keyboardType(.numbersAndPunctuation)
+                AssistantField("Target date") {
+                    TextField("Target date (YYYY-MM-DD)", text: $targetDate)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.numbersAndPunctuation)
+                }
                 Toggle("Show updates in my main chat", isOn: $mirrorToPrimary)
             }
             .listRowBackground(AssistantTheme.raised(for: colorScheme))
 
             Section("Current direction") {
-                TextField("Latest progress", text: $progress, axis: .vertical)
-                    .lineLimit(2...5)
-                TextField("Next action", text: $nextAction, axis: .vertical)
-                    .lineLimit(2...5)
+                AssistantField("Latest progress") {
+                    TextField("Latest progress", text: $progress, axis: .vertical)
+                        .lineLimit(2...5)
+                }
+                AssistantField("Next action") {
+                    TextField("Next action", text: $nextAction, axis: .vertical)
+                        .lineLimit(2...5)
+                }
             }
             .listRowBackground(AssistantTheme.raised(for: colorScheme))
         }

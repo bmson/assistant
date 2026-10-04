@@ -180,6 +180,30 @@ final class RenderCostTests: XCTestCase {
 
     // MARK: - Row equality
 
+    func testTranscriptBoundaryNoticesTokensDecisionsAndSendAvailability() {
+        let rows = { (messages: [ChatMessage], sending: Bool) in
+            ChatTranscriptRows(
+                messages: messages, isSending: sending,
+                openApprovals: {}, send: { _, _ in },
+                decideApproval: { _, _ in false }, rememberApproval: { _ in false },
+                decideSuggestion: { _, _ in nil }, openActivity: {},
+                refreshCard: { _ in nil }, hideMessage: { _ in }
+            )
+        }
+        let message = ChatMessage.optimistic(role: .assistant, text: "Half a reply", id: "stream-1")
+        XCTAssertEqual(rows([message], true), rows([message], true))
+        XCTAssertNotEqual(rows([message], true), rows([message], false))
+
+        var grown = message
+        grown.parts[0].text = "Half a reply, then the rest"
+        XCTAssertNotEqual(rows([message], true), rows([grown], true))
+
+        let pending = ChatMessage(id: "decision", role: .assistant, parts: [.init(type: "approval", status: "pending")])
+        var approved = pending
+        approved.parts[0].status = "approved"
+        XCTAssertNotEqual(rows([pending], false), rows([approved], false))
+    }
+
     func testRowComparesEqualOnlyWhileItsContentHoldsStill() {
         let message = ChatMessage.optimistic(role: .assistant, text: "Half a rep", id: "stream-1")
         let row = { (message: ChatMessage, prompt: String?, streaming: Bool) in

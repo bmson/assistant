@@ -6,6 +6,7 @@ import {
   improvementProposals,
   isTombstoned,
   knowledgeGraphSources,
+  maintenanceCursors,
   memories,
   modelCalls,
   modelRoles,
@@ -14,10 +15,13 @@ import {
   tasks,
   toolCalls,
 } from '@assistant/db';
-import type {
-  CodeJobLease,
-  ExecutionPersistence,
-  SelfImprovementRepository,
+import {
+  type CodeJobLease,
+  type ExecutionPersistence,
+  type ImprovementActionResult,
+  improvementModelChange,
+  type SelfImprovementRepository,
+  validateImprovementModels,
 } from '@assistant/persistence';
 import { and, desc, eq, gte, inArray, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -31,7 +35,8 @@ import { notifyOwnerInNotifications } from './anomaly.js';
  * retry, dead-letter, and cost-outlier signals from `tool_calls`/`tasks`/
  * `model_calls`, records the pattern as an `experience` memory, and drafts
  * concrete change proposals. Proposals are NEVER auto-applied — the owner
- * approves (which enacts an applyable model-role/policy change) or dismisses.
+ * approves a validated model-role change or acknowledges advisory policy,
+ * prompt and note suggestions. No code is changed by this review.
  */
 
 const WINDOW_DAYS = 7;
@@ -39,16 +44,6 @@ const MIN_FAILURES = 2;
 const COST_OUTLIER_USD = 0.1;
 /** Fresh graph work is expected; a ten-minute checkpoint is a health signal. */
 const GRAPH_STALE_PENDING_MS = 10 * 60 * 1000;
-const VALID_ROLES = new Set([
-  'plan',
-  'classify',
-  'extract',
-  'draft',
-  'reason',
-  'rewrite',
-  'embed',
-  'batch',
-]);
 
 /** Collapse a tool error to a stable signature so repeats group together. */
 function errorSignature(error: string | null): string {
@@ -422,7 +417,7 @@ export async function runSelfImprove(
     }
 
     if (proposalsDrafted > 0) {
-      const text = `🔧 I drafted ${proposalsDrafted} improvement proposal${proposalsDrafted === 1 ? '' : 's'} from this week's reliability review. Review them on the [Improvements page](/improvements) — nothing changes until you approve.`;
+      const text = `I drafted ${proposalsDrafted} improvement proposal${proposalsDrafted === 1 ? '' : 's'} from this week's reliability review. Review them on the [Improvements page](/improvements). No model settings or code were changed by this review.`;
       const notify = portable
         ? async () => {
             const conversationId = await portable.notifications.getOrCreate(agentId);
@@ -466,74 +461,119 @@ export async function listOpenProposals(
     .limit(100);
 }
 
-export async function dismissProposal(db: Db, id: string): Promise<void> {
-  await db
-    .update(improvementProposals)
-    .set({ status: 'dismissed', updatedAt: sql`now()` })
-    .where(eq(improvementProposals.id, id));
-}
-
-/**
- * Enact an approved proposal. model_role/policy changes are applied to the live
- * config after validation; prompt/note proposals (and any malformed change) are
- * advisory and merely acknowledged. Never touched without the owner approving.
- */
-export async function applyProposal(
+/** Both decisions serialize with owner erasure and with each other. */
+async function decideProposal(
   db: Db,
   id: string,
-): Promise<{ enacted: boolean; detail: string }> {
-  const [proposal] = await db
-    .select()
-    .from(improvementProposals)
-    .where(eq(improvementProposals.id, id));
-  if (proposal?.status !== 'open') return { enacted: false, detail: 'not applicable' };
+  agentId: string,
+  action: 'apply' | 'dismiss',
+): Promise<ImprovementActionResult> {
+  if (!agentId) throw new Error('Improvement owner is required');
+  return db.transaction(async (tx) => {
+    const [owner] = await tx
+      .select({ id: agents.id })
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .for('update');
+    if (!owner) throw new Error('Improvement owner was not found');
+    const [erasure] = await tx
+      .select({ name: maintenanceCursors.name })
+      .from(maintenanceCursors)
+      .where(eq(maintenanceCursors.name, `privacy-erasure-result:${agentId}`));
+    if (erasure) throw new Error('Privacy erasure is in progress');
+    const [proposal] = await tx
+      .select()
+      .from(improvementProposals)
+      .where(and(eq(improvementProposals.id, id), eq(improvementProposals.agentId, agentId)))
+      .for('update');
+    if (!proposal) throw new Error('Owned improvement proposal was not found');
+    if (proposal.status !== 'open')
+      return {
+        outcome: 'already_decided',
+        enacted: false,
+        detail: 'This proposal already has a recorded decision. No change was made.',
+      };
 
-  let enacted = false;
-  let detail = 'acknowledged (advisory)';
-  const change = (proposal.change ?? {}) as Record<string, unknown>;
-
-  if (proposal.kind === 'model_role') {
-    // A live routing swap must point at the pattern it claims to fix. A
-    // proposal with no evidence rows is an opinion, and opinions do not get to
-    // change which model answers the owner.
-    if (proposal.evidenceIds.length === 0) {
-      return { enacted: false, detail: 'model_role change refused: proposal cites no evidence' };
-    }
-    const role = typeof change.role === 'string' ? change.role : '';
-    const primaryModel = typeof change.primaryModel === 'string' ? change.primaryModel : '';
-    const fallbackModel = typeof change.fallbackModel === 'string' ? change.fallbackModel : '';
-    const wanted = [primaryModel, fallbackModel].filter(Boolean);
-    const known = wanted.length
-      ? new Set(
-          (
-            await db
-              .select({ id: models.id })
-              .from(models)
-              .where(and(inArray(models.id, wanted), eq(models.enabled, true)))
-          ).map((m) => m.id),
-        )
-      : new Set<string>();
-    if (VALID_ROLES.has(role) && (primaryModel || fallbackModel)) {
-      const set: Record<string, unknown> = { updatedAt: sql`now()` };
-      if (primaryModel && known.has(primaryModel)) set.primaryModel = primaryModel;
-      if (fallbackModel && known.has(fallbackModel)) set.fallbackModel = fallbackModel;
-      if (set.primaryModel || set.fallbackModel) {
-        await db.update(modelRoles).set(set).where(eq(modelRoles.role, role));
-        enacted = true;
-        detail = `swapped ${role} model`;
+    let result: ImprovementActionResult = {
+      outcome: action === 'dismiss' ? 'dismissed' : 'acknowledged',
+      enacted: false,
+      detail:
+        action === 'dismiss'
+          ? 'Proposal dismissed.'
+          : 'Suggestion noted. No settings or code were changed.',
+    };
+    if (action === 'apply' && proposal.kind === 'model_role') {
+      const change = improvementModelChange(
+        (proposal.change ?? {}) as Record<string, unknown>,
+        proposal.evidenceIds,
+      );
+      const wanted = [
+        ...new Set(
+          [change.primaryModel, change.fallbackModel].filter((id): id is string => Boolean(id)),
+        ),
+      ];
+      const modelRows = await tx
+        .select()
+        .from(models)
+        .where(inArray(models.id, wanted))
+        .for('share');
+      validateImprovementModels(change, modelRows);
+      const [role] = await tx
+        .select()
+        .from(modelRoles)
+        .where(eq(modelRoles.role, change.role))
+        .for('update');
+      if (!role)
+        throw new Error('Proposed model role is not configured. Review or dismiss this proposal.');
+      const changed =
+        (change.primaryModel && change.primaryModel !== role.primaryModel) ||
+        (change.fallbackModel && change.fallbackModel !== role.fallbackModel);
+      if (changed) {
+        const { role: _role, ...patch } = change;
+        await tx
+          .update(modelRoles)
+          .set({ ...patch, updatedAt: sql`now()` })
+          .where(eq(modelRoles.role, change.role));
+        result = {
+          outcome: 'applied',
+          enacted: true,
+          detail: `Updated ${change.role} model routing. Future calls will use this configuration.`,
+        };
       } else {
-        detail = 'proposed model is unknown — recorded only';
+        result = {
+          outcome: 'already_current',
+          enacted: false,
+          detail: `The ${change.role} role already uses the proposed models. No routing change was needed.`,
+        };
       }
     }
-  } else if (proposal.kind === 'policy') {
-    // Policy proposals from the model lack a validated template/match, so they
-    // are advisory here — the owner creates the exact rule from the approval flow.
-    detail = 'policy suggestion — create the exact rule from an approval card';
-  }
+    await tx
+      .update(improvementProposals)
+      .set({ status: action === 'dismiss' ? 'dismissed' : 'applied', updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(improvementProposals.id, id),
+          eq(improvementProposals.agentId, agentId),
+          eq(improvementProposals.status, 'open'),
+        ),
+      );
+    return result;
+  });
+}
 
-  await db
-    .update(improvementProposals)
-    .set({ status: 'applied', updatedAt: sql`now()` })
-    .where(eq(improvementProposals.id, id));
-  return { enacted, detail };
+export function dismissProposal(
+  db: Db,
+  id: string,
+  agentId: string,
+): Promise<ImprovementActionResult> {
+  return decideProposal(db, id, agentId, 'dismiss');
+}
+
+/** Apply routing atomically; advisory approval is an explicit acknowledgment. */
+export function applyProposal(
+  db: Db,
+  id: string,
+  agentId: string,
+): Promise<ImprovementActionResult> {
+  return decideProposal(db, id, agentId, 'apply');
 }

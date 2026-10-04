@@ -20,6 +20,10 @@ to `MessageBubble` or parsing anything in a view body. Getting a build to
 TestFlight is [`docs/shipping.md`](docs/shipping.md) — the app does not ship
 from CI.
 
+Relationship-map preparation, cancellation and its repeatable synthetic host
+benchmark are documented in [`docs/graph-performance.md`](docs/graph-performance.md).
+Host solver timings are separate from iPhone rendering and gesture verification.
+
 ## Run locally
 
 1. Start the database, agent, and web service with `pnpm dev` (or `docker compose up --build`).
@@ -94,15 +98,17 @@ nothing sent until you send it. A misheard word is ordinary, and this assistant
 acts on what it is told.
 
 Hands-free is a separate, deliberate move rather than something a tap can fall
-into: talk mode is reached from the microphone's "Talk to the assistant"
-accessibility action. It is a full screen with no transcript and no composer: the companion
+into: use More → Speech → **Talk to the assistant**, or the microphone's
+"Talk to the assistant" accessibility action. It is a full screen with no transcript and no composer: the companion
 face, a line of what was just said, and the loop — listen, notice the pause that
 means your turn is over, send, read the answer, listen again. The microphone
 stays open throughout, echo-cancelled, so the assistant can be interrupted
 mid-sentence the way a person can. A hands-free turn is sent with `spoken: true`
 and the server answers it in a register that survives being heard: a few
-sentences, no Markdown, no cue tags, no tables. Approvals are the exception it
-will not make — talk mode says a decision is waiting and stops there.
+sentences, no Markdown, no cue tags, no tables. Approvals and budget decisions
+pause listening and offer **Review decision** on screen. Suggestions keep the
+conversation moving. Leaving the app ends Talk mode; returning to the app
+never silently reopens the microphone.
 
 ## System surfaces
 

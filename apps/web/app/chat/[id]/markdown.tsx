@@ -1,5 +1,7 @@
 'use client';
 
+import 'katex/dist/katex.min.css';
+
 import { Code2, Quote } from 'lucide-react';
 import { Children, isValidElement, memo, type ReactElement, type ReactNode } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';

@@ -59,7 +59,7 @@ async function deliver(
  */
 export async function notifyOwnerByPush(
   deps: PushChannelDeps,
-  input: { taskId?: string; text: string },
+  input: { taskId?: string; conversationId?: string | null; text: string },
 ): Promise<void> {
   if (!deps.apns?.configured()) return;
   const agent = await deps.owner();
@@ -67,7 +67,12 @@ export async function notifyOwnerByPush(
     title: agent.name,
     body: plain(input.text),
     category: UPDATE_CATEGORY,
-    data: { route: 'chat' },
+    data: {
+      route: 'chat',
+      agentId: agent.id,
+      ...(uuid(input.conversationId) ? { conversationId: input.conversationId as string } : {}),
+      ...(uuid(input.taskId) ? { taskId: input.taskId as string } : {}),
+    },
   });
 }
 
@@ -89,6 +94,14 @@ export async function notifyApprovalsByPush(
         ? `Needs your approval: ${plain(single.summary, 160)}`
         : `${approvals.length} things need your approval`,
     category: ATTENTION_CATEGORY,
-    data: { route: 'approvals' },
+    data: { route: 'approvals', agentId: agent.id },
   });
+}
+
+/** Destinations are identifiers, never paths or URLs supplied by notice text. */
+function uuid(value: string | null | undefined): boolean {
+  return (
+    typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+  );
 }

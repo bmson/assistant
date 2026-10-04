@@ -31,6 +31,10 @@ struct RelationshipGraphCanvas: UIViewRepresentable {
         view.configure(snapshot: snapshot, selectedID: selectedID, dark: colorScheme == .dark, reduceMotion: reduceMotion)
         view.perform(command)
     }
+
+    static func dismantleUIView(_ view: RelationshipGraphCanvasView, coordinator: ()) {
+        view.stopPreparingLayout()
+    }
 }
 
 struct GraphCanvasCommand: Equatable {
@@ -110,7 +114,14 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
     private var unreviewed = Set<GraphLink>()
     private var dark = false
     private var reduceMotion = false
-    private var needsReducedMotionSettle = false
+    /// Only value-layout preparation runs off-main. Gestures, drawing and the
+    /// viewport stay owned by UIKit, and each replacement invalidates its work.
+    private var preparationTask: Task<Void, Never>?
+    private var preparationGeneration = 0
+    private var pendingPreparationSteps: Int?
+    private var preparationSuspended = false
+    private var touching = false
+    var isPreparingLayout: Bool { pendingPreparationSteps != nil }
     private var previousSize = CGSize.zero
     private var edgeLabels: [GraphLink: String] = [:]
     private var edgeDirections: [GraphLink: String] = [:]
@@ -129,8 +140,15 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
     var settings = GraphSettings() {
         didSet {
             guard settings != oldValue else { return }
+            let reshapes = settings.reshapesLayout(from: oldValue)
+            let wasPreparing = isPreparingLayout
             layout.apply(settings)
-            if reduceMotion { layout.settle() }
+            if reshapes {
+                cancelPreparation(keepingRequest: false)
+                if reduceMotion || !interactive || wasPreparing {
+                    prepareLayout(maxSteps: reduceMotion || !interactive ? 400 : 150)
+                }
+            }
             wake()
         }
     }
@@ -214,6 +232,8 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    deinit { preparationTask?.cancel() }
+
     private func commonInit() {
         isOpaque = true
         contentMode = .redraw
@@ -265,6 +285,8 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
         let newLinks = snapshot.links
         let changed = nodes != snapshot.nodes || links != newLinks
         let selectionChanged = self.selectedID != selectedID
+        let motionChanged = self.reduceMotion != reduceMotion
+        let wasPreparing = isPreparingLayout
         if dark != self.dark { labelImages.removeAll() }
         self.dark = dark
         self.reduceMotion = reduceMotion
@@ -279,6 +301,7 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
         }
         unreviewed = Set(snapshot.edges.filter { $0.reviewStatus != "confirmed" }.map { GraphLink($0.subjectId, $0.objectId) })
         if changed {
+            cancelPreparation(keepingRequest: false)
             let firstLayout = layout.ids.isEmpty
             let leaving: Set<String> = firstLayout || reduceMotion ? [] : Set(nodes.map(\.id)).subtracting(snapshot.nodes.map(\.id))
             if !leaving.isEmpty { letGo(leaving) }
@@ -288,16 +311,19 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
             degrees = snapshot.degrees
             adjacency = snapshot.adjacency
             layout.update(nodes: nodes, links: links)
-            if firstLayout || reduceMotion {
-                // Reduce Motion changes the geometry without animating it;
-                // topology edits still need a settled, correctly grouped map.
-                if !reduceMotion { for _ in 0..<150 where !layout.isSettled { layout.step() } }
-                else if isNavigating { needsReducedMotionSettle = true }
-                else { layout.settle(); needsReducedMotionSettle = false }
+            if firstLayout || reduceMotion || !interactive || wasPreparing {
+                // Draw the deterministic seed immediately; prepare the costly
+                // force passes without blocking Memory or the full map.
+                prepareLayout(maxSteps: reduceMotion || !interactive ? 400 : 150)
                 if firstLayout { needsInitialFit = true }
             }
             syncMotion(arriving: !firstLayout && !reduceMotion)
             if needsInitialFit, !bounds.isEmpty { fit(animated: false); needsInitialFit = false }
+        } else if motionChanged {
+            cancelPreparation(keepingRequest: false)
+            if reduceMotion || !interactive || wasPreparing {
+                prepareLayout(maxSteps: reduceMotion || !interactive ? 400 : 150)
+            }
         }
         self.selectedID = selectedID
         if selectionChanged {
@@ -311,6 +337,64 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
         }
         refreshAccessibility()
         wake()
+    }
+
+    private func prepareLayout(maxSteps: Int) {
+        guard !layout.isSettled else { return }
+        pendingPreparationSteps = maxSteps
+        startPreparationIfNeeded()
+    }
+
+    private func startPreparationIfNeeded() {
+        guard preparationTask == nil, !preparationSuspended, !isNavigating, !touching,
+              let steps = pendingPreparationSteps else { return }
+        let generation = preparationGeneration
+        let seed = layout
+        preparationTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let prepared = seed.prepared(maxSteps: steps, isCancelled: { Task.isCancelled })
+            guard !Task.isCancelled, let prepared else { return }
+            await self?.finishPreparation(prepared, generation: generation)
+        }
+    }
+
+    private func finishPreparation(_ prepared: RelationshipGraphLayout, generation: Int) {
+        guard generation == preparationGeneration, !preparationSuspended, !isNavigating, !touching,
+              prepared.ids == layout.ids else { return }
+        preparationTask = nil
+        pendingPreparationSteps = nil
+        let previous = layout
+        layout = prepared
+        // Display-only settings can change while the worker is running; their
+        // current value wins without reheating the prepared forces.
+        layout.apply(settings)
+        if !cameraTouched {
+            if bounds.isEmpty { needsInitialFit = true }
+            else { fit(animated: false); needsInitialFit = false }
+        }
+        if !reduceMotion && interactive { layout = layout.transitioning(from: previous) }
+        refreshAccessibility()
+        wake()
+    }
+
+    private func cancelPreparation(keepingRequest: Bool) {
+        preparationGeneration &+= 1
+        preparationTask?.cancel()
+        preparationTask = nil
+        if !keepingRequest { pendingPreparationSteps = nil }
+    }
+
+    /// Removal releases the worker as well as the display link. A temporary
+    /// window detach retains its request and resumes it when shown again.
+    func stopPreparingLayout() {
+        preparationSuspended = true
+        cancelPreparation(keepingRequest: false)
+        stopLoop()
+    }
+
+    private func interruptPreparationForInteraction() {
+        // Normal motion resumes from the positions the owner actually saw;
+        // Reduce Motion instead prepares one still replacement after release.
+        cancelPreparation(keepingRequest: reduceMotion)
     }
 
     /// Carries each item's animation over an update. Items already on the
@@ -354,7 +438,14 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window == nil { stopLoop() } else { startLoopIfNeeded() }
+        preparationSuspended = window == nil
+        if window == nil {
+            cancelPreparation(keepingRequest: true)
+            stopLoop()
+        } else {
+            startPreparationIfNeeded()
+            startLoopIfNeeded()
+        }
     }
 
     func perform(_ command: GraphCanvasCommand) {
@@ -364,6 +455,7 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
         // The command a view is created with has already been honoured by the
         // initial fit; replaying it would throw away a restored position.
         if first && command.id == 0 { return }
+        interruptPreparationForInteraction()
         cameraTouched = true
         switch command.action {
         case .fit: fit(animated: true)
@@ -480,13 +572,15 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
     }
 
     private var needsFrames: Bool {
-        (!layout.isSettled && !reduceMotion && !isNavigating) || camera != nil || animating
-            || hypot(momentum.x, momentum.y) > 4 || connectSourceID != nil || needsReducedMotionSettle
+        (!layout.isSettled && !reduceMotion && !isNavigating && !touching && !isPreparingLayout) || camera != nil || animating
+            || hypot(momentum.x, momentum.y) > 4 || connectSourceID != nil
+            || (isPreparingLayout && preparationTask == nil && !isNavigating && !touching)
     }
 
     /// Something the drawing animates towards has changed.
     private func wake() {
         if reduceMotion { settleAnimations() } else { animating = true }
+        startPreparationIfNeeded()
         setNeedsDisplay()
         startLoopIfNeeded()
     }
@@ -509,10 +603,8 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
         let now = link.timestamp
         let dt = min(1.0 / 20, max(1.0 / 240, now - lastTick))
         lastTick = now
-        if needsReducedMotionSettle && !isNavigating {
-            layout.settle(); needsReducedMotionSettle = false
-        }
-        if !layout.isSettled && !reduceMotion && !isNavigating {
+        startPreparationIfNeeded()
+        if !layout.isSettled && !reduceMotion && !isNavigating && !touching && !isPreparingLayout {
             layout.step()
             if !interactive { fit(animated: false) }
         }
@@ -622,6 +714,8 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesBegan(touches, with: event)
+        touching = true
+        interruptPreparationForInteraction()
         camera = nil; momentum = .zero
         guard interactive, event?.allTouches?.count == 1, let touch = touches.first else { return press(nil) }
         press(hitNode(at: touch.location(in: self), slop: 12))
@@ -629,12 +723,18 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesEnded(touches, with: event)
+        touching = !(event?.allTouches?.allSatisfy { $0.phase == .ended || $0.phase == .cancelled } ?? true)
         press(nil)
+        startPreparationIfNeeded()
+        startLoopIfNeeded()
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesCancelled(touches, with: event)
+        touching = false
         press(nil)
+        startPreparationIfNeeded()
+        startLoopIfNeeded()
     }
 
     /// A finger resting on a dot lights it and its neighbours, the way
@@ -652,6 +752,7 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
     }
 
     @objc private func doubleTap(_ gesture: UITapGestureRecognizer) {
+        interruptPreparationForInteraction()
         let point = gesture.location(in: self)
         cameraTouched = true
         if let id = hitNode(at: point) {
@@ -670,6 +771,7 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
     /// Every ordinary drag grabs the map, including one starting on a dot.
     func beginDrag(at point: CGPoint) {
         guard !pinching else { return }
+        interruptPreparationForInteraction()
         cameraTouched = true
         camera = nil; momentum = .zero
         dragStart = point; originalViewport = viewport
@@ -693,6 +795,7 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
             else if !reduceMotion { momentum = velocity }
         }
         dragStart = nil
+        startPreparationIfNeeded()
         startLoopIfNeeded()
         refreshAccessibility(); setNeedsDisplay()
     }
@@ -762,6 +865,7 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
     }
 
     func beginPinch(at point: CGPoint, recognizerScale: CGFloat = 1) {
+        interruptPreparationForInteraction()
         cameraTouched = true
         camera = nil; momentum = .zero
         pinching = true
@@ -789,6 +893,7 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
         panNeedsReanchor = false
         dragStart = nil
         if let point { beginDrag(at: point) }
+        startPreparationIfNeeded()
         startLoopIfNeeded()
         refreshAccessibility()
     }
@@ -814,6 +919,7 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
     }
 
     func beginConnect(from source: String, at point: CGPoint) {
+        interruptPreparationForInteraction()
         camera = nil; momentum = .zero
         connectSourceID = source
         connectPoint = point

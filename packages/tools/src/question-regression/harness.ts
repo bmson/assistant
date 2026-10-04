@@ -8,7 +8,10 @@ import {
   gradeAuditedOutput,
   type ModelRouter,
 } from '@assistant/core';
+import { BudgetReservationError } from '@assistant/core/cost';
+import { resolveApproval } from '@assistant/core/workflow/approvals';
 import {
+  agents,
   approvals,
   conversations,
   costEvents,
@@ -56,6 +59,9 @@ export interface QuestionResult {
   costUsd: number;
   modelCalls: Array<{ role: string; model: string; latencyMs: number | null; costUsd: string }>;
   verification: unknown[];
+  statusSequence?: string[];
+  executions?: Array<{ name: string; args: Record<string, unknown> }>;
+  modelContexts?: string[];
   failures: string[];
 }
 
@@ -99,6 +105,63 @@ export function evaluateQuestion(
     failures.push(`completion: ${result.status}, expected ${expectedStatuses.join('|')}`);
   if (result.approvals > (fixture.expect.maxApprovals ?? 0))
     failures.push(`approvals: ${result.approvals} exceeds allowance`);
+  if (
+    fixture.expect.approvalCount !== undefined &&
+    result.approvals !== fixture.expect.approvalCount
+  )
+    failures.push(`approvals: ${result.approvals}, expected ${fixture.expect.approvalCount}`);
+  if (
+    fixture.expect.statusSequence &&
+    JSON.stringify(result.statusSequence) !== JSON.stringify(fixture.expect.statusSequence)
+  )
+    failures.push(
+      `lifecycle: ${result.statusSequence?.join(' → ')}, expected ${fixture.expect.statusSequence.join(' → ')}`,
+    );
+  for (const expected of fixture.expect.calls ?? []) {
+    const calls = result.toolCalls.filter(
+      (call) => call.name === expected.name && call.status === expected.status,
+    );
+    if (calls.length !== expected.count)
+      failures.push(
+        `ledger: ${expected.name} ${expected.status} count ${calls.length}, expected ${expected.count}`,
+      );
+    if (
+      expected.args &&
+      !calls.some((call) =>
+        Object.entries(expected.args ?? {}).every(
+          ([key, value]) =>
+            JSON.stringify((call.args as Record<string, unknown> | null)?.[key]) ===
+            JSON.stringify(value),
+        ),
+      )
+    )
+      failures.push(`ledger: ${expected.name} missing requested arguments`);
+  }
+  for (const [name, count] of Object.entries(fixture.expect.executionCounts ?? {})) {
+    const actual = result.executions?.filter((call) => call.name === name).length ?? 0;
+    if (actual !== count) failures.push(`effects: ${name} invoked ${actual}, expected ${count}`);
+  }
+  for (const pattern of fixture.expect.contextMatches ?? [])
+    if (!result.modelContexts?.some((context) => new RegExp(pattern, 'is').test(context)))
+      failures.push(`continuity: model context missing ${pattern}`);
+  if (
+    fixture.expect.modelStepCount !== undefined &&
+    result.modelContexts?.length !== fixture.expect.modelStepCount
+  )
+    failures.push(
+      `model: ${result.modelContexts?.length ?? 0} steps, expected ${fixture.expect.modelStepCount}`,
+    );
+  if (fixture.expect.verification) {
+    const check = result.verification.at(-1) as Record<string, unknown> | undefined;
+    const expected = fixture.expect.verification;
+    for (const [field, value] of Object.entries({
+      outputVerificationAttempted: expected.attempted,
+      outputVerificationRevised: expected.revised,
+      outputVerificationUnavailable: expected.unavailable,
+      ...(expected.blocked !== undefined ? { blocked: expected.blocked } : {}),
+    }))
+      if (check?.[field] !== value) failures.push(`verification: ${field} expected ${value}`);
+  }
   if (fixture.expect.savedCount !== undefined && fixture.expect.savedCount !== result.saved.length)
     failures.push(`writes: saved ${result.saved.length}, expected ${fixture.expect.savedCount}`);
   const saved = result.saved.map((row) => `${row.subject}: ${row.content}`).join('\n');
@@ -145,6 +208,74 @@ export function evaluateQuestion(
       (part.data as { kind?: string } | null)?.kind === 'route',
   );
   if (fixture.expect.route && !hasRoute) failures.push('formatting: missing route card');
+  for (const kind of fixture.expect.responseCardKinds ?? [])
+    if (
+      !result.parts.some(
+        (part) =>
+          typeof part === 'object' &&
+          part !== null &&
+          'type' in part &&
+          part.type === 'data-card' &&
+          'data' in part &&
+          (part.data as { kind?: string } | null)?.kind === kind,
+      )
+    )
+      failures.push(`formatting: missing ${kind} card`);
+  for (const kind of fixture.expect.forbiddenResponseCardKinds ?? [])
+    if (
+      result.parts.some(
+        (part) =>
+          typeof part === 'object' &&
+          part !== null &&
+          'type' in part &&
+          part.type === 'data-card' &&
+          'data' in part &&
+          (part.data as { kind?: string } | null)?.kind === kind,
+      )
+    )
+      failures.push(`formatting: unexpected ${kind} card`);
+  if (fixture.expect.scoreboardScores) {
+    const expected = fixture.expect.scoreboardScores;
+    const matches = result.parts.some((part) => {
+      if (
+        typeof part !== 'object' ||
+        part === null ||
+        !('type' in part) ||
+        part.type !== 'data-card'
+      )
+        return false;
+      const data = 'data' in part ? (part.data as { kind?: string; games?: unknown } | null) : null;
+      if (data?.kind !== 'scoreboard' || !Array.isArray(data.games)) return false;
+      return data.games.some(
+        (game: { home?: { score?: string }; away?: { score?: string } }) =>
+          game?.home?.score === expected.home && game?.away?.score === expected.away,
+      );
+    });
+    if (!matches)
+      failures.push(`formatting: scoreboard scores expected ${expected.home}/${expected.away}`);
+  }
+  if (fixture.expect.routeTimes) {
+    const expected = fixture.expect.routeTimes;
+    const matches = result.parts.some((part) => {
+      if (
+        typeof part !== 'object' ||
+        part === null ||
+        !('type' in part) ||
+        part.type !== 'data-card'
+      )
+        return false;
+      const data =
+        'data' in part
+          ? (part.data as { kind?: string; departAt?: string; arriveAt?: string } | null)
+          : null;
+      return (
+        data?.kind === 'route' &&
+        data.departAt === expected.departAt &&
+        data.arriveAt === expected.arriveAt
+      );
+    });
+    if (!matches) failures.push('formatting: route timestamps do not match the requested meeting');
+  }
   if (fixture.expect.card && !cards.length)
     failures.push('formatting: missing persisted generated card');
   const cardFacts = cards
@@ -161,6 +292,7 @@ export function evaluateQuestion(
 function replayRegistry(
   fixture: QuestionCase,
   saved: Map<string, { subject: string; content: string }>,
+  executions: NonNullable<QuestionResult['executions']>,
 ): ToolRegistry {
   const registry = new ToolRegistry();
   function add(
@@ -250,8 +382,12 @@ function replayRegistry(
     add(
       'maps.directions',
       'Directions, travel time, and distance from Apple Maps.',
-      z.object({ destination: z.string(), origin: z.string().optional() }),
-      () => ({
+      z.object({
+        destination: z.string(),
+        origin: z.string().optional(),
+        arriveBy: z.string().datetime().optional(),
+      }),
+      (args) => ({
         origin: { label: 'Current Location', lat: 37.7857, lng: -122.4011, current: true },
         destination: {
           label: 'Oracle Park',
@@ -262,8 +398,10 @@ function replayRegistry(
         mode: 'driving',
         durationSeconds: 540,
         distanceMeters: 1850,
-        departAt: '2026-09-22T18:00:00.000Z',
-        arriveAt: '2026-09-22T18:09:00.000Z',
+        departAt: args.arriveBy
+          ? new Date(Date.parse(String(args.arriveBy)) - 540_000).toISOString()
+          : '2026-09-22T18:00:00.000Z',
+        arriveAt: args.arriveBy ?? '2026-09-22T18:09:00.000Z',
         routeName: 'King St',
         steps: [{ instruction: 'Turn right onto Howard St', distanceMeters: 900 }],
         polyline: '_p~iF~ps|U',
@@ -409,14 +547,49 @@ function replayRegistry(
       { confidentialRead: true },
     );
   }
+  for (const local of fixture.localTools ?? []) {
+    if (!local.outcomes.length) throw new Error(`Replay tool ${local.name} has no outcomes`);
+    let index = 0;
+    registry.register(
+      {
+        name: local.name,
+        description: `Local scenario fixture for ${local.name}`,
+        inputSchema: local.schema,
+        risk: local.risk ?? 'autonomous',
+        acceptsUntrustedInput: local.acceptsUntrustedInput ?? !local.flags?.writesMemory,
+        approvalSummary: (args) => local.summary ?? `${local.name}: ${JSON.stringify(args)}`,
+        execute: async (args) => {
+          executions.push({ name: local.name, args: args as Record<string, unknown> });
+          const outcome = local.outcomes[index++] ?? local.outcomes.at(-1);
+          if (!outcome) throw new Error(`Replay tool ${local.name} has no outcome`);
+          if ('error' in outcome) throw new Error(outcome.error);
+          return outcome.result;
+        },
+      },
+      local.flags ?? {},
+    );
+  }
   return registry;
 }
 
 class ScriptedRouter {
   private index = 0;
+  readonly contexts: string[] = [];
   constructor(private fixture: QuestionCase) {}
-  async step() {
+  async step(_role?: string, options?: { messages?: unknown[] }) {
+    this.contexts.push(JSON.stringify(options?.messages ?? []));
     const entry = this.fixture.script[this.index++] ?? this.fixture.script.at(-1) ?? { text: '' };
+    if (entry.failure === 'provider') throw new Error('Model provider temporarily unavailable');
+    if (entry.failure === 'task-budget')
+      throw new BudgetReservationError(
+        'task budget exhausted (scenario)',
+        new Date(Date.now() + 60_000),
+      );
+    if (entry.failure === 'daily-budget')
+      throw new BudgetReservationError(
+        'daily budget exhausted (scenario)',
+        new Date(Date.now() + 60_000),
+      );
     return {
       ok: true,
       modelId: 'regression/scripted',
@@ -430,13 +603,35 @@ class ScriptedRouter {
     };
   }
   async object(role: string, options?: { system?: string }) {
+    if (role === 'classify' && this.fixture.plan === 'clarify')
+      return {
+        ok: true,
+        modelId: 'regression/scripted',
+        degraded: false,
+        object: { trivial: false },
+      };
+    if (role === 'plan' && this.fixture.plan === 'clarify')
+      return {
+        ok: true,
+        modelId: 'regression/scripted',
+        degraded: false,
+        object: {
+          action: 'clarify',
+          reasoning: 'Required owner input is not available.',
+          steps: [],
+          missingInfo: this.fixture.missingInfo ?? [],
+        },
+      };
     if (role !== 'rewrite') throw new Error(`Unexpected scripted model role: ${role}`);
+    const composing = options?.system?.startsWith('You compose a native information card');
+    if (!composing && this.fixture.verification && 'unavailable' in this.fixture.verification)
+      return { ok: false, decision: { mode: 'park', reason: 'Scenario verifier unavailable' } };
     return {
       ok: true,
       modelId: 'regression/scripted',
       degraded: false,
       finishReason: 'stop',
-      object: options?.system?.startsWith('You compose a native information card')
+      object: composing
         ? {
             cardable: !!this.fixture.expect.card,
             card: this.fixture.expect.card
@@ -450,7 +645,7 @@ class ScriptedRouter {
                 }
               : undefined,
           }
-        : { decision: 'publish', reasons: [] },
+        : { reasons: [], ...(this.fixture.verification ?? { decision: 'publish' }) },
     };
   }
   async embed(texts: string[]) {
@@ -481,6 +676,11 @@ export async function runQuestion(
     await db.transaction(async (transaction) => {
       const replayDb = transaction as unknown as Db;
       const agent = await getAgent(replayDb);
+      if (fixture.timeZone)
+        await replayDb
+          .update(agents)
+          .set({ timezone: fixture.timeZone })
+          .where(eq(agents.id, agent.id));
       const [conversation] = await replayDb
         .insert(conversations)
         .values({
@@ -492,7 +692,8 @@ export async function runQuestion(
         .returning();
       if (!conversation) throw new Error('Cannot create fixture conversation');
       const at = new Date(
-        fixture.mailbox === 'hotel' ? '2026-09-03T18:00:00Z' : '2026-09-08T05:00:00Z',
+        fixture.at ??
+          (fixture.mailbox === 'hotel' ? '2026-09-03T18:00:00Z' : '2026-09-08T05:00:00Z'),
       );
       await replayDb.insert(messages).values(
         [...(fixture.history ?? []), { role: 'user', text: fixture.request }].map((message, i) => ({
@@ -504,6 +705,34 @@ export async function runQuestion(
           createdAt: new Date(at.getTime() - 30_000 + i * 1000),
         })),
       );
+      if (fixture.priorEvidence?.length) {
+        const { task: prior } = await enqueueTask(replayDb, {
+          event: {
+            source: 'chat',
+            trust: 'owner',
+            agentId: agent.id,
+            conversationId: conversation.id,
+            payload: { text: 'Previous synthetic request' },
+          },
+          type: 'chat_turn',
+        });
+        await replayDb
+          .update(tasks)
+          .set({ status: 'done', createdAt: new Date(at.getTime() - 60_000) })
+          .where(eq(tasks.id, prior.id));
+        await replayDb.insert(toolCalls).values(
+          fixture.priorEvidence.map((row, step) => ({
+            taskId: prior.id,
+            toolName: row.name,
+            args: row.args,
+            result: row.result,
+            status: 'succeeded',
+            risk: 'autonomous',
+            step,
+            finishedAt: new Date(at.getTime() - 50_000),
+          })),
+        );
+      }
       const { task } = await enqueueTask(replayDb, {
         event: {
           source: 'chat',
@@ -514,29 +743,71 @@ export async function runQuestion(
         },
         type: 'chat_turn',
         maxSteps: 12,
-        plan: {
-          action: fixture.plan ?? 'workflow',
-          reasoning:
-            'Answer the owner request using available evidence and perform requested work.',
-          steps: [
-            'Resolve the request using available tools and evidence',
-            'Return the verified result and disclose incomplete work',
-          ],
-          missingInfo: [],
-        },
+        ...(fixture.plan === 'clarify'
+          ? {}
+          : {
+              plan: {
+                action: fixture.plan ?? 'workflow',
+                reasoning:
+                  'Answer the owner request using available evidence and perform requested work.',
+                steps: [
+                  'Resolve the request using available tools and evidence',
+                  'Return the verified result and disclose incomplete work',
+                ],
+                missingInfo: [],
+              },
+            }),
       });
       await replayDb
         .update(tasks)
         .set({ createdAt: at, budgetUsdLimit: String(options.taskLimitUsd ?? 1) })
         .where(eq(tasks.id, task.id));
       const saved = new Map<string, { subject: string; content: string }>();
+      const executions: NonNullable<QuestionResult['executions']> = [];
       const started = performance.now();
-      const dispatcher = new ToolDispatcher(replayDb, replayRegistry(fixture, saved));
-      const router =
-        options.router?.(replayDb) ?? (new ScriptedRouter(fixture) as unknown as ModelRouter);
+      const dispatcher = new ToolDispatcher(replayDb, replayRegistry(fixture, saved, executions));
+      const scripted = new ScriptedRouter(fixture);
+      const router = options.router?.(replayDb) ?? (scripted as unknown as ModelRouter);
       let executionError: string | undefined;
+      const statusSequence: string[] = [];
       try {
         await executeTask({ db: replayDb, dispatcher, router }, task.id);
+        const captureStatus = async () => {
+          const [current] = await replayDb
+            .select({ status: tasks.status })
+            .from(tasks)
+            .where(eq(tasks.id, task.id));
+          statusSequence.push(current?.status ?? 'missing');
+          return current?.status;
+        };
+        let status = await captureStatus();
+        if (fixture.approvalDecision && status === 'waiting_approval') {
+          const pending = await replayDb
+            .select()
+            .from(approvals)
+            .where(eq(approvals.taskId, task.id));
+          for (const decision of pending)
+            await resolveApproval(replayDb, {
+              approvalId: decision.id,
+              decision: fixture.approvalDecision,
+              via: 'web',
+              deferNotification: true,
+            });
+          await executeTask({ db: replayDb, dispatcher, router }, task.id);
+          status = await captureStatus();
+        }
+        for (
+          let retry = 0;
+          status === 'sleeping' && retry < (fixture.retryFailures ?? 0);
+          retry++
+        ) {
+          await replayDb
+            .update(tasks)
+            .set({ runAfter: new Date(0) })
+            .where(eq(tasks.id, task.id));
+          await executeTask({ db: replayDb, dispatcher, router }, task.id);
+          status = await captureStatus();
+        }
       } catch (error) {
         executionError = error instanceof Error ? error.name : 'ExecutionError';
       }
@@ -595,6 +866,9 @@ export async function runQuestion(
         costUsd: costs.reduce((sum, call) => sum + Number(call.usd), 0),
         modelCalls: modelRows,
         verification: checks,
+        statusSequence,
+        executions,
+        modelContexts: options.router ? undefined : scripted.contexts,
       };
       throw new RollbackResult({
         ...result,

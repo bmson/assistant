@@ -29,6 +29,7 @@ export default async function CallsPage() {
     <PageShell size="reading">
       <AutoRefresh intervalMs={5_000} />
       <PageHeader
+        back={{ href: '/chat', label: 'Chat' }}
         title="Calls"
         intro="Phone calls the assistant placed for you. Every call opens by saying it is an AI assistant, and you approve each one first."
       />

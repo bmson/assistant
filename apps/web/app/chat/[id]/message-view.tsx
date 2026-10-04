@@ -578,10 +578,9 @@ export function RecallNote({
         ? 'Drawing on knowledge graph'
         : 'Drawing on knowledge graph and earlier chats';
   return (
-    // Muted by opacity rather than by token: this note appears both on the
-    // chat's stage and inside a paper update card, and has to recede against
-    // whichever ink it inherits.
-    <div className="mb-2 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs opacity-70">
+    // Provenance is required reading. Its surface supplies opaque supporting
+    // ink, while size and spacing keep it secondary to the actual reply.
+    <div className="recall-note mb-2 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs">
       <History className="size-3 shrink-0" aria-hidden="true" />
       <span className="font-medium">{label}</span>
       {sources.map((source, index) => (

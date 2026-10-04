@@ -39,7 +39,9 @@ For source development rather than containers, run `docker compose up db`, then 
 ## Native iOS app
 
 The SwiftUI client lives in `apps/ios` and uses the same server-owned chat, task, goal, memory, and
-approval workflows as the web UI. Open `apps/ios/Assistant.xcodeproj` in Xcode 26 or newer and run
+approval workflows through the versioned mobile API. The browser currently exposes owner pairing,
+security, and read-only audit; retained everyday browser product pages redirect to Settings.
+Open `apps/ios/Assistant.xcodeproj` in Xcode 26 or newer and run
 the `Assistant` scheme on an iPhone or Simulator.
 
 For local source development, connect the app to `http://localhost:3000`; the explicit development
@@ -191,6 +193,14 @@ OIDC; the shared-secret mode exists only for local development.
 
 ## Further documentation
 
+- [Complete documentation index](docs/README.md)
+- [App intent and every page](docs/product-guide.md)
+- [Architecture and implementation review](docs/architecture-review-2026-10-02.md)
+- [Design system and guidelines](docs/design-system.md)
+- [Model evaluation and current OpenRouter costs](docs/model-evaluation.md)
+- [System architecture, technologies, and decisions](docs/system-reference.md)
+- [Capabilities, integrations, and complete tool catalog](docs/capability-reference.md)
+- [Product gaps and completion criteria](docs/product-gaps.md)
 - [Architecture and package boundaries](docs/architecture.md)
 - [Optional modules and settings](docs/modules.md)
 - [Self-hosting on Google Cloud Run](docs/self-hosting.md)

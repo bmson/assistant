@@ -268,6 +268,79 @@ struct TranscriptContext {
     }
 }
 
+/// The eager transcript has a boundary of its own: typing and pulling the menu
+/// must not regroup receipts, resolve prompts, or visit every row builder.
+/// Actions capture the same AppModel and state bindings for this screen's life;
+/// availability changes are represented by `isSending`, not changing closures.
+struct ChatTranscriptRows: View, Equatable {
+    let messages: [ChatMessage]
+    let isSending: Bool
+    let openApprovals: () -> Void
+    let send: (String, Bool) -> Void
+    let decideApproval: (String, String) async -> Bool
+    let rememberApproval: (String) async -> Bool
+    let decideSuggestion: (String, SuggestionDecision) async -> String?
+    let openActivity: () -> Void
+    let refreshCard: (String) async -> String?
+    let hideMessage: (ChatMessage) -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.messages == rhs.messages && lhs.isSending == rhs.isSending
+    }
+
+    var body: some View {
+        let items = messages.transcriptItems()
+        let context = TranscriptContext(messages: messages)
+        VStack(spacing: 0) {
+            ForEach(items) { item in
+                row(item, context: context)
+                    .padding(.top, startsRun(at: item.firstIndex) ? 22 : 7)
+                    .transition(
+                        reduceMotion ? .opacity : .asymmetric(
+                            insertion: .opacity
+                                .combined(with: .scale(scale: 0.986, anchor: .bottom))
+                                .combined(with: .offset(y: 10)),
+                            removal: .opacity
+                        )
+                    )
+                    .id(item.id)
+            }
+        }
+        // Token growth changes content, not this identity list. New messages
+        // reveal once without restarting geometry animation for each token.
+        .animation(reduceMotion ? nil : .snappy(duration: 0.3, extraBounce: 0.02), value: messages.map(\.id))
+    }
+
+    @ViewBuilder
+    private func row(_ item: ChatTranscriptItem, context: TranscriptContext) -> some View {
+        switch item {
+        case let .message(message, index):
+            MessageBubble(
+                message: message,
+                userPrompt: context.userPrompt(before: index),
+                isStreaming: message.id.hasPrefix("stream-") && isSending,
+                openApprovals: openApprovals,
+                runForReal: isSending ? nil : { send($0, true) },
+                retry: isSending ? nil : { send($0, false) },
+                decideApproval: decideApproval,
+                rememberApproval: rememberApproval,
+                decideSuggestion: decideSuggestion,
+                openActivity: openActivity,
+                refreshCard: refreshCard,
+                hide: message.isDurableLogRow ? { hideMessage(message) } : nil
+            )
+            .equatable()
+        case let .approvedReceiptGroup(receipts, _):
+            ApprovedReceiptGroup(messages: receipts).equatable()
+        }
+    }
+
+    private func startsRun(at index: Int) -> Bool {
+        index == 0 || messages[index - 1].role != messages[index].role
+    }
+}
+
 struct ChatView: View {
     let safeAreaTopInset: CGFloat
     let safeAreaBottomInset: CGFloat
@@ -289,6 +362,7 @@ struct ChatView: View {
     @ScaledMetric(relativeTo: .subheadline) private var menuTileFontSize = 16.0
     @ScaledMetric(relativeTo: .caption2) private var menuBadgeFontSize = 9.0
     @State private var draft = ""
+    @State private var draftScope: ComposerDraftScope?
     @State private var isAtBottom = true
     @State private var transcriptFollow = TranscriptFollowState()
     // Opening requires the actual bottom edge. `isAtBottom` deliberately has
@@ -300,6 +374,9 @@ struct ChatView: View {
     @State private var scrollRequest = 0
     // A direct "Jump to latest" owns the scroll position until it has had a
     // chance to supersede an automatic scroll that may already be in flight.
+    #if DEBUG
+    private var visualReviewMenuIsOpen = false
+    #endif
     @State private var latestJumpRequest = 0
     // Unpositioned by default so normal finger scrolling remains authoritative.
     // Jump to latest writes an explicit edge only for that owner action.
@@ -341,6 +418,7 @@ struct ChatView: View {
     // instead of replacing it.
     @StateObject private var listener = SpeechListener()
     @State private var draftBeforeDictation = ""
+    @State private var dictationScope: ComposerDraftScope?
     @State private var pushToTalkActive = false
     @State private var micPressActive = false
     @GestureState private var micTouchDown = false
@@ -494,11 +572,23 @@ struct ChatView: View {
                 guard wasActive, !isActive else { return }
                 settleCancelledMenuGestureAfterRelease()
             }
-            .onChange(of: model.restorableDraft) { _, restorable in
-                // A failed send hands its text back — the composer shows the words
-                // again instead of the owner retyping them.
-                guard restorable != nil, let failed = model.restoreFailedDraft() else { return }
-                draft = failed
+            .onAppear {
+                synchronizeComposer()
+                #if DEBUG
+                if visualReviewMenuIsOpen { setPullMenu(open: true) }
+                #endif
+            }
+            .onDisappear {
+                if let draftScope { model.saveComposerDraft(draft, in: draftScope) }
+                dictationScope = nil
+                stopMicrophone(focusingComposer: false)
+            }
+            .onChange(of: model.composerDraftScope) { _, _ in synchronizeComposer() }
+            .onChange(of: draft) { _, text in
+                if let draftScope { model.saveComposerDraft(text, in: draftScope) }
+            }
+            .onChange(of: model.composerRecoveryRevision) { _, _ in
+                restoreUnsentMessageIfPossible()
             }
             .onChange(of: model.packDiscussionDraft) { _, requested in
                 guard requested != nil, let prompt = model.consumePackDiscussionDraft() else { return }
@@ -565,10 +655,6 @@ struct ChatView: View {
     }
 
     private var conversationSurface: some View {
-        let motionIsReduced = reduceMotion
-        let transcriptItems = model.messages.transcriptItems()
-        let transcriptContext = TranscriptContext(messages: model.messages)
-
         return Group {
             ConversationColumn {
                 ScrollView {
@@ -589,30 +675,27 @@ struct ChatView: View {
                     // scroll view in contact with geometry that moves under the
                     // pull menu, and the transcript slid 10pt against the
                     // composer for it. A row that exists cannot flicker.
-                    VStack(spacing: 0) {
+                    Group {
                         if model.messages.isEmpty {
-                            emptyConversation
+                            VStack(spacing: 0) { emptyConversation }
                         } else {
-                            ForEach(transcriptItems) { item in
-                                transcriptRow(
-                                    item,
-                                    context: transcriptContext,
-                                    motionIsReduced: motionIsReduced
-                                )
-                            }
+                            ChatTranscriptRows(
+                                messages: model.messages,
+                                isSending: model.isSending,
+                                openApprovals: { model.present(.approvals) },
+                                send: { model.send($0, force: $1) },
+                                decideApproval: { await model.decideApproval(id: $0, decision: $1) },
+                                rememberApproval: { await model.approveAndRemember(id: $0) },
+                                decideSuggestion: { await model.decideSuggestion(id: $0, decision: $1) },
+                                openActivity: { openRoute(.activity) },
+                                refreshCard: { await model.refreshSavedCard(id: $0) },
+                                hideMessage: { message in Task { await model.hideMessage(message) } }
+                            )
+                            .equatable()
                         }
                     }
                     .padding(.leading, AssistantTheme.compactGutter + (crownOnLeadingEdge ? landscapeCrownClearance : 0))
                     .padding(.trailing, AssistantTheme.compactGutter + (crownOnLeadingEdge ? 0 : landscapeCrownClearance))
-                    // Keyed to the identity list rather than the messages
-                    // themselves: without an animation transaction the row
-                    // transitions above never played at all, but animating on the
-                    // full array would re-animate the bubble's geometry on every
-                    // streamed token.
-                    .animation(
-                        reduceMotion ? nil : .snappy(duration: 0.3, extraBounce: 0.02),
-                        value: model.messages.map(\.id)
-                    )
                 }
                 // Older rows continue beneath the floating input and off the
                 // bottom of the screen while scrolling — the stack above is
@@ -787,6 +870,33 @@ struct ChatView: View {
                         hiddenMessageUndoBar(undo)
                             .transition(.opacity)
                     }
+                    if let draftScope, model.hasComposerRecovery(in: draftScope) {
+                        VStack(spacing: 5) {
+                            Button {
+                                restoreUnsentMessageIfPossible()
+                                composerFocused = true
+                            } label: {
+                                Label("Restore unsent message", systemImage: "arrow.uturn.backward")
+                                    .font(.subheadline.weight(.medium))
+                                    .padding(.horizontal, 14)
+                                    .frame(minHeight: 44)
+                                    .background(AssistantTheme.bubblePaper(for: colorScheme), in: Capsule())
+                                    .foregroundStyle(AssistantTheme.bubblePaperInk(for: colorScheme))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .accessibilityHint("Send or clear your current draft before restoring the message that did not send.")
+                            if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                Text("Send or clear this draft to restore your earlier message.")
+                                    .font(.caption)
+                                    .foregroundStyle(AssistantTheme.stageSecondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 4)
+                                    .background(AssistantTheme.stageWell(for: colorScheme), in: Capsule())
+                            }
+                        }
+                    }
                 }
                 .padding(.bottom, composerHeight + 12)
             }
@@ -810,78 +920,6 @@ struct ChatView: View {
 
     private var menuRevealProgress: CGFloat {
         min(max(visibleMenuRevealDistance / menuRevealHeight, 0), 1)
-    }
-
-    @ViewBuilder
-    private func transcriptRow(
-        _ item: ChatTranscriptItem,
-        context: TranscriptContext,
-        motionIsReduced: Bool
-    ) -> some View {
-        switch item {
-        case let .message(message, index):
-            messageRow(message, at: index, context: context, motionIsReduced: motionIsReduced)
-        case let .approvedReceiptGroup(messages, firstIndex):
-            ApprovedReceiptGroup(messages: messages)
-                .equatable()
-                .padding(.top, startsRun(at: firstIndex) ? 22 : 7)
-                .transition(
-                    motionIsReduced
-                        ? .opacity
-                        : .asymmetric(
-                            insertion: .opacity
-                                .combined(with: .scale(scale: 0.986, anchor: .bottom))
-                                .combined(with: .offset(y: 10)),
-                            removal: .opacity
-                        )
-                )
-                .id(item.id)
-        }
-    }
-
-    private func messageRow(
-        _ message: ChatMessage,
-        at index: Int,
-        context: TranscriptContext,
-        motionIsReduced: Bool
-    ) -> some View {
-        // No per-row edge effects: a scroll transition applies opacity and
-        // blur to the whole row, so a message taller than the viewport would
-        // dim even though most of it is on screen. The ScrollView mask fades
-        // pixels at the clipped edges instead, which works for any height.
-        MessageBubble(
-            message: message,
-            userPrompt: context.userPrompt(before: index),
-            isStreaming: message.id.hasPrefix("stream-") && model.isSending,
-            openApprovals: { model.present(.approvals) },
-            runForReal: model.isSending ? nil : { text in model.send(text, force: true) },
-            retry: model.isSending ? nil : { text in model.send(text) },
-            decideApproval: { id, decision in await model.decideApproval(id: id, decision: decision) },
-            rememberApproval: { id in await model.approveAndRemember(id: id) },
-            decideSuggestion: { id, decision in await model.decideSuggestion(id: id, decision: decision) },
-            openActivity: { openRoute(.activity) },
-            refreshCard: { id in await model.refreshSavedCard(id: id) },
-            // Only a row the server has stored can be taken out of the log; an
-            // echo of a turn still in flight has no id it would recognise.
-            hide: message.isDurableLogRow
-                ? { Task { await model.hideMessage(message) } }
-                : nil
-        )
-        // A streamed token changes one row; without this every other row in the
-        // log is rebuilt alongside it.
-        .equatable()
-        .padding(.top, startsRun(at: index) ? 22 : 7)
-        .transition(
-            motionIsReduced
-                ? .opacity
-                : .asymmetric(
-                    insertion: .opacity
-                        .combined(with: .scale(scale: 0.986, anchor: .bottom))
-                        .combined(with: .offset(y: 10)),
-                    removal: .opacity
-                )
-        )
-        .id(message.id)
     }
 
     private var visibleMenuRevealDistance: CGFloat {
@@ -1724,11 +1762,7 @@ struct ChatView: View {
                             } label: {
                                 Text(reply)
                                     .font(.footnote.weight(.medium))
-                                    // Suggestions are offered text, not
-                                    // active input. Keep their copy at the
-                                    // same neutral 50% white as the prompt
-                                    // without dimming the glass surface too.
-                                    .foregroundStyle(Color.white.opacity(0.5))
+                                    .foregroundStyle(AssistantTheme.stageSecondary)
                                     .padding(.horizontal, 14)
                                     .frame(height: 36)
                                     .modifier(
@@ -1979,9 +2013,7 @@ struct ChatView: View {
     }
 
     private var composerTextColor: Color {
-        // Auxiliary composer marks (the stop affordance and its rim) use the
-        // warm conversation white. The editable text itself is true white so
-        // its app-owned inline completion can read at an exact 25% opacity.
+        // Editable text is true white; auxiliary controls use warm white.
         AssistantTheme.stageStrong
     }
 
@@ -2080,7 +2112,9 @@ struct ChatView: View {
         }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: listening)
         .onChange(of: listener.transcript) { _, heard in
-            guard pushToTalkActive || micLatched || listener.isListening else { return }
+            guard dictationScope == model.composerDraftScope, dictationScope == draftScope,
+                  dictationScope != nil,
+                  pushToTalkActive || micLatched || listener.isListening else { return }
             draft = draftBeforeDictation.isEmpty
                 ? heard
                 : (heard.isEmpty ? draftBeforeDictation : "\(draftBeforeDictation) \(heard)")
@@ -2101,10 +2135,12 @@ struct ChatView: View {
     private func beginPushToTalk() {
         // A hold must not open a second session while dictation is active
         // or while the previous session is finishing.
-        guard !pushToTalkActive, !micLatched, !micStopping else { return }
+        guard !pushToTalkActive, !micLatched, !micStopping,
+              let scope = model.composerDraftScope else { return }
+        dictationScope = scope
         pushToTalkActive = true
         draftBeforeDictation = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        Task { await listener.start() }
+        startDictation(in: scope)
     }
 
     /// The whole of the button's behaviour in one place, for VoiceOver's
@@ -2115,22 +2151,36 @@ struct ChatView: View {
             stopMicrophone(focusingComposer: true)
             return
         }
+        guard let scope = model.composerDraftScope else { return }
+        dictationScope = scope
         micLatched = true
         draftBeforeDictation = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        Task { await listener.start() }
+        startDictation(in: scope)
+    }
+
+    private func startDictation(in scope: ComposerDraftScope) {
+        Task {
+            guard dictationScope == scope, draftScope == scope,
+                  model.composerDraftScope == scope, !micStopping else { return }
+            await listener.start()
+        }
     }
 
     /// - Parameter focusingComposer: bring the keyboard up on what was heard,
     ///   so a correction is one tap away rather than a re-take.
     private func stopMicrophone(focusingComposer: Bool) {
         guard !micStopping else { return }
+        let stoppedScope = dictationScope
+        let needsStop = micLatched || pushToTalkActive || listener.isListening || listener.state == .preparing
         micLatched = false
         pushToTalkActive = false
+        guard needsStop else { return }
         micStopping = true
         Task {
             _ = await listener.stop()
             micStopping = false
-            if focusingComposer { composerFocused = true }
+            if focusingComposer, let stoppedScope, stoppedScope == model.composerDraftScope,
+               stoppedScope == draftScope { composerFocused = true }
         }
     }
 
@@ -2145,16 +2195,12 @@ struct ChatView: View {
     }
 
     private var composerPlaceholderColor: Color {
-        // The hint belongs to the translucent stage, so it uses neutral white
-        // rather than the muted ink reserved for paper cards.
-        Color.white.opacity(0.5)
+        AssistantTheme.stageSecondary
     }
 
     private var composerCompletionColor: Color {
-        // A step below the placeholder: the suggested suffix is the only text
-        // on the stage the person has not actually typed, so it reads as
-        // provisional next to both the hint and the draft it trails.
-        Color.white.opacity(0.25)
+        // Keep offered text distinguishable from the white draft and readable.
+        AssistantTheme.stageSecondary
     }
 
     /// The ready send button's fill — the one bright object on the stage. With
@@ -2175,7 +2221,7 @@ struct ChatView: View {
     /// Keeping this as one value prevents Jump to latest from drifting darker
     /// than the composer when either glass treatment is adjusted.
     private var conversationControlGlassTintOpacity: Double { 0.04 }
-    private var conversationControlBackgroundOpacity: Double { 0.85 }
+    private var conversationControlBackgroundOpacity: Double { 1 }
 
     @ViewBuilder
     private func composerInputSurface<Content: View>(
@@ -2189,7 +2235,7 @@ struct ChatView: View {
         if reduceTransparency {
             content()
                 .background(
-                    AssistantTheme.stage(for: colorScheme),
+                    AssistantTheme.stageWell(for: colorScheme),
                     in: shape
                 )
                 .overlay {
@@ -2202,11 +2248,11 @@ struct ChatView: View {
             content()
                 .background {
                     shape.fill(
-                        AssistantTheme.stage(for: colorScheme)
+                        AssistantTheme.stageWell(for: colorScheme)
                             // Keep the input visually grounded in the green
                             // conversation stage; the liquid glass remains
-                            // above it, while 85% of the surface remains the
-                            // darker green conversation stage.
+                            // above an opaque well, so the input remains readable
+                            // regardless of the content moving behind it.
                             .opacity(conversationControlBackgroundOpacity)
                     )
                 }
@@ -2217,7 +2263,7 @@ struct ChatView: View {
                 .glassEffect(
                     Glass.clear
                         .tint(
-                            AssistantTheme.stage(for: colorScheme)
+                            AssistantTheme.stageWell(for: colorScheme)
                                 .opacity(
                                     composerFocused
                                         ? 0.065
@@ -2232,7 +2278,7 @@ struct ChatView: View {
                     ZStack {
                         shape.fill(.ultraThinMaterial)
                         shape.fill(
-                            AssistantTheme.stage(for: colorScheme)
+                            AssistantTheme.stageWell(for: colorScheme)
                                 .opacity(0.85)
                         )
                         shape.fill(
@@ -2258,8 +2304,10 @@ struct ChatView: View {
         // Return can still reach the field while a response is streaming.
         // Preserve the owner's draft instead of clearing text that AppModel
         // will correctly refuse to send during an active turn.
-        guard !text.isEmpty, !model.isSending else { return }
+        guard !text.isEmpty, !model.isSending,
+              draftScope == model.composerDraftScope, draftScope != nil else { return }
         draft = ""
+        if let draftScope { model.saveComposerDraft("", in: draftScope) }
         sendPreparedMessage(text, keepsComposerFocused: true)
     }
 
@@ -2272,11 +2320,34 @@ struct ChatView: View {
     private func sendPreparedMessage(_ text: String, keepsComposerFocused: Bool) {
         // The draft has just been taken; anything still being transcribed into
         // it belongs to a message that no longer exists.
-        if micLatched { stopMicrophone(focusingComposer: false) }
+        dictationScope = nil
+        stopMicrophone(focusingComposer: false)
         sendFeedback += 1
         composerFocused = keepsComposerFocused
         requestScrollToBottom()
         model.send(text)
+    }
+
+    private func synchronizeComposer() {
+        let nextScope = model.composerDraftScope
+        guard nextScope != draftScope else { return }
+        if let draftScope { model.saveComposerDraft(draft, in: draftScope) }
+        dictationScope = nil
+        stopMicrophone(focusingComposer: false)
+        draftScope = nextScope
+        draft = nextScope.map { model.composerDraft(in: $0) } ?? ""
+        draftBeforeDictation = ""
+        hasUnseenMessages = false
+        transcriptFollow.resume()
+        hasPositionedInitialConversation = false
+        restoreUnsentMessageIfPossible()
+        requestScrollToBottom()
+    }
+
+    private func restoreUnsentMessageIfPossible() {
+        guard let draftScope,
+              let restored = model.restoreComposerRecovery(in: draftScope, replacing: draft) else { return }
+        draft = restored
     }
 
     private var showsJumpToLatest: Bool {
@@ -2356,7 +2427,7 @@ struct ChatView: View {
             jumpToLatestLabel
                 .foregroundStyle(AssistantTheme.stageStrong)
                 .background(
-                    AssistantTheme.stage(for: colorScheme),
+                    AssistantTheme.stageWell(for: colorScheme),
                     in: Capsule()
                 )
                 .overlay {
@@ -2371,17 +2442,17 @@ struct ChatView: View {
                 .foregroundStyle(AssistantTheme.stageStrong)
                 .background {
                     Capsule().fill(
-                        AssistantTheme.stage(for: colorScheme)
+                        AssistantTheme.stageWell(for: colorScheme)
                             .opacity(conversationControlBackgroundOpacity)
                     )
                 }
                 .glassEffect(
                     // Glass.clear, matching the composer: .regular laid a
-                    // milky material over the 0.85 stage fill and read as a
+                    // milky material over the stage fill and read as a
                     // solid green pill next to the input's liquid glass.
                     Glass.clear
                         .tint(
-                            AssistantTheme.stage(for: colorScheme)
+                            AssistantTheme.stageWell(for: colorScheme)
                                 .opacity(conversationControlGlassTintOpacity)
                         )
                         .interactive(),
@@ -2396,7 +2467,7 @@ struct ChatView: View {
                         .fill(.ultraThinMaterial)
                         .overlay {
                             Capsule().fill(
-                                AssistantTheme.stage(for: colorScheme)
+                                AssistantTheme.stageWell(for: colorScheme)
                                     .opacity(0.85)
                             )
                         }
@@ -2528,10 +2599,6 @@ struct ChatView: View {
 
     private var canSend: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !model.isSending
-    }
-
-    private func startsRun(at index: Int) -> Bool {
-        index == 0 || model.messages[index - 1].role != model.messages[index].role
     }
 
 }
@@ -2919,7 +2986,7 @@ private struct QuickReplySurface: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
         let shape = Capsule()
-        let stage = AssistantTheme.stage(for: colorScheme)
+        let stage = AssistantTheme.stageWell(for: colorScheme)
         let rimOpacity = colorSchemeContrast == .increased ? 0.5 : 0.28
         let rimWidth = colorSchemeContrast == .increased ? 1.1 : 0.8
 
@@ -2989,3 +3056,13 @@ private struct ComposerWorkingIndicator: View {
         .accessibilityHidden(true)
     }
 }
+
+#if DEBUG
+extension ChatView {
+    @MainActor static func visualReviewMenu() -> AnyView {
+        var view = ChatView(safeAreaTopInset: 62, safeAreaBottomInset: 34, safeAreaLeadingInset: 0, safeAreaTrailingInset: 0)
+        view.visualReviewMenuIsOpen = true
+        return AnyView(view)
+    }
+}
+#endif

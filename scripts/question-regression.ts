@@ -9,6 +9,7 @@ import { ModelRouter } from '@assistant/core/model-router';
 import { agents, budgets, createDb, modelRoles, models } from '@assistant/db';
 import {
   APPLICATION_CASES,
+  ASSISTANT_SCENARIOS,
   assertReplayDatabaseUrl,
   QUESTION_CASES,
   type QuestionResult,
@@ -24,6 +25,7 @@ const { values } = parseArgs({
     'model-config': { type: 'string' },
     database: { type: 'string' },
     cases: { type: 'string' },
+    suite: { type: 'string', default: 'audit' },
     output: { type: 'string' },
     budget: { type: 'string', default: '5' },
     help: { type: 'boolean' },
@@ -31,7 +33,7 @@ const { values } = parseArgs({
 });
 if (values.help) {
   console.log(
-    'pnpm eval:questions [--live --model-config <snapshot.json>] [--cases id,id] [--budget 5] [--output <directory>] [--database <loopback _test URL>]\nDefaults to scripted replay. Live mode uses the existing OpenRouter credential and captured production model roles. All external tools are intercepted; all task state rolls back.',
+    'pnpm eval:questions [--suite audit|assistant|all] [--live --model-config <snapshot.json>] [--cases id,id] [--budget 5] [--output <directory>] [--database <loopback _test URL>]\nDefaults to scripted audit replay. The assistant suite exercises interaction, approval and recovery scenarios. Live mode uses the existing OpenRouter credential and captured production model roles. All external tools are intercepted; all task state rolls back.',
   );
   process.exit(0);
 }
@@ -41,10 +43,18 @@ const databaseUrl = assertReplayDatabaseUrl(
 const maxSpend = Number(values.budget);
 if (!Number.isFinite(maxSpend) || maxSpend < 0.1 || maxSpend > 20)
   throw new Error('--budget must be $0.10–$20');
+if (!['audit', 'assistant', 'all'].includes(values.suite ?? ''))
+  throw new Error('--suite must be audit, assistant or all');
+const corpus =
+  values.suite === 'assistant'
+    ? ASSISTANT_SCENARIOS
+    : values.suite === 'all'
+      ? [...QUESTION_CASES, ...ASSISTANT_SCENARIOS]
+      : QUESTION_CASES;
 const ids = values.cases?.split(',');
-if (ids?.some((id) => !QUESTION_CASES.some((fixture) => fixture.id === id)))
+if (ids?.some((id) => !corpus.some((fixture) => fixture.id === id)))
   throw new Error('--cases contains an unknown case ID');
-const fixtures = QUESTION_CASES.filter((fixture) => !ids || ids.includes(fixture.id));
+const fixtures = corpus.filter((fixture) => !ids || ids.includes(fixture.id));
 try {
   process.loadEnvFile('.env');
 } catch {
@@ -214,16 +224,17 @@ const summary = {
   ...summarizeQuestions(results),
   notRun,
   mode: values.live ? 'live' : 'scripted',
+  suite: values.suite,
   commit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
   workingTreeDirty: !!execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim(),
-  corpusSha256: createHash('sha256').update(JSON.stringify(QUESTION_CASES)).digest('hex'),
+  corpusSha256: createHash('sha256').update(JSON.stringify(corpus)).digest('hex'),
   configCapturedAt: snapshot?.capturedAt ?? null,
   executedRecords: [...new Set(results.flatMap((result) => result.records))].sort((a, b) => a - b),
   applicationCoverage: APPLICATION_CASES,
   boundaries: [
     'Tool responses are frozen sanitized fixtures; model calls alone use the network in live mode.',
     'Executor, dispatcher, contracts and output verification are real; task state is rolled back.',
-    'Planner and application triage are not exercised by executor replay; a fixed workflow plan isolates response execution.',
+    'Most executor cases pre-set a plan; clarification also exercises the actual planner with scripted decisions. Application triage and real-model planning are separate checks.',
     'Saved rows are intercepted replay state, not proof of production memory/graph persistence.',
     'Formatting checks cover response structure; simulator/device visual tests remain separate.',
     '120-second per-case deadline; $1 per-task cap with the existing 10% owner-response allowance.',
@@ -238,7 +249,7 @@ const rows = results
   .join('\n');
 await writeFile(
   `${outputDir}/report.md`,
-  `# Question regression\n\nMode: ${summary.mode}. Commit: ${summary.commit}. ${summary.passed}/${summary.cases} passed. Not run: ${notRun.length}. Cost: $${summary.costUsd.toFixed(4)}. p50 ${(summary.p50Ms / 1000).toFixed(1)}s; p95 ${(summary.p95Ms / 1000).toFixed(1)}s.\n\n| Case | Result | Time | Cost | Approvals | Failures |\n|---|---|---:|---:|---:|---|\n${rows}\n\n${summary.boundaries.map((text) => `- ${text}`).join('\n')}\n`,
+  `# Question regression\n\nMode: ${summary.mode}. Suite: ${summary.suite}. Commit: ${summary.commit}. ${summary.passed}/${summary.cases} passed. Not run: ${notRun.length}. Cost: $${summary.costUsd.toFixed(4)}. p50 ${(summary.p50Ms / 1000).toFixed(1)}s; p95 ${(summary.p95Ms / 1000).toFixed(1)}s.\n\n| Case | Result | Time | Cost | Approvals | Failures |\n|---|---|---:|---:|---:|---|\n${rows}\n\n${summary.boundaries.map((text) => `- ${text}`).join('\n')}\n`,
   { mode: 0o600 },
 );
 console.log(JSON.stringify(summary, null, 2));

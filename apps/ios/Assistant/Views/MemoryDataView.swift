@@ -13,10 +13,15 @@ struct MemoryDataScreen: View {
     @State private var exporting = false
     @State private var exported: ExportedFile?
     @State private var forgetting = false
+    @State private var dataActionFailed = false
+    @State private var memoryErased = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                if dataActionFailed {
+                    AssistantInlineFailure(message: "Couldn’t confirm that request. Try again when your server is available.")
+                }
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Take your data with you").font(.headline)
@@ -35,7 +40,7 @@ struct MemoryDataScreen: View {
                         .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(AssistantActionButtonStyle(kind: .primary, fillsWidth: true))
-                    .disabled(exporting)
+                    .disabled(exporting || forgetting)
                 }
                 .assistantPanel(in: colorScheme)
 
@@ -53,11 +58,23 @@ struct MemoryDataScreen: View {
                         hint: "This cannot be undone.",
                         fillsWidth: true
                     ) {
+                        guard !exporting, !forgetting else { return }
                         forgetting = true
-                        _ = await model.forgetLongTermMemory()
+                        dataActionFailed = false
+                        memoryErased = false
+                        let erased = await model.forgetLongTermMemory()
+                        dataActionFailed = !erased
+                        memoryErased = erased
                         forgetting = false
                     }
-                    .disabled(forgetting)
+                    .disabled(exporting || forgetting)
+                    if forgetting {
+                        ProgressView("Erasing memory")
+                    } else if memoryErased {
+                        Label("Long-term memory erased", systemImage: "checkmark.circle")
+                            .font(.subheadline)
+                            .foregroundStyle(AssistantTheme.success(for: colorScheme))
+                    }
                     Text("Erasure keeps only anonymous content hashes, so forgotten facts are not picked up again the next time they are mentioned.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -77,9 +94,15 @@ struct MemoryDataScreen: View {
     }
 
     private func export() {
+        guard !exporting, !forgetting else { return }
         exporting = true
+        dataActionFailed = false
         Task {
-            if let url = await model.exportMemoryFile() { exported = ExportedFile(url: url) }
+            if let url = await model.exportMemoryFile() {
+                exported = ExportedFile(url: url)
+            } else {
+                dataActionFailed = true
+            }
             exporting = false
         }
     }
@@ -117,10 +140,34 @@ struct VoiceProfileEditor: View {
     @State private var donts = ""
     @State private var signature = ""
     @State private var loaded = false
+    @State private var isLoading = false
+    @State private var loadFailed = false
     @State private var isSaving = false
+    @State private var saveFailed = false
 
     var body: some View {
         AssistantForm {
+            if loadFailed {
+                Section {
+                    AssistantLoadFailureState(
+                        title: "Writing voice unavailable",
+                        message: "Your saved writing voice couldn’t be loaded. Try again before making changes.",
+                        retry: { Task { await load() } }
+                    )
+                }
+                .listRowBackground(AssistantTheme.raised(for: colorScheme))
+            } else if !loaded {
+                Section {
+                    ProgressView("Loading writing voice")
+                }
+                .listRowBackground(AssistantTheme.raised(for: colorScheme))
+            }
+            if saveFailed {
+                Section {
+                    AssistantInlineFailure(message: "Couldn’t save your writing voice. Your changes are still here; try again.")
+                }
+                .listRowBackground(AssistantTheme.raised(for: colorScheme))
+            }
             Section {
                 TextField(
                     "How you write: tone, sentence length, what you never do",
@@ -134,6 +181,7 @@ struct VoiceProfileEditor: View {
                 Text("This is what the assistant reads before it drafts anything on your behalf.")
             }
             .listRowBackground(AssistantTheme.raised(for: colorScheme))
+            .disabled(!loaded || isSaving)
 
             Section {
                 TextField("One per line", text: $dos, axis: .vertical)
@@ -142,6 +190,7 @@ struct VoiceProfileEditor: View {
                 Text("Always")
             }
             .listRowBackground(AssistantTheme.raised(for: colorScheme))
+            .disabled(!loaded || isSaving)
 
             Section {
                 TextField("One per line", text: $donts, axis: .vertical)
@@ -150,19 +199,23 @@ struct VoiceProfileEditor: View {
                 Text("Never")
             }
             .listRowBackground(AssistantTheme.raised(for: colorScheme))
+            .disabled(!loaded || isSaving)
 
             Section("Sign-off") {
                 TextField("How you end a message", text: $signature)
             }
             .listRowBackground(AssistantTheme.raised(for: colorScheme))
+            .disabled(!loaded || isSaving)
         }
         .scrollContentBackground(.hidden)
         .toolbarBackground(.visible, for: .navigationBar)
         .navigationTitle("Writing voice")
         .navigationBarTitleDisplayMode(.inline)
+        .interactiveDismissDisabled(isSaving)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel") { dismiss() }
+                    .disabled(isSaving)
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button(isSaving ? "Saving…" : "Save") { save() }
@@ -173,20 +226,31 @@ struct VoiceProfileEditor: View {
                     )
             }
         }
-        .task {
-            guard !loaded else { return }
-            if let response = await model.voiceProfile() {
-                description = response.voiceProfile.description
-                dos = response.voiceProfile.dos.joined(separator: "\n")
-                donts = response.voiceProfile.donts.joined(separator: "\n")
-                signature = response.voiceProfile.signature
-            }
-            loaded = true
+        .task { await load() }
+    }
+
+    private func load() async {
+        guard !loaded, !isLoading, !isSaving else { return }
+        isLoading = true
+        loadFailed = false
+        let response = await model.voiceProfile()
+        isLoading = false
+        guard !Task.isCancelled else { return }
+        guard let response else {
+            loadFailed = true
+            return
         }
+        description = response.voiceProfile.description
+        dos = response.voiceProfile.dos.joined(separator: "\n")
+        donts = response.voiceProfile.donts.joined(separator: "\n")
+        signature = response.voiceProfile.signature
+        loaded = true
     }
 
     private func save() {
+        guard loaded, !isSaving, !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         isSaving = true
+        saveFailed = false
         Task {
             let saved = await model.saveVoiceProfile(
                 VoiceProfileMutation(
@@ -197,6 +261,7 @@ struct VoiceProfileEditor: View {
                 )
             )
             isSaving = false
+            saveFailed = !saved
             if saved { dismiss() }
         }
     }

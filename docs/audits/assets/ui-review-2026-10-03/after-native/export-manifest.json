@@ -1,0 +1,3848 @@
+[
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "9272ABBE-18F4-4B7A-8455-DB88AA27954E.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "error-banner-validation_0_04567BC3-1695-4B2E-AF0C-62F5CA6A0013.png",
+        "timestamp": 1791072624.116
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "04B7D469-BE1A-4A7A-9CF2-3EA5B578CB21.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "error-banner-accessible_0_8909626C-6986-4D30-9268-78417C4954C9.png",
+        "timestamp": 1791072623.711
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "08E488FE-8AF1-4301-804F-2FF3A6F7C8C8.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "error-banner-compact_0_56264C0F-DB6C-4D9D-8972-FB7A97DCB436.png",
+        "timestamp": 1791072623.272
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A0277C4E-D529-4F55-B82B-1CB1ECE95D93.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "error-banner-dark_0_7B445A7B-AA52-45AD-A019-F4C062FC9C1F.png",
+        "timestamp": 1791072622.851
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "53435C6A-5FF8-4159-87CF-351AB2EFB87C.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "error-banner-light_0_3B17C6D2-E32C-417E-9B5D-C96FCB3CBC50.png",
+        "timestamp": 1791072622.41
+      }
+    ],
+    "testIdentifier": "APIClientRetryTests/testErrorBannerVisualStates()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/APIClientRetryTests/testErrorBannerVisualStates"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "290762A3-FBDB-4D53-B352-93E281543D7A.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "force-graph-empty_0_17EC38F8-9845-4861-BFE8-86FD5DA31BC6.png",
+        "timestamp": 1791072630.775
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "868DCC80-1C1A-446B-BE8B-53CEB8B94F61.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "force-graph-accessible-selected_0_88F73DCE-B483-47AA-B951-8C28B9D9A334.png",
+        "timestamp": 1791072630.038
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B4D8710C-AFC9-496C-A428-C7B1B859F4DD.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "force-graph-accessible_0_21CB660B-D0B3-47CD-8A01-25EA279C3201.png",
+        "timestamp": 1791072629.313
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "D92DA6FC-76CF-41C3-BC7E-A08280BEA257.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "force-graph-dense-selected_0_28B15DAA-1BDC-4BB8-802B-AEAECC616113.png",
+        "timestamp": 1791072628.582
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "8DCAE94D-F40D-4C48-BFD9-68D143655498.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "force-graph-dense_0_7BE3352E-B83B-45F1-B261-5B34F366754D.png",
+        "timestamp": 1791072627.856
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "0534196D-310B-4FDA-A38C-4568478B61A2.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "force-graph-islands_0_404CA3C2-3C6D-4E8E-9F8B-6286FF0A84D2.png",
+        "timestamp": 1791072627.135
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "5EF7E4A5-08C5-48C0-B330-AA3262DB801B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "force-graph-selected_0_439F8873-B3DA-45F9-9CEB-A15E2F4C845D.png",
+        "timestamp": 1791072626.402
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B6F2A898-DBFA-445D-A1AF-505B73DD194B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "force-graph-dark_0_3737C89B-366A-4C92-9D8C-3857C860BFE7.png",
+        "timestamp": 1791072625.66
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E0FA1640-34BB-4D3C-8EAB-46B199EF5640.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "force-graph-light_0_8E7F412D-2B3F-4EE9-86E7-4D64F4FA2D75.png",
+        "timestamp": 1791072624.917
+      }
+    ],
+    "testIdentifier": "APIClientRetryTests/testForceGraphScreenLightDarkDenseAndAccessibleSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/APIClientRetryTests/testForceGraphScreenLightDarkDenseAndAccessibleSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "4492D20A-FAD8-407B-A8E2-CF111B8854E1.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "goal-edit-dark_0_A84C3524-5BFA-4C6B-8A5E-08C991257FD3.png",
+        "timestamp": 1791072633.177
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "19D3DD63-5A03-4704-9F92-F9B2BCFBE29E.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "goal-new-dark_0_521A6416-614A-4EB6-9F74-D7F2525196B9.png",
+        "timestamp": 1791072632.559
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C9E37040-145F-41BE-9D34-C7FF32984F87.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "goal-edit-light_0_471F0A16-B0CC-4D3A-9EC7-A36CAD8B68A3.png",
+        "timestamp": 1791072631.956
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "0715021A-8CFC-4931-B713-508890C05B8F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "goal-new-light_0_53A6F5BC-C946-4EF2-89BC-C3D93C9B0468.png",
+        "timestamp": 1791072631.35
+      }
+    ],
+    "testIdentifier": "APIClientRetryTests/testGoalEditorUsesSharedCanvasInBothAppearances()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/APIClientRetryTests/testGoalEditorUsesSharedCanvasInBothAppearances"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "3DE93396-EEA2-4C00-8296-5EF3CDEA37D6.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "graph-management-editor-dark_0_AE7089DF-D436-4344-816F-D59A3B8F6206.png",
+        "timestamp": 1791072639.068
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "8701C635-844E-4B34-8D0B-B4E5D086DAFA.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "graph-management-quick-connect-new-dark_0_49A09AEB-7FCD-4460-8A60-1A414A69DC5A.png",
+        "timestamp": 1791072638.486
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C2F6BEE2-F280-49F3-8FEA-C5D2F4152CED.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "graph-management-quick-connect-dark_0_124A0B5C-A1E1-489C-8FEC-FD11D3B30687.png",
+        "timestamp": 1791072637.896
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F8B39F13-610D-4224-AC84-3CCA33B662E1.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "graph-management-connect-dark_0_A080726F-77FE-4FDB-96F6-028ADB1D428A.png",
+        "timestamp": 1791072637.305
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "2D045780-BC1C-4E04-9FC9-48E1F9AEF142.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "graph-management-groups-dark_0_D49349E1-6CBA-4300-AED8-E7EAA794D065.png",
+        "timestamp": 1791072636.718
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "7BFFE215-CA82-4E36-B430-9069F8AD30C7.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "graph-management-editor-light_0_FE832856-6B1B-4B28-B399-8A45A3714CCF.png",
+        "timestamp": 1791072636.143
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B266F2E8-AB85-494A-9E06-18BFA9C692B0.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "graph-management-quick-connect-new-light_0_0F7DE759-B0CD-4CFA-87A6-AC41EAD26319.png",
+        "timestamp": 1791072635.559
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E96ABDE1-9FC3-4038-8780-506415E1AAFE.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "graph-management-quick-connect-light_0_C480DDA1-E486-49F7-BBAA-C4DB59DBD513.png",
+        "timestamp": 1791072634.97
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "72E820C8-3790-41C7-AC4E-809758198F58.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "graph-management-connect-light_0_F91A0937-29F3-4A38-9583-7F463252094B.png",
+        "timestamp": 1791072634.395
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "FE00134A-AB13-4675-A142-A963092DA7D1.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "graph-management-groups-light_0_AE677F99-94B5-44E9-8B1F-A612ABFDACCE.png",
+        "timestamp": 1791072633.842
+      }
+    ],
+    "testIdentifier": "APIClientRetryTests/testGraphManagementScreensInBothAppearances()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/APIClientRetryTests/testGraphManagementScreensInBothAppearances"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F785EA98-E381-4CD6-904E-1179358D2215.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "graph-item-card-dark_0_2342E502-D2A9-487A-8CB6-96310B48A16E.png",
+        "timestamp": 1791072642.236
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "82A34085-BEF2-4648-A5CB-CAB3BFA64E35.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "graph-item-card-light_0_027E4C39-1A28-41B3-AD9A-B3D66D2CC99E.png",
+        "timestamp": 1791072640.81
+      }
+    ],
+    "testIdentifier": "APIClientRetryTests/testGraphScreenOpensOnAnItemWithItsCard()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/APIClientRetryTests/testGraphScreenOpensOnAnItemWithItsCard"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "291778F3-A971-4F7E-B34E-62B0ED88A156.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "memory-home-accessible_0_BA11E262-588A-4444-BB04-7228374DC6E8.png",
+        "timestamp": 1791072646.163
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "06BC447D-34C2-4F9F-89AB-617C0BE24C9E.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "memory-home-dark_0_E3FB9E9A-8AE0-43C7-A627-B5EFCED11BEA.png",
+        "timestamp": 1791072645.035
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C03C8FE3-8694-4667-BDD3-260AE455E6FF.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "memory-home-light_0_A7C691B5-4005-47D0-9C07-3F01B2221955.png",
+        "timestamp": 1791072643.896
+      }
+    ],
+    "testIdentifier": "APIClientRetryTests/testMemoryHomeSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/APIClientRetryTests/testMemoryHomeSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E14962E6-F5F2-42EF-98BF-06D6AF61BF60.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "detail-costs-expanded_0_AE3AAF22-2529-4E27-A5C3-72282A423D08.png",
+        "timestamp": 1791072651.715
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "979376D8-5D47-4884-A059-17B1A02F93C8.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "detail-memory-expanded_0_8EEC6CF5-068B-497A-88BB-3474B0EC7861.png",
+        "timestamp": 1791072651.135
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "CFA0B9FC-0D2B-4183-8B8D-FAF26BE3BD76.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "detail-costs-accessible_0_9595A738-91EE-4E76-9E92-D25937A16A44.png",
+        "timestamp": 1791072650.575
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A66E94E0-E1CA-4C13-8B05-B5D7A7A9AC3F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "detail-memory-accessible_0_8CB43019-F7FF-41E8-93AD-4C402F590B5A.png",
+        "timestamp": 1791072650.016
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "9ED6F703-618D-474F-92B6-81DAEF62FC49.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "detail-costs-compact_0_3A717BEA-B5BA-43F8-9EAB-EB5C84735D0B.png",
+        "timestamp": 1791072649.463
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "D179874E-CFE6-4DBC-A884-10526161C82A.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "detail-memory-compact_0_9F8FBFF5-7627-4E30-B578-3709CFD5CD3B.png",
+        "timestamp": 1791072648.943
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "EE098ACB-CA72-46BB-B0F8-D166BE8D7216.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "detail-costs-dark_0_02D2926C-E6AA-476D-B5E3-A0C05A7201C1.png",
+        "timestamp": 1791072648.418
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "77B0B6C8-AC0E-4775-937C-1732424897B1.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "detail-memory-dark_0_6DCF9289-2D44-45F7-B166-80E76ADFDAB3.png",
+        "timestamp": 1791072647.855
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "5E51B75D-751F-4674-831F-E622904460A7.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "detail-costs-light_0_D8890E78-D8D6-4AC1-B942-6D9BC8B370C0.png",
+        "timestamp": 1791072647.293
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "224E78B7-D3F8-4BF2-AFC2-060D9A908552.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "detail-memory-light_0_329DE7EE-E5AC-4644-A4A2-A7541AD1CF11.png",
+        "timestamp": 1791072646.733
+      }
+    ],
+    "testIdentifier": "APIClientRetryTests/testMemoryOrganizerAndSpendingVisualStates()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/APIClientRetryTests/testMemoryOrganizerAndSpendingVisualStates"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C9B09C98-F9BF-4165-A748-CD3655792CF8.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "people-map-empty_0_50B00296-8E4A-4F0F-86C2-2D27A9419D69.png",
+        "timestamp": 1791072656.218
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "91F689DA-8E9E-4D47-9CF1-47CBD3C692CB.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "people-map-accessible_0_58C193FA-7AAA-46B2-A0EC-DDC96D9145A2.png",
+        "timestamp": 1791072655.642
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "17145138-ABB0-42C8-9C8C-53E4F219C73E.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "people-map-compact_0_76609527-37BE-4F0C-9907-2C326D53CC58.png",
+        "timestamp": 1791072655.053
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "0C7360F0-9210-487E-ADC7-7369CC972D45.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "people-map-dark_0_91675626-DDD3-4167-BC0D-9B8232809EB7.png",
+        "timestamp": 1791072654.522
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "9797EB94-52A6-4C70-BFCD-10BC7A272DB0.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "people-map-light_0_C489F365-9734-48D3-AF5F-18D1D8112968.png",
+        "timestamp": 1791072653.973
+      }
+    ],
+    "testIdentifier": "APIClientRetryTests/testPeopleConnectionMapLightDarkCompactAndLargeTextSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/APIClientRetryTests/testPeopleConnectionMapLightDarkCompactAndLargeTextSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "2AB70234-D6B7-46D4-AA34-1FBD682A9ED2.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "people-chooser-accessibility3_0_268C76BA-79BF-4AEE-B810-9914277A4D82.png",
+        "timestamp": 1791072657.392
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "DDE2F945-B88E-4DF6-A4B3-27A19EDACB10.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "people-chooser-large_0_05F6DDCC-45E0-4CAC-9A08-903009479C87.png",
+        "timestamp": 1791072656.807
+      }
+    ],
+    "testIdentifier": "APIClientRetryTests/testPeopleConnectionsStartsWithChoiceNotInventedDirectoryEdges()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/APIClientRetryTests/testPeopleConnectionsStartsWithChoiceNotInventedDirectoryEdges"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "0C22EF02-2366-487D-95D3-13C9FBB0DD58.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "person-birthday-dark_0_1456294B-D77D-476F-9EBC-EB53253392B1.png",
+        "timestamp": 1791072659.73
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "71F46FF2-EE6F-4C2A-A0FA-46EE9DD238C5.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "person-tree-dark_0_8B908CC7-3E77-403A-B1D8-FFF9C5DF0C87.png",
+        "timestamp": 1791072659.145
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "836E8923-B0DA-4BFF-8D34-DE396B395AB9.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "person-birthday-light_0_47599BAC-066B-42C3-A211-1E2330320C19.png",
+        "timestamp": 1791072658.57
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "D322AB69-7ACE-4290-A4F9-13F64132244C.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "person-tree-light_0_44AE4A67-B3C2-4D09-822F-2F16D6BB57CF.png",
+        "timestamp": 1791072657.985
+      }
+    ],
+    "testIdentifier": "APIClientRetryTests/testPersonTreeAndBirthdayEditorSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/APIClientRetryTests/testPersonTreeAndBirthdayEditorSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "862C19B7-1DE0-48A8-84BF-9925B2A22A18.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "situation-unavailable-dark_0_F0385387-BA63-4B93-90AA-C008978CDA39.png",
+        "timestamp": 1791072664.684
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C611FAFF-7B31-47A5-A346-02E100EC1B92.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "situation-form-dark_0_1AA81DA3-A472-4371-8565-EADED21E10F5.png",
+        "timestamp": 1791072664.105
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "BDC9E570-30A8-4E33-948E-22A3268994DD.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "situation-detail-dark_0_C29DE07A-3335-447A-9BAB-0DA19981D86C.png",
+        "timestamp": 1791072663.534
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "995144FB-6D12-4C27-829D-7FF971AA272E.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "situation-list-dark_0_CD474DF9-176E-44FA-B0B5-F21DCC707491.png",
+        "timestamp": 1791072662.955
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "1EF16CC3-51F4-495C-AA3E-E879679FCB08.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "situation-unavailable-light_0_E6A702C1-A5BE-4DD4-BB81-8631B532CA0C.png",
+        "timestamp": 1791072662.372
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "CB2FF0C6-1860-43B0-AF90-63F4F1C2DFB8.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "situation-form-light_0_90A316D0-4B80-43E6-8199-4567FF1A3AFE.png",
+        "timestamp": 1791072661.794
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "1763E7FA-36BE-4C76-A8E7-27340AD91E75.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "situation-detail-light_0_DA753FBD-C5F5-472D-8A88-2D20207A38BA.png",
+        "timestamp": 1791072661.207
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E7056FA2-485A-4BCE-B60A-8C02E602C7BC.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "situation-list-light_0_5ABC1F72-277F-426E-BE5E-BF0E0876C324.png",
+        "timestamp": 1791072660.633
+      }
+    ],
+    "testIdentifier": "APIClientRetryTests/testSituationPackLightAndDarkSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/APIClientRetryTests/testSituationPackLightAndDarkSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "D4902232-F283-4534-B3DF-42406565BECE.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "visual-editor-accessible_0_DB33AC15-2F70-4EE9-B494-58F07FB6A475.png",
+        "timestamp": 1791072673.886
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "867FCD31-E651-48D5-9E72-E61843BDC632.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "visual-goals-accessible_0_E8ED1932-93DE-4177-BF2F-72213F8843AC.png",
+        "timestamp": 1791072673.298
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "D85BC74E-1314-4D79-B531-E763AFDA0329.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "visual-activity-accessible_0_B939B47D-1CD2-4EF5-83C3-490F9E172F21.png",
+        "timestamp": 1791072672.727
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "956EB834-D277-4BC3-B36E-832A92B9C546.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "visual-editor-compact_0_0E9F479F-4407-4321-A1F5-B2EBBBD999B2.png",
+        "timestamp": 1791072672.147
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B7ACE162-763A-416D-8A61-91E2BACE7A53.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "visual-goals-compact_0_5C9E6B0B-129D-478F-BB78-EADB9AABD2D2.png",
+        "timestamp": 1791072671.598
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "FAE17679-7B59-47E9-A2B5-31637F39A35D.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "visual-activity-compact_0_CD53F197-07C9-4664-95DA-B692D984F02D.png",
+        "timestamp": 1791072671.074
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "825F73FD-59EE-4EB5-A467-2358A73E3511.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "visual-editor-dark_0_7B6BCFDA-4140-40BD-9469-F2F1E78CDB12.png",
+        "timestamp": 1791072670.505
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "6000556C-7F51-429A-9617-1711557C2B03.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "visual-goals-dark_0_4F913DF7-FCA1-41FB-9CFB-5927C6D27CB4.png",
+        "timestamp": 1791072669.92
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "44EA3B74-5D3C-4F97-B412-E40B1C31D96C.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "visual-activity-dark_0_55309365-E229-446B-8C60-26641A2919F0.png",
+        "timestamp": 1791072669.343
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "CB45597E-12C7-431F-9F72-85C03FB4FDAE.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "visual-editor-light_0_1217CD92-59CF-477F-9EF1-5A02F1CF9F66.png",
+        "timestamp": 1791072668.762
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E0C0665C-F648-4A92-AAFB-67B218B06A55.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "visual-goals-light_0_DB5D2960-D98D-4C2E-8936-75E78E72E4F9.png",
+        "timestamp": 1791072668.172
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "D89D0F6F-E564-4D25-B3C4-BB0D6260A0F2.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "visual-activity-light_0_96339C82-028D-4E94-BFEF-557FCCED4D52.png",
+        "timestamp": 1791072667.589
+      }
+    ],
+    "testIdentifier": "APIClientRetryTests/testVisualConsistencyActivityGoalsAndEditorSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/APIClientRetryTests/testVisualConsistencyActivityGoalsAndEditorSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "D58585DC-54E3-4FCC-83DA-5E0D22A4A751.txt",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "public.plain-text_0_7B7BBC50-A3D3-440A-B61C-51640B6061EC.txt",
+        "timestamp": 1791072674.958
+      }
+    ],
+    "testIdentifier": "APIModelsTests/testForceLayoutKeepsExistingPositionsDuringExpansionAndRemainsFiniteAtCapacity()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/APIModelsTests/testForceLayoutKeepsExistingPositionsDuringExpansionAndRemainsFiniteAtCapacity"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "470B89A9-A779-4C55-B4A9-C75F4B234C7E.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "approval-summary-transitions-accessible_0_EFF90359-77E3-40F7-BCA5-B6332BAC9A16.png",
+        "timestamp": 1791072675.638
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "2D0772E4-BA89-4345-942F-E810ACF20182.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "approval-summary-transitions-dark_0_19F34AD2-F9AE-4B3E-8842-722C57CFD965.png",
+        "timestamp": 1791072675.61
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "292AF31F-3177-45FC-9B96-552610B9917B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "approval-summary-transitions-light_0_A301B0A5-0940-4210-9DB2-C3B1BA3B8732.png",
+        "timestamp": 1791072675.594
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testApprovalSummaryDecisionTransitionSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testApprovalSummaryDecisionTransitionSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "758F7BD9-CF38-4AD8-BF26-3C3F7DB2D8D0.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "attached-card-controls-accessible_0_4CEB8A23-31CA-4536-B1EC-52B5BB4FC08E.png",
+        "timestamp": 1791072675.741
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A62B5079-0D8E-4568-9984-D6D9C7F1A325.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "attached-card-controls-dark_0_ACC338C7-B10A-46E4-9F8D-4C4878EF02C8.png",
+        "timestamp": 1791072675.712
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "EF58A623-58AC-497B-8E08-4A4839879C32.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "attached-card-controls-light_0_475692F7-5658-4527-87EF-D39974716081.png",
+        "timestamp": 1791072675.695
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testAttachedSourcesAndSavedCardSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testAttachedSourcesAndSavedCardSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "19A7934F-8651-4E72-A6CA-C9C13A8B3609.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "briefing-accessible_0_2C50E1DE-424B-4B8E-9A68-670A869482F3.png",
+        "timestamp": 1791072675.856
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "288332CF-1738-43A6-AE8A-E465C73EFDDB.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "briefing-320_0_369E4842-E33B-4A54-855E-5419149A3AF7.png",
+        "timestamp": 1791072675.815
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "DAAB4DE2-2B24-4A02-9FC4-A6CE2DC6387D.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "briefing-390_0_96DFE4F1-4052-4087-9941-37AB2CB7419B.png",
+        "timestamp": 1791072675.799
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testBriefingCardSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testBriefingCardSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "1DA5303E-BFBD-41C2-9669-86176A64F64C.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "chat-clearance-rest_0_B83D07E8-90E4-483D-8F7C-725B60AFF8A9.png",
+        "timestamp": 1791072678.289
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "9BB505F3-9E6D-44F0-A53B-B85DE9FE3E35.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "chat-clearance-keyboard_0_403610F1-4FA0-4916-987D-80870199704C.png",
+        "timestamp": 1791072677.705
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E8409B25-CD59-4964-AEA1-ACECBD024E9D.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "chat-clearance-rest_0_BE10FCBB-D5EF-4E94-88CD-CCF88F3D324B.png",
+        "timestamp": 1791072676.978
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testChatViewportKeepsLatestAboveFocusedComposer()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testChatViewportKeepsLatestAboveFocusedComposer"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "9876DCFB-6397-460F-947E-9F547DBC55D4.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "compact-calendar-dark_0_08F90E5A-39EB-46EF-883F-6FE4566573B2.png",
+        "timestamp": 1791072678.324
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "9C068DBA-43FC-4E89-9594-C12BD555EF41.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "compact-calendar-light_0_818D889F-5375-4E1B-8D10-145D6D4F8899.png",
+        "timestamp": 1791072678.311
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testCompactCalendarSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testCompactCalendarSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "7DCB5FD9-7BC7-4082-AB9D-36701DF8B687.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "compact-mask-and-people-accessible_0_B17807F6-09C5-4EE2-90DD-CE5C1DA8D069.png",
+        "timestamp": 1791072678.42
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "5B8083E6-4C08-413D-94C3-D6138720762F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "compact-mask-and-people-narrow_0_CF4E698E-0065-43E1-A6C9-5443E6EA9EFD.png",
+        "timestamp": 1791072678.391
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "EC427B75-7A65-4DDC-8B89-1C62B6D10A9E.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "compact-mask-and-people-dark_0_87462AB5-3C19-461F-8C0F-7C06B65A7089.png",
+        "timestamp": 1791072678.375
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "65A6875B-9F33-4ACA-960C-F87DD32331E7.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "compact-mask-and-people-light_0_E3EA232E-D7A1-420F-B759-9E3D184B2399.png",
+        "timestamp": 1791072678.356
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testCompactSensitiveValueAndPeopleGroupSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testCompactSensitiveValueAndPeopleGroupSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "1B18C1E9-BEAD-4210-A08D-3032E2254845.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "card-disclosure-accessible-expanded_0_08DB5D26-0DBF-41C6-B7DC-969A74199BA4.png",
+        "timestamp": 1791072678.515
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "4F8034C5-B7B4-46D6-B29B-8E2B916F6E84.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "card-disclosure-accessible-collapsed_0_948C4368-DD42-446D-8711-67A57EA3AC83.png",
+        "timestamp": 1791072678.491
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "9E6640DC-B125-4036-941C-8E5511179D3F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "card-disclosure-narrow-expanded_0_43D2A5CF-44F2-4C00-BD85-11926C7753B0.png",
+        "timestamp": 1791072678.486
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "EF6B4471-0C03-4BA2-8359-D9267D153538.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "card-disclosure-narrow-collapsed_0_EBDB142E-51FA-4FEF-BB89-B3F2D22E2C7A.png",
+        "timestamp": 1791072678.474
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "66BED618-5032-4D0C-98FE-A5539A8192B4.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "card-disclosure-dark-expanded_0_E6DD6CEC-FC92-4646-A7E6-69B5051BF3B1.png",
+        "timestamp": 1791072678.471
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "39FFA711-DE66-4D3C-A42C-95FF3A55DC38.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "card-disclosure-dark-collapsed_0_53972B3F-778E-4E91-B4CC-F28CB21C9FF4.png",
+        "timestamp": 1791072678.456
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "489B51E1-6741-4BA6-9E4D-64DEE690E532.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "card-disclosure-light-expanded_0_BA69CE85-B587-4D32-8B39-8CE5EB70485B.png",
+        "timestamp": 1791072678.452
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "6F4E9898-7751-433B-9589-77E0E330C628.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "card-disclosure-light-collapsed_0_ECF0E055-CB16-4344-BD54-FCE9266A5AC7.png",
+        "timestamp": 1791072678.428
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testExpandedCardDisclosureSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testExpandedCardDisclosureSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "8A74E502-F15F-4471-949B-3490E3B23EA6.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "polished-result-cards-accessible_0_7913237B-7B24-4C58-9F3F-FBDD45AF4E98.png",
+        "timestamp": 1791072685.342
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "92381891-F3FE-4496-BD4F-20498E7DC41C.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "polished-result-cards-narrow_0_38A117D8-75DB-494D-9616-DC8598C01F1E.png",
+        "timestamp": 1791072685.307
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "52A5B70B-5C0B-40A3-885F-58C0A064F961.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "polished-result-cards-dark_0_9F041455-03B2-42F7-9039-9275B0F311CD.png",
+        "timestamp": 1791072685.29
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "3C013EAA-BF19-47FE-9ACC-E5F57C4B47A5.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "polished-result-cards-light_0_53389857-0727-4E18-B9AB-3E3EFB95B2D2.png",
+        "timestamp": 1791072685.272
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testPolishedResultCardSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testPolishedResultCardSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C9BBD8BF-12C8-455C-A08D-E5D51C586F51.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "reply-card-accessible_0_872161B7-FFB0-4A5A-8642-FFF5B800CE9A.png",
+        "timestamp": 1791072685.384
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "4BB97AF5-6BA3-4299-A29F-E06F8BFD9799.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "reply-card-narrow_0_0671FBA0-76DD-4CDE-B70A-627B2FC29015.png",
+        "timestamp": 1791072685.372
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "2064A04F-95BD-4A49-8A17-FE88875DD616.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "reply-card-dark_0_EBEB730A-0190-45B6-B93D-9048C39D7ED1.png",
+        "timestamp": 1791072685.364
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "DBD650BF-791A-4752-BDE5-75FC484F7928.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "reply-card-light_0_4EE3E414-9D68-40FF-B033-CBDD548AC3A7.png",
+        "timestamp": 1791072685.356
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testReplyCardSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testReplyCardSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "D6931D2F-5CA7-4296-96DF-4496C65AE780.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "route-390_0_33B2FE96-DEFE-42DA-A23C-A6F18007EBD5.png",
+        "timestamp": 1791072685.525
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testRouteCardDecodesAndRenders()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testRouteCardDecodesAndRenders"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "09AD287B-51B8-4C4D-926E-0E3E9398EB61.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "scoreboard-accessible_0_002054BB-6686-4E65-9155-37A92D70AFBF.png",
+        "timestamp": 1791072685.586
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "49776FA4-3971-4817-A0DF-7D15C707F044.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "scoreboard-320_0_4D3B0436-FB0A-451A-8604-F65B50E01752.png",
+        "timestamp": 1791072685.571
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "955407BB-C120-4FD0-BF2F-17C985A9BB06.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "scoreboard-390_0_9B54A5AA-18CF-4E4D-982F-323C6BEB9CD2.png",
+        "timestamp": 1791072685.561
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testScoreboardCardSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testScoreboardCardSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "6034794C-7CF9-4FE4-87DA-01A392B0747B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "styled-decision-receipts-accessible_0_663B1DB2-571E-4D9D-A6A8-12958FFAA78A.png",
+        "timestamp": 1791072688.166
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "93C319C3-ADCD-4CD6-9CD4-6690901CA2BF.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "styled-decision-receipts-narrow_0_39E04B76-9954-46DF-8E7A-0DCDA31AD8BF.png",
+        "timestamp": 1791072688.14
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "7D2663CF-D13C-4CC7-AB7C-2F8789AD28C0.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "styled-decision-receipts-dark_0_ACDDC44C-5172-4AE7-A413-F7CBFA8DED22.png",
+        "timestamp": 1791072688.127
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B47AE458-8FE2-4BB6-8338-7E56B3DD2984.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "styled-decision-receipts-light_0_320B46FC-F4DB-4666-8A06-6CD8F9D2D426.png",
+        "timestamp": 1791072688.108
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testStyledDecisionReceiptSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testStyledDecisionReceiptSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E5BEE475-DA27-487D-87D0-3F06B8BA13FC.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "subpage-toolbar-scroll-520_0_6917B485-3EF0-4039-AB62-5FE376273563.png",
+        "timestamp": 1791072689.308
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "ABCA48B1-6035-42D8-9351-68227FFFE118.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "subpage-toolbar-scroll-160_0_A7D82007-ED84-467F-AA50-63241B20CD09.png",
+        "timestamp": 1791072689.01
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "1961C392-6E9E-4572-9097-CD147F80975F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "subpage-toolbar-scroll-0_0_C3954CC8-C868-4F63-8902-C1F70334F9BC.png",
+        "timestamp": 1791072688.703
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testSubpageChromeKeepsTitleWhileContentScrollsUnderToolbar()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testSubpageChromeKeepsTitleWhileContentScrollsUnderToolbar"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "7F322A21-7105-47F8-B098-E17771391764.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "suggestion-card-accessible_0_BFF0CABC-365E-4CC8-9C12-1C00F2987C22.png",
+        "timestamp": 1791072689.502
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C4BBABB8-E4C2-4CF3-AA2B-10BC811C0B23.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "suggestion-card-narrow_0_474A7A1D-60B4-45F0-887F-F067247E1A3C.png",
+        "timestamp": 1791072689.436
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "05917C72-66DB-4235-8293-5E262E60791C.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "suggestion-card-dark_0_BA9B82FF-FF6B-4C47-A286-DFFF1B49B9FB.png",
+        "timestamp": 1791072689.394
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "ED0D07AD-4020-456D-BA55-6C59B7429626.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "suggestion-card-light_0_D4987FAD-173F-4977-B5A2-0BEE65CABDD4.png",
+        "timestamp": 1791072689.36
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testSuggestionCardSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testSuggestionCardSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "EEDF91DB-2E1D-4224-AADB-70507FDC4FA7.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "unified-rich-card-accessible_0_88BC20A9-CD2E-4818-8553-5FBFF8DEA508.png",
+        "timestamp": 1791072689.748
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F47CD01B-86E5-41A0-93BD-4EDC1430B6A2.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "unified-rich-card-narrow_0_ECCBF444-6D5C-454C-B666-9352D458340D.png",
+        "timestamp": 1791072689.667
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B975284B-A13D-4EB3-96A0-4F45E79321B4.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "unified-rich-card-dark_0_0EE55074-913C-4F0B-A49C-80299212FDAC.png",
+        "timestamp": 1791072689.611
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "2F911575-4000-42F4-8721-879ADCDC4318.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "unified-rich-card-light_0_52AB0D7F-5740-4D78-BF35-A5AAA58ACA5B.png",
+        "timestamp": 1791072689.563
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testUnifiedSuggestionAndLiveRichCardSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testUnifiedSuggestionAndLiveRichCardSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "EBF01117-24FC-47A4-B778-C9BDB99CA204.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "user-table-accessible_0_025A8DA5-3BC1-465C-9A12-EA6E9032514A.png",
+        "timestamp": 1791072689.794
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "09F34464-6CC8-40F8-A257-D036C020BA04.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "user-table-dark_0_79993442-9FE1-46B8-8B55-69AAAC9F6C62.png",
+        "timestamp": 1791072689.778
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "9A19D558-65F3-4F5D-B167-A7A77371FF2E.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "user-table-light_0_93384112-B576-425A-8DD9-BF4C01AC7003.png",
+        "timestamp": 1791072689.769
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testUserFormattingSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testUserFormattingSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "AB0623C0-B17F-4B04-9F05-076A619AB9F2.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "weather-rows-accessible_0_6E5AE9E4-75A1-493A-ACFC-45E3444ED3DD.png",
+        "timestamp": 1791072689.904
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "652E70E7-4ED4-4FAB-AF11-9EFD64593A76.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "weather-rows-320_0_FBFE8000-923A-4AF9-AD6F-D3DBC4304287.png",
+        "timestamp": 1791072689.879
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "CE91B8EA-1D6E-4C2A-8B49-9F5365F519A1.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "weather-rows-390_0_193288F2-C429-4B49-B309-0D5290ACD0ED.png",
+        "timestamp": 1791072689.865
+      }
+    ],
+    "testIdentifier": "AssistantMarkdownTests/testWeatherForecastRowsSnapshots()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/AssistantMarkdownTests/testWeatherForecastRowsSnapshots"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "D050C1D5-D8A3-43AC-8071-9213DBA38A60.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "tools-load-failed-phone-light-402-accessible-top_0_97B35AC0-70EA-4DE0-BFFD-9FDB204FC629.png",
+        "timestamp": 1791072717.199
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B27372C8-AAD4-4B69-8068-BCAAF113C482.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-refresh-failed-phone-light-402-accessible-scroll-05_0_A2A76B9D-5B68-4003-A7D8-24569FA9ACBA.png",
+        "timestamp": 1791072716.39
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A175ED91-FEBF-46C9-A4FA-F78501D70513.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-refresh-failed-phone-light-402-accessible-scroll-04_0_898FA936-DB43-4677-8F0E-24BFC8E94C0B.png",
+        "timestamp": 1791072715.949
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "9A9F200D-703A-4C87-931B-75DE0F30325C.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-refresh-failed-phone-light-402-accessible-scroll-03_0_96C4804C-E15A-4E5B-B25C-78D86DFE0888.png",
+        "timestamp": 1791072715.523
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "6600D90E-E401-4678-98B9-90469B5FE2AA.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-refresh-failed-phone-light-402-accessible-scroll-02_0_32B7D31E-327F-441B-B8AF-FA44D84C7ADB.png",
+        "timestamp": 1791072715.083
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "65E62F14-104F-49E6-8B78-C6161304EE07.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-refresh-failed-phone-light-402-accessible-scroll-01_0_E9467F32-9D6C-4D0D-A532-F332913669EA.png",
+        "timestamp": 1791072714.637
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "195342A3-5F0F-4448-9A64-76F60F32FF48.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-refresh-failed-phone-light-402-accessible-top_0_AB2E0B59-6244-4F81-95C8-FC9FF7D4BC1D.png",
+        "timestamp": 1791072714.196
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F51E4B93-41D5-48DE-9621-00448AA54276.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "providers-refresh-failed-phone-light-402-accessible-scroll-03_0_63C19C2A-589F-402D-922B-C14B270C8B7B.png",
+        "timestamp": 1791072713.388
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "9445FB87-AA1E-47A6-BCCB-0CB315FA373F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "providers-refresh-failed-phone-light-402-accessible-scroll-02_0_ED5AB9A7-155F-46C9-AB9F-0F4ED485A573.png",
+        "timestamp": 1791072712.947
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "5DED51BA-F403-4261-AADF-E40A3860A74B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "providers-refresh-failed-phone-light-402-accessible-scroll-01_0_FBDFFAB3-A775-4974-BE04-CFEF774C0E93.png",
+        "timestamp": 1791072712.498
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "2E998EC0-EBFC-4F88-82EB-C135406CEADA.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "providers-refresh-failed-phone-light-402-accessible-top_0_D033AD92-99AF-4D27-A9AF-4CD4B77CDFB6.png",
+        "timestamp": 1791072712.065
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "9B14909C-8B8F-42CA-8CEC-41B4D852EAD4.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-load-failed-phone-light-402-accessible-scroll-07_0_1A2FB941-8A5B-4868-BF9B-4FEDA391C20D.png",
+        "timestamp": 1791072711.24
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "6653EB6F-EE01-4A1E-82AB-F623DFD59AB6.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-load-failed-phone-light-402-accessible-scroll-06_0_A193057F-7570-4D85-B2C8-9E194F79F653.png",
+        "timestamp": 1791072710.831
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "6B854432-BCD9-4510-83A1-41A736CD57CF.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-load-failed-phone-light-402-accessible-scroll-05_0_C64384D4-CED8-45BF-BF31-B48EB7EEE882.png",
+        "timestamp": 1791072710.413
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "FABFCF0F-1044-478B-8FA2-A885737C8B44.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-load-failed-phone-light-402-accessible-scroll-04_0_C7B4C050-BBAF-4780-9476-A3A78732276E.png",
+        "timestamp": 1791072710
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B2B09567-9508-46EC-BCB6-22CF67458D2B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-load-failed-phone-light-402-accessible-scroll-03_0_C753D596-1BF5-45AF-BCAB-211253224310.png",
+        "timestamp": 1791072709.584
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "DD4B997A-EAEE-432F-A6A4-0C3B8427B945.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-load-failed-phone-light-402-accessible-scroll-02_0_FDCE7E0A-2A0B-4075-9909-6A444C1E518D.png",
+        "timestamp": 1791072709.166
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "15ADDB08-092F-44A5-A7BA-0031EE8AA19F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-load-failed-phone-light-402-accessible-scroll-01_0_7314AEAE-6E56-4484-A515-6A836CD97D77.png",
+        "timestamp": 1791072708.755
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "38637086-9733-4D44-8FA3-6D66146033F7.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-load-failed-phone-light-402-accessible-top_0_922CE018-C1BD-4702-A62A-76777E660016.png",
+        "timestamp": 1791072708.338
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "BFEFBB8F-DF61-4F9B-94EA-A7EC47FDD8ED.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "tools-load-failed-phone-dark-402-top_0_E92A074A-8744-4ACD-A5A9-5813DBC135DB.png",
+        "timestamp": 1791072707.512
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "DBDADD34-F0F5-4A4D-AE42-5AA6A5DB962B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-refresh-failed-phone-dark-402-scroll-01_0_02A6FBA7-3292-405A-838D-D4CA373A404D.png",
+        "timestamp": 1791072706.704
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B9358C3E-174F-4102-AF28-8792576E2BB7.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-refresh-failed-phone-dark-402-top_0_16CDF3D5-6D81-42B9-BD62-DE7FDD4387F0.png",
+        "timestamp": 1791072706.255
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "28F27D7A-A126-47B2-B8CB-49A925FA18B0.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "providers-refresh-failed-phone-dark-402-scroll-01_0_01CDD4D6-76D1-46AB-A51F-744733F0880A.png",
+        "timestamp": 1791072705.447
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F099DDEC-8E64-446C-B730-8134D54820B0.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "providers-refresh-failed-phone-dark-402-top_0_953907D0-654F-4ABC-83C7-5DE85F8AFC12.png",
+        "timestamp": 1791072705.01
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "D86C498F-38CD-4571-9C00-568059CC8358.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-load-failed-phone-dark-402-scroll-03_0_7E6C81E2-C6A6-452F-B693-4CF8396627BC.png",
+        "timestamp": 1791072704.172
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B3953FB6-3EEF-428D-A010-C06CA05230B9.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-load-failed-phone-dark-402-scroll-02_0_733DF26F-C392-4DCA-94BE-F498F5C5D902.png",
+        "timestamp": 1791072703.751
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "3CD6C108-D34F-46CB-A0FA-E04FC6484479.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-load-failed-phone-dark-402-scroll-01_0_59A522DB-00D3-4E72-A1A8-1F1F161BF898.png",
+        "timestamp": 1791072703.344
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "BDE4AED9-69EA-46F8-82EF-172334DFE146.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-load-failed-phone-dark-402-top_0_BB19E065-6EAF-4F3F-800C-547A85546966.png",
+        "timestamp": 1791072702.927
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "BB88A4B8-2429-4633-B724-6FEA35F7BA9E.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "tools-load-failed-phone-light-402-top_0_F29A1D26-042D-4FF5-BEA6-6CB29BAAA814.png",
+        "timestamp": 1791072702.113
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "9F80DD02-9BB6-4506-9C51-86B55E1C7882.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-refresh-failed-phone-light-402-scroll-01_0_8BE698E9-9EDB-4869-AEC0-AD1B008A5AD2.png",
+        "timestamp": 1791072701.307
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "0E7B6018-331A-474C-84C8-3464360363A3.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-refresh-failed-phone-light-402-top_0_1CD62EE4-54FB-4A47-B81F-D864346FF04C.png",
+        "timestamp": 1791072700.864
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F90C1116-E280-43FA-8765-961133C9F84B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "providers-refresh-failed-phone-light-402-scroll-01_0_A829C609-6556-4AC8-A34D-1321227DA3B0.png",
+        "timestamp": 1791072700.054
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "3D743267-0569-4831-AEB0-09975FEF79A1.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "providers-refresh-failed-phone-light-402-top_0_76506AA4-FBBA-4CDD-BA5E-0895F5BB9236.png",
+        "timestamp": 1791072699.605
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "764E7948-24C8-4FEF-A820-8D1AB9A7AF02.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-load-failed-phone-light-402-scroll-03_0_E78C6217-E958-4D74-BEB5-B0E946046006.png",
+        "timestamp": 1791072698.792
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "3D2CFCB6-E151-4E01-9E87-521A2866930F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-load-failed-phone-light-402-scroll-02_0_55BF792B-B1AA-4197-951A-82423B2C9D8B.png",
+        "timestamp": 1791072698.369
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C8745A22-CC0E-46F9-AFCE-9C3AA6C529BC.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-load-failed-phone-light-402-scroll-01_0_4E8B0969-6DE6-4094-9EE5-AC3F19623188.png",
+        "timestamp": 1791072697.968
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "AF38B083-214E-4258-8D2B-71F4DFF35FA0.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-load-failed-phone-light-402-top_0_D068F2B1-6AB6-45EE-89F4-DF954956530F.png",
+        "timestamp": 1791072697.561
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "62E2506D-A63D-4FDB-A6B2-54E58A62C058.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "skills-empty-phone-dark-402-top_0_020F182B-298F-4009-AB23-D37B094F7843.png",
+        "timestamp": 1791072696.759
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E235797B-165B-4084-B98E-9E018ABBEC8B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "approvals-empty-phone-dark-402-top_0_776D679F-47A9-4D19-99EF-B682177EE2A7.png",
+        "timestamp": 1791072695.951
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B8433862-B209-4013-913C-26045B646384.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "goals-empty-phone-dark-402-top_0_4F9322F5-0D9D-4D92-9F0D-7196F57537FF.png",
+        "timestamp": 1791072695.14
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "23E76A1F-AB4C-4210-8648-9AAEC97CFB56.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "activity-empty-phone-dark-402-top_0_D6C7A48B-DB54-4DA7-9D34-F0F776121C86.png",
+        "timestamp": 1791072694.315
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "5EEE1BE3-E224-455A-A67E-F59F7257E6F2.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "skills-empty-phone-light-402-top_0_D28F84BB-5BB9-404B-8434-E415715AC274.png",
+        "timestamp": 1791072693.485
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "ED2D390B-A4E5-4449-9FC8-F30D7E0DAB36.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "approvals-empty-phone-light-402-top_0_E1F3E6F4-C4BD-470A-9B70-749BB017966E.png",
+        "timestamp": 1791072692.648
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A72E8F78-8CAF-4E25-B189-FBEC936ED8DA.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "goals-empty-phone-light-402-top_0_68426E00-810C-4BB9-BCEA-A25F44FDBC2F.png",
+        "timestamp": 1791072691.827
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F19EE707-7C9A-4293-AFDD-7E2867252578.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "activity-empty-phone-light-402-top_0_E450AF39-3C34-46F8-A07F-D887B2AB3CB7.png",
+        "timestamp": 1791072690.998
+      }
+    ],
+    "testIdentifier": "NativeVisualReviewTests/testEmptyAndRefreshFailurePages()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/NativeVisualReviewTests/testEmptyAndRefreshFailurePages"
+  },
+  {
+    "attachments": [
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "7206D67E-EB96-4E3D-A05B-5FC9A633B8DB.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "report-issue-phone-light-402-accessible-scroll-03_0_506E19AB-4916-4975-A07A-BE1AFA41796E.png",
+        "timestamp": 1791072876.261
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "85B4AB2A-CD98-4F07-B4FE-B9BF13071AC8.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "report-issue-phone-light-402-accessible-scroll-02_0_E5ACBE15-ADBC-42DF-AF0E-4C71F29C7FE0.png",
+        "timestamp": 1791072875.844
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C80E3CB3-C970-4AAA-9382-CBAD6BBC9592.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "report-issue-phone-light-402-accessible-scroll-01_0_AEE9935E-1D85-4A1A-8BAA-CB2464D636FB.png",
+        "timestamp": 1791072875.424
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E679896C-57EE-4C32-A79C-E77729A3B835.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "report-issue-phone-light-402-accessible-top_0_02F89DEF-BD6C-4C60-AA2D-9045BFCF8E8B.png",
+        "timestamp": 1791072874.998
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "1E328D7A-D1D7-453F-AC76-2D137E0D2EB8.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "writing-voice-editor-phone-light-402-accessible-scroll-01_0_81D12827-50C6-4B50-B121-36C02B803670.png",
+        "timestamp": 1791072874.202
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "948EDD3F-3D51-451B-8ED6-A10EE25788BC.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "writing-voice-editor-phone-light-402-accessible-top_0_736C5045-3770-4CC1-9A59-9BE81D644D4D.png",
+        "timestamp": 1791072873.791
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "55C431A8-3CF7-45B3-8059-CEBD279FD181.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "edit-goal-phone-light-402-accessible-scroll-03_0_407F41FF-BC9D-44CA-AF79-A770A024CF2C.png",
+        "timestamp": 1791072872.983
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "88EE66CB-DC05-47B7-9014-C8ADE47C10D6.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "edit-goal-phone-light-402-accessible-scroll-02_0_01F3FFB3-E288-4D50-91B3-C52CD4CFDBB5.png",
+        "timestamp": 1791072872.55
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "CBA6D7F0-AECF-4E29-9D13-A501F0B22E90.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "edit-goal-phone-light-402-accessible-scroll-01_0_F26D25E9-EDEF-4D78-A5D7-78AC47EE638C.png",
+        "timestamp": 1791072872.121
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "569F5446-E34B-48F5-B441-95092092F259.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "edit-goal-phone-light-402-accessible-top_0_F630B061-2374-4B13-87E4-309F78E28469.png",
+        "timestamp": 1791072871.677
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "169D4656-5C1B-4212-92CC-5859611D7DD8.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "provider-detail-phone-light-402-accessible-scroll-03_0_D98FB34E-5780-4B39-AFB8-3F1801B32D93.png",
+        "timestamp": 1791072870.863
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "7773A801-5033-49E4-8653-D09979EF659C.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "provider-detail-phone-light-402-accessible-scroll-02_0_3020559D-79EE-4555-AD27-16AD52A1EE2B.png",
+        "timestamp": 1791072870.416
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "2BCD3320-9977-4BB2-B672-70A2E2BBCA11.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "provider-detail-phone-light-402-accessible-scroll-01_0_63024322-71A9-4691-A167-20E32E2DDB79.png",
+        "timestamp": 1791072869.976
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "4D9C8F01-4F97-456D-A006-1633E29A7F2A.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "provider-detail-phone-light-402-accessible-top_0_48442905-81DA-4782-A1CC-F9DE9FC7AA2A.png",
+        "timestamp": 1791072869.533
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "544CF7D1-A029-4DE4-B1E0-F0262EEDBFA5.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-phone-light-402-accessible-scroll-04_0_BA223189-A88A-47E6-AA45-F4D5C110D3F3.png",
+        "timestamp": 1791072868.736
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "6CE461C2-93DD-4163-9D3E-3CDCA5DD5076.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-phone-light-402-accessible-scroll-03_0_297B877E-C51D-4FDE-B5A2-FDEE1F4593F3.png",
+        "timestamp": 1791072868.312
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "3D18714B-A68F-49DC-A8D2-99F0D42689E5.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-phone-light-402-accessible-scroll-02_0_99B47900-52B7-4207-92DA-5E12B1045B58.png",
+        "timestamp": 1791072867.867
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "45C15CC9-C1D5-416E-9968-935FCFCF1352.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-phone-light-402-accessible-scroll-01_0_B8CA168B-3002-47E6-A8D4-88EF84AE513C.png",
+        "timestamp": 1791072867.42
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "2BE3801D-95A6-4BD1-A4D4-7B122C278230.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-phone-light-402-accessible-top_0_B23D3E01-53B8-4F82-9068-9BCEAF702EEE.png",
+        "timestamp": 1791072866.978
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "EC66A8A2-E8EB-4A03-B156-8331A9E7B24A.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "memory-phone-light-402-accessible-scroll-03_0_C0A0D4E0-F374-45E2-9CFB-4F93A83CC339.png",
+        "timestamp": 1791072866.146
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "78F36D8E-1DC2-4644-8C26-EE36E50F90E5.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "memory-phone-light-402-accessible-scroll-02_0_1409AD97-ED2B-431B-8024-471D9E7F28C5.png",
+        "timestamp": 1791072865.707
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "7CAD20B9-FA33-45B0-ACAE-858E39895C7C.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "memory-phone-light-402-accessible-scroll-01_0_DAAAC17C-D9A0-4536-9128-8E02EC198267.png",
+        "timestamp": 1791072865.262
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "26389308-E64A-4014-ACF9-21EB956FA8F1.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "memory-phone-light-402-accessible-top_0_42CE3E08-0302-4C6C-B81A-D2B2643E3281.png",
+        "timestamp": 1791072864.825
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "AB427BCA-1C0D-4F14-8FEC-801B19F59760.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "people-phone-light-402-accessible-top_0_4C02CE67-A6A9-46DF-A01F-8BCD40244290.png",
+        "timestamp": 1791072864.031
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "4CF3665B-C375-48EF-81CC-7BCC4C2C32A6.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-light-402-accessible-scroll-09_0_9D4924FF-A923-4CD7-A5AF-EEAE95BBAE0B.png",
+        "timestamp": 1791072863.221
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "5D5FDA9E-5F5C-4170-909C-00770AE0D72A.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-light-402-accessible-scroll-08_0_98178A87-050A-4E75-80B4-F97648B70F3F.png",
+        "timestamp": 1791072862.795
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A72010EB-861D-4C05-8F02-C72E19525CC6.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-light-402-accessible-scroll-07_0_1880F06A-3343-4F9C-9B9C-73E0ED4699D3.png",
+        "timestamp": 1791072862.381
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E91AE33B-38E9-4A75-9E43-FEA4D3049FAF.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-light-402-accessible-scroll-06_0_403C9EA3-61B9-4CD9-9B2D-4FBCD5D7AE62.png",
+        "timestamp": 1791072861.956
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E3269F85-0B81-4ADB-BDFC-47C82337C6D2.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-light-402-accessible-scroll-05_0_4ACDA68C-D51D-429D-9259-9D106DC9954F.png",
+        "timestamp": 1791072861.548
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "21AE3D24-0A76-4BC5-9817-2F4AFA863D16.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-light-402-accessible-scroll-04_0_B8915FA6-9B25-47D3-8C36-6E51E694C12A.png",
+        "timestamp": 1791072861.13
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "798C6291-20B1-46E2-B984-72B340729A51.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-light-402-accessible-scroll-03_0_ED612B6E-B3FB-420E-97F4-87594F457D07.png",
+        "timestamp": 1791072860.712
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B9716AA8-CE2F-4214-85A7-A4E94CE6BF6E.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-light-402-accessible-scroll-02_0_BC9AA9F2-8985-40EB-823A-AE956885D115.png",
+        "timestamp": 1791072860.297
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "DA87A7D6-0DA4-4F2D-AEF2-888A5C003CE2.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-light-402-accessible-scroll-01_0_A5E1171C-3BC5-46A5-8282-6B93319C5C03.png",
+        "timestamp": 1791072859.884
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "4DB39A9C-8F4E-4280-8FF5-8CF6BED75D76.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-light-402-accessible-top_0_207C9E9E-3CF7-4326-9AAC-6A41D76338E7.png",
+        "timestamp": 1791072859.455
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "5EA91580-90F4-41AF-BC73-971C088CF547.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "approvals-phone-light-402-accessible-scroll-01_0_A3390704-EE62-49EA-9822-56E8B45996D5.png",
+        "timestamp": 1791072858.641
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "6CFFADBF-5A2B-42E4-8BDE-CEC8D31DD332.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "approvals-phone-light-402-accessible-top_0_873D1474-0491-4811-9FCD-FAF8D0C406B3.png",
+        "timestamp": 1791072858.218
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "2484F5AB-5BB4-49DB-B2AF-051C8EB41770.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "activity-phone-light-402-accessible-scroll-02_0_58658AD6-9CAA-4235-9AF3-0A0CBCE63D90.png",
+        "timestamp": 1791072857.406
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "FFD32A1A-92BE-42AF-A228-605F503B41A3.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "activity-phone-light-402-accessible-scroll-01_0_1F066581-0BA1-4E74-9FF7-F1B8301D27CD.png",
+        "timestamp": 1791072856.966
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "2C594FB5-9475-40B0-A6CA-CACFB01252FF.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "activity-phone-light-402-accessible-top_0_78941AE8-DAD7-4E1E-8F6E-D14B67F2D16D.png",
+        "timestamp": 1791072856.526
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "652F50C8-FA3A-48F6-99A9-0F6CA7E2BA5A.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "choice-reason-phone-dark-402-top_0_4AA443C3-D9CF-4498-93DA-3171DDDF56FF.png",
+        "timestamp": 1791072855.72
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "2E107DCE-F5B9-4A92-A3BA-728C57C748ED.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "rehearse-change-phone-dark-402-top_0_33F49FE8-59F3-4F3D-BEFF-F4B855755018.png",
+        "timestamp": 1791072854.91
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "0A3F064F-A819-4C55-A036-9D284CDB2EAF.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "linked-item-phone-dark-402-top_0_3D2C0F7D-99FF-4C1F-B245-33337CECD1B4.png",
+        "timestamp": 1791072854.097
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F249BDF6-B1DB-4CBE-802A-73B9A8622B98.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "new-pack-phone-dark-402-top_0_25C69ACB-B702-44D2-BF1B-AF66364B6033.png",
+        "timestamp": 1791072853.282
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "5EF92CC5-A6FC-4AB2-B041-94C3D6B536D8.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-connection-detail-phone-dark-402-top_0_C1531F48-56C0-4852-BB3F-807F2FE863F7.png",
+        "timestamp": 1791072852.46
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F9D77642-0FA9-44CC-B77F-C876497ACAD6.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-connections-phone-dark-402-scroll-02_0_5669CABA-9E6B-4966-98A6-0AD2F783464A.png",
+        "timestamp": 1791072851.656
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B0BE9C51-7B05-4CBC-AE45-0941BB7C70EC.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-connections-phone-dark-402-scroll-01_0_A161B6EB-0260-4B53-AAA9-667EFD07FAA5.png",
+        "timestamp": 1791072851.231
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "56227207-1FA7-400A-9DA1-B4D6EE62B1B7.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-connections-phone-dark-402-top_0_F54755EA-127C-4C2C-B4E8-7E29AD2509DB.png",
+        "timestamp": 1791072850.803
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F9A1D01F-D5F2-4DA3-A5EC-89BAE216460D.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-find-phone-dark-402-scroll-02_0_449E4B14-318C-46FB-A09F-4F1F44D2E219.png",
+        "timestamp": 1791072849.984
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "1508BFD2-74A2-4160-A281-32260F09B3C1.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-find-phone-dark-402-scroll-01_0_F4E056E1-16F6-4882-81C2-8F59164B8D0E.png",
+        "timestamp": 1791072849.565
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "78E35A37-1E4A-4469-8913-82CD73EDAEC2.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-find-phone-dark-402-top_0_40D8E1D1-674C-44B9-A216-0BC8F8A7D2C6.png",
+        "timestamp": 1791072849.151
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E8169E5E-3A2A-4A55-BA9F-02A38455CEC5.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "choose-model-phone-dark-402-top_0_7F314FAA-69E4-448A-A3FB-42AE7439D389.png",
+        "timestamp": 1791072848.346
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C14DF136-1586-423D-8E62-F3CB0BFA8AE9.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "provider-detail-phone-dark-402-top_0_D20AB042-12F8-469C-84EB-83807D9356BA.png",
+        "timestamp": 1791072847.558
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "47C2F790-1ED9-4580-88B1-46C902155C1B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "connect-provider-phone-dark-402-top_0_37081817-9B45-47FD-9D5B-8C3C100F1894.png",
+        "timestamp": 1791072846.74
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "70ADEC5F-4885-4803-99DE-30539B6C29AE.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "report-issue-phone-dark-402-top_0_11AFB9EB-342B-4D6B-92A5-759DE1922C1D.png",
+        "timestamp": 1791072845.926
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B0229EC9-ADE2-4C63-B5EF-4896591C3430.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "cost-limits-phone-dark-402-top_0_41CDEB5B-79BD-4FE6-AB50-25CA60A6C274.png",
+        "timestamp": 1791072845.102
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "3295B991-9934-46F4-A91F-0F25D0B3DD25.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "edit-skill-phone-dark-402-top_0_F0B1BC28-37CC-4E08-A961-79A5438FFB69.png",
+        "timestamp": 1791072844.294
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "770B79C7-61DC-4037-A3CF-6DA10F31D4FF.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "new-skill-phone-dark-402-top_0_2A442DAD-B266-4251-BEF8-1876BEF33A68.png",
+        "timestamp": 1791072843.5
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "BD532265-E263-4F33-B9E2-77BC387E2709.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "connected-tools-phone-dark-402-top_0_497B489A-A931-4E49-9B2F-27C85FB07BF7.png",
+        "timestamp": 1791072842.659
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A3168FE0-C400-4026-A745-C05D31BEFAC4.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "assistant-settings-phone-dark-402-top_0_FE4A4C71-5972-4007-9148-90159AC0A2D1.png",
+        "timestamp": 1791072841.835
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B66674BC-E14F-4778-B9E1-CE783CEE9C27.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "reminders-phone-dark-402-top_0_CB08B19E-4337-495E-A2E3-25BFC9A3080D.png",
+        "timestamp": 1791072841.027
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "FE4F8A1E-134E-4F96-80D1-C1D2F0C4BD2B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-phone-dark-402-scroll-01_0_AC57E7A7-30F2-4D6C-BAD1-EED2F37767C0.png",
+        "timestamp": 1791072840.219
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A9311042-8BFF-4852-9A97-0812742AD01B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-phone-dark-402-top_0_1796BD61-239B-46B2-B892-F67D0075F70B.png",
+        "timestamp": 1791072839.78
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "3181625D-BD16-4ADF-AD87-CE6C3610ECF2.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "anomalies-phone-dark-402-top_0_76C431D8-5A4F-4CC4-B942-3194653AAEA2.png",
+        "timestamp": 1791072838.96
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E7EDC131-7B5A-4F29-B325-07F75278A6A7.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "costs-phone-dark-402-top_0_A07A0847-E9BA-40D5-8BBF-1A9C9B29D831.png",
+        "timestamp": 1791072838.14
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "D5DA785A-D511-4241-B5A8-1E22D0AFE5A5.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "capabilities-phone-dark-402-top_0_27703AD4-B6FA-4BC7-A0E7-DFF6CCFC6218.png",
+        "timestamp": 1791072837.342
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A563B3B3-B6E4-415C-B603-0ACF73FE51B6.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "skills-phone-dark-402-top_0_65E914B2-762C-4F89-ABE3-57B4EA428333.png",
+        "timestamp": 1791072836.519
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "75773868-05B1-4A58-8C2D-6AA05C5BAA3F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "documents-phone-dark-402-top_0_32685CE7-ED23-4609-BB08-EACC79410389.png",
+        "timestamp": 1791072835.709
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A7BD09C6-D160-4519-BE85-F6D54444E2FD.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "chats-phone-dark-402-top_0_F7B91F78-5336-404C-BF3B-E12F904B2C6C.png",
+        "timestamp": 1791072834.894
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "FC6D1800-024A-4EC5-9F48-CF490C439FB5.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "situation-pack-phone-dark-402-top_0_4E5B9A85-E7E2-40AF-AEFF-2B95789BA62A.png",
+        "timestamp": 1791072834.092
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "1811F2D6-90DC-4D16-B768-F4C435E94709.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "situation-packs-phone-dark-402-top_0_320FF058-90B8-485F-B3BA-C9E57A5589BB.png",
+        "timestamp": 1791072833.282
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "BF2CFA6E-7764-4F47-BB21-B7E9E99B5EA8.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "edit-item-phone-dark-402-top_0_D6EFF304-C6FF-4464-B4A9-27CC0DB6D7DA.png",
+        "timestamp": 1791072832.439
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "6A92E993-BF0C-402A-ABEE-680ECA54E109.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "correct-connection-phone-dark-402-top_0_B9F49FB5-F161-4A19-AC41-4EB29D37B7C7.png",
+        "timestamp": 1791072831.629
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A6559DC9-3D5B-4864-9422-065E1A173685.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "new-connection-phone-dark-402-top_0_08C76EBD-46E1-4A93-84B7-208B30F71207.png",
+        "timestamp": 1791072830.819
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "BB424EE9-B73B-40DC-82A3-EDD0D6DC50E4.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-settings-phone-dark-402-scroll-03_0_58EF8F92-2679-4FD7-9C08-3EEC9442CBC2.png",
+        "timestamp": 1791072829.993
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "AC68DE34-122B-46CD-8DEE-996D014ABF5F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-settings-phone-dark-402-scroll-02_0_6B0D767A-9A47-46D5-975B-9A91B14179FE.png",
+        "timestamp": 1791072829.555
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C075DDB1-2FA1-465F-BDE7-92EDE121E91E.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-settings-phone-dark-402-scroll-01_0_08E46669-546A-48CD-8BD0-86FC528A0846.png",
+        "timestamp": 1791072829.123
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A0BD3ACF-7328-4D31-B9BA-E6C2BB6E5D7B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-settings-phone-dark-402-top_0_6ACD5410-4A0E-4797-AE07-C2F13BCCA7D4.png",
+        "timestamp": 1791072828.697
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "5B5B53BC-15E1-47EF-919A-E034999D756C.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-quick-connect-phone-dark-402-scroll-03_0_87229073-9FA5-4074-A758-25B93FB321B9.png",
+        "timestamp": 1791072827.866
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F13C480A-C36A-4C84-B447-A0D24F78C0BC.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-quick-connect-phone-dark-402-scroll-02_0_9751AE51-9B7A-4E0C-9B5C-0D99B8273D05.png",
+        "timestamp": 1791072827.436
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "421EFBEB-0F23-4329-8942-F31E02E22CC9.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-quick-connect-phone-dark-402-scroll-01_0_B9F10FED-D24A-4A51-A0E4-B41F67B403DE.png",
+        "timestamp": 1791072827.042
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "780390B1-1747-4383-A0C2-A1644B754795.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-quick-connect-phone-dark-402-top_0_DD7AEF2F-2246-45F0-A033-FC985CC148CE.png",
+        "timestamp": 1791072826.633
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F3FBE530-5949-42F5-B9D0-CA9DE90D875D.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-add-connection-phone-dark-402-scroll-03_0_64ADDB45-E01F-4A86-9BAA-626B4FECBF0B.png",
+        "timestamp": 1791072825.836
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B2F88D52-A0DD-490F-B52D-D29CE0C1EE26.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-add-connection-phone-dark-402-scroll-02_0_D726C1B8-5E31-4F6D-B428-0EF7466AB1A5.png",
+        "timestamp": 1791072825.399
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B3FA7E1E-0C6B-437C-92B3-A20245F9A557.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-add-connection-phone-dark-402-scroll-01_0_7705F840-B3D9-4839-A40B-4C02140AC88B.png",
+        "timestamp": 1791072824.962
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "3525F2B5-2D67-434D-ACCA-3CFB02CB7B10.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-add-connection-phone-dark-402-top_0_11D7798D-89DF-45B1-B2CE-19B42964B529.png",
+        "timestamp": 1791072824.528
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C3CFA0F5-12A6-4E03-BE8F-1EA482B90F27.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-groups-phone-dark-402-top_0_669A0909-E376-4424-9859-6858EB5834F8.png",
+        "timestamp": 1791072823.701
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "1A7A1AF3-5B41-4435-9F7A-781DB017DBA8.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-phone-dark-402-top_0_3FF9822D-F7EC-44B9-9999-F742487EDC01.png",
+        "timestamp": 1791072822.868
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "ED2E99BC-65CD-4002-B8CF-FC5A7C9EB130.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "edit-goal-phone-dark-402-top_0_472AA6EC-9F5A-43CE-B466-1B32A0B63590.png",
+        "timestamp": 1791072822.043
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "3F7E655C-A8D7-4FE7-8EE9-A204CD451AF4.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "new-goal-phone-dark-402-top_0_714F8ED0-71FE-405B-BD21-DFD33AEC72A7.png",
+        "timestamp": 1791072821.205
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A3029588-3A20-4CC4-AA86-F89E1878B483.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "edit-open-loop-phone-dark-402-top_0_7E16E3A5-34F3-4786-A4DB-56910E32B93A.png",
+        "timestamp": 1791072820.377
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "ADBE12A7-74FA-4F31-A8A2-24A8A3FE9047.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "relationship-evidence-phone-dark-402-top_0_2C172658-1A8E-4289-8FFA-77AA38657D54.png",
+        "timestamp": 1791072819.561
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "579EAECF-FA15-4C0C-BDCA-00D0FF1CC65D.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "people-connections-phone-dark-402-top_0_6ED960CE-9D25-45F0-8F93-DE8BA7C2CEB9.png",
+        "timestamp": 1791072818.75
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "16A867F5-E8ED-426D-9358-E72051E188F7.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "edit-occasion-phone-dark-402-top_0_700877D7-A4D9-4807-9774-8F76BD828C27.png",
+        "timestamp": 1791072817.952
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "D33B3148-ADBA-48E9-A0AF-B4D69AA03CD8.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "new-occasion-phone-dark-402-top_0_42E4D883-5416-4979-B525-8F71F0193BF2.png",
+        "timestamp": 1791072817.162
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A3C53002-8E34-4E09-A5AE-3C2F0D1054AA.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "person-dates-phone-dark-402-top_0_BBC26530-7CD9-422C-BCF8-1E1F9B73712A.png",
+        "timestamp": 1791072816.326
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "1D8C821B-D526-4E1C-9C74-D49F4FD03E18.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "person-details-phone-dark-402-top_0_E7356552-5560-4F56-93BF-303D4CC9C057.png",
+        "timestamp": 1791072815.524
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "DE5E2413-51CF-4215-A84F-C3E95E846B21.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "person-phone-dark-402-scroll-01_0_EB37F20D-B3AC-46BB-986D-B80B02E4D993.png",
+        "timestamp": 1791072814.694
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "1931A77E-C02F-4146-BD41-1FA423AE0E4D.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "person-phone-dark-402-top_0_5A89665A-11A2-4E32-9C71-0D0CE5373736.png",
+        "timestamp": 1791072814.256
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "31DC5D20-5ADA-4A38-A408-0B8FC769E9C8.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "edit-person-phone-dark-402-top_0_559C0132-4FB6-4EE6-86EB-3EB155132F22.png",
+        "timestamp": 1791072813.444
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "9113738A-2CFA-49A1-B2A8-99C54B9B9A80.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "new-person-phone-dark-402-top_0_3563009F-0F0E-4CC0-A6C4-F3552C7A28CB.png",
+        "timestamp": 1791072812.619
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "AF844610-75EC-482A-A86C-01964193707E.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "correct-memory-phone-dark-402-top_0_0C88F8A1-31E7-47AA-B76A-F318FCC240C1.png",
+        "timestamp": 1791072811.809
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "9EE2133B-BD49-4F3D-B207-60D00EAF25CE.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "new-memory-phone-dark-402-top_0_21F3A224-876C-40CD-9109-9D7807D69FD4.png",
+        "timestamp": 1791072811.005
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "50659992-572C-45CA-9D40-BEFECF48B4D3.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "memory-fact-phone-dark-402-top_0_8A86F422-EBF9-46EA-B65D-D5662B365A9D.png",
+        "timestamp": 1791072810.173
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "22ED65AA-3AB5-4909-A5BD-3322367F00DC.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "forget-source-phone-dark-402-top_0_6460232B-E6D0-41B1-8FC8-E10E00F0A325.png",
+        "timestamp": 1791072809.362
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A8E4F886-D41A-4539-B773-C61CB2F73D99.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "tidy-up-phone-dark-402-top_0_7BD726F7-3307-4317-8220-C434952F00C0.png",
+        "timestamp": 1791072808.556
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E07507F4-CFDC-45E7-8253-A606BCF353CC.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "your-data-phone-dark-402-top_0_F0C94036-F00B-408D-8DFC-F4AD2BF61A3A.png",
+        "timestamp": 1791072807.743
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "6B027DEB-5A6E-4354-910E-2315B2BCC22D.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "writing-voice-editor-phone-dark-402-top_0_715EBD20-0ADD-4BA7-9F30-FB03F0E9DB8D.png",
+        "timestamp": 1791072806.941
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "8484CD42-0DF9-4C30-A433-5BA574A3AF39.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "writing-voice-phone-dark-402-top_0_F9FA5E78-450A-4819-8B7C-98910B89331D.png",
+        "timestamp": 1791072806.118
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "72CB8173-1B8F-4C1F-967C-7B3557ABDBF4.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "profile-summary-phone-dark-402-top_0_B5F21BAB-0841-40BE-A0BA-643A1D412F50.png",
+        "timestamp": 1791072805.294
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C6288D8B-2DDC-475D-9DA6-3A3396EF1718.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "open-loops-phone-dark-402-top_0_EE4D9BE3-B1FF-44E1-9BFA-4EEF331E15CB.png",
+        "timestamp": 1791072804.482
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "65952C61-9CE0-4F7C-A995-892705649E02.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "memory-library-phone-dark-402-top_0_FFFEBCE0-DAAF-46C3-A350-890B9DA24A9E.png",
+        "timestamp": 1791072803.673
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A0D7B610-F0FE-4E7B-B40A-9953EEC98561.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "talk-paused-phone-dark-402-top_0_3AB0E423-04DD-448E-BAA7-D3F30852FD35.png",
+        "timestamp": 1791072802.878
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "2B8A2A36-008A-4C85-844B-0F8AB61EC914.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "call-detail-phone-dark-402-top_0_A26DCDB8-F276-48D3-A297-E7178AF4E8B2.png",
+        "timestamp": 1791072802.057
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A5AC9AC4-C865-4ED7-AEC0-B3117D3E42FA.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "calls-phone-dark-402-top_0_7BE8F436-BFF0-4D4C-8630-05CC21F6CA1B.png",
+        "timestamp": 1791072801.232
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "0AAC4497-CF40-4C13-BB89-D78ED59A40AE.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "ai-providers-phone-dark-402-top_0_F69C5710-AAC5-4984-998F-EF745DC89B4D.png",
+        "timestamp": 1791072800.411
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "0D5EC65F-A44A-4E12-988E-846E13FB4F84.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "connection-onboarding-phone-dark-402-top_0_F919CF26-DC26-4900-B4C2-3DB2B2D84FED.png",
+        "timestamp": 1791072799.579
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "3FB9A4D3-F845-411E-8B57-D48851A2BA1F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "connection-phone-dark-402-top_0_F5CA355C-D997-4B1E-947D-11C0E04D5799.png",
+        "timestamp": 1791072798.756
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A9E16377-93C2-42AC-B4D3-5DE61BC694DC.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-dark-402-scroll-04_0_B83924CE-32A7-4B3F-90B9-067A344A220F.png",
+        "timestamp": 1791072797.916
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E9C27167-627A-464D-A847-5E3D5926B194.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-dark-402-scroll-03_0_5FB6BEAE-A946-4BC6-AD18-2143F84E4300.png",
+        "timestamp": 1791072797.506
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "87089AAF-3122-4550-9EF8-300CFA18FFF0.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-dark-402-scroll-02_0_8497B8D7-AAD9-4A40-B35B-41AA22787E8B.png",
+        "timestamp": 1791072797.105
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B14CB24A-3445-411B-9357-E6865000969E.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-dark-402-scroll-01_0_B5DFB123-E684-4F08-8C22-CCDE0A3F2CA5.png",
+        "timestamp": 1791072796.692
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "10D0C8BF-4847-487B-9C21-B3850DC2620C.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-dark-402-top_0_066D9425-AE48-47C9-B227-EF648455A352.png",
+        "timestamp": 1791072796.286
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "3F4F50CD-1C7C-417A-9C33-4FAA3A3F37F1.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "people-phone-dark-402-top_0_0D8977C9-211D-4EAB-87A2-4315506FCC6F.png",
+        "timestamp": 1791072795.474
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B1796230-801B-48D3-A599-DAB9EEE29DA2.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "memory-phone-dark-402-top_0_10ECCF41-BC1F-4145-B4AF-74DCF55744EE.png",
+        "timestamp": 1791072794.654
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "5436FCD0-68F6-4449-9E56-3CDACCE6CD65.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "cards-phone-dark-402-top_0_776B3814-4CF8-4179-83B8-17B0982AC630.png",
+        "timestamp": 1791072793.833
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "CCB1E1ED-FA15-4C93-8ED1-EF8689D706B4.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "family-suggestions-phone-dark-402-top_0_59704BFA-78C3-4A2B-B84C-FCDE825F356C.png",
+        "timestamp": 1791072793.019
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E139DF70-5819-4AEA-B405-905DBA8001EF.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "about-open-loops-phone-dark-402-top_0_BCF28DB1-24EC-4419-A2F2-8CD740313B5F.png",
+        "timestamp": 1791072792.2
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C272A042-6151-481C-8C0A-380072F35B54.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "approval-editor-phone-dark-402-top_0_313C1A98-5472-4C7A-9A62-F0D9D12DECF5.png",
+        "timestamp": 1791072791.377
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F48C262D-EC25-43A2-83BC-9A40166D0E0F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "approvals-phone-dark-402-top_0_E6626EE3-5B32-437C-8E87-B8F4438BED0D.png",
+        "timestamp": 1791072790.565
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "1D7BAE73-23CE-44E8-8E9A-65628920D769.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "goals-phone-dark-402-top_0_F1DA85E0-6B96-4743-A4C1-8BFAE45EA907.png",
+        "timestamp": 1791072789.735
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "08ED56DF-5662-4BCA-8577-FEFE10EA843C.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "activity-phone-dark-402-top_0_A055C2C8-1DB1-4B1A-A768-A657794A78BE.png",
+        "timestamp": 1791072788.917
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "CBF383D7-6F9D-4676-AFFC-F46939326830.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "chat-directory-phone-dark-402-top_0_E3E2566C-A03A-4931-9983-5C1A1CDAC333.png",
+        "timestamp": 1791072788.095
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "EDA559B8-42FC-4FEF-98D5-0BDFA4BC3CE6.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "chat-phone-dark-402-top_0_95B59EEF-61C4-4129-B542-320C041F34D3.png",
+        "timestamp": 1791072787.229
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "10C955C1-6319-4D63-AF22-137166DE4BE4.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "choice-reason-phone-light-402-top_0_5CC12F5D-2E1E-461B-A262-A952066E7D4E.png",
+        "timestamp": 1791072786.392
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "5AEB63B0-D522-40ED-B171-500A1CB3B942.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "rehearse-change-phone-light-402-top_0_5ACC2BCA-F5CB-4218-B98F-5A0669AAE425.png",
+        "timestamp": 1791072785.585
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "405B3243-08EC-4363-8C36-7BBB1016D54D.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "linked-item-phone-light-402-top_0_541B3F26-1748-46F8-986D-D845E2EA2030.png",
+        "timestamp": 1791072784.764
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "FC94D090-A5B3-49A1-B51A-4380F60DDC06.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "new-pack-phone-light-402-top_0_E5793FBC-D7F9-4589-91CC-4AEFB3C5CED5.png",
+        "timestamp": 1791072783.953
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "BE7140A6-39E3-4B84-855A-0FC6FB8B63F8.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-connection-detail-phone-light-402-top_0_C7230B90-C70B-4E0F-BF6F-44850CD6771A.png",
+        "timestamp": 1791072783.145
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "2D3ADDE9-58B4-4092-A748-D53476AD8E73.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-connections-phone-light-402-scroll-02_0_ACA8773D-6B8C-41FD-B227-3DA75AF6061F.png",
+        "timestamp": 1791072782.329
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "1636803E-163D-4D3E-A717-ABE0B82241EF.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-connections-phone-light-402-scroll-01_0_87A40865-3A63-42CC-B4B8-E0C1184C8724.png",
+        "timestamp": 1791072781.904
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "0E38341A-F939-437A-85CE-F55F652B1F63.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-connections-phone-light-402-top_0_D6896C89-95C1-4D31-869F-20B32355D110.png",
+        "timestamp": 1791072781.475
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "FF61BB30-7E98-4DA4-841D-71357E56E817.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-find-phone-light-402-scroll-02_0_B52ABAF1-5D9B-4164-ACBB-8D88FE1821A8.png",
+        "timestamp": 1791072780.666
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "337F6602-E24E-4FF1-A0CC-BE9F00B0CA26.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-find-phone-light-402-scroll-01_0_AFDF0D44-0386-4B21-9DFF-66F9E9DB3D3B.png",
+        "timestamp": 1791072780.245
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "97DE5136-21C8-450A-BE3D-5A301B87701D.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-find-phone-light-402-top_0_DAC1C5F8-8D52-47D8-9CB7-BA8B31207E17.png",
+        "timestamp": 1791072779.809
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "761DCD99-1704-47F8-8E77-4E7DD2E02AB5.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "choose-model-phone-light-402-top_0_CEDEB738-08E8-4716-B94B-8EDF85B7DFFA.png",
+        "timestamp": 1791072779.015
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "3AA9C438-BC76-40FA-AF32-A3324B48781F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "provider-detail-phone-light-402-top_0_15D2DAB2-77F6-4050-9553-A241413FEADA.png",
+        "timestamp": 1791072778.197
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "658DA231-4A06-4CF7-A12A-08704DD7A8E4.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "connect-provider-phone-light-402-top_0_EBE79FED-6668-43A6-B81B-2C0816F25B50.png",
+        "timestamp": 1791072777.382
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E0911678-5F11-4AB6-9740-FBD5F760D4DF.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "report-issue-phone-light-402-top_0_B82C4DDA-A91E-43D3-AF78-70D1AE295A91.png",
+        "timestamp": 1791072776.564
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "60A606E3-3625-4B65-988C-04B605D0694B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "cost-limits-phone-light-402-top_0_10694C92-3503-4673-AC9E-01939F411B59.png",
+        "timestamp": 1791072775.741
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "FD8BA0FB-C112-4710-B61F-87B1C0B3D525.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "edit-skill-phone-light-402-top_0_3F3F3870-C22A-4669-A594-FC582C8F5345.png",
+        "timestamp": 1791072774.933
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "DCA762A9-ED4B-462A-8B90-A0A67E0E5655.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "new-skill-phone-light-402-top_0_1CE5AFF6-3F42-4BAF-A54E-C4071513BD86.png",
+        "timestamp": 1791072774.112
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E07B6176-EA9F-4164-B5F2-E26A00483065.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "connected-tools-phone-light-402-top_0_9FB893D5-0432-43B8-A4D1-7DD815C0112A.png",
+        "timestamp": 1791072773.312
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "60627C59-1B04-466B-885A-BA9E18C4002C.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "assistant-settings-phone-light-402-top_0_DC8B0A17-2C94-4BE2-A110-4442D86F2079.png",
+        "timestamp": 1791072772.523
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "AD7B6EB2-50BE-4473-A983-497893A95D53.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "reminders-phone-light-402-top_0_A843DDD4-E843-4B36-8647-2D68CA1B0ED1.png",
+        "timestamp": 1791072771.713
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F54C4DB3-A209-475F-8EC8-F8374AF1AA40.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-phone-light-402-scroll-01_0_1229472B-BB8B-4E70-B25D-ECD1F60408B3.png",
+        "timestamp": 1791072770.906
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "739C2D3F-B438-4E87-AF7B-4480EE7E083E.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "improvements-phone-light-402-top_0_B6A5748C-21BF-4740-BC3E-79D9E294508D.png",
+        "timestamp": 1791072770.459
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "207CBCAE-99A2-461B-BD4A-99A64E316CDE.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "anomalies-phone-light-402-top_0_BDC5D79B-0E99-4274-BA0E-8E666877A524.png",
+        "timestamp": 1791072769.628
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "EF493F25-8C2E-48E9-9775-2C5978DA4505.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "costs-phone-light-402-top_0_A8CB2B04-7B54-4AB9-8C71-3CA0A0C17EB0.png",
+        "timestamp": 1791072768.791
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E48E1AB3-81C9-4E2F-AF09-80B94113F555.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "capabilities-phone-light-402-top_0_ED5F91EE-0F2D-40D4-BDA7-392499F1DB08.png",
+        "timestamp": 1791072767.991
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "A5457F9A-7404-45F5-8AFF-CA5A39C89ED0.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "skills-phone-light-402-top_0_1E190F3E-9A03-4E23-BE5C-B157DB444C01.png",
+        "timestamp": 1791072767.178
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "AD9FBE4A-26A3-4F7F-A791-59E99E32B48A.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "documents-phone-light-402-top_0_0EE8546B-D13E-4AB5-B2CE-7177C6D17D5F.png",
+        "timestamp": 1791072766.358
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "51004C0C-BD33-41B3-B0E8-D2C32594AB6F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "chats-phone-light-402-top_0_724401CB-4F49-48DA-B588-830B956DC032.png",
+        "timestamp": 1791072765.544
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "AA8651D5-C11B-4220-BFDD-683F4ACDDCF7.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "situation-pack-phone-light-402-top_0_9BE37422-0881-4DB0-8905-795951C3E39F.png",
+        "timestamp": 1791072764.763
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "FBBAB9AE-84C8-4D35-9028-D0A6F6E9796C.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "situation-packs-phone-light-402-top_0_025E8A37-DAB4-4E25-A18B-B87020C032A2.png",
+        "timestamp": 1791072763.954
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "FFCDAB96-613A-41FA-BCFC-DE6DB73A9DB2.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "edit-item-phone-light-402-top_0_15202D8A-653D-4D2F-8C0B-2E1667D612BA.png",
+        "timestamp": 1791072763.138
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "4D36F1AD-3E1F-4EAC-875D-9FF78B490400.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "correct-connection-phone-light-402-top_0_903D4186-6D65-469C-8682-7DCD91FE0E65.png",
+        "timestamp": 1791072762.359
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "73CA521C-071D-41DD-A590-1469D8835E2D.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "new-connection-phone-light-402-top_0_64637312-74E0-44C1-8011-E7B882E66727.png",
+        "timestamp": 1791072761.565
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "949665D7-67D1-4B93-9C27-48A3CB3894FA.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-settings-phone-light-402-scroll-03_0_A5CC38F7-1DEF-4385-B428-1EE564865A1F.png",
+        "timestamp": 1791072760.743
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B4DE6037-22B5-4B35-A70A-50EE87EF7402.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-settings-phone-light-402-scroll-02_0_FF36BB7B-A2E3-419A-AF6B-ACD50C51307A.png",
+        "timestamp": 1791072760.33
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "8212F7EC-D792-4E63-BDB5-9A6D3DAF9729.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-settings-phone-light-402-scroll-01_0_3B3EBA7D-F85E-4F17-BE52-BE1487D3410A.png",
+        "timestamp": 1791072759.911
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "70DD4415-B852-4471-B6AB-6B4FB73B153D.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-settings-phone-light-402-top_0_CD84D8DB-70EE-4A0B-B901-5EBAB3970A0A.png",
+        "timestamp": 1791072759.492
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "77C01BB1-5600-4B10-8B2C-2FCFF19096EA.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-quick-connect-phone-light-402-scroll-03_0_494491A6-7A15-45AC-B0F8-AB2B7A582396.png",
+        "timestamp": 1791072758.684
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "87DBCB03-3331-497C-AEA6-3E9C4EE4EF9B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-quick-connect-phone-light-402-scroll-02_0_B497099C-04B0-4DE2-837D-5496657F8AD5.png",
+        "timestamp": 1791072758.252
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "4F8A9D8A-7CF5-4E7B-B2A2-F88E350392AC.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-quick-connect-phone-light-402-scroll-01_0_4CEE48CA-ED43-4474-8CCC-893D8C90384F.png",
+        "timestamp": 1791072757.863
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "4D8355FF-EE90-42B4-9C9E-CBE5C5E0BBFC.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-quick-connect-phone-light-402-top_0_CA3D225B-9C35-432C-93AB-5F8A06C66FA8.png",
+        "timestamp": 1791072757.444
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "09101FC1-2415-4001-8693-A593FCF085CA.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-add-connection-phone-light-402-scroll-03_0_35029A1A-6B2D-4C1C-B513-143365199743.png",
+        "timestamp": 1791072756.633
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "09EA026B-CB38-4627-9324-867CAFF73380.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-add-connection-phone-light-402-scroll-02_0_88D46306-AC45-4E55-9FA3-9749964C560F.png",
+        "timestamp": 1791072756.219
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "9A72F41B-E723-4478-A5BB-CCA5F33B9B68.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-add-connection-phone-light-402-scroll-01_0_517E9E59-F733-4DBF-8AF8-1D42118168B2.png",
+        "timestamp": 1791072755.773
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "7CA7AD6C-3AFE-42F6-813C-2168A5742BC2.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-add-connection-phone-light-402-top_0_B0F5B44E-7CA6-4CBF-BD4B-3FCF6149998B.png",
+        "timestamp": 1791072755.344
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "1D6DB7FD-E3F5-4273-9A03-A406A02B1AE3.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-groups-phone-light-402-top_0_588F6424-4643-4700-A591-6728CAD5A5D5.png",
+        "timestamp": 1791072754.525
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "38F4F435-8D00-4868-A001-B5275CC8E371.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "map-phone-light-402-top_0_AA110350-E1F6-4832-AA97-5A5C96109C59.png",
+        "timestamp": 1791072753.705
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B0E444E6-7E63-4B23-BCF5-71972B7C4157.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "edit-goal-phone-light-402-top_0_ECB1154C-FCF8-4B26-88F3-4225CB8DBFC8.png",
+        "timestamp": 1791072752.894
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "BEECBF9E-88E3-474F-8F9A-6A5EBB5C2B12.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "new-goal-phone-light-402-top_0_21382DA8-1F34-4A7E-BDD6-E16C1C84ADC5.png",
+        "timestamp": 1791072752.111
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "3799391C-21CC-449E-AC77-13BB7BAF2986.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "edit-open-loop-phone-light-402-top_0_3D3261B5-309B-44A9-BDDD-FE434BD87E4C.png",
+        "timestamp": 1791072751.266
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "38E4C3CC-7991-4244-A770-1F9BCC2A7953.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "relationship-evidence-phone-light-402-top_0_964B8F00-32BA-447E-8FDE-DD8CB40EAC6A.png",
+        "timestamp": 1791072750.43
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "13D411E5-694D-475D-B234-7000CEB8F26D.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "people-connections-phone-light-402-top_0_D28EFB3F-A9DA-4654-8BA1-59FC5DCDE829.png",
+        "timestamp": 1791072749.608
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "5D3850A5-66D9-4E67-9288-A820A545EFF6.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "edit-occasion-phone-light-402-top_0_4B129A32-D4A5-4E9F-BBE9-A3035BA51F24.png",
+        "timestamp": 1791072748.782
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "65F49F14-608C-410C-B652-944D70150C45.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "new-occasion-phone-light-402-top_0_C5035A0A-82C6-46FF-8986-76E6B8938ADA.png",
+        "timestamp": 1791072747.951
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "CACD51E8-D24F-4B5B-A228-BF169D33349B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "person-dates-phone-light-402-top_0_69049FEF-C846-4AD0-84CF-11E65EEC622B.png",
+        "timestamp": 1791072747.174
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "1E8F7B45-EE79-465B-9E59-F3E24EA5A1A7.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "person-details-phone-light-402-top_0_40F50040-5FD6-4D1F-82AE-C9BD16628DCA.png",
+        "timestamp": 1791072746.368
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "742F21C9-24C0-41D6-9C13-CA43F183623F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "person-phone-light-402-scroll-01_0_241B1ED8-4859-4DA7-B584-6BC994C59419.png",
+        "timestamp": 1791072745.587
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "367D230E-7D2F-4A03-9E2C-F4387457BADE.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "person-phone-light-402-top_0_79AF52E4-EAD5-4F6C-89CB-B485EB80495C.png",
+        "timestamp": 1791072745.163
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "391F75E9-09ED-4EB8-8374-75B26ABFBF33.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "edit-person-phone-light-402-top_0_A2D4C0D3-0B4F-460F-A39B-9DE715324A99.png",
+        "timestamp": 1791072744.319
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "50647E1F-15F7-43A9-961A-A62408216D5E.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "new-person-phone-light-402-top_0_73C8A74D-BED2-43F8-9566-5EA918180BA2.png",
+        "timestamp": 1791072743.488
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F8D7CBD9-DD66-43D6-91CF-B69B9EB4C419.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "correct-memory-phone-light-402-top_0_A68905BA-3D76-46C7-84D5-89A2E6780684.png",
+        "timestamp": 1791072742.659
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "DCD2A2C1-A1B8-4425-B162-47C1AEB5A050.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "new-memory-phone-light-402-top_0_4001AF85-6899-4329-8CE8-B9EC566031F2.png",
+        "timestamp": 1791072741.846
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "62179D4A-74D0-41EB-B0BB-25236706F5CB.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "memory-fact-phone-light-402-top_0_5C610F30-E55D-4C4F-96D0-2B91E6416A58.png",
+        "timestamp": 1791072741.01
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "27D9CE61-C937-4346-9A1A-FFE9A9296FC6.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "forget-source-phone-light-402-top_0_9E60F0C1-B0C6-40F5-83F9-4C3CC70BC8B9.png",
+        "timestamp": 1791072740.169
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "66E11979-A7E6-4904-A071-7029859A689B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "tidy-up-phone-light-402-top_0_BE17D511-166C-4605-9C18-246F559BFFB3.png",
+        "timestamp": 1791072739.346
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "22814121-228B-4C18-B039-16AD75346947.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "your-data-phone-light-402-top_0_EA5B083D-0255-4ED7-8F9F-BD6744046992.png",
+        "timestamp": 1791072738.552
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "5E9949D0-5AB8-49B1-87C7-E22F360071B9.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "writing-voice-editor-phone-light-402-top_0_64DE954D-AE63-4E53-89AC-B1A61E8AF7F8.png",
+        "timestamp": 1791072737.755
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "CFBF7DBC-19FA-4513-A094-4A7965B984DC.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "writing-voice-phone-light-402-top_0_B3F95472-B9C7-44A9-93E7-057E0E5A2422.png",
+        "timestamp": 1791072736.936
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "135E1430-83ED-42CB-B7E9-6773D90A8168.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "profile-summary-phone-light-402-top_0_743CE6B3-B2BA-4771-B692-994A8A215933.png",
+        "timestamp": 1791072736.113
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "2DE99768-B7F4-4622-98B9-1763AB4FB241.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "open-loops-phone-light-402-top_0_E6A096BF-393A-4204-BA44-1A54D72785CA.png",
+        "timestamp": 1791072735.3
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "CF5E1253-C3A2-48B4-B584-95D1D46782F3.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "memory-library-phone-light-402-top_0_C044E38C-197B-437D-A79B-C99E6330D174.png",
+        "timestamp": 1791072734.476
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "5FD3C852-B064-4789-B18D-63C94BCFEECC.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "talk-paused-phone-light-402-top_0_B385D2CC-5893-4651-9005-0A43CE4C0825.png",
+        "timestamp": 1791072733.665
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "DFF0905C-90BA-459C-9608-13DC5A383FF5.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "call-detail-phone-light-402-top_0_3345206A-824E-4C9B-AF73-9FE30DB5AEF7.png",
+        "timestamp": 1791072732.862
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "3A7A56BE-7772-4BCE-927C-F538793CA54A.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "calls-phone-light-402-top_0_C0073FA8-DE15-49C1-8A4A-802F14139F48.png",
+        "timestamp": 1791072732.07
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "4BE98CA8-25F3-4786-92D7-9DEC5909A719.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "ai-providers-phone-light-402-top_0_D383110A-BCF8-48B6-9C1E-2289B2C2BC1B.png",
+        "timestamp": 1791072731.261
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "46B3EF5A-FC2F-49EB-9CFB-9021E83AB6B7.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "connection-onboarding-phone-light-402-top_0_26126A95-4DD6-49EB-8B7F-B78402B68096.png",
+        "timestamp": 1791072730.454
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "5FFC9CFE-311D-4093-971B-E2DB87D32ECE.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "connection-phone-light-402-top_0_48AEED9F-878E-45F7-9A0F-9A1A4CBC73BB.png",
+        "timestamp": 1791072729.656
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "B0BAC764-2EE9-4A47-ABFA-670D4A7ED516.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-light-402-scroll-04_0_67231DC7-136B-4E48-926E-DDBCF4A64AEE.png",
+        "timestamp": 1791072728.85
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "67F327A6-7EAA-4488-A737-8BC6CB38C49F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-light-402-scroll-03_0_E687397B-DDC7-4A66-ACDD-98ADF187F5E0.png",
+        "timestamp": 1791072728.422
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C4A5ED27-67BC-45E3-A5DC-C16E046C188B.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-light-402-scroll-02_0_8914487F-8174-4759-AD76-FC391E7138CA.png",
+        "timestamp": 1791072728.018
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F28299DC-A384-4107-B192-4BA84FCE106F.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-light-402-scroll-01_0_80436B0E-979E-4B72-BAF2-94E443925BF7.png",
+        "timestamp": 1791072727.602
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C8AB98D8-047F-402B-9DE0-13F10D45ED5A.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "more-phone-light-402-top_0_36D5B2D6-AC92-4FEE-B7F2-6A9F1B16FE2A.png",
+        "timestamp": 1791072727.191
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "4DCA2527-0FB8-42CB-94C5-3CAC4CBA7845.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "people-phone-light-402-top_0_CCC37A1C-43B8-42DA-95F0-B1F237A73A8D.png",
+        "timestamp": 1791072726.381
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "C3EBDFBE-C232-400D-A677-AE71A1DAC44A.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "memory-phone-light-402-top_0_7A3D0D3F-7C40-4900-BE8D-F70BC14C94C5.png",
+        "timestamp": 1791072725.563
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "086D5104-7C8C-4F9A-84F0-33C976CBFAAF.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "cards-phone-light-402-top_0_F97C8CDD-6C18-4DA4-8F3F-67F22976D786.png",
+        "timestamp": 1791072724.739
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "27865DA9-FFC1-4BF5-869E-07E60FE3A680.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "family-suggestions-phone-light-402-top_0_3401EF71-9220-48A4-8BBA-F32792D8B893.png",
+        "timestamp": 1791072723.934
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "D36EAA69-B902-4AD6-9EF5-43212D426558.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "about-open-loops-phone-light-402-top_0_F41EC758-8DBB-4537-953B-002ED514137E.png",
+        "timestamp": 1791072723.124
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "9A57CAEE-8C3F-43DC-9B18-EF5CD05B2869.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "approval-editor-phone-light-402-top_0_F66C5A97-40F1-4825-8292-5D65F5121FC0.png",
+        "timestamp": 1791072722.287
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "3D373CE8-B7C7-4996-89B8-93B213A2FA53.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "approvals-phone-light-402-top_0_F5FEC939-7D1E-44A0-8B7E-240371F2733D.png",
+        "timestamp": 1791072721.457
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "E28B1A54-CB38-4A21-82CF-6478EE87C355.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "goals-phone-light-402-top_0_58A0A4CC-055D-48E2-A34F-EE22BE2DE67E.png",
+        "timestamp": 1791072720.648
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "666CF284-51A0-4CF6-87EE-112CB6B0D9EC.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "activity-phone-light-402-top_0_F38BCF72-7479-436B-96E1-9210C12A1609.png",
+        "timestamp": 1791072719.828
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "8C0B044C-3B7A-49C0-848D-CD3227BB4AA3.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "chat-directory-phone-light-402-top_0_739A3DE5-A7F9-4399-8BD0-C10074D5DA40.png",
+        "timestamp": 1791072719.022
+      },
+      {
+        "configurationName": "Test Scheme Action",
+        "deviceId": "E661514D-C1FB-4E62-B3B6-1C189A8ECF0E",
+        "deviceName": "Assistant UI Review 2026-10-03",
+        "exportedFileName": "F1600E10-43D5-4FCA-A51B-DDE1C0F4B03A.png",
+        "isAssociatedWithFailure": false,
+        "suggestedHumanReadableName": "chat-phone-light-402-top_0_31BCC091-2782-4154-BA15-B5E7D1DEBCB5.png",
+        "timestamp": 1791072718.128
+      }
+    ],
+    "testIdentifier": "NativeVisualReviewTests/testEveryPageInLightAndDark()",
+    "testIdentifierURL": "test://com.apple.xcode/Assistant/AssistantTests/NativeVisualReviewTests/testEveryPageInLightAndDark"
+  }
+]

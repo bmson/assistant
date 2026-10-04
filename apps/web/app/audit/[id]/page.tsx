@@ -3,7 +3,18 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { requireOwner } from '@/auth';
 import { getAuditInvestigation } from '@/lib/audit-investigation';
-import { btn, PageHeader, PageShell } from '@/lib/ui';
+import { formatUsd } from '@/lib/format';
+import {
+  btn,
+  focusRing,
+  MetaLine,
+  PageHeader,
+  PageShell,
+  SectionHeading,
+  selectClass,
+  summaryClass,
+} from '@/lib/ui';
+import { StatusChip } from '@/lib/views';
 import { InvestigationBrief } from './investigation-brief';
 
 export const metadata = { title: 'Audit investigation' };
@@ -65,7 +76,7 @@ export default async function AuditDetailPage({
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) notFound();
   const query = await searchParams;
   if (query.section && !AUDIT_SECTIONS.includes(query.section as AuditSection)) notFound();
-  const section = query.section as AuditSection | undefined;
+  const section = query.section ? (query.section as AuditSection) : undefined;
   let report: Awaited<ReturnType<typeof getAuditInvestigation>>;
   try {
     report = await getAuditInvestigation(id, {
@@ -89,49 +100,49 @@ export default async function AuditDetailPage({
         title={String(task.title || task.type)}
         intro="Follow the request, decisions, evidence, and response to understand what happened."
       />
-      <div className="grid gap-2">
-        <p className="font-semibold">
-          {String(task.status)} · Attempt {String(task.attempt)} · {String(task.spentUsd)} USD spent
+      <section
+        aria-label="Task summary"
+        className="grid min-w-0 gap-3 border-y border-edge/70 py-5"
+      >
+        <div className="flex flex-wrap items-center gap-3">
+          <StatusChip status={String(task.status)} />
+          <MetaLine
+            segments={[
+              `Attempt ${String(task.attempt)}`,
+              `${formatUsd(String(task.spentUsd ?? 0))} spent`,
+            ]}
+          />
+        </div>
+        <p className="text-sm leading-6 whitespace-pre-wrap break-words">
+          {String(task.progress || 'No progress recorded.')}
         </p>
-        <code className="break-all text-xs">{id}</code>
-        <p className="whitespace-pre-wrap text-sm">{String(task.progress || '')}</p>
-      </div>
-      <InvestigationBrief prompt={report.investigationPrompt} />
-      <details className="rounded-xl border border-edge p-4">
-        <summary className="cursor-pointer font-semibold">Task setup and diagnostics</summary>
-        <pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs">
-          {JSON.stringify(report.task, null, 2)}
-        </pre>
-      </details>
-      <details className="rounded-xl bg-sunken p-4 text-sm">
-        <summary className="cursor-pointer font-semibold">
-          Evidence coverage and limitations
-        </summary>
-        <ul className="mt-2 grid list-disc gap-2 pl-5">
-          {report.evidenceNotes.map((note) => (
-            <li key={note}>{note}</li>
-          ))}
-        </ul>
-      </details>
-      <nav aria-label="Audit sections" className="flex flex-wrap gap-2">
-        <Link className={btn.outline} href={`/audit/${id}`}>
-          Overview
-        </Link>
-        {AUDIT_SECTIONS.map((name) => (
-          <Link
-            key={name}
-            className={btn.outline}
-            href={`/audit/${id}?section=${name}`}
-            aria-current={section === name ? 'page' : undefined}
-          >
-            {labels[name]}
-          </Link>
-        ))}
-      </nav>
+        <p className="text-xs leading-5 text-muted">
+          Record ID <code className="break-all select-all">{id}</code>
+        </p>
+      </section>
+      <form
+        action={`/audit/${id}`}
+        className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-end gap-3 sm:max-w-lg"
+      >
+        <label className="grid min-w-0 gap-1.5 text-sm font-medium">
+          Evidence section
+          <select name="section" defaultValue={section ?? ''} className={`w-full ${selectClass}`}>
+            <option value="">Overview</option>
+            {AUDIT_SECTIONS.map((name) => (
+              <option key={name} value={name}>
+                {labels[name]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button type="submit" className={btn.outline}>
+          View
+        </button>
+      </form>
       {report.sections.map((group) => (
         <section key={group.name} className="grid gap-3" aria-label={labels[group.name]}>
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-lg font-semibold">{labels[group.name]}</h2>
+            <SectionHeading title={labels[group.name]} count={group.entries.length} />
             <a
               className={btn.outline}
               href={`/api/audit/${id}?${new URLSearchParams({ section: group.name, ...(query.cursor && section === group.name ? { cursor: query.cursor } : {}), ...(query.entry && section === group.name ? { entry: query.entry } : {}), ...(query.field && section === group.name ? { field: query.field, offset: query.offset ?? '0' } : {}) }).toString()}`}
@@ -145,67 +156,90 @@ export default async function AuditDetailPage({
               No records available in this view. Older tasks may have missing or expired capture.
             </p>
           ) : null}
-          {group.entries.map((entry) => (
-            <article key={entry.id} className="rounded-xl border border-edge p-4">
-              <p className="text-sm font-semibold">
-                {entry.fields.toolName?.text ||
-                  entry.fields.model?.text ||
-                  entry.fields.role?.text ||
-                  entry.fields.status?.text ||
-                  labels[group.name]}
-              </p>
-              <p className="mt-1 break-all text-xs text-muted">
-                {entry.at} · {entry.id}
-              </p>
-              <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-3">
+          {group.entries.map((entry) => {
+            const titleField = ['toolName', 'model', 'role'].find(
+              (name) => entry.fields[name]?.text && entry.fields[name].text !== 'null',
+            );
+            const metadata = Object.entries(entry.fields).filter(
+              ([key, field]) =>
+                !payloadFields.has(key) &&
+                !['id', 'createdAt', 'requestedAt', titleField].includes(key) &&
+                field.text &&
+                field.text !== 'null',
+            );
+            return (
+              <article
+                key={entry.id}
+                className="grid min-w-0 gap-4 rounded-[var(--radius-card)] bg-raised p-4 ring-1 ring-edge/70 sm:p-5"
+              >
+                <div className="grid min-w-0 gap-1">
+                  <h3 className="text-sm font-semibold break-words">
+                    {titleField ? entry.fields[titleField].text : labels[group.name]}
+                  </h3>
+                  <MetaLine
+                    segments={[
+                      <time key="time" dateTime={entry.at ?? undefined}>
+                        {entry.at
+                          ? entry.at.replace('T', ' ').replace(/Z$/, ' UTC')
+                          : 'Time not recorded'}
+                      </time>,
+                    ]}
+                  />
+                </div>
+                {metadata.length ? (
+                  <dl className="grid grid-cols-1 gap-x-4 gap-y-3 text-sm min-[400px]:grid-cols-2 sm:grid-cols-3">
+                    {metadata.map(([key, field]) => (
+                      <div key={key} className="min-w-0">
+                        <dt className="text-xs leading-5 text-muted">{fieldLabel(key)}</dt>
+                        <dd className="leading-6 break-words [overflow-wrap:anywhere]">
+                          {field.text}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : null}
                 {Object.entries(entry.fields)
                   .filter(
-                    ([key, field]) =>
-                      !payloadFields.has(key) &&
-                      !['id', 'createdAt', 'requestedAt'].includes(key) &&
-                      field.text &&
-                      field.text !== 'null',
+                    ([key, field]) => payloadFields.has(key) && field.text && field.text !== 'null',
                   )
                   .map(([key, field]) => (
-                    <div key={key} className="min-w-0">
-                      <dt className="text-muted">{fieldLabel(key)}</dt>
-                      <dd className="break-words">{field.text}</dd>
-                    </div>
+                    <details
+                      key={key}
+                      className="min-w-0 border-t border-edge/70 pt-1"
+                      open={query.field === key || ['error', 'text', 'output'].includes(key)}
+                    >
+                      <summary className={summaryClass}>
+                        {fieldLabel(key)}
+                        {field.hasMore ? ' · more available' : ''}
+                      </summary>
+                      <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-sunken p-3 text-xs leading-5">
+                        {field.text || 'Not recorded'}
+                      </pre>
+                      {field.hasMore ? (
+                        <Link
+                          className={`rounded-md text-sm underline ${focusRing}`}
+                          prefetch={false}
+                          href={`/audit/${id}?section=${group.name}&entry=${entry.id}&field=${encodeURIComponent(key)}&offset=${field.offset + field.text.length}`}
+                        >
+                          Continue this field ({field.offset + field.text.length} of{' '}
+                          {field.totalChars} characters)
+                        </Link>
+                      ) : null}
+                    </details>
                   ))}
-              </dl>
-              {Object.entries(entry.fields)
-                .filter(
-                  ([key, field]) => payloadFields.has(key) && field.text && field.text !== 'null',
-                )
-                .map(([key, field]) => (
-                  <details
-                    key={key}
-                    className="mt-3"
-                    open={query.field === key || ['error', 'text', 'output'].includes(key)}
-                  >
-                    <summary className="cursor-pointer text-sm">
-                      {fieldLabel(key)}
-                      {field.hasMore ? ' · more available' : ''}
-                    </summary>
-                    <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-sunken p-3 text-xs">
-                      {field.text || 'Not recorded'}
-                    </pre>
-                    {field.hasMore ? (
-                      <Link
-                        className="text-sm underline"
-                        href={`/audit/${id}?section=${group.name}&entry=${entry.id}&field=${encodeURIComponent(key)}&offset=${field.offset + field.text.length}`}
-                      >
-                        Continue this field ({field.offset + field.text.length} of{' '}
-                        {field.totalChars} characters)
-                      </Link>
-                    ) : null}
-                  </details>
-                ))}
-            </article>
-          ))}
+                <details className="min-w-0 border-t border-edge/70 pt-1">
+                  <summary className={summaryClass}>Record identifier</summary>
+                  <code className="block pb-2 text-xs leading-5 text-muted break-all select-all">
+                    {entry.id}
+                  </code>
+                </details>
+              </article>
+            );
+          })}
           {group.nextCursor ? (
             <Link
               className={btn.outline}
+              prefetch={false}
               href={`/audit/${id}?section=${group.name}&cursor=${encodeURIComponent(group.nextCursor)}`}
             >
               Older {labels[group.name].toLowerCase()}
@@ -213,6 +247,26 @@ export default async function AuditDetailPage({
           ) : null}
         </section>
       ))}
+      <details className="rounded-xl bg-sunken p-4 text-sm">
+        <summary className={summaryClass}>Evidence coverage and limitations</summary>
+        <ul className="mt-2 grid list-disc gap-2 pl-5">
+          {report.evidenceNotes.map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
+      </details>
+      <details className="rounded-xl border border-edge p-4">
+        <summary className={summaryClass}>Investigate with the assistant</summary>
+        <div className="mt-4">
+          <InvestigationBrief prompt={report.investigationPrompt} />
+        </div>
+      </details>
+      <details className="rounded-xl border border-edge p-4">
+        <summary className={summaryClass}>Task setup and diagnostics</summary>
+        <pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs leading-5">
+          {JSON.stringify(report.task, null, 2)}
+        </pre>
+      </details>
     </PageShell>
   );
 }

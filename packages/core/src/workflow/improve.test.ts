@@ -13,7 +13,7 @@ import {
   tasks,
   toolCalls,
 } from '@assistant/db';
-import { and, eq, inArray, like, ne } from 'drizzle-orm';
+import { and, eq, inArray, like, ne, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getAgent } from '../chat.js';
 import type { ModelRouter } from '../model-router/router.js';
@@ -354,7 +354,13 @@ describe('self-improvement loop', () => {
     const [otherModel] = await db
       .select({ id: models.id })
       .from(models)
-      .where(and(eq(models.enabled, true), ne(models.id, original)))
+      .where(
+        and(
+          eq(models.enabled, true),
+          ne(models.id, original),
+          sql`coalesce(${models.capabilities}->>'embedding', 'false') <> 'true'`,
+        ),
+      )
       .limit(1);
     if (!otherModel) return ctx.skip();
 
@@ -373,7 +379,7 @@ describe('self-improvement loop', () => {
     createdProposalIds.push(proposal?.id ?? '');
 
     try {
-      const result = await applyProposal(db, proposal?.id ?? '');
+      const result = await applyProposal(db, proposal?.id ?? '', agentId);
       expect(result.enacted).toBe(true);
       const [after] = await db.select().from(modelRoles).where(eq(modelRoles.role, 'draft'));
       expect(after?.primaryModel).toBe(otherModel.id);
@@ -391,7 +397,7 @@ describe('self-improvement loop', () => {
     }
   });
 
-  it('treats an unknown-model swap as advisory (enacts nothing) and dismisses', async (ctx) => {
+  it('keeps an unevidenced model swap open and dismisses an advisory', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const [bad] = await db
       .insert(improvementProposals)
@@ -403,15 +409,15 @@ describe('self-improvement loop', () => {
       })
       .returning();
     createdProposalIds.push(bad?.id ?? '');
-    const result = await applyProposal(db, bad?.id ?? '');
-    expect(result.enacted).toBe(false);
+    await expect(applyProposal(db, bad?.id ?? '', agentId)).rejects.toThrow('needs cited evidence');
+    expect((await listOpenProposals(db, agentId)).some((row) => row.id === bad?.id)).toBe(true);
 
     const [note] = await db
       .insert(improvementProposals)
       .values({ agentId, kind: 'note', title: 'xtest-dismiss-me', change: {} })
       .returning();
     createdProposalIds.push(note?.id ?? '');
-    await dismissProposal(db, note?.id ?? '');
+    await dismissProposal(db, note?.id ?? '', agentId);
     const open = (await listOpenProposals(db, agentId)).filter(
       (p) => p.title === 'xtest-dismiss-me',
     );

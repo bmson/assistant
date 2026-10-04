@@ -802,3 +802,11 @@ struct GraphFamilySuggestionsSheet: View {
         }
     }
 }
+
+#if DEBUG
+extension KnowledgeCleanupScreen {
+    @MainActor static func visualReviewForget() -> AnyView {
+        AnyView(KnowledgeForgetReview(memoryId: "fact-1", didForget: {}))
+    }
+}
+#endif

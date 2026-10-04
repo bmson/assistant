@@ -1,4 +1,3 @@
-@import "katex/dist/katex.min.css";
 @import "tailwindcss";
 
 /* Class-strategy dark mode: the theme toggle stamps `.dark` on <html>; a no-flash
@@ -53,7 +52,7 @@
      stage, in the stage's own ink. */
   --bubble-paper: #ffffff;
   --bubble-paper-ink: #15201a;
-  --bubble-paper-muted: #5e7266;
+  --bubble-paper-muted: #5a6d62;
   --bubble-paper-edge: #d3e1d7;
   --bubble-paper-sunken: #e6efe9;
   --bubble-paper-accent: #217a4b;
@@ -262,37 +261,8 @@ details[open] > .disclosure::before {
   }
 }
 
-/* ── Scroll-driven reveal ─────────────────────────────────────────────────────
-   Cards settle in as they scroll into view. `animation-timeline: view()` drives
-   this from the scroller itself — no IntersectionObserver, no client component,
-   and nothing to hydrate. Anything already on screen at load starts at the end
-   of its range, so the first paint is complete rather than animating in.
-
-   The animation targets `transform`, which makes every revealed card the
-   containing block for its `position: fixed` descendants — an overlay nested
-   in one is sized and clipped by the card, not the window. Overlays that must
-   cover the window belong in the top layer instead: `Modal` or `ActionMenu`
-   in lib/ui-client.tsx. */
-@media (prefers-reduced-motion: no-preference) {
-  @supports (animation-timeline: view()) {
-    .reveal {
-      animation: reveal-in linear both;
-      animation-timeline: view();
-      animation-range: entry 0% entry 32%;
-    }
-  }
-}
-
-@keyframes reveal-in {
-  from {
-    opacity: 0;
-    transform: translateY(12px) scale(0.995);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
+/* Records are readable at first paint and while scrolling. Motion belongs to
+   the control the owner used, rather than every card entering the viewport. */
 
 /* ── Popovers ─────────────────────────────────────────────────────────────────
    Native popovers (the card action menus) animate open *and* closed. Both
@@ -353,11 +323,9 @@ body {
 }
 
 html {
-  /* Keep iOS from enlarging type after rotation and allow one-finger panning
-     without exposing the document pinch gesture. The viewport metadata is the
-     primary zoom lock; this also covers WebKit builds that relax that flag. */
+  /* Keep type stable after rotation while preserving the user's pinch zoom. */
   -webkit-text-size-adjust: 100%;
-  touch-action: pan-x pan-y;
+  touch-action: pan-x pan-y pinch-zoom;
 }
 
 body {

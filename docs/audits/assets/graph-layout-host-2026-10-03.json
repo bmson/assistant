@@ -1,0 +1,48 @@
+{
+  "architecture": "arm64",
+  "compiler": "Apple Swift version 6.4 (swiftlang-6.4.0.20.104 clang-2100.3.20.102)\nTarget: arm64-apple-macosx27.2.0",
+  "graph_source_sha256": "5a876a01e7892ab1120b3e35d5d8c37b9c3aa93e38f59ee1aecee43ed45a105b",
+  "host": "macOS-27.2-arm64-arm-64bit-Mach-O",
+  "models_source_sha256": "eb01c3e93e83743a092dba647d9a1cfe0071ba4d82dcd302eb2d8a767ed8245d",
+  "optimization": "-O",
+  "results": [
+    {
+      "geometry_checksum": 975.2910742297646,
+      "links": 100,
+      "live_step_max_ms": 0.191125,
+      "live_step_median_ms": 0.004166,
+      "live_step_p95_ms": 0.183,
+      "nodes": 50,
+      "prepare_150_ms": 9.455958,
+      "prepare_400_ms": 15.975792,
+      "seed_ms": 0.303541,
+      "still_settled": true
+    },
+    {
+      "geometry_checksum": 1257.3008298117234,
+      "links": 400,
+      "live_step_max_ms": 1.030458,
+      "live_step_median_ms": 0.072,
+      "live_step_p95_ms": 1.016625,
+      "nodes": 200,
+      "prepare_150_ms": 59.183833,
+      "prepare_400_ms": 178.183458,
+      "seed_ms": 0.28325,
+      "still_settled": true
+    },
+    {
+      "geometry_checksum": 62860.580701324114,
+      "links": 2000,
+      "live_step_max_ms": 7.706167,
+      "live_step_median_ms": 1.636625,
+      "live_step_p95_ms": 7.547084,
+      "nodes": 1000,
+      "prepare_150_ms": 553.895083,
+      "prepare_400_ms": 1039.358708,
+      "seed_ms": 1.365542,
+      "still_settled": true
+    }
+  ],
+  "samples_per_live_step": 60,
+  "scope": "synthetic macOS value-layout CPU work; excludes UIKit and iPhone frame timing"
+}

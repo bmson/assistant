@@ -2,6 +2,32 @@ import SwiftUI
 import UIKit
 @preconcurrency import UserNotifications
 
+/// A notification is navigation intent, never authority to access a thread.
+/// The model verifies the owner and loads its destination through the server.
+struct AssistantNotificationDestination: Equatable, Sendable {
+    let route: AssistantRoute
+    let agentID: String?
+    let conversationID: String?
+
+    init?(userInfo: [AnyHashable: Any]) {
+        guard let rawRoute = userInfo["route"] as? String,
+              let route = AssistantRoute(rawValue: rawRoute) else { return nil }
+        self.route = route
+        if let value = userInfo["agentId"] {
+            guard let owner = value as? String, !owner.isEmpty, owner.count <= 128 else { return nil }
+            agentID = owner
+        } else {
+            agentID = nil
+        }
+        conversationID = (userInfo["conversationId"] as? String)
+            .flatMap { $0.count == 36 ? UUID(uuidString: $0)?.uuidString.lowercased() : nil }
+    }
+
+    func belongsTo(ownerID: String) -> Bool {
+        agentID == nil || agentID == ownerID
+    }
+}
+
 @MainActor
 final class NotificationManager: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     static let shared = NotificationManager()
@@ -9,7 +35,7 @@ final class NotificationManager: NSObject, ObservableObject, UNUserNotificationC
     @Published private(set) var authorizationStatus: UNAuthorizationStatus = .notDetermined
     @Published private(set) var isRequestingAuthorization = false
     @Published private(set) var authorizationError: String?
-    @Published private(set) var pendingRoute: AssistantRoute?
+    @Published private(set) var pendingDestination: AssistantNotificationDestination?
 
     /// Wired up by AppModel: handles Approve/Deny actions taken directly on a
     /// notification without opening the app into the Approvals sheet first.
@@ -84,7 +110,8 @@ final class NotificationManager: NSObject, ObservableObject, UNUserNotificationC
     }
 
     @discardableResult
-    func schedule(title: String, body: String, route: AssistantRoute?, approvalId: String? = nil) async -> Bool {
+    func schedule(title: String, body: String, route: AssistantRoute?, approvalId: String? = nil,
+                  agentID: String? = nil, conversationID: String? = nil) async -> Bool {
         let settings = await center.notificationSettings()
         authorizationStatus = settings.authorizationStatus
         guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional,
@@ -98,6 +125,10 @@ final class NotificationManager: NSObject, ObservableObject, UNUserNotificationC
         content.categoryIdentifier = route == .approvals ? Self.attentionCategory : Self.updateCategory
         if let route {
             content.userInfo["route"] = route.rawValue
+        }
+        if let agentID { content.userInfo["agentId"] = agentID }
+        if route == .chat, let conversationID, UUID(uuidString: conversationID) != nil {
+            content.userInfo["conversationId"] = conversationID
         }
         if let approvalId {
             content.userInfo["approvalId"] = approvalId
@@ -159,8 +190,9 @@ final class NotificationManager: NSObject, ObservableObject, UNUserNotificationC
     }
 #endif
 
-    func consumePendingRoute() {
-        pendingRoute = nil
+    func consumePendingDestination(_ destination: AssistantNotificationDestination) {
+        // An older asynchronous open must not consume a newer notification.
+        if pendingDestination == destination { pendingDestination = nil }
     }
 
     func openSystemSettings() {
@@ -199,10 +231,8 @@ final class NotificationManager: NSObject, ObservableObject, UNUserNotificationC
             }
         }
 
-        let rawRoute = userInfo["route"] as? String
-        let route = rawRoute.flatMap(AssistantRoute.init(rawValue:))
-        guard let route else { return }
-        await MainActor.run { self.pendingRoute = route }
+        guard let destination = AssistantNotificationDestination(userInfo: userInfo) else { return }
+        await MainActor.run { self.pendingDestination = destination }
     }
 
     private func registerCategories() {

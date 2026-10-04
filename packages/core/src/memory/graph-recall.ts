@@ -6,6 +6,7 @@ import {
 import type { GraphRecallRepository, GraphRelation as RelationRow } from '@assistant/persistence';
 import { GRAPH_EXTRACTION_VERSION } from './knowledge-graph.js';
 import type { RecallSource } from './recall.js';
+import { createRecallBlock } from './recall-budget.js';
 
 /**
  * Query-time GraphRAG. Semantic memory matches seed the traversal; relation
@@ -116,7 +117,13 @@ export async function recallKnowledgeGraph(
   options: GraphRecallOptions = {},
 ): Promise<GraphRecallResult> {
   const opts = { ...DEFAULTS, ...options };
-  if (args.queryText.replace(/\s+/g, ' ').trim().length < 3 || !args.queryEmbedding) return EMPTY;
+  const block = createRecallBlock(HEADER, opts.maxChars);
+  if (
+    args.queryText.replace(/\s+/g, ' ').trim().length < 3 ||
+    !args.queryEmbedding ||
+    !block.available
+  )
+    return EMPTY;
   const repository =
     'kind' in storage && storage.kind === 'graph-recall-repository'
       ? (storage as GraphRecallRepository)
@@ -147,11 +154,9 @@ export async function recallKnowledgeGraph(
   const entries: string[] = [];
   const sources: RecallSource[] = [];
   const seenSources = new Set<string>();
-  let chars = 0;
   const add = (entry: string, evidence: Array<{ row: RelationRow; hops: 1 | 2 }>) => {
-    if (entries.length > 0 && chars + entry.length > opts.maxChars) return false;
+    if (!block.add(entry)) return false;
     entries.push(entry);
-    chars += entry.length + 1;
     for (const item of evidence) {
       if (seenSources.has(item.row.sourceMemoryId)) continue;
       seenSources.add(item.row.sourceMemoryId);
@@ -187,7 +192,7 @@ export async function recallKnowledgeGraph(
 
   if (entries.length === 0) return { ...EMPTY, candidates: candidates.length };
   return {
-    block: [HEADER, '', ...entries].join('\n'),
+    block: block.text,
     used: entries.length,
     candidates: candidates.length,
     sources,

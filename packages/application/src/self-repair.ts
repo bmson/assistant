@@ -83,6 +83,14 @@ export async function decideRepairIssue(
     throw new Error('Confirm resolution after the fix is deployed');
   if (action === 'run_now' && !['reported', 'failed', 'blocked'].includes(issue.status))
     throw new Error('Only queued, failed or blocked reports can be run now');
+  if (
+    (action === 'retry' || action === 'run_now') &&
+    (issue.data.workerProvider ?? 'github') === 'github' &&
+    issue.data.prNumber
+  )
+    throw new Error(
+      'This investigation already has a pull request. Review it on GitHub, or report a new issue for a fresh code-fix attempt.',
+    );
   if (action === 'run_now' && issue.data.manualRunRequestedAt) return;
   const requestedAt = new Date();
   const next = await repository.update(
@@ -117,6 +125,8 @@ export async function decideRepairIssue(
             hostedCleanupPending: undefined,
             prNumber: undefined,
             prUrl: undefined,
+            mergeSha: undefined,
+            monitoringAt: undefined,
           }
         : {}),
     },

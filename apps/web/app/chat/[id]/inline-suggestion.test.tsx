@@ -1,3 +1,4 @@
+import { NextRequest } from 'next/server';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -5,8 +6,12 @@ vi.mock('@/app/suggestions/actions', () => ({
   decideSuggestionInline: vi.fn(),
   snoozeSuggestionInline: vi.fn(),
 }));
+vi.mock('@assistant/config', () => ({ loadConfig: () => ({ PERSISTENCE_DRIVER: 'postgres' }) }));
 
+import { proxy } from '../../../proxy';
 import { type InlineSuggestionPart, SuggestionCard } from './inline-suggestion';
+
+const taskId = '00000000-0000-4000-8000-000000000001';
 
 const part: InlineSuggestionPart = {
   type: 'suggestion',
@@ -43,7 +48,7 @@ describe('SuggestionCard', () => {
             ...part,
             status: 'accepted',
             acceptedTaskStatus: 'done',
-            acceptedTaskId: 't1',
+            acceptedTaskId: taskId,
             acceptedTaskSummary: 'No reply is needed.',
           },
         ]}
@@ -53,7 +58,10 @@ describe('SuggestionCard', () => {
     expect(html).not.toContain('<details open');
     expect(html).not.toContain('data-decision-card="true"');
     expect(html).toContain('No reply is needed.');
-    expect(html).toContain('href="/tasks/t1"');
+    expect(html).toContain(`href="/audit/${taskId}"`);
+    expect(html).toContain('View task evidence');
+    expect(html).not.toContain('href="/tasks/');
+    expect(proxy(new NextRequest(`https://assistant.test/audit/${taskId}`)).status).toBe(200);
   });
 
   it('does not crash on malformed persisted snooze timestamps', () => {

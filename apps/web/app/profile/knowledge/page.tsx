@@ -732,7 +732,7 @@ export default async function KnowledgePage({
           </div>
           <form
             action="/profile/knowledge"
-            className="mt-5 grid gap-2 rounded-2xl bg-sunken/35 p-3 md:grid-cols-5"
+            className="mt-5 grid gap-2 rounded-2xl bg-sunken/35 p-3 md:grid-cols-3"
           >
             <input type="hidden" name="view" value="map" />
             {sourceMemoryId ? <input type="hidden" name="memory" value={sourceMemoryId} /> : null}
@@ -741,7 +741,7 @@ export default async function KnowledgePage({
               defaultValue={query}
               aria-label="Narrow the map to matching items"
               placeholder="Narrow the map…"
-              className={`${inputClass} md:col-span-2`}
+              className={inputClass}
             />
             <select name="kind" defaultValue={kind} aria-label="Item type" className={selectClass}>
               <option value="">All item types</option>
@@ -766,12 +766,12 @@ export default async function KnowledgePage({
                 </option>
               ))}
             </select>
-            <div className="flex gap-2">
+            <div className="flex gap-2 md:col-span-3 md:justify-end">
               <select
                 name="review"
                 defaultValue={params.review ?? 'all'}
                 aria-label="Review state"
-                className={`${selectClass} min-w-0 flex-1`}
+                className={`${selectClass} min-w-0 flex-1 md:max-w-xs`}
               >
                 <option value="all">Any review state</option>
                 <option value="confirmed">Confirmed</option>

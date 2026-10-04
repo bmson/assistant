@@ -89,7 +89,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
     it('acknowledges portable advisory proposals and makes dismissal idempotent', async () => {
       await store.doc('agents', agentId).set({ id: agentId, name: 'Owner' });
       await seed('advisory', { kind: 'note', evidenceIds: [] });
-      await repository.applyAction(agentId, 'advisory', 'apply');
+      expect(await repository.applyAction(agentId, 'advisory', 'apply')).toMatchObject({
+        outcome: 'acknowledged',
+        enacted: false,
+      });
       expect((await store.doc('improvementProposals', 'advisory').get()).get('status')).toBe(
         'applied',
       );
@@ -99,6 +102,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       await repository.applyAction(agentId, 'dismiss-me', 'dismiss');
       expect((await store.doc('improvementProposals', 'dismiss-me').get()).get('status')).toBe(
         'dismissed',
+      );
+      expect(await repository.applyAction(agentId, 'advisory', 'dismiss')).toMatchObject({
+        outcome: 'already_decided',
+        enacted: false,
+      });
+      expect((await store.doc('improvementProposals', 'advisory').get()).get('status')).toBe(
+        'applied',
       );
     });
 
@@ -112,7 +122,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           params: {},
           updatedAt: new Date('2026-09-01T00:00:00Z'),
         }),
-        store.doc('models', 'new/primary').set({ id: 'new/primary', enabled: true }),
+        store.doc('models', 'new/primary').set({
+          id: 'new/primary',
+          enabled: true,
+          promptCostPerMTok: '0',
+          completionCostPerMTok: '0',
+          capabilities: {},
+        }),
         store.doc('models', 'disabled/fallback').set({ id: 'disabled/fallback', enabled: false }),
       ]);
       await seed('routing', {
@@ -123,7 +139,20 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           suggestion: 'Use the newer draft model',
         },
       });
-      await repository.applyAction(agentId, 'routing', 'apply');
+      await expect(repository.applyAction(agentId, 'routing', 'apply')).rejects.toThrow(
+        'not enabled with prices',
+      );
+      expect((await store.doc('improvementProposals', 'routing').get()).get('status')).toBe('open');
+      expect((await store.doc('modelRoles', 'draft').get()).get('primaryModel')).toBe(
+        'old/primary',
+      );
+      await store
+        .doc('improvementProposals', 'routing')
+        .update({ change: { role: 'draft', primaryModel: 'new/primary' } });
+      expect(await repository.applyAction(agentId, 'routing', 'apply')).toMatchObject({
+        outcome: 'applied',
+        enacted: true,
+      });
       expect((await store.doc('improvementProposals', 'routing').get()).get('status')).toBe(
         'applied',
       );
@@ -132,12 +161,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         fallbackModel: 'old/fallback',
       });
 
-      // Unknown roles and models are recorded only.
+      // Unknown models remain actionable and never claim an applied change.
       await seed('unknown', { change: { role: 'draft', primaryModel: 'missing/model' } });
-      await repository.applyAction(agentId, 'unknown', 'apply');
-      expect((await store.doc('improvementProposals', 'unknown').get()).get('status')).toBe(
-        'applied',
+      await expect(repository.applyAction(agentId, 'unknown', 'apply')).rejects.toThrow(
+        'not enabled with prices',
       );
+      expect((await store.doc('improvementProposals', 'unknown').get()).get('status')).toBe('open');
       expect((await store.doc('modelRoles', 'draft').get()).get('primaryModel')).toBe(
         'new/primary',
       );
@@ -151,7 +180,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         evidenceIds: [],
         change: { role: 'draft', primaryModel: 'new/primary' },
       });
-      await repository.applyAction(agentId, 'opinion', 'apply');
+      await expect(repository.applyAction(agentId, 'opinion', 'apply')).rejects.toThrow(
+        'needs cited evidence',
+      );
       expect((await store.doc('improvementProposals', 'opinion').get()).get('status')).toBe('open');
       expect((await store.doc('modelRoles', 'draft').get()).get('primaryModel')).toBe(
         'old/primary',
@@ -180,6 +211,111 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect((await store.doc('improvementProposals', 'erase-me').get()).get('status')).toBe(
         'open',
       );
+    });
+
+    async function routingFixture(id: string) {
+      await store.doc('agents', agentId).set({ id: agentId, name: 'Owner' });
+      await store
+        .doc('modelRoles', 'draft')
+        .set({ role: 'draft', primaryModel: 'old/model', fallbackModel: 'old/fallback' });
+      await store.doc('models', 'new/model').set({
+        id: 'new/model',
+        enabled: true,
+        promptCostPerMTok: '0',
+        completionCostPerMTok: '0',
+        capabilities: {},
+      });
+      await seed(id, { change: { role: 'draft', primaryModel: 'new/model' } });
+    }
+
+    it('serializes duplicate approvals and racing dismissal without closing an applied proposal again', async () => {
+      await routingFixture('duplicate');
+      const duplicate = await Promise.all([
+        repository.applyAction(agentId, 'duplicate', 'apply'),
+        repository.applyAction(agentId, 'duplicate', 'apply'),
+      ]);
+      expect(duplicate.map((row) => row.outcome).sort()).toEqual(['already_decided', 'applied']);
+      await store.doc('modelRoles', 'draft').update({ primaryModel: 'old/model' });
+      await seed('contested', { change: { role: 'draft', primaryModel: 'new/model' } });
+      const contested = await Promise.all([
+        repository.applyAction(agentId, 'contested', 'apply'),
+        repository.applyAction(agentId, 'contested', 'dismiss'),
+      ]);
+      const final = (await store.doc('improvementProposals', 'contested').get()).get('status');
+      expect(contested.filter((row) => row.outcome === 'already_decided')).toHaveLength(1);
+      expect((await store.doc('modelRoles', 'draft').get()).get('primaryModel')).toBe(
+        final === 'applied' ? 'new/model' : 'old/model',
+      );
+    });
+
+    it('reports an already current route and refuses missing roles or unpriced models', async () => {
+      await routingFixture('current');
+      await store.doc('modelRoles', 'draft').update({ primaryModel: 'new/model' });
+      expect(await repository.applyAction(agentId, 'current', 'apply')).toMatchObject({
+        outcome: 'already_current',
+        enacted: false,
+      });
+      await seed('missing-role', { change: { role: 'draft', primaryModel: 'new/model' } });
+      await store.doc('modelRoles', 'draft').delete();
+      await expect(repository.applyAction(agentId, 'missing-role', 'apply')).rejects.toThrow(
+        'not configured',
+      );
+      expect((await store.doc('improvementProposals', 'missing-role').get()).get('status')).toBe(
+        'open',
+      );
+      await store.doc('modelRoles', 'draft').set({ role: 'draft', primaryModel: 'old/model' });
+      await seed('unpriced', { change: { role: 'draft', primaryModel: 'new/model' } });
+      await store.doc('models', 'new/model').update({ promptCostPerMTok: null });
+      await expect(repository.applyAction(agentId, 'unpriced', 'apply')).rejects.toThrow(
+        'not enabled with prices',
+      );
+      expect((await store.doc('improvementProposals', 'unpriced').get()).get('status')).toBe(
+        'open',
+      );
+      expect((await store.doc('modelRoles', 'draft').get()).get('primaryModel')).toBe('old/model');
+    });
+
+    it('does not commit the routing update if the proposal write fails', async () => {
+      await routingFixture('rollback');
+      const failingDb = new Proxy(store.db, {
+        get(target, property) {
+          if (property !== 'runTransaction') return Reflect.get(target, property);
+          return (work: (tx: unknown) => Promise<unknown>) =>
+            target.runTransaction((tx) =>
+              work(
+                new Proxy(tx, {
+                  get(transaction, key) {
+                    if (key !== 'update') return Reflect.get(transaction, key);
+                    return (
+                      ref: FirebaseFirestore.DocumentReference,
+                      patch: FirebaseFirestore.UpdateData<Record<string, unknown>>,
+                    ) => {
+                      if (ref.path === store.doc('improvementProposals', 'rollback').path)
+                        throw new Error('Injected proposal persistence failure');
+                      return transaction.update(ref, patch);
+                    };
+                  },
+                }),
+              ),
+            );
+        },
+      });
+      const failingStore = new Proxy(store, {
+        get(target, property) {
+          return property === 'db' ? failingDb : Reflect.get(target, property);
+        },
+      });
+      await expect(
+        new FirestoreWorkspaceImprovementRepository(failingStore).applyAction(
+          agentId,
+          'rollback',
+          'apply',
+        ),
+      ).rejects.toThrow('Injected proposal persistence failure');
+      expect((await store.doc('improvementProposals', 'rollback').get()).get('status')).toBe(
+        'open',
+      );
+      expect((await store.doc('modelRoles', 'draft').get()).get('primaryModel')).toBe('old/model');
     });
 
     it('rejects owner scans beyond the cap instead of returning a partial top 100', async () => {

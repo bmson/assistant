@@ -3,6 +3,7 @@ import {
   FirestoreWorkspaceAnomalyRepository,
   FirestoreWorkspaceImprovementRepository,
 } from '@assistant/firestore';
+import type { ImprovementActionResult } from '@assistant/persistence';
 import { getApplication, getFirestoreInstallationStore } from './server';
 
 /**
@@ -56,7 +57,10 @@ export function listOpenImprovements() {
 }
 
 /** Apply or dismiss one owner proposal; repeated decisions are no-ops. */
-export function decideOwnerImprovement(id: string, action: 'apply' | 'dismiss'): Promise<void> {
+export function decideOwnerImprovement(
+  id: string,
+  action: 'apply' | 'dismiss',
+): Promise<ImprovementActionResult> {
   const firestore = firestoreReviews();
   if (firestore) return firestore.improvements.applyAction(firestore.agentId, id, action);
   return action === 'apply'

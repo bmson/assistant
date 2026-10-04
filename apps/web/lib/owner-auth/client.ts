@@ -63,10 +63,16 @@ export function deviceLabel(): string {
 export function ownerAuthMessage(error: unknown): string {
   if (error instanceof Error && error.name === 'NotAllowedError')
     return 'The passkey prompt was cancelled or timed out. Try again.';
+  if (error instanceof Error && error.name === 'InvalidStateError')
+    return 'This device already has a passkey for your assistant. Sign in with it, or add a passkey on another device.';
+  if (error instanceof Error && error.name === 'NotSupportedError')
+    return 'This device could not use the requested passkey. Try another device or browser.';
+  if (error instanceof Error && error.name === 'SecurityError')
+    return 'Passkeys could not be used at this address. Open the configured assistant URL and try again.';
   const code = error instanceof OwnerAuthRequestError ? error.code : '';
   switch (code) {
     case 'claim_invalid':
-      return 'This setup link is invalid, expired, or already used. Ask the Google Cloud owner to issue a new one with the installer.';
+      return 'This setup link is invalid, expired, or already used. Ask the person who manages this server for a new link.';
     case 'recovery_invalid':
       return 'That recovery code is not valid. Check it and try again.';
     case 'passkey_unknown':

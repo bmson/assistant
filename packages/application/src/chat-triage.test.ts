@@ -159,6 +159,9 @@ describe('looksLikeActionRequest', () => {
       'will it rain in Boston tomorrow?',
       'is it going to snow this weekend?',
       'what is the temperature in Reykjavík?',
+      'Check the weather in Tokyo tomorrow.',
+      'Please check the weather.',
+      'Look up the forecast for tomorrow',
     ]) {
       expect(looksLikeActionRequest(t), `should be a lookup: ${t}`).toBe(true);
     }

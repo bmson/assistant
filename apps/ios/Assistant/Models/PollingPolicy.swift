@@ -4,6 +4,16 @@ import Foundation
 /// AppModel makes the user-visible state owner smaller and lets tests lock down
 /// network behavior without constructing an API client or a SwiftUI view.
 enum PollingPolicy {
+    /// A visible call needs fresh questions; a failing connection needs room to
+    /// recover. Screens stop after three failures and offer an explicit retry.
+    static func callIntervalSeconds(consecutiveFailures: Int) -> Double {
+        switch consecutiveFailures {
+        case ...0: return 2
+        case 1: return 4
+        default: return 8
+        }
+    }
+
     /// How long the server may hold a poll open before answering "nothing yet".
     ///
     /// Slightly under the service's own 25s ceiling (MAX_CHAT_WAIT_MS) so the

@@ -180,4 +180,63 @@ describe('startPoller', () => {
     expect(sqlTick).not.toHaveBeenCalled();
     stop();
   });
+
+  it('keeps one slow run per recurring module tick without holding other work', async () => {
+    let release: (() => void) | undefined;
+    const slowTick = vi.fn(
+      async () =>
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const quickTick = vi.fn(async () => {});
+    const tickDeps = {
+      db: {},
+      router: {},
+      config: { PERSISTENCE_DRIVER: 'postgres' },
+      modules: {
+        sweepSteps: [],
+        ticks: [
+          { name: 'slow-provider', everyTicks: 1, run: slowTick },
+          { name: 'quick-provider', everyTicks: 1, run: quickTick },
+        ],
+      },
+    } as never;
+    findDueTasks.mockResolvedValueOnce(due('owner-request')).mockResolvedValue([]);
+    const stop = startPoller(tickDeps);
+    await vi.advanceTimersByTimeAsync(6_000);
+
+    expect(slowTick).toHaveBeenCalledTimes(1);
+    expect(quickTick).toHaveBeenCalledTimes(3);
+    expect(executeAgentTask).toHaveBeenCalledWith(tickDeps, 'owner-request');
+
+    release?.();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(slowTick).toHaveBeenCalledTimes(2);
+    release?.();
+    stop();
+  });
+
+  it('releases a failed or synchronously throwing module tick for the next cadence', async () => {
+    const logError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const moduleTick = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw new Error('provider crashed');
+      })
+      .mockRejectedValueOnce(new Error('provider unavailable'))
+      .mockResolvedValue(undefined);
+    const tickDeps = {
+      db: {},
+      router: {},
+      config: { PERSISTENCE_DRIVER: 'postgres' },
+      modules: { sweepSteps: [], ticks: [{ name: 'provider', everyTicks: 1, run: moduleTick }] },
+    } as never;
+
+    const stop = startPoller(tickDeps);
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(moduleTick).toHaveBeenCalledTimes(3);
+    expect(logError).toHaveBeenCalledTimes(2);
+    stop();
+  });
 });

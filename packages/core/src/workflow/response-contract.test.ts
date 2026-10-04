@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  type ActionEvidence,
   enforceResponseContract,
   enforceUrlProvenance,
   groundReadDraft,
@@ -1299,7 +1300,7 @@ describe('response execution contract', () => {
       );
       expect(result).toMatchObject({ blocked: false, unsupported: [] });
       expect(result.text).toContain('Busy (Family)');
-      expect(result.text).toContain('Monday, August 17, 2026 at 9:30 AM PDT');
+      expect(result.text).toContain('9:30 AM to 10:00 AM');
       expect(result.text).toContain('Open according to the checked calendars');
       expect(result.text).not.toContain('free all morning');
     });
@@ -1340,6 +1341,249 @@ describe('response execution contract', () => {
       expect(result.text).toContain('coverage was incomplete; unavailable: Work');
       expect(result.text).not.toContain('Open according to the checked calendars');
       expect(result.text).not.toContain('No conflicts');
+    });
+
+    const availabilityRequest = (
+      timeMin: string,
+      timeMax: string,
+      timeZone = 'America/Los_Angeles',
+    ) => ({
+      kind: 'calendar' as const,
+      queryTerms: [],
+      firstToolName: 'calendar.availability' as const,
+      requiresThreadRead: false,
+      timeZone,
+      timeWindow: { label: 'tomorrow', timeMin, timeMax },
+    });
+    const availabilityEvidence = (
+      request: ReturnType<typeof availabilityRequest>,
+      patch: Record<string, unknown> = {},
+    ): ActionEvidence => ({
+      toolName: 'calendar.availability',
+      status: 'succeeded',
+      args: { timeMin: request.timeWindow.timeMin, timeMax: request.timeWindow.timeMax },
+      result: { complete: true, calendarsChecked: ['Family', 'Work'], busy: [], ...patch },
+    });
+
+    it('answers a clear local day directly without UTC ranges or redundant midnight boundaries', () => {
+      const readRequest = availabilityRequest(
+        '2026-09-08T07:00:00.000Z',
+        '2026-09-09T07:00:00.000Z',
+      );
+      const result = enforceResponseContract(
+        'Tomorrow looks busy.',
+        [availabilityEvidence(readRequest)],
+        { readRequest },
+      );
+      expect(result).toMatchObject({ blocked: false, unsupported: [] });
+      expect(result.text).toBe('Tomorrow is clear on the Family and Work calendars I checked.');
+      expect(result.text).not.toMatch(/2026-09|00:00|12:00 AM|range checked/);
+    });
+
+    it.each([
+      ['2026-09-07T15:00:00.000Z', '2026-09-08T15:00:00.000Z', 'Asia/Tokyo'],
+      ['2026-03-08T08:00:00.000Z', '2026-03-09T07:00:00.000Z', 'America/Los_Angeles'],
+      ['2026-11-01T07:00:00.000Z', '2026-11-02T08:00:00.000Z', 'America/Los_Angeles'],
+    ])('recognizes the owner-local civil day across UTC dates and DST: %s', (start, end, zone) => {
+      const readRequest = availabilityRequest(start, end, zone);
+      const result = enforceResponseContract('Unknown.', [availabilityEvidence(readRequest)], {
+        readRequest,
+      });
+      expect(result.text).toBe('Tomorrow is clear on the Family and Work calendars I checked.');
+    });
+
+    it.each([false, true])(
+      'cannot promise a clear day with an unavailable calendar even when complete is %s',
+      (complete) => {
+        const readRequest = availabilityRequest(
+          '2026-09-08T07:00:00.000Z',
+          '2026-09-09T07:00:00.000Z',
+        );
+        const result = enforceResponseContract(
+          'Tomorrow is completely free.',
+          [
+            availabilityEvidence(readRequest, {
+              complete,
+              calendarsChecked: ['Family'],
+              unavailable: ['Work'],
+            }),
+          ],
+          { readRequest },
+        );
+        expect(result.text.startsWith('I can’t confirm that tomorrow is clear yet.')).toBe(true);
+        expect(result.text).toContain('Family calendar I checked returned no busy blocks');
+        expect(result.text).toContain('coverage was incomplete; unavailable: Work');
+        expect(result.text).not.toMatch(/Open according|Tomorrow is clear|completely free|2026-09/);
+      },
+    );
+
+    it('keeps a partial time window explicit instead of calling the whole day clear', () => {
+      const readRequest = availabilityRequest(
+        '2026-09-08T16:00:00.000Z',
+        '2026-09-08T18:00:00.000Z',
+      );
+      const result = enforceResponseContract(
+        'Tomorrow is clear.',
+        [availabilityEvidence(readRequest)],
+        { readRequest },
+      );
+      expect(result.text).toContain(
+        'The checked time range is clear on the Family and Work calendars I checked.',
+      );
+      expect(result.text).toContain('September 8 at 9:00 AM PDT');
+      expect(result.text).toContain('September 8 at 11:00 AM PDT');
+      expect(result.text).not.toContain('Tomorrow is clear');
+      expect(result.text).not.toMatch(/2026-09-08T|\.000Z/);
+    });
+
+    it('names the actual checked subset and makes no complete claim when none were checked', () => {
+      const readRequest = availabilityRequest(
+        '2026-09-08T07:00:00.000Z',
+        '2026-09-09T07:00:00.000Z',
+      );
+      const subset = enforceResponseContract(
+        'All calendars are clear.',
+        [availabilityEvidence(readRequest, { calendarsChecked: ['Work'] })],
+        { readRequest },
+      );
+      expect(subset.text).toBe('Tomorrow is clear on the Work calendar I checked.');
+      const empty = enforceResponseContract(
+        'All calendars are clear.',
+        [availabilityEvidence(readRequest, { calendarsChecked: [] })],
+        { readRequest },
+      );
+      expect(empty.text).toContain('I can’t confirm');
+      expect(empty.text).toContain('No calendars were listed as successfully checked');
+      expect(empty.text).not.toContain('Tomorrow is clear');
+    });
+
+    it('keeps incomplete busy coverage honest without manufacturing free intervals', () => {
+      const readRequest = availabilityRequest(
+        '2026-09-08T07:00:00.000Z',
+        '2026-09-09T07:00:00.000Z',
+      );
+      const result = enforceResponseContract(
+        'You are free after ten.',
+        [
+          availabilityEvidence(readRequest, {
+            complete: false,
+            calendarsChecked: ['Family'],
+            unavailable: ['Work'],
+            busy: [
+              {
+                calendar: 'Family',
+                start: '2026-09-08T16:30:00.000Z',
+                end: '2026-09-08T17:00:00.000Z',
+              },
+            ],
+          }),
+        ],
+        { readRequest },
+      );
+      expect(
+        result.text.startsWith(
+          'I found busy time tomorrow on the Family calendar I checked, but I can’t confirm your full availability.',
+        ),
+      ).toBe(true);
+      expect(result.text).toContain('Busy (Family): 9:30 AM to 10:00 AM');
+      expect(result.text).toContain('unavailable: Work');
+      expect(result.text).not.toContain('Open according');
+    });
+
+    it('disambiguates repeated local clock times when availability crosses a daylight-saving change', () => {
+      const readRequest = availabilityRequest(
+        '2026-11-01T07:00:00.000Z',
+        '2026-11-02T08:00:00.000Z',
+      );
+      const result = enforceResponseContract(
+        'You are free.',
+        [
+          availabilityEvidence(readRequest, {
+            busy: [
+              {
+                calendar: 'Work',
+                start: '2026-11-01T08:30:00.000Z',
+                end: '2026-11-01T09:30:00.000Z',
+              },
+            ],
+          }),
+        ],
+        { readRequest },
+      );
+      expect(result.text).toContain('Busy (Work): 1:30 AM PDT to 1:30 AM PST');
+      expect(result.text).not.toContain('1:30 AM to 1:30 AM');
+    });
+
+    it('does not accept a different date window or prior-task read as proof of a clear day', () => {
+      const readRequest = availabilityRequest(
+        '2026-09-08T07:00:00.000Z',
+        '2026-09-09T07:00:00.000Z',
+      );
+      for (const evidence of [
+        {
+          ...availabilityEvidence(readRequest),
+          args: { timeMin: '2026-09-07T07:00:00.000Z', timeMax: '2026-09-08T07:00:00.000Z' },
+        },
+        { ...availabilityEvidence(readRequest), fromCurrentTask: false },
+      ]) {
+        const result = enforceResponseContract('Tomorrow is clear.', [evidence], { readRequest });
+        expect(result.blocked).toBe(true);
+        expect(result.text).not.toContain('Tomorrow is clear');
+      }
+    });
+
+    it('does not promote a window starting after midnight into a clear whole day', () => {
+      const readRequest = availabilityRequest(
+        '2026-09-08T07:00:01.000Z',
+        '2026-09-09T07:00:00.000Z',
+      );
+      const result = enforceResponseContract(
+        'Tomorrow is clear.',
+        [availabilityEvidence(readRequest)],
+        { readRequest },
+      );
+      expect(result.text).toContain('The checked time range is clear');
+      expect(result.text).not.toContain('Tomorrow is clear');
+    });
+
+    it('intersects returned busy blocks with the checked day and labels full-day occupancy correctly', () => {
+      const readRequest = availabilityRequest(
+        '2026-09-08T07:00:00.000Z',
+        '2026-09-09T07:00:00.000Z',
+      );
+      const outside = enforceResponseContract(
+        'Tomorrow is busy.',
+        [
+          availabilityEvidence(readRequest, {
+            busy: [
+              {
+                calendar: 'Family',
+                start: '2026-09-09T08:00:00.000Z',
+                end: '2026-09-09T09:00:00.000Z',
+              },
+            ],
+          }),
+        ],
+        { readRequest },
+      );
+      expect(outside.text).toBe('Tomorrow is clear on the Family and Work calendars I checked.');
+      const allDay = enforceResponseContract(
+        'Tomorrow is clear.',
+        [
+          availabilityEvidence(readRequest, {
+            busy: [
+              {
+                calendar: 'Family',
+                start: '2026-09-07T07:00:00.000Z',
+                end: '2026-09-10T07:00:00.000Z',
+              },
+            ],
+          }),
+        ],
+        { readRequest },
+      );
+      expect(allDay.text).toContain('Busy (Family): all day');
+      expect(allDay.text).not.toMatch(/12:00 AM|Open according|2026-09/);
     });
   });
 });
@@ -1795,6 +2039,117 @@ describe('groundReadDraft', () => {
 });
 
 describe('production home audit regressions', () => {
+  it.each([
+    { cancelled: false, reason: 'not_found' },
+    { cancelled: false, reason: 'ambiguous', matches: [{ text: 'Take sunglasses' }] },
+    {},
+    { cancelled: 'true' },
+  ])('rejects a reminder removal claim without a true cancellation receipt: %j', (result) => {
+    const checked = enforceResponseContract('I cancelled the sunglasses reminder.', [
+      { toolName: 'reminder.cancel', status: 'succeeded', result },
+    ]);
+    expect(checked).toMatchObject({ blocked: true, unsupported: ['reminder_cancel'] });
+    expect(checked.text).not.toMatch(/^I cancelled|^The reminder was removed/);
+  });
+
+  it('asks which reminder to remove on an ambiguous match', () => {
+    const checked = enforceResponseContract(
+      'Done.',
+      [
+        {
+          toolName: 'reminder.cancel',
+          status: 'succeeded',
+          result: { cancelled: false, reason: 'ambiguous' },
+        },
+      ],
+      { requestText: 'Cancel the sunglasses reminder.' },
+    );
+    expect(checked.text).toContain('Which reminder');
+    expect(checked.text).toContain('not removed any');
+  });
+
+  it('names bounded reminder choices instead of making the owner guess', () => {
+    const checked = enforceResponseContract('I cancelled the reminder.', [
+      {
+        toolName: 'reminder.cancel',
+        status: 'succeeded',
+        result: {
+          cancelled: false,
+          reason: 'ambiguous',
+          matches: [{ text: 'Sunglasses for home' }, { text: 'Sunglasses for travel' }],
+        },
+      },
+    ]);
+    expect(checked.text).toContain('- Sunglasses for home');
+    expect(checked.text).toContain('- Sunglasses for travel');
+    expect(checked.text).toContain('not removed any');
+  });
+
+  it.each(['I removed it.', 'Done.', 'The reminder was cancelled.'])(
+    'requires a current cancellation for %s',
+    (text) => {
+      const receipt = {
+        toolName: 'reminder.cancel',
+        status: 'succeeded',
+        result: { cancelled: true },
+      };
+      expect(
+        enforceResponseContract(text, [receipt], {
+          requestText: 'Cancel the sunglasses reminder.',
+        }),
+      ).toMatchObject({ blocked: false, text });
+      expect(
+        enforceResponseContract(text, [{ ...receipt, fromCurrentTask: false }], {
+          requestText: 'Cancel the sunglasses reminder.',
+        }).blocked,
+      ).toBe(true);
+      expect(
+        enforceResponseContract(text, [{ ...receipt, toolName: 'reminder.create' }], {
+          requestText: 'Cancel the sunglasses reminder.',
+        }).blocked,
+      ).toBe(true);
+    },
+  );
+
+  it.each([
+    {},
+    { created: false, reminderId: 'r1' },
+    { reminderId: '' },
+    { reminderId: '   ' },
+    { ok: false, reminderId: 'r1' },
+  ])('does not treat a completed function as a scheduled reminder: %j', (result) => {
+    const checked = enforceResponseContract('I scheduled the reminder.', [
+      { toolName: 'reminder.create', status: 'succeeded', result },
+    ]);
+    expect(checked).toMatchObject({ blocked: true, unsupported: ['reminder_create'] });
+    expect(checked.text).toContain('not confirmed');
+    expect(
+      enforceResponseContract("I'll remind you tomorrow.", [
+        { toolName: 'reminder.create', status: 'succeeded', result },
+      ]).blocked,
+    ).toBe(true);
+  });
+
+  it('keeps real one-time and recurring reminder receipts', () => {
+    for (const kind of ['once', 'recurring']) {
+      const text = 'I scheduled the reminder.';
+      expect(
+        enforceResponseContract(text, [
+          { toolName: 'reminder.create', status: 'succeeded', result: { reminderId: 'r1', kind } },
+        ]),
+      ).toMatchObject({ blocked: false, text });
+    }
+  });
+
+  it.each([
+    'You can cancel the reminder in Settings.',
+    "I haven't removed any reminders.",
+    'Should I create a reminder?',
+    "I'll check which reminder matches.",
+  ])('preserves advice and truthful incomplete reminder replies: %s', (text) => {
+    expect(enforceResponseContract(text, [])).toMatchObject({ blocked: false, text });
+  });
+
   it('does not claim an interview was marked complete without a status mutation', () => {
     const result = enforceResponseContract('Got it — marking the Clay interview as complete.', []);
     expect(result.blocked).toBe(true);

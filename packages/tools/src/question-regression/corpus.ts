@@ -1,3 +1,18 @@
+import type { ZodType } from 'zod';
+import type { RiskTier, ToolFlags } from '../types.js';
+
+/** Local evidence fixtures; no live adapter or arbitrary network implementation. */
+export interface QuestionToolFixture {
+  name: string;
+  schema: ZodType;
+  risk?: RiskTier;
+  flags?: ToolFlags;
+  acceptsUntrustedInput?: boolean;
+  summary?: string;
+  /** Consume results in order, retaining the last result for a bounded retry. */
+  outcomes: Array<{ result: unknown } | { error: string }>;
+}
+
 /** Sanitized scenarios from the September 7 home audit; record numbers preserve coverage. */
 export interface QuestionCase {
   id: string;
@@ -14,10 +29,28 @@ export interface QuestionCase {
   calendar?: 'next-meeting' | 'no-location';
   mailbox?: 'hotel' | 'empty';
   memory?: boolean;
-  plan?: 'reply' | 'workflow';
+  plan?: 'reply' | 'workflow' | 'clarify';
+  missingInfo?: string[];
+  /** Override only inside the rolled-back transaction, never the real owner profile. */
+  timeZone?: string;
+  at?: string;
+  localTools?: QuestionToolFixture[];
+  /** A previous task's captured ledger, scoped to this synthetic conversation. */
+  priorEvidence?: Array<{
+    name: string;
+    args: Record<string, unknown>;
+    result: Record<string, unknown>;
+  }>;
+  approvalDecision?: 'approved' | 'denied';
+  /** Resume retryable task failures without waiting for real time to elapse. */
+  retryFailures?: number;
+  verification?:
+    | { decision: 'publish' | 'revise'; revisedText?: string; reasons?: string[] }
+    | { unavailable: true };
   script: Array<{
     text?: string;
     toolCalls?: Array<{ toolName: string; input: Record<string, unknown> }>;
+    failure?: 'provider' | 'task-budget' | 'daily-budget';
   }>;
   expect: {
     matches: string[];
@@ -35,6 +68,24 @@ export interface QuestionCase {
     /** A route card rides the reply. */
     route?: boolean;
     cardValues?: string[];
+    responseCardKinds?: string[];
+    forbiddenResponseCardKinds?: string[];
+    scoreboardScores?: { home: string; away: string };
+    routeTimes?: { departAt: string; arriveAt: string };
+    approvalCount?: number;
+    statusSequence?: string[];
+    /** Exact durable calls prove both bounded retries and lack of duplicate writes. */
+    calls?: Array<{ name: string; status: string; count: number; args?: Record<string, unknown> }>;
+    /** Local tool bodies invoked, independently of a waiting/denied ledger row. */
+    executionCounts?: Record<string, number>;
+    contextMatches?: string[];
+    modelStepCount?: number;
+    verification?: {
+      attempted: boolean;
+      revised: boolean;
+      unavailable: boolean;
+      blocked?: boolean;
+    };
   };
 }
 
@@ -156,10 +207,13 @@ export const QUESTION_CASES: QuestionCase[] = [
       { text: 'The Giants are ahead 7-3.' },
     ],
     expect: {
-      matches: ['do not state 7-3|retried'],
-      excludes: ['ahead 7-3'],
+      matches: ['do not state 7-3', 'verified source data'],
+      excludes: ['ahead 7-3', 'needs to be retried'],
       tools: ['sports.scores'],
-      statuses: ['needs_attention', 'failed'],
+      statuses: ['needs_attention'],
+      responseCardKinds: ['scoreboard'],
+      scoreboardScores: { home: '5', away: '2' },
+      verification: { attempted: false, revised: false, unavailable: false, blocked: true },
     },
   },
   {
@@ -204,17 +258,40 @@ export const QUESTION_CASES: QuestionCase[] = [
     // Phase 4: the destination comes from the calendar, then the route.
     records: [],
     request: 'When should I leave for my next meeting?',
+    at: '2026-09-22T16:00:00Z',
+    timeZone: 'America/Los_Angeles',
     calendar: 'next-meeting',
     maps: 'route',
     script: [
       {
-        text: 'Design review is at Oracle Park, about 9 minutes by car via King St, so leave a few minutes before it starts.',
+        text: 'Design review starts at 11:00 AM Pacific at Oracle Park. The drive is about 9 minutes via King St. Leave by 10:46 AM for a five-minute buffer before the meeting.',
       },
     ],
     expect: {
-      matches: ['Design review', 'Oracle Park', '9 min', 'King St'],
+      matches: [
+        'Design review',
+        'Oracle Park',
+        '9 min',
+        'King St',
+        '10:46 AM',
+        'five.minute buffer',
+      ],
+      excludes: ['leave a few minutes'],
       tools: ['calendar.list_events', 'maps.directions'],
       route: true,
+      responseCardKinds: ['route'],
+      calls: [
+        {
+          name: 'maps.directions',
+          status: 'succeeded',
+          count: 1,
+          args: { destination: 'Oracle Park', arriveBy: '2026-09-22T18:00:00.000Z' },
+        },
+      ],
+      routeTimes: {
+        departAt: '2026-09-22T17:51:00.000Z',
+        arriveAt: '2026-09-22T18:00:00.000Z',
+      },
     },
   },
   {
@@ -265,6 +342,8 @@ export const QUESTION_CASES: QuestionCase[] = [
       tools: ['calendar.list_events'],
       failedTools: ['weather.lookup'],
       statuses: ['needs_attention'],
+      responseCardKinds: ['calendar-event'],
+      forbiddenResponseCardKinds: ['weather'],
     },
   },
   {
@@ -481,6 +560,8 @@ export const QUESTION_CASES: QuestionCase[] = [
       matches: ['Harbor Hotel', 'Sunnyvale'],
       excludes: ['Morgan Hill', 'Friday', 'checked in'],
       tools: ['gmail.search', 'gmail.read_thread'],
+      responseCardKinds: ['email-thread'],
+      forbiddenResponseCardKinds: ['email-results'],
     },
   },
   {
@@ -570,6 +651,7 @@ export const QUESTION_CASES: QuestionCase[] = [
       { text: "I'll remind you next time you are in San Jose." },
     ],
     expect: {
+      statuses: ['needs_attention'],
       matches: ['not|cannot|can.t|unable|unconfirmed|no '],
       excludes: ['I.ll remind you|I will remind you'],
       tools: ['memory.save'],

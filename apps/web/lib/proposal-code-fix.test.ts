@@ -37,7 +37,7 @@ vi.mock('./workspace-reviews', () => ({
   decideOwnerImprovement: state.acknowledge,
 }));
 
-import { requestOwnerProposalCodeFix } from './proposal-code-fix';
+import { proposalCodeFixReceipt, requestOwnerProposalCodeFix } from './proposal-code-fix';
 
 let reports: Map<string, RepairIssue>;
 beforeEach(() => {
@@ -114,3 +114,22 @@ it('rejects unavailable, foreign/missing, and directly applyable proposals witho
   expect(reports.size).toBe(0);
   expect(state.acknowledge).not.toHaveBeenCalled();
 });
+
+it.each(['failed', 'blocked', 'resolved', 'dismissed', 'monitoring', 'pr_open'] as const)(
+  'preserves an existing %s report without implying a new run',
+  async (status) => {
+    const first = await requestOwnerProposalCodeFix('proposal');
+    first.status = status;
+    const repeated = await requestOwnerProposalCodeFix('proposal');
+    expect(repeated.status).toBe(status);
+    expect(reports.size).toBe(1);
+    expect(proposalCodeFixReceipt(repeated)).toMatchObject({
+      outcome: 'code_fix_requested',
+      enacted: false,
+      repairIssueId: first.id,
+      repairStatus: status,
+    });
+    expect(proposalCodeFixReceipt(repeated).detail).toContain('No new coding run');
+    expect(proposalCodeFixReceipt(repeated).detail).not.toContain('queued');
+  },
+);

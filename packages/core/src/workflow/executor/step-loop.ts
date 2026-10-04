@@ -54,7 +54,12 @@ import {
   readIntentText,
 } from '../read-intent.js';
 import { requestChecklistDirective } from '../request-checklist.js';
-import { enforcePersonalReadResponse, isSimulatedApprovalNotice } from '../response-contract.js';
+import { responseCardsForFinal } from '../response-cards.js';
+import {
+  enforcePersonalReadResponse,
+  isSimulatedApprovalNotice,
+  verifiedCurrentActionSummary,
+} from '../response-contract.js';
 import { isMemoryWriteRequest, stepLimitResponse } from '../saved-work.js';
 import { groundWorkspaceWrite, writeGroundingCorpus } from '../write-grounding.js';
 import { refreshRequestChecklist } from './checklist.js';
@@ -708,6 +713,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       !forcedArtifact &&
       !mustRecordGoalProgress &&
       !readAnswerTurn &&
+      !conceptualNoTool &&
       state.step === 0 &&
       (isUnattendedGoalSession(task) || plan?.action === 'workflow');
 
@@ -844,8 +850,25 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     // what makes it a guarantee. The old ledger short-circuit got the same
     // property by never running a model turn at all, and letting the model
     // write the answer must not quietly buy that back for an unrequested send.
-    if (stepResult.ok && readAnswerTurn && stepResult.toolCalls.length > 0) {
+    if (stepResult.ok && (readAnswerTurn || conceptualNoTool) && stepResult.toolCalls.length > 0) {
       stepResult = { ...stepResult, toolCalls: [] };
+      if (conceptualNoTool && !stepResult.text.trim() && !state.conceptualAnswerRetried) {
+        // Some providers ignore `none` and return only a forbidden call. Give
+        // the owner one bounded chance at an actual answer, with no dispatch.
+        state.conceptualAnswerRetried = true;
+        state.contextWindow = compact(rc.window) as unknown as TaskState['contextWindow'];
+        if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
+        stepResult = await router.step(role, {
+          taskId: task.id,
+          system: `${system}\n\nAnswer this conceptual question directly. The previous tool call was not executed. Return only the answer; no tools or action promises.`,
+          messages: rc.window,
+          tools: {},
+          toolChoice: 'none',
+          critical,
+        });
+        if (!(await renewTaskLease(deps.persistence?.tasks ?? db, lease))) return LOST_LEASE;
+        if (stepResult.ok) stepResult = { ...stepResult, toolCalls: [] };
+      }
     }
 
     if (stepResult.ok && isUnattendedGoalSession(task) && !mustRecordGoalProgress) {
@@ -902,6 +925,8 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     // publishing a phantom code that cannot exist on the Approvals page.
     if (
       stepResult.ok &&
+      !readAnswerTurn &&
+      !conceptualNoTool &&
       stepResult.toolCalls.length === 0 &&
       isSimulatedApprovalNotice(stepResult.text)
     ) {
@@ -928,6 +953,8 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     // dedicated retry; private reads and goal progress bypass the model.)
     if (
       stepResult.ok &&
+      !readAnswerTurn &&
+      !conceptualNoTool &&
       (mustAct || Boolean(forcedLiveLookup)) &&
       !forcedReadTool &&
       !mustRecordGoalProgress &&
@@ -1001,6 +1028,12 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       const budgetRequest = taskBudgetPermissionRequest(task, stepResult.decision.reason);
       await notifyAttention(deps, task, budgetRequest.text, [budgetRequest.part]);
       return { outcome: 'needs_attention', detail: stepResult.decision.reason };
+    }
+
+    // Recovery turns are model boundaries too. Keep the no-tool guarantee
+    // immediately before dispatch so any later retry cannot reopen it.
+    if (readAnswerTurn || conceptualNoTool) {
+      stepResult = { ...stepResult, toolCalls: [] };
     }
 
     if (forcedArtifact) {
@@ -1395,9 +1428,24 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     }
     // An empty final completion is a failed reply, not a message to the owner
     // — never ship a placeholder like "(no response)" as if the model spoke.
-    const text =
-      stepResult.text.trim() ||
-      'The model came back with an empty reply. Nothing from this turn was lost — the Activity page shows what ran. Send it again to retry.';
+    const text = stepResult.text.trim();
+    if (!text) {
+      const completed = await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id });
+      const receipt = verifiedCurrentActionSummary(completed);
+      const notice = `${receipt ? `${receipt}\n\n` : ''}I couldn't finish the reply. Check Activity for anything that already ran before trying again.`;
+      const cards = responseCardsForFinal({
+        evidence: completed,
+        requestText: latestUserText(rc.window),
+      });
+      rc.window.push({ role: 'assistant', content: notice } as ModelMessage);
+      return stageFinalResponse(deps, lease, state, rc.window, {
+        text: notice,
+        progress: 'model returned no usable final reply',
+        terminalStatus: 'needs_attention',
+        outcome: 'needs_attention',
+        ...(cards.length ? { responseCards: cards } : {}),
+      });
+    }
     rc.window.push({ role: 'assistant', content: text } as ModelMessage);
     return stageModelFinalResponse(
       deps,

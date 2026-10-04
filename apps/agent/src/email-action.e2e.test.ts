@@ -35,12 +35,17 @@ const workflowPlan = {
 function registry(flags: { outwardFacing?: boolean } = {}) {
   return new ToolRegistry().register(
     {
-      name: 'calendar.test_create',
+      name: 'calendar.create_event',
       description: 'Create a test calendar event.',
       inputSchema: z.object({ title: z.string() }),
       risk: 'autonomous',
       acceptsUntrustedInput: true,
-      execute: async (args) => ({ created: true, title: (args as { title: string }).title }),
+      // A frozen receipt under the real write name keeps routing and contract checks aligned.
+      execute: async (args) => ({
+        id: 'synthetic-lunch-event',
+        created: true,
+        title: (args as { title: string }).title,
+      }),
     },
     flags,
   );
@@ -135,7 +140,7 @@ describe('email action routing (integration, scripted model)', () => {
             degraded: false,
             text: '',
             toolCalls: [
-              { toolCallId: 'cal-1', toolName: 'calendar.test_create', input: { title: 'Lunch' } },
+              { toolCallId: 'cal-1', toolName: 'calendar.create_event', input: { title: 'Lunch' } },
             ],
           };
         }
@@ -163,7 +168,7 @@ describe('email action routing (integration, scripted model)', () => {
     // The tool actually ran (no prose-with-zero-tools).
     const calls = await db.select().from(toolCalls).where(eq(toolCalls.taskId, task.id));
     expect(
-      calls.some((c) => c.toolName === 'calendar.test_create' && c.status === 'succeeded'),
+      calls.some((c) => c.toolName === 'calendar.create_event' && c.status === 'succeeded'),
     ).toBe(true);
   });
 
@@ -229,7 +234,7 @@ describe('email action routing (integration, scripted model)', () => {
             degraded: false,
             text: '',
             toolCalls: [
-              { toolCallId: 'cal-1', toolName: 'calendar.test_create', input: { title: 'Lunch' } },
+              { toolCallId: 'cal-1', toolName: 'calendar.create_event', input: { title: 'Lunch' } },
             ],
           };
         }
@@ -256,7 +261,7 @@ describe('email action routing (integration, scripted model)', () => {
     // approval — never a silent no-op, never an autonomous send.
     expect(outcome.outcome).toBe('parked');
     const calls = await db.select().from(toolCalls).where(eq(toolCalls.taskId, task.id));
-    const cal = calls.find((c) => c.toolName === 'calendar.test_create');
+    const cal = calls.find((c) => c.toolName === 'calendar.create_event');
     expect(cal).toBeTruthy();
     expect(cal?.status).toBe('awaiting_approval'); // parked, not autonomously executed
     const appr = await db.select().from(approvals).where(eq(approvals.taskId, task.id));

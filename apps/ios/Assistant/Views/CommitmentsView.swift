@@ -245,9 +245,15 @@ struct CommitmentEditor: View {
     var body: some View {
         AssistantForm {
             Section("What you actually said") {
-                TextField("Title", text: $title, axis: .vertical)
-                TextField("Details", text: $details, axis: .vertical)
-                TextField("Next action", text: $nextAction, axis: .vertical)
+                AssistantField("Title") {
+                    TextField("Title", text: $title, axis: .vertical)
+                }
+                AssistantField("Details") {
+                    TextField("Details", text: $details, axis: .vertical)
+                }
+                AssistantField("Next action") {
+                    TextField("Next action", text: $nextAction, axis: .vertical)
+                }
             }
             .disabled(isSaving)
         }
@@ -286,3 +292,13 @@ struct CommitmentEditor: View {
         }
     }
 }
+
+#if DEBUG
+extension CommitmentsScreen {
+    @MainActor static func visualReviewGuide() -> AnyView {
+        var view = CommitmentsScreen()
+        view._showingGuide = State(initialValue: true)
+        return AnyView(view)
+    }
+}
+#endif

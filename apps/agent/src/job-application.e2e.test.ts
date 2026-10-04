@@ -408,9 +408,10 @@ describe('complex job application workflow (integration, scripted model)', () =>
     expect(
       (await executeTask({ db, router: scriptedRouter, dispatcher: harness.dispatcher }, task.id))
         .outcome,
-    ).toBe('done');
+    ).toBe('needs_attention');
 
     const [finalTask] = await db.select().from(tasks).where(eq(tasks.id, task.id));
+    expect(finalTask?.status).toBe('needs_attention');
     expect(finalTask?.progress).toContain('requested Drive file was staged');
     expect(finalTask?.progress).toContain('Still needed: the application submission');
     expect(finalTask?.progress).not.toContain('successfully');

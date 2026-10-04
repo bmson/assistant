@@ -4,8 +4,8 @@ import Foundation
 /// not redo it on every evaluation.
 ///
 /// The transcript is deliberately eager (see `ChatView.conversationSurface`):
-/// every row in the conversation is built whenever anything in `ChatView`
-/// changes, and a streaming reply changes something on every token. Turning a
+/// every row exists when the log opens. `ChatTranscriptRows` isolates changes
+/// in the composer, but a streaming reply changes something on every token. Turning a
 /// message into views is dominated by Markdown work — splitting the source into
 /// blocks, then building an `AttributedString` per block — and that work depends
 /// on nothing but the source string, which never changes once a message has

@@ -30,6 +30,7 @@ struct MessageBubble: View {
     var hide: (() -> Void)? = nil
 
     @State private var decidingApproval = false
+    @State private var approvalFailureID: String?
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -64,8 +65,7 @@ struct MessageBubble: View {
                 approvalSummaryCard(approvalSummary)
             } else if let noticeKind = message.noticeKind,
                message.role == .assistant,
-               decisionParts.isEmpty,
-               !message.text.isEmpty {
+               decisionParts.isEmpty {
                 noticeCard(
                     noticeKind,
                     text: message.text,
@@ -83,6 +83,22 @@ struct MessageBubble: View {
                     thinkingIndicator
                     Spacer(minLength: 40)
                 }
+            } else if let fallback = message.outputFallback(isStreaming: false, hasRenderableCards: !responseCards.isEmpty) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label(fallback.title, systemImage: "exclamationmark.circle")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+                    Text(fallback.detail)
+                        .font(.subheadline)
+                        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let openActivity {
+                        Button("Review Activity", systemImage: "list.bullet", action: openActivity)
+                            .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: true))
+                    }
+                }
+                .assistantCard(in: colorScheme)
+                .accessibilityElement(children: .contain)
             }
 
             ForEach(decisionParts.indices, id: \.self) { index in
@@ -203,7 +219,7 @@ struct MessageBubble: View {
                 source: message.text,
                 baseFontSize: messageFontSize,
                 ink: AssistantTheme.stageStrong,
-                mutedInk: AssistantTheme.stageStrong.opacity(0.85),
+                mutedInk: AssistantTheme.stageSecondary,
                 codeSurface: .black.opacity(0.16),
                 accent: AssistantTheme.stageStrong
             )
@@ -211,7 +227,7 @@ struct MessageBubble: View {
                 .padding(.vertical, resolvedBubbleVerticalInset)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
-                    .white.opacity(colorScheme == .dark ? 0.08 : 0.045),
+                    AssistantTheme.stageWell(for: colorScheme),
                     in: RoundedRectangle(
                         cornerRadius: AssistantTheme.conversationCornerRadius,
                         style: .continuous
@@ -346,8 +362,10 @@ struct MessageBubble: View {
                 .font(.caption2)
                 .lineLimit(1)
         }
-        .foregroundStyle(AssistantTheme.stageStrong.opacity(0.72))
-        .padding(.horizontal, 5)
+        .foregroundStyle(AssistantTheme.stageSecondary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(AssistantTheme.stageWell(for: colorScheme), in: Capsule())
         .accessibilityLabel("\(title): \(sources.map(\.label).joined(separator: ", "))")
     }
 
@@ -513,25 +531,39 @@ struct MessageBubble: View {
             layout {
                 AssistantConfirmationButton("Approve", confirmationTitle: "Approve?", systemImage: "checkmark",
                     kind: .primary, hint: "Approves this request and resumes the task.", compact: true, fillsWidth: true) {
+                    guard !decidingApproval else { return }
                     decidingApproval = true
-                    _ = await decide(approvalId, "approved")
+                    approvalFailureID = nil
+                    let confirmed = await decide(approvalId, "approved")
+                    approvalFailureID = confirmed ? nil : approvalId
                     decidingApproval = false
+                    AccessibilityNotification.Announcement(confirmed ? "Permission approved" : "Decision couldn’t be confirmed. Review Approvals before trying again.").post()
                 }
                 AssistantConfirmationButton("Deny", confirmationTitle: "Deny?", systemImage: "xmark",
                     kind: .neutral, hint: "Stops this action.", compact: true, fillsWidth: true) {
+                    guard !decidingApproval else { return }
                     decidingApproval = true
-                    _ = await decide(approvalId, "denied")
+                    approvalFailureID = nil
+                    let confirmed = await decide(approvalId, "denied")
+                    approvalFailureID = confirmed ? nil : approvalId
                     decidingApproval = false
+                    AccessibilityNotification.Announcement(confirmed ? "Permission declined" : "Decision couldn’t be confirmed. Review Approvals before trying again.").post()
                 }
             }
             if let rememberLabel, let rememberApproval {
                 AssistantAlwaysApproveButton(scope: rememberLabel, fillsWidth: true) {
                     guard !decidingApproval else { return }
                     decidingApproval = true
-                    _ = await rememberApproval(approvalId)
+                    approvalFailureID = nil
+                    let confirmed = await rememberApproval(approvalId)
+                    approvalFailureID = confirmed ? nil : approvalId
                     decidingApproval = false
+                    AccessibilityNotification.Announcement(confirmed ? "Standing permission saved" : "Standing permission couldn’t be confirmed. Review Approvals before trying again.").post()
                 }
                 .accessibilityIdentifier("assistant.chat.\(approvalId).alwaysApprove")
+            }
+            if approvalFailureID == approvalId {
+                AssistantInlineFailure(message: "Couldn’t confirm that decision. Review Approvals before trying again.")
             }
         }
         .id(approvalId)
@@ -540,45 +572,30 @@ struct MessageBubble: View {
 
     private func settledDecisionReceipt(_ part: MessagePart) -> some View {
         let presentation = settledDecisionPresentation(part)
-        return DecisionReceiptCard(title: presentation.title, summary: part.summary ?? presentation.detail,
-            detail: presentation.detail, code: part.shortCode, symbol: presentation.symbol, tint: presentation.tint)
+        let review = DecisionReceiptPresentation(part: part)
+        return VStack(alignment: .leading, spacing: 8) {
+            DecisionReceiptCard(title: presentation.title, summary: part.summary ?? presentation.detail,
+                detail: presentation.detail, code: part.shortCode, symbol: presentation.symbol, tint: presentation.tint)
+            if review.reviewInActivity, let openActivity {
+                Button("Review Activity", systemImage: "list.bullet", action: openActivity)
+                    .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: true))
+            } else if review.reviewInApprovals {
+                Button("Review Approvals", systemImage: "checkmark.shield", action: openApprovals)
+                    .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: true))
+            }
+        }
     }
 
     private func settledDecisionPresentation(
         _ part: MessagePart
     ) -> (title: String, detail: String, symbol: String, tint: Color) {
-        switch part.status {
-        case "approved":
-            return (
-                part.type == "budget-request" ? "Budget approved" : "Approved",
-                part.type == "budget-request"
-                    ? "The budget change was approved."
-                    : "This request was approved.",
-                "checkmark.circle.fill",
-                AssistantTheme.success(for: colorScheme)
-            )
-        case "denied":
-            return (
-                "Declined",
-                "No action was taken from this request.",
-                "xmark.circle.fill",
-                AssistantTheme.errorInk(for: colorScheme)
-            )
-        case "expired":
-            return (
-                "Expired",
-                "This decision is no longer waiting for a response.",
-                "clock.badge.exclamationmark.fill",
-                AssistantTheme.inkMuted(for: colorScheme)
-            )
-        default:
-            return (
-                "Closed",
-                "This decision is no longer available.",
-                "minus.circle.fill",
-                AssistantTheme.inkMuted(for: colorScheme)
-            )
+        let presentation = DecisionReceiptPresentation(part: part)
+        let tint: Color = switch presentation.tone {
+        case .success: AssistantTheme.success(for: colorScheme)
+        case .error: AssistantTheme.errorInk(for: colorScheme)
+        case .muted: AssistantTheme.inkMuted(for: colorScheme)
         }
+        return (presentation.title, presentation.detail, presentation.symbol, tint)
     }
 
     /// The honesty guard's marker on a tool-less reply that claimed work it
@@ -661,15 +678,15 @@ struct MessageBubble: View {
             (
                 "Response interrupted",
                 "Response interrupted",
-                compact?.summary ?? "The model service was unavailable. Try the request again.",
+                compact?.summary ?? "The model service was unavailable. Review Activity before trying again.",
                 "xmark.circle.fill",
                 AssistantTheme.inkMuted(for: colorScheme)
             )
         case .turnFailed:
             (
-                "Didn’t go through",
-                "Message didn’t go through",
-                compact?.summary ?? "Nothing was changed. You can try the request again.",
+                "Couldn’t finish",
+                "Reply not completed",
+                compact?.summary ?? "Review Activity for any work that started before trying again.",
                 "xmark.circle.fill",
                 AssistantTheme.inkMuted(for: colorScheme)
             )
@@ -705,7 +722,11 @@ struct MessageBubble: View {
                     }
                 }
             }
-            // A failed turn's recovery is one tap: the same words again.
+            if kind == .turnFailed || kind == .providerFailed, let openActivity {
+                Button("Review Activity", systemImage: "list.bullet", action: openActivity)
+                    .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: true))
+            }
+            // Retry is deliberate: interruption can follow work already done.
             if kind == .turnFailed, let retry, let userPrompt {
                 Button {
                     retry(userPrompt)
@@ -714,7 +735,7 @@ struct MessageBubble: View {
                         .font(.footnote.weight(.medium))
                         .foregroundStyle(AssistantTheme.accent(for: colorScheme))
                         .padding(.horizontal, 14)
-                        .frame(height: 36)
+                        .frame(minHeight: 44)
                         .background(
                             Capsule().strokeBorder(
                                 AssistantTheme.accent(for: colorScheme).opacity(0.35),
@@ -4272,45 +4293,6 @@ struct DecisionReceiptCard: View {
     }
 }
 
-/// "I noticed X — want me to Y?" with a one-tap yes. Mirrored from the web's
-/// inline-suggestion.tsx — keep the copy in step.
-///
-/// Deliberately not an approval card. An approval says "this is about to
-/// happen, stop it if you want"; this says "nothing is happening, shall it?".
-/// Accepting does not perform the action — it creates the work, which runs the
-/// normal pipeline and still raises its own approval for anything that reaches
-/// another person. So it never borrows the amber approval surface, and it
-/// answers in one tap rather than arm-and-confirm: a card that looks and acts
-/// like an approval trains the owner to skim both.
-enum SuggestionTaskReceipt {
-    static func title(for status: String?) -> String {
-        switch status {
-        case "done", "completed": "Completed"
-        case "failed", "dead", "dead_letter": "Couldn’t complete"
-        case "cancelled": "Cancelled"
-        case "pending", "queued": "Queued"
-        case "sleeping", "waiting_event": "Waiting"
-        case "running": "Working on it"
-        case let value? where value.hasPrefix("waiting_") || value == "needs_attention": "Needs attention"
-        default: "Accepted"
-        }
-    }
-
-    static func detail(for status: String?) -> String {
-        switch status {
-        case "done", "completed": "The task finished. View its status in Activity."
-        case "failed", "dead", "dead_letter": "The task did not finish. View the details in Activity."
-        case "cancelled": "The task was cancelled. View the details in Activity."
-        case "pending", "queued": "The task is waiting to start."
-        case "sleeping", "waiting_event": "The task is waiting to continue."
-        case "running": "The assistant is working on this task."
-        case let value? where value.hasPrefix("waiting_") || value == "needs_attention":
-            "The task needs attention. View the next step in Activity."
-        default: "The assistant accepted this as a task. View its status in Activity."
-        }
-    }
-}
-
 /// The same grounded context appears alone or above its suggested action.
 /// Details expand within the paper, without repeating the alert in a second card.
 struct ProactiveAlertContent: View {
@@ -4389,6 +4371,9 @@ struct ProactiveAlertContent: View {
     }
 }
 
+/// One proposed next step and its source, with a quiet receipt after answering.
+/// Accepting creates work under the assistant's normal action permissions.
+/// It does not itself approve external actions or alter the approval inbox.
 struct SuggestionCard: View {
     let parts: [MessagePart]
     let decide: ((String, SuggestionDecision) async -> String?)?
@@ -4403,6 +4388,8 @@ struct SuggestionCard: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.locale) private var locale
+    @Environment(\.timeZone) private var timeZone
 
     var body: some View {
         if parts.contains(where: { $0.suggestionStatus.isOpen }) {
@@ -4427,7 +4414,7 @@ struct SuggestionCard: View {
         let shape = RoundedRectangle(cornerRadius: AssistantTheme.cardCornerRadius, style: .continuous)
         return VStack(alignment: .leading, spacing: 14) {
             if parts.count != 1 || parts.first?.suggestionContext == nil {
-                Label(parts.count == 1 ? "A suggestion" : "\(parts.count) suggestions", systemImage: "lightbulb.fill")
+                Label(parts.count == 1 ? "Suggested next step" : "\(parts.count) suggestions", systemImage: "lightbulb.fill")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(accent)
                     .accessibilityAddTraits(.isHeader)
@@ -4495,7 +4482,7 @@ struct SuggestionCard: View {
     @ViewBuilder
     private func answers(for id: String, actionLabel: String, fillsWidth: Bool) -> some View {
         answerButton(actionLabel, id: id, decision: .accepted, kind: .primary, fillsWidth: fillsWidth,
-            hint: "Hands this to the assistant as a task. Anything that reaches another person still asks you first.")
+            hint: "Creates a task. The assistant’s action permissions still apply.")
         answerButton("Later", id: id, decision: .snoozed, kind: .neutral, fillsWidth: fillsWidth,
             hint: "Puts this aside and asks again later.")
         answerButton("No thanks", id: id, decision: .dismissed, kind: .neutral, fillsWidth: fillsWidth,
@@ -4525,14 +4512,15 @@ struct SuggestionCard: View {
             answering = false
             // The buttons are gone either way — to a receipt, or back with a
             // reason — so say which, rather than leave VoiceOver on nothing.
-            AccessibilityNotification.Announcement(failure ?? receipt(for: decision.status).title).post()
+            let confirmation = SuggestionReceiptPresentation(part: .init(type: "suggestion", status: decision.rawValue)).title
+            AccessibilityNotification.Announcement(failure ?? confirmation).post()
         }
     }
 
     /// An answered suggestion sharing a card with one still open: a line, not
     /// a second sheet of paper inside the first.
     private func settledRow(_ part: MessagePart) -> some View {
-        let receipt = receipt(for: part.suggestionStatus, taskStatus: part.acceptedTaskStatus)
+        let receipt = SuggestionReceiptPresentation(part: part)
         let id = part.suggestionId ?? ""
         return DisclosureGroup(isExpanded: Binding(
             get: { expandedReceipts.contains(id) },
@@ -4559,18 +4547,26 @@ struct SuggestionCard: View {
             VStack(alignment: .leading, spacing: 4) {
                 Label(receipt.title, systemImage: receipt.symbol)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(receipt.tint)
+                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                 Text(AssistantMarkdown.inlineAttributed(part.suggestionTitle))
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(AssistantTheme.ink(for: colorScheme))
                     .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
                     .fixedSize(horizontal: false, vertical: true)
+                if let returnLabel = receipt.returnLabel(locale: locale, timeZone: timeZone) {
+                    Text(returnLabel)
+                        .font(.caption)
+                        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .frame(minHeight: 44, alignment: .leading)
+            .accessibilityElement(children: .combine)
         }
         .multilineTextAlignment(.leading)
         .tint(AssistantTheme.inkMuted(for: colorScheme))
         .accessibilityIdentifier("assistant.suggestion.\(id).receipt")
+        .accessibilityHint(expandedReceipts.contains(id) ? "Hides suggestion details" : "Shows the suggestion and its current status")
     }
 
     private func receiptDetail(_ part: MessagePart, fallback: String) -> String {
@@ -4609,35 +4605,6 @@ struct SuggestionCard: View {
         }
     }
 
-    /// The settled line for each status. Only an accept is a success; the
-    /// rest are quiet, never red — passing on an offer is not a failure.
-    private func receipt(for status: SuggestionStatus, taskStatus: String? = nil) -> (title: String, detail: String, symbol: String, tint: Color) {
-        let quiet = AssistantTheme.inkMuted(for: colorScheme)
-        return switch status {
-        case .accepted:
-            (SuggestionTaskReceipt.title(for: taskStatus), SuggestionTaskReceipt.detail(for: taskStatus),
-             taskStatus == "done" || taskStatus == "completed" ? "checkmark.circle.fill" : "tray.full.fill", quiet)
-        case .dismissed:
-            ("Dismissed", "You passed on this suggestion.", "xmark.circle.fill", quiet)
-        case .snoozed:
-            ("Snoozed", "I’ll bring this back when the snooze ends.", "clock.fill", quiet)
-        case .expired:
-            ("Expired", "This suggestion is no longer waiting for an answer.",
-             "clock.badge.exclamationmark.fill", quiet)
-        case .pending, .missing:
-            ("No longer available", "This suggestion is no longer available.", "minus.circle.fill", quiet)
-        }
-    }
-}
-
-private extension SuggestionDecision {
-    var status: SuggestionStatus {
-        switch self {
-        case .accepted: .accepted
-        case .dismissed: .dismissed
-        case .snoozed: .snoozed
-        }
-    }
 }
 
 /// A value the card holds back: a booking reference, a ticket code.

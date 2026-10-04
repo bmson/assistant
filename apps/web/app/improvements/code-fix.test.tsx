@@ -28,9 +28,9 @@ const proposal = {
 it('offers a code-fix request only when the service is available', () => {
   const available = renderToStaticMarkup(<ProposalCard proposal={proposal} canRequestFix />);
   expect(available).toContain('Request code fix');
-  expect(available).not.toContain('Acknowledge');
+  expect(available).toContain('Mark reviewed');
 
   const unavailable = renderToStaticMarkup(<ProposalCard proposal={proposal} />);
   expect(unavailable).not.toContain('Request code fix');
-  expect(unavailable).toContain('Acknowledge');
+  expect(unavailable).toContain('Mark reviewed');
 });

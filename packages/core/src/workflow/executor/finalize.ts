@@ -425,12 +425,15 @@ export async function stageModelFinalResponse(
   const answered = liveLookups.filter(
     (lookup) => !liveFailures.some((entry) => entry.lookup === lookup),
   );
+  const ungroundedFigure = answered
+    .map((lookup) => ungroundedLiveFigure(lookup, pending.text, rows))
+    .find(Boolean);
   const liveFailure =
     liveLookups.length === 0
       ? undefined
       : liveFailures.length === liveLookups.length
         ? [...new Set(liveFailures.map((entry) => entry.failure))].join(' ')
-        : answered.map((lookup) => ungroundedLiveFigure(lookup, pending.text, rows)).find(Boolean);
+        : ungroundedFigure;
   const birthdays =
     task.trust === 'owner' && !isForwardedIngest(task)
       ? requestedBirthdaySaves(currentRequest)
@@ -454,16 +457,30 @@ export async function stageModelFinalResponse(
     // part of the answer: the read half comes straight from its ledger, and
     // the gap is named under it rather than replacing the whole reply.
     const mixedRead = readContext?.readRequest;
-    const text = mixedRead
-      ? `${verifiedReadResponse(mixedRead, evidence)}\n\n${liveFailure}`
-      : liveFailure;
+    const cards = responseCardsForFinal({
+      evidence: actionEvidence(rows),
+      readRequest: mixedRead,
+      requestText: latestUserText(window),
+      lookupOrder: liveLookups.map((lookup) => lookup.kind),
+    });
+    const gap =
+      ungroundedFigure && cards.length > 0
+        ? liveFailure.replace(
+            'The lookup needs to be retried.',
+            'The verified source data is shown below.',
+          )
+        : liveFailure;
+    const text = mixedRead ? `${verifiedReadResponse(mixedRead, evidence)}\n\n${gap}` : gap;
     return stageFinalResponse(deps, task, state, window, {
       ...pending,
       text,
       progress: text.slice(0, 200),
       terminalStatus: 'needs_attention',
       outcome: 'needs_attention',
+      contractBlocked: Boolean(ungroundedFigure),
+      contractUnsupportedCount: ungroundedFigure ? 1 : 0,
       contractNotice: true,
+      ...(cards.length ? { responseCards: cards } : {}),
     });
   }
   const explicitFailure = expectedArtifact
@@ -523,9 +540,26 @@ export async function stageModelFinalResponse(
   // A reviser is another generative surface: strip companion tags a second
   // time, then re-run the same authoritative response contract before publish.
   const reflectedText = stripCueTags(reflection.text).text;
-  const checked = reflection.revised
+  const reflectedCheck = reflection.revised
     ? enforceResponseContract(reflectedText, evidence, contractOptions)
     : initialCheck;
+  // Optional review may improve a checked draft, but cannot replace it with
+  // a rejected invention or a weaker contract fallback. Keep the useful
+  // original answer and record the review correction as a reliability signal.
+  const rejectedRevision =
+    reflection.revised &&
+    (reflectedCheck.blocked ||
+      reflectedCheck.qualityFallback ||
+      reflectedCheck.groundingFallback !== undefined ||
+      reflectedCheck.text !== reflectedText);
+  const checked = rejectedRevision ? initialCheck : reflectedCheck;
+  if (rejectedRevision) {
+    console.warn('rejected optional final-response revision; preserving checked draft', {
+      taskId: task.id,
+      unsupported: reflectedCheck.unsupported,
+      groundingFallback: reflectedCheck.groundingFallback,
+    });
+  }
   if (checked.groundingFallback && checked.groundingFallback.length > 0) {
     console.warn('lookup answer fell back to the verified ledger', {
       taskId: task.id,
@@ -723,9 +757,15 @@ export async function stageModelFinalResponse(
   // Stamp the contract verdict on pending; recordQualitySignals reads it from
   // the single funnel in finalizePendingResponse, so every terminal path — not
   // just this prose-model one — persists its verdict and loop-health counters.
-  pending.contractBlocked = checked.blocked;
-  pending.contractUnsupportedCount = checked.unsupported.length;
-  if (checked.qualityFallback) {
+  pending.contractBlocked = checked.blocked || (rejectedRevision && reflectedCheck.blocked);
+  pending.contractUnsupportedCount = Math.max(
+    checked.unsupported.length,
+    rejectedRevision ? reflectedCheck.unsupported.length : 0,
+  );
+  // A transparent replacement is a truthful reply, not proof the requested
+  // work finished. Keep unresolved effects visible and re-queueable. Grounded
+  // factual corrections with no missing effect may still complete normally.
+  if (checked.qualityFallback || checked.unsupported.length > 0) {
     pending.terminalStatus = 'needs_attention';
     pending.outcome = 'needs_attention';
   }
@@ -738,7 +778,7 @@ export async function stageModelFinalResponse(
   pending.cues =
     task.type === 'chat_turn' &&
     !checked.blocked &&
-    !reflection.revised &&
+    (!reflection.revised || rejectedRevision) &&
     strippedFinal.cues.length > 0
       ? strippedFinal.cues
       : undefined;

@@ -49,6 +49,7 @@
     "audit:llm": "tsx scripts/llm-audit.ts",
     "eval:questions": "tsx scripts/question-regression.ts",
     "eval:questions:config": "tsx scripts/question-regression-config.ts",
+    "eval:models": "tsx scripts/eval-models.ts",
     "test:firestore": "tsx scripts/test-firestore.ts",
     "firestore:validate": "tsx scripts/validate-firestore.ts",
     "firestore:backup-smoke": "tsx scripts/firestore-backup-smoke.ts",

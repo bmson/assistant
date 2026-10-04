@@ -456,8 +456,8 @@ private struct SituationItemEditor: View {
         NavigationStack {
             SituationPackForm {
                 Section("Item") {
-                    TextField("Title", text: $item.title)
-                    TextField("Notes", text: $item.details, axis: .vertical).lineLimit(3...8)
+                    AssistantField("Title") { TextField("Title", text: $item.title) }
+                    AssistantField("Notes") { TextField("Notes", text: $item.details, axis: .vertical).lineLimit(3...8) }
                     Picker("Lane", selection: $item.lane) {
                         Text("Plan").tag("plan")
                         Text("I owe").tag("i_owe")
@@ -535,12 +535,12 @@ private struct SituationDecisionEditor: View {
     var body: some View {
         NavigationStack {
             SituationPackForm {
-                TextField("Option", text: $decision.option)
+                AssistantField("Option") { TextField("Option", text: $decision.option) }
                 Picker("Decision", selection: $decision.outcome) {
                     Text("Chosen").tag("chosen")
                     Text("Rejected").tag("rejected")
                 }
-                TextField("Why?", text: $decision.reason, axis: .vertical).lineLimit(3...8)
+                AssistantField("Reason") { TextField("Why?", text: $decision.reason, axis: .vertical).lineLimit(3...8) }
                 Toggle(
                     "Remember as a lasting preference",
                     isOn: Binding(
@@ -580,3 +580,20 @@ private struct SituationDecisionEditor: View {
         }
     }
 }
+
+#if DEBUG
+extension SituationPacksView {
+    @MainActor static func visualReviewScreen(_ name: String, pack: SituationPack) -> AnyView? {
+        switch name {
+        case "new-pack":
+            var view = SituationPacksView()
+            view._creating = State(initialValue: true)
+            return AnyView(view)
+        case "linked-item": return AnyView(SituationItemEditor(item: pack.data.items.first ?? SituationItem(), pack: pack, sources: [], isNew: true, save: { _ in false }))
+        case "rehearse-change": return AnyView(SituationItemEditor(item: pack.data.items.first ?? SituationItem(), pack: pack, sources: [], isNew: false, save: { _ in false }))
+        case "choice-reason": return AnyView(SituationDecisionEditor(decision: SituationDecision(option: "Train", reason: "A simpler arrival without parking."), save: { _ in false }))
+        default: return nil
+        }
+    }
+}
+#endif

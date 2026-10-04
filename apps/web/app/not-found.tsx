@@ -1,14 +1,18 @@
 import Link from 'next/link';
-import { btn } from '@/lib/ui';
+import { btn, PageHeader } from '@/lib/ui';
 
 export default function NotFound() {
   return (
-    <div className="mx-auto mt-16 max-w-md text-center">
-      <h1 className="text-lg font-semibold text-strong">Not found</h1>
-      <p className="mt-2 text-sm text-muted">That page doesn’t exist or has moved.</p>
-      <Link href="/chat" className={`${btn.primary} mt-5`}>
-        Back to chat
-      </Link>
+    <div className="mx-auto grid min-w-0 max-w-xl gap-6 py-8 sm:py-12">
+      <PageHeader
+        title="Page not found"
+        intro="That page doesn’t exist or has moved. Return to Settings to find your way back."
+      />
+      <div>
+        <Link href="/settings" className={btn.primary}>
+          Back to settings
+        </Link>
+      </div>
     </div>
   );
 }

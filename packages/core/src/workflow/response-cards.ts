@@ -64,7 +64,13 @@ function numeric(value: unknown): number | undefined {
 }
 
 function succeeded(row: ActionEvidence): boolean {
-  return row.status === 'succeeded' && row.fromCurrentTask !== false;
+  if (row.status !== 'succeeded' || row.fromCurrentTask === false) return false;
+  const result = record(row.result);
+  return (
+    result?.ok !== false &&
+    !(typeof result?.status === 'number' && result.status >= 400) &&
+    result?.deliveryStatus !== 'unknown'
+  );
 }
 
 function details(
@@ -565,7 +571,9 @@ export function reminderResponseCards(evidence: ActionEvidence[]): ResponseCard[
     if (!succeeded(row)) continue;
     const result = record(row.result);
     if (!result) continue;
-    if (row.toolName === 'reminder.create') add(result);
+    if (row.toolName === 'reminder.create' && result.created !== false && result.ok !== false) {
+      add(result);
+    }
     if (row.toolName === 'reminder.list' && Array.isArray(result.reminders)) {
       result.reminders
         .map(record)
@@ -578,11 +586,37 @@ export function reminderResponseCards(evidence: ActionEvidence[]): ResponseCard[
 
 /** Metadata-only inbox searches have a stable, complete structured representation. */
 export function emailResponseCards(evidence: ActionEvidence[]): ResponseCard[] {
+  const openedThreads = new Map<string, number>();
+  evidence.forEach((row, index) => {
+    if (!succeeded(row) || row.toolName !== 'gmail.read_thread') return;
+    const result = record(row.result);
+    if (
+      !result ||
+      result.complete === false ||
+      !Array.isArray(result.messages) ||
+      !result.messages.some((message) => string(record(message)?.text))
+    )
+      return;
+    const threadId = string(record(row.args)?.threadId) || string(result.threadId);
+    if (threadId) openedThreads.set(threadId, index);
+  });
   return evidence.flatMap((row, index) => {
     if (!succeeded(row) || row.toolName !== 'gmail.search') return [];
     const result = record(row.result);
     if (!result) return [];
     const args = record(row.args);
+    const hits = Array.isArray(result.results)
+      ? result.results.map(record).filter((message): message is RecordValue => !!message)
+      : [];
+    // A complete search whose every hit was subsequently opened is provenance
+    // for the thread cards, rather than a second presentation of the answer.
+    // Keep incomplete, unread, empty, or unlinked results visible.
+    if (
+      result.complete === true &&
+      hits.length > 0 &&
+      hits.every((message) => (openedThreads.get(string(message.threadId)) ?? -1) > index)
+    )
+      return [];
     const messages = Array.isArray(result.results)
       ? result.results
           .map(record)

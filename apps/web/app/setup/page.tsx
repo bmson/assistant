@@ -10,12 +10,14 @@ export default async function SetupPage() {
   if (authMode !== 'passkey') notFound();
   if (await isAuthed()) redirect('/security');
   return (
-    <PageShell size="reading" className="grid gap-6">
-      <PageHeader
-        title="Secure your assistant"
-        intro="Claim this installation with a passkey. Only someone holding the one-time setup link can do this."
-      />
-      <SetupClient />
+    <PageShell size="reading">
+      <div className="grid min-w-0 w-full max-w-lg grid-cols-[minmax(0,1fr)] gap-6">
+        <PageHeader
+          title="Secure your assistant"
+          intro="Your one-time setup link lets you become the owner of this installation."
+        />
+        <SetupClient />
+      </div>
     </PageShell>
   );
 }

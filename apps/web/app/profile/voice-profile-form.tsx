@@ -83,15 +83,28 @@ export function VoiceProfileForm({
           className={`${inputClass} w-full`}
         />
       </label>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
           disabled={pending}
           onClick={() =>
             startTransition(async () => {
-              const result = await updateVoiceProfileAction({ description, dos, donts, signature });
-              if (result.error) setError(result.error);
-              else setSaved(true);
+              setError(null);
+              setSaved(false);
+              try {
+                const result = await updateVoiceProfileAction({
+                  description,
+                  dos,
+                  donts,
+                  signature,
+                });
+                if (result.error) setError(result.error);
+                else setSaved(true);
+              } catch {
+                setError(
+                  'Your writing voice could not be saved. Your changes are still here; try again.',
+                );
+              }
             })
           }
           className={btn.primary}
@@ -99,10 +112,15 @@ export function VoiceProfileForm({
           {pending ? 'Saving…' : 'Save voice'}
         </button>
         {saved && !pending ? (
-          <span className="text-xs font-medium text-emerald-600 dark:text-emerald-400">Saved</span>
+          <span
+            role="status"
+            className="text-sm font-medium text-emerald-600 dark:text-emerald-400"
+          >
+            Saved
+          </span>
         ) : null}
         {error ? (
-          <span role="alert" className="text-xs text-red-600 dark:text-red-400">
+          <span role="alert" className="basis-full text-sm text-red-600 dark:text-red-400">
             {error}
           </span>
         ) : null}
