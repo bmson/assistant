@@ -32,6 +32,25 @@ Priority key: **P1** wrong behaviour or a misleading state; **P2** confusing pre
 | 20 | Activity cards | Blank band between the divider and the footer; status shown twice | P3 |
 | 21 | Briefing list | Date chips use a monospaced font | P3 |
 
+The [log review](#making-the-logs-more-helpful) at the end covers the chat transcript and Activity as records of what the assistant did. It adds findings L1–L10.
+
+## Verification
+
+The following findings were reproduced against the current source with a temporary Vitest probe (not committed). Each probe fed the functions the same data shown in the screenshots.
+
+| Probe | Input | Result |
+| --- | --- | --- |
+| Conflict (#4) | The two game rows exactly as shown: Family 10:55–13:00 at "Crocker Amazon Soccer Fields, …785 Moscow St…", club 11:40–13:00 at "Crocker Amazon\n1669 Geneva Avenue…" | `findConflicts` returns **1** conflict |
+| Cancelled by title | Same pair, with the club row renamed "26/27 U13B Azul Event - CANCELLED" | Still **1** conflict |
+| Cancelled by status | An unrelated overlapping event with `status: 'cancelled'` | Still **1** conflict. `findConflicts` never reads `status` |
+| Reminder cards (#2) | `create A` → `list [A]` → `cancel A` → `create B` | Cards in order: `reminder-cancelled-a`, `reminder-a`, `reminder-b`. The cancelled reminder renders as active |
+| Cancel card (#3) | The same evidence; the cancel result carries `text: "Wash the car"` | Card detail is still the fixed "This reminder will no longer run." The text is available but unused |
+| Stale date (#11) | `ownerDateTime` for Sun 5:00 PM, evaluated on Saturday | `"Tomorrow 5:00 PM"`, which is then stored in the suggestion text |
+
+The rest are read from source only:
+- #7 (alignment) needs a rendered check on a device or simulator.
+- #13 (duplicate rules): the exact field that differs between the two rules is in owner data.
+
 ## 1. Reminders: "after the game tomorrow"
 
 **What the screenshots show.** The owner asked *"Remind me to wash the car after the game tomorrow."* The game is on the calendar as 10:55–13:00 (Family) and 11:40–13:00 (SF United Soccer). The transcript shows three cards in this order:
@@ -41,6 +60,16 @@ Priority key: **P1** wrong behaviour or a misleading state; **P2** confusing pre
 3. "Reminder · Wash the car · Oct 4, 2026 at 12:00"
 
 The Reminders screen lists a single "Wash the car — Once · Next in 10 hours" and, in a later screenshot, "Next in 13 hours".
+
+**Which reminder survived.** The probe shows that `reminderResponseCards` emits reminders in the order they first appear in the turn's evidence, and the cancellation card always comes first. With the transcript order "cancelled, 19:00, 12:00", the most likely sequence is:
+
+1. Create 19:00.
+2. Cancel 19:00.
+3. Create 12:00.
+
+If that's right, **the live reminder is the 12:00 one, which fires during the game**, and the reasonable 19:00 one was removed. The two Reminders screenshots ("10 hours" and "13 hours") fit a single 12:00 reminder viewed three hours apart. Check the turn's tool calls in the task record to confirm.
+
+**Why the model has to guess.** `reminder.create` accepts only `at`, `inMinutes`, `cron` or `time`. Nothing in its description, the planner or the response contract covers a reminder relative to an event. The model has to read the calendar itself, choose an instant and convert it to an ISO time with an offset. No check catches it choosing a time inside the event. There is also no regression scenario for this request: the question-regression corpus covers only "Bring sunglasses in 10 minutes".
 
 **Problems.**
 
@@ -53,6 +82,9 @@ The Reminders screen lists a single "Wash the car — Once · Next in 10 hours" 
 - When a reminder is relative to a named event ("after the game", "before the meeting"), resolve the event and schedule from its `end` (or `start`), returning the anchor in the tool result so the card can show "after United v Albion".
 - Add a response-contract check: a reminder scheduled "after" an event must not fire before that event's end.
 - If the anchoring event is cancelled, say so and ask instead of creating the reminder.
+- Add an optional `after: { eventId }` / `before: { eventId, minutes }` input to `reminder.create`, so the server resolves the instant from the event and records the anchor. Store the anchor too, so a later change to the event can move or flag the reminder.
+- Prevent silent duplicates. Two creates in one turn with the same text create two schedules, because each gets a fresh `randomUUID()` name. A second create with matching text should return the existing reminder, or ask whether to replace it.
+- Add "Remind me to X after the game tomorrow" to the question-regression corpus, with a calendar fixture, and assert the reminder time is at or after the event's end.
 
 Source: [reminder tools](../../packages/tools/src/reminders.ts), [response contract](../../packages/core/src/workflow/response-contract.ts).
 
@@ -60,7 +92,7 @@ Source: [reminder tools](../../packages/tools/src/reminders.ts), [response contr
 
 **Cause.** `reminderResponseCards` builds a card for every reminder in a `reminder.create` **or `reminder.list`** result, keyed by `reminderId`. It never removes a reminder that a later `reminder.cancel` in the same evidence cancelled. A list call made before the cancel therefore renders the cancelled reminder as an active "Reminder" card. `statusResponseCards` also renders every status card before every reminder card, so the cancellation appears above the reminders whatever order the calls ran in.
 
-The cancellation card text is fixed: "Reminder cancelled — This reminder will no longer run." It doesn't use the reminder's text or time, although the cancel result identifies the reminder.
+The cancellation card text is fixed: "Reminder cancelled — This reminder will no longer run." It doesn't use the reminder's text or time, although `cancelNamedReminder` already returns `text` and `reminderId`. The former time can be read from the same turn's `create` or `list` evidence.
 
 **Proposed changes.**
 
@@ -96,7 +128,8 @@ The strong signals it ignores:
 - Compare the venue name, meaning the first comma- or newline-separated location segment, on a token or prefix basis instead of comparing the whole address.
 - Treat the same end instant plus at least one shared distinctive title token as the same event across calendars.
 - Treat a time written in one title that equals the other event's start time as a match signal. `titleTokens` currently strips it before comparing.
-- Add this pair as a regression fixture in `briefing.test.ts`.
+- Add this pair as a regression fixture in `briefing.test.ts`. The existing fixture for this pattern ("Palo Alto v United (12:00)" against "26/27 U13B Azul @ Palo Alto SC…") passes only because both rows have the identical location string.
+- Exclude cancelled events: drop rows with `status: 'cancelled'`, and rows whose title ends in "CANCELLED", "Canceled" or "(cancelled)". Team apps rename cancelled events rather than deleting them, and the "26/27 U13B Azul Event - CANCELLED" row in the screenshots is exactly that pattern. Both cases currently still produce a conflict.
 
 Source: [`sameRealWorldEvent` / `findConflicts`](../../packages/core/src/workflow/briefing.ts) (≈L349–462), [`normalizedLocation` / `titleTokens`](../../packages/core/src/workflow/briefing.ts) (≈L315).
 
@@ -221,11 +254,123 @@ Source: [Documents content](../../apps/ios/Assistant/Views/WorkspaceView.swift) 
 - **See-through header.** On Improvements and Documents, scrolled text passes behind the floating title and back button with no material. For example, "Observed pattern" is cut off behind the back button, and "Filed documents 0" shows as a ghost behind "Documents". `assistantSubmenuChrome` should add a scroll-edge material (blur and fade) under the title row once the content has scrolled.
 - **"Jump to latest" placement.** The pill sits mid-card over body text in both chat screenshots. In one of them, the latest message is less than a screen away. Show it only when the distance to the bottom is more than about one viewport, and dock it above the composer over a backdrop so it never covers a line of text.
 
+
+## Making the logs more helpful
+
+The owner has two logs: the chat transcript and Activity. A helpful log answers four questions at a glance:
+
+- What did you do for me?
+- Did it work?
+- What is still open?
+- What do I need to do?
+
+Today both logs mostly answer a different question: *what ran?*
+
+### The chat transcript
+
+**L1. Background engineering notices sit inside the conversation (P2).** The failed-fix notice ("The fix for '…' needs attention: No endpoints found…") appears directly above the briefing, the settled suggestions and the owner's own request. The delivery code says repair progress "is a log, not a conversation… deliberately not mirrored into the owner's chat" ([jobs.ts](../../packages/core/src/memory/jobs.ts) ≈L713). It posts to the Notifications conversation, which on Firestore is a separate thread from the primary chat.
+
+Either the owner was typing in the Notifications thread, or something merges the two threads. Find out which. Either way, status about a self-improvement proposal shouldn't sit between a morning briefing and a personal request. Keep it on Improvements with a badge count, and add at most one weekly roll-up line to chat.
+
+**L2. Settled suggestions take more space than live ones (P2).**
+- Each dismissed suggestion renders as its own full card. In the screenshot, five dismissed rows fill half a screen.
+- Four of them repeat items already listed under the briefing's "Upcoming" section, so the same four events appear twice in one scroll.
+- When every suggestion in a group is settled, collapse the group to one line: "4 suggestions from Saturday's briefing · dismissed". Expand on tap.
+- The fixed receipt detail "You passed on this suggestion." adds nothing. "Security alert" doesn't say from whom or when; settled titles should keep the sender and date.
+
+Source: [suggestion group](../../apps/ios/Assistant/Components/MessageBubble.swift) (≈L4394).
+
+**L3. A turn should report its net effect, not every step (P1).** The reminder turn produced three cards in three different states: cancelled, active and active. The owner needs one outcome:
+
+> **Reminder set** · Wash the car · Sun 1:00 PM, after United v Albion
+> Replaced the 7:00 PM reminder.
+
+Reduce the turn's evidence per resource before building cards: for each `reminderId` (and each event or draft id), the last state wins. Then render only net creations, changes and cancellations. This also fixes #2 and #3 structurally rather than reminder by reminder.
+
+**L4. Cards are snapshots that go stale (P2).** A reminder card keeps saying "Reminder" after it has been cancelled, delivered or replaced. Suggestion receipts already update to their current state. Reminder, calendar-write and draft cards should do the same: the card already carries `reminderId`, and the client already loads active reminders for the Reminders screen. Show "Cancelled", "Delivered Sun 1:00 PM" or the next time, and fade cards whose effect no longer exists.
+
+**L5. Fired reminders are bare (P2).** When `reminder.notify` fires, it posts exactly the reminder text: "Wash the car". Add:
+- Where it came from, for example "Set Saturday — 'after the game tomorrow'".
+- **Done**, **Snooze 1 hour** and **Tomorrow** actions.
+
+A reminder with no text currently ends `done` with the summary "reminder: missing reminder text". It should be `needs_attention` so the owner learns a reminder didn't fire.
+
+### Activity
+
+**L6. Activity covers about three hours (P1).** The seeded schedules start about 15 background tasks per hour:
+
+| Job | How often |
+| --- | --- |
+| Pulse | Every 20 minutes |
+| Knowledge-graph sync | Twice an hour |
+| Ambient refresh | Every 30 minutes |
+| Self-repair | Every 15 minutes |
+| Document processing | Every 15 minutes |
+
+The phone's Activity route is hard-coded to `filter: 'all', limit: 50` ([route](../../apps/web/app/api/mobile/v1/activity/route.ts)), so the list holds roughly the last three hours, almost all of it upkeep. Anything the owner asked for this morning has already dropped off. "View in Activity" on a chat receipt opens this list, not the task, so it can open a list that doesn't contain the task.
+
+Proposed changes:
+- Filter on the server by origin: chat, goal or accepted suggestion versus scheduled upkeep, using the job that created the task. Don't filter by type, because reminder deliveries are also `scheduled`.
+- Default to **Your tasks**, with **Background** as a separate tab.
+- Don't write a task row for a run that did nothing, or roll such runs up per job per day: "Pulse · 72 runs today · nothing found".
+- Send the selected filter to the server, return totals per status, and page the list.
+
+**L7. Activity has no detail view on the phone (P1).** The server already builds a full task record in [`getTaskDetail`](../../packages/application/src/tasks/queries.ts) (≈L299):
+- Timeline.
+- Every tool call, with its arguments, result and error.
+- Model calls and cost.
+- Approvals.
+- Messages.
+- The request checklist.
+- A "what actually happened" action summary.
+
+Only the web console uses it. The mobile API has a list and a POST for actions, with no GET for one task.
+
+Add `GET /api/mobile/v1/activity/:id` and a native detail screen:
+- **Outcome** in one sentence, for example "Set a reminder for Sun 1:00 PM".
+- **What I did** from the action summary: each call as a plain step with ✓ or ✗.
+- **What's left** from the checklist.
+- **Where it came from**: a link back to the chat message or goal.
+- **Cost**.
+- The raw record behind a disclosure.
+
+Make Activity cards and "View in Activity" open this screen directly. This one screen would also have answered "which reminder survived?" in #1 without guessing from card order.
+
+**L8. Summaries are written for engineers (P2).** Each task's `progress` string is a log line. Return two fields instead:
+- `ownerSummary`: one plain sentence, shown on the card.
+- `diagnostics`: the full counts, shown in the detail screen.
+
+| Today | Owner summary |
+| --- | --- |
+| extraction: 7 saved (0 quarantined, 0 new people), 0 duplicate, 0 tombstoned, 0 occasion(s), from 2 conversation(s); open loops 4 saved (0 duplicate) | Learned 7 things from 2 conversations · noted 4 follow-ups |
+| document processor not configured — pending documents left as-is | Document reading isn't set up · Set up |
+| (Pulse, empty) | Checked for anything urgent · nothing found |
+| The fix for "…" needs attention: No endpoints found that can handle the requested parameters… | The investigation model isn't available with the current settings · Choose a model |
+
+**L9. Success-shaped failures (P1).** Several jobs finish `done` when they couldn't do their work:
+
+| Summary | Source |
+| --- | --- |
+| "document processor not configured — pending documents left as-is" | [document-processor.ts](../../packages/core/src/memory/document-processor.ts) ≈L219 |
+| "reminder: missing reminder text" | jobs.ts ≈L266 |
+| "curiosity: knowledge graph disabled" | jobs.ts ≈L432 |
+| "knowledge graph: disabled" | jobs.ts ≈L468 |
+| "knowledge graph dates: disabled" | jobs.ts ≈L500 |
+| "self-repair: disabled" | jobs.ts ≈L653 |
+
+Proposed changes:
+- Add a terminal `skipped` (or `not_set_up`) status. Show it in grey with a **Set up** action when one applies, and leave it out of the "done" count.
+- Stop scheduling a job every 15 minutes while it is unconfigured. Document processing runs 96 times a day here to report the same thing.
+- Keep the remaining "done" runs meaningful: a green check should mean the owner got something.
+
+**L10. The summary line should say what needs attention (P3).** "50 tasks · 50 done" is the least useful thing the header can say. Lead with what needs action ("1 needs you · 2 running"). When nothing does, say so: "Nothing needs you".
+
 ## Suggested order of work
 
-1. Reminder correctness: #1, #2, #3 and #10. These directly affect whether the owner trusts that a reminder will fire at the right time.
-2. Briefing truthfulness: #4 and #5. Never report a conflict that isn't one, and never propose adding a cancellation.
-3. Error honesty: #6 and #8. Classify errors, use plain language, and hide retries that can't succeed.
-4. Re-open the alignment improvement: #7, adding a rendered test.
-5. Activity scale: #9 and #14. Totals, paging and grouped upkeep.
-6. Presentation polish: #11–13 and #15–21.
+1. **Reminder trust:** #1, #2, #3, #10, L3 and L5. Resolve times from events, report the net effect, show absolute times, and make delivered reminders actionable.
+2. **Make Activity answer "what happened?":** L6 and L7. Server-side origin filter and paging, and a native task detail backed by the existing `getTaskDetail`.
+3. **Truthful status:** #8, L9 and #6. A `skipped`/not-set-up status, classified provider errors, and no retries that can't succeed.
+4. **Briefing truthfulness:** #4 and #5. Detect cross-calendar duplicates, exclude cancelled events, and never propose adding a cancellation.
+5. **Re-open the alignment improvement:** #7, adding a rendered test.
+6. **Readable logs:** L1, L2, L4 and L8. Owner summaries, collapsed settled suggestions, live card state, and engineering notices kept out of the conversation.
+7. **Presentation polish:** #11–13 and #15–21.
