@@ -1,0 +1,10 @@
+title: Assistant deployment cleanup
+description: Remove obsolete image versions and secret versions after deployment verification.
+stage: GA
+includedPermissions:
+  - artifactregistry.versions.delete
+  - secretmanager.secrets.get
+  - secretmanager.secrets.list
+  - secretmanager.versions.get
+  - secretmanager.versions.list
+  - secretmanager.versions.destroy

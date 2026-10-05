@@ -44,6 +44,8 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: '1'
       - run: pnpm lint
+      - name: Verify current deployment cleanup protection
+        run: PYTHONDONTWRITEBYTECODE=1 python3 infra/gcp/cleanup-current.test.py
       # 900+ lines of deploy bash run against production with no other check.
       - name: Lint shell scripts
         run: |

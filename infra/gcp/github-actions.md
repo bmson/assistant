@@ -142,3 +142,45 @@ variables must be set before its first run. GitHub creates the `production`
 environment on first use if it does not exist. Add required reviewers only when
 production releases should wait for a human gate. Workflow concurrency queues
 releases instead of cancelling one already in progress.
+
+## Retaining only the current deployment
+
+For a personal installation without rollback history, set the repository
+variable `CURRENT_ONLY_CLEANUP=true`. `Deploy production` then runs
+`infra/gcp/cleanup-current.py` after the release health checks succeed. The
+`Clean obsolete deployment versions` workflow also runs daily and can be
+dispatched manually to clear artifacts from failed builds. Both workflows use
+the same `production-deploy` concurrency group, so cleanup waits for builds.
+This policy is opt-in; other installations keep their existing retention.
+
+The cleanup reads the live Cloud Run services and jobs, resolves their exact
+image digests, and retains those images plus their current Cosign signatures
+and attestations (including untagged OCI referrers). Everything else in the
+configured image repository is deleted. Only the current `assistant-agent`
+and `assistant-web` revisions remain. Each secret retains its newest enabled
+version and any explicitly referenced or aliased versions. Secret payloads are
+never read. An unfinished rollout, split traffic, active job execution,
+unsupported multi-architecture index, or changed inventory stops cleanup.
+Application data, database backups, buckets, and integration credentials are
+not removed.
+
+The deployment identity already has Artifact Registry read/write and Cloud Run
+admin access. Add just the missing image deletion and secret metadata/deletion
+permissions using the included custom role:
+
+```sh
+gcloud iam roles create assistantDeploymentCleanup --project="$PROJECT_ID" \
+  --file=infra/gcp/cleanup-role.yaml
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${DEPLOY_SA}" \
+  --role="projects/${PROJECT_ID}/roles/assistantDeploymentCleanup" \
+  --condition=None
+gh variable set CURRENT_ONLY_CLEANUP --body true
+```
+
+Preview locally with
+`python3 infra/gcp/cleanup-current.py --project PROJECT_ID --region REGION --repository REPOSITORY`.
+Add `--apply` to execute after confirming that no deployment is running. This
+permanently destroys superseded secret versions and old image versions.
+Validate the protections with
+`PYTHONDONTWRITEBYTECODE=1 python3 infra/gcp/cleanup-current.test.py`.

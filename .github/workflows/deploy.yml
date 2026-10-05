@@ -314,3 +314,9 @@ jobs:
           RELEASE_PERSISTENCE_DRIVER: ${{ needs.plan.outputs.persistence }}
           SKIP_IMAGE_BUILD: 'true'
         run: bash infra/gcp/release.sh
+      - name: Keep only the current deployment
+        if: vars.CURRENT_ONLY_CLEANUP == 'true'
+        run: >-
+          python3 infra/gcp/cleanup-current.py
+          --project "$GCP_PROJECT" --region "$GCP_REGION"
+          --repository "$ARTIFACT_REPOSITORY" --apply
