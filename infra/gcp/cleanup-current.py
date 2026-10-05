@@ -15,21 +15,29 @@ import urllib.parse
 import urllib.request
 
 
+class CloudError(RuntimeError):
+    def __init__(self, message, status):
+        super().__init__(message)
+        self.status = status
+
+
 class Cloud:
     def __init__(self):
         self.token = None
         self.token_time = 0
+        self.token_lock = threading.Lock()
         self.run_write_lock = threading.Lock()
         self.next_run_write = 0
 
     def request(self, host, resource, method="GET", data=None, params=None):
-        if time.monotonic() - self.token_time > 120 or not self.token:
-            result = subprocess.run(
-                ["gcloud", "auth", "print-access-token", "--quiet"],
-                capture_output=True, text=True, check=True,
-            )
-            self.token = result.stdout.strip()
-            self.token_time = time.monotonic()
+        with self.token_lock:
+            if time.monotonic() - self.token_time > 120 or not self.token:
+                result = subprocess.run(
+                    ["gcloud", "auth", "print-access-token", "--quiet"],
+                    capture_output=True, text=True, check=True,
+                )
+                self.token = result.stdout.strip()
+                self.token_time = time.monotonic()
         url = f"https://{host}/{resource}"
         if params:
             url += "?" + urllib.parse.urlencode(params)
@@ -60,7 +68,7 @@ class Cloud:
                     detail = json.loads(error.read()).get("error", {}).get("message", "")
                 except (ValueError, AttributeError):
                     detail = ""
-                raise RuntimeError(f"{method} {host}/{resource}: HTTP {error.code}: {detail}") from None
+                raise CloudError(f"{method} {host}/{resource}: HTTP {error.code}: {detail}", error.code) from None
         raise RuntimeError("Cloud request retry limit exceeded")
 
     def listing(self, host, resource, key, params=None):
@@ -84,6 +92,8 @@ class Cloud:
             time.sleep(2)
             response = self.request(host, f"{'v2' if host == 'run.googleapis.com' else 'v1'}/{response['name']}")
         if response.get("error"):
+            if response["error"].get("code") == 5:
+                raise CloudError("Deletion target was already removed", 404)
             raise RuntimeError(f"Operation failed: {response['error']}")
         return response
 
@@ -246,6 +256,17 @@ def plan_secrets(secret, versions, references):
     return [by_number[number]["name"] for number in sorted(retained, key=int)], deletions
 
 
+def delete_image(cloud, name):
+    try:
+        result = cloud.request(ARTIFACTS, f"v1/{name}", method="DELETE", params={"force": "true"})
+        cloud.operation(ARTIFACTS, result)
+    except CloudError as error:
+        # Removing an old manifest may also remove its old OCI referrers.
+        # Treat their subsequent 404 as success; final inventory verifies all.
+        if error.status != 404:
+            raise
+
+
 def inventory(cloud, args):
     specs, revisions, fingerprint = runtime_inventory(cloud, args.project, args.region)
     root = f"projects/{args.project}/locations/{args.region}/repositories/{args.repository}"
@@ -299,21 +320,6 @@ def apply(cloud, args, plan):
         result = cloud.request(RUN, f"v2/{name}", method="DELETE")
         cloud.operation(RUN, result)
 
-    # The us-west1 service currently accepts at most 75 versions per batch.
-    batches = [plan["deleteImages"][offset:offset + 75] for offset in range(0, len(plan["deleteImages"]), 75)]
-
-    def remove_images(names):
-        result = cloud.request(ARTIFACTS, f"v1/{plan['repository']}/packages/-/versions:batchDelete",
-                               method="POST", data={"names": names})
-        cloud.operation(ARTIFACTS, result)
-        return len(names)
-
-    removed = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        for count in pool.map(remove_images, batches):
-            removed += count
-            print(f"Removed {removed}/{len(plan['deleteImages'])} old image/metadata versions", flush=True)
-
     def destroy_version(version):
         cloud.request(SECRETS, f"v1/{version['name']}:destroy", method="POST",
                       data={"etag": version["etag"]})
@@ -321,13 +327,27 @@ def apply(cloud, args, plan):
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(destroy_version, plan["deleteSecrets"]))
     print(f"Destroyed {len(plan['deleteSecrets'])} superseded secret versions", flush=True)
-    # These revisions have no traffic or tagged URL. Their images and secret
-    # versions can be removed while rate-limited descriptor deletion catches up.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
-        for count, _ in enumerate(pool.map(remove_revision, plan["deleteRevisions"]), 1):
-            if count % 50 == 0:
-                print(f"Removed {count}/{len(plan['deleteRevisions'])} retired revisions", flush=True)
-    print(f"Removed {len(plan['deleteRevisions'])} retired revisions", flush=True)
+
+    def remove_images():
+        # Individual force deletion works for both tagged Docker images and
+        # OCI signature artifacts, unlike the public bulk deletion endpoint.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
+            for count, _ in enumerate(pool.map(lambda name: delete_image(cloud, name), plan["deleteImages"]), 1):
+                if count % 100 == 0 or count == len(plan["deleteImages"]):
+                    print(f"Removed {count}/{len(plan['deleteImages'])} old image/metadata versions", flush=True)
+
+    def remove_revisions():
+        # These revisions have no traffic or tagged URL. Descriptor deletion
+        # runs alongside storage cleanup, paced to Cloud Run's write quota.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+            for count, _ in enumerate(pool.map(remove_revision, plan["deleteRevisions"]), 1):
+                if count % 50 == 0 or count == len(plan["deleteRevisions"]):
+                    print(f"Removed {count}/{len(plan['deleteRevisions'])} retired revisions", flush=True)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(remove_images), pool.submit(remove_revisions)]
+        for future in futures:
+            future.result()
     after = inventory(cloud, args)
     if after["deleteImages"] or after["deleteSecrets"] or after["deleteRevisions"]:
         raise RuntimeError("Cleanup verification found remaining obsolete versions; rerun to finish")

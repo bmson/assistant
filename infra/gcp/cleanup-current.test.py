@@ -59,6 +59,17 @@ class CleanupTests(unittest.TestCase):
         current = f"{PACKAGE}/versions/sha256:current"
         self.assertEqual(cleanup.image_referrers(cloud, [image("current")], [current]), {current: []})
 
+    def test_image_deletion_removes_tags_and_is_idempotent_for_deleted_referrers(self):
+        cloud = unittest.mock.Mock()
+        name = f"{PACKAGE}/versions/sha256:old"
+        cleanup.delete_image(cloud, name)
+        cloud.request.assert_called_once_with(cleanup.ARTIFACTS, f"v1/{name}", method="DELETE", params={"force": "true"})
+        cloud.request.side_effect = cleanup.CloudError("Already deleted", 404)
+        cleanup.delete_image(cloud, name)
+        cloud.request.side_effect = cleanup.CloudError("Permission denied", 403)
+        with self.assertRaisesRegex(cleanup.CloudError, "Permission denied"):
+            cleanup.delete_image(cloud, name)
+
     def test_missing_deployed_digest_or_tag_stops_cleanup(self):
         for reference in (f"{URI}@sha256:missing", f"{URI}:missing"):
             with self.assertRaisesRegex(RuntimeError, "missing"):
