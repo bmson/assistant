@@ -78,17 +78,17 @@
     "@assistant/persistence": "workspace:*",
     "@assistant/setup": "workspace:*",
     "@assistant/tools": "workspace:*",
-    "@biomejs/biome": "^2.5.14",
-    "@google-cloud/firestore": "^9.2.0",
-    "@types/node": "^26.6.3",
+    "@biomejs/biome": "^2.5.15",
+    "@google-cloud/firestore": "^9.3.1",
+    "@types/node": "^26.6.4",
     "drizzle-orm": "^0.45.3",
     "google-auth-library": "^10.9.1",
     "playwright": "^1.63.0",
-    "sharp": "^0.35.4",
+    "sharp": "^0.35.5",
     "tsx": "^4.23.15",
-    "turbo": "^2.11.4",
+    "turbo": "^2.11.7",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.2",
+    "vitest": "^5.0.3",
     "zod": "^4.6.5"
   }
 }
