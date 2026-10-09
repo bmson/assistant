@@ -2852,6 +2852,8 @@ export function verifiedReadResponse(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
 ): string {
+  if (request.temporalIssue || request.scopeIssue)
+    return request.temporalIssue ?? request.scopeIssue ?? '';
   const current = currentSuccessfulEvidence(evidence);
   if (request.kind === 'drive') {
     const rows = matchingPrivateReadRows(request, current);
@@ -3254,6 +3256,18 @@ function coverageGapResponse(
   const verified = currentSuccessfulEvidence(evidence).length
     ? `${verifiedReadResponse(request, evidence)}\n\n`
     : '';
+  if (request.answerFocus === 'flight') {
+    const missing = gaps.unsupported.includes('calendar_read')
+      ? gaps.unsupported.includes('inbox_read')
+        ? 'the calendar and booking emails'
+        : 'the calendar'
+      : 'the booking emails';
+    return {
+      text: `${verified}I couldn't finish checking ${missing}, so the departure time is still unverified.`,
+      blocked: true,
+      unsupported: gaps.unsupported,
+    };
+  }
   return {
     text: `${verified}${missingReadResponse(gaps.labels, evidence)}`,
     blocked: true,
@@ -3265,8 +3279,12 @@ export function enforcePersonalReadResponse(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
 ): ResponseContractResult {
-  if (request.temporalIssue)
-    return { text: request.temporalIssue, blocked: true, unsupported: ['calendar_read'] };
+  if (request.temporalIssue || request.scopeIssue)
+    return {
+      text: request.temporalIssue ?? request.scopeIssue ?? '',
+      blocked: true,
+      unsupported: ['calendar_read'],
+    };
   const gaps = requiredReadGaps(request, evidence);
   if (gaps.labels.length > 0) return coverageGapResponse(request, evidence, gaps);
 
@@ -3291,8 +3309,12 @@ function enforcePersonalReadGrounding(
 ): ResponseContractResult | undefined {
   const request = opts?.readRequest;
   if (!request) return undefined;
-  if (request.temporalIssue)
-    return { text: request.temporalIssue, blocked: true, unsupported: ['calendar_read'] };
+  if (request.temporalIssue || request.scopeIssue)
+    return {
+      text: request.temporalIssue ?? request.scopeIssue ?? '',
+      blocked: true,
+      unsupported: ['calendar_read'],
+    };
   const gaps = requiredReadGaps(request, evidence);
   if (gaps.labels.length > 0) return coverageGapResponse(request, evidence, gaps);
   if (request.answerFocus === 'flight')

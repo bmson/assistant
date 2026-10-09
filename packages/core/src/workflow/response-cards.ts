@@ -1331,6 +1331,11 @@ export function responseCardsForFinal(input: {
   /** The live lookups the request asked for, in the order it asked them. */
   lookupOrder?: ReadonlyArray<LiveLookup['kind']>;
 }): ResponseCard[] {
+  const explicitMailRead =
+    /\b(?:show|open|read|display|list|find|pull\s+up|what\s+(?:does|did))\b[^.!?]{0,120}\b(?:e-?mails?|mail|gmail|inbox|messages?|threads?)\b/i.test(
+      input.requestText ?? '',
+    );
+  const flightFocusedRead = input.readRequest?.answerFocus === 'flight' && !explicitMailRead;
   const cards = orderForLookups(
     [
       ...resourceResponseCards(input.evidence),
@@ -1339,8 +1344,11 @@ export function responseCardsForFinal(input: {
       ...reminderResponseCards(input.evidence),
       ...calendarResponseCards(input.evidence, input.readRequest),
       ...availabilityResponseCards(input.evidence),
-      ...emailResponseCards(input.evidence),
-      ...threadResponseCards(input.evidence),
+      // Flight answers use mail only to reconcile the requested itinerary.
+      // Do not turn every booking hit, historical message, or newsletter into
+      // a second inbox result surface below the one calendar answer.
+      ...(flightFocusedRead ? [] : emailResponseCards(input.evidence)),
+      ...(flightFocusedRead ? [] : threadResponseCards(input.evidence)),
       ...documentResponseCards(input.evidence),
       ...knowledgeGraphResponseCards(input.evidence),
       ...driveResponseCards(input.evidence),
