@@ -835,7 +835,8 @@ export async function runQuestion(
         .select()
         .from(messages)
         .where(eq(messages.taskId, task.id))
-        .orderBy(messages.createdAt);
+        // Match conversation history ordering when messages share a timestamp.
+        .orderBy(messages.appendSequence);
       const calls = await replayDb
         .select()
         .from(toolCalls)
