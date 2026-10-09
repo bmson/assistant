@@ -1,8 +1,12 @@
 import datetime as dt
 import importlib.util
+import contextlib
+import io
 import json
 import pathlib
+import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -94,33 +98,53 @@ class RunnerProfileTests(unittest.TestCase):
         data = profile(); data["installationId"] = "production"
         with self.assertRaises(runner.CheckError): self.check(data)
 
-    def test_expired_manifest_after_browser_latency_blocks_adapter_launch(self):
+    def test_main_rechecks_manifest_after_browser_before_adapter(self):
         data = profile()
+        data["sourceRoot"] = str(pathlib.Path(__file__).parents[1].resolve())
+        data["serverWorkingDirectory"] = str(pathlib.Path(data["sourceRoot"]) / "apps" / "web")
         verified = dt.datetime.fromisoformat(data["verifiedAt"])
+
+        class FrozenDateTime(dt.datetime):
+            current = verified
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current
+
         with tempfile.TemporaryDirectory() as directory:
             manifest_path = pathlib.Path(directory) / "root-manifest.json"
             manifest_path.write_text(json.dumps(data), encoding="utf-8")
-            launched = []
-            with patch.object(runner, "verify_live"):
-                runner.verify_fixture_preflight(
-                    manifest_path,
-                    expected_sha=SHA,
-                    expected_branch=BRANCH,
-                    source_root=ROOT,
-                    app_url="http://127.0.0.1:3000",
-                    now=verified + dt.timedelta(seconds=1),
-                )
-                launched.append("browser")
-                with self.assertRaises(runner.CheckError):
-                    runner.verify_fixture_preflight(
-                        manifest_path,
-                        expected_sha=SHA,
-                        expected_branch=BRANCH,
-                        source_root=ROOT,
-                        app_url="http://127.0.0.1:3000",
-                        now=verified + dt.timedelta(seconds=301),
-                    )
-                self.assertEqual(launched, ["browser"])
+            calls = []
+
+            def run_fixture(command, *, cwd, env, timeout):
+                calls.append(command[-1])
+                if command[-1] == "scripts/cf05-mounted-chat-admission.browser.ts":
+                    pathlib.Path(env["ASSISTANT_CHAT_RUN_RECEIPT_PATH"]).write_text("{}", encoding="utf-8")
+                    FrozenDateTime.current += dt.timedelta(seconds=301)
+                return types.SimpleNamespace(returncode=0)
+
+            argv = [
+                "cf05-run-mounted-loopback.py",
+                "--source-root", data["sourceRoot"],
+                "--expected-sha", SHA,
+                "--expected-branch", BRANCH,
+                "--app-url", "http://127.0.0.1:3000",
+                "--root-manifest", str(manifest_path),
+            ]
+            output = io.StringIO()
+            errors = io.StringIO()
+            with (
+                patch.object(runner, "dt", types.SimpleNamespace(datetime=FrozenDateTime, timezone=dt.timezone)),
+                patch.object(runner, "verify_live"),
+                patch.object(runner, "run_checked", side_effect=run_fixture),
+                patch.object(sys, "argv", argv),
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(errors),
+            ):
+                self.assertEqual(runner.main(), 1)
+            self.assertEqual(calls, ["scripts/cf05-mounted-chat-admission.browser.ts"])
+            self.assertIn('"status": "not-exercised"', errors.getvalue())
+            self.assertIn("stale", errors.getvalue())
 
     def test_accepts_only_plain_loopback_origin(self):
         for value in ("https://127.0.0.1:3000", "http://example.com:3000", "http://127.0.0.1:3000/path", "http://user@127.0.0.1:3000"):
