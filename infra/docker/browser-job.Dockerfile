@@ -1,36 +1,36 @@
 # The Workspace browser job (Cloud Run Job). Credential-free: no DB URL, no
 # API keys — only PROFILE_ENC_KEY (Secret Manager) and per-run BROWSER_JOB_INPUT.
-FROM node:22-slim
-WORKDIR /app
 
-RUN corepack enable \
-  && apt-get update \
-  && apt-get install -y --no-install-recommends --only-upgrade libpcre2-8-0 \
-  && rm -rf /var/lib/apt/lists/*
-
+# Build the workspace dependency graph, then deploy only this worker's production
+# dependencies. The root development install (TypeScript, test tools, old esbuild)
+# is confined to this stage and is not copied into the image.
+FROM node:22-slim AS build
+WORKDIR /workspace
+RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY workers/browser-job ./workers/browser-job
+COPY packages/persistence ./packages/persistence
+RUN pnpm install --frozen-lockfile --filter @assistant/browser-job... \
+  && pnpm --filter @assistant/browser-job deploy --prod --legacy /runtime
 
-RUN pnpm install --frozen-lockfile --filter @assistant/browser-job...
-# Chromium + OS deps, version-matched to the installed playwright package
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN pnpm --filter @assistant/browser-job exec playwright install --with-deps chromium \
+# Chromium and its matched Playwright package are installed in the final image.
+FROM node:22-slim
+WORKDIR /app
+RUN apt-get update \
+  && apt-get upgrade -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
-
-RUN groupadd --system browser && useradd --system --gid browser --create-home browser \
-  && chown -R browser:browser /app /home/browser
-
-# Runtime uses pnpm via corepack, never npm. Strip the base image's bundled npm
-# so its vendored deps (tar/sigstore/brace-expansion/picomatch, all HIGH/
-# CRITICAL) don't ship or fail the deploy vulnerability scan. Also strip the
-# corepack download cache the root-run install left under /root: the runtime
-# user can't read /root (mode 700) — corepack resolves its own per-user cache —
-# so the copy is dead weight that only feeds pnpm advisories to the scan.
-RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
-  /root/.cache/node
-
-ENV NODE_ENV=production \
+COPY --from=build /runtime ./
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+  NODE_ENV=production \
   CHROMIUM_SANDBOX=true \
   BROWSER_TRACES=false
+RUN ./node_modules/.bin/playwright install --with-deps chromium \
+  && rm -rf /var/lib/apt/lists/* \
+  && groupadd --system browser \
+  && useradd --system --gid browser --create-home browser \
+  && chown -R browser:browser /app /home/browser
+# No package manager is used at runtime; omit its unused vendored dependencies.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
+  /root/.cache/node
 USER browser
-CMD ["pnpm", "--filter", "@assistant/browser-job", "start"]
+CMD ["./node_modules/.bin/tsx", "src/index.ts"]

@@ -8,10 +8,10 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsx": "^4.23.15",
     "vitest": "^5.0.2"
   },
   "dependencies": {
-    "@assistant/persistence": "workspace:*"
+    "@assistant/persistence": "workspace:*",
+    "tsx": "^4.23.15"
   }
 }

@@ -294,6 +294,11 @@ jobs:
         run: |
           IMAGE_ROOT="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY}"
           bash scripts/smoke-web-image.sh "${IMAGE_ROOT}/${IMAGE_NAME}:${RELEASE_SHA}"
+      - name: Smoke-test production worker image
+        if: contains(fromJSON('["browser","code","processor"]'), matrix.entry.name)
+        run: |
+          IMAGE_ROOT="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY}"
+          bash scripts/smoke-worker-image.sh "$IMAGE_NAME" "${IMAGE_ROOT}/${IMAGE_NAME}:${RELEASE_SHA}"
       - name: Scan the image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
