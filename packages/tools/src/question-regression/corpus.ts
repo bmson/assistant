@@ -653,8 +653,12 @@ export const QUESTION_CASES: QuestionCase[] = [
     expect: {
       statuses: ['needs_attention'],
       matches: ['not|cannot|can.t|unable|unconfirmed|no '],
-      excludes: ['I.ll remind you|I will remind you'],
-      tools: ['memory.save'],
+      excludes: [
+        'I.ll remind you|I will remind you',
+        "I(?:'ve| have)? saved|saved (?:your|that)|I remembered|I stored",
+      ],
+      savedCount: 0,
+      executionCounts: { 'memory.save': 0 },
     },
   },
   {

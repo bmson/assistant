@@ -1,4 +1,9 @@
-import type { TaskActivityDetail } from '@assistant/persistence';
+import {
+  compareTimelineRows,
+  decodeTaskTimelineCursor,
+  type TaskActivityDetail,
+  type TaskActivityDetailRepository,
+} from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import { getTaskDetailWithRepository } from './tasks/queries.js';
 
@@ -99,6 +104,89 @@ describe('portable Activity task detail', () => {
       hasMoreTimeline: false,
       stuckWaiting: true,
     });
+  });
+
+  it('uses one total-order cursor across mixed equal-time streams', async () => {
+    const all = detail({
+      toolCalls: Array.from({ length: 101 }, (_, index) => ({
+        ...(detail().toolCalls[0] as TaskActivityDetail['toolCalls'][number]),
+        id: `tool-${String(index).padStart(3, '0')}`,
+      })),
+      modelCalls: [
+        {
+          id: 'model-1',
+          createdAt: timestamp,
+          role: 'planner',
+          model: 'test',
+          costUsd: '0',
+          latencyMs: 0,
+        },
+      ],
+      approvals: [
+        {
+          id: 'approval-1',
+          requestedAt: timestamp,
+          status: 'approved',
+          summary: 'test',
+          shortCode: 'one',
+          resolvedAt: timestamp,
+          resolvedVia: 'test',
+        },
+      ],
+    });
+    const getDetail = vi.fn(
+      async (
+        _owner: string,
+        _task: string,
+        input: Parameters<TaskActivityDetailRepository['getDetail']>[2],
+      ) => {
+        const before = input.cursor;
+        const filter = <T extends { id: string }>(
+          rows: T[],
+          kind: 'tool' | 'model' | 'approval' | 'message',
+        ) =>
+          rows
+            .filter(
+              (r) =>
+                !before ||
+                compareTimelineRows(
+                  { kind, id: r.id, at: '2026-09-22T12:00:00.000000000Z' },
+                  before,
+                ) > 0,
+            )
+            .sort((a, b) => b.id.localeCompare(a.id))
+            .slice(0, input.pageSize + 1);
+        return {
+          ...all,
+          toolCalls: filter(all.toolCalls, 'tool'),
+          modelCalls: filter(all.modelCalls, 'model'),
+          approvals: filter(all.approvals, 'approval'),
+          messages: filter(all.messages, 'message'),
+        };
+      },
+    );
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    for (let pages = 0; pages < 20; pages++) {
+      const page = await getTaskDetailWithRepository({ getDetail }, 'owner-agent', taskId, {
+        pageSize: 10,
+        cursor,
+      });
+      if (!page) throw new Error('Missing timeline page');
+      const ids = [...page.toolCalls, ...page.modelCalls, ...page.approvals, ...page.messages].map(
+        (r) => r.id,
+      );
+      expect(ids.length).toBeLessThanOrEqual(10);
+      for (const id of ids) {
+        expect(seen.has(id)).toBe(false);
+        seen.add(id);
+      }
+      if (!page.hasMoreTimeline) break;
+      if (!page.nextTimelineCursor) throw new Error('Missing timeline cursor');
+      cursor = page.nextTimelineCursor;
+      expect(decodeTaskTimelineCursor(cursor).at).toBe('2026-09-22T12:00:00.000000000Z');
+    }
+    expect(seen.size).toBe(104);
   });
 
   it('returns null for a missing or non-owner task', async () => {

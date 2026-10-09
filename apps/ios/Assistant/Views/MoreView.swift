@@ -8,7 +8,7 @@ struct MoreView: View {
     @ObservedObject private var notifications = NotificationManager.shared
     @AppStorage(AssistantAppearance.defaultsKey) private var appearance = AssistantAppearance.dark
     @AppStorage(AppModel.shareLocationKey) private var shareLocation = false
-    @AppStorage(AppModel.shareLocationBackgroundKey) private var shareLocationBackground = false
+    @AppStorage(AppModel.arrivalNudgesKey) private var arrivalNudges = false
     @AppStorage(SpeechSettings.speakRepliesKey) private var speakReplies = false
     @AppStorage(SpeechSettings.paceKey) private var speechPace = SpeechPace.default
     @AppStorage(SpeechSettings.voiceKey) private var speechVoice = ""
@@ -59,7 +59,9 @@ struct MoreView: View {
                     HStack {
                         Label("Reminders", systemImage: "bell.and.waves.left.and.right")
                         Spacer(minLength: 12)
-                        if let count = model.workspace?.settings.reminders.count, count > 0 {
+                        if model.workspace?.isSectionAvailable("settings") != false,
+                           let count = model.workspace?.settings.reminders.count,
+                           count > 0 {
                             Text("\(count)")
                                 .foregroundStyle(.secondary)
                         }
@@ -158,15 +160,22 @@ struct MoreView: View {
                 Toggle(isOn: $shareLocation) {
                     Label("Share iPhone location", systemImage: "location")
                 }
+                Toggle(isOn: $arrivalNudges) {
+                    Label("Generic arrival nudges", systemImage: "location.circle")
+                }
+                .disabled(!shareLocation)
+                .onChange(of: arrivalNudges) { _, enabled in
+                    model.arrivalNudgesPreferenceChanged()
+                    if enabled { Task { await model.shareLocationIfEnabled(force: true) } }
+                }
                 // Turning the intent on is what triggers the permission prompt
                 // — never the app launch.
                 .onChange(of: shareLocation) { _, on in
+                    model.locationSharingPreferenceChanged(enabled: on)
+                    if !on { arrivalNudges = false }
                     if on {
                         locations.requestAccess()
                         Task { await model.shareLocationIfEnabled(force: true) }
-                    } else {
-                        shareLocationBackground = false
-                        locations.setBackgroundMonitoring(false)
                     }
                 }
                 if shareLocation && locations.accessDenied {
@@ -177,22 +186,13 @@ struct MoreView: View {
                             .foregroundStyle(AssistantTheme.warningInk(for: colorScheme))
                     }
                 }
-                Toggle(isOn: $shareLocationBackground) {
-                    Label("Background arrival nudges", systemImage: "mappin.and.ellipse")
-                }
-                .disabled(!shareLocation)
-                .onChange(of: shareLocationBackground) { _, on in
-                    locations.setBackgroundMonitoring(on)
-                }
-                if shareLocationBackground && !locations.hasAlwaysAccess {
-                    Text("iOS will ask for Always location access; until then, arrivals are noticed only while the app is open.")
-                        .font(.caption)
-                        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                }
+                Text("Arrival nudges use foreground location only. Background location monitoring remains paused.")
+                    .font(.caption)
+                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
             } header: {
                 Text("Assistant context")
             } footer: {
-                Text("Share your current location with your own server for nearby answers. Arrival nudges use coarse location changes. You can turn either setting off at any time.")
+                Text("Location sharing sends a ping to your own server for current-location answers. The server keeps pings for its configured retention period (3 days by default, adjustable by the owner); it is not saved as personal memory. Generic arrival nudges are a separate opt-in. Their opaque source reference expires after 5 minutes; the durable task contains no coordinates or venue name. Turn either option off at any time.")
             }
 
             // The lower-traffic work areas. The pull-up menu stays at eight
@@ -230,7 +230,13 @@ struct MoreView: View {
                 }
             }
 
-            if let settings = model.workspace?.settings {
+            if model.workspace?.isSectionAvailable("settings") == false {
+                Section {
+                    WorkspaceAvailabilityNotice(title: "Settings")
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
+            } else if let settings = model.workspace?.settings {
                 Section("Recurring jobs") {
                     if settings.schedules.isEmpty {
                         Label("No recurring jobs", systemImage: "clock")
@@ -301,8 +307,11 @@ struct MoreView: View {
             Text("This removes “\(policy.displayName)”.")
         }
         .sheet(isPresented: $showingAgentSettings) {
-            if let settings = model.workspace?.settings.agent {
+            if model.workspace?.isSectionAvailable("settings") != false,
+               let settings = model.workspace?.settings.agent {
                 NavigationStack { AgentSettingsEditor(settings: settings) }
+            } else {
+                NavigationStack { WorkspaceAvailabilityNotice(title: "Settings").padding() }
             }
         }
         .fullScreenCover(isPresented: $showingTalk) { TalkView() }
@@ -582,7 +591,13 @@ private struct RemindersView: View {
             if removalFailed {
                 Section { AssistantInlineFailure(message: "Couldn’t confirm removal. Refresh to check whether the reminder is still active.") }
             }
-            if model.workspace == nil && !loadFailed {
+            if model.workspace?.isSectionAvailable("settings") == false {
+                Section {
+                    WorkspaceAvailabilityNotice(title: "Reminders")
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
+            } else if model.workspace == nil && !loadFailed {
                 Section { ProgressView("Loading reminders") }
             } else if reminders.isEmpty && !loadFailed {
                 AssistantEmptyState(

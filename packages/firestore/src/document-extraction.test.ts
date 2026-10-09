@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FirestoreDocumentCatalogRepository } from './document-catalog.js';
 import { FirestoreDocumentExtractionRepository } from './document-extraction.js';
+import { embeddingSpaceKey } from './memory.js';
 import { createInstallationStore, decodeRecord } from './store.js';
 import { FirestoreTaskLeaseRepository } from './tasks.js';
 
@@ -16,10 +17,17 @@ describe.skipIf(!emulator)('Firestore document extraction lifecycle', () => {
     databaseId: 'assistant-document-extraction-test',
   });
   const catalog = new FirestoreDocumentCatalogRepository(store, agentId);
-  const extraction = new FirestoreDocumentExtractionRepository(store, agentId);
+  const embeddingSpace = {
+    provider: 'test',
+    model: 'document-extraction-fixture',
+    dimensions: 1536,
+    revision: '1',
+  };
+  const extraction = new FirestoreDocumentExtractionRepository(store, agentId, embeddingSpace);
   const leases = new FirestoreTaskLeaseRepository(store);
   const now = new Date('2026-09-22T12:00:00.000Z');
   const vector = (value: number) => new Array(1536).fill(value);
+  const configuredEmbeddingSpaceKey = embeddingSpaceKey(embeddingSpace);
 
   beforeAll(async () => {
     await store.doc('agents', agentId).set({ id: agentId });
@@ -43,6 +51,8 @@ describe.skipIf(!emulator)('Firestore document extraction lifecycle', () => {
         mime: 'text/plain',
         bytes: 12,
         sha256: hash,
+        objectGeneration: null,
+        emailAttachmentCustodyId: null,
       },
       document: {
         id,
@@ -65,6 +75,7 @@ describe.skipIf(!emulator)('Firestore document extraction lifecycle', () => {
         processorStartedAt: null,
         processorAttempts: 0,
         processedTextPath: null,
+        extractionMetadata: null,
       },
     });
     if (!created.task) throw new Error('document ingest did not create extraction task');
@@ -105,6 +116,7 @@ describe.skipIf(!emulator)('Firestore document extraction lifecycle', () => {
       text: `content ${chunkIndex}`,
       charCount: 9,
       embedding: vector(chunkIndex + 0.25),
+      embeddingSpaceKey: configuredEmbeddingSpaceKey,
     }));
     const batch = {
       fence: run.fence,
@@ -158,6 +170,7 @@ describe.skipIf(!emulator)('Firestore document extraction lifecycle', () => {
       text: 'safe content',
       charCount: 12,
       embedding: vector(0.5),
+      embeddingSpaceKey: configuredEmbeddingSpaceKey,
     };
     const input = {
       fence: run.fence,
@@ -223,6 +236,7 @@ describe.skipIf(!emulator)('Firestore document extraction lifecycle', () => {
       text: 'first chunk',
       charCount: 11,
       embedding: null,
+      embeddingSpaceKey: null,
     };
     await expect(
       extraction.persistBatch({

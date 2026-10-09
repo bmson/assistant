@@ -1,8 +1,9 @@
-import { randomUUID } from 'node:crypto';
-import { type ExecutorDeps, executeTask } from '@assistant/core';
+import { createHash, randomUUID } from 'node:crypto';
+import { type ExecutorDeps, executeTask, runBriefing } from '@assistant/core';
 import type { Db } from '@assistant/db';
 import { createFirestoreExecutionPersistence, suggestionIdFor } from '@assistant/firestore';
 import type { ExecutionPersistence } from '@assistant/persistence';
+import { emailBookingKey } from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { encodeRecord, type InstallationStore } from '../../../packages/firestore/src/store.js';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
@@ -46,7 +47,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore daily briefing 
     deps = {
       db: unavailable('db') as Db,
       router: router as unknown as ExecutorDeps['router'],
-      dispatcher: unavailable('dispatcher') as ExecutorDeps['dispatcher'],
+      dispatcher: {
+        toolDefs: () => [],
+      } as unknown as ExecutorDeps['dispatcher'],
+      calendarReader: async () => ({ complete: true, events: [] }),
       persistence,
     };
     await store.doc('agents', agentId).set(
@@ -93,6 +97,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore daily briefing 
 
   async function seedDay() {
     const inTwoDays = new Date(now + 48 * HOUR).toISOString();
+    const bookingIdentity = 'dentist-cleaning-appointment';
+    const bookingKey = emailBookingKey(agentId, bookingIdentity);
+    const bookingSource = 'gmail:mail-dentist';
     await put('emailIngest', {
       id: randomUUID(),
       agentId,
@@ -103,6 +110,29 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore daily briefing 
       fromName: 'Dentist',
       subject: 'Your cleaning appointment',
       dates: [{ iso: inTwoDays, what: 'Dental cleaning' }],
+      createdAt: hoursAgo(3),
+      updatedAt: hoursAgo(3),
+    });
+    await put('emailBookingOccurrences', {
+      id: bookingKey,
+      agentId,
+      bookingKey,
+      lifecycle: 'confirmed',
+      dates: [
+        {
+          iso: inTwoDays,
+          what: 'Dental cleaning',
+          dateRole: 'event_start',
+          precision: 'date',
+          civilDate: inTwoDays.slice(0, 10),
+          lifecycle: 'confirmed',
+          bookingIdentity,
+        },
+      ],
+      sourceChannelMessageId: bookingSource,
+      sourceReceivedAt: hoursAgo(3),
+      sourceAuthenticated: true,
+      version: 1,
       createdAt: hoursAgo(3),
       updatedAt: hoursAgo(3),
     });
@@ -223,7 +253,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore daily briefing 
       trigger: { source: 'schedule', payload: { job: 'briefing.compose' } },
     });
     const result = await executeTask(deps, created.id);
-    expect(result.outcome).toBe('done');
+    expect(result.outcome, result.detail).toBe('done');
     return result.detail;
   }
 
@@ -268,7 +298,8 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore daily briefing 
     expect(notice?.text).toContain('A dentist visit is coming up and one approval is waiting.');
     const parts = (notice?.parts ?? []) as Array<{ type: string; suggestionId?: string }>;
     const suggestionPart = parts.find((part) => part.type === 'suggestion');
-    const suggestionId = suggestionIdFor(agentId, 'mail-dentist:0');
+    const bookingSourceRef = `booking:${emailBookingKey(agentId, 'dentist-cleaning-appointment')}:1:event_start:${new Date(now + 48 * HOUR).toISOString().slice(0, 10)}`;
+    const suggestionId = suggestionIdFor(agentId, bookingSourceRef);
     expect(suggestionPart?.suggestionId).toBe(suggestionId);
     expect(suggestionId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
@@ -278,14 +309,14 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore daily briefing 
       agentId,
       status: 'pending',
       origin: 'briefing',
-      sourceRef: 'mail-dentist:0',
+      sourceRef: bookingSourceRef,
     });
 
     // The next day's run sees the same mail: the digest repeats, the question does not.
     expect(await runJob()).toContain('0 suggestion(s)');
     const suggestions = await store
       .collection('suggestions')
-      .where('sourceRef', '==', 'mail-dentist:0')
+      .where('sourceRef', '==', bookingSourceRef)
       .get();
     expect(suggestions.size).toBe(1);
   });
@@ -326,5 +357,116 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore daily briefing 
     const fresh = { ...input, sourceRef: 'mail-fresh:0' };
     const raced = await Promise.all([repository.create(fresh), repository.create(fresh)]);
     expect(raced.filter(Boolean)).toHaveLength(1);
+  }, 30_000);
+
+  it('refreshes a cancelled booking only when its authenticated source version changes', async () => {
+    const at = new Date(now + 60 * 60 * 1000);
+    const bookingIdentity = `cancellation-${randomUUID()}`;
+    const bookingKey = emailBookingKey(agentId, bookingIdentity);
+    const eventId = `calendar-event-${randomUUID()}`;
+    const firstDate = new Date(at.getTime() + 5 * 24 * HOUR).toISOString().slice(0, 10);
+    let eventDate = firstDate;
+    const cancellationEvent = {
+      summary: 'Cancelled appointment',
+      description: `Booking reference ${bookingIdentity}`,
+      start: eventDate,
+      end: eventDate,
+      calendar: 'Primary',
+      calendarId: 'primary',
+      allDay: true,
+      eventId,
+    };
+    const calendarReader = async (window: { timeMin: Date; timeMax: Date }) => ({
+      complete: true,
+      events:
+        window.timeMax.getTime() - window.timeMin.getTime() > 2 * 24 * HOUR
+          ? [{ ...cancellationEvent, start: eventDate, end: eventDate }]
+          : [],
+    });
+    const runPortable = (runAt: Date) =>
+      runBriefing(
+        {
+          db: deps.db,
+          router: deps.router,
+          calendarCancellationEnabled: true,
+          calendarReader,
+          persistence,
+        },
+        { agentId, now: runAt },
+      );
+
+    await put('emailBookingOccurrences', {
+      id: bookingKey,
+      agentId,
+      bookingKey,
+      lifecycle: 'cancelled',
+      dates: [
+        {
+          iso: firstDate,
+          what: 'Cancelled appointment',
+          dateRole: 'event_start',
+          precision: 'date',
+          civilDate: firstDate,
+          lifecycle: 'cancelled',
+          bookingIdentity,
+        },
+      ],
+      sourceChannelMessageId: `gmail:${randomUUID()}`,
+      sourceReceivedAt: at,
+      sourceAuthenticated: true,
+      version: 1,
+      createdAt: at,
+      updatedAt: at,
+    });
+
+    const first = await runPortable(at);
+    expect(first.bookingCancellations).toBe(1);
+    expect(first.suggested).toBe(1);
+    const sourceDigest = (value: string) =>
+      createHash('sha256').update(value).digest('hex').slice(0, 16);
+    const firstSourceRef = `booking:${bookingKey}:1:cancel:${sourceDigest(bookingIdentity)}:${sourceDigest(eventId)}`;
+    const firstSuggestion = await store
+      .collection('suggestions')
+      .where('agentId', '==', agentId)
+      .where('sourceRef', '==', firstSourceRef)
+      .limit(1)
+      .get();
+    expect(firstSuggestion.size).toBe(1);
+    const firstSuggestionDoc = firstSuggestion.docs[0];
+    if (!firstSuggestionDoc) throw new Error('expected first cancellation suggestion');
+    await firstSuggestionDoc.ref.update({ status: 'dismissed' });
+
+    const refreshed = await runPortable(new Date(at.getTime() + 2 * 60 * 1000));
+    expect(refreshed.bookingCancellations).toBe(0);
+    expect(refreshed.suggested).toBe(0);
+
+    const secondDate = new Date(at.getTime() + 9 * 24 * HOUR).toISOString().slice(0, 10);
+    eventDate = secondDate;
+    await store.doc('emailBookingOccurrences', bookingKey).update({
+      dates: [
+        {
+          iso: secondDate,
+          what: 'Rescheduled cancelled appointment',
+          dateRole: 'event_start',
+          precision: 'date',
+          civilDate: secondDate,
+          lifecycle: 'cancelled',
+          bookingIdentity,
+        },
+      ],
+      version: 2,
+      updatedAt: new Date(at.getTime() + 3 * 60 * 1000),
+    });
+    const newVersion = await runPortable(new Date(at.getTime() + 3 * 60 * 1000));
+    expect(newVersion.bookingCancellations).toBe(1);
+    expect(newVersion.suggested).toBe(1);
+    const secondSourceRef = firstSourceRef.replace(':1:cancel:', ':2:cancel:');
+    const secondSuggestion = await store
+      .collection('suggestions')
+      .where('agentId', '==', agentId)
+      .where('sourceRef', '==', secondSourceRef)
+      .limit(1)
+      .get();
+    expect(secondSuggestion.size).toBe(1);
   });
 });

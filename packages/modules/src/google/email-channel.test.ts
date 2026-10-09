@@ -11,7 +11,7 @@ import {
   tasks,
 } from '@assistant/db';
 import { eq, inArray } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { deliverEmailFinal, type EmailChannelDeps } from './email-channel.js';
 
 const DATABASE_URL =
@@ -155,7 +155,7 @@ describe('deliverEmailFinal', () => {
     const { deps, sent } = makeDeps();
 
     const delivered = await deliverEmailFinal(deps, emailTask(), 'The performance is at 4pm.');
-    expect(delivered).toBe(true);
+    expect(delivered).toMatchObject({ channel: 'email', status: 'accepted' });
     expect(sent).toHaveLength(1);
     expect(sent[0]?.url).toContain('/messages/send');
 
@@ -177,7 +177,7 @@ describe('deliverEmailFinal', () => {
       emailTask({ trust: 'unknown' }),
       'should not send',
     );
-    expect(delivered).toBe(false);
+    expect(delivered).toMatchObject({ channel: 'email', status: 'not_applicable' });
     expect(sent).toHaveLength(0);
   });
 
@@ -203,7 +203,7 @@ describe('deliverEmailFinal', () => {
       }),
       'should never be sent',
     );
-    expect(delivered).toBe(false);
+    expect(delivered).toMatchObject({ channel: 'email', status: 'rejected' });
     expect(sent).toHaveLength(0);
   });
 
@@ -222,24 +222,78 @@ describe('deliverEmailFinal', () => {
       }),
       'should never be sent',
     );
-    expect(delivered).toBe(false);
+    expect(delivered).toMatchObject({ channel: 'email', status: 'rejected' });
     expect(sent).toHaveLength(0);
   });
 
   it('ignores non-email tasks and conversations', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const { deps, sent } = makeDeps();
-    expect(await deliverEmailFinal(deps, emailTask({ type: 'chat_turn' }), 'no')).toBe(false);
-    expect(await deliverEmailFinal(deps, emailTask({ conversationId: chatConvId }), 'no')).toBe(
-      false,
-    );
+    expect(await deliverEmailFinal(deps, emailTask({ type: 'chat_turn' }), 'no')).toMatchObject({
+      status: 'not_applicable',
+    });
+    expect(
+      await deliverEmailFinal(deps, emailTask({ conversationId: chatConvId }), 'no'),
+    ).toMatchObject({ status: 'rejected' });
     expect(
       await deliverEmailFinal(
         deps,
         emailTask({ trigger: { source: 'email', payload: {} } as TaskRow['trigger'] }),
         'no',
       ),
-    ).toBe(false);
+    ).toMatchObject({ status: 'rejected' });
+    expect(sent).toHaveLength(0);
+  });
+
+  it('returns a required-channel rejection for an unavailable client or missing thread binding', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const { deps, sent } = makeDeps();
+    deps.googleClient.configured = () => false;
+    expect(await deliverEmailFinal(deps, emailTask(), 'answer')).toMatchObject({
+      channel: 'email',
+      status: 'rejected',
+      reason: 'provider-not-configured',
+    });
+    expect(sent).toHaveLength(0);
+
+    deps.googleClient.configured = () => true;
+    const [conversation] = await db
+      .insert(conversations)
+      .values({ agentId, channel: 'email', trust: 'owner', title: 'unbound-email-test' })
+      .returning({ id: conversations.id });
+    const conversationId = conversation?.id;
+    if (!conversationId) throw new Error('test email conversation was not created');
+    createdConversationIds.push(conversationId);
+    const followUp = emailTask({ type: 'adhoc', conversationId, trigger: { source: 'internal' } });
+    expect(await deliverEmailFinal(deps, followUp, 'answer')).toMatchObject({
+      channel: 'email',
+      status: 'rejected',
+      reason: 'missing-owner-target',
+    });
+    expect(sent).toHaveLength(0);
+  });
+
+  it('distinguishes definite provider rejection from ambiguous send outcome', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const { deps, sent } = makeDeps();
+    deps.googleClient.api = async () => {
+      throw Object.assign(new Error('provider rejected request'), { status: 403 });
+    };
+    expect(await deliverEmailFinal(deps, emailTask(), 'answer')).toMatchObject({
+      status: 'rejected',
+      reason: 'provider-rejected',
+    });
+    expect(sent).toHaveLength(0);
+
+    deps.googleClient.api = async () => {
+      throw Object.assign(new Error('response lost after send'), {
+        deliveryMayHaveSucceeded: true,
+      });
+    };
+    expect(await deliverEmailFinal(deps, emailTask(), 'answer')).toMatchObject({
+      status: 'unknown',
+      reason: 'provider-outcome-unknown',
+    });
     expect(sent).toHaveLength(0);
   });
 
@@ -289,7 +343,7 @@ describe('deliverEmailFinal', () => {
     } as TaskRow;
 
     const delivered = await deliverEmailFinal(deps, adhoc, 'Booked the flights.');
-    expect(delivered).toBe(true);
+    expect(delivered).toMatchObject({ channel: 'email', status: 'accepted' });
     const body = JSON.parse(sent[0]?.body ?? '{}') as { raw: string; threadId: string };
     expect(body.threadId).toBe('thread-followup');
     const decoded = Buffer.from(body.raw, 'base64url').toString('utf8');

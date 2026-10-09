@@ -5,7 +5,10 @@ import type {
   Records,
 } from '@assistant/persistence';
 import { resolveFirestoreSubjectContact } from './contact-lookup.js';
-import { FirestoreProfileOccasionCommandRepository } from './profile-occasion-command.js';
+import {
+  FirestoreProfileOccasionCommandRepository,
+  OccasionDateCorrectionConflictError,
+} from './profile-occasion-command.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
 /** Every occasion is needed to compute what is upcoming; past this bound the read fails. */
@@ -36,25 +39,30 @@ export class FirestoreOccasionToolRepository implements OccasionToolRepository {
     const agentId = this.owner(input.agentId);
     const contactId = await resolveFirestoreSubjectContact(this.store, agentId, input.subject);
     if (!contactId) return null;
-    const result = await this.commands.record(
-      {
-        contactId,
-        kind: input.kind,
-        label: input.label.slice(0, 120),
-        month: input.month,
-        day: input.day,
-        year: input.year,
-        leadDays: input.leadDays,
-        notes: input.notes.trim().slice(0, 2000),
-      },
-      {
-        originTrust: input.originTrust,
-        quarantined: input.quarantined,
-        ownerConfirmed: false,
-        source: input.source,
-      },
-    );
-    return { saved: result.created };
+    try {
+      const result = await this.commands.record(
+        {
+          contactId,
+          kind: input.kind,
+          label: input.label.slice(0, 120),
+          month: input.month,
+          day: input.day,
+          year: input.year,
+          leadDays: input.leadDays,
+          notes: input.notes.trim().slice(0, 2000),
+        },
+        {
+          originTrust: input.originTrust,
+          quarantined: input.quarantined,
+          ownerConfirmed: false,
+          source: input.source,
+        },
+      );
+      return { saved: result.created };
+    } catch (error) {
+      if (error instanceof OccasionDateCorrectionConflictError) return { saved: false };
+      throw error;
+    }
   }
 
   async list(agentId: string): Promise<OccasionToolRow[]> {

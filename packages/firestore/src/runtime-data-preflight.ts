@@ -2,6 +2,7 @@ import {
   type EmbeddingSpace,
   embeddingModelId,
   MODEL_ROLE_NAMES as REQUIRED_ROLES,
+  snapshotEmbeddingSpace,
 } from '@assistant/persistence';
 import type { InstallationStore } from './store.js';
 
@@ -69,15 +70,13 @@ export async function checkFirestoreRuntimeData(
 ): Promise<RuntimeDataPreflight> {
   const issues: RuntimeDataIssue[] = [];
   const add = (code: RuntimeDataIssue['code'], subject: string) => issues.push({ code, subject });
-  if (
-    !input.embeddingSpace.provider ||
-    !input.embeddingSpace.model ||
-    !input.embeddingSpace.revision ||
-    !Number.isInteger(input.embeddingSpace.dimensions) ||
-    input.embeddingSpace.dimensions < 1 ||
-    input.embeddingSpace.dimensions > 2048 ||
-    (input.provider === 'vertex' && input.embeddingSpace.provider !== 'vertex')
-  ) {
+  let embeddingSpace: EmbeddingSpace | undefined;
+  try {
+    embeddingSpace = snapshotEmbeddingSpace(input.embeddingSpace);
+  } catch {
+    // Return the ordinary typed preflight issue instead of throwing on config.
+  }
+  if (!embeddingSpace || (input.provider === 'vertex' && embeddingSpace.provider !== 'vertex')) {
     add('embedding_space_invalid', 'embedding-space');
   }
   const [agent, policy, ...roles] = await Promise.all([
@@ -131,7 +130,7 @@ export async function checkFirestoreRuntimeData(
     }
     modelIds.add(primary);
     modelIds.add(fallback);
-    if (role === 'embed' && primary !== embeddingModelId(input.embeddingSpace)) {
+    if (role === 'embed' && embeddingSpace && primary !== embeddingModelId(embeddingSpace)) {
       add('embedding_mismatch', 'embed');
     }
   }

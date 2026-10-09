@@ -1,6 +1,6 @@
 import { getAgent } from '@assistant/core/chat';
 import { createDb, type Db, tasks, toolCalls } from '@assistant/db';
-import { eq, inArray } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getTaskDetail } from './tasks/queries.js';
 
@@ -115,6 +115,38 @@ describe('getTaskDetail', () => {
     expect((older as NonNullable<typeof older>).toolCalls.map((call) => call.step)).toEqual([
       2, 3, 4, 5, 6,
     ]);
+  });
+
+  it('reaches every equal-time and sub-millisecond event exactly once', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const taskId = await newTask();
+    await db.insert(toolCalls).values(
+      Array.from({ length: 121 }, (_, index) => ({
+        taskId,
+        toolName: 'web.fetch',
+        step: index,
+        risk: 'autonomous',
+        status: 'succeeded',
+        createdAt: sql`'2026-01-01T12:00:00Z'::timestamptz + ${index < 101 ? 0 : index} * interval '1 microsecond'`,
+      })),
+    );
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    for (let pages = 0; pages < 10; pages++) {
+      const page = await getTaskDetail(db, taskId, { pageSize: 25, cursor });
+      expect(page).not.toBeNull();
+      if (!page) throw new Error('Missing timeline page');
+      expect(page.toolCalls.length).toBeLessThanOrEqual(25);
+      for (const row of page.toolCalls) {
+        expect(seen.has(row.id)).toBe(false);
+        seen.add(row.id);
+      }
+      if (!page.hasMoreTimeline) break;
+      expect(page.nextTimelineCursor).toBeTruthy();
+      if (!page.nextTimelineCursor) throw new Error('Missing timeline cursor');
+      cursor = page.nextTimelineCursor;
+    }
+    expect(seen.size).toBe(121);
   });
 
   it('reports no more entries once the whole record fits on one page', async (ctx) => {

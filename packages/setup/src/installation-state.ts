@@ -158,8 +158,10 @@ export async function persistInstallationProgress(
   /**
    * `release-rebase` is the reviewed update/rollback transition: an
    * initialized or ready installation selects another verified release and
-   * returns to `bootstrapped` so the normal stages reapply it. Nothing else in
-   * the identity or selection may change.
+   * returns to `provisioned`, preserving all Terraform-owned resources. This
+   * prevents a foundation-only apply from deleting the live runtime while the
+   * new images are built. Nothing else in the identity, selection, or applied
+   * Terraform inventory may change.
    */
   transition: 'advance' | 'release-rebase' = 'advance',
 ): Promise<InstallationManifest> {
@@ -206,13 +208,17 @@ export async function persistInstallationProgress(
           !sameJson(current.selection, next.selection)
         )
           throw stateError(path, 'a release rebase may change only the release');
+        const terraformResources = (resources: InstallationManifest['resources']) =>
+          resources.filter((resource) => resource.owner === 'terraform');
+        if (!sameJson(terraformResources(current.resources), terraformResources(next.resources)))
+          throw stateError(path, 'a release rebase must preserve Terraform-owned resources');
         if (current.stage.current !== 'initialized' && current.stage.current !== 'ready')
           throw stateError(path, 'only an initialized or ready installation can change release');
         if (
-          next.stage.current !== 'bootstrapped' ||
-          next.stage.completed.join('\0') !== 'previewed\0authorized\0bootstrapped'
+          next.stage.current !== 'provisioned' ||
+          next.stage.completed.join('\0') !== 'previewed\0authorized\0bootstrapped\0provisioned'
         )
-          throw stateError(path, 'a release rebase must return to the bootstrapped stage');
+          throw stateError(path, 'a release rebase must return to the provisioned stage');
       } else if (
         !sameJson(current.identity, next.identity) ||
         !sameJson(current.selection, next.selection)

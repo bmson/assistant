@@ -13,12 +13,30 @@ export interface ExtractionConversation {
   conversationId: string;
   trust: string;
   messages: ExtractionMessage[];
+  /** Opaque privacy fence captured with the source snapshot. */
+  privacyGeneration?: string | null;
+}
+
+export interface PreparedMemoryExtraction {
+  agentId: string;
+  conversationId: string;
+  sourceHash: string;
+  extractionVersion: string;
+  privacyGeneration: string | null;
+  payload: unknown;
+}
+
+export interface ExtractionContactChoice {
+  id: string;
+  name: string;
 }
 
 export interface ExtractedMemoryFact {
   content: string;
   contentHash: string;
   embedding: number[];
+  /** Exact immutable identity of the space that produced `embedding`. */
+  embeddingSpaceKey?: string;
   category: 'knowledge' | 'experience';
   kind: 'fact' | 'preference' | 'person' | 'project' | 'episode';
   importance: number;
@@ -27,13 +45,16 @@ export interface ExtractedMemoryFact {
   domain: string | null;
   validFrom: Date | null;
   expiresAt: Date | null;
-  /** Who the fact is about: "owner", a person's name, or an assistant alias. */
+  /** Validated canonical subject label; empty means identity was unsupported. */
   subject: string;
+  subjectContactId?: string | null;
   relationship: string;
 }
 
 export interface ExtractedOccasion {
+  /** Validated canonical subject label; empty means identity was unsupported. */
   subject: string;
+  contactId?: string | null;
   kind: 'birthday' | 'anniversary' | 'custom';
   label: string;
   month: number;
@@ -51,6 +72,10 @@ export interface ExtractedCommitment {
   /** Two-decimal string, as stored. */
   confidence: string;
   contentHash: string;
+  /** Owner message range that establishes this occurrence, independent of wording. */
+  sourceMessageIds: string[];
+  sourceMessageId: string;
+  sourceOccurrenceKey: string;
 }
 
 export interface MemoryExtractionApplied {
@@ -60,6 +85,7 @@ export interface MemoryExtractionApplied {
   tombstoned: number;
   contactsCreated: number;
   occasionsSaved: number;
+  occasionsRejected: number;
 }
 
 export interface CommitmentExtractionApplied {
@@ -94,6 +120,18 @@ export interface MemoryExtractionRepository {
   }): Promise<ExtractionConversation[]>;
   /** Every contact's display name, for attributing facts. */
   knownContactNames(agentId: string): Promise<string[]>;
+  /** Stable IDs and labels used to construct a bounded, typed model catalog. */
+  knownContacts(agentId: string): Promise<ExtractionContactChoice[]>;
+  /** Reuse prepared paid output only for the same source and privacy generation. */
+  getPrepared(input: {
+    agentId: string;
+    conversationId: string;
+    sourceHash: string;
+    extractionVersion: string;
+    privacyGeneration: string | null;
+  }): Promise<PreparedMemoryExtraction | null>;
+  /** Persist validated output and embeddings before any derived writes/checkpoint. */
+  savePrepared(input: PreparedMemoryExtraction & { lease: CodeJobLease }): Promise<void>;
   /** Checkpoint keys this task has already committed. */
   completedSteps(agentId: string, lease: CodeJobLease): Promise<string[]>;
   /** Save one conversation's facts and occasions, once per checkpoint key. */
@@ -105,11 +143,18 @@ export interface MemoryExtractionRepository {
     quarantined: boolean;
     facts: ExtractedMemoryFact[];
     occasions: ExtractedOccasion[];
+    prepared?: Pick<
+      PreparedMemoryExtraction,
+      'conversationId' | 'sourceHash' | 'extractionVersion' | 'privacyGeneration'
+    >;
     /** The memories' `source`; nightly extraction when omitted. */
     source?: 'extraction' | 'dream' | 'self-improve';
   }): Promise<MemoryExtractionApplied | null>;
   /** The owner's open and snoozed loops, most recently touched first. */
-  activeCommitments(agentId: string, limit: number): Promise<Array<{ id: string; title: string }>>;
+  activeCommitments(
+    agentId: string,
+    limit: number,
+  ): Promise<Array<{ id: string; title: string; reopenedFromId: string | null }>>;
   /**
    * Save one conversation's open loops and resolve the ones it closed, once
    * per checkpoint key. A loop whose active twin already exists refreshes it
@@ -120,7 +165,6 @@ export interface MemoryExtractionRepository {
     lease: CodeJobLease;
     checkpointKey: string;
     conversationId: string;
-    sourceMessageId: string | null;
     resolveIds: string[];
     resolution: string;
     commitments: ExtractedCommitment[];

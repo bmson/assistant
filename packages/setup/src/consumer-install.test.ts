@@ -27,23 +27,33 @@ const indexSpec = JSON.parse(
   indexes: Array<{
     collectionGroup: string;
     queryScope: string;
-    fields: Array<{ fieldPath: string; order?: string }>;
+    fields: Array<{
+      fieldPath: string;
+      order?: string;
+      vectorConfig?: { dimension: number; flat: Record<string, never> };
+    }>;
   }>;
   fieldOverrides: Array<{ collectionGroup: string; fieldPath: string }>;
 };
 const indexPrefix = 'projects/customer-project/databases/(default)/collectionGroups/';
-const compositeIndexRows = indexSpec.indexes.map((index, number) => ({
-  name: `${indexPrefix}${index.collectionGroup}/indexes/${number + 1}`,
-  queryScope: index.queryScope,
-  fields: [
-    ...index.fields,
-    {
+const compositeIndexRows = indexSpec.indexes.map((index, number) => {
+  const fields = [...index.fields];
+  if (!fields.some((field) => field.fieldPath === '__name__')) {
+    const documentName = {
       fieldPath: '__name__',
       order: index.fields.at(-1)?.order === 'DESCENDING' ? 'DESCENDING' : 'ASCENDING',
-    },
-  ],
-  state: 'READY',
-}));
+    };
+    const vectorPosition = fields.findIndex((field) => field.vectorConfig !== undefined);
+    if (vectorPosition === fields.length - 1) fields.splice(vectorPosition, 0, documentName);
+    else fields.push(documentName);
+  }
+  return {
+    name: `${indexPrefix}${index.collectionGroup}/indexes/${number + 1}`,
+    queryScope: index.queryScope,
+    fields,
+    state: 'READY',
+  };
+});
 const fieldOverrideRows = indexSpec.fieldOverrides.map((field) => ({
   name: `${indexPrefix}${field.collectionGroup}/fields/${field.fieldPath}`,
   indexConfig: { indexes: [] },
@@ -158,6 +168,14 @@ function fakeRunner(
           stderr: '',
         };
       }
+      if (
+        command === 'gcloud' &&
+        args[0] === 'secrets' &&
+        args[1] === 'versions' &&
+        args[2] === 'describe'
+      ) {
+        return { ok: true, stdout: JSON.stringify({ state: 'ENABLED' }), stderr: '' };
+      }
       if (command === 'gcloud' && args[0] === 'services') {
         return { ok: true, stdout: JSON.stringify(requiredServiceRows), stderr: '' };
       }
@@ -218,6 +236,9 @@ function fakeRunner(
       }
       if (command === 'terraform' && args.includes('output')) {
         return { ok: true, stdout: JSON.stringify(terraformOutput), stderr: '' };
+      }
+      if (command === 'terraform' && args.includes('show') && args.includes('-json')) {
+        return { ok: true, stdout: JSON.stringify({ resource_changes: [] }), stderr: '' };
       }
       return { ok: true, stdout: '{}', stderr: '' };
     },
@@ -436,13 +457,32 @@ describe('consumer installation', () => {
               },
               spec: {
                 template: {
-                  spec: { containers: [{ image: runtimeImages.images.agent.reference }] },
+                  spec: {
+                    containers: [
+                      {
+                        image: runtimeImages.images.agent.reference,
+                        env: [{ name: 'ASSISTANT_RELEASE_SHA', value: runtimeImages.sourceSha }],
+                      },
+                    ],
+                  },
                 },
+              },
+              // Cloud Run service metadata carries the template env on the
+              // service spec in production; include both the service-level
+              // view and the legacy template fixture shape here.
+              template: {
+                containers: [
+                  {
+                    image: runtimeImages.images.agent.reference,
+                    env: [{ name: 'ASSISTANT_RELEASE_SHA', value: runtimeImages.sourceSha }],
+                  },
+                ],
               },
               status: {
                 conditions: [{ type: 'Ready', status: 'True' }],
                 latestCreatedRevisionName: 'rev-2',
                 latestReadyRevisionName: 'rev-2',
+                traffic: [{ revisionName: 'rev-2', percent: 100 }],
               },
             }),
             stderr: '',
@@ -463,6 +503,7 @@ describe('consumer installation', () => {
                     { name: 'AUTH_DEV_BYPASS', value: 'false' },
                     { name: 'AUTH_LOCALHOST_BYPASS', value: 'false' },
                     { name: 'VERTEX_LOCATION', value: runtimeConfig.vertexLocation },
+                    { name: 'ASSISTANT_RELEASE_SHA', value: runtimeImages.sourceSha },
                   ],
                 },
               ],
@@ -470,6 +511,7 @@ describe('consumer installation', () => {
             conditions: [{ type: 'Ready', state: 'CONDITION_SUCCEEDED' }],
             latestCreatedRevision: 'rev-1',
             latestReadyRevision: 'rev-1',
+            status: { traffic: [{ revisionName: 'rev-1', percent: 100 }] },
           }),
           stderr: '',
         };
@@ -631,7 +673,8 @@ describe('consumer installation', () => {
         (entry, index) =>
           index > targetApplyIndex &&
           entry.includes('web_image_digest=') &&
-          entry.includes('apply'),
+          entry.includes('plan') &&
+          entry.includes('runtime.tfplan'),
       ),
     ).toBeGreaterThan(targetApplyIndex);
     const callback = 'https://assistant.example.com/api/auth/callback/google';
@@ -1309,6 +1352,8 @@ describe('consumer installation', () => {
     let versions: string[] = [];
     let secretFileMode = -1;
     let webPublic = false;
+    let servingPercent = 100;
+    let servingReleaseSha = runtimeImages.sourceSha;
     const baseRun = runner.run.bind(runner);
     runner.run = async (command, args) => {
       if (command === 'gcloud' && args[0] === 'secrets' && args[1] === 'describe') {
@@ -1369,6 +1414,7 @@ describe('consumer installation', () => {
                     { name: 'AUTH_DEV_BYPASS', value: 'false' },
                     { name: 'AUTH_LOCALHOST_BYPASS', value: 'false' },
                     { name: 'VERTEX_LOCATION', value: 'global' },
+                    { name: 'ASSISTANT_RELEASE_SHA', value: servingReleaseSha },
                   ],
                 },
               ],
@@ -1376,14 +1422,15 @@ describe('consumer installation', () => {
             conditions: [{ type: 'Ready', state: 'CONDITION_SUCCEEDED' }],
             latestCreatedRevision: 'rev-1',
             latestReadyRevision: 'rev-1',
+            status: { traffic: [{ revisionName: 'rev-1', percent: servingPercent }] },
           }),
           stderr: '',
         };
       }
       if (
         command === 'terraform' &&
-        args.includes('apply') &&
-        args.includes('web_image_digest=' + runtimeImages.terraform.web_image_digest) &&
+        args.includes('plan') &&
+        args.includes(`web_image_digest=${runtimeImages.terraform.web_image_digest}`) &&
         !args.some((arg) => arg.startsWith('-target'))
       )
         webPublic = args.includes('allow_public_web_invoker=true');
@@ -1471,7 +1518,7 @@ describe('consumer installation', () => {
     );
     const runtimeApply = logs.find(
       (entry) =>
-        entry.includes('apply') &&
+        entry.includes('plan') &&
         entry.includes('web_image_digest=') &&
         !entry.includes('-target='),
     );
@@ -1492,7 +1539,7 @@ describe('consumer installation', () => {
     ).rejects.toThrow('need no OAuth callback');
 
     let claimed = false;
-    let modelResponse = false;
+    let ownerReplyDelivered = false;
     let healthSha = release;
     const httpFetcher: typeof fetch = async (input) => {
       const url = String(input);
@@ -1502,11 +1549,29 @@ describe('consumer installation', () => {
       return new Response('not found', { status: 404 });
     };
     const verify = {
+      nativeAppVersion: '1.0.0+synthetic',
+      nativePairingConfirmed: true,
       evidence: async () => ({
         runtimeData: { ready: true, issues: [] },
-        modelResponseObserved: modelResponse,
+        ownerReplyDelivered,
       }),
     };
+    servingPercent = 50;
+    await expect(
+      provisionConsumerInstallation(
+        { runner, fetcher: httpFetcher },
+        { ...options, apply: false, runtime, verify },
+      ),
+    ).rejects.toThrow('not serving the expected ready digest revision');
+    servingPercent = 100;
+    servingReleaseSha = 'f'.repeat(40);
+    await expect(
+      provisionConsumerInstallation(
+        { runner, fetcher: httpFetcher },
+        { ...options, apply: false, runtime, verify },
+      ),
+    ).rejects.toThrow('not serving the expected ready digest revision');
+    servingReleaseSha = runtimeImages.sourceSha;
     const pending = await provisionConsumerInstallation(
       { runner, fetcher: httpFetcher },
       { ...options, runtime, verify },
@@ -1515,9 +1580,9 @@ describe('consumer installation', () => {
     expect(pending.manifest.stage.current).toBe('initialized');
     expect(
       pending.verification?.checks.filter((check) => !check.ok).map((check) => check.name),
-    ).toEqual(['owner-claimed', 'model-response']);
+    ).toEqual(['owner-claimed', 'native-reply-delivery']);
     claimed = true;
-    modelResponse = true;
+    ownerReplyDelivered = true;
     healthSha = 'f'.repeat(40);
     const stale = await provisionConsumerInstallation(
       { runner, fetcher: httpFetcher },
@@ -1525,6 +1590,32 @@ describe('consumer installation', () => {
     );
     expect(stale.verification?.passed).toBe(false);
     healthSha = release;
+    // A working server/model is insufficient for the native-first handoff.
+    for (const nativeEvidence of [
+      { nativeAppVersion: undefined, nativePairingConfirmed: false },
+      { nativeAppVersion: '1.0.0+synthetic', nativePairingConfirmed: false },
+      { nativeAppVersion: undefined, nativePairingConfirmed: true },
+    ]) {
+      const unpaired = await provisionConsumerInstallation(
+        { runner, fetcher: httpFetcher },
+        { ...options, runtime, verify: { ...verify, ...nativeEvidence } },
+      );
+      expect(unpaired.runtimeReady).toBe(false);
+      expect(unpaired.manifest.stage.current).toBe('initialized');
+      expect(
+        unpaired.verification?.checks.some((check) => check.name === 'native-pairing' && !check.ok),
+      ).toBe(true);
+    }
+    await expect(
+      provisionConsumerInstallation(
+        { runner, fetcher: httpFetcher },
+        {
+          ...options,
+          runtime,
+          verify: { ...verify, nativeAppVersion: 'unknown installed version' },
+        },
+      ),
+    ).rejects.toThrow('Native app version');
     const previewed = await provisionConsumerInstallation(
       { runner, fetcher: httpFetcher },
       { ...options, apply: false, runtime, verify },
@@ -1536,6 +1627,9 @@ describe('consumer installation', () => {
       { ...options, runtime, verify },
     );
     expect(ready.runtimeReady).toBe(true);
+    expect(
+      ready.verification?.checks.find((check) => check.name === 'native-app-installed')?.detail,
+    ).toContain('not machine-verified');
     expect(ready.manifest.stage.current).toBe('ready');
     expect(JSON.parse(await readFile(state, 'utf8')).stage.current).toBe('ready');
     // A ready install re-verifies idempotently and reuses the recorded secret version.
@@ -1545,5 +1639,78 @@ describe('consumer installation', () => {
     );
     expect(again.runtimeReady).toBe(true);
     expect(versions).toHaveLength(1);
+  });
+
+  it('rejects a runtime plan that deletes or replaces existing resources before apply', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'assistant-consumer-runtime-plan-delete-'));
+    const archive = join(dir, 'release.tar.gz');
+    const state = join(dir, 'state.json');
+    await foundationArchive(archive);
+    const initial = manifest(await sha256File(archive));
+    const provisioned = advanceInstallationStage(
+      advanceInstallationStage(
+        advanceInstallationStage(initial, 'authorized', '2026-09-12T12:00:01.000Z'),
+        'bootstrapped',
+        '2026-09-12T12:00:02.000Z',
+      ),
+      'provisioned',
+      '2026-09-12T12:00:03.000Z',
+    );
+    await writeFile(state, JSON.stringify(provisioned));
+    const logs: string[] = [];
+    const terraformRunner = fakeRunner(logs);
+    const run = terraformRunner.run.bind(terraformRunner);
+    let runtimePlanShown = false;
+    terraformRunner.run = async (command, args) => {
+      if (command === 'terraform' && args.includes('show') && args.includes('-json')) {
+        const planPath = args.at(-1) ?? '';
+        if (planPath.endsWith('runtime.tfplan')) {
+          runtimePlanShown = true;
+          return {
+            ok: true,
+            stdout: JSON.stringify({
+              resource_changes: [
+                {
+                  address: 'google_cloud_run_v2_service.web',
+                  change: { actions: ['delete', 'create'] },
+                },
+              ],
+            }),
+            stderr: '',
+          };
+        }
+      }
+      return run(command, args);
+    };
+    const runtime = {
+      images: runtimeImages,
+      config: runtimeConfig,
+      authSecretVersion: '1',
+    };
+    await expect(
+      provisionConsumerInstallation(
+        {
+          runner: fakeRunner([]),
+          terraform: terraformRunner,
+          fetcher: async () =>
+            new Response(JSON.stringify({ permissions: ['iam.serviceAccounts.actAs'] })),
+        },
+        {
+          manifest: provisioned,
+          archivePath: archive,
+          statePath: state,
+          terraformDir: 'infra/gcp/consumer/terraform',
+          stateBucket: 'customer-project-consumer-install-state',
+          apply: true,
+          runtime,
+        },
+      ),
+    ).rejects.toThrow(
+      'would delete or replace existing resources: google_cloud_run_v2_service.web',
+    );
+    expect(runtimePlanShown).toBe(true);
+    expect(logs.some((entry) => entry.includes('apply') && entry.endsWith('runtime.tfplan'))).toBe(
+      false,
+    );
   });
 });

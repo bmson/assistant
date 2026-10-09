@@ -1,4 +1,5 @@
 import {
+  curiosityNudgePingId,
   insideQuietHours,
   type NudgePolicyRepository,
   ownerLocalMidnightUtc,
@@ -16,6 +17,9 @@ export function createPostgresNudgePolicyRepository(db: Db): NudgePolicyReposito
     evaluate(agent, opts) {
       const now = opts.now ?? new Date();
       const channel = opts.channel ?? 'out-of-band';
+      const id = channel.startsWith('curiosity-nudge:')
+        ? curiosityNudgePingId(agent.id, channel)
+        : undefined;
       return db.transaction(async (tx) => {
         let decision: PingDecision = { deliver: true };
         if (opts.urgency === 'ambient') {
@@ -27,6 +31,24 @@ export function createPostgresNudgePolicyRepository(db: Db): NudgePolicyReposito
           await tx.execute(
             sql`select pg_advisory_xact_lock(hashtext(${`assistant:ambient-ping:${agent.id}:${midnight.toISOString()}`}))`,
           );
+          if (id) {
+            const [prior] = await tx
+              .select()
+              .from(proactivePings)
+              .where(eq(proactivePings.id, id))
+              .limit(1);
+            if (prior) {
+              if (prior.agentId !== agent.id || prior.channel !== channel)
+                throw new Error('Curiosity nudge reservation ownership mismatch');
+              return {
+                deliver: prior.delivered,
+                ...(!prior.delivered &&
+                (prior.reason === 'quiet-hours' || prior.reason === 'daily-cap')
+                  ? { reason: prior.reason }
+                  : {}),
+              };
+            }
+          }
           const [prefs] = await tx
             .select()
             .from(notificationPrefs)
@@ -53,6 +75,7 @@ export function createPostgresNudgePolicyRepository(db: Db): NudgePolicyReposito
         }
 
         await tx.insert(proactivePings).values({
+          ...(id ? { id } : {}),
           agentId: agent.id,
           urgency: opts.urgency,
           channel,

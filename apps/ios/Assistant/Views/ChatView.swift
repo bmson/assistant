@@ -281,12 +281,20 @@ struct ChatTranscriptRows: View, Equatable {
     let rememberApproval: (String) async -> Bool
     let decideSuggestion: (String, SuggestionDecision) async -> String?
     let openActivity: () -> Void
-    let refreshCard: (String) async -> String?
+    let refreshCard: (String, String?) async -> String?
     let hideMessage: (ChatMessage) -> Void
+    let setRecallSourceSuppressed: (String, MessageRecallSource, Bool) async -> RecallSourceControlOutcome
+    let recallSourceSuppressed: (String, MessageRecallSource) async -> Bool?
+    let acknowledgeMessageDelivery: (String) async -> Bool
+    let cardFormActions: NativeCardFormActions?
+    let cardFormStateRevision: Int
+    let cardFormTaskRevision: Int
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.messages == rhs.messages && lhs.isSending == rhs.isSending
+            && lhs.cardFormStateRevision == rhs.cardFormStateRevision
+            && lhs.cardFormTaskRevision == rhs.cardFormTaskRevision
     }
 
     var body: some View {
@@ -328,7 +336,21 @@ struct ChatTranscriptRows: View, Equatable {
                 decideSuggestion: decideSuggestion,
                 openActivity: openActivity,
                 refreshCard: refreshCard,
-                hide: message.isDurableLogRow ? { hideMessage(message) } : nil
+                cardFormActions: cardFormActions,
+                cardFormStateRevision: cardFormStateRevision,
+                cardFormTaskRevision: cardFormTaskRevision,
+                setRecallSourceSuppressed: message.isDurableLogRow
+                    ? { source, suppressed in
+                        await setRecallSourceSuppressed(message.id, source, suppressed)
+                    }
+                    : nil,
+                recallSourceSuppressed: message.isDurableLogRow
+                    ? { source in await recallSourceSuppressed(message.id, source) }
+                    : nil,
+                hide: message.isDurableLogRow ? { hideMessage(message) } : nil,
+                acknowledgeDelivery: message.isDurableLogRow && message.role == .assistant
+                    ? { await acknowledgeMessageDelivery(message.id) }
+                    : nil
             )
             .equatable()
         case let .approvedReceiptGroup(receipts, _):
@@ -374,6 +396,7 @@ struct ChatView: View {
     // switches to the dedicated extra-large accessibility layout.
     @ScaledMetric(relativeTo: .subheadline) private var menuTileFontSize = 16.0
     @ScaledMetric(relativeTo: .caption2) private var menuBadgeFontSize = 9.0
+    @ScaledMetric(relativeTo: .subheadline) private var menuAccessibilityTextSize = 15.0
     @State private var draft = ""
     @State private var draftScope: ComposerDraftScope?
     @State private var isAtBottom = true
@@ -409,6 +432,7 @@ struct ChatView: View {
     @GestureState private var menuOpeningDragActive = false
     @GestureState private var menuClosingDragActive = false
     @State private var menuOpen = false
+    @State private var menuViewportWidth: CGFloat = 0
     // Hold transient overlays back from the first pull until the close
     // spring finishes, including when a closing gesture is reversed.
     @State private var menuSurfaceActive = false
@@ -461,7 +485,7 @@ struct ChatView: View {
             return (3 * menuButtonHeight) + 13 + menuAutonomyHeight
         }
         if usesExtraLargeAccessibilityMenu {
-            return menuButtonHeight + 10 + menuAutonomyHeight
+            return menuAccessibilityButtonHeight + 10 + menuAutonomyHeight
         }
         // Count the partially filled final row too. Adding People created a
         // fifth row; a four-row frame left Auto next below the visible sheet.
@@ -471,16 +495,79 @@ struct ChatView: View {
 
     private var menuButtonHeight: CGFloat {
         if isLandscape { return 58 }
-        if usesExtraLargeAccessibilityMenu { return 92 }
+        if usesExtraLargeAccessibilityMenu { return menuAccessibilityButtonHeight }
         return dynamicTypeSize.isAccessibilitySize ? 76 : 64
+    }
+
+    private var menuAccessibilityButtonHeight: CGFloat {
+        max(92, 32 + 4 + menuAccessibilityTitleHeight + 4 + menuAccessibilityBadgeHeight + 16)
+    }
+
+    private var menuAccessibilityTileWidth: CGFloat {
+        guard usesExtraLargeAccessibilityMenu, !isLandscape else { return 220 }
+        let titleFont = UIFont.systemFont(ofSize: menuAccessibilityTextSize, weight: .semibold)
+        let naturalTitleWidth = menuTitles
+            .map { ceil(($0 as NSString).size(withAttributes: [.font: titleFont]).width) }
+            .max() ?? 0
+        // Leave extra room beyond UIKit's glyph estimate because SwiftUI's
+        // Dynamic Type text styles can be a little wider at the accessibility
+        // categories. The common width keeps every tile aligned and avoids
+        // intraword hyphenation for the longest destination.
+        let preferredWidth = max(220, naturalTitleWidth + 64)
+        let availableWidth = menuViewportWidth > 0 ? max(1, menuViewportWidth - 36) : 220
+        return min(preferredWidth, availableWidth)
+    }
+
+    private var menuAccessibilityTitleHeight: CGFloat {
+        let titleFont = UIFont.systemFont(ofSize: menuAccessibilityTextSize, weight: .semibold)
+        let titleWidth = max(1, menuAccessibilityTileWidth - 24)
+        return menuTitles.map { title in
+            ceil((title as NSString).boundingRect(
+                with: CGSize(width: titleWidth, height: CGFloat.greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: titleFont],
+                context: nil
+            ).height)
+        }.max() ?? titleFont.lineHeight
+    }
+
+    private var menuAccessibilityBadgeHeight: CGFloat {
+        let badgeFont = UIFont.systemFont(ofSize: menuBadgeFontSize, weight: .bold)
+        return max(22, ceil(badgeFont.lineHeight) + 4)
+    }
+
+    private var menuTitles: [String] {
+        ["Chat", "Activity", "Goals", "Approvals", "Chats", "Memory", "Cards", "People", "More"]
+    }
+
+    private func menuAccessibilityBadge(_ badge: Int) -> some View {
+        HStack {
+            Spacer(minLength: 0)
+            if badge > 0 {
+                Text(badge > 99 ? "99+" : "\(badge)")
+                    .font(.system(size: menuBadgeFontSize, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .fixedSize()
+                    .background(AssistantTheme.notificationBadge, in: Capsule())
+                    .accessibilityHidden(true)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(height: menuAccessibilityBadgeHeight)
     }
 
     private var menuAutonomyHeight: CGFloat {
         dynamicTypeSize.isAccessibilitySize ? 58 : 50
     }
 
-    private var usesExtraLargeAccessibilityMenu: Bool {
+    private var usesExtraLargeAccessibilityTypography: Bool {
         dynamicTypeSize >= .accessibility4
+    }
+
+    private var usesExtraLargeAccessibilityMenu: Bool {
+        dynamicTypeSize >= .accessibility1
     }
 
     private var isLandscape: Bool { verticalSizeClass == .compact }
@@ -575,6 +662,10 @@ struct ChatView: View {
             }
             .onChange(of: scenePhase) { _, phase in
                 guard phase != .active else { return }
+                // Dictation in chat is foreground-only. The screen can remain
+                // mounted behind the lock screen, so view disappearance alone
+                // does not close the audio session.
+                stopMicrophone(focusingComposer: false)
                 settleInterruptedMenuGesture()
             }
             .onChange(of: menuOpeningDragActive) { wasActive, isActive in
@@ -586,10 +677,14 @@ struct ChatView: View {
                 settleCancelledMenuGestureAfterRelease()
             }
             .onAppear {
+                menuViewportWidth = viewport.size.width
                 synchronizeComposer()
                 #if DEBUG
                 if visualReviewMenuIsOpen { setPullMenu(open: true) }
                 #endif
+            }
+            .onChange(of: viewport.size.width) { _, width in
+                menuViewportWidth = width
             }
             .onDisappear {
                 if let draftScope { model.saveComposerDraft(draft, in: draftScope) }
@@ -701,8 +796,51 @@ struct ChatView: View {
                                 rememberApproval: { await model.approveAndRemember(id: $0) },
                                 decideSuggestion: { await model.decideSuggestion(id: $0, decision: $1) },
                                 openActivity: { openRoute(.activity) },
-                                refreshCard: { await model.refreshSavedCard(id: $0) },
-                                hideMessage: { message in Task { await model.hideMessage(message) } }
+                                refreshCard: { await model.refreshSavedCard(id: $0, revisionId: $1) },
+                                hideMessage: { message in Task { await model.hideMessage(message) } },
+                                setRecallSourceSuppressed: { messageId, source, suppressed in
+                                    guard let conversationId = model.conversationId else { return .discarded }
+                                    return await model.setRecallSourceSuppressed(
+                                        conversationId: conversationId,
+                                        messageId: messageId,
+                                        source: source,
+                                        suppressed: suppressed
+                                    )
+                                },
+                                recallSourceSuppressed: { messageId, source in
+                                    guard let conversationId = model.conversationId else { return nil }
+                                    return await model.recallSourceSuppressed(
+                                        conversationId: conversationId,
+                                        messageId: messageId,
+                                        source: source
+                                    )
+                                },
+                                acknowledgeMessageDelivery: { messageId in
+                                    guard let conversationId = model.conversationId else { return false }
+                                    return await model.acknowledgeMessageDelivery(
+                                        conversationId: conversationId,
+                                        messageId: messageId
+                                    )
+                                },
+                                cardFormActions: NativeCardFormActions(
+                                    load: { try await model.openCardForm($0) },
+                                    setValue: { try await model.setCardFormValue(scope: $0, form: $1, fieldId: $2, value: $3) },
+                                    review: { try await model.reviewCardForm(scope: $0, form: $1, carryCompatibleValues: $2) },
+                                    attachToMessage: { scope, form, prefill in
+                                        model.attachCardFormToComposer(scope: scope, form: form)
+                                        draft = prefill
+                                        composerFocused = true
+                                    },
+                                    retryUnknown: { model.retryCardForm(scope: $0, form: $1) },
+                                    resumeRejected: { try await model.resumeRejectedCardForm(scope: $0) },
+                                    taskStatus: { model.cardFormTaskStatus($0) },
+                                    startNextEntry: { try await model.startNextCardFormEntry(scope: $0, taskId: $1) },
+                                    observeActiveTask: { scope, form, pointer in
+                                        model.observeActiveCardFormTask(scope: scope, form: form, pointer: pointer)
+                                    }
+                                ),
+                                cardFormStateRevision: model.cardFormStateRevision,
+                                cardFormTaskRevision: model.cardFormTaskRevision
                             )
                             .equatable()
                         }
@@ -1467,42 +1605,46 @@ struct ChatView: View {
 
         return Button(action: action) {
             pullMenuButtonSurface(isSelected: isSelected) {
-                HStack(spacing: 12) {
-                    Image(systemName: icon)
-                        .font(
-                            usesExtraLargeAccessibilityMenu
-                                ? .headline.weight(.semibold)
-                                : .subheadline.weight(.semibold)
-                        )
-                        // A fixed square slot preserves the same breathing
-                        // room around every SF Symbol, including asymmetric
-                        // marks such as `ellipsis` and `scope`.
-                        .frame(width: 32, height: 32)
-                    Text(title)
-                        .font(
-                            usesExtraLargeAccessibilityMenu
-                                ? .subheadline.weight(.semibold)
-                                : .system(size: menuTileFontSize, weight: .semibold, design: .rounded)
-                        )
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                    Spacer(minLength: 0)
-                    if badge > 0 {
-                        Text(badge > 99 ? "99+" : "\(badge)")
-                            .font(.system(size: menuBadgeFontSize, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 7)
-                            .frame(minWidth: 24, minHeight: 22)
-                            .background(AssistantTheme.notificationBadge, in: Capsule())
-                            .accessibilityHidden(true)
+                if usesExtraLargeAccessibilityMenu && !isLandscape {
+                    pullMenuAccessibilityTile(title: title, icon: icon, badge: badge, isSelected: isSelected)
+                } else {
+                    HStack(spacing: !isLandscape && !usesExtraLargeAccessibilityMenu ? 8 : 12) {
+                        Image(systemName: icon)
+                            .font(
+                                usesExtraLargeAccessibilityTypography
+                                    ? .headline.weight(.semibold)
+                                    : .subheadline.weight(.semibold)
+                            )
+                            // A fixed square slot preserves the same breathing
+                            // room around every SF Symbol, including asymmetric
+                            // marks such as `ellipsis` and `scope`.
+                            .frame(width: 32, height: 32)
+                        Text(title)
+                            .font(
+                                usesExtraLargeAccessibilityTypography
+                                    ? .subheadline.weight(.semibold)
+                                    : .system(size: menuTileFontSize, weight: .semibold, design: .rounded)
+                            )
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                        Spacer(minLength: 0)
+                        if badge > 0 {
+                            Text(badge > 99 ? "99+" : "\(badge)")
+                                .font(.system(size: menuBadgeFontSize, weight: .bold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 7)
+                                .frame(minWidth: 24, minHeight: 22)
+                                .background(AssistantTheme.notificationBadge, in: Capsule())
+                                .accessibilityHidden(true)
+                        }
                     }
+                    .foregroundStyle(
+                        isSelected ? AssistantTheme.accent(for: colorScheme) : AssistantTheme.ink(for: colorScheme)
+                    )
+                    .padding(.horizontal, !isLandscape && !usesExtraLargeAccessibilityMenu ? 8 : 12)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: menuButtonHeight)
                 }
-                .foregroundStyle(
-                    isSelected ? AssistantTheme.accent(for: colorScheme) : AssistantTheme.ink(for: colorScheme)
-                )
-                .padding(.horizontal, 12)
-                .frame(maxWidth: .infinity)
-                .frame(height: menuButtonHeight)
             }
         }
         .buttonStyle(
@@ -1511,7 +1653,7 @@ struct ChatView: View {
                 pressedScale: 0.975
             )
         )
-        .frame(width: usesExtraLargeAccessibilityMenu && !isLandscape ? 220 : nil)
+        .frame(width: usesExtraLargeAccessibilityMenu && !isLandscape ? menuAccessibilityTileWidth : nil)
         .opacity(visibility)
         .accessibilityLabel(title)
         .accessibilityValue(
@@ -1524,6 +1666,29 @@ struct ChatView: View {
         )
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .accessibilityRemoveTraits(isSelected ? [] : .isSelected)
+    }
+
+    private func pullMenuAccessibilityTile(
+        title: String,
+        icon: String,
+        badge: Int,
+        isSelected: Bool
+    ) -> some View {
+        VStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 22, weight: .semibold))
+                .frame(width: 32, height: 32)
+                .accessibilityHidden(true)
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.center)
+                .frame(width: menuAccessibilityTileWidth - 24, height: menuAccessibilityTitleHeight)
+            menuAccessibilityBadge(badge)
+        }
+        .foregroundStyle(isSelected ? AssistantTheme.accent(for: colorScheme) : AssistantTheme.ink(for: colorScheme))
+        .padding(.horizontal, 12)
+        .frame(width: menuAccessibilityTileWidth, height: menuButtonHeight, alignment: .top)
     }
 
     @ViewBuilder
@@ -1766,6 +1931,21 @@ struct ChatView: View {
 
     private var composer: some View {
         VStack(spacing: 8) {
+            if model.cardFormComposerBinding != nil {
+                HStack(spacing: 8) {
+                    Text("Form answers will be included")
+                        .font(.caption)
+                        .foregroundStyle(AssistantTheme.stageSecondary)
+                    Spacer(minLength: 0)
+                    Button("Remove") { model.detachCardFormFromComposer() }
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(AssistantTheme.accent)
+                        .frame(minHeight: 36)
+                        .accessibilityHint("Removes the form from this message. It does not discard saved answers.")
+                }
+                .padding(.horizontal, 6)
+                .accessibilityIdentifier("assistant.chat.form-attached")
+            }
             if !model.latestQuickReplies.isEmpty && !composerFocused && !model.isSending {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -1902,6 +2082,7 @@ struct ChatView: View {
                         set: { composerFocused = $0 }
                     ),
                     prompt: composerPrompt,
+                    accessibilityPrompt: composerAccessibilityPrompt,
                     fontSize: composerFontSize,
                     textColor: .white,
                     placeholderColor: UIColor(composerPlaceholderColor),
@@ -1932,14 +2113,14 @@ struct ChatView: View {
                 pushToTalkButton
 
                 Button {
-                    if model.isSending {
+                    if model.canCancelCurrentSend {
                         model.cancelSend()
-                    } else {
+                    } else if !model.isSending {
                         sendDraft()
                     }
                 } label: {
                     ZStack {
-                        if model.isSending {
+                        if model.isSending || model.canCancelCurrentSend {
                             // A spinner in a button's position reads as a
                             // progress indicator, not a control. The square
                             // inside the arc says the turn can be stopped.
@@ -1957,7 +2138,7 @@ struct ChatView: View {
                         }
                     }
                     .foregroundStyle(
-                        model.isSending
+                        (model.isSending || model.canCancelCurrentSend)
                             ? AssistantTheme.stageDepth
                             : (canSend ? AssistantTheme.accent : composerPlaceholderColor)
                     )
@@ -1969,32 +2150,52 @@ struct ChatView: View {
                         // the one bright object on the stage. Its arrow takes
                         // the brand green so the white circle stays connected
                         // to the rest of the conversation controls.
-                        (canSend && !model.isSending ? sendReadyFill : AssistantTheme.raised(for: colorScheme))
-                            .opacity(model.isSending ? 0.28 : (!canSend ? 0.06 : 1)),
+                        (canSend && !model.isSending && !model.canCancelCurrentSend
+                            ? sendReadyFill : AssistantTheme.raised(for: colorScheme))
+                            .opacity(model.isSending || model.canCancelCurrentSend ? 0.28 : (!canSend ? 0.06 : 1)),
                         in: Circle()
                     )
                     .overlay {
                         Circle().strokeBorder(
-                            composerTextColor.opacity(model.isSending ? 0.25 : (canSend ? 0.3 : 0.1)),
+                            composerTextColor.opacity(model.isSending || model.canCancelCurrentSend
+                                ? 0.25 : (canSend ? 0.3 : 0.1)),
                             lineWidth: 0.7
                         )
                     }
-                    .scaleEffect(model.isSending || canSend ? 1 : 0.92)
+                    .scaleEffect(model.isSending || model.canCancelCurrentSend || canSend ? 1 : 0.92)
                     .shadow(
                         color: AssistantTheme.stageDepth.opacity(
-                            model.isSending ? 0.08 : (canSend ? 0.16 : 0)
+                            model.isSending || model.canCancelCurrentSend ? 0.08 : (canSend ? 0.16 : 0)
                         ),
                         radius: 7,
                         y: 3
                     )
                 }
                 .buttonStyle(.plain)
-                .disabled(!canSend && !model.isSending)
-                .accessibilityLabel(model.isSending ? "Stop the assistant" : "Send message")
+                .disabled((!canSend && !model.isSending && !model.canCancelCurrentSend)
+                    || (model.isSending && !model.canCancelCurrentSend)
+                    || model.isCancellingSend)
+                .accessibilityLabel(model.isCardFormAdmissionPending
+                    ? "Sending form"
+                    : model.isCancellingSend
+                    ? "Checking stop status"
+                    : model.canCancelCurrentSend
+                    ? (model.hasRequestedCancellationForCurrentSend
+                        ? "Retry stop"
+                        : (model.isSending ? "Stop the assistant" : "Stop pending turn"))
+                    : model.isSending ? "Stop the assistant" : "Send message")
                 .accessibilityIdentifier("assistant.chat.send")
                 .accessibilityHint(
-                    model.isSending
+                    model.isCardFormAdmissionPending
+                        ? "The saved form request is being sent. Its status will be checked when the server replies."
+                        : model.isCancellingSend
+                        ? "The stop request is pending. The server status is being checked."
+                        : model.canCancelCurrentSend && model.hasRequestedCancellationForCurrentSend
+                        ? "Retries cancellation for the same pending turn without sending another message."
+                        : model.isSending
                         ? "Stops this turn and keeps what has arrived so far"
+                        : model.canCancelCurrentSend
+                        ? "Requests cancellation for the same pending turn."
                         : "Sends the current message"
                 )
                 .animation(
@@ -2200,11 +2401,17 @@ struct ChatView: View {
     /// Below this, a press on the microphone was a tap and not a hold.
     private static let micTapSeconds: TimeInterval = 0.35
 
-    private var composerPrompt: String {
-        // Short enough to survive the narrowest phones without truncating.
+    private var composerAccessibilityPrompt: String {
         if !micStopping && listener.isListening { return "Listening…" }
         if !micStopping && listener.state == .preparing { return "Getting speech ready…" }
         return model.isSending ? "Working — keep typing" : "Ask anything…"
+    }
+
+    private var composerPrompt: String {
+        guard dynamicTypeSize.isAccessibilitySize else { return composerAccessibilityPrompt }
+        if !micStopping && listener.isListening { return "Listening" }
+        if !micStopping && listener.state == .preparing { return "Preparing" }
+        return model.isSending ? "Working" : "Message"
     }
 
     private var composerPlaceholderColor: Color {
@@ -2319,12 +2526,30 @@ struct ChatView: View {
         // will correctly refuse to send during an active turn.
         guard !text.isEmpty, !model.isSending,
               draftScope == model.composerDraftScope, draftScope != nil else { return }
+        // The message may already have been admitted. Keep the current text
+        // unsent until the owner retries that exact encrypted form operation.
+        guard model.cardFormRecoveryReady,
+              model.cardFormUnknownOperationIds.isEmpty,
+              model.cardFormUnknownOperationId == nil else { return }
+        if model.cardFormComposerBinding != nil {
+            model.sendCardForm(text) {
+                draft = ""
+                if let draftScope { model.saveComposerDraft("", in: draftScope) }
+                dictationScope = nil
+                stopMicrophone(focusingComposer: false)
+                sendFeedback += 1
+                composerFocused = true
+                requestScrollToBottom()
+            }
+            return
+        }
         draft = ""
         if let draftScope { model.saveComposerDraft("", in: draftScope) }
         sendPreparedMessage(text, keepsComposerFocused: true)
     }
 
     private func sendPreset(_ rawText: String) {
+        model.detachCardFormFromComposer()
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !model.isSending else { return }
         sendPreparedMessage(text, keepsComposerFocused: false)
@@ -2625,6 +2850,7 @@ private struct ComposerTextInput: UIViewRepresentable {
     @Binding var isFocused: Bool
 
     let prompt: String
+    let accessibilityPrompt: String
     let fontSize: CGFloat
     let textColor: UIColor
     let placeholderColor: UIColor
@@ -2706,7 +2932,9 @@ private struct ComposerTextInput: UIViewRepresentable {
         if textView.textColor != textColor { textView.textColor = textColor }
         if textView.tintColor != cursorColor { textView.tintColor = cursorColor }
         if textView.placeholderText != prompt { textView.placeholderText = prompt }
-        if textView.accessibilityLabel != prompt { textView.accessibilityLabel = prompt }
+        if textView.accessibilityLabel != accessibilityPrompt {
+            textView.accessibilityLabel = accessibilityPrompt
+        }
         if textView.placeholderColor != placeholderColor { textView.placeholderColor = placeholderColor }
         if textView.completionColor != completionColor { textView.completionColor = completionColor }
     }

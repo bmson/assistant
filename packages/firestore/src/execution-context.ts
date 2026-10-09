@@ -1,12 +1,25 @@
-import type {
-  ExecutionContextRepository,
-  ExecutionMessageCursor,
-  Records,
+import {
+  type ExecutionContextRepository,
+  type ExecutionMessageCursor,
+  MAX_EXECUTION_SEED_MESSAGES,
+  parseExactTimestamp,
+  type Records,
 } from '@assistant/persistence';
+import { Timestamp } from '@google-cloud/firestore';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
-const MAX_SEED_MESSAGES = 20;
 const MAX_FOLDED_REPLIES = 200;
+
+function exactTime(value: unknown): string {
+  if (value instanceof Timestamp)
+    return `${new Date(value.seconds * 1000).toISOString().slice(0, 19)}.${String(value.nanoseconds).padStart(9, '0')}Z`;
+  if (value instanceof Date) return value.toISOString().replace(/(\.\d{3})Z$/, '$1000000Z');
+  throw new Error('Invalid conversation timestamp');
+}
+function preciseTime(value: string): Timestamp {
+  const parsed = parseExactTimestamp(value);
+  return new Timestamp(parsed.seconds, parsed.nanoseconds);
+}
 
 function boundedLimit(value: number | undefined, fallback: number, maximum: number): number {
   const limit = value ?? fallback;
@@ -59,24 +72,34 @@ export class FirestoreExecutionContextRepository implements ExecutionContextRepo
     agentId,
     conversationId,
     before,
+    throughMessageId,
     limit: requestedLimit,
   }: {
     agentId: string;
     conversationId: string;
     before: Date;
+    throughMessageId?: string;
     limit?: number;
   }) {
-    const limit = boundedLimit(requestedLimit, MAX_SEED_MESSAGES, MAX_SEED_MESSAGES);
+    const limit = boundedLimit(requestedLimit, 20, MAX_EXECUTION_SEED_MESSAGES);
     if (!(await this.ownedConversation(agentId, conversationId))) return [];
-    const snapshot = await this.store
+    let query = this.store
       .collection('messages')
       .where('conversationId', '==', conversationId)
       .where('role', 'in', ['user', 'assistant'])
-      .where('createdAt', '<', before)
       .orderBy('createdAt', 'desc')
-      .orderBy('id', 'desc')
-      .limit(limit)
-      .get();
+      .orderBy('id', 'desc');
+    if (throughMessageId) {
+      const boundary = await this.store.doc('messages', throughMessageId).get();
+      if (
+        !boundary.exists ||
+        boundary.get('conversationId') !== conversationId ||
+        boundary.get('id') !== throughMessageId
+      )
+        return [];
+      query = query.startAt(boundary.get('createdAt'), throughMessageId);
+    } else query = query.where('createdAt', '<', before);
+    const snapshot = await query.limit(limit).get();
     return snapshot.docs.map((doc) => this.decodeMessage(doc)).reverse();
   }
 
@@ -127,7 +150,13 @@ export class FirestoreExecutionContextRepository implements ExecutionContextRepo
     if (row.conversationId !== conversationId) {
       throw new Error('Execution context message scope mismatch');
     }
-    return { cursor: { createdAt: row.createdAt, id: row.id } };
+    return {
+      cursor: {
+        createdAt: row.createdAt,
+        exactCreatedAt: exactTime(doc.get('createdAt')),
+        id: row.id,
+      },
+    };
   }
 
   async getOwnerRepliesAfter({
@@ -138,12 +167,21 @@ export class FirestoreExecutionContextRepository implements ExecutionContextRepo
   }: {
     agentId: string;
     conversationId: string;
-    after: { createdAt: Date; id?: string };
+    after: { createdAt: Date; exactCreatedAt?: string; id?: string };
     limit?: number;
   }) {
     const limit = boundedLimit(requestedLimit, MAX_FOLDED_REPLIES, MAX_FOLDED_REPLIES);
     const conversation = await this.ownedConversation(agentId, conversationId);
     if (conversation?.channel !== 'chat') return [];
+    let at = after.exactCreatedAt
+      ? preciseTime(after.exactCreatedAt)
+      : Timestamp.fromDate(after.createdAt);
+    // Recover storage precision for checkpoints written by an older executor.
+    if (after.id && (!after.exactCreatedAt || /\.\d{3}Z$/.test(after.exactCreatedAt))) {
+      const pinned = await this.store.doc('messages', after.id).get();
+      if (pinned.exists && pinned.get('conversationId') === conversationId)
+        at = preciseTime(exactTime(pinned.get('createdAt')));
+    }
     let query = this.store
       .collection('messages')
       .where('conversationId', '==', conversationId)
@@ -151,9 +189,7 @@ export class FirestoreExecutionContextRepository implements ExecutionContextRepo
       .where('origin', '==', 'owner')
       .orderBy('createdAt', 'asc')
       .orderBy('id', 'asc');
-    query = after.id
-      ? query.startAfter(after.createdAt, after.id)
-      : query.where('createdAt', '>', after.createdAt);
+    query = after.id ? query.startAfter(at, after.id) : query.where('createdAt', '>', at);
     const snapshot = await query.limit(limit + 1).get();
     if (snapshot.size > limit) {
       throw new Error(`Owner reply window exceeded ${limit} messages`);
@@ -163,7 +199,7 @@ export class FirestoreExecutionContextRepository implements ExecutionContextRepo
       if (row.conversationId !== conversationId || row.role !== 'user' || row.origin !== 'owner') {
         throw new Error('Execution context owner reply scope mismatch');
       }
-      return row;
+      return { ...row, exactCreatedAt: exactTime(doc.get('createdAt')) };
     });
   }
 

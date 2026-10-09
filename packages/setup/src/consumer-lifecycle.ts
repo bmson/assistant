@@ -14,11 +14,10 @@ import type { CommandRunner } from './runner.js';
 // Update / rollback: select another verified release
 
 /**
- * Return an installation to `bootstrapped` on a different verified release.
- * The normal install stages then reapply the foundation, rebuild or reuse the
- * release's images, redeploy the runtime, and require verification again.
- * Terraform-owned inventory is dropped because those stages re-record it;
- * bootstrap-owned records (state bucket, receipts, generated secret) stay.
+ * Rebase an initialized installation onto a different release while keeping
+ * its applied Terraform inventory. Updates resume from `provisioned`, so the
+ * installer cannot apply a foundation-only configuration over live runtime
+ * resources before the new images are built.
  */
 export function rebaseInstallationRelease(
   current: InstallationManifest,
@@ -37,16 +36,13 @@ export function rebaseInstallationRelease(
   if (release.commitSha === manifest.identity.release.commitSha)
     throw new Error('The installation already runs this release');
   const receipt = `gs://${stateBucket}/releases/${release.commitSha}.tar.gz`;
-  const resources = manifest.resources.filter(
-    (resource) =>
-      resource.owner !== 'terraform' &&
-      !(resource.kind === 'release-receipt' && resource.name === receipt),
-  );
   return validateInstallationManifest({
     ...manifest,
     identity: { ...manifest.identity, release: { ...release } },
     resources: [
-      ...resources,
+      ...manifest.resources.filter(
+        (resource) => !(resource.kind === 'release-receipt' && resource.name === receipt),
+      ),
       {
         kind: 'release-receipt',
         name: receipt,
@@ -56,8 +52,8 @@ export function rebaseInstallationRelease(
       },
     ],
     stage: {
-      current: 'bootstrapped',
-      completed: ['previewed', 'authorized', 'bootstrapped'],
+      current: 'provisioned',
+      completed: ['previewed', 'authorized', 'bootstrapped', 'provisioned'],
       updatedAt: now,
     },
   });

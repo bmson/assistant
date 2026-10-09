@@ -3,6 +3,7 @@ import {
   queuedRepairIssues,
   type RepairIssue,
   repairDispatchesUsed,
+  repairOutcome,
   type SelfRepairRepository,
 } from '@assistant/persistence';
 
@@ -15,19 +16,31 @@ function githubLink(value?: string): string | null {
     : null;
 }
 export function projectRepairIssue(issue: RepairIssue) {
+  const outcome = repairOutcome(issue);
   return {
     id: issue.id,
     title: issue.data.title,
     summary: issue.data.summary,
     status: issue.status,
     diagnosis: issue.data.diagnosis ?? '',
-    lastError: issue.data.lastError ?? '',
+    lastError: ['failed', 'blocked'].includes(issue.status)
+      ? `${outcome.message} ${outcome.nextStep}`
+      : '',
+    outcome,
+    deploymentConfirmed: Boolean(issue.data.mergeSha && issue.data.monitoringAt),
     sourceTaskId: issue.data.sourceTaskId ?? null,
     manualRunRequested: Boolean(issue.data.manualRunRequestedAt),
     prUrl: githubLink(issue.data.prUrl),
     runUrl: githubLink(issue.data.runUrl),
     mergeSha: issue.data.mergeSha ?? null,
-    history: issue.data.history,
+    history: issue.data.history.map((entry) =>
+      ['failed', 'blocked'].includes(entry.status)
+        ? {
+            ...entry,
+            detail: 'This stage did not complete. Inspect the recorded evidence before retrying.',
+          }
+        : entry,
+    ),
     createdAt: issue.createdAt.toISOString(),
     updatedAt: issue.updatedAt.toISOString(),
   };
@@ -79,7 +92,10 @@ export async function decideRepairIssue(
     throw new Error('Active work must finish first. Close an open PR on GitHub to dismiss it.');
   if (action === 'retry' && !['failed', 'blocked'].includes(issue.status))
     throw new Error('Only failed or blocked issues can be retried');
-  if (action === 'resolve' && issue.status !== 'monitoring')
+  if (
+    action === 'resolve' &&
+    (issue.status !== 'monitoring' || !issue.data.mergeSha || !issue.data.monitoringAt)
+  )
     throw new Error('Confirm resolution after the fix is deployed');
   if (action === 'run_now' && !['reported', 'failed', 'blocked'].includes(issue.status))
     throw new Error('Only queued, failed or blocked reports can be run now');

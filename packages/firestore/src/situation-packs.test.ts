@@ -8,6 +8,104 @@ import { disposeStore, emulatorStore } from './test-store.js';
 const now = new Date('2026-09-23T12:00:00.000Z');
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore situation pack reads', () => {
+  it('keeps cross-pack decision conflicts and filters by owner with revision provenance', async () => {
+    const store = emulatorStore(() => now);
+    try {
+      const owner = randomUUID();
+      const other = randomUUID();
+      const records = [
+        {
+          id: randomUUID(),
+          agentId: owner,
+          creationKey: randomUUID(),
+          title: 'Launch plan A',
+          createdAt: now,
+          updatedAt: now,
+          version: 3,
+          archived: false,
+          data: {
+            items: [],
+            decisions: [
+              {
+                id: 'daily-a',
+                option: 'Daily check-in',
+                outcome: 'rejected',
+                reason: 'Daily meetings interrupt focus during launch.',
+                scope: 'situation',
+                confirmed: true,
+              },
+            ],
+          },
+        },
+        {
+          id: randomUUID(),
+          agentId: owner,
+          creationKey: randomUUID(),
+          title: 'Launch plan B',
+          createdAt: now,
+          updatedAt: new Date(now.getTime() - 1000),
+          version: 2,
+          archived: false,
+          data: {
+            items: [],
+            decisions: [
+              {
+                id: 'daily-b',
+                option: 'Daily check-in',
+                outcome: 'chosen',
+                reason: 'Daily check-ins catch blockers during launch.',
+                scope: 'situation',
+                confirmed: true,
+              },
+            ],
+          },
+        },
+        {
+          id: randomUUID(),
+          agentId: other,
+          creationKey: randomUUID(),
+          title: 'Launch plan secret',
+          createdAt: now,
+          updatedAt: now,
+          version: 1,
+          archived: false,
+          data: {
+            items: [],
+            decisions: [
+              {
+                id: 'foreign',
+                option: 'Daily check-in',
+                outcome: 'chosen',
+                reason: 'Foreign owner confidential choice.',
+                scope: 'situation',
+                confirmed: true,
+              },
+            ],
+          },
+        },
+      ];
+      await Promise.all(
+        records.map((record) => store.doc('situationPacks', record.id).set(record)),
+      );
+
+      const decisions = await new FirestoreSituationPackReadRepository(store).decisionContext(
+        owner,
+        'Should we add a daily check-in for launch?',
+        1,
+      );
+
+      expect(decisions).toHaveLength(2);
+      expect(decisions.map((decision) => decision.outcome).sort()).toEqual(['chosen', 'rejected']);
+      expect(decisions.map(({ packId, packVersion }) => [packId, packVersion])).toEqual([
+        [records[0]?.id, 3],
+        [records[1]?.id, 2],
+      ]);
+      expect(JSON.stringify(decisions)).not.toContain('Foreign owner confidential choice');
+    } finally {
+      await disposeStore(store);
+    }
+  });
+
   it('projects only owner packs and sources, detects linked changes, and honors erasure', async () => {
     const store = emulatorStore(() => now);
     try {

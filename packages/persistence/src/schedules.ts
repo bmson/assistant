@@ -1,3 +1,4 @@
+import type { GoalSessionState } from './goals.js';
 import type { Records } from './records.js';
 import { reminderScheduleTemplate } from './reminders.js';
 import type { TaskCreateInput, TaskCreateResult } from './task-creation.js';
@@ -11,8 +12,15 @@ export interface ScheduleCreateInput {
   enabled?: boolean;
   nextRunAt: Date | null;
 }
+export interface GoalOccurrenceGuard {
+  goal: NonNullable<GoalSessionState['goal']>;
+  openTasks: GoalSessionState['openTasks'];
+  supersedeTaskIds: string[];
+}
 export interface ScheduleOccurrence {
   expected: ScheduleRecord;
+  /** Read-only preparation; supersession is committed with this occurrence. */
+  goalGuard?: GoalOccurrenceGuard;
   now: Date;
   /** Early wake briefs must supply an unchanged snapshot just like ordinary firings. */
   mode: 'due' | 'early';
@@ -110,5 +118,44 @@ export function occurrenceIsCurrent(current: ScheduleRecord, input: ScheduleOccu
     )
       throw new Error('Task does not belong to this schedule occurrence');
   }
+  return true;
+}
+
+export const GOAL_TASK_TERMINAL = ['done', 'failed', 'cancelled'];
+export const GOAL_SUPERSEDED_PROGRESS = 'superseded by the next automatic session';
+/** Compare the complete goal and the exact open task versions while locked. */
+export function goalOccurrenceIsCurrent(
+  input: ScheduleOccurrence,
+  goal: Records['goals'] | null,
+  openTasks: GoalSessionState['openTasks'],
+): boolean {
+  const guard = input.goalGuard;
+  if (!guard) {
+    if (input.task?.goalId) throw new Error('Goal occurrence requires its preparation guard');
+    return true;
+  }
+  if (
+    !input.task ||
+    input.task.goalId !== guard.goal.id ||
+    input.task.agentId !== guard.goal.agentId
+  )
+    throw new Error('Goal occurrence is outside its preparation guard');
+  if (
+    !goal ||
+    goal.status !== 'active' ||
+    goal.archivedAt ||
+    canonical(goal) !== canonical(guard.goal)
+  )
+    return false;
+  const ordered = (rows: GoalSessionState['openTasks']) =>
+    [...rows].sort((a, b) => a.id.localeCompare(b.id));
+  if (canonical(ordered(openTasks)) !== canonical(ordered(guard.openTasks))) return false;
+  if (
+    new Set(guard.supersedeTaskIds).size !== guard.supersedeTaskIds.length ||
+    guard.supersedeTaskIds.some(
+      (id) => !openTasks.some((task) => task.id === id && task.status === 'needs_attention'),
+    )
+  )
+    throw new Error('Invalid stalled task supersession');
   return true;
 }

@@ -23,8 +23,12 @@ describe('ExcelJS archive dependency compatibility', () => {
       'compatibility.xlsx',
     );
 
-    expect(extracted).toMatchObject({ kind: 'text', detail: 'spreadsheet' });
-    expect(extracted.text).toContain('# Compatibility');
-    expect(extracted.text).toContain('patch levels\t21\t7');
+    expect(extracted).toMatchObject({
+      kind: 'text',
+      detail: 'spreadsheet with cell coordinates',
+      structure: { complete: true, representation: 'cell-addresses' },
+    });
+    expect(extracted.text).toContain('# Sheet "Compatibility"');
+    expect(extracted.text).toContain('Row 1: A1="patch levels" | B1="21" | C1="7"');
   });
 });

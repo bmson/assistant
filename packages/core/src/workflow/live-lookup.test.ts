@@ -13,6 +13,22 @@ import {
 } from './live-lookup.js';
 
 describe('live lookup routing from home-screen regressions', () => {
+  it('forces a team fixture lookup before creating an event-completion reminder', () => {
+    const request = 'Remind me after the Giants game tomorrow to check the score.';
+    const lookup = detectLiveLookup([{ role: 'user', content: request }]);
+    if (!lookup) throw new Error('Expected a sports lookup for a team event reminder');
+    expect(lookup).toMatchObject({ kind: 'sports', reminderTeam: 'Giants' });
+    expect(
+      nextLiveLookup(lookup, [], {
+        now: new Date('2026-10-07T06:30:00.000Z'),
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toMatchObject({
+      toolName: 'sports.scores',
+      input: { team: 'Giants', date: '2026-10-07' },
+    });
+  });
+
   it.each([
     'Who is the current president of Iceland',
     'Search the web',
@@ -566,6 +582,193 @@ describe('a trip to an event on the calendar', () => {
     };
     expect(nextLiveLookup(lookup, [read, route], context)).toBeUndefined();
     expect(liveLookupFailure(lookup, [read, route], context)).toBeUndefined();
+  });
+
+  it('does not turn an unsupported historical trip period into the default future window', () => {
+    const lookup = trip('Directions to my dentist appointment 3 years ago');
+    expect(nextLiveLookup(lookup, [], context)).toBeUndefined();
+    expect(tripEvent(lookup, [calendar([dentist])], context)).toMatchObject({
+      problem: expect.stringMatching(/can’t safely search that calendar period/i),
+    });
+  });
+
+  it('binds the requested day before selecting a same-time appointment', () => {
+    const tomorrow = {
+      ...dentist,
+      start: '2026-09-24T15:00:00-07:00',
+      location: 'Tomorrow address',
+    };
+    const lookup = trip('Directions to my dentist appointment tomorrow');
+    expect(nextLiveLookup(lookup, [], context)).toMatchObject({
+      input: { timeMin: '2026-09-24T07:00:00.000Z', timeMax: '2026-09-25T07:00:00.000Z' },
+    });
+    expect(tripEvent(lookup, [calendar([dentist, tomorrow])], context).event?.location).toBe(
+      'Tomorrow address',
+    );
+    expect(
+      tripEvent(
+        trip('Directions to my dentist appointment on 2026-09-26'),
+        [calendar([dentist, { ...dentist, start: '2026-09-26T15:00:00-07:00' }])],
+        context,
+      ).event?.start,
+    ).toBe('2026-09-26T15:00:00-07:00');
+  });
+
+  it('binds a weekday beyond the default 36-hour trip window', () => {
+    const lookup = trip('Directions to my dentist appointment next Monday');
+    const nextMonday = {
+      ...dentist,
+      start: '2026-09-28T15:00:00-07:00',
+      location: 'Monday clinic',
+    };
+    const today = { ...dentist, location: 'Today clinic' };
+    expect(nextLiveLookup(lookup, [], context)).toMatchObject({
+      input: { timeMin: '2026-09-28T07:00:00.000Z', timeMax: '2026-09-29T07:00:00.000Z' },
+    });
+    expect(
+      tripEvent(lookup, [calendar([today]), calendar([nextMonday])], context).event?.location,
+    ).toBe('Monday clinic');
+  });
+
+  it('requires every significant word in a multiword event reference', () => {
+    const lookup = trip('Directions to my annual dentist appointment');
+    const unrelated = { ...dentist, summary: 'Annual review', location: 'Review room' };
+    const partialToken = { ...dentist, summary: 'Annual dentisty review', location: 'Review room' };
+    expect(tripEvent(lookup, [calendar([unrelated, partialToken])], context)).toMatchObject({
+      problem: expect.stringMatching(/couldn't find your annual dentist appointment/i),
+    });
+
+    const actual = { ...dentist, summary: 'Annual dentist visit' };
+    expect(tripEvent(lookup, [calendar([unrelated, actual])], context).event?.summary).toBe(
+      'Annual dentist visit',
+    );
+  });
+
+  it('binds same-title events on separate calendars to the requested civil day', () => {
+    const lookup = trip('Directions to my dentist appointment tomorrow');
+    const todayCopy = {
+      ...dentist,
+      start: '2026-09-23T09:00:00-07:00',
+      end: '2026-09-23T11:00:00-07:00',
+      location: 'Today clinic',
+    };
+    const tomorrowCopy = {
+      ...dentist,
+      start: '2026-09-24T15:00:00-07:00',
+      location: 'Tomorrow clinic',
+    };
+    expect(
+      tripEvent(lookup, [calendar([todayCopy]), calendar([tomorrowCopy])], context).event?.location,
+    ).toBe('Tomorrow clinic');
+  });
+
+  it('chooses the later match when the owner explicitly asks for the next named event', () => {
+    const lookup = trip('Directions to my next dentist appointment');
+    const underway = {
+      ...dentist,
+      start: '2026-09-23T09:00:00-07:00',
+      end: '2026-09-23T11:00:00-07:00',
+    };
+    const next = { ...dentist, start: '2026-09-23T15:00:00-07:00', location: 'Later clinic' };
+    expect(
+      tripEvent(lookup, [calendar([underway]), calendar([next])], context).event,
+    ).toMatchObject({
+      location: 'Later clinic',
+    });
+  });
+
+  it('does not route to a later duplicate when the requested event is already underway', () => {
+    const lookup = trip('Directions to my dentist appointment');
+    const underway = {
+      ...dentist,
+      start: '2026-09-23T09:00:00-07:00',
+      end: '2026-09-23T11:00:00-07:00',
+    };
+    const laterSameName = { ...dentist, start: '2026-09-23T15:00:00-07:00' };
+    const evidence = [calendar([underway]), calendar([laterSameName])];
+
+    expect(tripEvent(lookup, evidence, context)).toMatchObject({
+      problem: expect.stringMatching(/already underway/i),
+    });
+    expect(nextLiveLookup(lookup, evidence, context)).toBeUndefined();
+    expect(liveLookupFailure(lookup, evidence, context)).toMatch(/already underway/i);
+  });
+
+  it('selects the earliest next meeting across calendars after finished events', () => {
+    const lookup = trip('When should I leave for my next meeting?');
+    const finished = {
+      ...dentist,
+      summary: 'Planning meeting',
+      start: '2026-09-23T09:00:00-07:00',
+      end: '2026-09-23T09:30:00-07:00',
+    };
+    const later = {
+      ...dentist,
+      summary: 'Review meeting',
+      start: '2026-09-23T13:00:00-07:00',
+      location: 'Later office',
+    };
+    const earliest = {
+      ...dentist,
+      summary: 'Team meeting',
+      start: '2026-09-23T11:00:00-07:00',
+      location: 'First office',
+    };
+
+    const evidence = [calendar([finished, later]), calendar([earliest])];
+    expect(tripEvent(lookup, evidence, context).event).toMatchObject({
+      summary: 'Team meeting',
+      location: 'First office',
+    });
+    expect(nextLiveLookup(lookup, evidence, context)).toMatchObject({
+      toolName: 'maps.directions',
+      input: { destination: 'First office', arriveBy: '2026-09-23T18:00:00.000Z' },
+    });
+  });
+
+  it.each(['February 30', 'April 31'])(
+    'does not replace an invalid named trip date %s with the default upcoming window',
+    (date) => {
+      const lookup = trip(`Directions to my dentist appointment on ${date}`);
+      expect(nextLiveLookup(lookup, [], context)).toBeUndefined();
+      expect(tripEvent(lookup, [calendar([dentist])], context)).toMatchObject({
+        problem: expect.stringMatching(/calendar date is not valid/i),
+      });
+    },
+  );
+
+  it('does not route when multiple matching calendar events make the destination ambiguous', () => {
+    const otherDentist = {
+      ...dentist,
+      summary: 'Dentist — Dr. Nguyen',
+      location: 'Different clinic, San Francisco',
+    };
+    const lookup = trip('How long will it take to drive to my dentist appointment?');
+    const evidence = [calendar([dentist, otherDentist])];
+
+    expect(tripEvent(lookup, evidence, context)).toMatchObject({
+      problem: expect.stringMatching(/more than one matching event/i),
+    });
+    expect(nextLiveLookup(lookup, evidence, context)).toBeUndefined();
+  });
+
+  it('does not choose a destination from incomplete calendar coverage', () => {
+    const lookup = trip('How long will it take to drive to my dentist appointment?');
+    const incomplete = {
+      ...calendar([dentist]),
+      result: { events: [dentist], complete: false, note: 'additional matching events exist' },
+    };
+
+    expect(tripEvent(lookup, [incomplete], context)).toMatchObject({
+      problem: expect.stringMatching(/calendar coverage is incomplete/i),
+    });
+    expect(nextLiveLookup(lookup, [incomplete], context)).toBeUndefined();
+  });
+
+  it('rejects malformed explicit dates before reading or routing', () => {
+    const lookup = trip('Directions to my dentist appointment on 2026-02-30');
+    expect(nextLiveLookup(lookup, [], context)).toBeUndefined();
+    expect(liveLookupFailure(lookup, [], context)).toMatch(/requested calendar date is not valid/i);
   });
 
   it('picks the event the request names', () => {

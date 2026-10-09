@@ -3,6 +3,8 @@ import {
   correctCommitment,
   dismissCommitment,
   listOpenCommitments,
+  listRecentlyClosedCommitments,
+  reopenCommitment,
   resolveCommitment,
   snoozeCommitment,
 } from '@assistant/core/memory/commitments';
@@ -24,6 +26,26 @@ export async function listCommitmentOverview(db: Db): Promise<CommitmentView[]> 
     nextAction,
     dueAt,
     status,
+  }));
+}
+
+export type ClosedCommitmentView = Pick<
+  import('@assistant/db').CommitmentRow,
+  'id' | 'kind' | 'title' | 'details' | 'nextAction' | 'dueAt' | 'status' | 'updatedAt'
+>;
+
+export async function listClosedCommitmentOverview(db: Db): Promise<ClosedCommitmentView[]> {
+  const agent = await getAgent(db);
+  const rows = await listRecentlyClosedCommitments(db, { agentId: agent.id, limit: 12 });
+  return rows.map(({ id, kind, title, details, nextAction, dueAt, status, updatedAt }) => ({
+    id,
+    kind,
+    title,
+    details,
+    nextAction,
+    dueAt,
+    status,
+    updatedAt,
   }));
 }
 
@@ -49,4 +71,14 @@ export async function correctOwnerCommitment(
 ) {
   const agent = await getAgent(db);
   return correctCommitment(db, agent.id, id, patch);
+}
+
+export async function reopenOwnerCommitment(
+  db: Db,
+  id: string,
+  expectedUpdatedAt: Date,
+  operationId: string,
+) {
+  const agent = await getAgent(db);
+  return reopenCommitment(db, agent.id, id, expectedUpdatedAt, operationId);
 }

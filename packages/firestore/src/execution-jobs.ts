@@ -233,7 +233,35 @@ export class FirestoreExecutionJobRepository implements ExecutionJobRepository {
       // against the committed state: a result recorded here is never
       // overwritten by a timeout, and a settled timeout is never revived.
       const taskRef = this.store.doc('tasks', input.taskId);
-      const snapshot = await tx.get(taskRef);
+      const receiptRef = input.idempotencyKey
+        ? this.store.doc('executionJobCallbackReceipts', input.idempotencyKey)
+        : null;
+      if (input.idempotencyKey && (!input.tokenHash || !input.payloadDigest))
+        throw new Error('idempotent callback identity is incomplete');
+      const snapshots = receiptRef
+        ? await tx.getAll(receiptRef, taskRef)
+        : [null, await tx.get(taskRef)];
+      const receipt = snapshots[0];
+      const snapshot = snapshots[1];
+      if (!snapshot) throw new Error('execution callback task snapshot is missing');
+      if (receipt?.exists) {
+        if (
+          receipt.get('taskId') !== input.taskId ||
+          receipt.get('tokenHash') !== input.tokenHash ||
+          receipt.get('payloadDigest') !== input.payloadDigest
+        )
+          return {
+            ok: false,
+            status: 409,
+            error: 'callback identity was already used for different content',
+          };
+        return {
+          ok: true,
+          taskId: input.taskId,
+          queueGeneration: Number(receipt.get('queueGeneration')),
+          replayed: true,
+        };
+      }
       const task = snapshot.exists ? decodeRecord<Records['tasks']>(snapshot.data()) : null;
       const owned =
         task !== null && task.id === input.taskId && documentKey(task.id) === snapshot.id;
@@ -279,6 +307,18 @@ export class FirestoreExecutionJobRepository implements ExecutionJobRepository {
         updatedAt: now,
       });
       createWakeIntent(tx, this.store, { taskId: task.id, generation, availableAt: now });
+      if (receiptRef && input.tokenHash && input.payloadDigest)
+        tx.create(
+          receiptRef,
+          encodeRecord({
+            idempotencyKey: input.idempotencyKey,
+            taskId: task.id,
+            tokenHash: input.tokenHash,
+            payloadDigest: input.payloadDigest,
+            queueGeneration: generation,
+            createdAt: now,
+          }),
+        );
       return { ok: true, taskId: task.id, queueGeneration: generation };
     });
   }

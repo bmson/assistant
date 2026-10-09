@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { resetConfigForTest } from '@assistant/config';
+import { loadConfig, resetConfigForTest, validateAgentPersistenceConfig } from '@assistant/config';
 import {
   createInstallationStore,
   FirestoreDocumentReadRepository,
@@ -9,12 +9,14 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 const auth = vi.hoisted(() => ({
   mobile: vi.fn(),
+  documentsPage: vi.fn(),
   store: null as unknown,
   workspace: null as unknown,
 }));
 vi.mock('@/lib/server', () => ({
   getFirestoreInstallationStore: () => auth.store,
   getWorkspace: () => auth.workspace,
+  getMobileDocumentsPage: auth.documentsPage,
   getDb: () => {
     throw new Error('PostgreSQL-backed web surface is unavailable');
   },
@@ -79,6 +81,39 @@ describe.skipIf(!emulator)('Firestore mobile Documents with PostgreSQL offline',
     auth.mobile.mockResolvedValue(true);
     auth.store = store;
     auth.workspace = workspace;
+    auth.documentsPage.mockImplementation(async ({ limit, cursor }) => {
+      const config = loadConfig();
+      const problems = validateAgentPersistenceConfig(config);
+      if (problems.length) throw new Error(problems.join('; '));
+      const ownerId = config.FIRESTORE_AGENT_ID;
+      const repository = new FirestoreDocumentReadRepository(store, ownerId);
+      let after: { id: string; createdAt: Date } | undefined;
+      if (cursor) {
+        const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+        if (
+          parsed?.version !== 1 ||
+          parsed.ownerId !== ownerId ||
+          typeof parsed.id !== 'string' ||
+          typeof parsed.createdAt !== 'string'
+        )
+          throw new Error('Invalid document continuation');
+        after = { id: parsed.id, createdAt: new Date(parsed.createdAt) };
+      }
+      const page = await repository.listPage(ownerId, { limit, ...(after ? { after } : {}) });
+      return {
+        ...page,
+        nextCursor: page.nextCursor
+          ? Buffer.from(
+              JSON.stringify({
+                version: 1,
+                ownerId,
+                id: page.nextCursor.id,
+                createdAt: page.nextCursor.createdAt.toISOString(),
+              }),
+            ).toString('base64url')
+          : null,
+      };
+    });
     staged.clear();
     await Promise.all([
       store.doc('agents', agentId).set({ id: agentId }),
@@ -189,6 +224,14 @@ describe.skipIf(!emulator)('Firestore mobile Documents with PostgreSQL offline',
     ]);
     expect(list.stats).toEqual({ total: 1, ready: 1, pending: 0, chunks: 2 });
     expect(list.primaryConversationId).toBe(primaryConversationId);
+    expect(list.pagination).toMatchObject({
+      version: 1,
+      consistency: 'live-keyset',
+      pageSize: 50,
+      hasMore: false,
+      complete: true,
+      nextCursor: null,
+    });
     expect(JSON.stringify(list)).not.toContain('Private foreign doc');
 
     const detailResponse = await getDetail(new Request(`${url}/${documentId}`), {
@@ -201,11 +244,109 @@ describe.skipIf(!emulator)('Firestore mobile Documents with PostgreSQL offline',
         { chunkIndex: 0, text: 'First passage', charCount: 13 },
         { chunkIndex: 1, text: 'Second passage', charCount: 14 },
       ],
+      nextCursor: null,
+      totalChunks: 2,
+    });
+    const firstPageResponse = await getDetail(new Request(`${url}/${documentId}?limit=1`), {
+      params: Promise.resolve({ id: documentId }),
+    });
+    expect(firstPageResponse.status).toBe(200);
+    expect(await firstPageResponse.json()).toMatchObject({
+      document: list.documents[0],
+      chunks: [{ chunkIndex: 0, text: 'First passage' }],
+      nextCursor: 1,
+      totalChunks: 2,
+    });
+    const secondPageResponse = await getDetail(
+      new Request(`${url}/${documentId}?cursor=1&limit=1`),
+      { params: Promise.resolve({ id: documentId }) },
+    );
+    expect(await secondPageResponse.json()).toMatchObject({
+      chunks: [{ chunkIndex: 1, text: 'Second passage' }],
+      nextCursor: null,
+      totalChunks: 2,
     });
     const foreignResponse = await getDetail(new Request(`${url}/${foreignDocumentId}`), {
       params: Promise.resolve({ id: foreignDocumentId }),
     });
     expect(foreignResponse.status).toBe(404);
+  });
+
+  it('pages a growing document library with owner-scoped totals and no duplicates', async () => {
+    const { GET } = await import('./route.js');
+    const created = Array.from({ length: 205 }, (_, index) => {
+      const id = randomUUID();
+      const fileId = randomUUID();
+      return {
+        document: {
+          id,
+          agentId,
+          fileId,
+          title: `Paged document ${String(index).padStart(3, '0')}`,
+          mime: 'text/plain',
+          source: 'upload',
+          trust: 'owner',
+          status: index % 5 === 0 ? 'pending' : 'ready',
+          extractor: 'text',
+          chunkCount: index % 3,
+          charCount: 10 + index,
+          error: null,
+          createdAt: now,
+        },
+        file: { id: fileId, agentId, bytes: index },
+      };
+    });
+    for (let offset = 0; offset < created.length; offset += 200) {
+      const batch = store.db.batch();
+      for (const { document, file } of created.slice(offset, offset + 200)) {
+        batch.set(store.doc('documents', document.id), document);
+        batch.set(store.doc('files', file.id), file);
+      }
+      await batch.commit();
+    }
+
+    const ids: string[] = [];
+    let cursor: string | null = null;
+    let firstStats: unknown;
+    do {
+      const query = new URLSearchParams({ limit: '50' });
+      if (cursor) query.set('cursor', cursor);
+      const response = await GET(new Request(`${url}?${query}`));
+      expect(response.status).toBe(200);
+      const page = await response.json();
+      ids.push(...page.documents.map((document: { id: string }) => document.id));
+      firstStats ??= page.stats;
+      cursor = page.pagination.nextCursor;
+      expect(page.pagination.pageSize).toBe(50);
+    } while (cursor);
+
+    expect(ids).toHaveLength(206);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toContain(documentId);
+    expect(ids).not.toContain(foreignDocumentId);
+    expect(firstStats).toMatchObject({ total: 206 });
+    const cleanup = store.db.batch();
+    for (const { document, file } of created) {
+      cleanup.delete(store.doc('documents', document.id));
+      cleanup.delete(store.doc('files', file.id));
+    }
+    await cleanup.commit();
+  });
+
+  it('rejects malformed continuation tokens before querying Firestore', async () => {
+    const { GET } = await import('./route.js');
+    for (const id of ['22222222222242228222222222222222', { id: documentId }]) {
+      const cursor = Buffer.from(
+        JSON.stringify({
+          version: 1,
+          ownerId: agentId,
+          id,
+          createdAt: now.toISOString(),
+        }),
+      ).toString('base64url');
+      const response = await GET(new Request(`${url}?cursor=${encodeURIComponent(cursor)}`));
+      expect(response.status).toBe(400);
+    }
   });
 
   it('authenticates first and validates Firestore document writes', async () => {
@@ -225,6 +366,26 @@ describe.skipIf(!emulator)('Firestore mobile Documents with PostgreSQL offline',
     auth.mobile.mockResolvedValueOnce(false);
     expect((await GET(new Request(url))).status).toBe(401);
     expect((await POST(new Request(url, { method: 'POST' }))).status).toBe(400);
+    let bodyRead = false;
+    const protectedUpload = new Request(url, {
+      method: 'POST',
+      headers: { 'content-type': 'multipart/form-data; boundary=unused' },
+      body: new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            bodyRead = true;
+            controller.enqueue(new TextEncoder().encode('body'));
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      ),
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+    auth.mobile.mockResolvedValueOnce(false);
+    expect((await POST(protectedUpload)).status).toBe(401);
+    expect(bodyRead).toBe(false);
+    expect(protectedUpload.body?.locked).toBe(false);
     auth.mobile.mockResolvedValueOnce(false);
     const params = { params: Promise.resolve({ id: documentId }) };
     expect(
@@ -237,6 +398,56 @@ describe.skipIf(!emulator)('Firestore mobile Documents with PostgreSQL offline',
         })
       ).status,
     ).toBe(400);
+  });
+
+  it('rejects duplicate, extra, wrongly typed, and oversized multipart metadata', async () => {
+    const { POST } = await import('./route.js');
+    auth.mobile.mockResolvedValue(true);
+    const validFile = () => new File(['x'], 'notes.txt', { type: 'text/plain' });
+    const forms: FormData[] = [];
+
+    const extraField = new FormData();
+    extraField.set('file', validFile());
+    extraField.set('title', 'Notes');
+    extraField.set('unexpected', 'large metadata is not accepted');
+    forms.push(extraField);
+
+    const duplicateTitle = new FormData();
+    duplicateTitle.set('file', validFile());
+    duplicateTitle.append('title', 'First title');
+    duplicateTitle.append('title', 'Second title');
+    forms.push(duplicateTitle);
+
+    const duplicateFile = new FormData();
+    duplicateFile.append('file', validFile());
+    duplicateFile.append('file', validFile());
+    forms.push(duplicateFile);
+
+    const fileTitle = new FormData();
+    fileTitle.set('file', validFile());
+    fileTitle.set('title', new File(['title'], 'title.txt'));
+    forms.push(fileTitle);
+
+    const oversizedTitle = new FormData();
+    oversizedTitle.set('file', validFile());
+    oversizedTitle.set('title', 't'.repeat(1025));
+    forms.push(oversizedTitle);
+
+    const oversizedFilename = new FormData();
+    oversizedFilename.set('file', new File(['x'], `${'n'.repeat(252)}.txt`));
+    forms.push(oversizedFilename);
+
+    const oversizedMime = new FormData();
+    oversizedMime.set('file', new File(['x'], 'notes.txt', { type: 'x'.repeat(257) }));
+    forms.push(oversizedMime);
+
+    const stagedBefore = staged.size;
+    for (const form of forms) {
+      const response = await POST(new Request(url, { method: 'POST', body: form }));
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: 'invalid multipart form fields' });
+    }
+    expect(staged.size).toBe(stagedBefore);
   });
 
   it('stages and catalogs owner text atomically with its extraction wake while PostgreSQL is offline', async () => {
@@ -338,6 +549,14 @@ describe.skipIf(!emulator)('Firestore mobile Documents with PostgreSQL offline',
       expect.arrayContaining([documentId, uploadedDocumentId]),
     );
     expect(overview.documents.stats).toEqual({ total: 2, ready: 1, pending: 1, chunks: 2 });
+    expect(overview.documents.pagination).toMatchObject({
+      version: 1,
+      consistency: 'live-keyset',
+      pageSize: 50,
+      hasMore: false,
+      complete: true,
+      nextCursor: null,
+    });
     // The extraction task queued by the text upload above is ordinary activity.
     expect(overview.activity).toMatchObject({
       items: [{ id: uploadedTaskId, status: 'pending', type: 'adhoc', trust: 'assistant' }],
@@ -427,6 +646,16 @@ describe.skipIf(!emulator)('Firestore mobile Documents with PostgreSQL offline',
       expect(response.status).toBe(200);
       expect((await response.json()).documents).toEqual({
         documents: [],
+        hasMore: false,
+        nextCursor: null,
+        pagination: {
+          version: 1,
+          consistency: 'live-keyset',
+          pageSize: 50,
+          hasMore: false,
+          complete: true,
+          nextCursor: null,
+        },
         stats: { total: 0, ready: 0, pending: 0, chunks: 0 },
         primaryConversationId: null,
       });
@@ -443,7 +672,9 @@ describe.skipIf(!emulator)('Firestore mobile Documents with PostgreSQL offline',
       const { GET } = await import('./route.js');
       const response = await GET(new Request(url));
       expect(response.status).toBe(503);
-      expect((await response.json()).error).toContain('CANARY_ENABLED must be false');
+      expect((await response.json()).error).toBe(
+        'Documents are unavailable. Retry before viewing them.',
+      );
     } finally {
       vi.stubEnv('CANARY_ENABLED', 'false');
       resetConfigForTest();
@@ -490,17 +721,37 @@ describe.skipIf(!emulator)('Firestore mobile Documents with PostgreSQL offline',
     // request-latency assertion. Keep the same overflow check under load.
   }, 30_000);
 
-  it('fails explicitly when a document detail exceeds its chunk bound', async () => {
+  it('pages document details beyond the former global chunk bound', async () => {
     const chunkIds: string[] = [];
+    const largeDocumentId = randomUUID();
+    const largeFileId = randomUUID();
+    await Promise.all([
+      store.doc('files', largeFileId).set({ id: largeFileId, agentId, bytes: 16_016 }),
+      store.doc('documents', largeDocumentId).set({
+        id: largeDocumentId,
+        agentId,
+        fileId: largeFileId,
+        title: 'Large owner handbook',
+        mime: 'text/plain',
+        source: 'upload',
+        trust: 'owner',
+        status: 'ready',
+        extractor: 'text',
+        chunkCount: 1_001,
+        charCount: 16_016,
+        error: null,
+        createdAt: now,
+      }),
+    ]);
     for (let offset = 0; offset < 1_001; offset += 500) {
       const batch = store.db.batch();
       for (let index = offset; index < Math.min(offset + 500, 1_001); index++) {
-        const id = `overflow-${index}`;
+        const id = `${largeDocumentId}-${index}`;
         chunkIds.push(id);
         batch.set(store.doc('documentChunks', id), {
           id,
           agentId,
-          documentId,
+          documentId: largeDocumentId,
           chunkIndex: index,
           text: 'overflow fixture',
           charCount: 16,
@@ -509,9 +760,22 @@ describe.skipIf(!emulator)('Firestore mobile Documents with PostgreSQL offline',
       await batch.commit();
     }
     try {
-      await expect(
-        new FirestoreDocumentReadRepository(store, agentId).get(agentId, documentId),
-      ).rejects.toThrow('bounded chunk limit');
+      const reader = new FirestoreDocumentReadRepository(store, agentId);
+      const first = await reader.get(agentId, largeDocumentId, { cursor: 0, limit: 100 });
+      const next = await reader.get(agentId, largeDocumentId, {
+        cursor: first?.nextCursor ?? 0,
+        limit: 100,
+      });
+      expect(first?.chunks.map((chunk) => chunk.chunkIndex)).toEqual(
+        Array.from({ length: 100 }, (_, index) => index),
+      );
+      expect(first?.document.title).toBe('Large owner handbook');
+      expect(first?.totalChunks).toBe(1_001);
+      expect(first?.nextCursor).toBe(100);
+      expect(next?.chunks.map((chunk) => chunk.chunkIndex)).toEqual(
+        Array.from({ length: 100 }, (_, index) => index + 100),
+      );
+      expect(next?.nextCursor).toBe(200);
     } finally {
       for (let offset = 0; offset < chunkIds.length; offset += 500) {
         const batch = store.db.batch();

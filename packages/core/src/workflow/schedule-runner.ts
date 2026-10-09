@@ -1,4 +1,5 @@
 import {
+  type GoalOccurrenceGuard,
   type ScheduleRecord,
   type ScheduleRepository,
   scheduleBatch,
@@ -15,7 +16,8 @@ export interface ScheduledTaskTemplate {
   instruction?: string;
   job?: string;
   reminderText?: string;
-  reminderKind?: 'once' | 'recurring';
+  reminderKind?: 'once' | 'recurring' | 'event_completion';
+  reminderEventDependency?: unknown;
   budgetUsdLimit?: string;
   maxSteps?: number;
   goalId?: string;
@@ -24,6 +26,7 @@ export interface ScheduledTaskTemplate {
 }
 export interface SchedulePreparation {
   action: 'fire' | 'skip' | 'disable';
+  goalGuard?: GoalOccurrenceGuard;
   autonomyGrant?: AutonomyGrant;
   /** Replaces the template's standing instruction for this firing, e.g. with a goal's latest progress. */
   instruction?: string;
@@ -81,6 +84,9 @@ export async function runScheduleBatch(
             ...(template.job ? { job: template.job } : {}),
             ...(template.reminderText ? { reminderText: template.reminderText } : {}),
             ...(template.reminderKind ? { reminderKind: template.reminderKind } : {}),
+            ...(template.reminderEventDependency
+              ? { reminderEventDependency: template.reminderEventDependency }
+              : {}),
             scheduleId: row.id,
             occurrenceId: `schedule:${row.id}:${row.nextRunAt.toISOString()}`,
             ...(template.taintedOrigin ? { taintedOrigin: true } : {}),
@@ -89,6 +95,7 @@ export async function runScheduleBatch(
       : null;
     const committed = await repository.commitOccurrence({
       expected: row,
+      ...(create && preparation.goalGuard ? { goalGuard: preparation.goalGuard } : {}),
       now,
       mode: 'due',
       enabled,

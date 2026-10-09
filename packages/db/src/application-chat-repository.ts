@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type {
   ApplicationChatMessage,
   ApplicationChatPersistence,
@@ -6,9 +6,18 @@ import type {
   TaskLease,
 } from '@assistant/persistence';
 import {
+  assertChatAdmissionOperationId,
   boundedChatConversationLimit,
   boundedChatMessageLimit,
+  chatAdmissionCancellationPayload,
+  chatAdmissionCancellationTrigger,
+  chatAdmissionExternalEventId,
+  chatAdmissionPayload,
+  isChatAdmissionCancellationProjection,
   newTaskRecord,
+  normalizeTaskBudget,
+  recallSurfaceRefs,
+  withChatAdmissionPhase,
 } from '@assistant/persistence';
 import {
   and,
@@ -23,13 +32,18 @@ import {
   isNull,
   like,
   lt,
-  ne,
   notInArray,
   or,
   sql,
 } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { createPostgresExecutionEvidenceRepository } from './execution-evidence-repository.js';
+import { assertPostgresInstallationOwner } from './installation-owner.js';
+import {
+  assertPostgresPrivacyObservationFence,
+  lockPostgresPrivacyObservationFence,
+  postgresPrivacyObservationFence,
+} from './privacy-erasure-repository.js';
 import {
   agents,
   approvals,
@@ -38,6 +52,7 @@ import {
   goals,
   messages,
   models,
+  recallSurfaces,
   suggestions,
   tasks,
   toolCalls,
@@ -62,6 +77,56 @@ function ownedConversationWhere(agentId: string, conversationId: string) {
   );
 }
 
+async function assertRecalledMessagesCurrent(
+  tx: Pick<Db, 'select'>,
+  agentId: string,
+  refs: ReturnType<typeof recallSurfaceRefs>,
+) {
+  const ids = [...new Set(refs.flatMap((ref) => ref.sourceMessageIds ?? []))];
+  if (!ids.length) return;
+  const rows = await tx
+    .select({ id: messages.id, text: messages.text, hiddenAt: messages.hiddenAt })
+    .from(messages)
+    .innerJoin(conversations, eq(conversations.id, messages.conversationId))
+    .where(and(inArray(messages.id, ids), eq(conversations.agentId, agentId)))
+    .for('share');
+  const current = new Map(rows.map((row) => [row.id, row]));
+  for (const ref of refs) {
+    const sourceIds = ref.sourceMessageIds;
+    if (!sourceIds?.length) continue;
+    const sourceRows = sourceIds.map((id) => current.get(id));
+    if (sourceRows.some((row) => !row || row.hiddenAt !== null))
+      throw new Error('Recalled source changed before chat publication');
+    if (ref.representation === 'message_excerpts') {
+      const revision = createHash('sha256')
+        .update(JSON.stringify(sourceRows.map((row, index) => [sourceIds[index], row?.text])))
+        .digest('hex');
+      if (revision !== ref.sourceRevision)
+        throw new Error('Recalled source changed before chat publication');
+    }
+  }
+}
+
+async function assertRecallSourcesNotHidden(
+  tx: Pick<Db, 'select'>,
+  agentId: string,
+  refs: ReturnType<typeof recallSurfaceRefs>,
+) {
+  for (const ref of refs) {
+    const [current] = await tx
+      .select({
+        sourceRevision: recallSurfaces.sourceRevision,
+        suppressedAt: recallSurfaces.suppressedAt,
+      })
+      .from(recallSurfaces)
+      .where(and(eq(recallSurfaces.agentId, agentId), eq(recallSurfaces.sourceKey, ref.sourceKey)))
+      .for('update')
+      .limit(1);
+    if (current?.suppressedAt && current.sourceRevision === ref.sourceRevision)
+      throw new Error('Recalled source was hidden before chat publication');
+  }
+}
+
 export function createPostgresApplicationChatPersistence(db: Db): ApplicationChatPersistence {
   async function owned(agentId: string, conversationId: string) {
     const [row] = await db
@@ -75,10 +140,16 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
   return {
     kind: 'application-chat-persistence',
 
+    async privacyObservationGeneration(agentId) {
+      return postgresPrivacyObservationFence(db, agentId);
+    },
+
     async resolveAgent() {
+      const ownerId = await assertPostgresInstallationOwner(db);
       const [agent] = await db
         .select()
         .from(agents)
+        .where(eq(agents.id, ownerId))
         .orderBy(asc(agents.createdAt), asc(agents.id))
         .limit(1);
       if (!agent) throw new Error('no agent row — run pnpm seed');
@@ -87,21 +158,47 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
 
     async getOrCreatePrimaryConversation(agentId) {
       return db.transaction(async (tx) => {
+        // Serialize both selection and legacy repair on the configured owner,
+        // including the first call when no primary conversation exists yet.
+        const owners = await tx
+          .select({ id: agents.id })
+          .from(agents)
+          .where(eq(agents.id, agentId))
+          .for('update');
+        if (!owners.length) throw new Error('Primary conversation owner is missing');
         const [existing] = await tx
           .select()
           .from(conversations)
           .where(and(eq(conversations.agentId, agentId), eq(conversations.isPrimary, true)))
           .limit(1);
-        if (existing) {
-          if (!existing.archivedAt) return existing;
+        const ownerPurpose = (row: typeof conversations.$inferSelect) => {
+          const metadata = row.metadata as Record<string, unknown>;
+          return (
+            row.channel === 'chat' &&
+            row.trust === 'owner' &&
+            !metadata.goalId &&
+            (metadata.purpose === undefined || metadata.purpose === 'owner-chat')
+          );
+        };
+        if (existing && ownerPurpose(existing)) {
           const [restored] = await tx
             .update(conversations)
-            .set({ archivedAt: null, updatedAt: sql`now()` })
+            .set({
+              archivedAt: null,
+              metadata: { ...(existing.metadata as object), purpose: 'owner-chat' },
+              updatedAt: sql`now()`,
+            })
             .where(eq(conversations.id, existing.id))
             .returning();
           return restored ?? existing;
         }
-
+        // Do not promote assistant-only background history to owner authority.
+        // Repair its primary flag; retain its messages and original trust.
+        if (existing)
+          await tx
+            .update(conversations)
+            .set({ isPrimary: false, updatedAt: sql`now()` })
+            .where(eq(conversations.id, existing.id));
         const [recent] = await tx
           .select()
           .from(conversations)
@@ -109,24 +206,35 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
             and(
               eq(conversations.agentId, agentId),
               eq(conversations.channel, 'chat'),
+              eq(conversations.trust, 'owner'),
               isNull(conversations.archivedAt),
               sql`${conversations.metadata}->>'goalId' IS NULL`,
+              sql`(${conversations.metadata}->>'purpose' IS NULL OR ${conversations.metadata}->>'purpose' = 'owner-chat')`,
             ),
           )
-          .orderBy(desc(conversations.updatedAt))
+          .orderBy(desc(conversations.updatedAt), desc(conversations.id))
           .limit(1);
         if (recent) {
           const [promoted] = await tx
             .update(conversations)
-            .set({ isPrimary: true, updatedAt: sql`now()` })
+            .set({
+              isPrimary: true,
+              metadata: { ...(recent.metadata as object), purpose: 'owner-chat' },
+              updatedAt: sql`now()`,
+            })
             .where(eq(conversations.id, recent.id))
             .returning();
           if (promoted) return promoted;
         }
-
         const [created] = await tx
           .insert(conversations)
-          .values({ agentId, channel: 'chat', trust: 'owner', isPrimary: true })
+          .values({
+            agentId,
+            channel: 'chat',
+            trust: 'owner',
+            isPrimary: true,
+            metadata: { purpose: 'owner-chat' },
+          })
           .returning();
         if (!created) throw new Error('failed to create primary conversation');
         return created;
@@ -136,7 +244,7 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
     async createConversation(agentId) {
       const [created] = await db
         .insert(conversations)
-        .values({ agentId, channel: 'chat', trust: 'owner' })
+        .values({ agentId, channel: 'chat', trust: 'owner', metadata: { purpose: 'owner-chat' } })
         .returning();
       if (!created) throw new Error('failed to create conversation');
       return created;
@@ -351,7 +459,7 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
 
     async getTaskStatus(agentId, conversationId, taskId) {
       const [task] = await db
-        .select({ status: tasks.status })
+        .select()
         .from(tasks)
         .where(
           and(
@@ -361,10 +469,12 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
           ),
         )
         .limit(1);
-      return task?.status ?? null;
+      if (!task || isChatAdmissionCancellationProjection(task)) return null;
+      return task.status;
     },
 
     async listTaskActivity(agentId, conversationId, taskId, requestedLimit = 3) {
+      if ((await this.getTaskStatus(agentId, conversationId, taskId)) === null) return [];
       const limit = Math.max(1, Math.min(10, Math.floor(requestedLimit)));
       const rows = await db
         .select({
@@ -404,9 +514,8 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
       const limit = boundedChatMessageLimit(input.limit);
       const createdAtExact = sql<string>`to_char(${messages.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
       const selection = { ...getTableColumns(messages), createdAtExact };
-      if (input.after) {
+      if (input.after?.appendSequence) {
         const after = input.after;
-        const timestamp = sql`${after.createdAtExact ?? after.createdAt.toISOString()}::timestamptz`;
         const rows = await db
           .select(selection)
           .from(messages)
@@ -414,14 +523,19 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
             and(
               eq(messages.conversationId, conversationId),
               isNull(messages.hiddenAt),
-              or(
-                sql`${messages.createdAt} > ${timestamp}`,
-                and(sql`${messages.createdAt} = ${timestamp}`, gt(messages.id, after.id)),
-              ),
-              ne(messages.id, after.id),
+              sql`${messages.appendSequence} > ${after.appendSequence}`,
             ),
           )
-          .orderBy(asc(messages.createdAt), asc(messages.id))
+          .orderBy(asc(messages.appendSequence))
+          .limit(limit + 1);
+        return { messages: rows.slice(0, limit), hasMore: rows.length > limit };
+      }
+      if (input.fromStart || input.after) {
+        const rows = await db
+          .select(selection)
+          .from(messages)
+          .where(and(eq(messages.conversationId, conversationId), isNull(messages.hiddenAt)))
+          .orderBy(asc(messages.appendSequence))
           .limit(limit + 1);
         return { messages: rows.slice(0, limit), hasMore: rows.length > limit };
       }
@@ -429,7 +543,7 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
         .select(selection)
         .from(messages)
         .where(and(eq(messages.conversationId, conversationId), isNull(messages.hiddenAt)))
-        .orderBy(desc(messages.createdAt), desc(messages.id))
+        .orderBy(desc(messages.appendSequence))
         .limit(limit);
       return { messages: rows.reverse(), hasMore: false };
     },
@@ -571,6 +685,68 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
       return Boolean(row);
     },
 
+    async acknowledgeMessageDelivery(agentId, conversationId, messageId, clientId) {
+      return db.transaction(async (tx) => {
+        const [message] = await tx
+          .select()
+          .from(messages)
+          .where(
+            and(
+              eq(messages.id, messageId),
+              eq(messages.conversationId, conversationId),
+              eq(messages.role, 'assistant'),
+              sql`EXISTS (
+                SELECT 1 FROM ${conversations}
+                WHERE ${conversations.id} = ${conversationId}
+                  AND ${conversations.agentId} = ${agentId}
+                  AND ${conversations.channel} = 'chat'
+              )`,
+            ),
+          )
+          .for('update')
+          .limit(1);
+        if (!message) return false;
+        if (message.clientDeliveredBy) return message.clientDeliveredBy === clientId;
+        if (!message.taskId) return false;
+        const [task] = await tx
+          .select()
+          .from(tasks)
+          .where(
+            and(
+              eq(tasks.id, message.taskId),
+              eq(tasks.agentId, agentId),
+              eq(tasks.conversationId, conversationId),
+              eq(tasks.type, 'chat_turn'),
+              eq(tasks.trust, 'owner'),
+              eq(tasks.status, 'done'),
+            ),
+          )
+          .limit(1);
+        const admission = task && chatAdmissionPayload(task);
+        if (!task || !admission) return false;
+        const [request] = await tx
+          .select({ clientId: messages.clientId })
+          .from(messages)
+          .where(
+            and(
+              eq(messages.id, admission.triggerMessageId),
+              eq(messages.conversationId, conversationId),
+              eq(messages.taskId, task.id),
+              eq(messages.role, 'user'),
+              eq(messages.origin, 'owner'),
+            ),
+          )
+          .limit(1);
+        if (!request || request.clientId !== clientId) return false;
+        const [updated] = await tx
+          .update(messages)
+          .set({ clientDeliveredAt: new Date(), clientDeliveredBy: clientId })
+          .where(and(eq(messages.id, messageId), isNull(messages.clientDeliveredBy)))
+          .returning({ id: messages.id });
+        return Boolean(updated);
+      });
+    },
+
     async appendOwned(agentId, input) {
       return db.transaction(async (tx) => {
         const [conversation] = await tx
@@ -596,6 +772,350 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
             .where(ownedConversationWhere(agentId, input.conversationId));
         }
         return row as ApplicationChatMessage | undefined;
+      });
+    },
+
+    async cancelChatTurn(input) {
+      assertChatAdmissionOperationId(input.clientOperationId);
+      return db.transaction(async (tx) => {
+        const [conversation] = await tx
+          .select({ id: conversations.id })
+          .from(conversations)
+          .where(ownedConversationWhere(input.agentId, input.conversationId))
+          .limit(1);
+        if (!conversation) throw new Error('chat not found');
+        const externalEventId = chatAdmissionExternalEventId(input);
+        const readExisting = async () => {
+          const [existing] = await tx
+            .select()
+            .from(tasks)
+            .where(eq(tasks.externalEventId, externalEventId))
+            .limit(1)
+            .for('update');
+          if (!existing) return null;
+          if (
+            existing.agentId !== input.agentId ||
+            existing.conversationId !== input.conversationId
+          )
+            throw new Error('Chat operation ID was already used for a different request');
+          const cancellation = chatAdmissionCancellationPayload(existing);
+          if (cancellation) {
+            if (cancellation.clientOperationId !== input.clientOperationId)
+              throw new Error('Chat operation ID was already used for a different request');
+            return {
+              kind: 'cancelled_before_admission',
+              task: existing,
+              status: 'cancelled',
+              transitioned: false,
+              effectStatus: 'not_started',
+            } as const;
+          }
+          const admission = chatAdmissionPayload(existing);
+          if (!admission || admission.clientOperationId !== input.clientOperationId)
+            throw new Error('Chat operation ID was already used for a different request');
+          const [message] = await tx
+            .select({ id: messages.id })
+            .from(messages)
+            .where(
+              and(
+                eq(messages.id, admission.triggerMessageId),
+                eq(messages.conversationId, input.conversationId),
+                eq(messages.role, 'user'),
+                eq(messages.taskId, existing.id),
+              ),
+            )
+            .limit(1);
+          if (!message) throw new Error('Chat admission is missing its owner message');
+          if (['done', 'failed', 'cancelled'].includes(existing.status))
+            return {
+              kind: 'admitted_task',
+              task: existing,
+              status: existing.status,
+              transitioned: false,
+              effectStatus: 'unknown',
+            } as const;
+          const [updated] = await tx
+            .update(tasks)
+            .set({
+              status: 'cancelled',
+              lockedUntil: null,
+              leaseToken: null,
+              runAfter: null,
+              attempt: 0,
+              updatedAt: sql`now()`,
+            })
+            .where(and(eq(tasks.id, existing.id), eq(tasks.agentId, input.agentId)))
+            .returning();
+          if (!updated) throw new Error('Chat task cancellation lost its locked row');
+          return {
+            kind: 'admitted_task',
+            task: updated,
+            status: 'cancelled',
+            transitioned: true,
+            effectStatus: 'unknown',
+          } as const;
+        };
+
+        const existing = await readExisting();
+        if (existing) return existing;
+        const [clock] = await tx.execute<{ now: string }>(sql`select clock_timestamp() as now`);
+        if (!clock) throw new Error('Missing database clock');
+        const tombstone = {
+          ...newTaskRecord(
+            {
+              agentId: input.agentId,
+              conversationId: input.conversationId,
+              type: 'chat_turn',
+              trust: 'owner',
+              trigger: chatAdmissionCancellationTrigger(input),
+              externalEventId,
+            },
+            randomUUID(),
+            new Date(clock.now),
+          ),
+          status: 'cancelled' as const,
+        };
+        const [created] = await tx
+          .insert(tasks)
+          .values(tombstone)
+          .onConflictDoNothing({
+            target: tasks.externalEventId,
+            where: sql`${tasks.externalEventId} IS NOT NULL`,
+          })
+          .returning();
+        if (created)
+          return {
+            kind: 'cancelled_before_admission',
+            task: created,
+            status: 'cancelled',
+            transitioned: true,
+            effectStatus: 'not_started',
+          } as const;
+        const raced = await readExisting();
+        if (raced) return raced;
+        throw new Error('Chat cancellation conflict without an operation row');
+      });
+    },
+
+    async admitChatTurn(input) {
+      return db.transaction(async (tx) => {
+        const [conversation] = await tx
+          .select({ id: conversations.id })
+          .from(conversations)
+          .where(ownedConversationWhere(input.agentId, input.conversationId))
+          .limit(1);
+        if (!conversation) throw new Error('chat not found');
+        const externalEventId = chatAdmissionExternalEventId(input);
+        const readExisting = async () => {
+          const [existing] = await tx
+            .select()
+            .from(tasks)
+            .where(eq(tasks.externalEventId, externalEventId))
+            .limit(1)
+            .for('update');
+          if (!existing) return null;
+          const cancellation = chatAdmissionCancellationPayload(existing);
+          if (cancellation) {
+            if (
+              existing.agentId !== input.agentId ||
+              existing.conversationId !== input.conversationId ||
+              cancellation.clientOperationId !== input.clientOperationId
+            )
+              throw new Error('Chat operation ID was already used for a different request');
+            return {
+              kind: 'cancelled_before_admission',
+              created: false,
+              task: existing,
+              status: 'cancelled',
+              effectStatus: 'not_started',
+            } as const;
+          }
+          const admission = chatAdmissionPayload(existing);
+          if (
+            existing.agentId !== input.agentId ||
+            existing.conversationId !== input.conversationId ||
+            !admission ||
+            admission.clientOperationId !== input.clientOperationId ||
+            admission.requestHash !== input.requestHash
+          ) {
+            throw new Error('Chat operation ID was already used for a different request');
+          }
+          const [message] = await tx
+            .select()
+            .from(messages)
+            .where(
+              and(
+                eq(messages.id, admission.triggerMessageId),
+                eq(messages.conversationId, input.conversationId),
+                eq(messages.role, 'user'),
+              ),
+            )
+            .limit(1);
+          if (!message) throw new Error('Chat admission is missing its owner message');
+          return { kind: 'admitted', created: false, task: existing, message } as const;
+        };
+        const existing = await readExisting();
+        if (existing) return existing;
+
+        const [budget] = await tx.select().from(budgets).where(eq(budgets.scope, 'task_default'));
+        const [clock] = await tx.execute<{ now: string }>(sql`select clock_timestamp() as now`);
+        if (!clock) throw new Error('Missing database clock');
+        const now = new Date(clock.now);
+        const messageId = randomUUID();
+        const trigger = {
+          source: 'chat',
+          agentId: input.agentId,
+          conversationId: input.conversationId,
+          trust: 'owner',
+          payload: {
+            text: input.text,
+            triggerMessageId: messageId,
+            requestAt: now.toISOString(),
+            intentRevision: 1,
+            clientOperationId: input.clientOperationId,
+            autonomous: input.autonomous,
+            force: input.force,
+            spoken: input.spoken,
+            chatAdmission: {
+              protocol: 'owner-chat-v1',
+              clientOperationId: input.clientOperationId,
+              requestHash: input.requestHash,
+              triggerMessageId: messageId,
+              phase: 'classifying',
+            },
+          },
+        };
+        const leaseToken = randomUUID();
+        const task = newTaskRecord(
+          {
+            agentId: input.agentId,
+            conversationId: input.conversationId,
+            type: 'chat_turn',
+            trust: 'owner',
+            title: input.text,
+            goalId: input.goalId,
+            trigger,
+            externalEventId,
+            budgetUsdLimit: budget?.limitUsd ?? '0.50',
+            autonomyGrant: input.autonomyGrant,
+          },
+          randomUUID(),
+          now,
+        );
+        const lease: TaskLease = {
+          ...task,
+          status: 'running',
+          updatedAt: now,
+          lockedUntil: new Date(now.getTime() + DIRECT_CHAT_LEASE_MS),
+          leaseToken,
+        };
+        const [created] = await tx
+          .insert(tasks)
+          .values(lease)
+          .onConflictDoNothing({
+            target: tasks.externalEventId,
+            where: sql`${tasks.externalEventId} IS NOT NULL`,
+          })
+          .returning();
+        if (!created) {
+          const raced = await readExisting();
+          if (raced) return raced;
+          throw new Error('Chat admission conflict without an existing receipt');
+        }
+        const [message] = await tx
+          .insert(messages)
+          .values({
+            id: messageId,
+            conversationId: input.conversationId,
+            taskId: created.id,
+            role: 'user',
+            origin: 'owner',
+            clientId: input.clientId ?? null,
+            clientDeliveredAt: null,
+            clientDeliveredBy: null,
+            parts: [{ type: 'text', text: input.text }],
+            text: input.text,
+          })
+          .returning();
+        if (!message) throw new Error('failed to persist chat admission message');
+        await tx
+          .update(conversations)
+          .set({ updatedAt: now })
+          .where(ownedConversationWhere(input.agentId, input.conversationId));
+        return { kind: 'admitted', created: true, task: created, message, lease } as const;
+      });
+    },
+
+    async queueAdmittedChatTurn(input) {
+      return db.transaction(async (tx) => {
+        const leaseToken = input.task.leaseToken;
+        if (!leaseToken) return null;
+        const [current] = await tx
+          .select()
+          .from(tasks)
+          .where(and(eq(tasks.id, input.task.id), eq(tasks.agentId, input.agentId)))
+          .limit(1);
+        if (current?.status !== 'running' || current.leaseToken !== input.task.leaseToken)
+          return null;
+        const admission = chatAdmissionPayload(current);
+        if (!admission || admission.phase === 'queued') return null;
+        const [queued] = await tx
+          .update(tasks)
+          .set({
+            status: 'pending',
+            trigger: withChatAdmissionPhase(current.trigger, 'queued', input.triagedActionable),
+            lockedUntil: null,
+            leaseToken: null,
+            queueGeneration: sql`${tasks.queueGeneration} + 1`,
+            updatedAt: sql`now()`,
+          })
+          .where(
+            and(
+              eq(tasks.id, input.task.id),
+              eq(tasks.agentId, input.agentId),
+              eq(tasks.status, 'running'),
+              eq(tasks.leaseToken, leaseToken),
+            ),
+          )
+          .returning({ id: tasks.id, queueGeneration: tasks.queueGeneration });
+        return queued ?? null;
+      });
+    },
+
+    async markChatTurnStreaming(input) {
+      return db.transaction(async (tx) => {
+        const leaseToken = input.task.leaseToken;
+        if (!leaseToken) return false;
+        const [current] = await tx
+          .select()
+          .from(tasks)
+          .where(and(eq(tasks.id, input.task.id), eq(tasks.agentId, input.agentId)))
+          .limit(1);
+        if (current?.status !== 'running' || current.leaseToken !== input.task.leaseToken)
+          return false;
+        const admission = chatAdmissionPayload(current);
+        if (!admission || admission.phase === 'queued') return false;
+        const [updated] = await tx
+          .update(tasks)
+          .set({
+            trigger: withChatAdmissionPhase(
+              current.trigger,
+              'streaming',
+              false,
+              input.triageOutcome,
+            ),
+            updatedAt: sql`now()`,
+          })
+          .where(
+            and(
+              eq(tasks.id, input.task.id),
+              eq(tasks.agentId, input.agentId),
+              eq(tasks.status, 'running'),
+              eq(tasks.leaseToken, leaseToken),
+            ),
+          )
+          .returning({ id: tasks.id });
+        return Boolean(updated);
       });
     },
 
@@ -640,6 +1160,35 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
       const leaseToken = input.task.leaseToken;
       if (!leaseToken) return false;
       return db.transaction(async (tx) => {
+        const surfaced =
+          input.status === 'done'
+            ? input.messages.flatMap((message) =>
+                message.role === 'assistant' ? recallSurfaceRefs(message.parts) : [],
+              )
+            : [];
+        if (input.privacyObservationGeneration !== undefined) {
+          const observed = await lockPostgresPrivacyObservationFence(tx, input.agentId);
+          await assertPostgresPrivacyObservationFence(
+            tx,
+            input.agentId,
+            input.privacyObservationGeneration,
+          );
+          if (observed !== input.privacyObservationGeneration)
+            throw new Error('Privacy erasure changed during chat observation');
+        } else if (surfaced.length > 0) {
+          const [conversation] = await tx
+            .select({ agentId: conversations.agentId })
+            .from(conversations)
+            .where(ownedConversationWhere(input.agentId, input.task.conversationId ?? ''))
+            .limit(1);
+          if (!conversation || conversation.agentId !== input.agentId)
+            throw new Error('Chat completion conversation is outside the owner scope');
+          await lockPostgresPrivacyObservationFence(tx, input.agentId);
+        }
+        if (input.status === 'done')
+          await assertRecalledMessagesCurrent(tx, input.agentId, surfaced);
+        if (input.status === 'done')
+          await assertRecallSourcesNotHidden(tx, input.agentId, surfaced);
         const [completed] = await tx
           .update(tasks)
           .set({
@@ -660,6 +1209,10 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
           )
           .returning({ id: tasks.id });
         if (!completed) return false;
+        const surfacedMessageIds = new Map<
+          string,
+          { messageId: string; ref: (typeof surfaced)[number] }
+        >();
         for (const message of input.messages) {
           if (
             message.conversationId !== input.task.conversationId ||
@@ -667,7 +1220,86 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
           ) {
             throw new Error('Chat completion message does not match its task');
           }
-          await tx.insert(messages).values(message);
+          const [inserted] = await tx.insert(messages).values(message).returning({
+            id: messages.id,
+            createdAt: messages.createdAt,
+          });
+          if (!inserted) throw new Error('Chat completion message was not persisted');
+          if (input.status === 'done' && message.role === 'assistant') {
+            const refs = recallSurfaceRefs(message.parts);
+            for (const ref of refs) {
+              surfacedMessageIds.set(ref.sourceKey, { messageId: inserted.id, ref });
+            }
+          }
+        }
+        for (const { messageId, ref } of surfacedMessageIds.values()) {
+          const [current] = await tx
+            .select()
+            .from(recallSurfaces)
+            .where(
+              and(
+                eq(recallSurfaces.agentId, input.agentId),
+                eq(recallSurfaces.sourceKey, ref.sourceKey),
+              ),
+            )
+            .for('update')
+            .limit(1);
+          if (current) {
+            const revised = current.sourceRevision !== ref.sourceRevision;
+            await tx
+              .update(recallSurfaces)
+              .set({
+                suppressedAt: revised ? null : current.suppressedAt,
+                sourceRevision: ref.sourceRevision,
+                kind: ref.kind,
+                lastSurfacedAt: sql`now()`,
+                lastMessageId: messageId,
+                surfaceCount: current.surfaceCount + 1,
+                version: current.version + (revised ? 1 : 0),
+              })
+              .where(eq(recallSurfaces.id, current.id));
+            continue;
+          }
+          const [created] = await tx
+            .insert(recallSurfaces)
+            .values({
+              agentId: input.agentId,
+              sourceKey: ref.sourceKey,
+              sourceRevision: ref.sourceRevision,
+              kind: ref.kind,
+              firstSurfacedAt: sql`now()`,
+              lastSurfacedAt: sql`now()`,
+              lastMessageId: messageId,
+              surfaceCount: 1,
+            })
+            .onConflictDoNothing()
+            .returning({ id: recallSurfaces.id });
+          if (created) continue;
+          const [raced] = await tx
+            .select()
+            .from(recallSurfaces)
+            .where(
+              and(
+                eq(recallSurfaces.agentId, input.agentId),
+                eq(recallSurfaces.sourceKey, ref.sourceKey),
+              ),
+            )
+            .for('update')
+            .limit(1);
+          if (!raced) throw new Error('Recall surface changed during chat completion');
+          const revised = raced.sourceRevision !== ref.sourceRevision;
+          await tx
+            .update(recallSurfaces)
+            .set({
+              suppressedAt: revised ? null : raced.suppressedAt,
+              sourceRevision: ref.sourceRevision,
+              kind: ref.kind,
+              lastSurfacedAt: sql`now()`,
+              lastMessageId: messageId,
+              surfaceCount: raced.surfaceCount + 1,
+              version: raced.version + (revised ? 1 : 0),
+            })
+            .where(eq(recallSurfaces.id, raced.id));
         }
         if (input.task.conversationId && input.messages.length) {
           await tx
@@ -680,8 +1312,10 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
     },
 
     async raiseTaskBudget(agentId, taskId, requested) {
-      if (!Number.isFinite(requested) || requested < 0.01 || requested > 10_000) {
-        throw new Error('task budget must be between $0.01 and $10,000');
+      if (normalizeTaskBudget(requested, 0.01) === null) {
+        throw new Error(
+          'task budget must be between $0.01 and $9,999.9999 with at most four decimal places',
+        );
       }
       const [task] = await db
         .select({

@@ -9,10 +9,15 @@ import {
   FirestoreGraphRecallRepository,
   FirestoreMemoryRepository,
   FirestoreOccasionToolRepository,
+  FirestoreProfileOccasionCommandRepository,
   FirestoreSituationToolRepository,
   FirestoreToolExecutionRepository,
 } from '@assistant/firestore';
-import type { EmbeddingSpace, Records } from '@assistant/persistence';
+import {
+  conversationMessageSourceRevision,
+  type EmbeddingSpace,
+  type Records,
+} from '@assistant/persistence';
 import {
   registerAuditTools,
   registerPortableContactLookupTool,
@@ -89,8 +94,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         embed,
         graph: new FirestoreGraphRecallRepository(store, space),
       });
+      const conversations = new FirestoreConversationSearchRepository(store, space);
       registerPortableReadResultTool(registry, {
         toolExecution: new FirestoreToolExecutionRepository(store),
+        conversations,
       });
       registerPortableOccasionTools(registry, new FirestoreOccasionToolRepository(store, AGENT));
       registerPortableContactLookupTool(
@@ -98,8 +105,11 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         new FirestoreContactLookupRepository(store, AGENT),
       );
       registerPortableConversationSearchTool(registry, {
-        embed,
-        conversations: new FirestoreConversationSearchRepository(store, space),
+        embed: async (texts) => ({
+          embeddings: await embed(texts),
+          embeddingSpaceKey: embeddingSpaceKey(space),
+        }),
+        conversations,
       });
       registerSituationTools(registry, new FirestoreSituationToolRepository(store, AGENT));
       await store.doc('agents', AGENT).set({ id: AGENT, name: 'Owner', timezone: 'UTC' });
@@ -179,6 +189,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         createdAt: earlier,
         expiresAt: null,
         embedding: vector,
+        embeddingSpaceKey: embeddingSpaceKey(options.space ?? space),
         sourceTaskId: null,
         kind: 'fact',
         confidence: '0.90',
@@ -227,6 +238,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         objectEntityId: `org-${id}`,
         predicate: 'works_at',
         evidenceQuote: `works at ${id}`,
+        assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
         confidence: '0.80',
         reviewStatus: 'pending',
         validFrom: null,
@@ -382,6 +394,59 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       ).rejects.toThrow('outside the configured Firestore agent');
     });
 
+    it('routes occasion tools through the stable identity marker after an owner date edit', async () => {
+      await contact('owner-contact', { name: 'Olivia Owner', trust: 'owner' });
+      await contact('anna', { name: 'Anna Jónsdóttir' });
+      await run('occasions.save', {
+        subject: 'Anna',
+        kind: 'birthday',
+        month: 4,
+        day: 12,
+        notes: 'Initial source',
+      });
+      const original = (await store.collection('occasions').where('contactId', '==', 'anna').get())
+        .docs[0];
+      if (!original) throw new Error('Expected the tool occasion');
+      const originalId = String(original.get('id'));
+      await new FirestoreProfileOccasionCommandRepository(store, AGENT).update(originalId, {
+        kind: 'birthday',
+        label: 'Birthday',
+        month: 4,
+        day: 13,
+        year: null,
+        leadDays: 7,
+        notes: 'Owner correction',
+      });
+
+      expect(
+        await run('occasions.save', {
+          subject: 'Anna',
+          kind: 'birthday',
+          month: 4,
+          day: 12,
+          notes: 'Old email date',
+        }),
+      ).toMatchObject({ saved: false, updated: true });
+      expect(
+        await run('occasions.save', {
+          subject: 'Anna',
+          kind: 'birthday',
+          month: 4,
+          day: 13,
+          notes: 'Later source',
+        }),
+      ).toMatchObject({ saved: false, updated: true });
+      const rows = await store.collection('occasions').where('contactId', '==', 'anna').get();
+      expect(rows.size).toBe(1);
+      expect(rows.docs.find((row) => row.get('id') === originalId)?.data()).toMatchObject({
+        id: originalId,
+        day: 13,
+        notes: 'Owner correction; Later source',
+        ownerConfirmed: true,
+      });
+      expect(rows.docs.find((row) => row.get('day') === 12)).toBeUndefined();
+    });
+
     it('looks up saved addresses by name and alias without creating contacts', async () => {
       await contact('anna', {
         name: 'Anna Jónsdóttir',
@@ -462,6 +527,190 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       );
     });
 
+    it('pages an unchanged Firestore search whose persisted dates remain Date objects', async () => {
+      const taskId = randomUUID();
+      const callId = randomUUID();
+      const sourceConversationId = randomUUID();
+      const currentConversationId = randomUUID();
+      const marker = `persisted date search ${randomUUID()}`;
+      await store.doc('tasks', taskId).set({ id: taskId, agentId: AGENT, status: 'running' });
+      await conversation(sourceConversationId);
+      await conversation(currentConversationId);
+      const firstId = randomUUID();
+      const secondId = randomUUID();
+      const firstText = `${marker} ${'first source passage '.repeat(1_000)}`;
+      const secondText = `${marker} ${'second source passage '.repeat(1_000)}`;
+      await message(firstId, sourceConversationId, firstText, {
+        embedded: false,
+        createdAt: earlier,
+      });
+      await message(secondId, sourceConversationId, secondText, {
+        embedded: false,
+        createdAt: now,
+      });
+      const repository = new FirestoreConversationSearchRepository(store, space);
+      const matches = await repository.text({
+        agentId: AGENT,
+        query: marker,
+        limit: 5,
+        currentConversationId,
+      });
+      expect(matches.map((match) => match.messageId)).toEqual([secondId, firstId]);
+      expect(matches.every((match) => match.createdAt instanceof Date)).toBe(true);
+      const result = { mode: 'text', matches };
+      expect(JSON.stringify(result).length).toBeGreaterThan(30_000);
+      await store.doc('toolCalls', callId).set({
+        id: callId,
+        taskId,
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        approvalId: null,
+        args: { query: marker, limit: 5 },
+        result,
+      });
+      const storedBefore = (await store.doc('toolCalls', callId).get()).get('result');
+      const first = await run('tools.read_result', { toolCallId: callId }, { taskId });
+      expect(first).toMatchObject({ offset: 0, hasMore: true });
+      const second = await run(
+        'tools.read_result',
+        { toolCallId: callId, offset: 30_000 },
+        { taskId },
+      );
+      expect(second).toMatchObject({ offset: 30_000, hasMore: false });
+      expect(`${String(first.chunk)}${String(second.chunk)}`).toBe(JSON.stringify(result));
+      const storedAfter = (await store.doc('toolCalls', callId).get()).get('result');
+      expect(JSON.stringify(storedAfter)).toEqual(JSON.stringify(storedBefore));
+    });
+
+    it.each(['corrected', 'hidden', 'erased'] as const)(
+      'refuses an oversized conversation-search result after its source is %s',
+      async (change) => {
+        const taskId = randomUUID();
+        const callId = randomUUID();
+        const conversationId = randomUUID();
+        const currentConversationId = randomUUID();
+        const messageId = randomUUID();
+        const body = `newsletter privacy marker ${'old private body '.repeat(800)}`;
+        await store.doc('tasks', taskId).set({
+          id: taskId,
+          agentId: AGENT,
+          status: 'running',
+        });
+        await store.doc('conversations', conversationId).set({
+          id: conversationId,
+          agentId: AGENT,
+        });
+        await store.doc('conversations', currentConversationId).set({
+          id: currentConversationId,
+          agentId: AGENT,
+        });
+        await store.doc('messages', messageId).set({
+          id: messageId,
+          conversationId,
+          role: 'user',
+          text: body,
+          createdAt: earlier,
+          hiddenAt: null,
+        });
+        const conversations = new FirestoreConversationSearchRepository(store, space);
+        const matches = await conversations.text({
+          agentId: AGENT,
+          query: 'privacy marker',
+          limit: 5,
+          currentConversationId,
+        });
+        expect(matches).toHaveLength(1);
+        const result = {
+          mode: 'semantic',
+          matches: matches.map((match) => ({ ...match, similarity: 0.9 })),
+        };
+        expect(JSON.stringify(result).length).toBeGreaterThan(8_000);
+        await store.doc('toolCalls', callId).set({
+          id: callId,
+          taskId,
+          toolName: 'conversations.search',
+          status: 'succeeded',
+          approvalId: null,
+          args: { query: 'privacy marker', limit: 5 },
+          result,
+        });
+        const storedResultBefore = (await store.doc('toolCalls', callId).get()).get('result');
+
+        if (change === 'corrected') {
+          await store.doc('messages', messageId).update({
+            text: 'Owner correction: the old private body was withdrawn.',
+          });
+        } else if (change === 'hidden') {
+          await store.doc('messages', messageId).update({ hiddenAt: now });
+        } else {
+          // This completed marker models the committed erasure generation; the
+          // source predates it and is outside the current task conversation.
+          await store.doc('privacyErasureJobs', AGENT).set({
+            agentId: AGENT,
+            status: 'complete',
+            generation: randomUUID(),
+          });
+        }
+
+        const page = await run('tools.read_result', { toolCallId: callId }, { taskId });
+        expect(page).toEqual({
+          error:
+            'This stored conversation search changed. Run a fresh conversations.search before using its results.',
+        });
+        expect(JSON.stringify(page)).not.toContain(body);
+        const storedResultAfter = (await store.doc('toolCalls', callId).get()).get('result');
+        expect(JSON.stringify(storedResultAfter)).toEqual(JSON.stringify(storedResultBefore));
+      },
+    );
+
+    it('refuses a search result bound to a foreign owner conversation', async () => {
+      const taskId = randomUUID();
+      const callId = randomUUID();
+      const foreignConversationId = randomUUID();
+      const messageId = randomUUID();
+      const body = `foreign private marker ${'foreign body '.repeat(900)}`;
+      await store.doc('tasks', taskId).set({ id: taskId, agentId: AGENT, status: 'running' });
+      await store.doc('conversations', foreignConversationId).set({
+        id: foreignConversationId,
+        agentId: 'another-owner',
+      });
+      await store.doc('messages', messageId).set({
+        id: messageId,
+        conversationId: foreignConversationId,
+        role: 'user',
+        text: body,
+        createdAt: earlier,
+        hiddenAt: null,
+      });
+      await store.doc('toolCalls', callId).set({
+        id: callId,
+        taskId,
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        approvalId: null,
+        args: { query: 'foreign private marker', limit: 5 },
+        result: {
+          mode: 'semantic',
+          matches: [
+            {
+              messageId,
+              conversationId: foreignConversationId,
+              sourceRevision: conversationMessageSourceRevision(messageId, body),
+              text: body,
+              createdAt: earlier,
+              similarity: 0.9,
+            },
+          ],
+        },
+      });
+      const page = await run('tools.read_result', { toolCallId: callId }, { taskId });
+      expect(page).toEqual({
+        error:
+          'This stored conversation search changed. Run a fresh conversations.search before using its results.',
+      });
+      expect(JSON.stringify(page)).not.toContain(body);
+    });
+
     it('falls back to an owned substring search when nothing is embedded', async () => {
       await conversation('mine');
       await conversation('theirs', 'foreign');
@@ -473,8 +722,20 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect(result).toEqual({
         mode: 'text',
         matches: [
-          { conversationId: 'mine', text: 'kitchen quote', createdAt: now },
-          { conversationId: 'mine', text: 'The Kitchen tiles arrived', createdAt: earlier },
+          {
+            messageId: 'b',
+            conversationId: 'mine',
+            sourceRevision: conversationMessageSourceRevision('b', 'kitchen quote'),
+            text: 'kitchen quote',
+            createdAt: now,
+          },
+          {
+            messageId: 'a',
+            conversationId: 'mine',
+            sourceRevision: conversationMessageSourceRevision('a', 'The Kitchen tiles arrived'),
+            text: 'The Kitchen tiles arrived',
+            createdAt: earlier,
+          },
         ],
       });
     });

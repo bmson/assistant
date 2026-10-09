@@ -1,8 +1,11 @@
+import type { KnowledgeGraphAssertion } from './knowledge-graph-sync.js';
+
 export interface GraphRelation {
   relationId: string;
   subjectEntityId: string;
   subjectLabel: string;
   predicate: string;
+  assertion: KnowledgeGraphAssertion;
   objectEntityId: string;
   objectLabel: string;
   sourceMemoryId: string;
@@ -40,6 +43,7 @@ export interface GraphSnapshotRelation {
   subjectLabel: string;
   subjectKind: string;
   predicate: string;
+  assertion: KnowledgeGraphAssertion;
   objectId: string;
   objectLabel: string;
   objectKind: string;

@@ -11,9 +11,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
     let repository: FirestoreWorkspaceAnomalyRepository;
     const agentId = randomUUID();
 
-    beforeEach(() => {
+    beforeEach(async () => {
       store = emulatorStore();
       repository = new FirestoreWorkspaceAnomalyRepository(store);
+      await store.doc('agents', agentId).set({ id: agentId, name: 'Owner' });
     });
 
     afterEach(async () => disposeStore(store));
@@ -104,7 +105,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       await expect(repository.listOpen(agentId)).rejects.toThrow('Invalid open anomaly document');
     });
 
-    it('rejects a scan beyond its cap instead of returning a partial top 100', async () => {
+    it('keeps live anomalies available after more than 2,000 dismissed historical rows', async () => {
       for (let offset = 0; offset < 2_001; offset += 500) {
         const batch = store.db.batch();
         for (let index = offset; index < Math.min(offset + 500, 2_001); index += 1) {
@@ -113,9 +114,79 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         }
         await batch.commit();
       }
+      await seed('still-open', { createdAt: new Date('2026-12-02') });
+      await expect(repository.listOpen(agentId)).resolves.toMatchObject([{ id: 'still-open' }]);
+    });
+
+    it('retains the active-row bound when more than 2,000 anomalies are open', async () => {
+      const ids = Array.from({ length: 2_001 }, () => randomUUID()).sort();
+      for (let offset = 0; offset < 2_001; offset += 500) {
+        const batch = store.db.batch();
+        for (let index = offset; index < Math.min(offset + 500, 2_001); index += 1) {
+          const id = ids[index];
+          if (!id) throw new Error('Missing seeded anomaly ID');
+          batch.set(store.doc('anomalies', id), {
+            id,
+            agentId,
+            status: 'open',
+            kind: 'frequency',
+            toolName: 'calendar.create',
+            detail: 'Unexpected writes',
+            observed: 1,
+            expected: 0,
+            toolCallIds: [],
+            policyId: null,
+            createdAt: new Date('2026-09-01T00:00:00.000Z'),
+          });
+        }
+        await batch.commit();
+      }
       await expect(repository.listOpen(agentId)).rejects.toThrow(
         'Owner anomalies exceed the mobile workspace scan limit',
       );
+
+      const collected: string[] = [];
+      let afterId: string | undefined;
+      do {
+        const page = await repository.listOpenPage(agentId, {
+          ...(afterId ? { afterId } : {}),
+          limit: 100,
+        });
+        collected.push(...page.items.map((row) => row.id));
+        afterId = page.nextCursor ?? undefined;
+        expect(page.hasMore).toBe(Boolean(afterId));
+      } while (afterId);
+      expect(collected).toEqual(ids);
+    });
+
+    it('paginates open anomalies with owner-bound cursors and no skipped rows', async () => {
+      const ids = Array.from({ length: 5 }, () => randomUUID()).sort();
+      await Promise.all([
+        ...ids.map((id) => seed(id)),
+        store.doc('anomalies', randomUUID()).set({
+          id: randomUUID(),
+          agentId: randomUUID(),
+          status: 'open',
+          kind: 'frequency',
+          toolName: 'calendar.create',
+          detail: 'Foreign',
+          observed: 1,
+          expected: 0,
+          toolCallIds: [],
+          policyId: null,
+          createdAt: new Date(),
+        }),
+      ]);
+      const collected: string[] = [];
+      let afterId: string | undefined;
+      do {
+        const page = await repository.listOpenPage(agentId, { afterId, limit: 2 });
+        collected.push(...page.items.map((row) => row.id));
+        afterId = page.nextCursor ?? undefined;
+        expect(page.hasMore).toBe(Boolean(afterId));
+      } while (afterId);
+      expect(collected).toEqual(ids);
+      expect(new Set(collected).size).toBe(ids.length);
     });
 
     it('rejects reads during erasure and an erasure that completes mid-read', async () => {

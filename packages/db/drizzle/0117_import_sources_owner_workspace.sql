@@ -1,0 +1,2 @@
+CREATE INDEX "import_sources_agent_source_idx" ON "import_sources" USING btree ("agent_id","source");--> statement-breakpoint
+CREATE INDEX "import_sources_agent_workspace_path_idx" ON "import_sources" USING btree ("agent_id","workspace_path");

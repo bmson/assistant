@@ -1,25 +1,17 @@
-import type { ImportOverviewData, ImportOverviewRepository, Records } from '@assistant/persistence';
-import { FieldPath, type Query, type QueryDocumentSnapshot } from '@google-cloud/firestore';
+import type {
+  ImportOverviewData,
+  ImportOverviewRepository,
+  ImportSourcePathsInput,
+  ImportSourcesPageInput,
+  Records,
+} from '@assistant/persistence';
+import type { Query, QueryDocumentSnapshot } from '@google-cloud/firestore';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
-const PAGE_SIZE = 500;
-const MAX_SOURCE_ROWS = 20_000;
-const MAX_QUARANTINED_MEMORIES = 100_000;
-
-async function scan(query: Query, maxRows: number, message: string) {
-  const documents: QueryDocumentSnapshot[] = [];
-  let cursor: QueryDocumentSnapshot | undefined;
-  while (true) {
-    let page = query.orderBy(FieldPath.documentId()).limit(PAGE_SIZE);
-    if (cursor) page = page.startAfter(cursor);
-    const snapshot = await page.get();
-    documents.push(...snapshot.docs);
-    if (documents.length > maxRows) throw new Error(message);
-    if (snapshot.size < PAGE_SIZE) return documents;
-    cursor = snapshot.docs.at(-1);
-  }
-}
+const MAX_PAGE_SIZE = 50;
+const MAX_SOURCE_SCAN = 1_000;
+const MAX_SOURCE_PATH_LOOKUP = 50;
 
 function ownedSource(doc: QueryDocumentSnapshot, agentId: string): Records['importSources'] {
   const source = decodeRecord<Records['importSources']>(doc.data());
@@ -45,60 +37,95 @@ export class FirestoreImportOverviewRepository implements ImportOverviewReposito
     readonly configuredAgentId: string,
   ) {}
 
-  async load(): Promise<ImportOverviewData> {
+  async listPage(input: ImportSourcesPageInput): Promise<ImportOverviewData> {
+    if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > MAX_PAGE_SIZE)
+      throw new Error('Import source page size must be between 1 and 50');
+    if (
+      input.afterSource !== undefined &&
+      (input.afterSource.length === 0 || input.afterSource.length > 500)
+    )
+      throw new Error('Invalid import source continuation');
+    if (
+      input.excludeSourcePrefix !== undefined &&
+      (input.excludeSourcePrefix.length === 0 || input.excludeSourcePrefix.length > 100)
+    )
+      throw new Error('Invalid excluded import source prefix');
     const agent = await this.store.doc('agents', this.configuredAgentId).get();
     if (!agent.exists || agent.get('id') !== this.configuredAgentId)
       throw new Error('Configured Firestore agent is missing or malformed');
     const fence = await readPrivacyErasureFence(this.store, this.configuredAgentId);
-    const [sourceDocs, quarantinedDocs] = await Promise.all([
-      scan(
-        this.store
-          .collection('importSources')
-          .where('agentId', '==', this.configuredAgentId) as Query,
-        MAX_SOURCE_ROWS,
-        'Import overview source scan exceeds its explicit limit',
-      ),
-      scan(
-        this.store
-          .collection('memories')
-          .where('agentId', '==', this.configuredAgentId)
-          .where('quarantined', '==', true) as Query,
-        MAX_QUARANTINED_MEMORIES,
-        'Import overview quarantine scan exceeds its explicit limit',
-      ),
-    ]);
-
-    const sources = sourceDocs.map((doc) => ownedSource(doc, this.configuredAgentId));
-    const sourceNames = new Set<string>();
-    for (const source of sources) {
-      if (sourceNames.has(source.source)) throw new Error('Duplicate import source identity');
-      sourceNames.add(source.source);
+    const sourceQuery = this.store
+      .collection('importSources')
+      .where('agentId', '==', this.configuredAgentId)
+      .orderBy('source', 'asc') as Query;
+    const query = input.afterSource ? sourceQuery.startAfter(input.afterSource) : sourceQuery;
+    // Scan a bounded number of ordered source rows so omitted classes (for example
+    // voice-sample imports) never consume a visible page or hide later history.
+    const sourceSnapshot = await query.limit(MAX_SOURCE_SCAN + 1).get();
+    const sources: Records['importSources'][] = [];
+    let lastScannedSource: string | null = null;
+    let foundVisibleOverflow = false;
+    for (const doc of sourceSnapshot.docs.slice(0, MAX_SOURCE_SCAN)) {
+      const source = ownedSource(doc, this.configuredAgentId);
+      if (input.excludeSourcePrefix && source.source.startsWith(input.excludeSourcePrefix)) {
+        lastScannedSource = source.source;
+        continue;
+      }
+      if (sources.length === input.limit) {
+        foundVisibleOverflow = true;
+        break;
+      }
+      sources.push(source);
+      lastScannedSource = source.source;
     }
     const quarantineCounts = new Map<string, number>();
-    for (const doc of quarantinedDocs) {
-      const memory = decodeRecord<{
-        id: string;
-        agentId: string;
-        quarantined: boolean;
-        source?: string | null;
-      }>(doc.data());
-      if (
-        !memory.id ||
-        documentKey(memory.id) !== doc.id ||
-        memory.agentId !== this.configuredAgentId ||
-        memory.quarantined !== true
-      )
-        throw new Error('Malformed or foreign quarantined import memory');
-      if (memory.source == null) continue;
-      if (typeof memory.source !== 'string')
-        throw new Error('Malformed quarantined import memory source');
-      quarantineCounts.set(memory.source, (quarantineCounts.get(memory.source) ?? 0) + 1);
-    }
-    sources.sort(
-      (left, right) =>
-        right.updatedAt.getTime() - left.updatedAt.getTime() || right.id.localeCompare(left.id),
+    await Promise.all(
+      sources.map(async (source) => {
+        const query = this.store
+          .collection('memories')
+          .where('agentId', '==', this.configuredAgentId)
+          .where('source', '==', source.source)
+          .where('quarantined', '==', true);
+        const result = await query.count().get();
+        const count = result.data().count;
+        if (!Number.isSafeInteger(count) || count < 0)
+          throw new Error('Malformed import quarantine count');
+        if (count > 0) quarantineCounts.set(source.source, count);
+      }),
     );
     await assertPrivacyErasureFenceUnchanged(this.store, this.configuredAgentId, fence);
-    return { sources, quarantineBySource: Object.fromEntries(quarantineCounts) };
+    const hasMore = foundVisibleOverflow || sourceSnapshot.size > MAX_SOURCE_SCAN;
+    return {
+      sources,
+      quarantineBySource: Object.fromEntries(quarantineCounts),
+      hasMore,
+      nextCursor: hasMore ? lastScannedSource : null,
+    };
+  }
+
+  async trackedWorkspacePaths(input: ImportSourcePathsInput): Promise<string[]> {
+    if (input.workspacePaths.length > MAX_SOURCE_PATH_LOOKUP)
+      throw new Error('Import workspace path lookup exceeds its explicit bound');
+    if (input.workspacePaths.length === 0) return [];
+    const agent = await this.store.doc('agents', this.configuredAgentId).get();
+    if (!agent.exists || agent.get('id') !== this.configuredAgentId)
+      throw new Error('Configured Firestore agent is missing or malformed');
+    const fence = await readPrivacyErasureFence(this.store, this.configuredAgentId);
+    const paths: string[] = [];
+    for (let offset = 0; offset < input.workspacePaths.length; offset += 30) {
+      const batch = input.workspacePaths.slice(offset, offset + 30);
+      const snapshot = await this.store
+        .collection('importSources')
+        .where('agentId', '==', this.configuredAgentId)
+        .where('workspacePath', 'in', batch)
+        .get();
+      for (const doc of snapshot.docs) {
+        const row = ownedSource(doc, this.configuredAgentId);
+        if (!batch.includes(row.workspacePath)) throw new Error('Malformed tracked import path');
+        paths.push(row.workspacePath);
+      }
+    }
+    await assertPrivacyErasureFenceUnchanged(this.store, this.configuredAgentId, fence);
+    return paths;
   }
 }

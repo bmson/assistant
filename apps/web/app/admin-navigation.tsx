@@ -21,7 +21,7 @@ export function AdminNavigation({ passkey }: { passkey: boolean }) {
             key={href}
             href={href}
             aria-current={active ? 'page' : undefined}
-            className={`inline-flex min-h-11 items-center rounded-lg px-3 text-sm font-medium motion-safe:transition-colors ${active ? 'bg-sunken text-strong' : 'text-muted hover:bg-sunken/60 hover:text-strong'} ${focusRing}`}
+            className={`inline-flex min-h-[44px] items-center rounded-lg px-3 text-sm font-medium motion-safe:transition-colors ${active ? 'bg-sunken text-strong' : 'text-muted hover:bg-sunken/60 hover:text-strong'} ${focusRing}`}
           >
             {label}
           </Link>

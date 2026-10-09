@@ -20,6 +20,7 @@ import {
   listSituationPacks,
   PackDataSchema,
   PackItemSchema,
+  recallSituationDecisionContext,
   recallSituationDecisions,
   validatePack,
 } from './situations.js';
@@ -398,6 +399,52 @@ describe('durable situation packs', () => {
     }
     expect((await get(id)).data.decisions).toHaveLength(1);
     expect((await get(id)).data.decisions[0]?.outcome).toBe('chosen');
+  });
+
+  it('preplanning context keeps opposite owner-confirmed choices from separate packs', async () => {
+    const rejectedPack = await create('Launch plan A');
+    const chosenPack = await create('Launch plan B');
+    for (const [packId, outcome, reason] of [
+      [rejectedPack, 'rejected', 'Daily meetings interrupt focus during launch.'],
+      [chosenPack, 'chosen', 'Daily check-ins catch blockers during launch.'],
+    ] as const) {
+      const result = await commandSituationPack(
+        db,
+        agentId,
+        {
+          action: 'decision',
+          packId,
+          version: 1,
+          decision: {
+            id: 'daily-check-in',
+            option: 'Daily check-in',
+            outcome,
+            reason,
+            scope: 'situation',
+            confirmed: true,
+          },
+        },
+        { ownerConfirmed: true },
+      );
+      expect(result).toMatchObject({ ok: true });
+    }
+
+    const matches = await recallSituationDecisionContext(
+      db,
+      agentId,
+      'Should we add a daily check-in for launch?',
+      1,
+    );
+
+    expect(
+      matches
+        .map(({ packId, packVersion, outcome }) => ({ packId, packVersion, outcome }))
+        .sort((a, b) => a.outcome.localeCompare(b.outcome)),
+    ).toEqual([
+      { packId: chosenPack, packVersion: 2, outcome: 'chosen' },
+      { packId: rejectedPack, packVersion: 2, outcome: 'rejected' },
+    ]);
+    expect(await recallSituationDecisionContext(db, otherId, 'daily check-in launch')).toEqual([]);
   });
   it('produces a deduplicated, non-executing review suggestion only for changed sources', async () => {
     const id = await create();

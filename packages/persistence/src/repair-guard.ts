@@ -30,8 +30,19 @@ export function repairPathBlocked(path: string, allowExecutor = false): boolean 
     'packages/core/src/workflow/improve.ts',
     'packages/core/src/workflow/dream.ts',
   ];
+  // Review patches can introduce new security files outside the canonical
+  // packages/firestore subtree. Match security concepts as filename tokens,
+  // including common expanded names, rather than relying on an exact `auth`
+  // path segment that misses `owner-authentication.ts` and
+  // `owner-authorization.ts`.
+  const securityPathSegment = (segment: string) =>
+    /(?:^|[-_.])(?:auth|authentication|authorization|authenticator|passkeys?|device[-_]keys?)(?:$|[-_.])/i.test(
+      segment,
+    );
   return (
     protectedFiles.includes(path) ||
+    /^packages\/firestore\//.test(path) ||
+    path.split('/').some(securityPathSegment) ||
     /(^|\/)(?:auth(?:[./-]|$)|credential|secret|taint|oidc)|credential|secret|approval|trust|policy|policies|permission|privacy|email-provenance|webhooks?\.|(^|\/)\.env|(^|\/)(?:self-repair|repair(?:s)?(?:[./-]|$))|(^|\/)(?:AGENTS\.md|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig[^/]*|biome[^/]*|vitest[^/]*|Dockerfile|\.git[^/]*)(?:$|\/)|^packages\/(?:config|persistence|db)\//i.test(
       path,
     )

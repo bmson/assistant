@@ -3,6 +3,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInstallationStore } from '@assistant/firestore';
+import { chatAdmissionPayload } from '@assistant/persistence';
 import {
   advanceInstallationStage,
   type ConsumerInstallOptions,
@@ -490,7 +491,7 @@ describe('consumer install image publishing orchestration', () => {
 });
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('consumer install readiness evidence', () => {
-  it('reports seeded runtime data, a recorded model response, and issues one owner claim', async () => {
+  it('requires a current owner reply acknowledged by the paired native client', async () => {
     const installationId = `ready-${randomUUID().slice(0, 8)}`;
     const createStore = () =>
       createInstallationStore({ projectId: 'demo-assistant-test', installationId });
@@ -505,12 +506,15 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('consumer install readines
         webUrl: 'https://ready-web-1.us-central1.run.app',
         authOrigin: 'https://ready-web-1.us-central1.run.app',
         agentId,
+        runtimeInitializedAt: seedAt,
+        servingAgentRevision: 'ready-agent-revision',
+        releaseSha: '0123456789abcdef0123456789abcdef01234567',
         embeddingSpace,
       };
       const evidence = firestoreReadinessEvidence(createStore);
       expect(await evidence(context)).toEqual({
         runtimeData: { ready: true, issues: [] },
-        modelResponseObserved: false,
+        ownerReplyDelivered: false,
       });
       await inspect.doc('modelCalls', 'call-1').set({
         id: 'call-1',
@@ -518,7 +522,97 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('consumer install readines
         model: 'vertex/example-chat',
         outputTokens: 12,
       });
-      expect((await evidence(context)).modelResponseObserved).toBe(true);
+      expect((await evidence(context)).ownerReplyDelivered).toBe(false);
+      const requestAt = new Date();
+      const callAt = new Date(requestAt.getTime() + 1);
+      const replyAt = new Date(callAt.getTime() + 1);
+      const deliveredAt = new Date(replyAt.getTime() + 1);
+      const clientId = '5609a8a4-fd04-49bf-a90a-d0038262e765';
+      const conversationId = 'd1f64071-aa8d-4d7a-a68f-1d1c75f51630';
+      await inspect.doc('tasks', 'owner-task-1').set({
+        id: 'owner-task-1',
+        agentId,
+        trust: 'owner',
+        type: 'chat_turn',
+        status: 'done',
+        createdAt: requestAt,
+        conversationId,
+        trigger: {
+          payload: {
+            chatAdmission: {
+              protocol: 'owner-chat-v1',
+              clientOperationId: '5509a8a4-fd04-49bf-a90a-d0038262e765',
+              requestHash: 'a'.repeat(64),
+              triggerMessageId: 'owner-request-1',
+              phase: 'streaming',
+            },
+          },
+        },
+      });
+      await inspect.doc('messages', 'owner-request-1').set({
+        id: 'owner-request-1',
+        taskId: 'owner-task-1',
+        role: 'user',
+        origin: 'owner',
+        text: 'Hi',
+        conversationId,
+        clientId,
+        createdAt: requestAt,
+      });
+      await inspect.doc('messages', 'owner-reply-1').set({
+        id: 'owner-reply-1',
+        taskId: 'owner-task-1',
+        role: 'assistant',
+        origin: 'assistant',
+        text: 'Hello.',
+        conversationId,
+        clientDeliveredAt: deliveredAt,
+        clientDeliveredBy: clientId,
+        createdAt: replyAt,
+      });
+      await inspect.doc('modelCalls', 'owner-call-1').set({
+        id: 'owner-call-1',
+        taskId: 'owner-task-1',
+        createdAt: callAt,
+        model: 'vertex/example-chat',
+        outputTokens: 12,
+        runtimeRevision: context.servingAgentRevision,
+        runtimeReleaseSha: context.releaseSha,
+      });
+      const savedTask = await inspect.doc('tasks', 'owner-task-1').get();
+      expect(chatAdmissionPayload(savedTask.data() as never)?.triggerMessageId).toBe(
+        'owner-request-1',
+      );
+      const savedCall = await inspect.doc('modelCalls', 'owner-call-1').get();
+      expect(savedCall.get('runtimeRevision')).toBe(context.servingAgentRevision);
+      const savedRequest = await inspect.doc('messages', 'owner-request-1').get();
+      const savedReply = await inspect.doc('messages', 'owner-reply-1').get();
+      expect(savedRequest.get('clientId')).toBe(clientId);
+      expect(savedReply.get('clientDeliveredBy')).toBe(clientId);
+      expect(savedRequest.get('createdAt').toDate().getTime()).toBeLessThanOrEqual(
+        savedCall.get('createdAt').toDate().getTime(),
+      );
+      expect(savedCall.get('createdAt').toDate().getTime()).toBeLessThanOrEqual(
+        savedReply.get('createdAt').toDate().getTime(),
+      );
+      expect((await evidence(context)).ownerReplyDelivered).toBe(true);
+      await inspect.doc('modelCalls', 'owner-call-1').update({ runtimeRevision: 'old-revision' });
+      expect((await evidence(context)).ownerReplyDelivered).toBe(false);
+      await inspect.doc('modelCalls', 'owner-call-1').update({
+        runtimeRevision: context.servingAgentRevision,
+      });
+      await inspect.doc('messages', 'owner-reply-1').update({ clientDeliveredBy: 'other-client' });
+      expect((await evidence(context)).ownerReplyDelivered).toBe(false);
+      await inspect.doc('messages', 'owner-reply-1').update({ clientDeliveredBy: clientId });
+      await inspect.doc('messages', 'owner-reply-1').update({ clientDeliveredAt: null });
+      expect((await evidence(context)).ownerReplyDelivered).toBe(false);
+      await inspect.doc('messages', 'owner-reply-1').update({ clientDeliveredAt: deliveredAt });
+      await inspect.doc('tasks', 'owner-task-1').update({ agentId: 'foreign-agent' });
+      expect((await evidence(context)).ownerReplyDelivered).toBe(false);
+      await inspect.doc('tasks', 'owner-task-1').update({ agentId });
+      await inspect.doc('tasks', 'owner-task-1').update({ type: 'scheduled' });
+      expect((await evidence(context)).ownerReplyDelivered).toBe(false);
+      await inspect.doc('tasks', 'owner-task-1').update({ type: 'chat_turn' });
       expect(
         (await evidence({ ...context, agentId: '00000000-0000-4000-8000-000000000000' }))
           .runtimeData.ready,
@@ -558,5 +652,5 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('consumer install readines
       await inspect.db.recursiveDelete(inspect.root);
       await inspect.db.terminate();
     }
-  });
+  }, 30_000);
 });

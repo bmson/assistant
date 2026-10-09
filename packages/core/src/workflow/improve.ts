@@ -18,6 +18,7 @@ import {
 import {
   type CodeJobLease,
   type ExecutionPersistence,
+  embeddingSpaceIdentityKey,
   type ImprovementActionResult,
   improvementModelChange,
   type SelfImprovementRepository,
@@ -309,7 +310,12 @@ export async function runSelfImprove(
       const extraction = portable.memoryExtraction;
       if (!extraction || !opts.lease)
         throw new Error('Portable self-improvement needs memory extraction and the task lease');
-      const [embedding] = await router.embed([content], { taskId: opts.taskId });
+      const space = await router.embeddingSpace();
+      const embeddingSpaceKey = embeddingSpaceIdentityKey(space);
+      const [embedding] = await router.embed([content], {
+        taskId: opts.taskId,
+        expectedSpace: space,
+      });
       await deps.heartbeat?.();
       if (embedding) {
         // One checkpoint per review task: a reclaimed run never re-saves it.
@@ -324,6 +330,7 @@ export async function runSelfImprove(
               content,
               contentHash,
               embedding,
+              embeddingSpaceKey,
               category: 'experience',
               kind: 'episode',
               importance: 2,
@@ -341,7 +348,12 @@ export async function runSelfImprove(
         experienceSaved = (applied?.saved ?? 0) > 0;
       }
     } else if (!(await isTombstoned(db, contentHash))) {
-      const [embedding] = await router.embed([content], { taskId: opts.taskId });
+      const space = await router.embeddingSpace();
+      const embeddingSpaceKey = embeddingSpaceIdentityKey(space);
+      const [embedding] = await router.embed([content], {
+        taskId: opts.taskId,
+        expectedSpace: space,
+      });
       await deps.heartbeat?.();
       const [saved] = await db
         .insert(memories)
@@ -352,6 +364,7 @@ export async function runSelfImprove(
           content,
           contentHash,
           embedding,
+          embeddingSpaceKey,
           importance: 2,
           confidence: '0.80',
           originTrust: 'assistant',

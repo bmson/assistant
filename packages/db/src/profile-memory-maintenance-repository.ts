@@ -51,6 +51,13 @@ export function createPostgresProfileMemoryMaintenance(
                 WHERE relation.subject_entity_id = ${knowledgeGraphEntities.id}
                    OR relation.object_entity_id = ${knowledgeGraphEntities.id}
               )`,
+            // Canonical assertions retain owner review and correction history
+            // independently of whether any source evidence still survives.
+            sql`NOT EXISTS (
+                SELECT 1 FROM knowledge_graph_assertions AS assertion
+                WHERE assertion.subject_entity_id = ${knowledgeGraphEntities.id}
+                   OR assertion.object_entity_id = ${knowledgeGraphEntities.id}
+              )`,
           ),
         );
       });

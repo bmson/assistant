@@ -69,19 +69,19 @@ function StableLabel({
   return (
     <span className="grid min-w-0 max-w-full grid-cols-[minmax(0,1fr)] items-center justify-items-center">
       <span
-        className="invisible col-start-1 row-start-1 inline-flex min-w-0 max-w-full items-center gap-2 [overflow-wrap:anywhere]"
+        className="invisible col-start-1 row-start-1 flex min-w-0 max-w-full flex-wrap items-center justify-center gap-2 [overflow-wrap:break-word]"
         aria-hidden="true"
       >
         {children}
       </span>
       <span
-        className="invisible col-start-1 row-start-1 inline-flex min-w-0 max-w-full items-center gap-2 [overflow-wrap:anywhere]"
+        className="invisible col-start-1 row-start-1 flex min-w-0 max-w-full flex-wrap items-center justify-center gap-2 [overflow-wrap:break-word]"
         aria-hidden="true"
       >
         <LoaderCircle />
         {pendingLabel}
       </span>
-      <span className="col-start-1 row-start-1 inline-flex min-w-0 max-w-full items-center gap-2 [overflow-wrap:anywhere]">
+      <span className="col-start-1 row-start-1 flex min-w-0 max-w-full flex-wrap items-center justify-center gap-2 [overflow-wrap:break-word]">
         {pending ? (
           <>
             <LoaderCircle className="motion-safe:animate-spin" aria-hidden="true" />
@@ -406,11 +406,14 @@ export function Modal({
   label,
   onClose,
   panelClassName = 'max-w-2xl gap-4',
+  dismissible = true,
   children,
 }: {
   /** Accessible name for the dialog, since the heading lives in `children`. */
   label: string;
   onClose: () => void;
+  /** Pending writes may keep the dialog open until the authoritative result arrives. */
+  dismissible?: boolean;
   /** Width and internal spacing for the panel; the shell styling is fixed. */
   panelClassName?: string;
   children: ReactNode;
@@ -440,6 +443,9 @@ export function Modal({
     <dialog
       ref={dialogRef}
       aria-label={label}
+      onCancel={(event) => {
+        if (!dismissible) event.preventDefault();
+      }}
       onClose={() => {
         // `close` is fired from a queued task, so the one Strict Mode's
         // mount/unmount/mount provokes arrives *after* the remount reopened
@@ -453,7 +459,7 @@ export function Modal({
         // Testing containment rather than `target === dialog` keeps a native
         // select's option list — which reports the select as its target while
         // painting outside the panel — from closing the form.
-        if (pressedScrim.current && outside(event.target)) onClose();
+        if (dismissible && pressedScrim.current && outside(event.target)) onClose();
       }}
       className="fixed inset-0 m-0 hidden h-full max-h-none w-full max-w-none place-items-end border-0 bg-transparent p-0 backdrop:bg-strong/25 open:grid sm:place-items-center sm:p-6"
     >

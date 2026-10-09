@@ -1,29 +1,38 @@
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
+import { allocateTestTarget } from './scripts/test-target.js';
 
 /**
- * The integration projects drop and recreate their schema, so they may only
- * ever point at a `_test` database. A contributor's shell usually has
- * DATABASE_URL aimed at their development database, and a suite invoked
- * directly once wiped one — so redirect rather than trust it.
- *
- * Redirecting instead of throwing is deliberate: refusing outright also
- * blocked `vitest packages/config` and the web component suites, which never
- * open a connection, for anyone whose shell had the variable set at all.
+ * Every Vitest invocation receives a fresh loopback database URL. Database
+ * suites require `pnpm test` to create it; direct unit-suite invocations stay
+ * usable without being able to select a shared or remote database.
  */
-function safeTestDatabaseUrl(): string {
-  const configured = process.env.DATABASE_URL;
-  const url = new URL(configured ?? 'postgres://assistant:assistant@localhost:5432/assistant_test');
-  const database = decodeURIComponent(url.pathname.replace(/^\//, ''));
-  if (!database) throw new Error('DATABASE_URL names no database.');
-  if (!database.endsWith('_test')) {
-    url.pathname = `/${encodeURIComponent(`${database}_test`)}`;
-    console.warn(
-      `Vitest redirected DATABASE_URL from "${database}" to "${database}_test" — the integration suites recreate the schema they run against.`,
-    );
+function isolatedTestTarget(): {
+  databaseUrl: string;
+  token?: string;
+  kind: 'standard' | 'restore';
+} {
+  const token = process.env.ASSISTANT_TEST_TARGET_TOKEN;
+  const source = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL;
+  const requestedKind = token ? (process.env.ASSISTANT_TEST_TARGET_KIND ?? 'standard') : 'standard';
+  if (requestedKind !== 'standard' && requestedKind !== 'restore')
+    throw new Error('ASSISTANT_TEST_TARGET_KIND must be standard or restore.');
+  try {
+    const target = allocateTestTarget(source, token, requestedKind);
+    if (token && (source !== target.databaseUrl || process.env.DATABASE_URL !== source))
+      throw new Error('The supplied test target does not match the allocated database URL.');
+    return { databaseUrl: target.databaseUrl, kind: target.kind, ...(token ? { token } : {}) };
+  } catch (error) {
+    if (token) throw error;
+    // A shell can contain a remote development URL. Unit suites should remain
+    // runnable, while database tests fail locally unless `pnpm test` created
+    // their unique disposable target.
+    const target = allocateTestTarget(undefined);
+    return { databaseUrl: target.databaseUrl, kind: target.kind };
   }
-  return url.toString();
 }
+
+const target = isolatedTestTarget();
 
 /**
  * Projects that never touch PostgreSQL run their files in parallel; the
@@ -38,7 +47,12 @@ const parallel = (root: string) => ({
 
 export default defineConfig({
   test: {
-    env: { DATABASE_URL: safeTestDatabaseUrl() },
+    env: {
+      DATABASE_URL: target.databaseUrl,
+      TEST_DATABASE_URL: target.databaseUrl,
+      ...(target.token ? { ASSISTANT_TEST_TARGET_TOKEN: target.token } : {}),
+      ASSISTANT_TEST_TARGET_KIND: target.kind,
+    },
     // Inherited default for the DB-touching projects listed as plain strings.
     fileParallelism: false,
     projects: [
@@ -66,7 +80,8 @@ export default defineConfig({
       },
       parallel('packages/config'),
       parallel('packages/setup'),
-      parallel('scripts'),
+      // Fixture and recovery scripts share the allocated PostgreSQL database.
+      'scripts',
       {
         ...parallel('apps/web'),
         // Next resolves "@/..." from the app's tsconfig paths; vitest does not

@@ -1,7 +1,14 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { cardsReplaceProse, ResponseCards, rendersAllCards } from './response-card';
-import { liveScoreQuery, scoreboardShouldPoll, scoreGames } from './scoreboard-card';
+import {
+  liveScoreQuery,
+  nextScoreboardEligibilityBoundary,
+  refreshedGames,
+  ScoreboardRefreshFence,
+  scoreboardShouldPoll,
+  scoreGames,
+} from './scoreboard-card';
 
 const game = (id: string, state: string, extra: Record<string, unknown> = {}) => ({
   id,
@@ -41,6 +48,56 @@ describe('scoreboard polling', () => {
       ),
     ).toBe(false);
     expect(scoreboardShouldPoll(scoreGames([game('1', 'post')]), now)).toBe(false);
+    const startedAt = Date.parse('2026-09-22T01:45:00Z');
+    expect(scoreboardShouldPoll(scoreGames([game('1', 'in')]), startedAt + 4 * 3600_000)).toBe(
+      false,
+    );
+  });
+
+  it('schedules the ten-minute activation and four-hour stop boundaries from a frozen clock', () => {
+    const start = Date.parse('2026-09-22T02:00:00Z');
+    const now = Date.parse('2026-09-22T01:30:00Z');
+    const pregame = scoreGames([game('1', 'pre', { startsAt: new Date(start).toISOString() })]);
+    expect(nextScoreboardEligibilityBoundary(pregame, now)).toBe(start - 10 * 60_000);
+    const activationBoundary = nextScoreboardEligibilityBoundary(pregame, now);
+    expect(activationBoundary).toBe(start - 10 * 60_000);
+    if (activationBoundary !== undefined)
+      expect(scoreboardShouldPoll(pregame, activationBoundary)).toBe(true);
+    expect(nextScoreboardEligibilityBoundary(pregame, start + 4 * 3600_000)).toBeUndefined();
+    const inProgress = scoreGames([game('1', 'in', { startsAt: new Date(start).toISOString() })]);
+    expect(nextScoreboardEligibilityBoundary(inProgress, start + 60_000)).toBe(
+      start + 4 * 3600_000,
+    );
+  });
+
+  it('aborts superseded and stopped scoreboard requests and rejects stale revisions', () => {
+    const fence = new ScoreboardRefreshFence();
+    const first = fence.begin('revision-a');
+    const second = fence.begin('revision-a');
+    expect(first.signal.aborted).toBe(true);
+    expect(fence.isCurrent(first, 'revision-a')).toBe(false);
+    expect(fence.isCurrent(second, 'revision-b')).toBe(false);
+    expect(fence.isCurrent(second, 'revision-a')).toBe(true);
+    const changedRevision = fence.begin('revision-b');
+    expect(second.signal.aborted).toBe(true);
+    expect(fence.isCurrent(changedRevision, 'revision-b')).toBe(true);
+    fence.cancel(); // same cleanup is used for hidden cards and unmount
+    expect(changedRevision.signal.aborted).toBe(true);
+    expect(fence.isCurrent(changedRevision, 'revision-b')).toBe(false);
+  });
+
+  it('accepts only timestamped complete responses for the requested event set', () => {
+    const requested = scoreGames([game('1', 'in'), game('2', 'in', { league: 'nfl' })]);
+    const expected = requested.map((item) => `${item.league}:${item.id}`);
+    const body = {
+      ok: true,
+      fetchedAt: '2026-09-22T02:00:00Z',
+      games: requested,
+    };
+    expect(refreshedGames(body, expected)?.size).toBe(2);
+    expect(refreshedGames({ ...body, games: [requested[0]] }, expected)).toBeUndefined();
+    expect(refreshedGames({ ...body, fetchedAt: 'unknown' }, expected)).toBeUndefined();
+    expect(refreshedGames({ ...body, ok: false }, expected)).toBeUndefined();
   });
 
   it('asks the live endpoint only for games that can still change', () => {

@@ -1,4 +1,10 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import {
+  boundedProviderResponse,
+  ProviderDeadlineError,
+  providerTransaction,
+  withProviderSignal,
+} from '../bounded-provider-response.js';
 
 /**
  * Minimal Twilio REST client (fetch + basic auth — no SDK). Injectable so
@@ -6,6 +12,12 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
  */
 export interface SmsSender {
   send(to: string, body: string): Promise<{ sid: string }>;
+  getMessageUsage?(sid: string): Promise<TwilioMessageUsage>;
+}
+
+export interface TwilioMessageUsage {
+  billedSegments?: number;
+  priceUsd?: number;
 }
 
 export interface TwilioMessageStatus {
@@ -98,7 +110,26 @@ export class TwilioClient implements SmsSender {
     return Boolean(this.accountSid && this.authToken && this.fromNumber);
   }
 
-  async send(to: string, body: string): Promise<{ sid: string }> {
+  async send(to: string, body: string, callerSignal?: AbortSignal): Promise<{ sid: string }> {
+    try {
+      return await providerTransaction(callerSignal, this.timeoutMs, 'Twilio', (signal) =>
+        this.sendWithinDeadline(to, body, signal),
+      );
+    } catch (error) {
+      if (error instanceof ProviderDeadlineError || callerSignal?.aborted)
+        throw new AmbiguousTwilioDeliveryError(
+          'Twilio delivery outcome is unknown after its transaction was interrupted',
+          error,
+        );
+      throw error;
+    }
+  }
+
+  private async sendWithinDeadline(
+    to: string,
+    body: string,
+    signal: AbortSignal,
+  ): Promise<{ sid: string }> {
     let retries = 0;
     while (true) {
       // A network error or timeout is ambiguous: Twilio may have accepted the
@@ -109,6 +140,7 @@ export class TwilioClient implements SmsSender {
           `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(this.accountSid)}/Messages.json`,
           {
             method: 'POST',
+            signal,
             headers: {
               authorization: `Basic ${Buffer.from(`${this.accountSid}:${this.authToken}`).toString('base64')}`,
               'content-type': 'application/x-www-form-urlencoded',
@@ -143,7 +175,10 @@ export class TwilioClient implements SmsSender {
         const retryAfter = retryAfterMs(res.headers.get('retry-after'));
         const exponential = this.retryBaseDelayMs * 2 ** retries;
         retries += 1;
-        await this.sleep(Math.min(MAX_RETRY_DELAY_MS, retryAfter ?? exponential));
+        await withProviderSignal(
+          this.sleep(Math.min(MAX_RETRY_DELAY_MS, retryAfter ?? exponential)),
+          signal,
+        );
         continue;
       }
       if (res.status === 408 || res.status >= 500) {
@@ -200,21 +235,48 @@ export class TwilioClient implements SmsSender {
     };
   }
 
-  private async fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
-    if (init.signal?.aborted) throw init.signal.reason ?? new Error('request aborted');
-    const controller = new AbortController();
-    const abort = () => controller.abort(init.signal?.reason);
-    init.signal?.addEventListener('abort', abort, { once: true });
-    const timeout = setTimeout(
-      () => controller.abort(new Error(`Twilio request timed out after ${this.timeoutMs}ms`)),
-      this.timeoutMs,
+  /** Read Message usage; durable read-repair retries when Twilio has not populated it yet. */
+  async getMessageUsage(sid: string): Promise<TwilioMessageUsage> {
+    if (!/^SM[0-9A-Za-z]{8,64}$/.test(sid)) throw new Error('invalid Twilio Message SID');
+    const res = await this.fetchWithTimeout(
+      `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(this.accountSid)}/Messages/${encodeURIComponent(sid)}.json`,
+      {
+        method: 'GET',
+        headers: {
+          authorization: `Basic ${Buffer.from(`${this.accountSid}:${this.authToken}`).toString('base64')}`,
+        },
+      },
     );
+    const text = await res.text();
+    if (!res.ok) throw new Error(`twilio usage lookup failed: ${res.status} ${text.slice(0, 200)}`);
+    let data: {
+      sid?: string;
+      num_segments?: string | number;
+      price?: string | null;
+      price_unit?: string | null;
+    };
     try {
-      return await this.fetchFn(url, { ...init, signal: controller.signal });
-    } finally {
-      clearTimeout(timeout);
-      init.signal?.removeEventListener('abort', abort);
+      data = text ? (JSON.parse(text) as typeof data) : {};
+    } catch {
+      throw new Error(`twilio usage lookup returned malformed data: ${text.slice(0, 200)}`);
     }
+    if (data.sid !== sid) throw new Error('twilio usage lookup returned a different message SID');
+    const segments = Number(data.num_segments);
+    const price = data.price === null || data.price === undefined ? Number.NaN : Number(data.price);
+    return {
+      ...(Number.isInteger(segments) && segments > 0 ? { billedSegments: segments } : {}),
+      ...(Number.isFinite(price) && data.price_unit?.toLowerCase() === 'usd'
+        ? { priceUsd: Math.abs(price) }
+        : {}),
+    };
+  }
+
+  private async fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+    return boundedProviderResponse(this.fetchFn, url, init, {
+      timeoutMs: this.timeoutMs,
+      maxBytes: 1024 * 1024,
+      label: 'Twilio',
+    });
   }
 }
 

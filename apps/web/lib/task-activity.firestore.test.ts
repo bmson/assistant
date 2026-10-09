@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { resetConfigForTest } from '@assistant/config';
 import { createInstallationStore } from '@assistant/firestore';
+import { Timestamp } from '@google-cloud/firestore';
 import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -139,6 +140,45 @@ describe.skipIf(!emulator)('web task Activity in Firestore mode with PostgreSQL 
       actions: [{ id: 'activity-tool', completed: true }],
     });
     expect(await activity.getTaskActivityDetail(foreignTaskId)).toBeNull();
+  });
+
+  it('pages equal-time and nanosecond audit entries without loss or repeats', async () => {
+    const id = randomUUID();
+    const baseline = (await store.doc('tasks', taskId).get()).data();
+    await store.doc('tasks', id).set({ ...baseline, id });
+    await Promise.all(
+      Array.from({ length: 121 }, (_, index) => {
+        const key = `timeline-${String(index).padStart(3, '0')}`;
+        return store.doc('toolCalls', key).set({
+          id: key,
+          taskId: id,
+          createdAt: new Timestamp(1_790_000_000, index < 101 ? 0 : index),
+          finishedAt: null,
+          toolName: 'web.fetch',
+          step: index,
+          status: 'succeeded',
+          decision: {},
+          args: {},
+          result: { ok: true },
+          error: null,
+        });
+      }),
+    );
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    for (let pageIndex = 0; pageIndex < 10; pageIndex++) {
+      const page = await activity.getTaskActivityDetail(id, { pageSize: 25, cursor });
+      if (!page) throw new Error('Missing timeline page');
+      expect(page.toolCalls.length).toBeLessThanOrEqual(25);
+      for (const row of page.toolCalls) {
+        expect(seen.has(row.id)).toBe(false);
+        seen.add(row.id);
+      }
+      if (!page.hasMoreTimeline) break;
+      if (!page.nextTimelineCursor) throw new Error('Missing timeline cursor');
+      cursor = page.nextTimelineCursor;
+    }
+    expect(seen.size).toBe(121);
   });
 
   it('allows only the Activity pages and Server Action methods through the Firestore proxy', async () => {

@@ -6,6 +6,7 @@ import { appearanceScript } from '@/lib/appearance';
 import { focusRing } from '@/lib/ui';
 import { AdminNavigation } from './admin-navigation';
 import { AppearanceMenu } from './appearance-control';
+import { OwnerAccountMenu } from './owner-account-menu';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -37,7 +38,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
           </p>
         ) : null}
         <header className="border-b border-edge bg-raised/50">
-          <div className="page-gutter mx-auto flex max-w-4xl flex-wrap items-center justify-between gap-x-8 gap-y-1 py-2 sm:py-3">
+          <div className="page-gutter mx-auto flex max-w-4xl flex-wrap items-center justify-between gap-x-2 sm:gap-x-8 gap-y-1 py-2 sm:py-3">
             <Link
               href="/settings"
               className={`inline-flex min-h-11 items-center gap-2.5 rounded-lg text-lg font-semibold tracking-tight ${focusRing}`}
@@ -61,7 +62,12 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
                 <AdminNavigation passkey={authMode === 'passkey'} />
               </div>
             ) : null}
-            <AppearanceMenu />
+            <div className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2">
+              {owner && (authMode === 'google' || authMode === 'passkey') ? (
+                <OwnerAccountMenu name={owner.user.name || owner.user.email} />
+              ) : null}
+              <AppearanceMenu />
+            </div>
           </div>
         </header>
         <main

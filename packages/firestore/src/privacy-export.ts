@@ -89,22 +89,42 @@ export class FirestorePrivacyExportRepository implements PrivacyExportRepository
       entities,
       aliases,
       relations,
+      assertions,
+      assertionEvidence,
       people,
       samples,
       profiles,
       card,
       packs,
+      securityIncidents,
+      securityIncidentSources,
+      securityIncidentAttention,
+      emailIngestRows,
+      emailObserverRows,
+      missionReports,
+      notificationOutboxRows,
+      recallSurfaceRows,
     ] = await Promise.all([
       owned('memories'),
       allRows<Records['memoryTombstones']>(this.store.collection('memoryTombstones')),
       owned('knowledgeGraphEntities'),
       owned('knowledgeGraphEntityAliases'),
       owned('knowledgeGraphRelations'),
+      owned('knowledgeGraphAssertions'),
+      owned('knowledgeGraphAssertionEvidence'),
       allRows<Records['contacts']>(this.store.collection('contacts')),
       ownerWritingSamples(this.store, agentId),
       allRows<Records['voiceProfile']>(this.store.collection('voiceProfile')),
       this.store.doc('ownerCards', agentId).get(),
       owned('situationPacks'),
+      owned('securityIncidents'),
+      owned('securityIncidentSources'),
+      owned('securityIncidentAttention'),
+      owned('emailIngest'),
+      owned('emailObserverWork'),
+      owned('missionReports'),
+      owned('notificationOutbox'),
+      owned('recallSurfaces'),
     ]);
     const profile = profiles.find((row) => row.id === 1);
     const tombstonedHashes = new Set(tombstones.map((row) => row.contentHash));
@@ -173,6 +193,51 @@ export class FirestorePrivacyExportRepository implements PrivacyExportRepository
               'createdAt',
             ]),
           ) as LongTermMemoryExportData['knowledgeGraph']['relations'],
+        assertions: assertions.map((row) =>
+          pick(row, [
+            'id',
+            'subjectEntityId',
+            'predicate',
+            'objectEntityId',
+            'assertion',
+            'qualifiers',
+            'validFrom',
+            'validUntil',
+            'semanticRevision',
+            'evidenceRevision',
+            'lifecycle',
+            'reviewStatus',
+            'reviewedRevision',
+            'ownerAuthored',
+            'supersededById',
+            'createdAt',
+            'updatedAt',
+          ]),
+        ) as LongTermMemoryExportData['knowledgeGraph']['assertions'],
+        assertionEvidence: assertionEvidence
+          .filter(
+            (row) =>
+              typeof row.sourceMemoryId === 'string' && activeMemoryIds.has(row.sourceMemoryId),
+          )
+          .map((row) =>
+            pick(row, [
+              'id',
+              'assertionId',
+              'sourceMemoryId',
+              'sourceFingerprint',
+              'sourceContentHash',
+              'evidenceQuote',
+              'sourceAuthor',
+              'sourceTrust',
+              'independent',
+              'spanStart',
+              'spanEnd',
+              'extractionVersion',
+              'evidenceRevision',
+              'observedAt',
+              'createdAt',
+            ]),
+          ) as LongTermMemoryExportData['knowledgeGraph']['assertionEvidence'],
       },
       people: people.map((row) =>
         pick(row, [
@@ -215,6 +280,150 @@ export class FirestorePrivacyExportRepository implements PrivacyExportRepository
           'updatedAt',
         ]),
       ) as Records['situationPacks'][],
+      emailObservers: {
+        scope: 'observer-work-metadata-only',
+        rows: emailObserverRows.map((row) => {
+          if (typeof row.id !== 'string' || !row.id || row.agentId !== agentId)
+            throw new Error('Privacy export found a malformed email observer identity');
+          return pick(row as Records['emailObserverWork'], [
+            'observerKey',
+            'observerVersion',
+            'workClass',
+            'status',
+            'attemptCount',
+            'budgetReserved',
+            'budgetWindowStart',
+            'createdAt',
+            'completedAt',
+          ]);
+        }),
+      },
+      missionReports: missionReports.map((row) => {
+        if (typeof row.id !== 'string' || !row.id || row.agentId !== agentId)
+          throw new Error('Privacy export found a malformed mission report identity');
+        return pick(row as Records['missionReports'], [
+          'id',
+          'missionId',
+          'goalId',
+          'conversationId',
+          'outcome',
+          'text',
+          'chatStatus',
+          'ownerStatus',
+          'mirrorStatus',
+          'createdAt',
+          'chatDeliveredAt',
+          'ownerDeliveredAt',
+          'mirrorDeliveredAt',
+        ]);
+      }),
+      notificationOutbox: {
+        scope: 'delivery-receipts-only',
+        rows: notificationOutboxRows.map((row) => {
+          if (typeof row.id !== 'string' || !row.id || row.agentId !== agentId)
+            throw new Error('Privacy export found a malformed notification receipt identity');
+          return pick(row as Records['notificationOutbox'], [
+            'id',
+            'deliveryKey',
+            'legKey',
+            'adapter',
+            'status',
+            'attempts',
+            'retryable',
+            'providerMessageId',
+            'createdAt',
+            'finishedAt',
+          ]);
+        }),
+      },
+      recallSurfaces: {
+        scope: 'source-identity-ledger-only',
+        rows: recallSurfaceRows.map((row) => {
+          if (typeof row.id !== 'string' || !row.id || row.agentId !== agentId)
+            throw new Error('Privacy export found a malformed recall surface identity');
+          return pick(row as Records['recallSurfaces'], [
+            'sourceKey',
+            'sourceRevision',
+            'kind',
+            'firstSurfacedAt',
+            'lastSurfacedAt',
+            'surfaceCount',
+            'suppressedAt',
+            'version',
+          ]);
+        }),
+      },
+      directEmailRecovery: {
+        scope: 'direct-ingest-routing-and-body-free-content-provenance',
+        rows: emailIngestRows.flatMap((row) =>
+          row.ingestMode === 'direct' &&
+          (row.directRouting != null ||
+            row.directRecoveryReason != null ||
+            row.emailContentProvenance != null)
+            ? [
+                pick(row as Records['emailIngest'], [
+                  'channelMessageId',
+                  'directRouting',
+                  'directRecoveryReason',
+                  'emailContentProvenance',
+                ]),
+              ]
+            : [],
+        ),
+      },
+      securityIncidents: {
+        incidents: securityIncidents.map((row) => {
+          if (typeof row.id !== 'string' || !row.id)
+            throw new Error('Privacy export found a malformed security incident identity');
+          return pick(row as Records['securityIncidents'], [
+            'id',
+            'confidence',
+            'revision',
+            'disposition',
+            'decisionRevision',
+            'decisionReason',
+            'materialChangeReason',
+            'createdAt',
+            'updatedAt',
+          ]);
+        }),
+        sources: securityIncidentSources.map((row) => {
+          if (typeof row.id !== 'string' || !row.id)
+            throw new Error('Privacy export found a malformed security source identity');
+          return pick(row as Records['securityIncidentSources'], [
+            'id',
+            'incidentId',
+            'channelMessageId',
+            'sourceMessageId',
+            'mailboxHash',
+            'evidenceFingerprint',
+            'observedAt',
+          ]);
+        }),
+        attention: securityIncidentAttention.map((row) => {
+          if (typeof row.id !== 'string' || !row.id)
+            throw new Error('Privacy export found a malformed security attention identity');
+          return pick(row as Records['securityIncidentAttention'], [
+            'id',
+            'incidentId',
+            'revision',
+            'producer',
+            'deliveryStatus',
+            'createdAt',
+            'updatedAt',
+          ]);
+        }),
+        evidence: emailIngestRows.flatMap((row) => {
+          if (row.securityIncidentId == null) return [];
+          return [
+            pick(row as Records['emailIngest'], [
+              'channelMessageId',
+              'securityIncidentId',
+              'securityEvidence',
+            ]),
+          ];
+        }),
+      },
     };
     await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
     return result;

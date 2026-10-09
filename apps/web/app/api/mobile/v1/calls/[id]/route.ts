@@ -1,4 +1,5 @@
 import { answerCallCheckin, getCall, hangUpCall } from '@assistant/application/calls';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getCallsPorts } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -21,7 +22,14 @@ export async function POST(request: Request, { params }: Params): Promise<Respon
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID.test(id)) return mobileJson({ error: 'invalid call id' }, { status: 400 });
-  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+  const mutationBody = await readMobileMutationBody(request, [
+    'action',
+    'answer',
+    'checkinId',
+    'revision',
+  ]);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as Record<string, unknown> | null;
   const ports = await getCallsPorts();
   if (body?.action === 'hangup') {
     const result = await hangUpCall(ports, id);
@@ -30,11 +38,18 @@ export async function POST(request: Request, { params }: Params): Promise<Respon
       : mobileJson({ error: result.error }, { status: 409 });
   }
   if (body?.action === 'answer') {
-    if (typeof body.checkinId !== 'string' || typeof body.answer !== 'string')
-      return mobileJson({ error: 'checkinId and answer are required' }, { status: 400 });
+    if (
+      typeof body.checkinId !== 'string' ||
+      typeof body.revision !== 'number' ||
+      !Number.isSafeInteger(body.revision) ||
+      body.revision < 1 ||
+      typeof body.answer !== 'string'
+    )
+      return mobileJson({ error: 'checkinId, revision, and answer are required' }, { status: 400 });
     const result = await answerCallCheckin(ports, {
       callId: id,
       checkinId: body.checkinId,
+      revision: body.revision,
       answer: body.answer,
       via: 'mobile',
     });

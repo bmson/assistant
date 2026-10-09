@@ -1,8 +1,9 @@
 import type {
   EmbeddingSpace,
-  ReflectedSkill,
   ReflectionTask,
   ReflectionToolCall,
+  SkillReflectionCommit,
+  SkillReflectionCommitResult,
   SkillReflectionRepository,
 } from '@assistant/persistence';
 import { FirestoreSkillMutationRepository } from './skill-mutations.js';
@@ -78,6 +79,18 @@ export class FirestoreSkillReflectionRepository implements SkillReflectionReposi
         if (typeof id === 'string') sourced.push(id);
       }
     }
+    const tasks = await Promise.all(
+      taskIds.map(async (taskId) => ({
+        taskId,
+        snapshot: await this.store.doc('tasks', taskId).get(),
+      })),
+    );
+    for (const { taskId, snapshot } of tasks) {
+      if (!snapshot.exists) continue;
+      const row = decodeRecord<Record<string, unknown>>(snapshot.data());
+      const state = row.state as Record<string, unknown> | null;
+      if (state?.skillReflectionReceipt) sourced.push(taskId);
+    }
     return sourced;
   }
 
@@ -101,13 +114,13 @@ export class FirestoreSkillReflectionRepository implements SkillReflectionReposi
     });
   }
 
-  ownerAuthored(agentId: string, name: string): Promise<boolean> {
+  libraryRevision(agentId: string): Promise<string> {
     this.owned(agentId);
-    return this.writes.ownerAuthoredNamed(agentId, name);
+    return this.writes.libraryRevisionForReflection(agentId);
   }
 
-  saveReflected(agentId: string, skill: ReflectedSkill, embedding: number[]): Promise<boolean> {
-    this.owned(agentId);
-    return this.writes.saveReflected(agentId, skill, embedding);
+  commitReflection(input: SkillReflectionCommit): Promise<SkillReflectionCommitResult> {
+    this.owned(input.agentId);
+    return this.writes.commitReflection(input);
   }
 }

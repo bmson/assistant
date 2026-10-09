@@ -6,6 +6,9 @@ import {
   type EmailImportance,
   fallbackImportance,
   scoreEmailImportance,
+  scoreEmailImportanceOutcome,
+  validateBookingLifecycleEvidence,
+  validateSecurityEvidence,
 } from './email-importance.js';
 
 const payload = (headers: Record<string, string>) => ({
@@ -132,6 +135,64 @@ describe('scoreEmailImportance', () => {
     expect(score.reason).toContain('could not be scored');
   });
 
+  it('keeps deterministic fallback distinct from a fallback after a possibly paid call', async () => {
+    const deterministic = await scoreEmailImportanceOutcome(
+      routerReturning({ ok: false, decision: { mode: 'block', reason: 'budget' } }),
+      {
+        from: 'stranger@example.com',
+        subject: 'hi',
+        body: 'hello',
+        contentTrust: 'unknown',
+        authenticated: true,
+      },
+    );
+    expect(deterministic).toEqual({ kind: 'budget_blocked' });
+
+    const paidUnknown = await scoreEmailImportanceOutcome(
+      {
+        object: vi.fn().mockRejectedValue(new Error('synthetic provider failure')),
+      } as unknown as ModelRouter,
+      {
+        from: 'anna@example.com',
+        subject: 'Lunch?',
+        body: 'Are you free Thursday?',
+        contentTrust: 'known',
+        authenticated: true,
+      },
+    );
+    expect(paidUnknown).toMatchObject({ kind: 'fallback_unknown', score: { importance: 3 } });
+
+    const afterPrimaryAttempt = await scoreEmailImportanceOutcome(
+      routerReturning({
+        ok: false,
+        decision: { mode: 'block', reason: 'fallback budget' },
+        attempts: [
+          {
+            method: 'object',
+            role: 'classify',
+            selection: 'primary',
+            modelId: 'fixture-primary',
+            elapsedMs: 1,
+            outcome: 'failed',
+            failureKind: 'transient_provider',
+            fallbackAttempted: false,
+          },
+        ],
+      }),
+      {
+        from: 'anna@example.com',
+        subject: 'Lunch?',
+        body: 'Are you free Thursday?',
+        contentTrust: 'known',
+        authenticated: true,
+      },
+    );
+    expect(afterPrimaryAttempt).toMatchObject({
+      kind: 'fallback_unknown',
+      score: { importance: 3 },
+    });
+  });
+
   it('falls back when the router reports a failed outcome', async () => {
     const score = await scoreEmailImportance(routerReturning({ ok: false, reason: 'budget' }), {
       from: 'stranger@example.com',
@@ -209,5 +270,147 @@ describe('fallbackImportance', () => {
     expect(fallbackImportance({ contentTrust: 'owner', authenticated: true }).importance).toBe(3);
     expect(fallbackImportance({ contentTrust: 'known', authenticated: false }).importance).toBe(2);
     expect(fallbackImportance({ contentTrust: 'unknown', authenticated: true }).importance).toBe(2);
+  });
+});
+
+describe('source-backed booking lifecycle extraction', () => {
+  const source =
+    'Reservation R-314 is confirmed for October 12 in Europe/Berlin. Free cancellation until October 10.';
+  const candidate = (overrides: Partial<EmailImportance['dates'][number]> = {}) =>
+    validateBookingLifecycleEvidence(
+      {
+        category: 'travel',
+        importance: 3,
+        actionable: false,
+        dates: [
+          {
+            iso: '2026-10-12',
+            what: 'spa booking',
+            dateRole: 'event_start',
+            precision: 'date',
+            civilDate: '2026-10-12',
+            sourceTimeZone: 'Europe/Berlin',
+            lifecycle: 'confirmed',
+            bookingIdentity: 'R-314',
+            dateEvidence: 'Reservation R-314 is confirmed for October 12 in Europe/Berlin',
+            statusEvidence: 'Reservation R-314 is confirmed',
+            ...overrides,
+          },
+        ],
+        reason: 'source-backed booking',
+      },
+      source,
+      true,
+    ).dates[0];
+
+  it('retains explicit booking identity, lifecycle evidence, date precision, and source timezone', () => {
+    expect(candidate()).toMatchObject({
+      dateRole: 'event_start',
+      precision: 'date',
+      civilDate: '2026-10-12',
+      sourceTimeZone: 'Europe/Berlin',
+      lifecycle: 'confirmed',
+      bookingIdentity: 'R-314',
+    });
+  });
+
+  it('drops unquoted timezone and date roles when source evidence does not support them', () => {
+    expect(
+      candidate({
+        sourceTimeZone: 'Europe/Berlin',
+        dateEvidence: 'Reservation R-314 is confirmed for October 12',
+      }),
+    ).toMatchObject({ dateRole: 'event_start', precision: 'date', sourceTimeZone: undefined });
+    expect(candidate({ dateEvidence: undefined, sourceTimeZone: undefined })).toMatchObject({
+      dateRole: 'unknown',
+      precision: 'unknown',
+      civilDate: undefined,
+    });
+  });
+
+  it('does not treat conditional free cancellation as an already-cancelled booking', () => {
+    expect(
+      candidate({
+        iso: '2026-10-10',
+        what: 'free cancellation deadline',
+        dateRole: 'cancellation_deadline',
+        lifecycle: 'cancelled',
+        dateEvidence: 'Free cancellation until October 10',
+        statusEvidence: 'Free cancellation until October 10',
+      }),
+    ).toMatchObject({ lifecycle: 'unknown', bookingIdentity: undefined });
+  });
+
+  it('keeps a lifecycle unknown when its identity is absent or the source is unauthenticated', () => {
+    const score = {
+      category: 'travel' as const,
+      importance: 3,
+      actionable: false,
+      dates: [
+        {
+          iso: '2026-10-12',
+          what: 'spa booking',
+          dateRole: 'event_start' as const,
+          precision: 'date' as const,
+          lifecycle: 'confirmed' as const,
+          bookingIdentity: 'R-314',
+          dateEvidence: 'Reservation R-314 is confirmed for October 12 in Europe/Berlin',
+          statusEvidence: 'Reservation R-314 is confirmed',
+        },
+      ],
+      reason: 'test',
+    };
+    expect(validateBookingLifecycleEvidence(score, source, false).dates[0]?.lifecycle).toBe(
+      'unknown',
+    );
+    const originalDate = score.dates.at(0);
+    if (!originalDate) throw new Error('booking date fixture is missing');
+    expect(
+      validateBookingLifecycleEvidence(
+        { ...score, dates: [{ ...originalDate, bookingIdentity: 'R-999' }] },
+        source,
+        true,
+      ).dates[0]?.lifecycle,
+    ).toBe('unknown');
+  });
+
+  it('preserves only explicitly quoted security incident fields from authenticated source mail', async () => {
+    const body =
+      'Security alert A-77: A sign-in to alex@example.com from Pixel 9 in Berlin at 09:40 CEST. Recovery copy of A-70.';
+    const score = {
+      category: 'security' as const,
+      importance: 5,
+      actionable: true,
+      dates: [],
+      reason: 'security alert',
+      securityEvidence: {
+        providerIncidentRef: 'A-77',
+        eventType: 'sign_in' as const,
+        affectedAccount: 'alex@example.com',
+        eventAt: '09:40 CEST',
+        device: 'Pixel 9',
+        location: 'Berlin',
+        recoveryCopyOf: 'A-70',
+        evidenceQuote: body,
+      },
+    };
+    expect(validateSecurityEvidence(score, body, true, 'security').securityEvidence).toMatchObject({
+      providerIncidentRef: 'A-77',
+      eventType: 'sign_in',
+      affectedAccount: 'alex@example.com',
+      eventAt: '09:40 CEST',
+      device: 'Pixel 9',
+      location: 'Berlin',
+      recoveryCopyOf: 'A-70',
+    });
+    expect(validateSecurityEvidence(score, body, false, 'security').securityEvidence).toBeNull();
+    expect(
+      validateSecurityEvidence(
+        { ...score, securityEvidence: { ...score.securityEvidence, location: 'Paris' } },
+        body,
+        true,
+        'security',
+      ).securityEvidence,
+    ).not.toMatchObject({ location: 'Paris' });
   });
 });

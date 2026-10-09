@@ -89,3 +89,78 @@ export async function getFirestoreCommitmentOverview(
       status,
     }));
 }
+
+export async function getFirestoreClosedCommitmentOverview(
+  store: InstallationStore,
+  configuredAgentId: string,
+  limit = 12,
+): Promise<
+  Array<
+    Pick<
+      OwnerCommitment,
+      'id' | 'kind' | 'title' | 'details' | 'nextAction' | 'dueAt' | 'status' | 'updatedAt'
+    >
+  >
+> {
+  const boundedLimit = Math.min(Math.max(limit, 1), 30);
+  await assertConfiguredOwner(store, configuredAgentId);
+  const fence = await readPrivacyErasureFence(store, configuredAgentId);
+  const rows: OwnerCommitment[] = [];
+  for (const status of ['resolved', 'dismissed'] as const) {
+    const page = await store
+      .collection('commitments')
+      .where('agentId', '==', configuredAgentId)
+      .where('status', '==', status)
+      .orderBy('updatedAt', 'desc')
+      .limit(boundedLimit)
+      .get();
+    for (const doc of page.docs) {
+      const row = decodeRecord<OwnerCommitment>(doc.data());
+      if (
+        row.id !== undefined &&
+        documentKey(row.id) === doc.id &&
+        row.agentId === configuredAgentId &&
+        row.status === status &&
+        row.resolvedAt instanceof Date &&
+        row.updatedAt instanceof Date &&
+        ['decision', 'question', 'promise', 'waiting_on'].includes(row.kind) &&
+        typeof row.title === 'string' &&
+        typeof row.details === 'string' &&
+        typeof row.nextAction === 'string'
+      )
+        rows.push(row);
+    }
+  }
+  const parentIds = rows.map((row) => row.id);
+  const alreadyReopened = new Set<string>();
+  for (let offset = 0; offset < parentIds.length; offset += 30) {
+    const ids = parentIds.slice(offset, offset + 30);
+    if (!ids.length) continue;
+    const children = await store
+      .collection('commitments')
+      .where('agentId', '==', configuredAgentId)
+      .where('reopenedFromId', 'in', ids)
+      .limit(30)
+      .get();
+    for (const doc of children.docs) {
+      const parentId = doc.get('reopenedFromId');
+      if (typeof parentId === 'string') alreadyReopened.add(parentId);
+    }
+  }
+  await assertConfiguredOwner(store, configuredAgentId);
+  await assertPrivacyErasureFenceUnchanged(store, configuredAgentId, fence);
+  return rows
+    .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
+    .filter((row) => !alreadyReopened.has(row.id))
+    .slice(0, boundedLimit)
+    .map(({ id, kind, title, details, nextAction, dueAt, status, updatedAt }) => ({
+      id,
+      kind,
+      title,
+      details,
+      nextAction,
+      dueAt,
+      status,
+      updatedAt,
+    }));
+}

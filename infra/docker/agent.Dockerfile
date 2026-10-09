@@ -14,14 +14,16 @@ COPY packages/tools/package.json ./packages/tools/
 COPY packages/modules/package.json ./packages/modules/
 COPY packages/setup/package.json ./packages/setup/
 COPY apps/agent/package.json ./apps/agent/
+COPY apps/agent/runtime-dependencies/package.json ./apps/agent/runtime-dependencies/
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
-    pnpm install --frozen-lockfile --filter @assistant/agent...
+    pnpm install --frozen-lockfile --filter @assistant/agent... --filter @assistant/agent-runtime-dependencies
 
 # The composition file is agent source: it decides which modules are compiled in.
 COPY assistant.config.ts ./
 COPY packages ./packages
 COPY apps/agent ./apps/agent
 RUN pnpm --filter @assistant/agent build
+RUN pnpm --filter @assistant/agent-runtime-dependencies --prod deploy --legacy /runtime-dependencies
 
 FROM node:22-slim AS runtime
 # Apply the Debian PCRE2 security update even when the base image layer is older.
@@ -36,17 +38,12 @@ WORKDIR /app
 
 COPY --from=build --chown=node:node /src/apps/agent/dist/index.mjs ./index.mjs
 COPY --from=build --chown=node:node /src/apps/agent/dist/index.mjs.map ./index.mjs.map
+COPY --from=build --chown=node:node /runtime-dependencies/node_modules ./node_modules
 
-# These packages must keep their own filesystem layout at runtime. unpdf is
-# large and rarely used; Firestore's Google SDK loads protobuf files relative
-# to its package and cannot run when flattened into the ESM agent bundle.
-RUN npm install --no-save --omit=dev unpdf@1.6.2 @google-cloud/firestore@9.0.1 \
-  && chown -R node:node /app/node_modules
-
-# npm is only needed for the install above, never at runtime (the app runs on
-# node directly). Strip it so the base image's bundled npm — whose vendored deps
-# tar/sigstore/brace-expansion/picomatch carry HIGH/CRITICAL CVEs — neither ships
-# in the released image nor fails the deploy vulnerability scan.
+# The tiny locked runtime dependency workspace contains only packages external
+# to the ESM bundle. Keep its pnpm virtual store and symlinks intact so Firestore
+# can resolve protobuf assets and unpdf can load its worker/WASM files.
+# npm is not used at runtime; strip its bundled tree from the final image.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 USER node

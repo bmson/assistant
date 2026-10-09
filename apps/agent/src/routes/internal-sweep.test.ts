@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   backfillMessageEmbeddings: vi.fn(),
   purgeExpired: vi.fn(),
   purgeAgedHistory: vi.fn(),
+  repairMissionReports: vi.fn(),
   pinnedMemoryEmbed: vi.fn(),
   prepareGoalSession: vi.fn(),
   releaseStaleReservations: vi.fn(),
@@ -45,6 +46,7 @@ vi.mock('@assistant/core', () => ({
   getQueueNotifier: mocks.executeSqlOnlySweep,
   purgeAgedHistory: mocks.purgeAgedHistory,
   purgeExpired: mocks.purgeExpired,
+  repairMissionReports: mocks.repairMissionReports,
 }));
 vi.mock('@assistant/firestore', () => ({
   FirestoreScheduleRepository: class {
@@ -65,7 +67,11 @@ vi.mock('../google-oidc.js', () => ({
 }));
 vi.mock('../canaries.js', () => ({ latestCanaryRun: vi.fn(), runCanaries: vi.fn() }));
 vi.mock('../executor-deps.js', () => ({
-  executorDeps: () => ({ notifyApproval: mocks.notifyApproval, notifyOwner: mocks.notifyOwner }),
+  executorDeps: (deps: { persistence?: unknown }) => ({
+    persistence: deps.persistence,
+    notifyApproval: mocks.notifyApproval,
+    notifyOwner: mocks.notifyOwner,
+  }),
 }));
 
 const { internal } = await import('./internal.js');
@@ -118,7 +124,8 @@ function fixture() {
     config: {
       PERSISTENCE_DRIVER: 'firestore',
       FIRESTORE_AGENT_ID: 'agent-1',
-      FIRESTORE_EMBEDDING_SPACE: '{"provider":"synthetic"}',
+      FIRESTORE_EMBEDDING_SPACE:
+        '{"provider":"synthetic","model":"sweep-fixture","dimensions":1536,"revision":"1"}',
     },
     db,
     persistence,
@@ -160,6 +167,7 @@ beforeEach(() => {
     modelCalls: 0,
     costEvents: 0,
   });
+  mocks.repairMissionReports.mockResolvedValue(0);
   mocks.pinnedMemoryEmbed.mockReturnValue(mocks.executeSqlOnlySweep);
 });
 
@@ -178,6 +186,7 @@ describe('POST /internal/sweep in Firestore mode', () => {
       resumedApprovalTasks: 1,
       renotifiedApprovals: 2,
       renotifiedAttention: 6,
+      missionReportsRepaired: 0,
       expiredWatches: 3,
       schedulesFired: 1,
       budgetNotices: 1,
@@ -194,15 +203,39 @@ describe('POST /internal/sweep in Firestore mode', () => {
     );
     expect(mocks.emitBudgetNotices).toHaveBeenCalledWith({ costs, maintenance }, 'agent-1');
     expect(mocks.pinnedMemoryEmbed).toHaveBeenCalledWith(
-      { provider: 'synthetic' },
+      {
+        provider: 'synthetic',
+        model: 'sweep-fixture',
+        dimensions: 1536,
+        revision: '1',
+      },
       modelRouting,
       expect.any(Function),
     );
-    expect(mocks.backfillMessageEmbeddings).toHaveBeenCalledWith(maintenance, {
-      embed: mocks.executeSqlOnlySweep,
+    expect(mocks.backfillMessageEmbeddings).toHaveBeenCalledWith(
+      maintenance,
+      expect.objectContaining({
+        embeddingSpace: expect.any(Function),
+        embed: mocks.executeSqlOnlySweep,
+      }),
+    );
+    const [, backfillOptions] = mocks.backfillMessageEmbeddings.mock.calls[0] ?? [];
+    if (!backfillOptions || typeof backfillOptions !== 'object')
+      throw new Error('Firestore sweep omitted embedding configuration');
+    await expect(
+      (backfillOptions as { embeddingSpace: () => Promise<unknown> }).embeddingSpace(),
+    ).resolves.toEqual({
+      provider: 'synthetic',
+      model: 'sweep-fixture',
+      dimensions: 1536,
+      revision: '1',
     });
     expect(mocks.purgeExpired).toHaveBeenCalledWith({ maintenance, costs, recallMetrics });
     expect(mocks.purgeAgedHistory).toHaveBeenCalledWith(maintenance);
+    expect(mocks.repairMissionReports).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: 'agent-1', persistence: f.persistence }),
+      20,
+    );
     expect(mocks.expireStaleApprovals).toHaveBeenCalledWith(f.persistence.approvals);
     expect(mocks.resumeResolvedApprovalTasks).toHaveBeenCalledWith(f.persistence.approvals);
     expect(mocks.renotifyStalledApprovals).toHaveBeenCalledWith(

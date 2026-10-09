@@ -124,6 +124,10 @@ describe('Gemini Live adapter', () => {
       },
     });
     fake.emit({ serverContent: { interrupted: true } });
+    expect(session.interrupt(20)).toEqual({
+      providerState: 'cancelled',
+      spokenOffset: 'unknown',
+    });
     fake.emit({
       toolCall: { functionCalls: [{ id: 't1', name: 'end_call', args: { outcome: 'done' } }] },
     });
@@ -139,8 +143,17 @@ describe('Gemini Live adapter', () => {
       inputAudioTokens: 100,
       inputTextTokens: 20,
       cachedInputTokens: 0,
+      cachedAudioInputTokens: 0,
+      cachedTextInputTokens: 0,
+      cachedUnclassifiedInputTokens: 0,
       outputAudioTokens: 50,
       outputTextTokens: 0,
+      reasoningOutputTokens: 0,
+      reasoningUsageReported: false,
+      transcriptionInputAudioTokens: 0,
+      transcriptionOutputTextTokens: 0,
+      transcriptionUsageReported: false,
+      transcriptionInputAudioMilliseconds: 0,
     });
 
     session.sendToolResult({ id: 't1', name: 'end_call', args: {} }, { ok: true });
@@ -155,6 +168,50 @@ describe('Gemini Live adapter', () => {
     await session.close();
     fake.params().callbacks.onclose?.({} as CloseEvent);
     expect(events.log.at(-1)).toEqual(['toolCall', expect.anything()]);
+  });
+
+  it('fences interrupted output and reports unknown model state without server confirmation', async () => {
+    const fake = fakeClient();
+    const events = recorder();
+    const session = await createGeminiLiveProvider({
+      project: 'p',
+      location: 'us-central1',
+      client: fake.client,
+    }).connect({ model: 'gemini-live', instructions: '', tools: [] }, events);
+    const audio = {
+      inlineData: {
+        mimeType: 'audio/pcm;rate=24000',
+        data: Buffer.from(pcm16ToBytes(new Int16Array(480))).toString('base64'),
+      },
+    };
+
+    expect(session.interrupt(20)).toEqual({
+      providerState: 'unknown',
+      spokenOffset: 'unknown',
+    });
+    fake.emit({
+      serverContent: { interrupted: true, modelTurn: { parts: [audio] } },
+    });
+    expect(events.log).toEqual([['speechStarted']]);
+    expect(session.interrupt(20)).toEqual({
+      providerState: 'cancelled',
+      spokenOffset: 'unknown',
+    });
+
+    // The interruption message ends the cancelled turn. Only output on the
+    // following turn is allowed through the adapter.
+    fake.emit({ serverContent: { turnComplete: true } });
+    fake.emit({ serverContent: { modelTurn: { parts: [audio] } } });
+    expect(events.log).toEqual([['speechStarted'], ['audio', 160]]);
+
+    // If there was no queued audio, the bridge has no reason to call
+    // interrupt(); a completed old confirmation must not leak to a later clear.
+    fake.emit({ serverContent: { interrupted: true, turnComplete: true } });
+    expect(session.interrupt(20)).toEqual({
+      providerState: 'unknown',
+      spokenOffset: 'unknown',
+    });
+    await session.close();
   });
 
   it('hands the conversation to a new connection when the server says GoAway', async () => {
@@ -179,7 +236,25 @@ describe('Gemini Live adapter', () => {
     expect(fake.session.sendRealtimeInput).not.toHaveBeenCalled();
     // The retired connection's close is expected, not the call ending.
     fake.connections[0]?.callbacks.onclose?.({} as CloseEvent);
+    fake.emit(
+      {
+        serverContent: {
+          modelTurn: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: 'audio/pcm;rate=24000',
+                  data: Buffer.from(pcm16ToBytes(new Int16Array(480))).toString('base64'),
+                },
+              },
+            ],
+          },
+        },
+      },
+      0,
+    );
     expect(events.log).not.toContainEqual(['closed']);
+    expect(events.log).not.toContainEqual(['audio', 160]);
     await session.close();
   });
 

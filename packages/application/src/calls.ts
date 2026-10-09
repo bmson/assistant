@@ -43,7 +43,9 @@ export interface CallView {
   notes: string[];
   checkins: CallCheckin[];
   /** The check-in the assistant is waiting on right now, if any. */
-  openCheckin: CallCheckin | null;
+  openCheckin:
+    | (CallCheckin & { revision: number; expiresAt: string; deliveryStatus: 'delivered' })
+    | null;
 }
 
 export interface CallsPorts {
@@ -55,6 +57,22 @@ function view(row: CallSession): CallView {
   const brief = (row.brief ?? {}) as Partial<CallBriefView>;
   const checkins = (row.checkins as CallCheckin[]) ?? [];
   const active = (ACTIVE_CALL_STATUSES as readonly string[]).includes(row.status);
+  const openCheckin = active
+    ? ([...checkins].reverse().find(
+        (
+          checkin,
+        ): checkin is CallCheckin & {
+          revision: number;
+          expiresAt: string;
+          deliveryStatus: 'delivered';
+        } =>
+          checkin.answer === null &&
+          checkin.deliveryStatus === 'delivered' &&
+          typeof checkin.revision === 'number' &&
+          typeof checkin.expiresAt === 'string' &&
+          Date.parse(checkin.expiresAt) > Date.now(),
+      ) ?? null)
+    : null;
   return {
     id: row.id,
     taskId: row.taskId,
@@ -83,7 +101,7 @@ function view(row: CallSession): CallView {
     transcript: (row.transcript as CallTranscriptLine[]) ?? [],
     notes: (row.notes as string[]) ?? [],
     checkins,
-    openCheckin: active ? ([...checkins].reverse().find((c) => c.answer === null) ?? null) : null,
+    openCheckin,
   };
 }
 
@@ -98,7 +116,13 @@ export async function getCall(ports: CallsPorts, id: string): Promise<CallView |
 
 export async function answerCallCheckin(
   ports: CallsPorts,
-  input: { callId: string; checkinId: string; answer: string; via: 'web' | 'mobile' },
+  input: {
+    callId: string;
+    checkinId: string;
+    revision: number;
+    answer: string;
+    via: 'web' | 'mobile';
+  },
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const answer = input.answer.trim();
   if (!answer) return { ok: false, error: 'Type an answer for the assistant.' };
@@ -106,6 +130,7 @@ export async function answerCallCheckin(
     ports.agentId,
     input.callId,
     input.checkinId,
+    input.revision,
     answer,
     input.via,
   );

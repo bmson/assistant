@@ -390,6 +390,7 @@ struct AssistantSettingsList<Content: View>: View {
             .headerProminence(.increased)
             .environment(\.defaultMinListRowHeight, 44)
             .listSectionSpacing(20)
+            .labelStyle(AssistantSettingsLabelStyle())
             .assistantEditorChrome()
     }
 }
@@ -408,6 +409,26 @@ private struct AssistantEditorChrome: ViewModifier {
             .tint(AssistantTheme.accent(for: colorScheme))
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(AssistantTheme.canvas(for: colorScheme), for: .navigationBar)
+    }
+}
+
+/// Keeps utility-list symbols on one optical column. SwiftUI's default Label
+/// width varies with each SF Symbol, which makes settings rows look ragged;
+/// a quiet fixed icon lane gives the text a consistent start without changing
+/// the list's native typography, tint, or control behavior.
+private struct AssistantSettingsLabelStyle: LabelStyle {
+    @ScaledMetric(relativeTo: .body) private var iconColumnWidth: CGFloat = 22
+    @ScaledMetric(relativeTo: .body) private var iconTextSpacing: CGFloat = 12
+
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: iconTextSpacing) {
+            configuration.icon
+                .font(.body.weight(.regular))
+                .frame(width: iconColumnWidth, alignment: .center)
+                .accessibilityHidden(true)
+            configuration.title
+        }
+        .contentShape(Rectangle())
     }
 }
 

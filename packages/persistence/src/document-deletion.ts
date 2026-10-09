@@ -5,8 +5,14 @@
  */
 export interface DocumentDeletionRepository {
   readonly kind: 'document-deletion-repository';
-  purge(
+  purge(agentId: string, documentId: string): Promise<{ deleted: boolean }>;
+  pendingAssets(agentId: string, documentId: string): Promise<PrivacyErasureAsset[]>;
+  assetDeleted(agentId: string, asset: PrivacyErasureAsset | string): Promise<void>;
+  refreshEmailAttachmentCustodyCleanupIntent(
     agentId: string,
-    documentId: string,
-  ): Promise<{ deleted: boolean; workspacePaths: string[] }>;
+    asset: Extract<PrivacyErasureAsset, { kind: 'email_attachment_custody' }>,
+    observed: { generation: string; objectState: 'marker' | 'content' },
+  ): Promise<void>;
 }
+
+import type { PrivacyErasureAsset } from './privacy-erasure.js';

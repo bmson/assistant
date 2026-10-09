@@ -63,6 +63,33 @@ export class FirestoreSkillLibraryRepository implements SkillLibraryRepository {
 
   constructor(readonly store: InstallationStore) {}
 
+  async listPage(agentId: string, input: { afterId?: string; limit: number }) {
+    const limit = boundedPageSize(input.limit);
+    if (!agentId) throw new Error('An agent is required to list learned skills');
+    if (input.afterId !== undefined && !/^[0-9a-f-]{36}$/i.test(input.afterId))
+      throw new Error('Invalid learned-skill continuation');
+    const agent = await this.store.doc('agents', agentId).get();
+    if (!agent.exists || agent.get('id') !== agentId || documentKey(agentId) !== agent.id)
+      throw new Error('Configured learned-skill agent is missing or malformed');
+    const fence = await readPrivacyErasureFence(this.store, agentId);
+    let query = this.store
+      .collection('skills')
+      .where('agentId', '==', agentId)
+      .orderBy('id', 'asc')
+      .select(...FIELDS);
+    if (input.afterId) query = query.startAfter(input.afterId);
+    const snapshot = await query.limit(limit + 1).get();
+    const page = snapshot.docs
+      .slice(0, limit)
+      .map((doc) => skillFromDocument(doc.data(), doc.id, agentId));
+    await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
+    return {
+      items: page,
+      hasMore: snapshot.size > limit,
+      nextCursor: snapshot.size > limit ? (page.at(-1)?.id ?? null) : null,
+    };
+  }
+
   async list(agentId: string): Promise<WorkspaceSkillRecord[]> {
     if (!agentId) throw new Error('An agent is required to list learned skills');
     const agent = await this.store.doc('agents', agentId).get();
@@ -90,4 +117,10 @@ export class FirestoreSkillLibraryRepository implements SkillLibraryRepository {
     await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
     return skills;
   }
+}
+
+function boundedPageSize(limit: number): number {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+    throw new Error('Workspace page size must be between 1 and 100');
+  return limit;
 }

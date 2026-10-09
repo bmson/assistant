@@ -10,12 +10,16 @@ import { getApplication, getWorkspace } from '@/lib/server';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Delete a document: its chunks, the row, the file inventory, and the bytes. */
-export async function purgeDocumentAction(id: string): Promise<void> {
+export async function purgeDocumentAction(
+  id: string,
+): Promise<{ deleted: boolean; pendingAssets: boolean } | undefined> {
   await requireOwner();
   if (!isModuleEnabled(loadConfig(), 'documents')) return;
   if (!UUID_RE.test(id)) return;
+  let result: { deleted: boolean; pendingAssets: boolean };
   if (loadConfig().PERSISTENCE_DRIVER === 'firestore')
-    await deleteDocument(getFirestoreDocumentStores(), getWorkspace(), id);
-  else await getApplication().deleteDocument(id);
-  revalidatePath('/documents');
+    result = await deleteDocument(getFirestoreDocumentStores(), getWorkspace(), id);
+  else result = await getApplication().deleteDocument(id);
+  if (!result.pendingAssets) revalidatePath('/documents');
+  return result;
 }

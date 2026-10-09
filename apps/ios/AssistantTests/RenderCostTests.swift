@@ -187,7 +187,13 @@ final class RenderCostTests: XCTestCase {
                 openApprovals: {}, send: { _, _ in },
                 decideApproval: { _, _ in false }, rememberApproval: { _ in false },
                 decideSuggestion: { _, _ in nil }, openActivity: {},
-                refreshCard: { _ in nil }, hideMessage: { _ in }
+                refreshCard: { _, _ in nil }, hideMessage: { _ in },
+                setRecallSourceSuppressed: { _, _, _ in .failed },
+                recallSourceSuppressed: { _ , _ in nil },
+                acknowledgeMessageDelivery: { _ in false },
+                cardFormActions: nil,
+                cardFormStateRevision: 0,
+                cardFormTaskRevision: 0
             )
         }
         let message = ChatMessage.optimistic(role: .assistant, text: "Half a reply", id: "stream-1")
@@ -274,7 +280,7 @@ final class RenderCostTests: XCTestCase {
         let row = MessageBubble(message: message, userPrompt: nil,
             isStreaming: false, openApprovals: {}, runForReal: nil, retry: nil, decideApproval: nil)
         var available = row
-        available.refreshCard = { _ in nil }
+        available.refreshCard = { _, _ in nil }
         XCTAssertNotEqual(row, available)
         let fresh = MessageBubble(message: ChatMessage(id: "m", role: .assistant, parts: [
             RichMessageFixture.generated(updatedAt: "2026-09-19T18:01:00.000Z")

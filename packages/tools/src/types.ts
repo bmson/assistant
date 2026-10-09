@@ -1,5 +1,11 @@
-import type { StagedJobPending, Trust } from '@assistant/core';
+import type { OwnerIntent, StagedJobPending, Trust } from '@assistant/core';
 import type { Db, SpendSource } from '@assistant/db';
+import type {
+  CostEvidence,
+  ExternalEffectProgress,
+  ReminderEventDependency,
+  ReservationActual,
+} from '@assistant/persistence';
 import type { z } from 'zod';
 
 export type RiskTier = 'autonomous' | 'approval' | 'forbidden';
@@ -16,11 +22,15 @@ export interface StagedBrowserJob extends ToolExecutionIdentity {
 
 export interface ToolContext {
   taskId: string;
+  /** Lease token from the currently claimed durable task, when running one. */
+  taskLeaseToken?: string | null;
   agentId: string;
   conversationId?: string;
   trust: Trust;
   /** True once externally controlled content has entered this workflow's model context. */
   tainted: boolean;
+  /** Typed owner-authored intent; external text never contributes authorized scopes. */
+  ownerIntent?: OwnerIntent;
   /**
    * Email addresses and phone numbers the owner/thread actually provided (from
    * the seed conversation window + trigger payload). The dispatcher treats a
@@ -30,10 +40,31 @@ export interface ToolContext {
   knownAddresses?: { emails: string[]; phones: string[] };
   db: Db;
   now: () => Date;
+  /** Immutable request clock and timezone for owner-relative one-time schedules. */
+  requestAt?: Date;
+  requestTimeZone?: string;
+  /** Runtime-bound fixture copied from a successful current-task sports result. */
+  verifiedReminderEvent?: ReminderEventDependency;
+  /** Durable booking revision bound when a mail-derived suggestion was accepted. */
+  bookingOccurrence?: {
+    agentId: string;
+    bookingKey: string;
+    version: number;
+    operation?: 'cancel_existing';
+    calendarEventId?: string;
+    bookingIdentity?: string;
+  };
+  /** Revalidate a mail-derived booking revision immediately before calendar write. */
+  assertBookingOccurrenceCurrent?: () => Promise<boolean>;
   signal: AbortSignal;
   log: (type: string, payload: unknown) => Promise<void>;
   /** Present only while the dispatcher is executing a persisted tool_calls row. */
   execution?: ToolExecutionIdentity;
+  /** Dispatcher-bound operation identity; independent of generated display/content. */
+  operationId?: string;
+  checkpointExternalEffect?: (
+    progress: Omit<ExternalEffectProgress, 'payloadDigest'>,
+  ) => Promise<void>;
   /** Browser launch intent must be checkpointed before the external job request. */
   stageBrowserJob?: (job: StagedBrowserJob) => Promise<void>;
   /** Roll back a staged intent after a definitive pre-launch/provider rejection. */
@@ -59,6 +90,12 @@ export interface AssistantTool<S extends z.ZodType = z.ZodType, Out = unknown> {
    * the owner approves is exactly what executes.
    */
   prepare?: (args: z.infer<S>, ctx: ToolContext) => Promise<z.infer<S>>;
+  /** Mandatory security binding, unlike cosmetic preparation: failure blocks dispatch. */
+  prepareSecurity?: (
+    args: z.infer<S>,
+    ctx: ToolContext,
+    phase: 'dispatch' | 'approved',
+  ) => Promise<z.infer<S>>;
   /** Human-readable action line shown on approval cards. */
   approvalSummary?: (args: z.infer<S>) => string;
   idempotencyKey?: (args: z.infer<S>, ctx: ToolContext) => string;
@@ -74,8 +111,13 @@ export interface AssistantTool<S extends z.ZodType = z.ZodType, Out = unknown> {
     source: SpendSource;
     rateKey: string;
     quantity: number;
+    /** Override a legacy rate-table unit when the configured price is per SMS segment. */
+    unit?: string;
     description?: string;
+    evidence?: CostEvidence;
   } | null;
+  /** Provider-reported usage/price that should replace the preflight estimate. */
+  reconcileCost?: (args: z.infer<S>, result: Out) => Partial<ReservationActual>;
   execute: (args: z.infer<S>, ctx: ToolContext) => Promise<Out>;
 }
 

@@ -1,11 +1,24 @@
-import { randomUUID } from 'node:crypto';
-import { type Db, type DocumentRow, documentChunks, documents, files, tasks } from '@assistant/db';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  createPostgresPrivacyErasureRepository,
+  type Db,
+  type DocumentRow,
+  documentChunks,
+  documents,
+  emailAttachmentCustodies,
+  files,
+  lockPostgresPrivacyObservationFence,
+  maintenanceCursors,
+  tasks,
+} from '@assistant/db';
 import type {
   DocumentCatalogRepository,
   DocumentDeletionRepository,
+  DocumentExtractionMetadata,
   Records,
 } from '@assistant/persistence';
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { emailAttachmentCustodyCleanupIntentId } from '@assistant/persistence';
+import { and, desc, eq, inArray, like, sql } from 'drizzle-orm';
 import { getQueueNotifier } from '../queue.js';
 import { enqueueTask } from '../workflow/machine.js';
 import { type DocumentSource, type DocumentTrust, extractorFor } from './document-types.js';
@@ -29,6 +42,25 @@ export interface StartDocumentResult {
   document: DocumentRow;
   taskId: string | null;
   duplicate: boolean;
+}
+
+interface DocumentDeletionWorkspace {
+  delete(relativePath: string): Promise<void>;
+  readonly emailAttachmentCustody?: {
+    inspectEmailAttachmentObject(
+      custodyId: string,
+      generation?: string,
+    ): Promise<{
+      generation: string;
+      custodyId: string;
+      state: 'marker' | 'content';
+      sha256: string | null;
+    } | null>;
+    deleteOwnedEmailAttachment(input: {
+      custodyId: string;
+      expectedGeneration?: string;
+    }): Promise<'deleted' | 'missing' | 'changed'>;
+  };
 }
 
 /**
@@ -55,6 +87,8 @@ export async function startDocumentIngest(
       mime: input.mime,
       bytes: input.bytes,
       sha256: input.sha256,
+      objectGeneration: null,
+      emailAttachmentCustodyId: null,
     };
     const created = await store.createDocumentCatalog({
       file,
@@ -79,6 +113,7 @@ export async function startDocumentIngest(
         processorStartedAt: null,
         processorAttempts: 0,
         processedTextPath: null,
+        extractionMetadata: null,
       },
     });
     return {
@@ -177,6 +212,7 @@ export interface DocumentView {
   trust: string;
   status: string;
   extractor: string;
+  extractionMetadata?: DocumentExtractionMetadata | null;
   chunkCount: number;
   charCount: number;
   bytes: number;
@@ -194,6 +230,7 @@ export async function listDocuments(db: Db, agentId: string): Promise<DocumentVi
       trust: documents.trust,
       status: documents.status,
       extractor: documents.extractor,
+      extractionMetadata: documents.extractionMetadata,
       chunkCount: documents.chunkCount,
       charCount: documents.charCount,
       bytes: files.bytes,
@@ -238,55 +275,320 @@ export async function purgeDocument(
   storage: Db | DocumentDeletionRepository,
   agentId: string,
   documentId: string,
-  workspace?: { delete(relativePath: string): Promise<void> },
-): Promise<{ deleted: boolean }> {
+  workspace?: DocumentDeletionWorkspace,
+): Promise<{ deleted: boolean; pendingAssets: boolean }> {
   if ('kind' in storage && storage.kind === 'document-deletion-repository') {
-    const { deleted, workspacePaths } = await (storage as DocumentDeletionRepository).purge(
-      agentId,
-      documentId,
-    );
-    for (const path of workspace ? workspacePaths : [])
-      await workspace?.delete(path).catch((error) => {
-        console.error(`document purge: workspace delete failed for ${path}`, error);
-      });
-    return { deleted };
+    const repository = storage as DocumentDeletionRepository;
+    const { deleted } = await repository.purge(agentId, documentId);
+    return {
+      deleted,
+      pendingAssets: await drainDocumentDeletionAssets(repository, agentId, documentId, workspace),
+    };
   }
   const db = storage as Db;
-  const [document] = await db
-    .select()
-    .from(documents)
-    .where(and(eq(documents.id, documentId), eq(documents.agentId, agentId)));
-  if (!document) return { deleted: false };
-  const [file] = await db.select().from(files).where(eq(files.id, document.fileId));
+  const deleted = await db.transaction(async (tx) => {
+    await lockPostgresPrivacyObservationFence(tx as unknown as Db, agentId);
+    const [document] = await tx
+      .select()
+      .from(documents)
+      .where(and(eq(documents.id, documentId), eq(documents.agentId, agentId)))
+      .for('update');
+    if (!document) return false;
+    const [file] = await tx
+      .select()
+      .from(files)
+      .where(and(eq(files.id, document.fileId), eq(files.agentId, agentId)))
+      .for('update');
+    if (!file) throw new Error('Document file inventory is missing; deletion remains incomplete');
+    if (
+      file.workspacePath.startsWith('email-attachments/custody/') &&
+      !file.emailAttachmentCustodyId
+    )
+      throw new Error('Email attachment custody identity is missing from its catalog file');
+    let ownedCustody: typeof emailAttachmentCustodies.$inferSelect | null = null;
+    if (file.emailAttachmentCustodyId) {
+      const [custody] = await tx
+        .select()
+        .from(emailAttachmentCustodies)
+        .where(
+          and(
+            eq(emailAttachmentCustodies.id, file.emailAttachmentCustodyId),
+            eq(emailAttachmentCustodies.agentId, agentId),
+          ),
+        )
+        .for('update')
+        .limit(1);
+      if (
+        custody?.status !== 'catalogued' ||
+        custody.fileId !== file.id ||
+        custody.documentId !== document.id ||
+        custody.workspacePath !== file.workspacePath ||
+        file.workspacePath !== `email-attachments/custody/${custody.id}` ||
+        custody.objectGeneration !== file.objectGeneration ||
+        custody.sha256 !== file.sha256 ||
+        custody.actualBytes !== file.bytes ||
+        custody.mime !== file.mime ||
+        !custody.providerMessageId ||
+        document.source !== 'email' ||
+        document.sourceRef !== `gmail:${custody.providerMessageId}` ||
+        document.title !== custody.filename ||
+        document.mime !== custody.mime ||
+        document.sha256 !== custody.sha256 ||
+        document.fileId !== file.id ||
+        document.agentId !== agentId ||
+        !custody.objectGeneration
+      )
+        throw new Error('Email attachment custody no longer matches its catalog file');
 
-  await db.transaction(async (tx) => {
+      const generations = [
+        ...(custody.markerGeneration && custody.markerGeneration !== custody.objectGeneration
+          ? [{ generation: custody.markerGeneration, objectState: 'marker' as const }]
+          : []),
+        { generation: custody.objectGeneration, objectState: 'content' as const },
+      ];
+      for (const { generation, objectState } of generations) {
+        const id = emailAttachmentCustodyCleanupIntentId(custody.id, generation);
+        const name = `privacy-erasure-asset:${agentId}:${id}`;
+        const asset = {
+          kind: 'email_attachment_custody',
+          id,
+          workspacePath: custody.workspacePath,
+          custodyId: custody.id,
+          generation,
+          objectState,
+          documentId: document.id,
+        };
+        const cursor = JSON.stringify(asset);
+        const [existing] = await tx
+          .select({ cursor: maintenanceCursors.cursor })
+          .from(maintenanceCursors)
+          .where(eq(maintenanceCursors.name, name))
+          .for('update')
+          .limit(1);
+        if (existing && existing.cursor !== cursor)
+          throw new Error('Email attachment cleanup intent changed');
+        if (!existing) await tx.insert(maintenanceCursors).values({ name, cursor });
+      }
+      ownedCustody = custody;
+      await tx
+        .update(emailAttachmentCustodies)
+        .set({ status: 'cleanup_pending', fileId: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(emailAttachmentCustodies.id, custody.id),
+            eq(emailAttachmentCustodies.agentId, agentId),
+            eq(emailAttachmentCustodies.status, 'catalogued'),
+          ),
+        );
+    }
+    const paths = [
+      ...(ownedCustody ? [] : [file.workspacePath]),
+      document.processedTextPath,
+      `documents/${documentId}/extracted.txt`,
+    ].filter((path): path is string => typeof path === 'string' && !!path);
+    for (const path of new Set(paths)) {
+      const id = documentDeletionAssetId(documentId, path);
+      await tx
+        .insert(maintenanceCursors)
+        .values({ name: `privacy-erasure-asset:${agentId}:${id}`, cursor: path })
+        .onConflictDoNothing({ target: maintenanceCursors.name });
+    }
+    if (document.processorTokenHash) {
+      const outputPath = `documents/${documentId}/extracted.txt`;
+      const tombstone = {
+        agentId,
+        documentId,
+        processorTokenHash: document.processorTokenHash,
+        outputPath,
+      };
+      await tx
+        .insert(maintenanceCursors)
+        .values({
+          name: `document-delete-tombstone:${documentId}`,
+          cursor: JSON.stringify(tombstone),
+        })
+        .onConflictDoUpdate({
+          target: maintenanceCursors.name,
+          set: { cursor: JSON.stringify(tombstone), updatedAt: new Date() },
+        });
+      await tx
+        .insert(maintenanceCursors)
+        .values({
+          name: `privacy-erasure-asset:${agentId}:document-delete-worker:${documentId}`,
+          cursor: outputPath,
+        })
+        .onConflictDoNothing({ target: maintenanceCursors.name });
+    }
     await tx
       .update(tasks)
       .set({ status: 'cancelled', lockedUntil: null, runAfter: null, updatedAt: sql`now()` })
       .where(
         and(
+          eq(tasks.agentId, agentId),
           sql`${tasks.trigger}->'payload'->>'job' IN ('documents.extract','documents.process')`,
           sql`${tasks.trigger}->'payload'->>'documentId' = ${documentId}`,
           inArray(tasks.status, ['pending', 'sleeping', 'running', 'needs_attention']),
         ),
       );
-    await tx.delete(documentChunks).where(eq(documentChunks.documentId, documentId));
+    await tx
+      .delete(documentChunks)
+      .where(and(eq(documentChunks.agentId, agentId), eq(documentChunks.documentId, documentId)));
     await tx.delete(documents).where(eq(documents.id, documentId));
     await tx.delete(files).where(eq(files.id, document.fileId));
+    return true;
   });
+  return {
+    deleted,
+    pendingAssets: await drainPostgresDocumentDeletionAssets(db, agentId, documentId, workspace),
+  };
+}
 
-  if (workspace && file) {
-    await workspace.delete(file.workspacePath).catch((error) => {
-      console.error(`document purge: workspace delete failed for ${file.workspacePath}`, error);
-    });
+function documentDeletionAssetId(documentId: string, path: string): string {
+  return `document-delete:${documentId}:${createHash('sha256').update(path).digest('hex')}`;
+}
+
+async function drainDocumentDeletionAssets(
+  repository: DocumentDeletionRepository,
+  agentId: string,
+  documentId: string,
+  workspace?: DocumentDeletionWorkspace,
+): Promise<boolean> {
+  const assets = await repository.pendingAssets(agentId, documentId);
+  if (!workspace) return assets.length > 0;
+  let pending = false;
+  for (const asset of assets) {
+    try {
+      if (asset.kind === 'email_attachment_custody') {
+        if (asset.documentId !== documentId) {
+          pending = true;
+          continue;
+        }
+        const custody = workspace.emailAttachmentCustody;
+        if (!custody) throw new Error('Email attachment custody cleanup is unsupported');
+        const result = await custody.deleteOwnedEmailAttachment({
+          custodyId: asset.custodyId,
+          expectedGeneration: asset.generation,
+        });
+        if (result === 'changed') {
+          const observed = await custody.inspectEmailAttachmentObject(
+            asset.custodyId,
+            asset.generation,
+          );
+          if (!observed) {
+            pending = true;
+            continue;
+          }
+          if (observed.custodyId !== asset.custodyId)
+            throw new Error('Email attachment custody identity changed during cleanup');
+          if (observed.generation === asset.generation && observed.state === asset.objectState) {
+            pending = true;
+            continue;
+          }
+          await repository.refreshEmailAttachmentCustodyCleanupIntent(agentId, asset, {
+            generation: observed.generation,
+            objectState: observed.state,
+          });
+          pending = true;
+          continue;
+        } else if (result !== 'deleted' && result !== 'missing') {
+          throw new Error('Email attachment custody cleanup was not confirmed');
+        }
+      } else {
+        await workspace.delete(asset.workspacePath);
+      }
+      await repository.assetDeleted(agentId, asset);
+    } catch {
+      // Keep the durable asset intent. Paths are deliberately excluded from logs/errors.
+      pending = true;
+    }
   }
-  if (workspace && document.processedTextPath) {
-    await workspace.delete(document.processedTextPath).catch((error) => {
-      console.error(
-        `document purge: text-blob delete failed for ${document.processedTextPath}`,
-        error,
-      );
-    });
+  return pending || (await repository.pendingAssets(agentId, documentId)).length > 0;
+}
+
+async function drainPostgresDocumentDeletionAssets(
+  db: Db,
+  agentId: string,
+  documentId: string,
+  workspace?: DocumentDeletionWorkspace,
+): Promise<boolean> {
+  const prefixes = [
+    `privacy-erasure-asset:${agentId}:document-delete:${documentId}:`,
+    `privacy-erasure-asset:${agentId}:document-delete-worker:${documentId}`,
+  ];
+  const assets = await db
+    .select({ name: maintenanceCursors.name, path: maintenanceCursors.cursor })
+    .from(maintenanceCursors)
+    .where(
+      sql`${maintenanceCursors.name} like ${`${prefixes[0]}%`} OR ${maintenanceCursors.name} = ${prefixes[1]}`,
+    );
+  const attachmentCleanupPrefix = `privacy-erasure-asset:${agentId}:email-attachment-custody:`;
+  const linkedAttachmentAssets = await db
+    .select({ name: maintenanceCursors.name })
+    .from(maintenanceCursors)
+    .where(
+      and(
+        like(maintenanceCursors.name, `${attachmentCleanupPrefix}%`),
+        like(maintenanceCursors.cursor, `%"documentId":"${documentId}"%`),
+      ),
+    )
+    .limit(1);
+  if (!workspace) return assets.length > 0 || linkedAttachmentAssets.length > 0;
+  for (const asset of assets) {
+    if (!prefixes.some((prefix) => asset.name.startsWith(prefix)) || !asset.path) continue;
+    try {
+      await workspace.delete(asset.path);
+      if (asset.name === prefixes[1]) continue;
+      await db.delete(maintenanceCursors).where(eq(maintenanceCursors.name, asset.name));
+    } catch {
+      // Keep the durable asset intent. Paths are deliberately excluded from logs/errors.
+    }
   }
-  return { deleted: true };
+  if (linkedAttachmentAssets.length) {
+    const privacyRepository = createPostgresPrivacyErasureRepository(db);
+    const custodyWorkspace = workspace.emailAttachmentCustody;
+    const linkedAssets = (await privacyRepository.pendingAssets()).filter(
+      (asset) => asset.kind === 'email_attachment_custody' && asset.documentId === documentId,
+    );
+    for (const asset of linkedAssets) {
+      if (asset.kind !== 'email_attachment_custody' || !custodyWorkspace) continue;
+      const removed = await custodyWorkspace.deleteOwnedEmailAttachment({
+        custodyId: asset.custodyId,
+        expectedGeneration: asset.generation,
+      });
+      if (removed === 'changed') {
+        const observed = await custodyWorkspace.inspectEmailAttachmentObject(asset.custodyId);
+        if (!observed)
+          throw new Error('Email attachment cleanup generation could not be confirmed missing');
+        if (observed.custodyId !== asset.custodyId)
+          throw new Error('Email attachment custody identity changed during document deletion');
+        await privacyRepository.refreshEmailAttachmentCustodyCleanupIntent(asset, {
+          generation: observed.generation,
+          objectState: observed.state,
+        });
+        continue;
+      }
+      if (removed !== 'deleted' && removed !== 'missing') continue;
+      await privacyRepository.assetDeleted(asset);
+    }
+  }
+  const remaining = await db
+    .select({ name: maintenanceCursors.name })
+    .from(maintenanceCursors)
+    .where(
+      sql`${maintenanceCursors.name} like ${`${prefixes[0]}%`} OR ${maintenanceCursors.name} = ${prefixes[1]}`,
+    );
+  const remainingAttachmentAssets = await db
+    .select({ name: maintenanceCursors.name })
+    .from(maintenanceCursors)
+    .where(
+      and(
+        like(maintenanceCursors.name, `${attachmentCleanupPrefix}%`),
+        like(maintenanceCursors.cursor, `%"documentId":"${documentId}"%`),
+      ),
+    )
+    .limit(1);
+  return (
+    remaining.some((asset) => prefixes.some((prefix) => asset.name.startsWith(prefix))) ||
+    remainingAttachmentAssets.length > 0
+  );
 }

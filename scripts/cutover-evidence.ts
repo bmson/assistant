@@ -1,14 +1,18 @@
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   renameSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 /**
  * One JSON evidence file per cutover step. Files are private (0600), created
@@ -40,6 +44,24 @@ export type StepEvidence<T = unknown> = {
 
 export function sha256Hex(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function durableCreateFile(path: string, contents: string | Buffer, mode = 0o600): void {
+  const descriptor = openSync(path, 'wx', mode);
+  try {
+    if (typeof contents === 'string') writeSync(descriptor, contents);
+    else writeSync(descriptor, contents, 0, contents.length);
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+  chmodSync(path, mode);
+  const directory = openSync(dirname(path), 'r');
+  try {
+    fsyncSync(directory);
+  } finally {
+    closeSync(directory);
+  }
 }
 
 /** Stable JSON: object keys sorted, so the config hash does not depend on key order. */
@@ -94,15 +116,18 @@ export class EvidenceStore {
       const stamp = existing.completedAt.replace(/[:.]/g, '');
       renameSync(path, path.replace(/\.json$/, `.failed-${stamp}.json`));
     }
-    writeFileSync(path, `${JSON.stringify(evidence, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
-    chmodSync(path, 0o600);
+    durableCreateFile(path, `${JSON.stringify(evidence, null, 2)}\n`);
     return path;
   }
 
   writePrivate(name: string, contents: string | Buffer, options: { overwrite?: boolean } = {}) {
     if (!/^[a-zA-Z0-9._-]+$/.test(name)) throw new Error('Invalid private evidence file name');
     const path = join(this.privateDirectory, name);
-    writeFileSync(path, contents, { flag: options.overwrite ? 'w' : 'wx', mode: 0o600 });
+    if (options.overwrite) {
+      writeFileSync(path, contents, { flag: 'w', mode: 0o600 });
+    } else {
+      durableCreateFile(path, contents);
+    }
     chmodSync(path, 0o600);
     return path;
   }
@@ -119,8 +144,27 @@ export class EvidenceStore {
     if (!/^[a-z][a-zA-Z0-9._-]+\.json$/.test(name) || /^\d/.test(name))
       throw new Error('Invalid evidence record name');
     const path = join(this.directory, name);
-    writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+    durableCreateFile(path, `${JSON.stringify(value, null, 2)}\n`);
     return path;
+  }
+
+  readRecord<T = unknown>(name: string): T | null {
+    if (!/^[a-z][a-zA-Z0-9._-]+\.json$/.test(name) || /^\d/.test(name))
+      throw new Error('Invalid evidence record name');
+    const path = join(this.directory, name);
+    if (!existsSync(path)) return null;
+    return JSON.parse(readFileSync(path, 'utf8')) as T;
+  }
+
+  records<T = unknown>(prefix: string): Array<{ name: string; value: T }> {
+    if (!/^[a-z][a-zA-Z0-9._-]*$/.test(prefix)) throw new Error('Invalid evidence record prefix');
+    return readdirSync(this.directory)
+      .filter((name) => name.startsWith(prefix) && name.endsWith('.json'))
+      .sort()
+      .map((name) => ({
+        name,
+        value: JSON.parse(readFileSync(join(this.directory, name), 'utf8')) as T,
+      }));
   }
 
   privatePath(name: string): string {

@@ -885,7 +885,7 @@ private struct GraphConnectionsSheet: View {
     private var ordered: [RelationshipGraphEdge] {
         edges.sorted {
             let a = $0.reviewStatus == "confirmed", b = $1.reviewStatus == "confirmed"
-            return a != b ? !a : $0.presentation.sentence.localizedStandardCompare($1.presentation.sentence) == .orderedAscending
+            return a != b ? !a : $0.displayText(focusedAt: node.id).localizedStandardCompare($1.displayText(focusedAt: node.id)) == .orderedAscending
         }
     }
 
@@ -900,7 +900,7 @@ private struct GraphConnectionsSheet: View {
                             GraphEdgeDetail(edge: edge, node: node, explore: explore, removed: removed, refresh: refresh)
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(edge.presentation.sentence)
+                                Text(edge.displayText(focusedAt: node.id))
                                     .fixedSize(horizontal: false, vertical: true)
                                 if edge.reviewStatus != "confirmed" {
                                     Text("Not yet confirmed").font(.caption).foregroundStyle(AssistantTheme.warningInk(for: colorScheme))
@@ -963,7 +963,7 @@ private struct GraphEdgeDetail: View {
     var body: some View {
         AssistantForm {
             Section {
-                Text(edge.presentation.sentence).font(.title3.weight(.semibold))
+                Text(edge.displayText(focusedAt: node.id)).font(.title3.weight(.semibold))
                     .fixedSize(horizontal: false, vertical: true)
                 if edge.validFrom != nil || edge.validUntil != nil {
                     LabeledContent("When", value: "\(edge.validFrom ?? "Unknown start") to \(edge.validUntil ?? "present")")

@@ -6,10 +6,13 @@ import { disposeStore, emulatorStore } from './test-store.js';
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore approval remember flow', () => {
   let store: InstallationStore;
   let approvals: FirestoreApprovalRepository;
+  let currentTime: Date;
 
   beforeEach(async () => {
-    store = emulatorStore();
+    currentTime = new Date('2026-09-12T12:00:00.000Z');
+    store = emulatorStore(() => new Date(currentTime));
     approvals = new FirestoreApprovalRepository(store);
+    await store.doc('agents', 'agent').set({ id: 'agent', name: 'Assistant' });
     await store.doc('tasks', 'task').set({
       id: 'task',
       agentId: 'agent',
@@ -51,6 +54,47 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore approval rememb
     await expect(approvals.getRememberable('other-agent', 'approval')).resolves.toBeNull();
 
     await store.doc('toolCalls', 'tool').update({ taskId: 'other-task' });
+    await expect(approvals.getRememberable('agent', 'approval')).resolves.toBeNull();
+  });
+
+  it('rechecks remember-rule eligibility after linked task and tool reads', async () => {
+    const expiresAt = new Date(currentTime.getTime() + 1);
+    await store.doc('approvals', 'approval').update({ expiresAt });
+    const delayedStore = Object.create(store) as InstallationStore;
+    const originalDoc = store.doc.bind(store);
+    delayedStore.doc = (collection, id) => {
+      const reference = originalDoc(collection, id);
+      if (collection !== 'tasks' || id !== 'task') return reference;
+      const originalGet = reference.get.bind(reference);
+      return new Proxy(reference, {
+        get(target, property, receiver) {
+          if (property === 'get') {
+            return async (...args: Parameters<typeof reference.get>) => {
+              const snapshot = await originalGet(...args);
+              currentTime = new Date(expiresAt.getTime() + 1);
+              return snapshot;
+            };
+          }
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    };
+    const delayedApprovals = new FirestoreApprovalRepository(delayedStore);
+
+    await expect(delayedApprovals.getRememberable('agent', 'approval')).resolves.toBeNull();
+  });
+
+  it('only exposes in-time pending approvals for remember-rule derivation', async () => {
+    const now = store.now();
+    await store.doc('approvals', 'approval').update({ expiresAt: new Date(now.getTime() + 1) });
+    await expect(approvals.getRememberable('agent', 'approval')).resolves.toMatchObject({
+      approval: { id: 'approval' },
+    });
+
+    await store.doc('approvals', 'approval').update({ expiresAt: now });
+    await expect(approvals.getRememberable('agent', 'approval')).resolves.toBeNull();
+    await store.doc('approvals', 'approval').update({ expiresAt: new Date(now.getTime() - 1) });
     await expect(approvals.getRememberable('agent', 'approval')).resolves.toBeNull();
   });
 

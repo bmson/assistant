@@ -27,6 +27,9 @@ function axis(index: number): number[] {
 function topicRouter() {
   const summaries: string[] = [];
   const router = {
+    async embeddingSpace() {
+      return SPACE;
+    },
     async generate(_role: string, input: { prompt: string }) {
       const topic = ['sailing', 'mortgage', 'garden'].find((word) => input.prompt.includes(word));
       const text = `Talked about ${topic ?? 'something'}`;
@@ -137,7 +140,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore chat segmentati
       trigger: { source: 'schedule', payload: { job: 'chat.segment' } },
     });
     const result = await executeTask(deps, task.id);
-    expect(result.outcome).toBe('done');
+    expect(result.outcome, JSON.stringify(result)).toBe('done');
     return result.detail;
   }
 
@@ -199,6 +202,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore chat segmentati
       agentId,
       embedding: axis(101),
       limit: 2,
+      embeddingSpaceKey: embeddingSpaceKey(SPACE),
       exclude: { conversationId: randomUUID(), sinceCreatedAt: new Date() },
     });
     expect(recalled[0]).toMatchObject({
@@ -231,15 +235,20 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore chat segmentati
     ]);
   });
 
-  it('skips vectors from another space, unembedded turns, and threads it does not own', async () => {
+  it('does not advance past foreign-space or unembedded turns and ignores threads it does not own', async () => {
     const thread = await conversation({});
-    await message(thread, {
-      text: 'sailing stale space',
+    const foreignSpace = await message(thread, {
+      text: 'sailing stale space vector needs to be repaired',
       topic: 1,
       minutesAgo: 120,
       space: OTHER_SPACE,
     });
-    await message(thread, { text: 'sailing no vector', topic: 1, minutesAgo: 119, space: null });
+    const noVector = await message(thread, {
+      text: 'sailing no vector yet this turn is substantive',
+      topic: 1,
+      minutesAgo: 119,
+      space: null,
+    });
     const first = await message(thread, { text: 'sailing kept', topic: 1, minutesAgo: 118 });
     await message(thread, { text: 'sailing kept too', topic: 1, minutesAgo: 117 });
     await message(thread, { text: 'sailing tool noise', topic: 1, minutesAgo: 116, role: 'tool' });
@@ -252,8 +261,18 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore chat segmentati
     await message(foreign, { text: 'sailing elsewhere again', topic: 1, minutesAgo: 119 });
 
     await runJob();
+    expect(await segments(thread)).toEqual([]);
+    expect(summaries).toEqual([]);
+
+    for (const id of [foreignSpace, noVector])
+      await store.doc('messages', id).update({
+        embedding: FieldValue.vector(axis(1)),
+        embeddingSpace: embeddingSpaceKey(SPACE),
+      });
+    await runJob();
     const rows = await segments(thread);
-    expect(rows.map((row) => [row.startMessageId, row.messageCount])).toEqual([[first, 2]]);
+    expect(rows.map((row) => [row.startMessageId, row.messageCount])).toEqual([[foreignSpace, 4]]);
+    expect(first).not.toBe(foreignSpace);
     expect(await segments(external)).toEqual([]);
     expect(await segments(foreign)).toEqual([]);
     expect(summaries).toEqual(['Talked about sailing']);
@@ -272,6 +291,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore chat segmentati
       endMessageId: end,
       summary: 'Talked about sailing',
       embedding: axis(100),
+      embeddingSpaceKey: embeddingSpaceKey(SPACE),
       messageCount: 2,
       startedAt: at(60),
       endedAt: at(59),
@@ -290,5 +310,128 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore chat segmentati
     await expect(repository.commitSegment({ ...input, startMessageId: end })).rejects.toThrow(
       'Privacy erasure is in progress',
     );
+  }, 10_000);
+
+  it('keeps the segment boundary before an unresolved turn and resumes after its vector arrives', async () => {
+    const thread = await conversation({ minutesAgo: 100 });
+    const unresolved = await message(thread, {
+      text: 'The older source turn is waiting for embedding repair',
+      topic: 1,
+      minutesAgo: 80,
+      space: null,
+    });
+    const laterStart = await message(thread, {
+      text: 'The sailing plan starts here',
+      topic: 1,
+      minutesAgo: 70,
+    });
+    const laterEnd = await message(thread, {
+      text: 'The sailing plan ends here',
+      topic: 1,
+      minutesAgo: 69,
+    });
+
+    expect(await runJob()).toBe('segmentation: 0 new segment(s) across 1 conversation(s)');
+    expect(await segments(thread)).toHaveLength(0);
+
+    await store.doc('messages', unresolved).update({
+      embedding: FieldValue.vector(axis(1)),
+      embeddingSpace: embeddingSpaceKey(SPACE),
+    });
+    expect(await runJob()).toBe('segmentation: 1 new segment(s) across 1 conversation(s)');
+    expect(await segments(thread)).toMatchObject([
+      {
+        startMessageId: unresolved,
+        endMessageId: laterEnd,
+        messageCount: 3,
+      },
+    ]);
+    expect(laterStart).not.toBe(unresolved);
+  });
+
+  it('records a settled singleton without skipping it as covered history', async () => {
+    const thread = await conversation({ minutesAgo: 100 });
+    const only = await message(thread, {
+      text: 'A single source turn about the garden',
+      topic: 3,
+      minutesAgo: 60,
+    });
+    expect(await runJob()).toBe('segmentation: 1 new segment(s) across 1 conversation(s)');
+    expect(await segments(thread)).toMatchObject([
+      { startMessageId: only, endMessageId: only, messageCount: 1 },
+    ]);
+  });
+
+  it('covers a settled singleton before the following multi-turn topic', async () => {
+    const thread = await conversation({ minutesAgo: 100 });
+    const singleton = await message(thread, {
+      text: 'A garden decision from one turn',
+      topic: 3,
+      minutesAgo: 60,
+    });
+    const followup = await message(thread, {
+      text: 'The mortgage plan begins',
+      topic: 2,
+      minutesAgo: 59,
+    });
+    const followupEnd = await message(thread, {
+      text: 'The mortgage plan is confirmed',
+      topic: 2,
+      minutesAgo: 58,
+    });
+    await runJob();
+    expect(
+      (await segments(thread)).map((row) => [
+        row.startMessageId,
+        row.endMessageId,
+        row.messageCount,
+      ]),
+    ).toEqual([
+      [singleton, singleton, 1],
+      [followup, followupEnd, 2],
+    ]);
+  });
+
+  it('leaves a span open when summary generation fails, then commits it after recovery', async () => {
+    const thread = await conversation({ minutesAgo: 100 });
+    const only = await message(thread, {
+      text: 'A source turn whose summary service will recover',
+      topic: 3,
+      minutesAgo: 60,
+    });
+    const original = deps.router;
+    let recovered = false;
+    deps.router = {
+      async embeddingSpace() {
+        return SPACE;
+      },
+      async generate() {
+        if (!recovered) throw new Error('temporary summarizer outage');
+        return {
+          ok: true,
+          modelId: 'fixture',
+          degraded: false,
+          text: 'Recovered summary includes the source decision.',
+        };
+      },
+      async embed(texts: string[]) {
+        return texts.map(() => axis(110));
+      },
+    } as unknown as ExecutorDeps['router'];
+    try {
+      expect(await runJob()).toBe('segmentation: 0 new segment(s) across 1 conversation(s)');
+      expect(await segments(thread)).toEqual([]);
+      recovered = true;
+      expect(await runJob()).toBe('segmentation: 1 new segment(s) across 1 conversation(s)');
+      expect(await segments(thread)).toMatchObject([
+        {
+          startMessageId: only,
+          endMessageId: only,
+          summary: 'Recovered summary includes the source decision.',
+        },
+      ]);
+    } finally {
+      deps.router = original;
+    }
   });
 });

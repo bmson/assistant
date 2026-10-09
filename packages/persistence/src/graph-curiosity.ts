@@ -1,3 +1,26 @@
+export interface CuriosityQuestionInput {
+  agentId: string;
+  key: string;
+  question: string;
+  taskId?: string;
+  now: Date;
+  observationFence: string | null;
+}
+export type CuriosityPushAdmission =
+  | { status: 'queued'; destinations: number }
+  | { status: 'held'; reason: 'quiet-hours' | 'daily-cap' }
+  | { status: 'skipped'; reason: 'no-active-devices' }
+  | { status: 'unknown'; reason: 'device-list-overflow' | 'malformed-device-registry' };
+export type CuriosityQuestionOutcome =
+  | {
+      status: 'posted';
+      conversationId: string;
+      messageId: string;
+      pushAdmission: CuriosityPushAdmission;
+    }
+  | { status: 'already-posted'; conversationId: string; messageId: string }
+  | { status: 'legacy-unknown' };
+
 /** A well-connected entity of the active graph, with its active outgoing degree. */
 export interface GraphGapEntity {
   id: string;
@@ -26,6 +49,9 @@ export interface GraphGapRelation {
  */
 export interface GraphCuriosityRepository {
   readonly kind: 'graph-curiosity-repository';
+  observationFence(agentId: string): Promise<string | null>;
+  /** Commit the inert asked-gap marker and the visible question together. */
+  admitQuestion(input: CuriosityQuestionInput): Promise<CuriosityQuestionOutcome>;
   /**
    * Entities with at least `minRelations` active outgoing relations, by label,
    * at most `maxCandidates`; and every active relation those entities head.

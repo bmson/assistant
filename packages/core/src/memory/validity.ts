@@ -53,6 +53,44 @@ export function statedPeriodEnd(value: string | Date | null | undefined): Date |
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+/** Start boundary for a canonical year/month/day. Unreadable non-empty text is unknown. */
+export function statedPeriodStart(value: string | Date | null | undefined): Date | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+  const trimmed = value.trim();
+  const year = /^(\d{4})$/.exec(trimmed);
+  if (year) return new Date(Date.UTC(Number(year[1]), 0, 1));
+  const month = /^(\d{4})-(\d{2})$/.exec(trimmed);
+  if (month) {
+    const valueDate = new Date(Date.UTC(Number(month[1]), Number(month[2]) - 1, 1));
+    return valueDate.getUTCMonth() === Number(month[2]) - 1 ? valueDate : null;
+  }
+  const day = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (day) {
+    const valueDate = new Date(Date.UTC(Number(day[1]), Number(day[2]) - 1, Number(day[3])));
+    return valueDate.getUTCFullYear() === Number(day[1]) &&
+      valueDate.getUTCMonth() === Number(day[2]) - 1 &&
+      valueDate.getUTCDate() === Number(day[3])
+      ? valueDate
+      : null;
+  }
+  const parsed = new Date(trimmed);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+/** Strict current-time eligibility for graph context; ambiguous stated bounds abstain. */
+export function isCurrentInterval(
+  validFrom: string | Date | null | undefined,
+  validUntil: string | Date | null | undefined,
+  now: Date,
+): boolean {
+  const from = statedPeriodStart(validFrom);
+  if (validFrom != null && validFrom !== '' && (!from || from > now)) return false;
+  const until = statedPeriodEnd(validUntil);
+  if (validUntil != null && validUntil !== '' && (!until || until <= now)) return false;
+  return true;
+}
+
 /**
  * Whether a row still speaks for the present.
  *
@@ -61,7 +99,12 @@ export function statedPeriodEnd(value: string | Date | null | undefined): Date |
  * the safe direction for an unreadable value is to keep showing the fact
  * rather than to quietly retire it on a guess.
  */
-export function isCurrentAt(validUntil: string | Date | null | undefined, now: Date): boolean {
+export function isCurrentAt(
+  validUntil: string | Date | null | undefined,
+  now: Date,
+  validFrom?: Date | null,
+): boolean {
+  if (validFrom && validFrom.getTime() > now.getTime()) return false;
   const end = statedPeriodEnd(validUntil);
   return end === null || end.getTime() > now.getTime();
 }
@@ -81,6 +124,8 @@ export function validitySuffix(
   const from = fact.validFrom ? fact.validFrom.toISOString().slice(0, 10) : null;
   const until = fact.validUntil ? fact.validUntil.toISOString().slice(0, 10) : null;
 
+  if (fact.validFrom && fact.validFrom > now)
+    return from ? ` (future: from ${from}${until ? `, until ${until}` : ''})` : '';
   if (!isCurrentAt(fact.validUntil, now)) {
     return from ? ` (past: ${from}–${until})` : ` (past: until ${until})`;
   }

@@ -23,14 +23,31 @@ struct MessageBubble: View {
     /// Where an accepted suggestion's task can be seen. The phone has no page
     /// for a single task, so this is Activity.
     var openActivity: (() -> Void)? = nil
-    var refreshCard: ((String) async -> String?)? = nil
+    var refreshCard: ((String, String?) async -> String?)? = nil
+    var cardFormActions: NativeCardFormActions? = nil
+    var cardFormStateRevision: Int = 0
+    var cardFormTaskRevision: Int = 0
+    /// Revision-fenced recall-source hide/allow control, available only in the
+    /// durable transcript where the server hydrated a current source ref.
+    var setRecallSourceSuppressed: ((MessageRecallSource, Bool) async -> RecallSourceControlOutcome)? = nil
+    /// Reads the authoritative current setting on demand before offering the
+    /// inverse action for an old transcript source.
+    var recallSourceSuppressed: ((MessageRecallSource) async -> Bool?)? = nil
     /// Take this card out of the log. Nil while the row is still in flight —
     /// there is nothing for the server to hide until the turn has settled —
     /// and nil wherever a bubble is rendered outside the log, as in snapshots.
     var hide: (() -> Void)? = nil
+    /// Called only after a stable assistant row is visible in the native chat.
+    var acknowledgeDelivery: (() async -> Bool)? = nil
 
     @State private var decidingApproval = false
     @State private var approvalFailureID: String?
+    @State private var deliveryRowVisible = false
+    @State private var deliveryAcknowledgementInFlight = false
+    @State private var deliveryAcknowledged = false
+    @State private var recallSourceStates: [String: Bool] = [:]
+    @State private var recallSourceInFlight = Set<String>()
+    @State private var recallControlNotice: String?
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -49,10 +66,34 @@ struct MessageBubble: View {
         // where there is something to offer, and on a condition that is fixed
         // for the life of a row: a menu appearing mid-stream would rebuild the
         // bubble underneath the reply it is still writing.
-        if hide != nil {
-            card.contextMenu { cardMenu(copyLabel: "Copy message") }
-        } else {
-            card
+        Group {
+            if hide != nil {
+                card.contextMenu { cardMenu(copyLabel: "Copy message") }
+            } else {
+                card
+            }
+        }
+        .onScrollVisibilityChange(threshold: 0.5) { visible in
+            deliveryRowVisible = visible
+            acknowledgeVisibleReplyIfReady()
+        }
+        .onChange(of: isStreaming) { _, streaming in
+            if !streaming { acknowledgeVisibleReplyIfReady() }
+        }
+    }
+
+    @MainActor
+    private func acknowledgeVisibleReplyIfReady() {
+        guard deliveryRowVisible,
+              message.role == .assistant,
+              !isStreaming,
+              !deliveryAcknowledgementInFlight,
+              !deliveryAcknowledged,
+              let acknowledgeDelivery else { return }
+        deliveryAcknowledgementInFlight = true
+        Task { @MainActor in
+            deliveryAcknowledged = await acknowledgeDelivery()
+            deliveryAcknowledgementInFlight = false
         }
     }
 
@@ -146,7 +187,13 @@ struct MessageBubble: View {
             }
 
             if message.role == .assistant, !responseCards.isEmpty, !message.hasSupportingResultCards {
-                RichResponseCards(cards: responseCards, onSend: retry, onRefresh: refreshCard)
+                RichResponseCards(
+                    cards: responseCards,
+                    onSend: retry,
+                    onRefresh: refreshCard,
+                    cardFormActions: cardFormActions,
+                    cardFormTaskRevision: cardFormTaskRevision
+                )
             }
 
             if message.role == .assistant, message.isOffCourse, !isStreaming {
@@ -344,17 +391,37 @@ struct MessageBubble: View {
 
     private var recallNote: some View {
         let sources = message.recallSources
-        let graphCount = sources.filter(\.isKnowledgeGraph).count
-        let title: String
-        if graphCount == 0 {
-            title = "Drawing on earlier chats"
-        } else if graphCount == sources.count {
-            title = "Drawing on knowledge graph"
-        } else {
-            title = "Drawing on graph and earlier chats"
+        let groups = Array(Set(sources.map(\.displayGroup))).sorted()
+        let title = "Drawing on " + groups.joined(separator: " and ")
+        let controllable = sources.filter(\.hasCurrentLedgerReference)
+        return VStack(alignment: .leading, spacing: 4) {
+            Group {
+                if setRecallSourceSuppressed != nil, !controllable.isEmpty {
+                    Menu {
+                        ForEach(controllable) { source in
+                            recallSourceMenuSection(source)
+                        }
+                    } label: {
+                        recallPill(title: title, sources: sources)
+                    }
+                    .accessibilityLabel("Manage recalled sources: \(sources.map(\.label).joined(separator: ", "))")
+                    .accessibilityHint("Hide or allow a source in future recalled context.")
+                } else {
+                    recallPill(title: title, sources: sources)
+                }
+            }
+            if let recallControlNotice {
+                Text(recallControlNotice)
+                    .font(.caption2)
+                    .foregroundStyle(AssistantTheme.stageSecondary)
+                    .accessibilityLabel(recallControlNotice)
+            }
         }
-        return HStack(alignment: .firstTextBaseline, spacing: 5) {
-            Image(systemName: graphCount > 0 ? "point.3.connected.trianglepath.dotted" : "clock.arrow.circlepath")
+    }
+
+    private func recallPill(title: String, sources: [MessageRecallSource]) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            Image(systemName: sources.contains(where: \.isKnowledgeGraph) ? "point.3.connected.trianglepath.dotted" : "clock.arrow.circlepath")
                 .font(.caption2.weight(.semibold))
             Text(title)
                 .font(.caption2.weight(.semibold))
@@ -367,6 +434,81 @@ struct MessageBubble: View {
         .padding(.vertical, 4)
         .background(AssistantTheme.stageWell(for: colorScheme), in: Capsule())
         .accessibilityLabel("\(title): \(sources.map(\.label).joined(separator: ", "))")
+    }
+
+    @ViewBuilder
+    private func recallSourceMenuSection(_ source: MessageRecallSource) -> some View {
+        let stateKey = recallSourceStateKey(source)
+        Section(source.label) {
+            if let hidden = recallSourceStates[stateKey] {
+                Button(
+                    hidden ? "Allow this version in future recall" : "Hide this version from future recall",
+                    systemImage: hidden ? "eye" : "eye.slash"
+                ) {
+                    updateRecallSource(source, suppressed: !hidden)
+                }
+                .disabled(recallSourceInFlight.contains(stateKey))
+            } else {
+                Button("Check this version’s setting", systemImage: "arrow.clockwise") {
+                    loadRecallSourceState(source)
+                }
+                .disabled(recallSourceInFlight.contains(stateKey) || recallSourceSuppressed == nil)
+            }
+        }
+    }
+
+    private func updateRecallSource(_ source: MessageRecallSource, suppressed: Bool) {
+        guard source.surfaceKey != nil,
+              source.hasCurrentLedgerReference,
+              !recallSourceInFlight.contains(recallSourceStateKey(source)),
+              let setRecallSourceSuppressed else { return }
+        let stateKey = recallSourceStateKey(source)
+        recallSourceInFlight.insert(stateKey)
+        recallControlNotice = nil
+        Task { @MainActor in
+            let outcome = await setRecallSourceSuppressed(source, suppressed)
+            recallSourceInFlight.remove(stateKey)
+            switch outcome {
+            case .updated:
+                recallSourceStates[stateKey] = suppressed
+                recallControlNotice = suppressed
+                    ? "This version is hidden from future recall."
+                    : "This version is allowed in future recall."
+            case .stale:
+                recallSourceStates.removeValue(forKey: stateKey)
+                recallControlNotice = "This source version changed. Refresh the conversation before changing it."
+            case .failed:
+                recallControlNotice = "Could not update recall settings. Try again."
+            case .discarded:
+                break
+            }
+        }
+    }
+
+    private func loadRecallSourceState(_ source: MessageRecallSource) {
+        guard source.surfaceKey != nil,
+              source.hasCurrentLedgerReference,
+              !recallSourceInFlight.contains(recallSourceStateKey(source)),
+              let recallSourceSuppressed else { return }
+        let stateKey = recallSourceStateKey(source)
+        recallSourceInFlight.insert(stateKey)
+        recallControlNotice = nil
+        Task { @MainActor in
+            let value = await recallSourceSuppressed(source)
+            recallSourceInFlight.remove(stateKey)
+            if let value {
+                recallSourceStates[stateKey] = value
+                recallControlNotice = value
+                    ? "This version is hidden from future recall."
+                    : "This version is allowed in future recall."
+            } else {
+                recallControlNotice = "Could not check this source setting. Refresh the conversation and try again."
+            }
+        }
+    }
+
+    private func recallSourceStateKey(_ source: MessageRecallSource) -> String {
+        "\(source.surfaceKey ?? ""):\(source.sourceRevision ?? "")"
     }
 
     private var resolvedBubbleVerticalInset: CGFloat {
@@ -384,8 +526,13 @@ struct MessageBubble: View {
     /// pick between them — could only ever produce a shape someone had
     /// already thought of, and re-derived it on every scroll.
     private var responseCards: [MessageResponseCard] {
-        let explicit = message.parts.compactMap(MessageResponseCard.init(part:))
-        guard explicit.isEmpty else { return message.standaloneResponseCards }
+        let formRendererAvailable = cardFormActions != nil
+        let explicit = message.parts.compactMap {
+            MessageResponseCard(part: $0, formRendererAvailable: formRendererAvailable)
+        }
+        guard explicit.isEmpty else {
+            return message.responseCards(formRendererAvailable: formRendererAvailable)
+        }
 
         // One exception, and it is not prose interpretation: the proactive
         // pulse still phrases an event alert as a sentence, in an exact
@@ -819,8 +966,14 @@ extension MessagePart {
 
 extension ChatMessage {
     var standaloneResponseCards: [MessageResponseCard] {
+        responseCards(formRendererAvailable: false)
+    }
+
+    func responseCards(formRendererAvailable: Bool) -> [MessageResponseCard] {
         let paired = Set(suggestionParts.compactMap { $0.suggestionContext?.id })
-        return parts.compactMap(MessageResponseCard.init(part:)).filter { card in
+        return parts.compactMap {
+            MessageResponseCard(part: $0, formRendererAvailable: formRendererAvailable)
+        }.filter { card in
             if case .proactiveAlert = card { return !paired.contains(card.id) }
             return true
         }
@@ -861,20 +1014,21 @@ enum MessageResponseCard: Identifiable {
         }
 
         init(data: [String: JSONValue]) {
-            func number(_ value: JSONValue?) -> Double? {
-                if case let .number(number)? = value, number.isFinite { return number }
+            func number(_ value: JSONValue?, in range: ClosedRange<Double>) -> Double? {
+                if case let .number(number)? = value, number.isFinite, range.contains(number) { return number }
                 return nil
             }
             if case let .array(values)? = data["days"] {
                 days = values.compactMap { value in
                     guard case let .object(day) = value,
                           let weekday = day["weekday"]?.string, !weekday.isEmpty,
-                          let low = number(day["lowC"]), let high = number(day["highC"]) else { return nil }
+                          let low = number(day["lowC"], in: -150...100),
+                          let high = number(day["highC"], in: -150...100) else { return nil }
                     return Day(
                         weekday: weekday,
                         lowC: low,
                         highC: high,
-                        precipPct: number(day["precipPct"]),
+                        precipPct: number(day["precipPct"], in: 0...100),
                         description: day["description"]?.string ?? "",
                         symbol: day["symbol"]?.string ?? ""
                     )
@@ -882,9 +1036,9 @@ enum MessageResponseCard: Identifiable {
             }
             if case let .object(reading)? = data["current"] {
                 current = Current(
-                    windKmh: number(reading["windKmh"]),
-                    humidity: number(reading["humidity"]),
-                    precipPct: number(reading["precipPct"])
+                    windKmh: number(reading["windKmh"], in: 0...500),
+                    humidity: number(reading["humidity"], in: 0...100),
+                    precipPct: number(reading["precipPct"], in: 0...100)
                 )
             }
         }
@@ -979,6 +1133,7 @@ enum MessageResponseCard: Identifiable {
         let overlapStart: String
         let overlapEnd: String
         let groups: [[ConflictEvent]]
+        var evidenceNote: String? = nil
     }
 
     struct GeneratedFact: Identifiable {
@@ -1099,6 +1254,7 @@ enum MessageResponseCard: Identifiable {
 
     struct GeneratedCard {
         let id: String
+        var revisionId: String? = nil
         /// The composer read this card out of the reply rather than out of a
         /// lookup, so the card heads the answer instead of replacing it.
         let groundedOnAnswer: Bool
@@ -1110,12 +1266,19 @@ enum MessageResponseCard: Identifiable {
         let facts: [GeneratedFact]
         let blocks: [GeneratedBlock]
         let actions: [GeneratedAction]
+        let form: NativeCardForm?
         var steps: [CardStep]
         var updatedAt: String? = nil
         var stale: Bool? = nil
         var refreshState: String? = nil
         var refreshError: String? = nil
         var refreshable: Bool = false
+        var nativeCompositionCompleteOverride: Bool? = nil
+
+        var hasCompleteNativeComposition: Bool {
+            nativeCompositionCompleteOverride ??
+                NativeGeneratedCardCatalog.supportsComplete(blocks, facts: Set(facts.map(\.id)))
+        }
 
         /// The clocks a journey block already shows, top level or in a section.
         var journeyClockFacts: Set<String> {
@@ -1127,7 +1290,7 @@ enum MessageResponseCard: Identifiable {
         var blockSections: (preview: [GeneratedBlock], details: [GeneratedBlock]) {
             var preview: [GeneratedBlock] = []
             var details: [GeneratedBlock] = []
-            for block in blocks {
+            for block in blocks where !(form != nil && block.type == "form") {
                 guard preview.count < 2 else { details.append(block); continue }
                 let ids = block.values["factIds"]?.arrayStrings ?? []
                 if ["facts", "timeline"].contains(block.type), ids.count > 4 {
@@ -1198,6 +1361,10 @@ enum MessageResponseCard: Identifiable {
     }
 
     init?(part: MessagePart) {
+        self.init(part: part, formRendererAvailable: false)
+    }
+
+    init?(part: MessagePart, formRendererAvailable: Bool) {
         guard part.type == "data-card", case let .object(data)? = part.data,
               let kind = data["kind"]?.string else { return nil }
         switch kind {
@@ -1301,7 +1468,7 @@ enum MessageResponseCard: Identifiable {
                         document: passage["document"]?.string ?? "Untitled document",
                         source: passage["source"]?.string ?? "",
                         snippet: passage["snippet"]?.string ?? "",
-                        similarity: passage["similarity"]?.numberValue
+                        similarity: passage["similarity"]?.numberValue.flatMap { (0...1).contains($0) ? $0 : nil }
                     )
                 }
             }()
@@ -1334,14 +1501,15 @@ enum MessageResponseCard: Identifiable {
                 files: files
             )
         case "knowledge-graph":
-            let nodes: [String: String] = {
-                guard case let .array(values)? = data["nodes"] else { return [:] }
-                return Dictionary(uniqueKeysWithValues: values.compactMap { value in
-                    guard case let .object(node) = value,
-                          let id = node["id"]?.string else { return nil }
-                    return (id, node["label"]?.string ?? "Unknown")
-                })
-            }()
+            guard case let .array(nodeValues)? = data["nodes"] else { return nil }
+            let nodePairs = nodeValues.compactMap { value -> (String, String)? in
+                guard case let .object(node) = value,
+                      let id = node["id"]?.string, !id.isEmpty else { return nil }
+                return (id, node["label"]?.string ?? "Unknown")
+            }
+            guard nodePairs.count == nodeValues.count,
+                  Set(nodePairs.map(\.0)).count == nodePairs.count else { return nil }
+            let nodes = Dictionary(nodePairs, uniquingKeysWith: { first, _ in first })
             let edges: [KnowledgeEdge] = {
                 guard case let .array(values)? = data["edges"] else { return [] }
                 return values.enumerated().compactMap { index, value in
@@ -1353,7 +1521,7 @@ enum MessageResponseCard: Identifiable {
                         object: nodes[edge["to"]?.string ?? ""] ?? "Unknown",
                         evidence: edge["evidenceQuote"]?.string ?? "",
                         source: edge["source"]?.string ?? "",
-                        confidence: edge["confidence"]?.numberValue,
+                        confidence: edge["confidence"]?.numberValue.flatMap { (0...1).contains($0) ? $0 : nil },
                         ownerConfirmed: edge["ownerConfirmed"]?.boolValue ?? false
                     )
                 }
@@ -1391,7 +1559,8 @@ enum MessageResponseCard: Identifiable {
                         id: conflict["id"]?.string ?? "conflict-\(index)",
                         overlapStart: conflict["overlapStart"]?.string ?? "",
                         overlapEnd: conflict["overlapEnd"]?.string ?? "",
-                        groups: groups
+                        groups: groups,
+                        evidenceNote: conflict["evidenceNote"]?.string
                     )
                 }
             }()
@@ -1424,22 +1593,34 @@ enum MessageResponseCard: Identifiable {
                 results: results
             )
         case "availability":
-            let busy: [BusyBlock] = {
-                guard case let .array(values)? = data["busy"] else { return [] }
-                return values.compactMap { value in
-                    guard case let .object(slot) = value,
-                          let start = slot["start"]?.string, !start.isEmpty,
-                          let end = slot["end"]?.string, !end.isEmpty else { return nil }
-                    return .init(start: start, end: end, calendar: slot["calendar"]?.string ?? "")
-                }
-            }()
+            let rawBusy: [JSONValue]?
+            if case let .array(values)? = data["busy"] {
+                rawBusy = values
+            } else {
+                rawBusy = nil
+            }
+            let busy: [BusyBlock] = rawBusy?.compactMap { value in
+                guard case let .object(slot) = value,
+                      let start = slot["start"]?.string,
+                      let startDate = CardText.timestamp(start),
+                      let end = slot["end"]?.string,
+                      let endDate = CardText.timestamp(end),
+                      endDate > startDate else { return nil }
+                return .init(start: start, end: end, calendar: slot["calendar"]?.string ?? "")
+            } ?? []
+            let checkedCalendars = (data["calendarsChecked"]?.arrayStrings ?? [])
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            let allBusyRowsUsable = rawBusy.map { busy.count == $0.count } ?? false
             self = .availability(
                 id: data["id"]?.string ?? "availability",
                 timeMin: data["timeMin"]?.string ?? "",
                 timeMax: data["timeMax"]?.string ?? "",
                 busy: busy,
-                calendarsChecked: data["calendarsChecked"]?.arrayStrings ?? [],
-                complete: data["complete"]?.boolValue ?? true,
+                calendarsChecked: checkedCalendars,
+                complete: data["complete"]?.boolValue == true
+                    && !checkedCalendars.isEmpty
+                    && allBusyRowsUsable,
                 note: data["note"]?.string
             )
         case "email-thread":
@@ -1469,7 +1650,10 @@ enum MessageResponseCard: Identifiable {
                     return cells.map { cell in
                         switch cell {
                         case let .string(text): text
-                        case let .number(value): value.rounded() == value ? String(Int(value)) : String(value)
+                        case let .number(value):
+                            value.rounded() == value
+                                ? (JSONValue.number(value).integerValue.map(String.init) ?? String(value))
+                                : String(value)
                         case let .bool(flag): flag ? "TRUE" : "FALSE"
                         default: ""
                         }
@@ -1531,7 +1715,7 @@ enum MessageResponseCard: Identifiable {
             guard !games.isEmpty else { return nil }
             let live = data["live"]?.objectValue
             let poll: Int = {
-                if case let .number(seconds)? = live?["pollSeconds"] { return Int(seconds) }
+                if let seconds = live?["pollSeconds"]?.integerValue, (5...300).contains(seconds) { return seconds }
                 return 30
             }()
             self = .scoreboard(
@@ -1567,6 +1751,19 @@ enum MessageResponseCard: Identifiable {
                           let type = block["type"]?.string else { return nil }
                     return .init(id: "\(index)-\(type)", type: type, values: block)
                 }
+            }()
+            let nativeForm: NativeCardForm? = {
+                guard let revisionId = data["revisionId"]?.string,
+                      let candidate = NativeCardFormParser.forms(
+                        in: spec,
+                        cardId: data["id"]?.string ?? "",
+                        revisionId: revisionId
+                      ).first else { return nil }
+                let factsById = Dictionary(facts.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+                guard candidate.warningFactIds.allSatisfy({ factsById[$0]?.sensitive == false && factsById[$0] != nil }) else {
+                    return nil
+                }
+                return candidate
             }()
             let actions: [GeneratedAction] = {
                 guard case let .array(values)? = spec["actions"] else { return [] }
@@ -1608,6 +1805,7 @@ enum MessageResponseCard: Identifiable {
             guard !facts.isEmpty, !blocks.isEmpty else { return nil }
             self = .generated(.init(
                 id: data["id"]?.string ?? "generated-\(title)",
+                revisionId: data["revisionId"]?.string,
                 // Grounding rides on the payload beside the trail, not in the
                 // model-authored spec: which corpus a card stands on is the
                 // runtime's finding, never the composer's claim. An older
@@ -1622,12 +1820,17 @@ enum MessageResponseCard: Identifiable {
                 facts: facts,
                 blocks: blocks,
                 actions: actions,
+                form: nativeForm,
                 steps: steps,
                 updatedAt: data["updatedAt"]?.string,
                 stale: data["stale"]?.boolValue,
                 refreshState: data["refreshState"]?.string,
                 refreshError: data["refreshError"]?.string,
-                refreshable: spec["refreshable"]?.boolValue ?? actions.contains { $0.type == "refresh" }
+                refreshable: spec["refreshable"]?.boolValue ?? actions.contains { $0.type == "refresh" },
+                nativeCompositionCompleteOverride: NativeGeneratedCardCatalog.supportsComplete(
+                    spec: spec,
+                    validatedNativeForm: formRendererAvailable ? nativeForm : nil
+                )
             ))
         default:
             return nil
@@ -1670,6 +1873,13 @@ enum MessageResponseCard: Identifiable {
 
     static func replacesProse(_ cards: [Self]) -> Bool {
         guard !cards.isEmpty else { return false }
+        // A card is allowed to replace prose only when this native build can
+        // render every requested block and every reference it needs. This is
+        // the text fallback for an older or partially compatible schema.
+        if cards.contains(where: { card in
+            if case let .generated(generated) = card { return !generated.hasCompleteNativeComposition }
+            return false
+        }) { return false }
         return !cards.allSatisfy(\.summarizesAnswer)
     }
 
@@ -2064,7 +2274,7 @@ enum CardFreshnessPresentation {
 
 struct GeneratedCardFreshness: View {
     let card: MessageResponseCard.GeneratedCard
-    let refresh: ((String) async -> String?)?
+    let refresh: ((String, String?) async -> String?)?
     @State private var requesting = false
     @State private var failure: String?
     @Environment(\.colorScheme) private var colorScheme
@@ -2100,7 +2310,7 @@ struct GeneratedCardFreshness: View {
                         requesting = true
                         failure = nil
                         Task {
-                            failure = await refresh(card.id)
+                            failure = await refresh(card.id, card.revisionId)
                             requesting = false
                         }
                     } label: {
@@ -2159,13 +2369,19 @@ struct RichResponseCards: View {
 
     let cards: [MessageResponseCard]
     let onSend: ((String) -> Void)?
-    let onRefresh: ((String) async -> String?)?
+    let onRefresh: ((String, String?) async -> String?)?
+    let cardFormActions: NativeCardFormActions?
+    let cardFormTaskRevision: Int
 
     init(cards: [MessageResponseCard], onSend: ((String) -> Void)? = nil,
-         onRefresh: ((String) async -> String?)? = nil) {
+         onRefresh: ((String, String?) async -> String?)? = nil,
+         cardFormActions: NativeCardFormActions? = nil,
+         cardFormTaskRevision: Int = 0) {
         self.cards = cards
         self.onSend = onSend
         self.onRefresh = onRefresh
+        self.cardFormActions = cardFormActions
+        self.cardFormTaskRevision = cardFormTaskRevision
     }
 
     @Environment(\.colorScheme) private var colorScheme
@@ -3120,7 +3336,7 @@ struct RichResponseCards: View {
         VStack(alignment: .leading, spacing: 14) {
             resultHeader(
                 title: title,
-                subtitle: complete ? "Confirmed overlaps" : "Calendar coverage is partial",
+                subtitle: complete ? "Calendar coverage is complete" : "Calendar coverage is partial",
                 countLabel: "\(conflicts.count)"
             )
             ForEach(conflicts) { conflict in
@@ -3131,6 +3347,9 @@ struct RichResponseCards: View {
                     )
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                    Text(conflict.evidenceNote ?? "The times overlap; personal attendance and event identity are unverified.")
+                        .font(.caption)
+                        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                     ForEach(Array(conflict.groups.enumerated()), id: \.offset) { _, events in
                         if let event = events.first {
                             VStack(alignment: .leading, spacing: 6) {
@@ -3142,7 +3361,7 @@ struct RichResponseCards: View {
                                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                                 HStack(spacing: 5) {
                                     ForEach(events) { source in
-                                        Text(source.calendar)
+                                        Text(events.count > 1 ? "\(source.calendar) · \(source.title) · \(cardTime(source.start))–\(cardTime(source.end))" : source.calendar)
                                             .font(.caption2.weight(.medium))
                                             .padding(.horizontal, 7)
                                             .padding(.vertical, 6)
@@ -3237,27 +3456,57 @@ struct RichResponseCards: View {
             resultHeader(
                 title: "Availability",
                 subtitle: availabilityWindowCaption(timeMin: timeMin, timeMax: timeMax),
-                countLabel: busy.isEmpty ? "Free" : "\(busy.count) busy"
+                countLabel: busy.isEmpty
+                    ? (complete ? "Free" : "Unconfirmed")
+                    : "\(busy.count) busy"
             )
             if busy.isEmpty {
-                Text("Nothing on the calendar in this window.")
+                Text(complete
+                    ? "Nothing on the calendar in this window."
+                    : calendarsChecked.isEmpty
+                        ? "Availability is unconfirmed for this window."
+                        : "No conflicts found in the calendars that were checked.")
                     .font(.subheadline)
                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .accessibilityLabel(complete
+                        ? "Nothing on the calendar in this window."
+                        : calendarsChecked.isEmpty
+                            ? "Availability is unconfirmed for this window."
+                            : "No conflicts found in the calendars that were checked.")
             } else {
                 VStack(spacing: 0) {
                     ForEach(Array(busy.enumerated()), id: \.element.id) { index, block in
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            Text(availabilityTimeLabel(start: block.start, end: block.end, spansMultipleDays: spansMultipleDays))
-                                .font(.subheadline.monospacedDigit().weight(.semibold))
-                                .foregroundStyle(AssistantTheme.ink(for: colorScheme))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.82)
-                            Spacer(minLength: 6)
+                        let interval = Text(availabilityTimeLabel(start: block.start, end: block.end, spansMultipleDays: spansMultipleDays))
+                            .font(.subheadline.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+                        let calendar = Text(block.calendar)
+                            .font(.caption)
+                            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                        let stacked = VStack(alignment: .leading, spacing: 10) {
+                            interval.fixedSize(horizontal: false, vertical: true)
                             if !block.calendar.isEmpty {
-                                Text(block.calendar)
-                                    .font(.caption)
-                                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                                    .lineLimit(1)
+                                calendar.fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        Group {
+                            if usesAccessibilityLayout {
+                                stacked
+                            } else {
+                                ViewThatFits(in: .horizontal) {
+                                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                        interval
+                                            .lineLimit(1)
+                                            .fixedSize(horizontal: true, vertical: false)
+                                        Spacer(minLength: 6)
+                                        if !block.calendar.isEmpty {
+                                            calendar
+                                                .lineLimit(1)
+                                                .fixedSize(horizontal: true, vertical: false)
+                                        }
+                                    }
+                                    stacked
+                                }
                             }
                         }
                         .padding(.vertical, index == 0 ? 0 : 10)
@@ -3512,37 +3761,63 @@ struct RichResponseCards: View {
         let facts = Dictionary(card.facts.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let sections = card.blockSections
         return VStack(alignment: .leading, spacing: CardStyle.blockSpacing) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: generatedSymbol(card.icon))
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(AssistantTheme.accent(for: colorScheme))
-                    .frame(width: 36, height: 36)
-                    .background(
-                        AssistantTheme.accent(for: colorScheme).opacity(0.10),
-                        in: RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    )
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(CardText.presentationLabel(card.sourceLabel))
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+            if usesAccessibilityLayout {
+                VStack(alignment: .leading, spacing: 6) {
                     Text(card.title)
                         .font(.headline.weight(.semibold))
                         .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+                        .fixedSize(horizontal: false, vertical: true)
                     if !card.subtitle.isEmpty {
                         Text(card.subtitle)
                             .font(.caption)
                             .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text(CardText.presentationLabel(card.sourceLabel))
+                        .font(.caption)
+                        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Spacer(minLength: 0)
+                        ShareLink(item: GeneratedCardValue.shareText(card)) {
+                            Image(systemName: "square.and.arrow.up")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                                .frame(minWidth: 44, minHeight: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .accessibilityLabel("Share \(card.title)")
                     }
                 }
-                Spacer(minLength: 8)
-                ShareLink(item: GeneratedCardValue.shareText(card)) {
-                    Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                        .frame(width: 36, height: 36)
-                        .contentShape(Rectangle())
+            } else {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: generatedSymbol(card.icon))
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                        .frame(width: 20, height: 20)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(CardText.presentationLabel(card.sourceLabel))
+                            .font(.caption)
+                            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                        Text(card.title)
+                            .font(.headline.weight(.semibold))
+                            .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+                        if !card.subtitle.isEmpty {
+                            Text(card.subtitle)
+                                .font(.caption)
+                                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    ShareLink(item: GeneratedCardValue.shareText(card)) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .accessibilityLabel("Share \(card.title)")
                 }
-                .accessibilityLabel("Share \(card.title)")
             }
 
             ForEach(sections.preview) { block in
@@ -3559,6 +3834,16 @@ struct RichResponseCards: View {
                 }
                 .font(.caption.weight(.semibold))
                 .tint(AssistantTheme.accent(for: colorScheme))
+            }
+
+            if let form = card.form, let cardFormActions {
+                NativeCardFormView(
+                    form: form,
+                    warningFacts: form.warningFactIds.compactMap { facts[$0] },
+                    actions: cardFormActions,
+                    stateRevision: cardFormTaskRevision
+                )
+                .padding(.top, 4)
             }
 
             GeneratedCardFreshness(card: card, refresh: onRefresh)
@@ -3593,7 +3878,7 @@ struct RichResponseCards: View {
         }
         .resultCardSurface(colorScheme: colorScheme, colorSchemeContrast: colorSchemeContrast)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(card.accessibilityLabel)
+        .accessibilityLabel(SpeakableText.safeAccessibilityLabel(for: card))
     }
 
     @ViewBuilder
@@ -3844,6 +4129,7 @@ struct RichResponseCards: View {
         } else if action.type == "add_to_calendar",
                   let start = action.startFact.flatMap({ facts[$0] }), !start.sensitive,
                   let draft = CalendarDraft(
+                      identity: "\(card.id):\(action.id)",
                       title: card.title,
                       start: start.value,
                       end: action.endFact.flatMap { facts[$0]?.value },
@@ -4669,7 +4955,7 @@ struct SensitiveCardValue: View {
 struct AnswerSourcesFooter: View {
     let cards: [MessageResponseCard]
     var onSend: ((String) -> Void)? = nil
-    var onRefresh: ((String) async -> String?)? = nil
+    var onRefresh: ((String, String?) async -> String?)? = nil
     @State private var expanded = false
     @Environment(\.colorScheme) private var colorScheme
 
@@ -4800,10 +5086,6 @@ extension JSONValue {
         return value
     }
 
-    var integerValue: Int? {
-        guard let numberValue, numberValue.rounded() == numberValue else { return nil }
-        return Int(numberValue)
-    }
 }
 
 /// Cards carry third-party text: a Gmail `Date:` header, an RFC 5322 mailbox,
@@ -5961,7 +6243,12 @@ extension MessageBubble: Equatable {
             && (lhs.decideSuggestion == nil) == (rhs.decideSuggestion == nil)
             && (lhs.openActivity == nil) == (rhs.openActivity == nil)
             && (lhs.refreshCard == nil) == (rhs.refreshCard == nil)
+            && (lhs.setRecallSourceSuppressed == nil) == (rhs.setRecallSourceSuppressed == nil)
+            && (lhs.recallSourceSuppressed == nil) == (rhs.recallSourceSuppressed == nil)
             && (lhs.hide == nil) == (rhs.hide == nil)
+            && (lhs.acknowledgeDelivery == nil) == (rhs.acknowledgeDelivery == nil)
+            && lhs.cardFormStateRevision == rhs.cardFormStateRevision
+            && lhs.cardFormTaskRevision == rhs.cardFormTaskRevision
     }
 }
 

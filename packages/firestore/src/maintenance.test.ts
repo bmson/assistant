@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { toolCallReplayKeysForStart } from '@assistant/persistence';
 import { FieldValue } from '@google-cloud/firestore';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FirestoreMaintenanceRepository } from './maintenance.js';
@@ -167,6 +168,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance rep
     const emoji = await message({ text: '😀'.repeat(21), role: 'assistant' });
     const tool = await message({ role: 'tool' });
     const current = await message({});
+    const visualFixture = await message({ channelMessageId: 'visual-qa:maintenance:fixture' });
+    const readabilityFixture = await message({
+      channelMessageId: 'readability-maintenance-run-01-user',
+    });
     await store.doc('messages', current).update({
       embedding: FieldValue.vector(vector(1)),
       embeddingSpace: embeddingSpaceKey(space),
@@ -179,15 +184,26 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance rep
     await message({ createdAt: ago(10_000) });
 
     const embed = vi.fn(async (texts: string[]) => texts.map((_, i) => vector(10 + i)));
-    expect(await repository.embedMissingMessages({ batch: 20, embed })).toBe(3);
+    expect(
+      await repository.embedMissingMessages({
+        batch: 20,
+        embeddingSpaceKey: embeddingSpaceKey(space),
+        embed,
+      }),
+    ).toBe(2);
     expect(embed).toHaveBeenCalledOnce();
-    for (const id of [eligible, emoji, foreign]) {
+    for (const id of [eligible, emoji]) {
       const row = (await store.doc('messages', id).get()).data();
       expect(row?.embeddingSpace).toBe(embeddingSpaceKey(space));
       expect(row?.embedding.toArray()).toHaveLength(1536);
     }
+    expect((await store.doc('messages', foreign).get()).get('embeddingSpace')).toBe(
+      'another-space',
+    );
     for (const id of [short, tool])
       expect((await store.doc('messages', id).get()).get('embedding')).toBeNull();
+    expect((await store.doc('messages', visualFixture).get()).get('embedding')).toBeNull();
+    expect((await store.doc('messages', readabilityFixture).get()).get('embedding')).toBeNull();
 
     // A failed embedding call leaves the cursor, so the message is retried.
     now = new Date(now.getTime() + 5 * 60_000);
@@ -195,6 +211,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance rep
     await expect(
       repository.embedMissingMessages({
         batch: 20,
+        embeddingSpaceKey: embeddingSpaceKey(space),
         embed: async () => {
           throw new Error('provider down');
         },
@@ -202,19 +219,106 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance rep
     ).rejects.toThrow('provider down');
     const retry = vi.fn(async (texts: string[]) => texts.map(() => vector(5)));
     // The too-recent message from before has settled and is taken with the late one.
-    expect(await repository.embedMissingMessages({ batch: 20, embed: retry })).toBe(2);
+    expect(
+      await repository.embedMissingMessages({
+        batch: 20,
+        embeddingSpaceKey: embeddingSpaceKey(space),
+        embed: retry,
+      }),
+    ).toBe(2);
     expect((await store.doc('messages', late).get()).get('embeddingSpace')).toBe(
       embeddingSpaceKey(space),
     );
     const idle = vi.fn(async () => []);
-    expect(await repository.embedMissingMessages({ batch: 20, embed: idle })).toBe(0);
+    expect(
+      await repository.embedMissingMessages({
+        batch: 20,
+        embeddingSpaceKey: embeddingSpaceKey(space),
+        embed: idle,
+      }),
+    ).toBe(0);
     expect(idle).not.toHaveBeenCalled();
 
     // A vector outside the configured space is never written.
     await message({ createdAt: ago(61_000) });
     await expect(
-      repository.embedMissingMessages({ batch: 1, embed: async () => [[1, 2, 3]] }),
+      repository.embedMissingMessages({
+        batch: 1,
+        embeddingSpaceKey: embeddingSpaceKey(space),
+        embed: async () => [[1, 2, 3]],
+      }),
     ).rejects.toThrow('incompatible embedding space');
+  });
+
+  it('restarts completed scans to find older backfills and gives each embedding space its own progress', async () => {
+    const conversationId = randomUUID();
+    const longText = 'an old imported message that needs a semantic vector';
+    const add = async (createdAt: Date, text = longText) => {
+      const id = randomUUID();
+      await put('messages', {
+        id,
+        conversationId,
+        role: 'user',
+        text,
+        embedding: null,
+        createdAt,
+      });
+      return id;
+    };
+    const first = await add(ago(30 * 60_000));
+    const embed = vi.fn(async (texts: string[]) => texts.map(() => vector(3)));
+    expect(
+      await repository.embedMissingMessages({
+        batch: 1,
+        embeddingSpaceKey: embeddingSpaceKey(space),
+        embed,
+      }),
+    ).toBe(1);
+
+    // A late imported record sorts before the completed cursor. A completed
+    // sweep must eventually revisit it, while the existing vector is not paid
+    // for again.
+    const backfilled = await add(ago(60 * 60_000));
+    // The in-progress pass reaches end-of-scan and clears its cursor first.
+    expect(
+      await repository.embedMissingMessages({
+        batch: 1,
+        embeddingSpaceKey: embeddingSpaceKey(space),
+        embed,
+      }),
+    ).toBe(0);
+    expect(
+      await repository.embedMissingMessages({
+        batch: 1,
+        embeddingSpaceKey: embeddingSpaceKey(space),
+        embed,
+      }),
+    ).toBe(1);
+    expect(embed).toHaveBeenCalledTimes(2);
+    expect((await store.doc('messages', backfilled).get()).get('embeddingSpace')).toBe(
+      embeddingSpaceKey(space),
+    );
+    expect((await store.doc('messages', first).get()).get('embeddingSpace')).toBe(
+      embeddingSpaceKey(space),
+    );
+
+    const nextSpace = { ...space, revision: '2' };
+    const nextRepository = new FirestoreMaintenanceRepository(store, agentId, nextSpace);
+    const changedSpaceEmbed = vi.fn(async (texts: string[]) => texts.map(() => vector(4)));
+    // A new space starts an independent scan but does not pay to regenerate
+    // known old vectors automatically.
+    expect(
+      await nextRepository.embedMissingMessages({
+        batch: 10,
+        embeddingSpaceKey: embeddingSpaceKey(nextSpace),
+        embed: changedSpaceEmbed,
+      }),
+    ).toBe(0);
+    expect(changedSpaceEmbed).not.toHaveBeenCalled();
+    for (const id of [first, backfilled])
+      expect((await store.doc('messages', id).get()).get('embeddingSpace')).toBe(
+        embeddingSpaceKey(space),
+      );
   });
 
   it('purges every expired data class, with memory graph provenance and hash', async () => {
@@ -222,7 +326,15 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance rep
     const memory = randomUUID();
     const fresh = randomUUID();
     const permanent = randomUUID();
-    await put('memories', { id: memory, agentId, contentHash: hash, expiresAt: ago(1) });
+    await put('memories', {
+      id: memory,
+      agentId,
+      contentHash: hash,
+      expiresAt: ago(1),
+      embedding: FieldValue.vector(vector(0)),
+      embeddingSpaceKey: 'b'.repeat(64),
+      embeddingSpace: embeddingSpaceKey(space),
+    });
     await store.doc('memoryContentHashes', hash).set({ memoryId: memory });
     await store.doc('knowledgeGraphSources', memory).set({ memoryId: memory, agentId });
     await put('knowledgeGraphRelations', { id: 'relation', agentId, sourceMemoryId: memory });
@@ -303,9 +415,22 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance rep
     await put('commitments', { id: 'commitment', sourceMessageId: plain });
     await put('recallFeedback', { id: 'feedback', messageId: plain });
 
+    const receiptTaskId = randomUUID();
+    await put('tasks', { id: receiptTaskId, agentId, status: 'done', updatedAt: aged, state: {} });
     const toolCall = async (createdAt: Date, patch: Record<string, unknown> = {}) => {
       const id = randomUUID();
-      await put('toolCalls', { id, createdAt, idempotencyKey: null, ...patch });
+      await put('toolCalls', {
+        id,
+        taskId: receiptTaskId,
+        createdAt,
+        idempotencyKey: null,
+        status: 'succeeded',
+        toolName: 'test.retained-effect',
+        result: { completed: true },
+        error: null,
+        decision: {},
+        ...patch,
+      });
       return id;
     };
     const approved = await toolCall(aged);
@@ -333,11 +458,298 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance rep
     expect((await read('commitments', 'commitment')).sourceMessageId).toBeNull();
     for (const id of [approved, costed, newCall]) expect(await exists('toolCalls', id)).toBe(true);
     for (const id of [freedByCost, loose]) expect(await exists('toolCalls', id)).toBe(false);
+    for (const id of [freedByCost, loose]) {
+      const receipt = await read('toolCallReceipts', id);
+      expect(receipt).toMatchObject({
+        id,
+        toolCallId: id,
+        taskId: receiptTaskId,
+        effectOutcome: 'completed',
+      });
+      expect(receipt).not.toHaveProperty('args');
+      expect(receipt).not.toHaveProperty('result');
+      expect(receipt).not.toHaveProperty('error');
+    }
     expect(await exists('toolCallIdempotency', 'key-1')).toBe(false);
     expect(await exists('modelCalls', 'old-call')).toBe(false);
     expect(await exists('modelCallAudit', 'audit')).toBe(false);
     expect(await exists('modelCalls', 'new-call')).toBe(true);
     expect(await exists('costEvents', 'kept-cost')).toBe(true);
+  });
+
+  it('reclaims aged receipts after an old terminal task tree settles', async () => {
+    const aged = ago(31 * DAY);
+    const rootId = randomUUID();
+    const childId = randomUUID();
+    const grandchildId = randomUUID();
+    await put('tasks', { id: rootId, agentId, status: 'done', updatedAt: aged, state: {} });
+    await put('tasks', {
+      id: childId,
+      agentId,
+      parentTaskId: rootId,
+      status: 'failed',
+      updatedAt: aged,
+      state: {},
+    });
+    await put('tasks', {
+      id: grandchildId,
+      agentId,
+      parentTaskId: childId,
+      status: 'cancelled',
+      updatedAt: aged,
+      state: {},
+    });
+    const receiptId = randomUUID();
+    await put('toolCalls', {
+      id: receiptId,
+      taskId: rootId,
+      createdAt: aged,
+      idempotencyKey: null,
+      status: 'succeeded',
+      toolName: 'test.retained-effect',
+      result: { completed: true },
+      error: null,
+      decision: {},
+    });
+
+    expect(
+      await repository.purgeAgedHistory({ historyDays: 30, costDays: 0, batch: 1000 }),
+    ).toMatchObject({ toolCalls: 1 });
+    expect(await exists('toolCalls', receiptId)).toBe(false);
+    expect(await read('toolCallReceipts', receiptId)).toMatchObject({
+      id: receiptId,
+      taskId: rootId,
+      effectOutcome: 'completed',
+    });
+
+    for (const childStatus of ['running', 'done'] as const) {
+      const guardedRootId = randomUUID();
+      const guardedChildId = randomUUID();
+      const recentOrActive = childStatus === 'running' ? aged : now;
+      await put('tasks', {
+        id: guardedRootId,
+        agentId,
+        status: 'done',
+        updatedAt: aged,
+        state: {},
+      });
+      await put('tasks', {
+        id: guardedChildId,
+        agentId,
+        parentTaskId: guardedRootId,
+        status: childStatus,
+        updatedAt: recentOrActive,
+        state: {},
+      });
+      const guardedReceiptId = randomUUID();
+      await put('toolCalls', {
+        id: guardedReceiptId,
+        taskId: guardedRootId,
+        createdAt: aged,
+        idempotencyKey: null,
+        status: 'succeeded',
+        toolName: 'test.retained-effect',
+        result: { completed: true },
+        error: null,
+        decision: {},
+      });
+
+      await repository.purgeAgedHistory({ historyDays: 30, costDays: 0, batch: 1000 });
+      expect(await exists('toolCalls', guardedReceiptId)).toBe(true);
+      expect(await exists('toolCallReceipts', guardedReceiptId)).toBe(false);
+    }
+  });
+
+  it('retains a full aged call when its compact replay-key projection conflicts', async () => {
+    const aged = ago(31 * DAY);
+    const taskId = randomUUID();
+    const toolCallId = randomUUID();
+    const modelToolCallId = `conflict-${randomUUID()}`;
+    await put('tasks', { id: taskId, agentId, status: 'done', updatedAt: aged, state: {} });
+    await put('toolCalls', {
+      id: toolCallId,
+      taskId,
+      createdAt: aged,
+      status: 'failed',
+      toolName: 'test.compaction-conflict',
+      args: { private: 'retain this full row on collision' },
+      result: null,
+      error: 'synthetic failure',
+      decision: { modelToolCallId },
+      idempotencyKey: null,
+    });
+    const [expectedKey] =
+      toolCallReplayKeysForStart({
+        agentId,
+        taskId,
+        toolCallId,
+        modelToolCallId,
+      }) ?? [];
+    if (!expectedKey) throw new Error('expected replay key was not generated');
+    await put('toolCallReceiptKeys', { ...expectedKey, receiptId: randomUUID() });
+
+    const counts = await repository.purgeAgedHistory({ historyDays: 30, costDays: 0, batch: 50 });
+    expect(counts.toolCalls).toBe(0);
+    expect(await exists('toolCalls', toolCallId)).toBe(true);
+    expect(await exists('toolCallReceipts', toolCallId)).toBe(false);
+  });
+
+  it('does not invent compact outcomes for missing or nonterminal call status', async () => {
+    const aged = ago(31 * DAY);
+    const taskId = randomUUID();
+    await put('tasks', { id: taskId, agentId, status: 'done', updatedAt: aged, state: {} });
+    const missingStatusId = randomUUID();
+    const runningId = randomUUID();
+    await put('toolCalls', {
+      id: missingStatusId,
+      taskId,
+      createdAt: aged,
+      idempotencyKey: null,
+      toolName: 'test.unknown-status',
+      decision: {},
+    });
+    await put('toolCalls', {
+      id: runningId,
+      taskId,
+      createdAt: aged,
+      idempotencyKey: null,
+      status: 'running',
+      toolName: 'test.active-call',
+      result: null,
+      error: null,
+      decision: {},
+    });
+
+    expect(
+      await repository.purgeAgedHistory({ historyDays: 30, costDays: 0, batch: 100 }),
+    ).toMatchObject({ toolCalls: 0 });
+    for (const id of [missingStatusId, runningId]) {
+      expect(await exists('toolCalls', id)).toBe(true);
+      expect(await exists('toolCallReceipts', id)).toBe(false);
+    }
+  });
+
+  it('retains terminal receipts named by unresolved or malformed checkpoints', async () => {
+    const aged = ago(31 * DAY);
+    const fixtures = [
+      {
+        name: 'pending job',
+        state: (callId: string) => ({ pendingJob: { dbToolCallId: callId } }),
+      },
+      {
+        name: 'unsettled tool batch',
+        state: (callId: string) => ({
+          pendingToolBatch: { calls: [{ status: 'job', dbToolCallId: callId }] },
+        }),
+      },
+      { name: 'malformed state', state: (_callId: string) => 'not-a-checkpoint' },
+    ] as const;
+    const retained: string[] = [];
+    for (const fixture of fixtures) {
+      const taskId = randomUUID();
+      await put('tasks', {
+        id: taskId,
+        agentId,
+        status: 'done',
+        updatedAt: aged,
+        state: {},
+      });
+      const id = randomUUID();
+      retained.push(id);
+      await put('toolCalls', {
+        id,
+        taskId,
+        createdAt: aged,
+        idempotencyKey: null,
+        status: 'succeeded',
+        toolName: 'test.retained-effect',
+        result: { completed: true },
+        error: null,
+        decision: {},
+      });
+      const state = fixture.state(id);
+      await store.doc('tasks', taskId).update({ state });
+    }
+
+    const finalTaskId = randomUUID();
+    await put('tasks', {
+      id: finalTaskId,
+      agentId,
+      status: 'done',
+      updatedAt: aged,
+      state: {
+        pendingFinal: {
+          text: 'The completed response remains available.',
+          progress: 'done',
+          terminalStatus: 'done',
+          outcome: 'done',
+        },
+      },
+    });
+    const finalReceiptId = randomUUID();
+    await put('toolCalls', {
+      id: finalReceiptId,
+      taskId: finalTaskId,
+      createdAt: aged,
+      idempotencyKey: null,
+      status: 'succeeded',
+      toolName: 'test.retained-effect',
+      result: { completed: true },
+      error: null,
+      decision: {},
+    });
+    const danglingTaskId = randomUUID();
+    const missingCallId = randomUUID();
+    await put('tasks', {
+      id: danglingTaskId,
+      agentId,
+      status: 'done',
+      updatedAt: aged,
+      state: {
+        pendingJob: {
+          dbToolCallId: missingCallId,
+          toolCallId: 'missing-model-call',
+          toolName: 'browser.execute',
+          callbackTokenHash: 'c'.repeat(64),
+          timeoutAt: now.toISOString(),
+        },
+      },
+    });
+    const unrelatedReceiptId = randomUUID();
+    await put('toolCalls', {
+      id: unrelatedReceiptId,
+      taskId: danglingTaskId,
+      createdAt: aged,
+      idempotencyKey: null,
+      status: 'succeeded',
+      toolName: 'test.retained-effect',
+      result: { completed: true },
+      error: null,
+      decision: {},
+    });
+
+    const counts = await repository.purgeAgedHistory({
+      historyDays: 30,
+      costDays: 0,
+      batch: 1000,
+    });
+    expect(counts.toolCalls).toBe(2);
+    for (const id of retained) {
+      expect(await exists('toolCalls', id)).toBe(true);
+      expect(await exists('toolCallReceipts', id)).toBe(false);
+    }
+    expect(await exists('toolCalls', finalReceiptId)).toBe(false);
+    expect(await read('toolCallReceipts', finalReceiptId)).toMatchObject({
+      id: finalReceiptId,
+      taskId: finalTaskId,
+      effectOutcome: 'completed',
+    });
+    expect(await exists('toolCalls', unrelatedReceiptId)).toBe(false);
+    expect(await exists('toolCallReceipts', unrelatedReceiptId)).toBe(true);
+    expect(await exists('toolCalls', missingCallId)).toBe(false);
+    expect(await read('tasks', danglingTaskId)).toMatchObject({
+      state: { pendingJob: { dbToolCallId: missingCallId } },
+    });
   });
 
   it('keeps anchored history behind its cursor so it cannot starve later rows', async () => {

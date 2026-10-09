@@ -106,6 +106,32 @@ describe('historical conversation card context', () => {
     ).toBe(assistant.text);
   });
 
+  it.each([
+    'Make it shorter',
+    'I want to implement that',
+    'Write this report',
+    'Explain those ideas',
+    'Can I pay with this credit card?',
+  ])('does not admit stale card data for a generic pronoun: %s', (request) => {
+    expect(
+      conversationMessageTexts([
+        { ...assistant, parts: [card()] },
+        { ...followup, text: request },
+      ]).get(assistant.id),
+    ).toBe(assistant.text);
+  });
+
+  it('includes the named card and leaves unrelated historical cards out', () => {
+    const other = card('v1', 'Unrelated flight time', 'flight-card');
+    other.data.spec.title = 'Westbound Flight';
+    const result = conversationMessageTexts([
+      { ...assistant, parts: [card(), other] },
+      { ...followup, text: 'Explain the Harbor Hotel card' },
+    ]);
+    expect(result.get(assistant.id)).toContain('Harbor Hotel');
+    expect(result.get(assistant.id)).not.toContain('Unrelated flight time');
+  });
+
   it('leaves save-receipt questions on the authoritative receipt-check path', () => {
     const result = conversationMessageTexts([
       { ...assistant, parts: [card()] },

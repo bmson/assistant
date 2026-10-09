@@ -1,9 +1,12 @@
 import type { Records } from './records.js';
+import type { TaskTimelineCursor } from './task-timeline.js';
 
 export type ActivityTaskRecord = Pick<
   Records['tasks'],
   | 'id'
   | 'agentId'
+  | 'conversationId'
+  | 'externalEventId'
   | 'type'
   | 'status'
   | 'title'
@@ -29,6 +32,8 @@ export interface TaskActivityRepository {
   }>;
 }
 
+type Timed<T> = T & { timelineAt?: string };
+
 export interface TaskActivityDetail {
   timezone: string;
   task: Pick<
@@ -51,30 +56,36 @@ export interface TaskActivityDetail {
     | 'autonomyGrant'
   >;
   toolCalls: Array<
-    Pick<
-      Records['toolCalls'],
-      | 'id'
-      | 'createdAt'
-      | 'finishedAt'
-      | 'toolName'
-      | 'step'
-      | 'status'
-      | 'decision'
-      | 'args'
-      | 'result'
-      | 'error'
+    Timed<
+      Pick<
+        Records['toolCalls'],
+        | 'id'
+        | 'createdAt'
+        | 'finishedAt'
+        | 'toolName'
+        | 'step'
+        | 'status'
+        | 'decision'
+        | 'args'
+        | 'result'
+        | 'error'
+      >
     >
   >;
   modelCalls: Array<
-    Pick<Records['modelCalls'], 'id' | 'createdAt' | 'role' | 'model' | 'costUsd' | 'latencyMs'>
-  >;
-  approvals: Array<
-    Pick<
-      Records['approvals'],
-      'id' | 'requestedAt' | 'status' | 'summary' | 'shortCode' | 'resolvedVia' | 'resolvedAt'
+    Timed<
+      Pick<Records['modelCalls'], 'id' | 'createdAt' | 'role' | 'model' | 'costUsd' | 'latencyMs'>
     >
   >;
-  messages: Array<Pick<Records['messages'], 'id' | 'createdAt' | 'role' | 'text'>>;
+  approvals: Array<
+    Timed<
+      Pick<
+        Records['approvals'],
+        'id' | 'requestedAt' | 'status' | 'summary' | 'shortCode' | 'resolvedVia' | 'resolvedAt'
+      >
+    >
+  >;
+  messages: Array<Timed<Pick<Records['messages'], 'id' | 'createdAt' | 'role' | 'text'>>>;
   files: Array<Pick<Records['files'], 'id' | 'workspacePath' | 'bytes'>>;
   actions: Array<
     Pick<
@@ -90,6 +101,6 @@ export interface TaskActivityDetailRepository {
   getDetail(
     agentId: string,
     taskId: string,
-    input: { pageSize: number; before?: Date },
+    input: { pageSize: number; before?: Date; cursor?: TaskTimelineCursor },
   ): Promise<TaskActivityDetail | null>;
 }

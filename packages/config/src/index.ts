@@ -123,7 +123,21 @@ const ConfigSchema = z.object({
    * AUTH_SECRET: rotating a phone credential must not invalidate web sessions.
    */
   MOBILE_API_TOKEN: z.string().default(''),
-  QUEUE_DRIVER: z.enum(['local', 'cloudtasks']).default('local'),
+  /** Secret Manager resource used only by installations that explicitly support rotation. */
+  MOBILE_API_TOKEN_SECRET_NAME: z
+    .string()
+    .regex(/^$|^[A-Za-z0-9_-]{1,255}$/)
+    .default(''),
+  MOBILE_API_TOKEN_ROTATION_ENABLED: booleanString,
+  QUEUE_DRIVER: z.enum(['local', 'cloudtasks', 'inert']).default('local'),
+  /** Strictly fenced read-only runtime used only for local PostgreSQL restore rehearsals. */
+  RESTORE_REHEARSAL: booleanString,
+  /** Release-only maintenance fence while the service pair is being upgraded. */
+  ASSISTANT_RELEASE_WRITES_PAUSED: booleanString,
+  /** Opt in to retained chat pages only in development on a loopback origin. */
+  WEB_APP_PREVIEW_ENABLED: booleanString,
+  /** Dedicated local workspace root required when RESTORE_REHEARSAL=true. */
+  RESTORE_REHEARSAL_ROOT: z.string().default(''),
   FILES_DRIVER: z.enum(['local', 'gcs']).default('local'),
   GCS_ENDPOINT: z.string().default('http://localhost:4443'),
   WORKSPACE_BUCKET: z.string().default('assistant-workspace'),
@@ -271,6 +285,8 @@ const ConfigSchema = z.object({
    * The google module is an additional hard gate.
    */
   GMAIL_SYNC_ENABLED: z.enum(['true', 'false']).optional(),
+  /** Rollout gate for draining durable email observer work; deliberately off until acceptance closes. */
+  EMAIL_OBSERVER_WORKER_ENABLED: booleanString,
   /**
    * What the assistant's mailbox IS.
    *
@@ -305,6 +321,8 @@ const ConfigSchema = z.object({
    * ingest needs its own brake or one busy day can exhaust the month's budget.
    */
   EMAIL_INGEST_MAX_TRIAGE_PER_DAY: z.coerce.number().int().min(0).max(1000).default(40),
+  /** Separate paid-observer cap; never coupled to forwarded triage task volume. */
+  EMAIL_OBSERVER_MAX_PAID_PER_DAY: z.coerce.number().int().min(0).max(1000).default(20),
   /**
    * Recipient domains the assistant may send mail to, comma-separated and
    * empty-means-unrestricted. This mirrors a restriction enforced at the mail
@@ -354,6 +372,101 @@ const ConfigSchema = z.object({
 
 export type Config = z.infer<typeof ConfigSchema>;
 
+/** Fail-closed profile check used before any restore-rehearsal process starts. */
+export function validateRestoreRehearsalConfig(
+  config: Config,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  if (!config.RESTORE_REHEARSAL) return [];
+  const problems: string[] = [];
+  if (env.NODE_ENV === 'production') problems.push('RESTORE_REHEARSAL cannot run in production');
+  if (config.PERSISTENCE_DRIVER !== 'postgres')
+    problems.push('RESTORE_REHEARSAL requires PERSISTENCE_DRIVER=postgres');
+  if (config.QUEUE_DRIVER !== 'inert')
+    problems.push('RESTORE_REHEARSAL requires QUEUE_DRIVER=inert');
+  if (!config.POSTGRES_SOURCE_WRITES_FENCED)
+    problems.push('POSTGRES_SOURCE_WRITES_FENCED=true is required for RESTORE_REHEARSAL');
+  const workspaceRunId = config.ASSISTANT_WORKSPACE_ID.match(/^restore-([a-f0-9]{12})$/)?.[1];
+  if (!workspaceRunId)
+    problems.push('ASSISTANT_WORKSPACE_ID must be restore-<12 hex> during RESTORE_REHEARSAL');
+  if (config.FILES_DRIVER !== 'local')
+    problems.push('RESTORE_REHEARSAL requires FILES_DRIVER=local');
+  if (
+    config.BROWSER_DRIVER !== 'local' ||
+    config.CODE_DRIVER !== 'local' ||
+    config.PROCESSOR_DRIVER !== 'local'
+  )
+    problems.push('RESTORE_REHEARSAL requires local browser, code, and processor drivers');
+  if (
+    !/^\/(?:[^/]+\/)*assistant_restore_[a-f0-9]{12}_files$/.test(config.RESTORE_REHEARSAL_ROOT) ||
+    config.RESTORE_REHEARSAL_ROOT.split('/').includes('..')
+  )
+    problems.push(
+      'RESTORE_REHEARSAL_ROOT must be an absolute assistant_restore_<12 hex>_files directory',
+    );
+  if (config.DATABASE_URL) {
+    try {
+      const database = new URL(config.DATABASE_URL);
+      const host = database.hostname.replace(/^\[|\]$/g, '');
+      const octets = host.split('.').map(Number);
+      const loopback =
+        host === '::1' ||
+        (octets.length === 4 &&
+          octets[0] === 127 &&
+          octets.every((octet) => octet >= 0 && octet <= 255));
+      const name = decodeURIComponent(database.pathname.slice(1));
+      if (
+        !['postgres:', 'postgresql:'].includes(database.protocol) ||
+        !loopback ||
+        !/^assistant_restore_[a-f0-9]{12}_test$/.test(name)
+      )
+        problems.push(
+          'RESTORE_REHEARSAL requires a loopback assistant_restore_<12 hex>_test database',
+        );
+      const databaseRunId = name.match(/^assistant_restore_([a-f0-9]{12})_test$/)?.[1];
+      if (databaseRunId && workspaceRunId && databaseRunId !== workspaceRunId)
+        problems.push(
+          'RESTORE_REHEARSAL database and workspace identities must use the same run ID',
+        );
+      if (
+        !workspaceRunId ||
+        decodeURIComponent(database.username) !== `assistant_restore_reader_${workspaceRunId}`
+      )
+        problems.push(
+          'RESTORE_REHEARSAL requires the run-scoped assistant_restore_reader_<run ID> database role',
+        );
+      if (!database.password)
+        problems.push('RESTORE_REHEARSAL requires an explicit read-only database credential');
+    } catch {
+      problems.push('RESTORE_REHEARSAL requires a valid PostgreSQL DATABASE_URL');
+    }
+  }
+  const externalCredentials = [
+    'OPENROUTER_API_KEY',
+    'AUTH_GOOGLE_SECRET',
+    'GOOGLE_OAUTH_CLIENT_SECRET',
+    'BOT_GOOGLE_REFRESH_TOKEN',
+    'TWILIO_ACCOUNT_SID',
+    'TWILIO_AUTH_TOKEN',
+    'TWILIO_FROM_NUMBER',
+    'MOBILE_API_TOKEN',
+    'INTERNAL_API_SECRET',
+    'LOCATION_PING_SECRET',
+  ] as const;
+  for (const key of externalCredentials) {
+    if (config[key]) problems.push(`${key} must be empty during RESTORE_REHEARSAL`);
+  }
+  if (config.GCP_PROJECT || config.AGENT_URL || config.WEB_URL || config.GMAIL_PUBSUB_TOPIC)
+    problems.push(
+      'Cloud project, callback, and push routing must be unset during RESTORE_REHEARSAL',
+    );
+  if (config.AUTH_DEV_BYPASS || config.AUTH_LOCALHOST_BYPASS)
+    problems.push('Authentication bypasses must be disabled during RESTORE_REHEARSAL');
+  if (config.OTEL_EXPORTER !== 'none')
+    problems.push('OTEL_EXPORTER=none is required during RESTORE_REHEARSAL');
+  return problems;
+}
+
 const FirestoreEmbeddingSpaceSchema = z.strictObject({
   provider: z.string().trim().min(1),
   model: z.string().trim().min(1),
@@ -363,7 +476,7 @@ const FirestoreEmbeddingSpaceSchema = z.strictObject({
 
 export function parseFirestoreEmbeddingSpace(value: string) {
   try {
-    return FirestoreEmbeddingSpaceSchema.parse(JSON.parse(value));
+    return Object.freeze(FirestoreEmbeddingSpaceSchema.parse(JSON.parse(value)));
   } catch {
     throw new Error('FIRESTORE_EMBEDDING_SPACE must be JSON {provider,model,dimensions,revision}');
   }

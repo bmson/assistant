@@ -1,3 +1,4 @@
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getOwnerMemoryCommands } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -6,7 +7,15 @@ export const dynamic = 'force-dynamic';
 /** Owner-authored facts go straight into the same memory library as the web form. */
 export async function POST(request: Request): Promise<Response> {
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
-  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+  const mutationBody = await readMobileMutationBody(request, [
+    'content',
+    'domain',
+    'importance',
+    'pinned',
+    'subjectContactId',
+  ]);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as Record<string, unknown> | null;
   if (!body) return mobileJson({ error: 'invalid memory body' }, { status: 400 });
   const result = await getOwnerMemoryCommands().createMemory({
     content: typeof body.content === 'string' ? body.content : '',

@@ -15,6 +15,9 @@ import {
   createDb,
   createPostgresExecutionPersistence,
   type Db,
+  emailIngest,
+  emailObserverSources,
+  emailObserverWork,
   messages,
   tasks,
   toolCalls,
@@ -24,6 +27,7 @@ import {
   applicationPersistence,
   executeApplicationConfirmationTask,
   processApplicationConfirmation,
+  processMessage,
 } from '@assistant/modules';
 import {
   type BrowserJobLaunchInput,
@@ -36,8 +40,10 @@ import {
   type WorkspaceStore,
 } from '@assistant/tools';
 import type { ModelMessage } from 'ai';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, like } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { drainEmailObservers } from '../../../packages/modules/src/email-observers.js';
+import { googleDurableEmailObservers } from '../../../packages/modules/src/google/durable-email-observers.js';
 import type { AgentDeps } from './deps.js';
 
 const DATABASE_URL =
@@ -46,6 +52,23 @@ const RUN = `Xtest-Continuity-${Date.now()}`;
 const RECEIPT = 'CHAIN-84291';
 const CONFIRMATION_CONTENT =
   '# Application completed\n\nAcme confirmed receipt of the Software Engineer application.';
+
+function stagedResumePath(transcript: string): string {
+  const match = transcript.match(
+    /"workspacePath":"(browser\/attachments\/[a-f0-9]{64}\/[a-f0-9]{64}\/resume\.pdf)"/,
+  );
+  if (!match?.[1]) throw new Error('Drive download receipt did not include the staged resume path');
+  return match[1];
+}
+
+function applicationPlanWithResume(path: string): BrowserPlan {
+  return {
+    ...applicationPlan,
+    steps: applicationPlan.steps.map((step) =>
+      step.action === 'upload' ? { ...step, workspacePath: path } : step,
+    ),
+  };
+}
 
 let db: Db;
 let dbUp = false;
@@ -118,6 +141,7 @@ function continuityRouter(): ModelRouter {
         };
       }
       if (!transcript.includes('"toolName":"browser.execute"')) {
+        const stagedPath = stagedResumePath(transcript);
         return {
           ok: true,
           modelId: 'fake/model',
@@ -127,7 +151,7 @@ function continuityRouter(): ModelRouter {
             {
               toolCallId: 'call_apply',
               toolName: 'browser.execute',
-              input: { plan: applicationPlan },
+              input: { plan: applicationPlanWithResume(stagedPath) },
             },
           ],
         };
@@ -171,7 +195,7 @@ function continuityRouter(): ModelRouter {
           ok: true,
           modelId: 'fake/model',
           degraded: false,
-          text: 'The portal confirmed the application submission. I did not create the confirmation watch because you denied it, so no later Sheet or Doc action is scheduled.',
+          text: 'The portal confirmed the application submission. You denied the confirmation watch, so I left the Sheet and Doc unchanged.',
           toolCalls: [],
         };
       }
@@ -272,6 +296,132 @@ function workflowHarness() {
   return { dispatcher, googleApi, launches, writes, agentDeps };
 }
 
+async function admitAndDrainConfirmation(
+  harness: ReturnType<typeof workflowHarness>,
+  input: { agentId: string; messageId: string; from: string; subject: string; body: string },
+) {
+  const payload = {
+    mimeType: 'text/plain',
+    headers: [
+      { name: 'From', value: input.from },
+      { name: 'Subject', value: input.subject },
+      { name: 'Message-ID', value: `<${input.messageId}@mail.test>` },
+      {
+        name: 'Authentication-Results',
+        value: `mx.google.com; dmarc=pass header.from=${input.from.split('@')[1]}`,
+      },
+    ],
+    body: { data: Buffer.from(input.body).toString('base64url') },
+  };
+  const gmail = {
+    api: vi.fn(async (url: string) => {
+      if (!url.includes(`/messages/${input.messageId}?`))
+        throw new Error(`unexpected ingress Google API call: ${url}`);
+      return {
+        id: input.messageId,
+        threadId: `${RUN}-mail-thread`,
+        labelIds: ['INBOX'],
+        snippet: input.body.slice(0, 40),
+        payload,
+      };
+    }),
+    configured: () => true,
+  } as unknown as GoogleClient;
+  const config = {
+    ASSISTANT_MODULES: ['google'],
+    GMAIL_SYNC_ENABLED: 'true',
+    EMAIL_OBSERVER_WORKER_ENABLED: true,
+    EMAIL_INGEST_MODE: 'direct',
+    EMAIL_INGEST_IMPORTANCE_THRESHOLD: 3,
+    EMAIL_INGEST_NOTIFY_THRESHOLD: 5,
+    EMAIL_INGEST_MAX_TRIAGE_PER_DAY: 1000,
+    EMAIL_OBSERVER_MAX_PAID_PER_DAY: 20,
+    GENERATIVE_CARDS_ENABLED: false,
+  };
+  const router = {
+    async embeddingSpace() {
+      return {
+        provider: 'synthetic',
+        model: 'job-application-continuity-test',
+        dimensions: 1536,
+        revision: '1',
+      };
+    },
+    async object(_role: string, input: { system?: string }) {
+      if (input.system?.includes('Classify whether this email is automated'))
+        return { ok: true, object: { automated: false } };
+      return {
+        ok: true,
+        object: {
+          category: 'personal',
+          importance: 3,
+          actionable: false,
+          reason: 'Synthetic confirmation receipt.',
+          dates: [],
+          cardCandidate: false,
+        },
+      };
+    },
+    async embed(texts: string[]) {
+      return texts.map(() => Array.from({ length: 1536 }, () => 0));
+    },
+  };
+  const persistence = harness.agentDeps.persistence;
+  const durableEmailObservers = googleDurableEmailObservers(gmail);
+  const emailDeps = {
+    config,
+    db,
+    persistence,
+    router,
+    workspace: {},
+    googleClient: gmail,
+    notifyOwner: async () => {},
+    observeInboundEmail: async () => {},
+    durableEmailObservers,
+  } as never;
+  const mailbox = await persistence.emailSync!.mailbox();
+  expect(
+    await processMessage(
+      emailDeps,
+      input.agentId,
+      mailbox.email,
+      new Map([['jobs@acme.example', 'known']]),
+      input.messageId,
+    ),
+  ).toBe('skipped');
+  const drain = await drainEmailObservers(
+    {
+      config,
+      db,
+      persistence,
+      router,
+      registry: harness.agentDeps.registry,
+      dispatcher: harness.agentDeps.dispatcher,
+      workspace: {},
+      ownerNotifier: { notifyOwner: async () => ({ legs: [] }), notifyApprovals: async () => {} },
+      emailObservers: [],
+      durableEmailObservers,
+    } as never,
+    input.agentId,
+    {
+      limit: 20,
+      shouldContinue: () =>
+        config.EMAIL_OBSERVER_WORKER_ENABLED === true && config.GMAIL_SYNC_ENABLED === 'true',
+    },
+  );
+  expect(drain.unknown).toBe(0);
+  expect(drain.failed).toBe(0);
+  const record = await persistence.applications?.byConfirmationMessage(
+    input.agentId,
+    `gmail:${input.messageId}`,
+  );
+  if (record)
+    return record.status === 'confirmation_received'
+      ? { kind: 'in_progress' as const, applicationId: record.id }
+      : { kind: 'replay' as const, applicationId: record.id, status: record.status };
+  return { kind: 'ignored' as const };
+}
+
 async function pendingApproval(taskId: string) {
   const [row] = await db
     .select({ approval: approvals, toolName: toolCalls.toolName })
@@ -294,6 +444,14 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (dbUp) {
+    const channelMessagePattern = `gmail:${RUN}%`;
+    await db
+      .delete(emailObserverWork)
+      .where(like(emailObserverWork.channelMessageId, channelMessagePattern));
+    await db.delete(emailIngest).where(like(emailIngest.channelMessageId, channelMessagePattern));
+    await db
+      .delete(emailObserverSources)
+      .where(like(emailObserverSources.channelMessageId, channelMessagePattern));
     if (createdApplicationIds.length > 0) {
       await db
         .delete(applicationConfirmations)
@@ -346,12 +504,17 @@ describe('continuous job-application context across delayed external events', ()
       (await executeTask({ db, router: scriptedRouter, dispatcher: harness.dispatcher }, task.id))
         .outcome,
     ).toBe('parked');
-    expect(harness.writes).toMatchObject([
-      { path: 'browser/attachments/resume.pdf', contentType: 'application/pdf' },
-    ]);
+    const stagedResume = harness.writes[0];
+    expect(stagedResume).toMatchObject({
+      path: expect.stringMatching(
+        /^browser\/attachments\/[a-f0-9]{64}\/[a-f0-9]{64}\/resume\.pdf$/,
+      ),
+      bytes: Buffer.from('%PDF continuous complex workflow resume'),
+      contentType: 'application/pdf',
+    });
     const browserApproval = await pendingApproval(task.id);
     expect(browserApproval?.toolName).toBe('browser.execute');
-    expect(browserApproval?.approval.summary).toContain('browser/attachments/resume.pdf');
+    expect(browserApproval?.approval.summary).toContain(stagedResume?.path);
     await resolveApproval(db, {
       approvalId: browserApproval?.approval.id,
       decision: 'approved',
@@ -363,7 +526,7 @@ describe('continuous job-application context across delayed external events', ()
         .outcome,
     ).toBe('sleeping');
     expect(harness.launches).toHaveLength(1);
-    expect(harness.launches[0]?.plan).toEqual(applicationPlan);
+    expect(harness.launches[0]?.plan).toEqual(applicationPlanWithResume(stagedResume?.path ?? ''));
     await recordBrowserJobResult(db, {
       taskId: task.id,
       token: harness.launches[0]?.callbackToken ?? '',
@@ -463,10 +626,10 @@ describe('continuous job-application context across delayed external events', ()
     expect(harness.googleApi).toHaveBeenCalledTimes(1); // Drive metadata only.
 
     await expect(
-      processApplicationConfirmation(harness.agentDeps, {
+      admitAndDrainConfirmation(harness, {
         ...baseEmail,
         from: 'jobs@acme.example',
-        authenticated: true,
+        agentId,
       }),
     ).resolves.toEqual({ kind: 'in_progress', applicationId: watch.id });
     const [confirmationTask] = await db
@@ -520,10 +683,10 @@ describe('continuous job-application context across delayed external events', ()
     expect(notice?.text).toContain('Sheet Applications!C42 and Google Doc append succeeded');
 
     await expect(
-      processApplicationConfirmation(harness.agentDeps, {
+      admitAndDrainConfirmation(harness, {
         ...baseEmail,
         from: 'jobs@acme.example',
-        authenticated: true,
+        agentId,
       }),
     ).resolves.toEqual({ kind: 'replay', applicationId: watch.id, status: 'updated' });
     expect(harness.googleApi).toHaveBeenCalledTimes(4);
@@ -600,7 +763,7 @@ describe('continuous job-application context across delayed external events', ()
     ).toBe('done');
     const [finished] = await db.select().from(tasks).where(eq(tasks.id, task.id));
     expect(finished?.progress).toContain('portal confirmed the application submission');
-    expect(finished?.progress).toContain('did not create the confirmation watch');
+    expect(finished?.progress).toContain('denied the confirmation watch');
     expect(finished?.progress).not.toContain("I couldn't verify this completed");
     const records = await db
       .select()

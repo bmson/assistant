@@ -8,7 +8,7 @@ import {
 } from '@assistant/persistence';
 import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
-import { conversations, selfRepairIssues, tasks } from './schema.js';
+import { conversations, costReservations, modelCalls, selfRepairIssues, tasks } from './schema.js';
 
 export function createPostgresSelfRepairRepository(db: Db): SelfRepairRepository {
   return {
@@ -61,7 +61,7 @@ export function createPostgresSelfRepairRepository(db: Db): SelfRepairRepository
       if (rows.length > 1000) throw new Error('Repair ledger requires archival');
       return rows;
     },
-    async claim(agentId, now, dailyLimit) {
+    async claim(agentId, now, dailyLimit, taskId) {
       return db.transaction(async (tx) => {
         await tx.execute(sql`SELECT id FROM agents WHERE id = ${agentId} FOR UPDATE`);
         const rows = (await tx
@@ -78,15 +78,76 @@ export function createPostgresSelfRepairRepository(db: Db): SelfRepairRepository
           {
             manualRunStartedAt: issue.data.manualRunRequestedAt ?? issue.data.manualRunStartedAt,
             manualRunRequestedAt: undefined,
+            nextEligibleAt: undefined,
+            ownerActionRequired: undefined,
+            investigationStartedAt: now.toISOString(),
+            investigationTaskIds: taskId
+              ? [...new Set([...(issue.data.investigationTaskIds ?? []), taskId])].slice(-30)
+              : issue.data.investigationTaskIds,
           },
           now,
         );
-        await tx
+        const [saved] = await tx
           .update(selfRepairIssues)
           .set({ status: next.status, version: next.version, data: next.data, updatedAt: now })
-          .where(eq(selfRepairIssues.id, issue.id));
-        return next;
+          .where(
+            and(
+              eq(selfRepairIssues.id, issue.id),
+              eq(selfRepairIssues.agentId, agentId),
+              eq(selfRepairIssues.version, issue.version),
+              eq(selfRepairIssues.status, issue.status),
+            ),
+          )
+          .returning();
+        // An owner dismissal can commit after candidate selection. A stale
+        // automated claim must not overwrite that accepted owner decision.
+        return saved ? (saved as RepairIssue) : null;
       });
+    },
+    async modelAccounting(agentId, taskIds, since) {
+      if (taskIds.length === 0)
+        return {
+          observedModelCalls: 0,
+          knownCostUsd: null,
+          unresolvedReservations: 0,
+          complete: false,
+        };
+      const ids = [...new Set(taskIds)].slice(-30);
+      const calls = await db
+        .select({ costUsd: modelCalls.costUsd })
+        .from(modelCalls)
+        .innerJoin(tasks, eq(tasks.id, modelCalls.taskId))
+        .where(
+          and(
+            eq(tasks.agentId, agentId),
+            inArray(modelCalls.taskId, ids),
+            gte(modelCalls.createdAt, since),
+          ),
+        );
+      const reservations = await db
+        .select({ status: costReservations.status })
+        .from(costReservations)
+        .innerJoin(tasks, eq(tasks.id, costReservations.taskId))
+        .where(
+          and(
+            eq(tasks.agentId, agentId),
+            inArray(costReservations.taskId, ids),
+            inArray(costReservations.status, ['dispatching', 'unknown']),
+          ),
+        );
+      const knownMicros = calls.reduce(
+        (total, row) => total + Math.round(Number(row.costUsd) * 1_000_000),
+        0,
+      );
+      return {
+        observedModelCalls: calls.length,
+        knownCostUsd:
+          calls.length > 0 && Number.isFinite(knownMicros)
+            ? (knownMicros / 1_000_000).toFixed(6)
+            : null,
+        unresolvedReservations: reservations.length,
+        complete: calls.length > 0 && reservations.length === 0,
+      };
     },
     async update(issue, status, patch, now) {
       const next = repairTransition(issue, status, patch, now);

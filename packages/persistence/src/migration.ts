@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { parseExactTimestamp } from './exact-timestamp.js';
+import { toolCallReceiptKeyId } from './tool-call-receipts.js';
 
 /**
  * Complete installation coverage for the PostgreSQL schema. Adding a table to
@@ -34,10 +36,18 @@ export const MIGRATION_TABLES = [
   { table: 'conversations', collection: 'conversations', id: 'id', scope: 'agent' },
   { table: 'channel_bindings', collection: 'channelBindings', id: 'id', scope: 'conversation' },
   { table: 'messages', collection: 'messages', id: 'id', scope: 'conversation' },
+  { table: 'mission_reports', collection: 'missionReports', id: 'id', scope: 'agent' },
   { table: 'commitments', collection: 'commitments', id: 'id', scope: 'agent' },
   { table: 'conversation_segments', collection: 'conversationSegments', id: 'id', scope: 'agent' },
   { table: 'tasks', collection: 'tasks', id: 'id', scope: 'agent' },
   { table: 'tool_calls', collection: 'toolCalls', id: 'id', scope: 'agent' },
+  {
+    table: 'tool_call_receipt_keys',
+    collection: 'toolCallReceiptKeys',
+    id: 'id',
+    scope: 'agent',
+  },
+  { table: 'tool_call_receipts', collection: 'toolCallReceipts', id: 'id', scope: 'agent' },
   { table: 'approvals', collection: 'approvals', id: 'id', scope: 'agent' },
   { table: 'approval_policies', collection: 'approvalPolicies', id: 'id', scope: 'agent' },
   { table: 'cost_events', collection: 'costEvents', id: 'id', scope: 'installation' },
@@ -46,7 +56,61 @@ export const MIGRATION_TABLES = [
   { table: 'document_chunks', collection: 'documentChunks', id: 'id', scope: 'agent' },
   { table: 'documents', collection: 'documents', id: 'id', scope: 'agent' },
   { table: 'dream_notes', collection: 'dreamNotes', id: 'id', scope: 'agent' },
+  {
+    table: 'email_attachment_custodies',
+    collection: 'emailAttachmentCustodies',
+    id: 'id',
+    scope: 'agent',
+  },
+  {
+    table: 'email_booking_occurrences',
+    collection: 'emailBookingOccurrences',
+    id: 'id',
+    scope: 'agent',
+  },
   { table: 'email_ingest', collection: 'emailIngest', id: 'id', scope: 'agent' },
+  {
+    table: 'email_observer_budgets',
+    collection: 'emailObserverBudgets',
+    id: 'id',
+    scope: 'agent',
+  },
+  {
+    table: 'email_observer_sources',
+    collection: 'emailObserverSources',
+    id: 'id',
+    scope: 'agent',
+  },
+  {
+    table: 'email_observer_work',
+    collection: 'emailObserverWork',
+    id: 'id',
+    scope: 'agent',
+  },
+  {
+    table: 'security_incidents',
+    collection: 'securityIncidents',
+    id: 'id',
+    scope: 'agent',
+  },
+  {
+    table: 'security_incident_sources',
+    collection: 'securityIncidentSources',
+    id: 'id',
+    scope: 'agent',
+  },
+  {
+    table: 'security_incident_attention',
+    collection: 'securityIncidentAttention',
+    id: 'id',
+    scope: 'agent',
+  },
+  {
+    table: 'execution_job_callback_receipts',
+    collection: 'executionJobCallbackReceipts',
+    id: 'idempotency_key',
+    scope: 'agent',
+  },
   { table: 'files', collection: 'files', id: 'id', scope: 'agent' },
   {
     table: 'generated_card_revisions',
@@ -58,6 +122,18 @@ export const MIGRATION_TABLES = [
   { table: 'gmail_sync_state', collection: 'gmailSyncState', id: 'mailbox', scope: 'installation' },
   { table: 'schedules', collection: 'schedules', id: 'id', scope: 'agent' },
   { table: 'memories', collection: 'memories', id: 'id', scope: 'agent' },
+  {
+    table: 'memory_embedding_refreshes',
+    collection: 'memoryEmbeddingRefreshes',
+    id: 'id',
+    scope: 'agent',
+  },
+  {
+    table: 'memory_import_lineage',
+    collection: 'memoryImportLineage',
+    id: 'source',
+    scope: 'agent',
+  },
   {
     table: 'memory_tombstones',
     collection: 'memoryTombstones',
@@ -76,6 +152,18 @@ export const MIGRATION_TABLES = [
   {
     table: 'knowledge_graph_entity_aliases',
     collection: 'knowledgeGraphEntityAliases',
+    id: 'id',
+    scope: 'agent',
+  },
+  {
+    table: 'knowledge_graph_assertions',
+    collection: 'knowledgeGraphAssertions',
+    id: 'id',
+    scope: 'agent',
+  },
+  {
+    table: 'knowledge_graph_assertion_evidence',
+    collection: 'knowledgeGraphAssertionEvidence',
     id: 'id',
     scope: 'agent',
   },
@@ -108,15 +196,29 @@ export const MIGRATION_TABLES = [
     scope: 'installation',
   },
   { table: 'model_roles', collection: 'modelRoles', id: 'role', scope: 'installation' },
+  {
+    table: 'model_role_revisions',
+    collection: 'modelRoleRevisions',
+    id: 'id',
+    scope: 'installation',
+  },
   { table: 'models', collection: 'models', id: 'id', scope: 'installation' },
   { table: 'notification_prefs', collection: 'notificationPrefs', id: 'agent_id', scope: 'agent' },
+  { table: 'notification_outbox', collection: 'notificationOutbox', id: 'id', scope: 'agent' },
   { table: 'occasions', collection: 'occasions', id: 'id', scope: 'agent' },
+  {
+    table: 'occasion_import_lineage',
+    collection: 'occasionImportLineage',
+    id: 'source',
+    scope: 'agent',
+  },
   { table: 'owner_card', collection: 'ownerCards', id: 'id', scope: 'agent' },
   { table: 'proactive_moments', collection: 'proactiveMoments', id: 'id', scope: 'agent' },
   { table: 'proactive_pings', collection: 'proactivePings', id: 'id', scope: 'agent' },
   { table: 'rate_limits', collection: 'rateLimits', id: 'scope', scope: 'installation' },
   { table: 'rate_table', collection: 'rateTable', id: 'key', scope: 'installation' },
   { table: 'recall_feedback', collection: 'recallFeedback', id: 'id', scope: 'agent' },
+  { table: 'recall_surfaces', collection: 'recallSurfaces', id: 'id', scope: 'agent' },
   { table: 'recall_metrics', collection: 'recallMetrics', id: 'id', scope: 'agent' },
   { table: 'response_checks', collection: 'responseChecks', id: 'id', scope: 'agent' },
   { table: 'self_repair_issues', collection: 'selfRepairIssues', id: 'id', scope: 'agent' },
@@ -124,9 +226,16 @@ export const MIGRATION_TABLES = [
   { table: 'situation_packs', collection: 'situationPacks', id: 'id', scope: 'agent' },
   { table: 'situation_previews', collection: 'situationPreviews', id: 'id', scope: 'agent' },
   { table: 'skills', collection: 'skills', id: 'id', scope: 'agent' },
+  {
+    table: 'skill_library_revisions',
+    collection: 'skillLibraryRevisions',
+    id: 'agent_id',
+    scope: 'agent',
+  },
   { table: 'suggestions', collection: 'suggestions', id: 'id', scope: 'agent' },
   { table: 'tool_cache', collection: 'toolCache', id: 'cache_key', scope: 'installation' },
   { table: 'voice_profile', collection: 'voiceProfile', id: 'id', scope: 'installation' },
+  { table: 'watch_fire_effects', collection: 'watchFireEffects', id: 'id', scope: 'agent' },
   { table: 'watch_fires', collection: 'watchFires', id: 'id', scope: 'agent' },
   { table: 'watches', collection: 'watches', id: 'id', scope: 'agent' },
   { table: 'writing_samples', collection: 'writingSamples', id: 'id', scope: 'installation' },
@@ -200,6 +309,24 @@ export type MigrationBundle = {
 
 export function tableDefinition(table: string) {
   return MIGRATION_TABLES.find((definition) => definition.table === table);
+}
+
+/** Stable Firestore document IDs for provenance junctions with composite keys. */
+export function compositeMigrationId(
+  table: MigrationTable,
+  data: Record<string, unknown>,
+): string | null {
+  const fields =
+    table === 'memory_import_lineage'
+      ? ['source', 'memoryId']
+      : table === 'occasion_import_lineage'
+        ? ['source', 'occasionId']
+        : undefined;
+  if (!fields) return null;
+  const values = fields.map((field) => data[field]);
+  if (values.some((value) => typeof value !== 'string' || !value))
+    throw new Error(`Invalid composite migration identity: ${table}`);
+  return createHash('sha256').update(JSON.stringify(values)).digest('hex');
 }
 
 export function assertSupportedMigrationTables(tables: readonly string[]): MigrationTable[] {
@@ -276,11 +403,13 @@ export function serializeMigrationTimestamp(value: string): SerializedValue {
   const match =
     /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?(?:\+00(?::?00)?|Z)?$/.exec(value);
   if (!match) throw new Error(`Invalid PostgreSQL migration timestamp: ${value}`);
-  const milliseconds = Date.parse(`${match[1]}T${match[2]}Z`);
-  if (!Number.isFinite(milliseconds))
-    throw new Error(`Invalid PostgreSQL migration timestamp: ${value}`);
   const fraction = match[3] ?? '';
   const canonical = `${match[1]}T${match[2]}.${fraction.padEnd(6, '0')}Z`;
+  try {
+    parseExactTimestamp(canonical);
+  } catch {
+    throw new Error(`Invalid PostgreSQL migration timestamp: ${value}`);
+  }
   return { $assistantMigration: ['timestamp', canonical] };
 }
 
@@ -336,13 +465,16 @@ export function deserializeMigrationValue(value: SerializedValue): unknown {
       if (type === 'timestamp' && typeof payload === 'string') {
         const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})\.(\d{6})Z$/.exec(payload);
         if (match) {
-          const milliseconds = Date.parse(`${match[1]}T${match[2]}Z`);
-          if (Number.isFinite(milliseconds))
+          try {
+            const parsed = parseExactTimestamp(payload);
             return new PreciseMigrationTimestamp(
-              BigInt(Math.trunc(milliseconds / 1000)),
-              Number((match[3] as string).padEnd(9, '0')),
+              BigInt(parsed.seconds),
+              parsed.nanoseconds,
               payload,
             );
+          } catch {
+            // Fall through to the malformed-tag error below.
+          }
         }
       }
       if (type === 'bytes' && typeof payload === 'string') {
@@ -473,11 +605,12 @@ export function validateMigrationBundle(
       throw new Error(`Invalid collection mapping for ${record.table}`);
     const definition = tableDefinition(record.table);
     const primary =
-      record.table === 'owner_card' || record.table === 'ambient_snapshots'
+      compositeMigrationId(record.table, record.data) ??
+      (record.table === 'owner_card' || record.table === 'ambient_snapshots'
         ? expected.sourceAgentId
         : definition?.id === 'content_hash'
           ? record.data.contentHash
-          : record.data[snakeToCamel(definition?.id ?? 'id')];
+          : record.data[snakeToCamel(definition?.id ?? 'id')]);
     if (String(primary ?? '') !== record.id) throw new Error(`Primary ID mismatch: ${key}`);
     const summary = bundle.manifest.tables[record.table];
     for (const value of Object.values(record.data)) deserializeMigrationValue(value);
@@ -526,11 +659,25 @@ export function validateMigrationReferences(
   sourceAgentId: string,
 ): void {
   const ids = new Map<string, Set<string>>();
+  const linkedRows = new Map<string, MigrationRecord>();
   for (const record of records) {
     const values = ids.get(record.table) ?? new Set<string>();
     values.add(record.id);
     ids.set(record.table, values);
+    linkedRows.set(`${record.table}:${record.id}`, record);
   }
+  const importSourceTags = new Set(
+    records
+      .filter((record) => record.table === 'import_sources')
+      .map((record) => record.data.source)
+      .filter((source): source is string => typeof source === 'string'),
+  );
+  const compactReceipts = new Map(
+    records
+      .filter((record) => record.table === 'tool_call_receipts')
+      .map((record) => [record.id, record]),
+  );
+  const compactKeys = records.filter((record) => record.table === 'tool_call_receipt_keys');
   if (!ids.get('agents')?.has(sourceAgentId))
     throw new Error('Migration bundle must include the source agent record');
   if ((ids.get('agents')?.size ?? 0) !== 1)
@@ -548,6 +695,24 @@ export function validateMigrationReferences(
     if (typeof value !== 'string' || !ids.get(table)?.has(value))
       throw new Error(`Invalid ${record.table}/${record.id} reference ${field}=${String(value)}`);
   };
+  const linked = (table: MigrationTable, id: SerializedValue | undefined) =>
+    typeof id === 'string' ? linkedRows.get(`${table}:${id}`) : undefined;
+  const requireParent = (
+    record: MigrationRecord,
+    field: string,
+    table: MigrationTable,
+    parentField: string,
+    expectedParent: SerializedValue | undefined,
+  ) => {
+    if (record.data[field] == null) return;
+    const target = linked(table, record.data[field]);
+    if (
+      !target ||
+      typeof expectedParent !== 'string' ||
+      target.data[parentField] !== expectedParent
+    )
+      throw new Error(`Inconsistent ${record.table}/${record.id} parent linkage: ${field}`);
+  };
   const directlyOwned = new Set<MigrationTable>([
     'ambient_snapshots',
     'anomalies',
@@ -563,7 +728,12 @@ export function validateMigrationReferences(
     'document_chunks',
     'documents',
     'dream_notes',
+    'email_booking_occurrences',
     'email_ingest',
+    'email_attachment_custodies',
+    'email_observer_budgets',
+    'email_observer_sources',
+    'email_observer_work',
     'files',
     'generated_cards',
     'goals',
@@ -571,10 +741,14 @@ export function validateMigrationReferences(
     'improvement_proposals',
     'knowledge_graph_entities',
     'knowledge_graph_entity_aliases',
+    'knowledge_graph_assertions',
+    'knowledge_graph_assertion_evidence',
     'knowledge_graph_relations',
     'location_pings',
     'mcp_connections',
     'memories',
+    'memory_embedding_refreshes',
+    'mission_reports',
     'notification_prefs',
     'occasions',
     'owner_card',
@@ -582,6 +756,7 @@ export function validateMigrationReferences(
     'proactive_pings',
     'recall_feedback',
     'recall_metrics',
+    'recall_surfaces',
     'schedules',
     'self_maintenance',
     'situation_packs',
@@ -589,6 +764,7 @@ export function validateMigrationReferences(
     'suggestions',
     'tasks',
     'watch_fires',
+    'watch_fire_effects',
     'watches',
     'writing_samples',
   ]);
@@ -600,18 +776,84 @@ export function validateMigrationReferences(
     )
       throw new Error(`Record outside source workspace: ${record.table}/${record.id}`);
     if (directlyOwned.has(record.table)) requireReference(record, 'agentId', 'agents', true);
+    if (record.table === 'tool_call_receipts') {
+      if (
+        record.data.agentId !== sourceAgentId ||
+        record.data.toolCallId !== record.id ||
+        typeof record.data.taskId !== 'string' ||
+        typeof record.data.toolName !== 'string' ||
+        !['completed', 'failed', 'unknown', 'not_executed'].includes(
+          String(record.data.effectOutcome),
+        )
+      )
+        throw new Error(`Invalid compact tool-call receipt: ${record.id}`);
+      for (const field of ['modelToolCallIdHash', 'idempotencyKeyHash'] as const) {
+        const value = record.data[field];
+        if (value != null && (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)))
+          throw new Error(`Invalid compact tool-call receipt identity: ${record.id}/${field}`);
+        const kind = field === 'modelToolCallIdHash' ? 'model_tool_call' : 'idempotency';
+        const matching = compactKeys.filter(
+          (candidate) =>
+            candidate.data.receiptId === record.id &&
+            candidate.data.kind === kind &&
+            candidate.data.digest === value,
+        );
+        if (value != null && matching.length !== 1)
+          throw new Error(`Missing compact tool-call receipt key: ${record.id}/${kind}`);
+      }
+    }
+    if (record.table === 'tool_call_receipt_keys') {
+      const receipt = compactReceipts.get(String(record.data.receiptId ?? ''));
+      const field =
+        record.data.kind === 'model_tool_call'
+          ? 'modelToolCallIdHash'
+          : record.data.kind === 'idempotency'
+            ? 'idempotencyKeyHash'
+            : null;
+      if (
+        !receipt ||
+        !field ||
+        record.data.agentId !== sourceAgentId ||
+        record.data.taskId !== receipt.data.taskId ||
+        record.data.digest !== receipt.data[field] ||
+        record.id !==
+          toolCallReceiptKeyId(
+            record.data.kind as 'model_tool_call' | 'idempotency',
+            String(record.data.digest ?? ''),
+          )
+      )
+        throw new Error(`Invalid compact tool-call receipt key: ${record.id}`);
+    }
     if (record.table === 'channel_bindings')
       requireReference(record, 'conversationId', 'conversations', true);
     if (record.table === 'messages') {
       requireReference(record, 'conversationId', 'conversations', true);
       requireReference(record, 'taskId', 'tasks');
     }
+    if (record.table === 'execution_job_callback_receipts')
+      requireReference(record, 'taskId', 'tasks', true);
     if (record.table === 'situation_previews')
       requireReference(record, 'packId', 'situation_packs', true);
+    if (record.table === 'memory_import_lineage') {
+      if (typeof record.data.source !== 'string' || !importSourceTags.has(record.data.source))
+        throw new Error(
+          `Invalid ${record.table}/${record.id} reference source=${String(record.data.source)}`,
+        );
+      requireReference(record, 'memoryId', 'memories', true);
+    }
+    if (record.table === 'occasion_import_lineage') {
+      if (typeof record.data.source !== 'string' || !importSourceTags.has(record.data.source))
+        throw new Error(
+          `Invalid ${record.table}/${record.id} reference source=${String(record.data.source)}`,
+        );
+      requireReference(record, 'occasionId', 'occasions', true);
+    }
     if (record.table === 'generated_cards') {
       requireReference(record, 'conversationId', 'conversations');
       requireReference(record, 'messageId', 'messages');
       requireReference(record, 'currentRevisionId', 'generated_card_revisions', true);
+      requireParent(record, 'currentRevisionId', 'generated_card_revisions', 'cardId', record.id);
+      requireParent(record, 'messageId', 'messages', 'conversationId', record.data.conversationId);
     }
     if (record.table === 'generated_card_revisions')
       requireReference(record, 'cardId', 'generated_cards', true);
@@ -619,11 +861,37 @@ export function validateMigrationReferences(
       requireReference(record, 'conversationId', 'conversations', true);
       requireReference(record, 'sourceMessageId', 'messages');
       requireReference(record, 'sourceTaskId', 'tasks');
+      requireParent(
+        record,
+        'sourceMessageId',
+        'messages',
+        'conversationId',
+        record.data.conversationId,
+      );
     }
     if (record.table === 'conversation_segments') {
       requireReference(record, 'conversationId', 'conversations', true);
       requireReference(record, 'startMessageId', 'messages', true);
       requireReference(record, 'endMessageId', 'messages', true);
+      requireParent(
+        record,
+        'startMessageId',
+        'messages',
+        'conversationId',
+        record.data.conversationId,
+      );
+      requireParent(
+        record,
+        'endMessageId',
+        'messages',
+        'conversationId',
+        record.data.conversationId,
+      );
+    }
+    if (record.table === 'mission_reports') {
+      requireReference(record, 'missionId', 'tasks', true);
+      requireReference(record, 'goalId', 'goals');
+      requireReference(record, 'conversationId', 'conversations');
     }
     if (record.table === 'tasks') {
       requireReference(record, 'conversationId', 'conversations');
@@ -655,11 +923,52 @@ export function validateMigrationReferences(
       requireReference(record, 'confirmationMessageId', 'messages');
     }
     if (record.table === 'skills') requireReference(record, 'sourceTaskId', 'tasks');
+    if (record.table === 'skill_library_revisions')
+      requireReference(record, 'agentId', 'agents', true);
     if (record.table === 'memories') {
       requireReference(record, 'subjectContactId', 'contacts');
       requireReference(record, 'sourceTaskId', 'tasks');
       requireReference(record, 'goalId', 'goals');
       requireReference(record, 'supersededById', 'memories');
+      const spaceKey = record.data.embeddingSpaceKey;
+      if (
+        spaceKey !== undefined &&
+        spaceKey !== null &&
+        (typeof spaceKey !== 'string' || !/^[a-f0-9]{64}$/.test(spaceKey))
+      )
+        throw new Error(`Invalid memories/${record.id} embedding space identity`);
+    }
+    if (record.table === 'memory_embedding_refreshes') {
+      requireReference(record, 'memoryId', 'memories', true);
+      requireParent(record, 'memoryId', 'memories', 'agentId', record.data.agentId);
+      if (
+        typeof record.data.sourceHash !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(record.data.sourceHash) ||
+        typeof record.data.targetSpaceKey !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(record.data.targetSpaceKey) ||
+        !Number.isInteger(record.data.targetDimensions) ||
+        Number(record.data.targetDimensions) < 1 ||
+        Number(record.data.targetDimensions) > 2048 ||
+        ![
+          'dispatching',
+          'prepared',
+          'unknown',
+          'retry_authorized',
+          'completed',
+          'stale',
+          'abandoned',
+        ].includes(String(record.data.status))
+      )
+        throw new Error(`Invalid memory_embedding_refreshes/${record.id} receipt`);
+      if (record.data.preparedVector !== null && record.data.preparedVector !== undefined) {
+        const decoded = deserializeMigrationValue(record.data.preparedVector as SerializedValue);
+        if (
+          !Array.isArray(decoded) ||
+          decoded.length !== record.data.targetDimensions ||
+          !decoded.every((value) => typeof value === 'number' && Number.isFinite(value))
+        )
+          throw new Error(`Invalid memory_embedding_refreshes/${record.id} prepared vector`);
+      }
     }
     if (record.table === 'knowledge_graph_entities')
       requireReference(record, 'contactId', 'contacts');
@@ -672,6 +981,16 @@ export function validateMigrationReferences(
     if (record.table === 'knowledge_graph_relations') {
       requireReference(record, 'subjectEntityId', 'knowledge_graph_entities', true);
       requireReference(record, 'objectEntityId', 'knowledge_graph_entities', true);
+      requireReference(record, 'sourceMemoryId', 'memories', true);
+      requireReference(record, 'assertionId', 'knowledge_graph_assertions');
+    }
+    if (record.table === 'knowledge_graph_assertions') {
+      requireReference(record, 'subjectEntityId', 'knowledge_graph_entities', true);
+      requireReference(record, 'objectEntityId', 'knowledge_graph_entities', true);
+      requireReference(record, 'supersededById', 'knowledge_graph_assertions');
+    }
+    if (record.table === 'knowledge_graph_assertion_evidence') {
+      requireReference(record, 'assertionId', 'knowledge_graph_assertions', true);
       requireReference(record, 'sourceMemoryId', 'memories', true);
     }
     if (record.table === 'occasions') requireReference(record, 'contactId', 'contacts', true);
@@ -693,12 +1012,40 @@ export function validateMigrationReferences(
     if (record.table === 'cost_reservations') requireReference(record, 'taskId', 'tasks');
     if (record.table === 'email_ingest')
       requireReference(record, 'conversationId', 'conversations');
+    if (record.table === 'email_attachment_custodies') {
+      requireReference(record, 'observerWorkId', 'email_observer_work');
+      requireReference(record, 'fileId', 'files');
+      requireReference(record, 'documentId', 'documents');
+      requireReference(record, 'duplicateDocumentId', 'documents');
+      requireParent(
+        record,
+        'observerWorkId',
+        'email_observer_work',
+        'agentId',
+        record.data.agentId,
+      );
+      requireParent(record, 'fileId', 'files', 'agentId', record.data.agentId);
+      requireParent(record, 'documentId', 'documents', 'agentId', record.data.agentId);
+      requireParent(record, 'duplicateDocumentId', 'documents', 'agentId', record.data.agentId);
+    }
+    if (record.table === 'files') {
+      requireReference(record, 'emailAttachmentCustodyId', 'email_attachment_custodies');
+      requireParent(
+        record,
+        'emailAttachmentCustodyId',
+        'email_attachment_custodies',
+        'agentId',
+        record.data.agentId,
+      );
+    }
     if (record.table === 'suggestions') {
       requireReference(record, 'conversationId', 'conversations');
       requireReference(record, 'acceptedTaskId', 'tasks');
     }
     if (record.table === 'watches') requireReference(record, 'conversationId', 'conversations');
     if (record.table === 'watch_fires') requireReference(record, 'watchId', 'watches', true);
+    // Fire-effect rows are durable receipts and intentionally outlive deleted
+    // watch/fire records while idempotent destination work is being reconciled.
     if (record.table === 'files') requireReference(record, 'taskId', 'tasks');
     if (record.table === 'documents') requireReference(record, 'fileId', 'files', true);
     if (record.table === 'document_chunks')

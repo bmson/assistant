@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   buildReadToolInput,
   detectPersonalReadRequest,
+  gmailThreadIdsToRead,
   groundReadToolInput,
   nextRequiredReadTool,
   type ReadToolEvidence,
+  resolveTemporalIntent,
+  resolveTimeWindow,
 } from './read-intent.js';
 
 const turn = (text: string, prior = '') => [
@@ -13,6 +16,249 @@ const turn = (text: string, prior = '') => [
 ];
 
 describe('detectPersonalReadRequest', () => {
+  it('requires mailbox source reads for a requested reservation card while keeping other actions separate', () => {
+    expect(
+      detectPersonalReadRequest(
+        turn('Create a card for my hotel reservation in my mailbox under QA-BOOKING-123.'),
+      ),
+    ).toMatchObject({
+      kind: 'email',
+      firstToolName: 'gmail.search',
+      mailQuery: 'QA-BOOKING-123',
+      requiresThreadRead: true,
+    });
+    for (const text of [
+      'Do not create a card for my hotel reservation in my mailbox.',
+      'Create a card for my hotel reservation in my mailbox and email it to Alice.',
+      'How do reservation cards work?',
+    ])
+      expect(detectPersonalReadRequest(turn(text))).toBeNull();
+  });
+  it('leaves future notification requests for the watch planner', () => {
+    expect(detectPersonalReadRequest(turn('Tell me if Alex emails me'))).toBeNull();
+    expect(
+      detectPersonalReadRequest(
+        turn('Check whether Alex replied; if not, notify me when they do.'),
+      ),
+    ).toBeNull();
+  });
+
+  it('retains present mailbox lookups as read requests', () => {
+    expect(detectPersonalReadRequest(turn('Has Alex emailed me?'))).toMatchObject({
+      kind: 'email',
+      firstToolName: 'gmail.search',
+    });
+  });
+
+  it.each([
+    ['yesterday', '2026-09-07T07:00:00.000Z', '2026-09-08T07:00:00.000Z'],
+    ['last week', '2026-08-31T07:00:00.000Z', '2026-09-07T07:00:00.000Z'],
+    ['last Monday', '2026-09-07T07:00:00.000Z', '2026-09-08T07:00:00.000Z'],
+    ['last month', '2026-08-01T07:00:00.000Z', '2026-09-01T07:00:00.000Z'],
+    ['past 3 days', '2026-09-05T07:00:00.000Z', '2026-09-08T07:00:00.000Z'],
+  ])('keeps historical calendar range %s in the past', (text, timeMin, timeMax) => {
+    expect(
+      resolveTimeWindow(text, 'calendar', false, {
+        now: new Date('2026-09-08T12:00:00Z'),
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toMatchObject({ timeMin, timeMax });
+  });
+
+  it('returns a typed interval while preserving the legacy public window shape', () => {
+    const options = {
+      now: new Date('2026-09-08T12:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    };
+    const resolved = resolveTemporalIntent(
+      'What did I have last week?',
+      'calendar',
+      false,
+      options,
+    );
+    expect(resolved).toMatchObject({
+      kind: 'resolved',
+      intent: {
+        direction: 'past',
+        anchor: {
+          instant: options.now.toISOString(),
+          timeZone: 'America/Los_Angeles',
+          localDate: '2026-09-08',
+        },
+        interval: {
+          start: '2026-08-31T07:00:00.000Z',
+          endExclusive: '2026-09-07T07:00:00.000Z',
+        },
+        granularity: 'week',
+      },
+    });
+    expect(resolveTimeWindow('What did I have last week?', 'calendar', false, options)).toEqual({
+      timeMin: '2026-08-31T07:00:00.000Z',
+      timeMax: '2026-09-07T07:00:00.000Z',
+      label: 'last week',
+    });
+  });
+
+  it.each([
+    'What was on my calendar 3 years ago?',
+    'What is on my calendar next 2 months?',
+    'What was on my calendar last week and 3 years ago?',
+    'What will be on my calendar in two months?',
+    'What is on my calendar two months from now?',
+    'What did I have three years ago on my calendar?',
+  ])('refuses recognized but unsupported relative period: %s', (text) => {
+    const options = {
+      now: new Date('2026-09-08T12:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    };
+    expect(resolveTemporalIntent(text, 'calendar', false, options).kind).toBe('unsupported');
+    expect(resolveTimeWindow(text, 'calendar', false, options)).toBeUndefined();
+    const request = detectPersonalReadRequest(turn(text), options);
+    expect(request).toMatchObject({ temporalIssue: expect.stringMatching(/can’t safely search/i) });
+    if (!request) throw new Error('Expected a calendar request carrying the temporal issue');
+    expect(nextRequiredReadTool(request, [])).toBeUndefined();
+    expect(buildReadToolInput(request, request.firstToolName, [])).toBeNull();
+  });
+
+  it.each([
+    ['LAST 2 WEEKS', '2026-08-25T07:00:00.000Z', '2026-09-08T07:00:00.000Z'],
+    ['past 2 WEEKS', '2026-08-25T07:00:00.000Z', '2026-09-08T07:00:00.000Z'],
+  ])(
+    'keeps case-insensitive plural week counts at the requested scale: %s',
+    (text, timeMin, timeMax) => {
+      expect(
+        resolveTimeWindow(`What was on my calendar ${text}?`, 'calendar', false, {
+          now: new Date('2026-09-08T12:00:00.000Z'),
+          timeZone: 'America/Los_Angeles',
+        }),
+      ).toMatchObject({ timeMin, timeMax });
+    },
+  );
+
+  it.each(['last 0 days', 'last 0 weeks', 'past 0 days', 'next 0 days'])(
+    'blocks a recognized zero-length period instead of choosing a default window: %s',
+    (period) => {
+      const options = {
+        now: new Date('2026-09-08T12:00:00.000Z'),
+        timeZone: 'America/Los_Angeles',
+      };
+      const text = `What was on my calendar ${period}?`;
+      expect(resolveTemporalIntent(text, 'calendar', false, options).kind).toBe('unsupported');
+      const request = detectPersonalReadRequest(turn(text), options);
+      if (!request) throw new Error('Expected a calendar request carrying the temporal issue');
+      expect(request.temporalIssue).toMatch(/can’t safely search/i);
+      expect(nextRequiredReadTool(request, [])).toBeUndefined();
+      expect(buildReadToolInput(request, request.firstToolName, [])).toBeNull();
+    },
+  );
+
+  it('keeps the unsupported plural period scale and rejects a later unsupported phrase', () => {
+    const options = {
+      now: new Date('2026-09-08T12:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    };
+    expect(
+      resolveTemporalIntent('What happened 3 years ago?', 'calendar', false, options),
+    ).toMatchObject({ kind: 'unsupported', granularity: 'year' });
+    expect(
+      resolveTemporalIntent('What happened last week and 3 years ago?', 'calendar', false, options),
+    ).toMatchObject({ kind: 'unsupported', granularity: 'year' });
+  });
+
+  it.each(['February 30', '2026-02-30'])('blocks an invalid explicit date: %s', (date) => {
+    const request = detectPersonalReadRequest(turn(`What was on my calendar on ${date}?`), {
+      now: new Date('2026-09-08T12:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!request) throw new Error('Expected a calendar read request');
+    expect(request.temporalIssue).toMatch(/can’t safely resolve that calendar date or period/i);
+    expect(nextRequiredReadTool(request, [])).toBeUndefined();
+    expect(buildReadToolInput(request, request.firstToolName, [])).toBeNull();
+  });
+
+  it('does not let a named search bypass an unsupported temporal interval', () => {
+    const request = detectPersonalReadRequest(
+      turn('Find my dentist appointment from 3 years ago on my calendar.'),
+      {
+        now: new Date('2026-09-08T12:00:00.000Z'),
+        timeZone: 'America/Los_Angeles',
+      },
+    );
+    if (!request) throw new Error('Expected a calendar search request');
+    expect(request.firstToolName).toBe('calendar.search_events');
+    expect(request.temporalIssue).toMatch(/can’t safely search/i);
+    expect(nextRequiredReadTool(request, [])).toBeUndefined();
+    expect(groundReadToolInput(request, request.firstToolName, { query: 'dentist' }, [])).toEqual(
+      {},
+    );
+    expect(buildReadToolInput(request, request.firstToolName, [])).toBeNull();
+  });
+
+  it('binds next-event selection to one captured request instant', () => {
+    const requestAt = new Date('2026-09-23T17:00:00.000Z');
+    const resolved = resolveTemporalIntent(
+      'What is my next calendar event?',
+      'calendar',
+      false,
+      { now: requestAt, timeZone: 'America/Los_Angeles' },
+      'next-event',
+    );
+    expect(resolved).toMatchObject({
+      kind: 'resolved',
+      intent: {
+        direction: 'future',
+        anchor: { instant: requestAt.toISOString() },
+        interval: {
+          start: requestAt.toISOString(),
+          endExclusive: '2026-09-30T07:00:00.000Z',
+        },
+      },
+    });
+  });
+
+  it('resolves last year and an unqualified past named date as historical civil ranges', () => {
+    const options = {
+      now: new Date('2026-09-08T12:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    };
+    expect(resolveTimeWindow('What happened last year?', 'calendar', false, options)).toMatchObject(
+      {
+        timeMin: '2025-01-01T08:00:00.000Z',
+        timeMax: '2026-01-01T08:00:00.000Z',
+      },
+    );
+    expect(
+      resolveTimeWindow('What happened on March 12?', 'calendar', false, options),
+    ).toMatchObject({
+      timeMin: '2026-03-12T07:00:00.000Z',
+      timeMax: '2026-03-13T07:00:00.000Z',
+    });
+  });
+
+  it('resolves last Friday to the previous Friday when the request itself arrives on Friday', () => {
+    expect(
+      resolveTimeWindow('What did I have last Friday?', 'calendar', false, {
+        now: new Date('2026-09-11T18:00:00.000Z'),
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toMatchObject({
+      timeMin: '2026-09-04T07:00:00.000Z',
+      timeMax: '2026-09-05T07:00:00.000Z',
+    });
+  });
+
+  it('resolves yesterday across the spring daylight-saving boundary using local civil days', () => {
+    expect(
+      resolveTimeWindow('What did I have yesterday?', 'calendar', false, {
+        now: new Date('2026-03-09T07:30:00.000Z'),
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toMatchObject({
+      timeMin: '2026-03-08T08:00:00.000Z',
+      timeMax: '2026-03-09T07:00:00.000Z',
+    });
+  });
+
   it.each([
     'Is my calendar clear tomorrow?',
     'Is our schedule empty on Monday?',
@@ -182,6 +428,50 @@ describe('detectPersonalReadRequest', () => {
     });
   });
 
+  it('starts a generic next-event read at the request instant, not local midnight', () => {
+    const requestAt = new Date('2026-09-23T17:00:00.000Z');
+    expect(
+      detectPersonalReadRequest(turn('What is my next calendar event?'), {
+        now: requestAt,
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toMatchObject({
+      maxResults: 1,
+      timeWindow: {
+        timeMin: requestAt.toISOString(),
+        timeMax: '2026-09-30T07:00:00.000Z',
+      },
+    });
+    expect(
+      detectPersonalReadRequest(turn('What is my next event today?'), {
+        now: requestAt,
+        timeZone: 'America/Los_Angeles',
+      })?.timeWindow?.timeMin,
+    ).toBe(requestAt.toISOString());
+  });
+
+  it('rejects nonexistent ISO calendar dates instead of normalizing them', () => {
+    const options = {
+      now: new Date('2026-09-23T17:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    };
+    expect(resolveTimeWindow('What is on 2026-02-30?', 'calendar', false, options)).toBeUndefined();
+    expect(resolveTimeWindow('What is on 2026-13-01?', 'calendar', false, options)).toBeUndefined();
+    expect(detectPersonalReadRequest(turn('What is on 2026-02-30?'), options)).toBeNull();
+  });
+
+  it.each(['February 30', 'April 31', 'February 29, 2026'])(
+    'rejects nonexistent named date %s without selecting a broad fallback range',
+    (date) => {
+      expect(
+        resolveTimeWindow(`What is on my calendar on ${date}?`, 'calendar', false, {
+          now: new Date('2026-09-23T17:00:00.000Z'),
+          timeZone: 'America/Los_Angeles',
+        }),
+      ).toBeUndefined();
+    },
+  );
+
   it('reads text from AI SDK UI message parts', () => {
     expect(
       detectPersonalReadRequest(
@@ -222,6 +512,48 @@ describe('detectPersonalReadRequest', () => {
     ).toMatchObject({ kind: 'calendar_email', queryTerms: ['clay'] });
   });
 
+  it('keeps a destination after a relative date in a named flight lookup', () => {
+    expect(
+      detectPersonalReadRequest(turn('When is my flight tomorrow to Berlin?'), {
+        now: new Date('2026-10-08T18:00:00.000Z'),
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toMatchObject({
+      kind: 'calendar_email',
+      queryTerms: ['berlin'],
+      firstToolName: 'calendar.search_events',
+      requiresThreadRead: true,
+      mailQuery: 'berlin',
+      answerFocus: 'flight',
+      timeWindow: {
+        label: 'tomorrow',
+        timeMin: '2026-10-09T07:00:00.000Z',
+        timeMax: '2026-10-10T07:00:00.000Z',
+      },
+    });
+  });
+
+  it('does not mistake a flight date for a mail-received date filter', () => {
+    const request = detectPersonalReadRequest(turn('When is my flight tomorrow?'), {
+      now: new Date('2026-10-08T18:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    expect(request).toMatchObject({
+      answerFocus: 'flight',
+      queryTerms: ['flight'],
+      mailQuery: 'flight',
+    });
+
+    const explicitlyRecent = detectPersonalReadRequest(
+      turn('When is my flight tomorrow from the last 7 days?'),
+      {
+        now: new Date('2026-10-08T18:00:00.000Z'),
+        timeZone: 'America/Los_Angeles',
+      },
+    );
+    expect(explicitlyRecent?.mailQuery).toContain('newer_than:7d');
+  });
+
   it('searches both calendar and Gmail for a named interview', () => {
     expect(detectPersonalReadRequest(turn('When is my Clay interview?'))).toEqual({
       kind: 'calendar_email',
@@ -245,6 +577,77 @@ describe('detectPersonalReadRequest', () => {
       queryTerms: ['jane', 'doe'],
       mailQuery: 'jane doe',
     });
+  });
+
+  it('prioritizes a target flight booking confirmation ahead of matching newsletters', () => {
+    const request = detectPersonalReadRequest(turn('When is my flight tomorrow to Berlin?'), {
+      now: new Date('2026-10-08T18:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!request) throw new Error('expected a flight read request');
+    const evidence: ReadToolEvidence[] = [
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        args: { query: request.mailQuery },
+        result: {
+          results: [
+            {
+              threadId: 'newsletter-1',
+              subject: 'Berlin flight deals this week',
+              snippet: 'Weekly travel offers',
+            },
+            {
+              threadId: 'newsletter-2',
+              subject: 'Your Berlin flight inspiration',
+              snippet: 'Explore destinations',
+            },
+            {
+              threadId: 'newsletter-3',
+              subject: 'Berlin airport news',
+              snippet: 'Terminal updates',
+            },
+            {
+              threadId: 'booking',
+              subject: 'Berlin flight confirmation',
+              snippet: 'Your itinerary and departure details',
+            },
+          ],
+        },
+      },
+    ];
+
+    expect(gmailThreadIdsToRead(evidence, request)).toEqual([
+      'booking',
+      'newsletter-1',
+      'newsletter-2',
+    ]);
+  });
+
+  it('prioritizes the newest matching thread for current or upcoming mail questions', () => {
+    const request = detectPersonalReadRequest(turn('What does the latest trip email say?'));
+    expect(request).toMatchObject({
+      kind: 'email',
+      requiresThreadRead: true,
+      preferLatestMail: true,
+    });
+    if (!request) throw new Error('expected an email read request');
+    const evidence: ReadToolEvidence[] = [
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        args: { query: request.mailQuery },
+        result: {
+          results: [
+            { threadId: 'old', date: '2026-08-01T00:00:00Z' },
+            { threadId: 'middle', date: '2026-09-01T00:00:00Z' },
+            { threadId: 'current', date: '2026-10-01T00:00:00Z' },
+            { threadId: 'fourth', date: '2026-10-02T00:00:00Z' },
+          ],
+        },
+      },
+    ];
+    expect(gmailThreadIdsToRead(evidence, request)).toEqual(['fourth', 'current', 'middle']);
   });
 
   // The reported miss: the owner asked whether a hotel email had arrived and got
@@ -470,8 +873,19 @@ describe('detectPersonalReadRequest', () => {
     'Find my hotel reservation and remind me',
     'Find my hotel reservation, save it as a card',
     'Read my hotel email; draft a reply',
+    'Find the venue-planning email address I gave you for Anna earlier and prepare this draft for review: The venue plan is ready.',
+    'Search my email for the venue confirmation and write a draft reply for review.',
+    'Read my hotel email; compose a reply for review.',
     'Find my hotel reservation and make a card',
   ])('keeps follow-through available for compound requests: %s', (text) => {
+    expect(detectPersonalReadRequest(turn(text))).toBeNull();
+  });
+
+  it.each([
+    'Email Riley about the launch notes, but do not search contacts.',
+    'Please email Anna the venue details after checking my calendar.',
+    'E-mail Jordan the invoice without searching my inbox.',
+  ])('preserves the requested email workflow instead of forcing a mailbox read: %s', (text) => {
     expect(detectPersonalReadRequest(turn(text))).toBeNull();
   });
 
@@ -549,6 +963,38 @@ describe('required read sequence', () => {
     expect(buildReadToolInput(request, 'gmail.read_thread', evidence)).toEqual({
       threadId: 'thread-2',
     });
+  });
+
+  it('continues a broad mailbox search only through a bounded set of grounded pages', () => {
+    const broad = detectPersonalReadRequest(turn('Search my inbox history for Clay'));
+    expect(broad).toMatchObject({ kind: 'email', requiresExhaustiveMail: true });
+    if (!broad) throw new Error('expected a broad mail request');
+    expect(
+      groundReadToolInput(broad, 'gmail.search', { pageToken: 'model-invented' }, []),
+    ).not.toHaveProperty('pageToken');
+    const firstPage: ReadToolEvidence = {
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      args: { query: broad.mailQuery },
+      result: { hasMore: true, nextPageToken: 'page-2', results: [] },
+    };
+    expect(nextRequiredReadTool(broad, [firstPage])).toBe('gmail.search');
+    expect(buildReadToolInput(broad, 'gmail.search', [firstPage])).toMatchObject({
+      query: broad.mailQuery,
+      pageToken: 'page-2',
+      maxResults: 20,
+    });
+    const secondPage: ReadToolEvidence = {
+      ...firstPage,
+      args: { query: broad.mailQuery, pageToken: 'page-2' },
+      result: { hasMore: true, nextPageToken: 'page-3', results: [] },
+    };
+    const thirdPage: ReadToolEvidence = {
+      ...firstPage,
+      args: { query: broad.mailQuery, pageToken: 'page-3' },
+      result: { hasMore: true, nextPageToken: 'page-4', results: [] },
+    };
+    expect(nextRequiredReadTool(broad, [firstPage, secondPage, thirdPage])).toBeUndefined();
   });
 
   it('binds searches to the owner wording and removes calendar narrowing', () => {

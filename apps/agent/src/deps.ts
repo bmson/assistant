@@ -15,18 +15,20 @@ import {
   goalAutomationInstruction,
   ModelRouter,
   nextRun,
-  postOwnerNotice,
 } from '@assistant/core';
 import { compileOwnerCard } from '@assistant/core/memory/consolidation';
 import { supersedeContradictedFacts } from '@assistant/core/memory/supersede';
 import { evaluateOutOfBandPing } from '@assistant/core/proactive/nudge-policy';
 import {
+  conversations,
   createDb,
   createPostgresAuditInvestigationRepository,
+  createPostgresConversationSearchRepository,
   createPostgresExecutionPersistence,
   createPostgresModelConnectionRepository,
   createPostgresSelfRepairRepository,
   type Db,
+  tasks,
 } from '@assistant/db';
 import {
   createFirestoreExecutionPersistence,
@@ -65,15 +67,29 @@ import {
   smsModule,
 } from '@assistant/modules';
 import {
+  curiosityNudgeChannel,
   type DocumentExtractionRepository,
+  drainNotificationOutbox,
+  EmailObserverEffectFenceRejectedError,
   type EmbeddingSpace,
   type ExecutionPersistence,
   embeddingModelId,
+  embeddingSpaceIdentityKey,
   type GoalToolRepository,
+  hasEffectiveNotificationDelivery,
   type ImportJobRepository,
   type ModelRoutingRepository,
+  type NotificationDeliveryResult,
+  type NotificationOutboxLeg,
+  type NotificationOutboxSendResult,
   type NudgePolicyRepository,
+  notificationDashboardMessageId,
+  notificationDeliveryKey,
+  notificationLeg,
+  notificationLegEntry,
+  POSTGRES_EMBEDDING_DIMENSIONS,
   type Records,
+  sendNotificationOutboxLeg,
 } from '@assistant/persistence';
 import type { BrowserJobLauncher } from '@assistant/tools/browser';
 import {
@@ -103,6 +119,7 @@ import {
   LocalWorkspaceStore,
   type WorkspaceStore,
 } from '@assistant/tools/workspace';
+import { and, eq } from 'drizzle-orm';
 // The installation's composition file, at the repository root. Importing it
 // here is what bakes the chosen modules into the built image.
 import composition from '../../../assistant.config.js';
@@ -130,13 +147,6 @@ export interface AgentDeps {
   outOfBandNotifier: OwnerNotifier;
   browserLauncher?: BrowserJobLauncher;
   documentProcessor?: DocumentProcessorConfig;
-}
-
-/** Shared readiness fence for the probe and the Firestore local queue. */
-export async function firestoreOwnerReady(deps: AgentDeps): Promise<boolean> {
-  if (!deps.firestoreStore) return false;
-  const owner = await deps.firestoreStore.doc('agents', deps.config.FIRESTORE_AGENT_ID).get();
-  return owner.exists && owner.get('id') === deps.config.FIRESTORE_AGENT_ID;
 }
 
 /** Maintenance stays fenced while an imported workspace awaits explicit activation. */
@@ -244,66 +254,297 @@ function dashboardOwnerNotifier(deps: AgentDeps): OwnerNotifier {
     taskId?: string,
     sourceConversationId?: string | null,
     extraParts?: readonly unknown[],
-  ) => {
+    deliveryKey?: string,
+    emailObserverEffectFence?: import('@assistant/persistence').EmailObserverEffectFence,
+    applicationConfirmationNoticeFence?: import('@assistant/persistence').ApplicationConfirmationNoticeFence,
+  ): Promise<NotificationDeliveryResult> => {
     const agent = await getAgent(deps.db);
     const primary = await findPrimaryConversation(deps.db, agent.id);
     // Executor notices are already persisted into their owning conversation.
     // Mirroring one whose owner IS the primary chat creates the exact pair the
     // reader used to see: a structured card followed by a prose restatement.
-    if (!shouldMirrorIntoPrimary(sourceConversationId, primary?.id)) return;
-    await postOwnerNotice(deps.db, {
+    if (!shouldMirrorIntoPrimary(sourceConversationId, primary?.id))
+      return notificationLeg('dashboard', 'skipped', 'already-in-source-conversation');
+    const persistence = deps.persistence ?? createPostgresExecutionPersistence(deps.db);
+    const destination =
+      primary?.id ??
+      (await persistence.notifications.getOrCreate(
+        agent.id,
+        emailObserverEffectFence,
+        applicationConfirmationNoticeFence,
+      ));
+    return persistDashboardNotice(deps, persistence, {
       agentId: agent.id,
-      text,
+      conversationId: destination,
       ...(taskId ? { taskId } : {}),
-      ...(extraParts?.length ? { extraParts } : {}),
+      text,
+      extraParts,
+      deliveryKey:
+        deliveryKey ?? notificationDeliveryKey('dashboard-notice', taskId ?? agent.id, text),
+      ...(emailObserverEffectFence ? { emailObserverEffectFence } : {}),
+      ...(applicationConfirmationNoticeFence ? { applicationConfirmationNoticeFence } : {}),
     });
   };
   return {
-    notifyOwner: async ({ text, taskId, conversationId }) => {
-      await post(text, taskId, conversationId);
+    notifyOwner: async ({
+      text,
+      taskId,
+      conversationId,
+      deliveryKey,
+      emailObserverEffectFence,
+      applicationConfirmationNoticeFence,
+    }) => {
+      return post(
+        text,
+        taskId,
+        conversationId,
+        undefined,
+        deliveryKey,
+        emailObserverEffectFence,
+        applicationConfirmationNoticeFence,
+      );
     },
     // Approval cards are already posted into the originating conversation by the
     // executor. Mirror one compact, purpose-first summary for an owner who is
     // looking at the primary chat instead — details remain on Approvals.
     notifyApprovals: async (pending) => {
-      if (pending.length === 0) return;
+      if (pending.length === 0) return notificationLeg('dashboard', 'skipped', 'empty-batch');
       const agent = await getAgent(deps.db);
       const primary = await findPrimaryConversation(deps.db, agent.id);
       const notices = pending.filter((approval) =>
         shouldMirrorIntoPrimary(approval.conversationId, primary?.id),
       );
-      if (notices.length === 0) return;
+      if (notices.length === 0)
+        return notificationLeg('dashboard', 'skipped', 'already-in-source-conversation');
       const summary = approvalSummaryNotice(notices);
-      await post(summary.text, notices[0]?.taskId, notices[0]?.conversationId, summary.extraParts);
+      return post(
+        summary.text,
+        notices[0]?.taskId,
+        notices[0]?.conversationId,
+        summary.extraParts,
+        notificationDeliveryKey(
+          'dashboard-approval-batch',
+          ...notices.map((notice) => `${notice.taskId}:${notice.shortCode}`).sort(),
+        ),
+      );
     },
   };
+}
+
+/**
+ * Dashboard delivery is an outbox leg too. The deterministic channel message
+ * identity makes a crash after message append but before receipt commit
+ * recoverable without creating a second chat message.
+ */
+async function persistDashboardNotice(
+  deps: AgentDeps,
+  persistence: ExecutionPersistence,
+  input: {
+    agentId: string;
+    conversationId: string;
+    taskId?: string;
+    text: string;
+    extraParts?: readonly unknown[];
+    deliveryKey: string;
+    emailObserverEffectFence?: import('@assistant/persistence').EmailObserverEffectFence;
+    applicationConfirmationNoticeFence?: import('@assistant/persistence').ApplicationConfirmationNoticeFence;
+  },
+): Promise<NotificationDeliveryResult> {
+  const legKey = 'dashboard';
+  const now = new Date();
+  const result = await sendNotificationOutboxLeg(
+    persistence.notificationOutbox,
+    {
+      agentId: input.agentId,
+      deliveryKey: input.deliveryKey,
+      legKey,
+      adapter: 'dashboard',
+      destination: { conversationId: input.conversationId },
+      payload: {
+        text: input.text,
+        ...(input.taskId ? { taskId: input.taskId } : {}),
+        extraParts: input.extraParts ?? [],
+      },
+      ...(input.emailObserverEffectFence
+        ? { emailObserverEffectFence: input.emailObserverEffectFence }
+        : {}),
+      ...(input.applicationConfirmationNoticeFence
+        ? { applicationConfirmationNoticeFence: input.applicationConfirmationNoticeFence }
+        : {}),
+      now,
+    },
+    (row) => sendDashboardOutboxLeg(deps, persistence, row),
+  );
+  return { legs: [result] };
+}
+
+async function sendDashboardOutboxLeg(
+  deps: AgentDeps,
+  persistence: ExecutionPersistence,
+  row: NotificationOutboxLeg,
+): Promise<NotificationOutboxSendResult> {
+  const destination = row.destination as { conversationId?: unknown } | null;
+  const payload = row.payload as { text?: unknown; taskId?: unknown; extraParts?: unknown } | null;
+  if (
+    !destination ||
+    typeof destination.conversationId !== 'string' ||
+    !payload ||
+    typeof payload.text !== 'string' ||
+    (payload.taskId !== undefined && typeof payload.taskId !== 'string') ||
+    !Array.isArray(payload.extraParts)
+  )
+    return { status: 'skipped', reason: 'dashboard-payload-erased-or-invalid' };
+  const conversationId = destination.conversationId;
+  const taskId = typeof payload.taskId === 'string' ? payload.taskId : undefined;
+  if (deps.config.PERSISTENCE_DRIVER === 'firestore') {
+    const store = deps.firestoreStore;
+    if (!store)
+      return { status: 'failed', retryable: true, reason: 'conversation-store-unavailable' };
+    const conversation = await store.doc('conversations', conversationId).get();
+    if (
+      !conversation.exists ||
+      conversation.get('id') !== conversationId ||
+      conversation.get('agentId') !== row.agentId
+    )
+      return { status: 'skipped', reason: 'dashboard-conversation-no-longer-owned' };
+    if (taskId) {
+      const task = await store.doc('tasks', taskId).get();
+      if (!task.exists || task.get('id') !== taskId || task.get('agentId') !== row.agentId)
+        return { status: 'skipped', reason: 'dashboard-task-no-longer-owned' };
+    }
+  } else {
+    const [conversation] = await deps.db
+      .select({ id: conversations.id })
+      .from(conversations)
+      .where(and(eq(conversations.id, conversationId), eq(conversations.agentId, row.agentId)))
+      .limit(1);
+    if (!conversation)
+      return { status: 'skipped', reason: 'dashboard-conversation-no-longer-owned' };
+    if (taskId) {
+      const [task] = await deps.db
+        .select({ id: tasks.id })
+        .from(tasks)
+        .where(and(eq(tasks.id, taskId), eq(tasks.agentId, row.agentId)))
+        .limit(1);
+      if (!task) return { status: 'skipped', reason: 'dashboard-task-no-longer-owned' };
+    }
+  }
+  const channelMessageId = notificationDashboardMessageId(row.agentId, row.deliveryKey, row.legKey);
+  try {
+    await persistence.messages.append({
+      conversationId,
+      ...(taskId ? { taskId } : {}),
+      role: 'assistant',
+      origin: 'assistant',
+      parts: [{ type: 'text', text: payload.text }, ...payload.extraParts],
+      text: payload.text,
+      channelMessageId,
+      ...(row.leaseToken && (row.producerWorkId || row.producerTaskId)
+        ? {
+            notificationOutboxFence: {
+              agentId: row.agentId,
+              legId: row.id,
+              leaseToken: row.leaseToken,
+              producerWorkId: row.producerWorkId ?? null,
+              producerTaskId: row.producerTaskId ?? null,
+              producerApplicationId: row.producerApplicationId ?? null,
+              producerConfirmationMessageId: row.producerConfirmationMessageId ?? null,
+              producerPrivacyGeneration: row.producerPrivacyGeneration ?? null,
+            },
+          }
+        : {}),
+    });
+    return { status: 'delivered', providerMessageId: channelMessageId };
+  } catch (error) {
+    if (error instanceof EmailObserverEffectFenceRejectedError)
+      return { status: 'skipped', reason: 'email-observer-fence-invalid' };
+    // Append is deduped by channelMessageId, so retry remains safe if a
+    // connection failed after the insert committed.
+    return {
+      status: 'failed',
+      retryable: true,
+      retryAt: new Date(Date.now() + 15_000),
+      reason: 'dashboard-persistence-temporarily-unavailable',
+    };
+  }
+}
+
+async function drainDashboardNotificationOutbox(deps: AgentDeps): Promise<number> {
+  const persistence = deps.persistence ?? createPostgresExecutionPersistence(deps.db);
+  const agent =
+    deps.config.PERSISTENCE_DRIVER === 'firestore'
+      ? await persistence.executionContext.getAgent(deps.config.FIRESTORE_AGENT_ID)
+      : await getAgent(deps.db);
+  if (!agent) throw new Error('Notification outbox owner is unavailable');
+  return drainNotificationOutbox(persistence.notificationOutbox, {
+    agentId: agent.id,
+    adapter: 'dashboard',
+    now: new Date(),
+    limit: 100,
+    send: (row) => sendDashboardOutboxLeg(deps, persistence, row),
+  });
 }
 
 /** Firestore's dashboard sink keeps notices durable without opening SQL. */
 function firestoreDashboardOwnerNotifier(deps: AgentDeps): OwnerNotifier {
   if (!deps.firestoreStore)
     throw new Error('Firestore owner notices require an installation store');
+  const persistence = deps.persistence;
+  if (!persistence) throw new Error('Firestore owner notices require execution persistence');
   const notices = new FirestoreOwnerNoticeRepository(
     deps.firestoreStore,
     deps.config.FIRESTORE_AGENT_ID,
   );
   return {
-    notifyOwner: async ({ text, taskId, conversationId }) => {
-      await notices.post({ text, taskId, sourceConversationId: conversationId });
+    notifyOwner: async ({
+      text,
+      taskId,
+      conversationId,
+      deliveryKey,
+      emailObserverEffectFence,
+      applicationConfirmationNoticeFence,
+    }) => {
+      const agentId = deps.config.FIRESTORE_AGENT_ID;
+      const primaryId = await notices.primaryConversationId();
+      if (!shouldMirrorIntoPrimary(conversationId, primaryId))
+        return notificationLeg('dashboard', 'skipped', 'already-in-source-conversation');
+      const destinationId =
+        primaryId ??
+        (await notices.getOrCreate(
+          agentId,
+          emailObserverEffectFence,
+          applicationConfirmationNoticeFence,
+        ));
+      return persistDashboardNotice(deps, persistence, {
+        agentId,
+        conversationId: destinationId,
+        ...(taskId ? { taskId } : {}),
+        text,
+        deliveryKey:
+          deliveryKey ?? notificationDeliveryKey('dashboard-notice', taskId ?? agentId, text),
+        ...(emailObserverEffectFence ? { emailObserverEffectFence } : {}),
+        ...(applicationConfirmationNoticeFence ? { applicationConfirmationNoticeFence } : {}),
+      });
     },
     notifyApprovals: async (pending) => {
-      if (pending.length === 0) return;
+      if (pending.length === 0) return notificationLeg('dashboard', 'skipped', 'empty-batch');
       const primaryId = await notices.primaryConversationId();
       const toMirror = pending.filter((approval) =>
         shouldMirrorIntoPrimary(approval.conversationId, primaryId),
       );
-      if (toMirror.length === 0) return;
+      if (toMirror.length === 0)
+        return notificationLeg('dashboard', 'skipped', 'already-in-source-conversation');
       const summary = approvalSummaryNotice(toMirror);
-      await notices.post({
-        text: summary.text,
+      return persistDashboardNotice(deps, persistence, {
+        agentId: deps.config.FIRESTORE_AGENT_ID,
+        conversationId: primaryId ?? (await notices.getOrCreate(deps.config.FIRESTORE_AGENT_ID)),
         taskId: toMirror[0]?.taskId,
-        sourceConversationId: toMirror[0]?.conversationId,
+        text: summary.text,
         extraParts: summary.extraParts,
+        deliveryKey: notificationDeliveryKey(
+          'dashboard-approval-batch',
+          ...toMirror.map((notice) => `${notice.taskId}:${notice.shortCode}`).sort(),
+        ),
       });
     },
   };
@@ -326,27 +567,66 @@ function policyGatedOutOfBand(
     notifyOwner: async (input) => {
       const decision = await evaluateOutOfBandPing(policy, await owner(), {
         urgency: input.urgency ?? 'interrupt',
+        ...(input.deliveryKey?.startsWith('curiosity-notice:')
+          ? { channel: curiosityNudgeChannel(input.deliveryKey) }
+          : {}),
       });
-      if (!decision.deliver) return;
-      await inner.notifyOwner(input);
+      if (!decision.deliver)
+        return notificationLeg('out-of-band', 'held', decision.reason ?? 'policy-held');
+      return (
+        (await inner.notifyOwner(input)) ??
+        notificationLeg('out-of-band', 'skipped', 'legacy-no-result')
+      );
     },
     notifyApprovals: (pending) => inner.notifyApprovals(pending),
   };
 }
 
 /** Fan a notice out to every notifier, so one failing channel cannot silence the rest. */
-function composeOwnerNotifiers(notifiers: readonly OwnerNotifier[]): OwnerNotifier {
-  const each = async (run: (notifier: OwnerNotifier) => Promise<void>) => {
-    for (const notifier of notifiers) {
+function composeOwnerNotifiers(
+  notifiers: readonly { name: string; notifier: OwnerNotifier }[],
+): OwnerNotifier {
+  const each = async (
+    run: (notifier: OwnerNotifier) => Promise<NotificationDeliveryResult | void>,
+    method: string,
+  ): Promise<NotificationDeliveryResult> => {
+    const legs: NotificationDeliveryResult['legs'][number][] = [];
+    for (const { name, notifier } of notifiers) {
       // A leg that throws synchronously is isolated the same as one that rejects.
-      await Promise.resolve()
-        .then(() => run(notifier))
-        .catch((err) => console.error('owner notification failed', err));
+      try {
+        const result = await run(notifier);
+        legs.push(...(result?.legs ?? [notificationLegEntry(name, 'skipped', 'legacy-no-result')]));
+      } catch (err) {
+        console.error(`${method} notification failed in ${name}`, err);
+        legs.push(notificationLegEntry(name, 'failed', 'notifier-threw'));
+      }
     }
+    return { legs };
   };
   return {
-    notifyOwner: (input) => each((notifier) => notifier.notifyOwner(input)),
-    notifyApprovals: (approvals) => each((notifier) => notifier.notifyApprovals(approvals)),
+    notifyOwner: (input) => {
+      const prepared = {
+        ...input,
+        deliveryKey:
+          input.deliveryKey ??
+          notificationDeliveryKey(
+            'owner-notice',
+            input.taskId ?? 'no-task',
+            input.conversationId ?? 'no-conversation',
+            input.text,
+          ),
+      };
+      return each((notifier) => notifier.notifyOwner(prepared), 'owner');
+    },
+    notifyApprovals: (approvals) => {
+      const prepared = approvals.map((approval) => ({
+        ...approval,
+        deliveryKey:
+          approval.deliveryKey ??
+          notificationDeliveryKey('approval-notice', approval.taskId, approval.shortCode),
+      }));
+      return each((notifier) => notifier.notifyApprovals(prepared), 'approval');
+    },
   };
 }
 
@@ -360,13 +640,22 @@ export function agentServices(deps: AgentDeps): ModuleServices {
     dispatcher: deps.dispatcher,
     workspace: deps.workspace,
     ownerNotifier: composeOwnerNotifiers([
-      deps.config.PERSISTENCE_DRIVER === 'firestore'
-        ? firestoreDashboardOwnerNotifier(deps)
-        : dashboardOwnerNotifier(deps),
-      deps.outOfBandNotifier,
+      {
+        name: 'dashboard',
+        notifier:
+          deps.config.PERSISTENCE_DRIVER === 'firestore'
+            ? firestoreDashboardOwnerNotifier(deps)
+            : dashboardOwnerNotifier(deps),
+      },
+      { name: 'out-of-band', notifier: deps.outOfBandNotifier },
     ]),
     emailObservers: deps.modules.emailObservers,
+    durableEmailObservers: deps.modules.durableEmailObservers,
     persistence: deps.persistence ?? createPostgresExecutionPersistence(deps.db),
+    operationalReady: () =>
+      deps.config.PERSISTENCE_DRIVER === 'firestore'
+        ? firestoreMaintenanceReady(deps)
+        : Promise.resolve(true),
   };
 }
 
@@ -387,7 +676,7 @@ function unavailableSqlDb(): Db {
 export function pinnedMemoryEmbed(
   space: EmbeddingSpace,
   routing: Pick<ModelRoutingRepository, 'role'>,
-  embed: (texts: string[]) => Promise<number[][]>,
+  embed: (texts: string[], expectedSpace: EmbeddingSpace) => Promise<number[][]>,
 ): (texts: string[]) => Promise<number[][]> {
   return async (texts) => {
     const selected = await routing.role('embed');
@@ -395,7 +684,7 @@ export function pinnedMemoryEmbed(
     if (selected?.primaryModel !== expected) {
       throw new Error(`Firestore memory embedding role must use ${expected}`);
     }
-    return embed(texts);
+    return embed(texts, space);
   };
 }
 
@@ -476,9 +765,12 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
     config.OPENROUTER_API_KEY,
     config.LLM_AUDIT_CAPTURE,
     createConnectedModelProviders(config, () => modelConnections.list()),
+    embeddingSpace,
   );
   const workspacePrefix = `workspace/${config.ASSISTANT_WORKSPACE_ID}`;
-  const workspaceRoot = path.join(repoRoot, '.workspace');
+  const workspaceRoot = config.RESTORE_REHEARSAL
+    ? config.RESTORE_REHEARSAL_ROOT
+    : path.join(repoRoot, '.workspace');
   const workspace: WorkspaceStore =
     config.FILES_DRIVER === 'gcs'
       ? new GcsWorkspaceStore(config.WORKSPACE_BUCKET, workspacePrefix)
@@ -513,8 +805,16 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
             {
               memory: persistence.memory,
               embed: pinnedMemoryEmbed(embeddingSpace, persistence.modelRouting, (texts) =>
-                router.embed(texts),
+                router.embed(texts, { expectedSpace: embeddingSpace }),
               ),
+              embedWithIdentity: async (texts) => ({
+                embeddings: await pinnedMemoryEmbed(
+                  embeddingSpace,
+                  persistence.modelRouting,
+                  (values) => router.embed(values, { expectedSpace: embeddingSpace }),
+                )(texts),
+                embeddingSpaceKey: embeddingSpaceIdentityKey(embeddingSpace),
+              }),
               supersede: (input) =>
                 supersedeContradictedFacts(
                   {
@@ -537,7 +837,11 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
             throw new Error('Owner notice is outside the configured Firestore agent');
           return notices.postToolNotice(input);
         },
-        notifyOwner: (input) => outOfBandNotifier.notifyOwner(input),
+        notifyOwner: async (input) => {
+          const result = await outOfBandNotifier.notifyOwner(input);
+          if (!hasEffectiveNotificationDelivery(result))
+            throw new Error('No out-of-band notification provider acknowledged the ping');
+        },
       },
     ),
     store,
@@ -551,13 +855,17 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
   // contacts, conversation search, situation packs) use their Firestore
   // repositories. Vector reads use the pinned embedding space.
   const recordEmbed = pinnedMemoryEmbed(embeddingSpace, persistence.modelRouting, (texts) =>
-    router.embed(texts),
+    router.embed(texts, { expectedSpace: embeddingSpace }),
   );
   registerPortableGraphSnapshotTool(registry, {
     embed: recordEmbed,
     graph: new FirestoreGraphRecallRepository(store, embeddingSpace),
   });
-  registerPortableReadResultTool(registry, { toolExecution: persistence.toolExecution });
+  const conversations = new FirestoreConversationSearchRepository(store, embeddingSpace);
+  registerPortableReadResultTool(registry, {
+    toolExecution: persistence.toolExecution,
+    conversations,
+  });
   registerAuditTools(registry, new FirestoreAuditInvestigationRepository(store));
   if (persistence.selfRepair) registerSelfRepairTools(registry, persistence.selfRepair);
   registerPortableOccasionTools(
@@ -569,15 +877,19 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
     new FirestoreContactLookupRepository(store, config.FIRESTORE_AGENT_ID),
   );
   registerPortableConversationSearchTool(registry, {
-    embed: recordEmbed,
-    conversations: new FirestoreConversationSearchRepository(store, embeddingSpace),
+    embed: async (texts) => ({
+      embeddings: await recordEmbed(texts),
+      embeddingSpaceKey: embeddingSpaceIdentityKey(embeddingSpace),
+    }),
+    conversations,
   });
   registerSituationTools(
     registry,
     new FirestoreSituationToolRepository(store, config.FIRESTORE_AGENT_ID),
   );
 
-  const modules = installModules(composition.modules, {
+  let dashboardDrainDeps: AgentDeps | undefined;
+  const installedModules = installModules(composition.modules, {
     config,
     db,
     registry,
@@ -593,6 +905,20 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
       getTimezone: ownerTimezone,
     },
   });
+  const modules: InstalledModuleSet = {
+    ...installedModules,
+    sweepSteps: [
+      {
+        name: 'drainDashboardNotificationOutbox',
+        portable: true,
+        run: async () => {
+          if (!dashboardDrainDeps) throw new Error('Dashboard notification sweep is not ready');
+          return drainDashboardNotificationOutbox(dashboardDrainDeps);
+        },
+      },
+      ...installedModules.sweepSteps,
+    ],
+  };
   const nudgePolicy = persistence.nudgePolicy;
   if (!nudgePolicy) throw new Error('Firestore persistence has no nudge policy');
   outOfBandNotifier = policyGatedOutOfBand(
@@ -603,7 +929,8 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
     }),
     modules.ownerNotifier,
   );
-  return {
+  const documentProcessor = modules.exportsOf(documentsModule);
+  const composed: AgentDeps = {
     config,
     db,
     firestoreStore: store,
@@ -624,7 +951,10 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
     workspace,
     modules,
     outOfBandNotifier,
+    ...(documentProcessor ? { documentProcessor } : {}),
   };
+  dashboardDrainDeps = composed;
+  return composed;
 }
 
 export function buildDeps(): AgentDeps {
@@ -640,7 +970,12 @@ export function buildDeps(): AgentDeps {
     idleTimeoutSeconds: config.DB_IDLE_TIMEOUT_SECONDS,
     connectTimeoutSeconds: config.DB_CONNECT_TIMEOUT_SECONDS,
     statementTimeoutMs: config.DB_STATEMENT_TIMEOUT_MS,
-    sourceWritesFenced: config.POSTGRES_SOURCE_WRITES_FENCED,
+    // The restore profile's non-elevated role and server-enforced
+    // default_transaction_read_only fence are stronger. Keeping the cutover
+    // proxy here would also reject the read-only catalog inspection needed to
+    // verify that database fence before listening.
+    sourceWritesFenced: config.POSTGRES_SOURCE_WRITES_FENCED && !config.RESTORE_REHEARSAL,
+    readOnly: config.RESTORE_REHEARSAL,
   });
   const persistence = createPostgresExecutionPersistence(db);
   const modelConnections = createPostgresModelConnectionRepository(db);
@@ -649,9 +984,13 @@ export function buildDeps(): AgentDeps {
     config.OPENROUTER_API_KEY,
     config.LLM_AUDIT_CAPTURE,
     createConnectedModelProviders(config, () => modelConnections.list()),
+    undefined,
+    POSTGRES_EMBEDDING_DIMENSIONS,
   );
   const workspacePrefix = `workspace/${config.ASSISTANT_WORKSPACE_ID}`;
-  const workspaceRoot = path.join(repoRoot, '.workspace');
+  const workspaceRoot = config.RESTORE_REHEARSAL
+    ? config.RESTORE_REHEARSAL_ROOT
+    : path.join(repoRoot, '.workspace');
   const workspace: WorkspaceStore =
     config.FILES_DRIVER === 'gcs'
       ? new GcsWorkspaceStore(config.WORKSPACE_BUCKET, workspacePrefix)
@@ -668,11 +1007,23 @@ export function buildDeps(): AgentDeps {
   // each registers its own tools — the composition root names none of them.
   const registry = registerMcpTools(
     registerBuiltinTools(new ToolRegistry(), {
+      conversations: createPostgresConversationSearchRepository(db),
       tasks: persistence.tasks,
       memory: persistence.memory,
-      embed: (texts) => router.embed(texts),
+      embed: async (texts) => {
+        const space = await router.embeddingSpace();
+        return router.embed(texts, { expectedSpace: space });
+      },
+      embedWithIdentity: async (texts) => {
+        const result = await router.embedWithIdentity(texts);
+        return { embeddings: result.embeddings, embeddingSpaceKey: result.spaceKey };
+      },
       workspace,
-      notifyOwner: (input) => outOfBandNotifier.notifyOwner(input),
+      notifyOwner: async (input) => {
+        const result = await outOfBandNotifier.notifyOwner(input);
+        if (!hasEffectiveNotificationDelivery(result))
+          throw new Error('No out-of-band notification provider acknowledged the ping');
+      },
       supersede: (input) =>
         supersedeContradictedFacts(
           {
@@ -686,7 +1037,7 @@ export function buildDeps(): AgentDeps {
   );
   registerAuditTools(registry, createPostgresAuditInvestigationRepository(db));
   registerSelfRepairTools(registry, createPostgresSelfRepairRepository(db));
-  const modules = installModules(composition.modules, {
+  const installedModules = installModules(composition.modules, {
     config,
     db,
     registry,
@@ -697,6 +1048,20 @@ export function buildDeps(): AgentDeps {
     workspaceRoot,
     persistence,
   });
+  const modules: InstalledModuleSet = {
+    ...installedModules,
+    sweepSteps: [
+      {
+        name: 'drainDashboardNotificationOutbox',
+        portable: true,
+        run: async () => {
+          if (!cached) throw new Error('Dashboard notification sweep is not ready');
+          return drainDashboardNotificationOutbox(cached);
+        },
+      },
+      ...installedModules.sweepSteps,
+    ],
+  };
   outOfBandNotifier = policyGatedOutOfBand(db, () => getAgent(db), modules.ownerNotifier);
 
   const browserLauncher = modules.exportsOf(browserModule);

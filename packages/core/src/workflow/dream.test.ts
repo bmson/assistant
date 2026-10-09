@@ -6,10 +6,20 @@ import type { ModelRouter } from '../model-router/router.js';
 import { purgeStaleDreamNotes, recentDreamNotes, runDream } from './dream.js';
 import { enqueueTask } from './machine.js';
 
+const DREAM_SPACE = {
+  provider: 'test',
+  model: 'dream-fixture',
+  dimensions: 1536,
+  revision: '1',
+} as const;
+
 const DATABASE_URL =
   process.env.DATABASE_URL ?? 'postgres://assistant:assistant@localhost:5432/assistant';
 
 const fakeRouter = {
+  async embeddingSpace() {
+    return DREAM_SPACE;
+  },
   async embed(texts: string[]) {
     return texts.map(() => new Array(1536).fill(0.02));
   },

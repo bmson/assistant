@@ -6,11 +6,26 @@ describe('long-term memory export use case', () => {
   it('builds the stable owner-visible envelope without SQL', async () => {
     const data = {
       memories: [],
-      knowledgeGraph: { entities: [], aliases: [], relations: [] },
+      knowledgeGraph: {
+        entities: [],
+        aliases: [],
+        relations: [],
+        assertions: [],
+        assertionEvidence: [],
+      },
       people: [],
       writingVoice: { samples: [], profile: null },
       compiledOwnerCard: null,
       situationPacks: [],
+      emailObservers: { scope: 'observer-work-metadata-only' as const, rows: [] },
+      directEmailRecovery: {
+        scope: 'direct-ingest-routing-and-body-free-content-provenance' as const,
+        rows: [],
+      },
+      missionReports: [],
+      notificationOutbox: { scope: 'delivery-receipts-only' as const, rows: [] },
+      recallSurfaces: { scope: 'source-identity-ledger-only' as const, rows: [] },
+      securityIncidents: { incidents: [], sources: [], attention: [], evidence: [] },
     };
     const repository: PrivacyExportRepository = {
       kind: 'privacy-export-repository',
@@ -31,6 +46,10 @@ describe('long-term memory export use case', () => {
         'writing samples and voice profile',
         'compiled recall card',
         'situation packs and decision reasons',
+        'durable mission reports and delivery receipts',
+        'notification delivery receipts',
+        'recall source identities and owner controls',
+        'security incident evidence and attention history',
       ],
       ...data,
     });

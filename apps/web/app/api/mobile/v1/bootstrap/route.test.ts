@@ -74,6 +74,43 @@ describe('mobile bootstrap', () => {
     expect(mocks.getChatConversation).toHaveBeenCalledWith('conversation-1', {});
   });
 
+  it('negotiates native card schema and preserves prose for older clients', async () => {
+    const part = {
+      type: 'data-card',
+      data: {
+        kind: 'generated-card',
+        id: 'stable-card',
+        spec: {
+          version: 1,
+          title: 'Trip',
+          sourceLabel: 'Booking',
+          accessibilityLabel: 'Trip details',
+          facts: [{ id: 'flight', label: 'Flight', value: 'FI 614', source: 'mail' }],
+          blocks: [{ type: 'facts', factIds: ['flight'] }],
+          actions: [],
+        },
+      },
+    };
+    mocks.getChatConversation.mockResolvedValue({
+      id: 'conversation-1',
+      messages: [{ id: 'message-1', text: 'Your flight is FI 614.', parts: [part] }],
+    });
+    const legacy = await GET(new Request('https://example.com/api/mobile/v1/bootstrap'));
+    const legacyBody = await legacy.json();
+    expect(legacyBody.conversation.messages).toEqual([
+      { id: 'message-1', text: 'Your flight is FI 614.', parts: [] },
+    ]);
+
+    const capable = await GET(
+      new Request('https://example.com/api/mobile/v1/bootstrap', {
+        headers: { 'x-assistant-card-schema': '1' },
+      }),
+    );
+    const capableBody = await capable.json();
+    expect(capableBody.conversation.messages[0].parts).toEqual([part]);
+    expect(capableBody.conversation.messages[0].id).toBe('message-1');
+  });
+
   it('does not invent an identity when the assistant is unconfigured', async () => {
     mocks.identity.mockResolvedValue({ id: '', name: 'Assistant', avatarUrl: null });
     const response = await GET(new Request('https://example.com/api/mobile/v1/bootstrap'));

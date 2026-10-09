@@ -24,7 +24,10 @@ export interface CardRefreshRepository {
   request(input: {
     agentId: string;
     cardId: string;
+    /** Current immutable card view; a stale action must not refresh a new revision. */
+    expectedRevisionId?: string;
     conversationId?: string;
+    operationId?: string;
     formatInstruction: (spec: unknown) => CardRefreshInstruction | null;
   }): Promise<CardRefreshRequestResult>;
 }

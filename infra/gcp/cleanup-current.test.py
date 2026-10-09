@@ -80,11 +80,11 @@ class CleanupTests(unittest.TestCase):
             cleanup.plan_images([image("current", "application/vnd.oci.image.index.v1+json")],
                                 [], [f"{URI}@sha256:current"])
 
-    def test_latest_secret_retains_one_and_destroys_enabled_and_disabled_history(self):
+    def test_secret_planner_retains_enabled_and_disabled_history(self):
         keep, delete = cleanup.plan_secrets({"name": "auth"},
             [version(1), version(2, "DISABLED"), version(3)], {"latest"})
-        self.assertEqual(keep, [version(3)["name"]])
-        self.assertEqual([v["name"] for v in delete], [version(1)["name"], version(2)["name"]])
+        self.assertEqual(keep, [version(1)["name"], version(2, "DISABLED")["name"], version(3)["name"]])
+        self.assertEqual(delete, [])
 
     def test_pinned_and_aliased_versions_are_never_destroyed(self):
         keep, delete = cleanup.plan_secrets({"name": "auth", "versionAliases": {"stable": 2}},
@@ -99,12 +99,21 @@ class CleanupTests(unittest.TestCase):
 
     def test_current_secret_for_other_consumers_is_retained_without_cloud_run_reference(self):
         keep, delete = cleanup.plan_secrets({"name": "auth"}, [version(1), version(2)], set())
-        self.assertEqual(keep, [version(2)["name"]])
-        self.assertEqual(delete, [version(1)])
-
-    def test_already_destroyed_versions_are_not_destroyed_again(self):
-        _, delete = cleanup.plan_secrets({"name": "auth"}, [version(1, "DESTROYED"), version(2)], set())
+        self.assertEqual(keep, [version(1)["name"], version(2)["name"]])
         self.assertEqual(delete, [])
+
+    def test_already_destroyed_versions_are_not_returned_for_retention(self):
+        keep, delete = cleanup.plan_secrets({"name": "auth"}, [version(1, "DESTROYED"), version(2)], set())
+        self.assertEqual(keep, [version(2)["name"]])
+        self.assertEqual(delete, [])
+
+    def test_cleanup_apply_never_requests_secret_history_destruction(self):
+        cloud = unittest.mock.Mock()
+        plan = {"fingerprint": "same", "secretFingerprint": [], "keepImages": [],
+                "deleteImages": [], "deleteSecrets": [], "deleteRevisions": []}
+        with patch.object(cleanup, "inventory", side_effect=[plan, plan]):
+            cleanup.apply(cloud, None, plan)
+        self.assertFalse(any("secret" in str(call).lower() for call in cloud.mock_calls))
 
     def test_reads_environment_and_volume_secret_references(self):
         refs = cleanup.referenced_secrets([{

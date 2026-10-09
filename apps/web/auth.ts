@@ -1,8 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { loadConfig } from '@assistant/config';
 import { headers } from 'next/headers';
 import { redirect, unauthorized } from 'next/navigation';
 import NextAuth from 'next-auth';
 import Google from 'next-auth/providers/google';
+import { formSessionScopeForJwt, isValidFormSessionScope } from './app/auth-form-session-scope';
 import { requestLooksLoopback, resolveAuthMode } from './auth-mode';
 
 // loadConfig() side-loads the repo-root .env, so AUTH_* vars defined there are
@@ -43,6 +45,24 @@ export const { handlers, auth, signOut } = NextAuth({
   providers: [Google],
   session: { strategy: 'jwt' },
   callbacks: {
+    async jwt({ token, account }) {
+      const claims = token as typeof token & { assistantFormSessionScope?: unknown };
+      const scope = formSessionScopeForJwt({
+        accountPresent: Boolean(account),
+        existingScope: claims.assistantFormSessionScope,
+        createScope: randomUUID,
+      });
+      if (scope) claims.assistantFormSessionScope = scope;
+      else delete claims.assistantFormSessionScope;
+      return token;
+    },
+    session({ session, token }) {
+      const scope = (token as typeof token & { assistantFormSessionScope?: unknown })
+        .assistantFormSessionScope;
+      return Object.assign(session, {
+        assistantFormSessionScope: isValidFormSessionScope(scope) ? scope : null,
+      });
+    },
     signIn({ profile }) {
       // Belt-and-suspenders: with Google as the sole IdP the email namespace is
       // Google's, but require the verified flag so an unverified-email account
@@ -55,6 +75,8 @@ export const { handlers, auth, signOut } = NextAuth({
 
 export interface OwnerSession {
   user: { email: string; name?: string | null };
+  /** Opaque per-browser login scope used only to partition local form drafts. */
+  formSessionScope?: string;
 }
 
 /**
@@ -81,18 +103,30 @@ export async function isAuthed(): Promise<OwnerSession | null> {
         return null;
       }
     }
-    return { user: { email: config.OWNER_EMAIL, name: 'Owner (dev)' } };
+    return {
+      user: { email: config.OWNER_EMAIL, name: 'Owner (dev)' },
+      formSessionScope: 'local-development-scope',
+    };
   }
   if (authMode === 'disabled') return null;
   if (authMode === 'passkey') {
     const { currentOwnerSession } = await import('./lib/owner-auth/runtime');
-    return (await currentOwnerSession())
-      ? { user: { email: config.OWNER_EMAIL, name: config.OWNER_NAME } }
+    const claims = await currentOwnerSession();
+    return claims
+      ? {
+          user: { email: config.OWNER_EMAIL, name: config.OWNER_NAME },
+          ...(isValidFormSessionScope(claims.sid) ? { formSessionScope: claims.sid } : {}),
+        }
       : null;
   }
   const session = await auth();
   if (session?.user?.email === config.OWNER_EMAIL) {
-    return { user: { email: session.user.email, name: session.user.name } };
+    const formSessionScope = (session as typeof session & { assistantFormSessionScope?: unknown })
+      .assistantFormSessionScope;
+    return {
+      user: { email: session.user.email, name: session.user.name },
+      ...(isValidFormSessionScope(formSessionScope) ? { formSessionScope } : {}),
+    };
   }
   return null;
 }

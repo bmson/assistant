@@ -1,3 +1,4 @@
+import type { ExternalEffectProgress } from './external-effect.js';
 import type { Records } from './records.js';
 
 export interface WakeIntent {
@@ -28,6 +29,13 @@ export interface ApprovedToolCall {
   approval: Records['approvals'] | null;
 }
 
+export interface StaleToolAuthorization {
+  type: 'stale_authorization';
+  error: string;
+}
+
+export type ClaimApprovedToolCallResult = ApprovedToolCall | StaleToolAuthorization | null;
+
 export interface ClaimApprovedToolCallInput {
   agentId: string;
   taskId: string;
@@ -36,6 +44,14 @@ export interface ClaimApprovedToolCallInput {
   decision: Record<string, unknown>;
   expectedApprovalId?: string | null;
   expectedResolutionPayload?: unknown;
+  /** Bounded snapshot digest of all policy rows for this tool, enabled or not. */
+  expectedPolicyFingerprint: string;
+  /** MCP's prepared connection/tool/credential binding; required for mcp.call. */
+  expectedMcpBinding?: import('./approval-authority.js').ExpectedMcpApprovalBinding;
+  /** Trust/capability tier read from the task before claiming. */
+  expectedTaskTrust: string;
+  /** Task state that must still hold at the atomic side-effect claim. */
+  expectedTaskStatus?: string;
   startedAt?: Date;
 }
 
@@ -68,10 +84,40 @@ export interface ToolExecutionRepository {
   readonly kind: 'tool-execution-repository';
   /** Load a call and its links without returning another owner's records. */
   load(agentId: string, taskId: string, toolCallId: string): Promise<ApprovedToolCall | null>;
+  /** Find the unique call emitted by a model inside this task, for crash recovery. */
+  findByModelToolCallId?(
+    agentId: string,
+    taskId: string,
+    modelToolCallId: string,
+  ): Promise<{ toolCall: Records['toolCalls']; approval: Records['approvals'] | null } | null>;
+  /** Compact replay receipt retained after the full private tool-call row expires. */
+  findReceiptByToolCallId?(
+    agentId: string,
+    taskId: string,
+    toolCallId: string,
+  ): Promise<Records['toolCallReceipts'] | null>;
+  findReceiptByModelToolCallId?(
+    agentId: string,
+    taskId: string,
+    modelToolCallId: string,
+  ): Promise<Records['toolCallReceipts'] | null>;
+  /** Returns only this owner/task's receipt; foreign global-key collisions stay opaque. */
+  findReceiptByIdempotencyKey?(
+    agentId: string,
+    taskId: string,
+    idempotencyKey: string,
+  ): Promise<Records['toolCallReceipts'] | null>;
   /** Atomically transition this exact approved call to executing. */
-  claim(input: ClaimApprovedToolCallInput): Promise<ApprovedToolCall | null>;
+  claim(input: ClaimApprovedToolCallInput): Promise<ClaimApprovedToolCallResult>;
   /** Persist a terminal outcome only for the owner-linked call. */
   outcome(input: ToolExecutionOutcome): Promise<boolean>;
+  /** Preserve provider object identity before the next non-atomic create/fill/share stage. */
+  checkpointExternalEffect?(input: {
+    agentId: string;
+    taskId: string;
+    toolCallId: string;
+    progress: ExternalEffectProgress;
+  }): Promise<boolean>;
   contacts(): Promise<Array<{ emails: string[]; phones: string[] }>>;
   underRateLimit(scope: string, toolName: string, now?: Date): Promise<boolean>;
   cacheGet(cacheKey: string, now?: Date): Promise<{ result: unknown } | null>;

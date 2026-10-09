@@ -40,6 +40,23 @@ on:
           - auto
           - postgres
           - firestore
+      components:
+        description: Component set; web-only is accepted only when the live agent contract is proven compatible
+        required: false
+        default: full
+        type: choice
+        options:
+          - full
+          - web
+      break_glass:
+        description: Allow a release without a successful main-branch CI run for the exact SHA
+        required: false
+        default: false
+        type: boolean
+      break_glass_reason:
+        description: Required audit reason when break_glass is enabled
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -76,7 +93,7 @@ jobs:
     # passes would start this job, check out the fork's commit, and execute its
     # package scripts and Dockerfiles under the production deploy identity.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository &&
@@ -91,12 +108,36 @@ jobs:
       images: ${{ steps.matrix.outputs.entries }}
       modules: ${{ steps.modules.outputs.modules }}
       persistence: ${{ steps.persistence.outputs.driver }}
+      components: ${{ steps.components.outputs.components }}
     steps:
       - name: Resolve the release commit
         id: release
         env:
           RESOLVED_SHA: ${{ github.event.workflow_run.head_sha || github.event.inputs.sha || github.sha }}
         run: echo "sha=${RESOLVED_SHA}" >> "$GITHUB_OUTPUT"
+      # Manual verification code comes from the trusted commit that contains
+      # this workflow. The requested release SHA is checked out only after the
+      # verifier approves it.
+      - name: Checkout trusted workflow source for manual verifier
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      # Manual releases use the same exact-source gate as automatic releases.
+      # The explicit, audited break-glass input is only for a deliberate
+      # exception; dispatching this privileged workflow from another branch is
+      # never allowed.
+      - name: Verify exact source passed main CI
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          BREAK_GLASS: ${{ inputs.break_glass }}
+          BREAK_GLASS_REASON: ${{ inputs.break_glass_reason }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: bash infra/gcp/verify-release-source.sh
       # Which release path the installation expects. A non-auto manual input wins,
       # then the PERSISTENCE_DRIVER repository variable (set it to firestore
       # after the cutover), then auto. release.sh always re-reads the live
@@ -111,7 +152,25 @@ jobs:
             auto|postgres|firestore) echo "driver=${REQUESTED}" >> "$GITHUB_OUTPUT" ;;
             *) echo "PERSISTENCE_DRIVER must be auto, postgres, or firestore" >&2; exit 1 ;;
           esac
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Resolve component selection
+        id: components
+        env:
+          REQUESTED_COMPONENTS: ${{ github.event.inputs.components || 'full' }}
+          PERSISTENCE_DRIVER: ${{ steps.persistence.outputs.driver }}
+        run: |
+          case "$REQUESTED_COMPONENTS" in
+            full) echo "components=agent,web" >> "$GITHUB_OUTPUT" ;;
+            web)
+              if [ "$PERSISTENCE_DRIVER" = "auto" ]; then
+                echo "web-only selection requires an explicit postgres or firestore persistence driver" >&2
+                exit 1
+              fi
+              echo "components=web" >> "$GITHUB_OUTPUT"
+              ;;
+            *) echo "components must be full or web" >&2; exit 1 ;;
+          esac
+      - name: Checkout exact release source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ steps.release.outputs.sha }}
       # modules:plan runs a pnpm script against workspace packages, so this
@@ -139,6 +198,7 @@ jobs:
           BUILD_CODE: ${{ steps.modules.outputs.code }}
           BUILD_PROCESSOR: ${{ steps.modules.outputs.processor }}
           PERSISTENCE: ${{ steps.persistence.outputs.driver }}
+          COMPONENTS: ${{ steps.components.outputs.components }}
         run: |
           entries='[]'
           add() {
@@ -146,19 +206,21 @@ jobs:
           }
           # The backup and migration images exist only for the PostgreSQL
           # release path. A Firestore release neither builds nor runs them.
-          if [ "$PERSISTENCE" != "firestore" ]; then
+          if [ "$PERSISTENCE" != "firestore" ] && [ "$COMPONENTS" = "agent,web" ]; then
             add backup infra/docker/backup.Dockerfile
             add migrate infra/docker/migrate.Dockerfile
           fi
-          add agent infra/docker/agent.Dockerfile
+          if [ "$COMPONENTS" = "agent,web" ]; then
+            add agent infra/docker/agent.Dockerfile
+          fi
           add web infra/docker/web.Dockerfile
-          if [ "$BUILD_BROWSER" = "true" ]; then
+          if [ "$COMPONENTS" = "agent,web" ] && [ "$BUILD_BROWSER" = "true" ]; then
             add browser infra/docker/browser-job.Dockerfile
           fi
-          if [ "$BUILD_CODE" = "true" ]; then
+          if [ "$COMPONENTS" = "agent,web" ] && [ "$BUILD_CODE" = "true" ]; then
             add code infra/docker/code-runner.Dockerfile
           fi
-          if [ "$BUILD_PROCESSOR" = "true" ]; then
+          if [ "$COMPONENTS" = "agent,web" ] && [ "$BUILD_PROCESSOR" = "true" ]; then
             add processor infra/docker/document-processor.Dockerfile
           fi
           echo "entries=${entries}" >> "$GITHUB_OUTPUT"
@@ -185,16 +247,6 @@ jobs:
       RELEASE_SHA: ${{ needs.plan.outputs.sha }}
       IMAGE_NAME: ${{ matrix.entry.name }}
       DOCKERFILE: ${{ matrix.entry.dockerfile }}
-      # The release image scans below exclude node_modules from vulnerability
-      # scanning: the app's JavaScript dependency graph is already gated on every
-      # PR by `pnpm audit` (CI `checks` job), so scanning it again here is
-      # redundant — and it drags in a large, unpatchable, ever-growing set of
-      # CVEs embedded in dormant build tooling (esbuild's Go stdlib, the native
-      # tsc, drizzle-kit/tsx transitive deps) that never sits on a request path.
-      # These scans stay focused on what they alone cover: OS packages, secrets,
-      # and misconfiguration. The agent image passing its full scan confirms the
-      # shared node:22-slim OS layer is clean.
-      TRIVY_SKIP_DIRS: '**/node_modules'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -312,8 +364,20 @@ jobs:
           IMAGE_TAG: ${{ needs.plan.outputs.sha }}
           ASSISTANT_MODULES: ${{ needs.plan.outputs.modules }}
           RELEASE_PERSISTENCE_DRIVER: ${{ needs.plan.outputs.persistence }}
+          RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
+          RELEASE_SCHEMA_UNCHANGED: ${{ needs.plan.outputs.components == 'web' && 'true' || 'false' }}
+          RELEASE_EMAIL_OBSERVER_WORKER_ENABLED: ${{ vars.RELEASE_EMAIL_OBSERVER_WORKER_ENABLED }}
+          RELEASE_MANIFEST_PATH: ${{ runner.temp }}/assistant-release-${{ needs.plan.outputs.sha }}.json
           SKIP_IMAGE_BUILD: 'true'
         run: bash infra/gcp/release.sh
+      - name: Archive the immutable release manifest
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: release-manifest-${{ needs.plan.outputs.sha }}
+          path: ${{ runner.temp }}/assistant-release-${{ needs.plan.outputs.sha }}.json
+          if-no-files-found: ignore
+          retention-days: 90
       - name: Keep only the current deployment
         if: vars.CURRENT_ONLY_CLEANUP == 'true'
         run: >-

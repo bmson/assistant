@@ -15,10 +15,12 @@ import {
 } from '@assistant/db';
 import type {
   DocumentCatalogRepository,
+  DocumentChunkPageOptions,
   DocumentDeletionRepository,
   WorkspaceFileLookup,
 } from '@assistant/persistence';
-import { and, asc, eq } from 'drizzle-orm';
+import { buildDocumentChunkPage, normalizeDocumentChunkPageOptions } from '@assistant/persistence';
+import { and, asc, eq, gte } from 'drizzle-orm';
 import { safeWorkspacePath, type WorkspacePort } from './workspace.js';
 
 const SAFE_DOWNLOAD_PREFIXES = ['code/', 'browser/attachments/', 'documents/'];
@@ -37,7 +39,14 @@ export async function getDocumentsOverview(db: Db) {
   return { documents, stats, primaryConversationId: primary.id };
 }
 
-export async function getDocument(db: Db, documentId: string) {
+export async function getDocument(
+  db: Db,
+  documentId: string,
+  options: DocumentChunkPageOptions = {},
+) {
+  const pageOptions = normalizeDocumentChunkPageOptions(options);
+  const startIndex =
+    typeof pageOptions.cursor === 'number' ? pageOptions.cursor : pageOptions.cursor.chunkIndex;
   const agent = await getAgent(db);
   const [row] = await db
     .select({
@@ -48,6 +57,7 @@ export async function getDocument(db: Db, documentId: string) {
       trust: documents.trust,
       status: documents.status,
       extractor: documents.extractor,
+      extractionMetadata: documents.extractionMetadata,
       chunkCount: documents.chunkCount,
       charCount: documents.charCount,
       bytes: files.bytes,
@@ -73,10 +83,17 @@ export async function getDocument(db: Db, documentId: string) {
       charCount: documentChunks.charCount,
     })
     .from(documentChunks)
-    .where(and(eq(documentChunks.agentId, agent.id), eq(documentChunks.documentId, documentId)))
-    .orderBy(asc(documentChunks.chunkIndex));
+    .where(
+      and(
+        eq(documentChunks.agentId, agent.id),
+        eq(documentChunks.documentId, documentId),
+        gte(documentChunks.chunkIndex, startIndex),
+      ),
+    )
+    .orderBy(asc(documentChunks.chunkIndex))
+    .limit(pageOptions.limit + 1);
   const { fileId: _fileId, ...document } = { ...row, bytes: row.bytes ?? 0 };
-  return { document, chunks };
+  return buildDocumentChunkPage(document, chunks, pageOptions);
 }
 
 /** The configured owner's portable document stores, for Firestore mode. */
@@ -94,13 +111,12 @@ export async function deleteDocument(
   storage: Db | PortableDocumentStores,
   workspace: WorkspacePort,
   documentId: string,
-): Promise<void> {
+): Promise<{ deleted: boolean; pendingAssets: boolean }> {
   if (isPortable(storage)) {
-    await purgeDocument(storage.deletion, storage.agentId, documentId, workspace);
-    return;
+    return purgeDocument(storage.deletion, storage.agentId, documentId, workspace);
   }
   const agent = await getAgent(storage);
-  await purgeDocument(storage, agent.id, documentId, workspace);
+  return purgeDocument(storage, agent.id, documentId, workspace);
 }
 
 export async function uploadDocument(

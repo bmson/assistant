@@ -1,12 +1,26 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  ApplicationConfirmationNoticeFence,
+  EmailObserverEffectFence,
   NotificationsConversationRepository,
+  OwnerNoticeDecisionFenceInput,
+  OwnerNoticeDecisionFenceResult,
   OwnerNoticeRepository,
   Records,
 } from '@assistant/persistence';
-import type { DocumentSnapshot, Timestamp, Transaction } from '@google-cloud/firestore';
+import {
+  matchesApplicationConfirmationNoticeLineage,
+  matchesPreparedEmailObserverClaim,
+  securityIncidentId,
+} from '@assistant/persistence';
+import { type DocumentSnapshot, Timestamp, type Transaction } from '@google-cloud/firestore';
+import { conversationDocument } from './conversation-document.js';
 import { messageRecord } from './messages.js';
-import { privacyErasureIsActive, readPrivacyErasureFence } from './privacy-erasure.js';
+import {
+  assertPrivacyErasureGenerationInTransaction,
+  privacyErasureIsActive,
+  readPrivacyErasureFence,
+} from './privacy-erasure.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 type Conversation = Records['conversations'];
@@ -92,6 +106,23 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
     return result;
   }
 
+  async observationFence(agentId: string): Promise<string | null> {
+    if (agentId !== this.agentId)
+      throw new Error('Owner notice is outside the configured installation');
+    const snapshot = await this.store.doc('privacyErasureJobs', agentId).get();
+    if (!snapshot.exists) return null;
+    const generation = snapshot.get('generation');
+    if (
+      snapshot.get('agentId') !== agentId ||
+      privacyErasureIsActive(snapshot.get('status')) ||
+      typeof generation !== 'string' ||
+      !generation ||
+      generation.length > 100
+    )
+      throw new Error('Privacy erasure generation is malformed or in progress');
+    return generation;
+  }
+
   private async resolveNotifications(tx: Transaction): Promise<OwnerNoticeDestination> {
     const markerRef = this.store.doc('notificationConversations', this.agentId);
     const marker = await tx.get(markerRef);
@@ -132,6 +163,7 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
       archivedAt: null,
       modelOverride: null,
       lastReadAt: null,
+      messageSequence: 0,
       createdAt: now,
       updatedAt: now,
     };
@@ -200,7 +232,7 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
     if (destination.created)
       tx.create(
         conversationRef,
-        encodeRecord({ ...destination.row, updatedAt: input.now, archived: false }),
+        conversationDocument({ ...destination.row, updatedAt: input.now }),
       );
     else
       tx.update(conversationRef, {
@@ -216,23 +248,108 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
    * uniqueness record: concurrent first uses contend on it and converge on the
    * one conversation it names.
    */
-  async notificationsConversationId(): Promise<string> {
+  async notificationsConversationId(
+    fence?: EmailObserverEffectFence,
+    noticeFence?: ApplicationConfirmationNoticeFence,
+  ): Promise<string> {
     return this.store.db.runTransaction(async (tx) => {
       await this.owner(tx);
-      const destination = await this.notifications(tx);
+      if (fence && noticeFence)
+        throw new Error('Notifications conversation accepts one producer fence');
+      if (fence) {
+        if (fence.agentId !== this.agentId)
+          throw new Error('Email observer notification conversation is outside the owner');
+        await assertPrivacyErasureGenerationInTransaction(
+          tx,
+          this.store,
+          this.agentId,
+          fence.expectedPrivacyGeneration,
+        );
+        const workRef = this.store.doc('emailObserverWork', fence.id);
+        const workSnapshot = await tx.get(workRef);
+        const work = workSnapshot.exists
+          ? decodeRecord<Records['emailObserverWork']>(workSnapshot.data())
+          : null;
+        if (!matchesPreparedEmailObserverClaim(work, fence, this.store.now()))
+          throw new Error('Email observer notification conversation claim is stale');
+      }
+      if (noticeFence) {
+        if (noticeFence.agentId !== this.agentId)
+          throw new Error('Application confirmation conversation is outside the owner');
+        await assertPrivacyErasureGenerationInTransaction(
+          tx,
+          this.store,
+          this.agentId,
+          noticeFence.producerPrivacyGeneration,
+        );
+        const [taskSnapshot, applicationSnapshot] = await tx.getAll(
+          this.store.doc('tasks', noticeFence.taskId),
+          this.store.doc('applicationConfirmations', noticeFence.applicationId),
+        );
+        if (
+          !matchesApplicationConfirmationNoticeLineage(
+            taskSnapshot?.exists ? decodeRecord<Records['tasks']>(taskSnapshot.data()) : null,
+            applicationSnapshot?.exists
+              ? decodeRecord<Records['applicationConfirmations']>(applicationSnapshot.data())
+              : null,
+            noticeFence,
+            { now: this.store.now(), requireLiveTaskLease: true },
+          )
+        )
+          throw new Error('Application confirmation conversation fence is stale');
+      }
+      const destination = await this.resolveNotifications(tx);
+      if (fence) {
+        // Resolve marker/conversation reads before writing anything, then
+        // refresh the lease immediately before the transaction's first write.
+        const workSnapshot = await tx.get(this.store.doc('emailObserverWork', fence.id));
+        const work = workSnapshot.exists
+          ? decodeRecord<Records['emailObserverWork']>(workSnapshot.data())
+          : null;
+        if (!matchesPreparedEmailObserverClaim(work, fence, this.store.now()))
+          throw new Error('Email observer notification conversation claim expired');
+      }
+      if (noticeFence) {
+        const [taskSnapshot, applicationSnapshot] = await tx.getAll(
+          this.store.doc('tasks', noticeFence.taskId),
+          this.store.doc('applicationConfirmations', noticeFence.applicationId),
+        );
+        if (
+          !matchesApplicationConfirmationNoticeLineage(
+            taskSnapshot?.exists ? decodeRecord<Records['tasks']>(taskSnapshot.data()) : null,
+            applicationSnapshot?.exists
+              ? decodeRecord<Records['applicationConfirmations']>(applicationSnapshot.data())
+              : null,
+            noticeFence,
+            { now: this.store.now(), requireLiveTaskLease: true },
+          )
+        )
+          throw new Error('Application confirmation conversation claim expired');
+      }
+      const now = this.store.now();
+      if (destination.createNotificationsMarker)
+        tx.create(this.store.doc('notificationConversations', this.agentId), {
+          agentId: this.agentId,
+          conversationId: destination.row.id,
+          createdAt: now,
+        });
       const ref = this.store.doc('conversations', destination.row.id);
       if (destination.created)
-        tx.create(ref, encodeRecord({ ...destination.row, archived: false }));
+        tx.create(ref, conversationDocument({ ...destination.row, updatedAt: now }));
       else if (destination.row.archivedAt)
-        tx.update(ref, { archivedAt: null, archived: false, updatedAt: this.store.now() });
+        tx.update(ref, { archivedAt: null, archived: false, updatedAt: now });
       return destination.row.id;
     });
   }
 
-  async getOrCreate(agentId: string): Promise<string> {
+  async getOrCreate(
+    agentId: string,
+    fence?: EmailObserverEffectFence,
+    noticeFence?: ApplicationConfirmationNoticeFence,
+  ): Promise<string> {
     if (!this.agentId || agentId !== this.agentId)
       throw new Error('Notifications conversation is outside the configured owner');
-    return this.notificationsConversationId();
+    return this.notificationsConversationId(fence, noticeFence);
   }
 
   async post(input: {
@@ -280,10 +397,7 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
       );
       const conversationRef = this.store.doc('conversations', destination.row.id);
       if (destination.created)
-        tx.create(
-          conversationRef,
-          encodeRecord({ ...destination.row, updatedAt: now, archived: false }),
-        );
+        tx.create(conversationRef, conversationDocument({ ...destination.row, updatedAt: now }));
       else
         tx.update(conversationRef, {
           updatedAt: now,
@@ -291,6 +405,178 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
         });
       tx.create(this.store.doc('messages', message.id), encodeRecord(message));
       return { conversationId: destination.row.id };
+    });
+  }
+
+  async postWithDecisionFence(
+    input: OwnerNoticeDecisionFenceInput,
+  ): Promise<OwnerNoticeDecisionFenceResult> {
+    if (input.agentId !== this.agentId)
+      throw new Error('Owner notice is outside the configured installation');
+    const refs = [...new Set(input.suggestionSourceRefs)];
+    const requiredRefs = [...new Set(input.requiredSuggestionSourceRefs)];
+    const incidents = [
+      ...new Map(
+        input.securityIncidents.map((entry) => [`${entry.incidentId}:r${entry.revision}`, entry]),
+      ).values(),
+    ];
+    if (
+      refs.length > 64 ||
+      refs.some((ref) => !ref || ref.length > 2048) ||
+      requiredRefs.length > 64 ||
+      requiredRefs.some((ref) => !refs.includes(ref)) ||
+      incidents.length > 32 ||
+      incidents.some(
+        (entry) => !entry.incidentId || !Number.isSafeInteger(entry.revision) || entry.revision < 0,
+      )
+    )
+      throw new Error('Invalid owner notice decision fence');
+    const fence = await readPrivacyErasureFence(this.store, this.agentId);
+    return this.store.db.runTransaction(async (tx) => {
+      await this.owner(tx);
+      const erasure = await tx.get(this.store.doc('privacyErasureJobs', this.agentId));
+      let currentGeneration: string | null = null;
+      if (erasure.exists) {
+        currentGeneration = erasure.get('generation');
+        if (
+          erasure.get('agentId') !== this.agentId ||
+          privacyErasureIsActive(erasure.get('status')) ||
+          typeof currentGeneration !== 'string' ||
+          !currentGeneration ||
+          currentGeneration.length > 100
+        )
+          throw new Error('Privacy erasure generation is malformed or in progress');
+      }
+      if (currentGeneration !== input.observationFence)
+        throw new Error('Privacy erasure changed during owner notice composition');
+      await this.assertErasureUnchanged(tx, fence);
+
+      const inactiveSuggestionSourceRefs: string[] = [];
+      const pendingSuggestionWindows: Array<{
+        sourceRef: string;
+        expiresAt: Date;
+        snoozedUntil: Date | null;
+      }> = [];
+      for (const sourceRef of refs) {
+        const matches = await tx.get(
+          this.store
+            .collection('suggestions')
+            .where('agentId', '==', this.agentId)
+            .where('sourceRef', '==', sourceRef)
+            .limit(2),
+        );
+        if (matches.size > 1) throw new Error('Ambiguous owner suggestion source');
+        const snapshot = matches.docs[0];
+        if (!snapshot) {
+          if (requiredRefs.includes(sourceRef)) inactiveSuggestionSourceRefs.push(sourceRef);
+          continue;
+        }
+        const suggestion = decodeRecord<Records['suggestions']>(snapshot.data());
+        if (
+          suggestion.agentId !== this.agentId ||
+          documentKey(suggestion.id) !== snapshot.id ||
+          suggestion.sourceRef !== sourceRef
+        )
+          throw new Error('Owner suggestion source identity mismatch');
+        const expiresAt = snapshot.get('expiresAt');
+        const snoozedUntil = snapshot.get('snoozedUntil');
+        const expiresAtDate = expiresAt instanceof Timestamp ? expiresAt.toDate() : null;
+        const snoozedUntilDate = snoozedUntil instanceof Timestamp ? snoozedUntil.toDate() : null;
+        if (suggestion.status !== 'pending' || !expiresAtDate) {
+          inactiveSuggestionSourceRefs.push(sourceRef);
+        } else {
+          pendingSuggestionWindows.push({
+            sourceRef,
+            expiresAt: expiresAtDate,
+            snoozedUntil: snoozedUntilDate,
+          });
+        }
+      }
+
+      const inactiveSecurityIncidents: Array<{ incidentId: string; revision: number }> = [];
+      const attentionToAccept: Array<{
+        ref: ReturnType<InstallationStore['doc']>;
+        snapshot: DocumentSnapshot;
+      }> = [];
+      for (const expected of incidents) {
+        const attentionId = securityIncidentId(
+          this.agentId,
+          `attention:${expected.incidentId}:${expected.revision}`,
+        );
+        const [snapshot, attentionSnapshot] = await Promise.all([
+          tx.get(this.store.doc('securityIncidents', expected.incidentId)),
+          tx.get(this.store.doc('securityIncidentAttention', attentionId)),
+        ]);
+        if (!snapshot.exists) {
+          inactiveSecurityIncidents.push(expected);
+          continue;
+        }
+        const incident = decodeRecord<Records['securityIncidents']>(snapshot.data());
+        if (
+          incident.id !== expected.incidentId ||
+          incident.agentId !== this.agentId ||
+          incident.revision !== expected.revision ||
+          (incident.decisionRevision === incident.revision &&
+            (incident.disposition === 'dismissed' || incident.disposition === 'expected'))
+        )
+          inactiveSecurityIncidents.push(expected);
+        else if (!attentionSnapshot.exists) {
+          throw new Error('Claimed briefing attention receipt is missing');
+        } else {
+          const attention = decodeRecord<Records['securityIncidentAttention']>(
+            attentionSnapshot.data(),
+          );
+          if (
+            attention.id !== attentionId ||
+            attention.agentId !== this.agentId ||
+            attention.incidentId !== expected.incidentId ||
+            attention.revision !== expected.revision ||
+            attention.producer !== 'briefing' ||
+            attention.deliveryStatus !== 'claimed'
+          )
+            throw new Error('Claimed briefing attention receipt changed');
+          attentionToAccept.push({
+            ref: this.store.doc('securityIncidentAttention', attentionId),
+            snapshot: attentionSnapshot,
+          });
+        }
+      }
+      if (inactiveSuggestionSourceRefs.length || inactiveSecurityIncidents.length)
+        return {
+          status: 'stale',
+          inactiveSuggestionSourceRefs,
+          inactiveSecurityIncidents,
+        };
+
+      const destination = await this.prepareNoticeInTransaction(tx, input.taskId);
+      // Sample the clock only after all source and destination reads have
+      // completed. A delayed transaction read must not let an item expire
+      // against a timestamp captured before that wait.
+      const publicationNow = this.store.now();
+      for (const row of pendingSuggestionWindows) {
+        if (
+          row.expiresAt <= publicationNow ||
+          (row.snoozedUntil !== null && row.snoozedUntil > publicationNow)
+        )
+          inactiveSuggestionSourceRefs.push(row.sourceRef);
+      }
+      if (inactiveSuggestionSourceRefs.length)
+        return {
+          status: 'stale',
+          inactiveSuggestionSourceRefs,
+          inactiveSecurityIncidents,
+        };
+      const conversationId = destination.row.id;
+      this.appendNoticeInTransaction(tx, destination, {
+        id: randomUUID(),
+        text: input.text,
+        ...(input.taskId ? { taskId: input.taskId } : {}),
+        extraParts: input.extraParts ?? [],
+        now: publicationNow,
+      });
+      for (const attention of attentionToAccept)
+        tx.update(attention.ref, { deliveryStatus: 'accepted', updatedAt: publicationNow });
+      return { status: 'posted', conversationId };
     });
   }
 
@@ -329,10 +615,7 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
     );
     const conversationRef = this.store.doc('conversations', destination.row.id);
     if (destination.created)
-      tx.create(
-        conversationRef,
-        encodeRecord({ ...destination.row, updatedAt: now, archived: false }),
-      );
+      tx.create(conversationRef, conversationDocument({ ...destination.row, updatedAt: now }));
     else tx.update(conversationRef, { updatedAt: now });
     tx.create(this.store.doc('messages', message.id), encodeRecord(message));
   }
@@ -466,10 +749,7 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
       );
       const conversationRef = this.store.doc('conversations', destination.row.id);
       if (destination.created)
-        tx.create(
-          conversationRef,
-          encodeRecord({ ...destination.row, updatedAt: now, archived: false }),
-        );
+        tx.create(conversationRef, conversationDocument({ ...destination.row, updatedAt: now }));
       else
         tx.update(conversationRef, {
           updatedAt: now,
@@ -487,6 +767,11 @@ export function firestoreOwnerNotices(
 ): OwnerNoticeRepository {
   return {
     kind: 'owner-notice-repository',
+    observationFence(agentId) {
+      if (agentId !== notices.agentId)
+        throw new Error('Owner notice is outside the configured owner');
+      return notices.observationFence(agentId);
+    },
     async post(input) {
       if (input.agentId !== notices.agentId)
         throw new Error('Owner notice is outside the configured owner');
@@ -499,6 +784,11 @@ export function firestoreOwnerNotices(
       // producer's notice has no source conversation.
       if (!posted) throw new Error('Owner notice was not posted');
       return posted;
+    },
+    async postWithDecisionFence(input) {
+      if (input.agentId !== notices.agentId)
+        throw new Error('Owner notice is outside the configured owner');
+      return notices.postWithDecisionFence(input);
     },
   };
 }

@@ -3,12 +3,18 @@ import {
   detectPersonalReadRequest,
   type ReadIntentMessage,
   readIntentText,
+  resolveTemporalIntent,
+  resolveTimeWindow,
+  type TemporalIntentResolution,
 } from './read-intent.js';
 import type { ActionEvidence } from './response-contract.js';
 
 export type LiveLookup = {
   kind: 'weather' | 'web' | 'sports' | 'directions';
   request: string;
+  /** Team/league names extracted from a completion-dependent sports reminder. */
+  reminderTeam?: string;
+  reminderLeague?: string;
   /**
    * A trip whose destination is an event on the owner's calendar ("my 3pm",
    * "my dentist appointment"): the runtime reads the calendar first and
@@ -38,6 +44,22 @@ const SPORT_WORD =
 const NOT_SPORTS =
   /\b(?:credit|test|exam|sat|act|gre|fico|risk|health|sleep|readiness|lighthouse|nps|quiz)\s+scores?\b|\bmy\b[^.?!]{0,40}\b(?:game|match|practice|score)\b/i;
 const SPORTS_IMPERATIVE = /\b(?:show|give|get|check|track|follow|create|make|build|render)\b/i;
+const EVENT_REMINDER =
+  /\b(?:remind me|(?:set|create|add|make|put|schedule) (?:me )?a reminder|reminder to)\b[\s\S]{0,80}\b(?:after|when|once|as soon as)\b[\s\S]{0,80}\b(?:game|match|fixture)\b/i;
+
+function reminderSportsTeam(request: string): string | undefined {
+  const match =
+    /\b(?:after|when|once|as soon as)\s+(?:(?:the|my)\s+)?([\p{L}][\p{L}.' -]{0,50}?)\s+(?:game|match|fixture)\b/iu.exec(
+      request,
+    );
+  const value = match?.[1]
+    ?.replace(/\b(?:tomorrow|today|tonight|yesterday|next|this|last)\b/gi, '')
+    .replace(/['’]s\b/g, '')
+    .trim();
+  if (!value || /^(?:game|match|fixture|event|my|our)$/i.test(value)) return undefined;
+  if (/^(?:my|our)\s+/i.test(value)) return undefined;
+  return value;
+}
 
 /**
  * A trip question: "directions to Oracle Park", "how long to drive to SFO",
@@ -57,13 +79,18 @@ const MY_EVENT =
   /\bmy\s+(?:next\s+)?(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}:\d{2}|(?:[a-z'-]+\s+){0,2}(?:meeting|appointment|event|flight|reservation|call|dinner|lunch|interview|class|practice))\b/i;
 /** Event words that name a kind of thing, so the event must say it too. */
 const SPECIFIC_EVENT = /\b(?:flight|dinner|lunch|interview|class|practice)\b/i;
-/** How far ahead "my 3pm" or "my next meeting" can reasonably be. */
-const TRIP_WINDOW_MS = 36 * 60 * 60 * 1000;
-
 /** "What's the Giants score?", "any Premier League results?", "make a live score card". */
 function isSportsRequest(request: string, asks: boolean): boolean {
   if (NOT_SPORTS.test(request)) return false;
-  if (!asks && !SPORTS_IMPERATIVE.test(request)) return false;
+  if (
+    !asks &&
+    !SPORTS_IMPERATIVE.test(request) &&
+    !(
+      EVENT_REMINDER.test(request) &&
+      (SPORT_WORD.test(request) || leagueNamedIn(request) || reminderSportsTeam(request))
+    )
+  )
+    return false;
   if (SPORTS_RESULT.test(request)) return true;
   return SPORTS_EVENT.test(request) && (SPORT_WORD.test(request) || !!leagueNamedIn(request));
 }
@@ -80,6 +107,13 @@ export function detectLiveLookup(
   if (!request || /^(?:don't|do not|never)\b/i.test(request)) return undefined;
   if (/\b(?:password|passcode|wifi|wi-fi|API key)\b/i.test(request)) return undefined;
   const asks = QUESTION.test(request) || request.includes('?') || SEARCH.test(request);
+  if (EVENT_REMINDER.test(request) && isSportsRequest(request, asks))
+    return {
+      kind: 'sports',
+      request,
+      ...(reminderSportsTeam(request) ? { reminderTeam: reminderSportsTeam(request) } : {}),
+      ...(leagueNamedIn(request) ? { reminderLeague: leagueNamedIn(request)?.key } : {}),
+    };
   if (WEATHER.test(request) && asks) return { kind: 'weather', request };
   // Before the personal-read router, which reads "drive time" as Google
   // Drive. A trip to "my 3pm" reads the calendar as the first step of the trip
@@ -211,7 +245,7 @@ function sportsAnswered(row: ActionEvidence): boolean {
   return (result.games?.length ?? 0) > 0 || (result.candidates?.length ?? 0) > 0;
 }
 
-type TripEvent = { summary: string; start: string; location: string };
+type TripEvent = { summary: string; start: string; location: string; end?: string };
 
 function calendarEvents(rows: ActionEvidence[]): TripEvent[] {
   return rows
@@ -230,6 +264,7 @@ function calendarEvents(rows: ActionEvidence[]): TripEvent[] {
           summary: typeof event?.summary === 'string' ? event.summary.trim() : '',
           start,
           location: typeof event?.location === 'string' ? event.location.trim() : '',
+          ...(typeof event?.end === 'string' ? { end: event.end } : {}),
         },
       ];
     });
@@ -266,49 +301,124 @@ const DEFAULT_CONTEXT: LookupContext = { now: new Date(0), timeZone: 'UTC' };
  * location is reported, not skipped: routing to the event after it would
  * answer a question the owner did not ask.
  */
+function hasMalformedIsoDate(text: string): boolean {
+  const match = /\b(20\d{2})-(\d{2})-(\d{2})\b/.exec(text);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const normalized = new Date(Date.UTC(year, month - 1, day));
+  return (
+    normalized.getUTCFullYear() !== year ||
+    normalized.getUTCMonth() + 1 !== month ||
+    normalized.getUTCDate() !== day
+  );
+}
+
+function tripWindow(lookup: LiveLookup, context: LookupContext): TemporalIntentResolution {
+  return resolveTemporalIntent(lookup.request, 'calendar', false, context, 'trip');
+}
+
 export function tripEvent(
   lookup: LiveLookup,
   evidence: ActionEvidence[],
   context: LookupContext = DEFAULT_CONTEXT,
 ): { event: TripEvent; problem?: undefined } | { event?: undefined; problem: string } {
-  const now = context.now.getTime();
-  const upcoming = calendarEvents(evidence.filter((row) => row.fromCurrentTask !== false))
+  const temporal = tripWindow(lookup, context);
+  if (temporal.kind === 'unsupported') return { problem: temporal.message };
+  if (temporal.kind !== 'resolved')
+    return {
+      problem:
+        'The requested calendar date is not valid, so I have not looked up or routed to an event.',
+    };
+  const window = temporal.intent;
+  const calendarRows = evidence.filter(
+    (row) => row.toolName === 'calendar.list_events' && row.fromCurrentTask !== false,
+  );
+  if (
+    calendarRows.some((row) => {
+      const result = row.result as { complete?: unknown } | null;
+      return result?.complete === false;
+    })
+  )
+    return {
+      problem:
+        'Calendar coverage is incomplete, so I cannot choose a unique destination or route yet.',
+    };
+  const now = Math.max(Date.parse(window.anchor.instant), Date.parse(window.interval.start));
+  const end = Date.parse(window.interval.endExclusive);
+  const events = calendarEvents(evidence.filter((row) => row.fromCurrentTask !== false));
+  const upcoming = events
     .filter((event) => {
       const start = Date.parse(event.start);
-      return Number.isFinite(start) && start >= now && start - now <= TRIP_WINDOW_MS;
+      return Number.isFinite(start) && start >= now && start < end;
     })
     .sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
   const reference = MY_EVENT.exec(lookup.request)?.[0] ?? '';
   const clock = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i.exec(
     reference.replace(/^my\s+(?:next\s+)?/i, ''),
   );
-  let matches = upcoming;
-  if (clock && (clock[3] || clock[2])) {
-    const meridiem = clock[3]?.toLowerCase();
-    const hour24 = meridiem
-      ? (Number(clock[1]) % 12) + (meridiem === 'pm' ? 12 : 0)
-      : Number(clock[1]);
-    const minute = Number(clock[2] ?? 0);
-    matches = upcoming.filter((event) => {
-      const local = localClock(event.start, context.timeZone);
-      return local.hour === hour24 && local.minute === minute;
-    });
-  } else {
+  const matchesReference = (candidates: TripEvent[]) => {
+    if (clock && (clock[3] || clock[2])) {
+      const meridiem = clock[3]?.toLowerCase();
+      const hour24 = meridiem
+        ? (Number(clock[1]) % 12) + (meridiem === 'pm' ? 12 : 0)
+        : Number(clock[1]);
+      const minute = Number(clock[2] ?? 0);
+      return candidates.filter((event) => {
+        const local = localClock(event.start, context.timeZone);
+        return local.hour === hour24 && local.minute === minute;
+      });
+    }
     const words = reference
       .replace(/^my\s+(?:next\s+)?/i, '')
       .split(/\s+/)
       .filter(Boolean);
     const noun = words.at(-1) ?? '';
     const named = [...words.slice(0, -1), ...(SPECIFIC_EVENT.test(noun) ? [noun] : [])];
-    if (named.length > 0)
-      matches = upcoming.filter((event) =>
-        named.some((word) => event.summary.toLowerCase().includes(word.toLowerCase())),
-      );
+    if (named.length === 0) return candidates;
+    return candidates.filter((event) =>
+      named.every((word) => {
+        const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return new RegExp(`\\b${escaped}\\b`, 'i').test(event.summary);
+      }),
+    );
+  };
+  const matches = matchesReference(upcoming);
+  const explicitNextEvent =
+    /^my\s+next\b/i.test(reference) ||
+    /\b(?:next|nearest|soonest)\s+(?:calendar\s+)?(?:event|meeting|appointment|call)\b/i.test(
+      lookup.request,
+    );
+  const windowStart = Date.parse(window.interval.start);
+  const currentTime = context.now.getTime();
+  if (!explicitNextEvent && Number.isFinite(windowStart) && windowStart <= currentTime) {
+    const underway = matchesReference(
+      events.filter((event) => {
+        const start = Date.parse(event.start);
+        const eventEnd = Date.parse(event.end ?? '');
+        return (
+          Number.isFinite(start) &&
+          Number.isFinite(eventEnd) &&
+          start < currentTime &&
+          currentTime < eventEnd
+        );
+      }),
+    );
+    const underwayEvent = underway[0];
+    if (underwayEvent)
+      return {
+        problem: `${describeEvent(underwayEvent, context.timeZone)} is already underway, so I haven't worked out a route. If you meant a later event, tell me which one.`,
+      };
   }
+  if (matches.length > 1 && !explicitNextEvent)
+    return {
+      problem: `I found more than one matching event for ${reference.replace(/^my\b/i, 'your') || 'that request'}; please choose which one before I route you.`,
+    };
   const event = matches[0];
   if (!event)
     return {
-      problem: `I couldn't find ${reference.replace(/^my\b/i, 'your') || 'that event'} on your calendar in the next day and a half, so I haven't worked out a route.`,
+      problem: `I couldn't find ${reference.replace(/^my\b/i, 'your') || 'that event'} on your calendar in ${window.window.label}, so I haven't worked out a route.`,
     };
   if (!event.location)
     return {
@@ -322,12 +432,15 @@ function nextTripStep(
   rows: ActionEvidence[],
   context: LookupContext = DEFAULT_CONTEXT,
 ): { toolName: string; input?: Record<string, unknown> } | undefined {
+  const temporal = tripWindow(lookup, context);
+  if (temporal.kind !== 'resolved') return undefined;
+  const window = temporal.intent;
   if (!rows.some((row) => row.toolName === 'calendar.list_events'))
     return {
       toolName: 'calendar.list_events',
       input: {
-        timeMin: context.now.toISOString(),
-        timeMax: new Date(context.now.getTime() + TRIP_WINDOW_MS).toISOString(),
+        timeMin: window.interval.start,
+        timeMax: window.interval.endExclusive,
         maxResults: 50,
       },
     };
@@ -360,7 +473,31 @@ export function nextLiveLookup(
   }
   if (lookup.kind === 'sports') {
     const scores = rows.filter((row) => row.toolName === 'sports.scores');
-    if (!scores.length) return { toolName: 'sports.scores' };
+    if (!scores.length) {
+      const dateWindow = context
+        ? resolveTimeWindow(lookup.request, 'calendar', false, context)
+        : undefined;
+      const date = dateWindow
+        ? new Intl.DateTimeFormat('en-CA', {
+            timeZone: context?.timeZone ?? 'UTC',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+          }).format(new Date(dateWindow.timeMin))
+        : undefined;
+      return {
+        toolName: 'sports.scores',
+        ...(lookup.reminderTeam || lookup.reminderLeague || date
+          ? {
+              input: {
+                ...(lookup.reminderTeam ? { team: lookup.reminderTeam } : {}),
+                ...(lookup.reminderLeague ? { league: lookup.reminderLeague } : {}),
+                ...(date ? { date } : {}),
+              },
+            }
+          : {}),
+      };
+    }
     if (scores.some(sportsAnswered)) return undefined;
     // An uncovered team or league, or a provider outage: search the web.
     return nextLiveLookup({ kind: 'web', request: lookup.request }, evidence);
@@ -462,6 +599,9 @@ export function liveLookupDirective(
   const [first] = lookups;
   if (!first) return '';
   const rules = `Use a successful lookup from this task. Earlier assistant answers and recalled conversations are not current evidence. If a provider fails, report the gap; never invent measurements, scores, office holders, opening hours, player traits, or verified job openings. Search snippets locate sources; read the source before concluding. Resolve relative dates using the owner's request time ${context.requestAt.toISOString()} and timezone ${context.timeZone}.`;
+  const eventReminder = lookups.some((lookup) => lookup.kind === 'sports' && lookup.reminderTeam)
+    ? '\nThis game is the dependency of a requested event-completion reminder. Use the exact event ID, league, start time and team IDs returned by this task. If the lookup has multiple or no matching games, ask which occurrence the owner means. The reminder will poll the exact fixture and fire only when the provider reports it finished; never substitute the scheduled start/end time.'
+    : '';
   const trip = lookups.some((lookup) => lookup.destination === 'calendar')
     ? "\nThe trip destination is an event on the owner's calendar. The runtime read the calendar, chose that event, and routed to its own location arriving by its start. Name the event, the travel time, and when to leave; never route to or suggest a different event."
     : '';
@@ -471,7 +611,7 @@ export function liveLookupDirective(
   );
   if (lookups.length === 1)
     return [
-      `This request needs fresh ${first.kind} evidence: ${first.request}\n${rules}${trip}`,
+      `This request needs fresh ${first.kind} evidence: ${first.request}\n${rules}${trip}${eventReminder}`,
       // Only a turn that also reads the calendar or mail gets this far with a
       // failed lookup; alone, the failure is the whole answer.
       ...failed,
@@ -485,7 +625,7 @@ export function liveLookupDirective(
     ...failed,
     rules,
   ];
-  return `${lines.join('\n')}${trip}`;
+  return `${lines.join('\n')}${trip}${eventReminder}`;
 }
 
 /**
@@ -618,6 +758,10 @@ export function liveLookupFailure(
   context?: LookupContext,
 ): string | undefined {
   if (lookup.destination === 'calendar') {
+    const temporal = context ? tripWindow(lookup, context) : undefined;
+    if (temporal?.kind === 'unsupported') return temporal.message;
+    if (temporal?.kind === 'unresolved' || hasMalformedIsoDate(lookup.request))
+      return 'The requested calendar date is not valid, so I have not looked up or routed to an event.';
     const rows = evidence.filter((row) => row.fromCurrentTask !== false);
     if (rows.some((row) => row.toolName === 'maps.directions' && successfulLookup(row)))
       return undefined;

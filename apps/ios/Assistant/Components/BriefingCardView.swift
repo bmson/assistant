@@ -14,17 +14,32 @@ struct BriefingCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Label("Briefing", systemImage: "sun.horizon.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(AssistantTheme.accent(for: colorScheme))
-                    .labelStyle(.titleAndIcon)
-                Spacer(minLength: 8)
-                if !card.date.isEmpty {
-                    Text(card.date)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                        .lineLimit(1)
+            if stacksRows {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Briefing")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                        .accessibilityAddTraits(.isHeader)
+                    if !card.date.isEmpty {
+                        Text(card.date)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            } else {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("Briefing")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                        .accessibilityAddTraits(.isHeader)
+                    Spacer(minLength: 8)
+                    if !card.date.isEmpty {
+                        Text(card.date)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                            .lineLimit(1)
+                    }
                 }
             }
 
@@ -78,10 +93,7 @@ struct BriefingCardView: View {
     }
 
     private func heading(_ text: String) -> some View {
-        Text(text.uppercased())
-            .font(.caption.weight(.bold))
-            .tracking(0.5)
-            .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+        CardEyebrow(text)
             .accessibilityAddTraits(.isHeader)
     }
 

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { loadConfig, resetConfigForTest } from '@assistant/config';
+import { loadConfig, parseFirestoreEmbeddingSpace, resetConfigForTest } from '@assistant/config';
 import { createInstallationStore } from '@assistant/firestore';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -13,8 +13,15 @@ vi.mock('@assistant/db', async (importOriginal) => ({
   createDb,
 }));
 
-const { composeFirestoreAgent } = await import('./deps.js');
+const { agentServices, composeFirestoreAgent } = await import('./deps.js');
+const { firestoreMaintenanceReady } = await import('./firestore-maintenance-ready.js');
 const { runFirestoreSweep } = await import('./firestore-sweep.js');
+const { executeAgentTask } = await import('./task-runner.js');
+const { LocalDocumentProcessLauncher, hashCallbackToken } = await import('@assistant/core');
+const { embeddingModelId } = await import('@assistant/persistence');
+const { startDocumentIngest } = await import(
+  '../../../packages/core/src/memory/document-catalog.js'
+);
 const { default: composition } = await import('../../../assistant.config.js');
 
 /**
@@ -41,6 +48,7 @@ const PORTABLE_TOOLS = [
   'browser.execute',
   'browser.plan',
   'calendar.availability',
+  'calendar.cancel_booking_event',
   'calendar.cancel_event',
   'calendar.create_event',
   'calendar.list_calendars',
@@ -201,6 +209,222 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         [],
       );
       expect(createDb).not.toHaveBeenCalled();
+    });
+
+    it('rechecks activation inside the document callback transaction after route readiness', async () => {
+      const deps = composeFirestoreAgent(productionConfig());
+      const callback = deps.modules.webhookHandler('/document/callback');
+      if (!callback) throw new Error('document callback was not registered');
+      const now = new Date();
+      const inactiveDocumentId = randomUUID();
+      const inactiveToken = randomUUID();
+      const activeDocumentId = randomUUID();
+      const activeToken = randomUUID();
+      const seedProcessorDocument = async (documentId: string, token: string) =>
+        store.doc('documents', documentId).set({
+          id: documentId,
+          agentId,
+          title: 'Activation fence fixture',
+          mime: 'text/plain',
+          status: 'pending',
+          extractor: 'pending_processor',
+          processorTokenHash: hashCallbackToken(token),
+          processorStartedAt: now,
+          processorAttempts: 1,
+          processedTextPath: null,
+          createdAt: now,
+          updatedAt: now,
+        });
+      const send = (documentId: string, token: string) =>
+        callback(agentServices(deps), {
+          json: async <T>() =>
+            ({ documentId, token, result: { ok: true, kind: 'text', chars: 32 } }) as T,
+          form: async () => ({}),
+          header: () => undefined,
+        });
+
+      try {
+        await store.doc('coordination', 'migration').set({ status: 'active' });
+        expect(await firestoreMaintenanceReady(store, agentId)).toBe(true);
+        await seedProcessorDocument(inactiveDocumentId, inactiveToken);
+
+        // Simulate activation withdrawal after the real readiness read but
+        // before the supported module webhook enters its persistence adapter.
+        await store.doc('coordination', 'migration').update({ status: 'pending_activation' });
+        await expect(send(inactiveDocumentId, inactiveToken)).resolves.toEqual({
+          status: 503,
+          json: { error: 'Firestore installation is not operationally ready' },
+        });
+        const inactiveDocument = await store.doc('documents', inactiveDocumentId).get();
+        expect(inactiveDocument.get('processorTokenHash')).toBe(hashCallbackToken(inactiveToken));
+        expect(inactiveDocument.get('processedTextPath')).toBeNull();
+        expect(
+          (
+            await store
+              .collection('tasks')
+              .where('trigger.payload.documentId', '==', inactiveDocumentId)
+              .get()
+          ).size,
+        ).toBe(0);
+        expect((await store.collection('taskEventKeys').get()).size).toBe(0);
+        expect((await store.collection('outbox').get()).size).toBe(0);
+
+        // An active installation still accepts the same real callback path.
+        await store.doc('coordination', 'migration').update({ status: 'active' });
+        expect(await firestoreMaintenanceReady(store, agentId)).toBe(true);
+        await seedProcessorDocument(activeDocumentId, activeToken);
+        await expect(send(activeDocumentId, activeToken)).resolves.toEqual({
+          status: 200,
+          json: { ok: true },
+        });
+        expect(
+          (await store.doc('documents', activeDocumentId).get()).get('processedTextPath'),
+        ).toBe(`documents/${activeDocumentId}/extracted.txt`);
+        expect(
+          (
+            await store
+              .collection('tasks')
+              .where('trigger.payload.documentId', '==', activeDocumentId)
+              .get()
+          ).size,
+        ).toBe(1);
+        expect((await store.collection('taskEventKeys').get()).size).toBe(1);
+        expect((await store.collection('outbox').get()).size).toBe(1);
+      } finally {
+        await store
+          .doc('coordination', 'migration')
+          .delete()
+          .catch(() => {});
+      }
+    });
+
+    it('wires the configured Firestore processor through ingest, the task runner, callback and extraction', async () => {
+      const deps = composeFirestoreAgent(productionConfig());
+      expect(deps.documentProcessor).toBeDefined();
+      expect(deps.documentProcessor?.launcher).toBeInstanceOf(LocalDocumentProcessLauncher);
+      const embeddingSpace = parseFirestoreEmbeddingSpace(deps.config.FIRESTORE_EMBEDDING_SPACE);
+      const embeddingModel = embeddingModelId(embeddingSpace);
+      const modelCatalog = deps.persistence?.modelCatalog;
+      if (!modelCatalog) throw new Error('model catalog is unavailable');
+      await modelCatalog.upsertModel({
+        id: embeddingModel,
+        label: 'Synthetic embedding model',
+        capabilities: { embeddings: true },
+        promptCostPerMTok: '0',
+        completionCostPerMTok: '0',
+        latencyClass: 'fast',
+        enabled: true,
+      });
+      // This is installation model-routing configuration for the synthetic
+      // composition test; the fake embedder below makes no provider call.
+      await store.doc('modelRoles', 'embed').set({
+        role: 'embed',
+        primaryModel: embeddingModel,
+        fallbackModel: embeddingModel,
+        params: {},
+        updatedAt: new Date(),
+      });
+
+      const launches: Array<{ documentId: string; callbackToken: string; outputPath: string }> = [];
+      const launcher = vi
+        .spyOn(LocalDocumentProcessLauncher.prototype, 'launch')
+        .mockImplementation(async (input) => {
+          launches.push({
+            documentId: input.documentId,
+            callbackToken: input.callbackToken,
+            outputPath: input.outputPath,
+          });
+          return { executionName: 'synthetic/document-job' };
+        });
+      const sourcePath = `documents/uploads/${randomUUID()}-report.docx`;
+      let outputPath: string | undefined;
+      try {
+        const catalog = deps.persistence?.documentCatalog;
+        if (!catalog) throw new Error('Firestore document catalog is not configured');
+        const sourceBytes = Buffer.from('synthetic office document');
+        const docxMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        await deps.workspace.writeBytes(sourcePath, sourceBytes, docxMime);
+        const ingested = await startDocumentIngest(catalog, {
+          agentId,
+          title: 'Annual report.docx',
+          workspacePath: sourcePath,
+          mime: docxMime,
+          bytes: sourceBytes.byteLength,
+          sha256: 'a'.repeat(64),
+          source: 'upload',
+        });
+        expect(ingested.document.extractor).toBe('pending_processor');
+        expect(ingested.taskId).toBeTruthy();
+        const task = await deps.persistence?.tasks.getTask(ingested.taskId ?? '');
+        if (!task) throw new Error('document ingest did not enqueue its processor task');
+
+        expect(await executeAgentTask(deps, task.id, task.queueGeneration)).toMatchObject({
+          outcome: 'done',
+        });
+        expect(launches).toHaveLength(1);
+        const launch = launches[0];
+        if (!launch) throw new Error('configured processor did not launch');
+        outputPath = launch.outputPath;
+        await deps.workspace.write(
+          outputPath,
+          'The report states that revenue grew twelve percent.',
+        );
+
+        const callback = deps.modules.webhookHandler('/document/callback');
+        if (!callback) throw new Error('document callback was not registered');
+        const response = await callback(agentServices(deps), {
+          json: async <T>() =>
+            ({
+              documentId: launch.documentId,
+              token: launch.callbackToken,
+              result: { ok: true, kind: 'text', chars: 51 },
+            }) as T,
+          form: async () => ({}),
+          header: () => undefined,
+        });
+        expect(response).toEqual({ status: 200, json: { ok: true } });
+
+        const embed = vi
+          .spyOn(deps.router, 'embed')
+          .mockImplementation(async (texts) => texts.map(() => new Array(1536).fill(0.125)));
+        const extractionTasks = await store
+          .collection('tasks')
+          .where('trigger.payload.job', '==', 'documents.extract')
+          .where('trigger.payload.documentId', '==', launch.documentId)
+          .get();
+        expect(extractionTasks.size).toBe(1);
+        const extraction = extractionTasks.docs[0];
+        if (!extraction) throw new Error('document callback did not enqueue extraction');
+        // Firestore document IDs are reversibly encoded by InstallationStore;
+        // the task repository key is the stable ID stored in the task record.
+        const extractionTaskId = String(extraction.get('id'));
+        const extractionTask = await deps.persistence?.tasks.getTask(extractionTaskId);
+        if (!extractionTask) throw new Error('extraction task was not readable');
+        const extractionOutcome = await executeAgentTask(
+          deps,
+          extractionTask.id,
+          extractionTask.queueGeneration,
+        );
+        if (extractionOutcome.outcome !== 'done')
+          throw new Error(
+            `Synthetic extraction did not complete: ${JSON.stringify(extractionOutcome)}`,
+          );
+        expect(extractionOutcome).toMatchObject({ outcome: 'done' });
+        expect(embed).toHaveBeenCalledOnce();
+        expect((await store.doc('documents', launch.documentId).get()).get('status')).toBe('ready');
+        expect(
+          (
+            await store
+              .collection('documentChunks')
+              .where('documentId', '==', launch.documentId)
+              .get()
+          ).size,
+        ).toBeGreaterThan(0);
+      } finally {
+        launcher.mockRestore();
+        await deps.workspace.delete(sourcePath).catch(() => {});
+        if (outputPath) await deps.workspace.delete(outputPath).catch(() => {});
+      }
     });
 
     it('validates the full production module set with no module left on SQL', async () => {

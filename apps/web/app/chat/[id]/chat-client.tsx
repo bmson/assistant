@@ -1,6 +1,7 @@
 'use client';
 
 import { useChat } from '@ai-sdk/react';
+import { type CardForm, type CardFormValues, findCardForm } from '@assistant/persistence/card-form';
 import { DefaultChatTransport, type UIMessage } from 'ai';
 import {
   ArrowDown,
@@ -26,9 +27,9 @@ import {
   useState,
   useTransition,
 } from 'react';
-import { signOutAction } from '@/app/actions';
+import { requestBrowserSignOut } from '@/app/browser-signout';
 import { destinationIcon, formatBadgeCount, useNavCommands } from '@/app/nav-commands';
-import { cancelTask } from '@/app/tasks/actions';
+import { cancelChatTask } from '@/app/tasks/actions';
 import { latestTheme } from '@/lib/chat-cues';
 import {
   type CompanionActivity,
@@ -39,6 +40,34 @@ import { BackLink, CountBadge, focusRing, microLabelClass } from '@/lib/ui';
 import { SubmitButton } from '@/lib/ui-client';
 import { toolLabel } from '@/lib/views';
 import { archiveConversation, changeConversationModel, restoreConversation } from '../actions';
+import {
+  type ChatOperationTurnFence,
+  isCancelledBeforeAdmissionSend,
+  isCurrentChatOperation,
+  requestChatOperationCancellation,
+} from '../chat-operation-cancellation-client';
+import {
+  beginCardFormOperation,
+  blockCardFormDraftForTask,
+  type CardFormDraft,
+  type CardFormIdentity,
+  cardFormCallbackGeneration,
+  carryCardFormDraft,
+  clearCardFormSessionStorage,
+  discardCardFormDraft,
+  formatCardFormMessage,
+  markCardFormReviewed,
+  parseActiveCardFormConflict,
+  parseStaleCardFormConflict,
+  readCardFormDraft,
+  recordCardFormTask,
+  releaseBlockedCardFormDraft,
+  releaseStaleCardFormOperation,
+  saveCardFormDraft,
+  sessionScopedCardFormStorage,
+  settleCardFormTask,
+  updateCardFormValues,
+} from './card-form-operations';
 import { ChatErrorBanner } from './chat-error-banner';
 import { ChatLog } from './chat-log';
 import {
@@ -52,6 +81,7 @@ import {
   RecallNote,
   type RecallSource,
 } from './message-view';
+import { useCardFormTaskObserver } from './use-card-form-task-observer';
 import {
   type AsyncNote,
   type AsyncTurn,
@@ -63,6 +93,7 @@ import {
 
 interface ChatClientProps {
   conversationId: string;
+  formSessionScope?: string;
   title: string;
   /** The assistant's display name — the chat header shows who you're talking to. */
   agentName: string;
@@ -144,6 +175,7 @@ function matchesToken(entry: SlashEntry, token: string): boolean {
 
 export function ChatClient({
   conversationId,
+  formSessionScope,
   title,
   agentName,
   agentTimezone,
@@ -161,8 +193,31 @@ export function ChatClient({
   initialInput,
 }: ChatClientProps) {
   const router = useRouter();
+  const currentConversationIdRef = useRef(conversationId);
+  currentConversationIdRef.current = conversationId;
   const { destinations, signedIn } = useNavCommands();
   const [input, setInput] = useState(initialInput ?? '');
+  const inputRef = useRef(initialInput ?? '');
+  inputRef.current = input;
+  const [formDraft, setFormDraft] = useState<CardFormDraft | null>(null);
+  const [formDraftScope, setFormDraftScope] = useState(formSessionScope);
+  const [formError, setFormError] = useState<string | null>(null);
+  const formDraftRef = useRef<CardFormDraft | null>(null);
+  const cardFormOperationRef = useRef<CardFormDraft['operation']>(undefined);
+  const volatileFormConflictRef = useRef<{ taskId: string; operationId: string } | null>(null);
+  const getFormStorage = useCallback(() => {
+    if (!formSessionScope) throw new Error('The authenticated form session is unavailable.');
+    return sessionScopedCardFormStorage(window.sessionStorage, formSessionScope);
+  }, [formSessionScope]);
+  const saveFormDraft = useCallback(
+    (draft: CardFormDraft | null) => {
+      formDraftRef.current = draft;
+      cardFormOperationRef.current = draft?.operation;
+      setFormDraft(draft);
+      setFormDraftScope(formSessionScope);
+    },
+    [formSessionScope],
+  );
   const [fallbackNote, setFallbackNote] = useState<string | null>(null);
   const [isSwitching, startTransition] = useTransition();
   const [selectedModel, setSelectedModel] = useState(modelOverride);
@@ -180,6 +235,19 @@ export function ChatClient({
   /** The silent poll loop's only surfaces: repeated failure, or a dead session. */
   const [pollTrouble, setPollTrouble] = useState<PollTrouble>(null);
   const [asyncActionError, setAsyncActionError] = useState<string | null>(null);
+  const [operationCancellation, setOperationCancellation] = useState<{
+    turn: ChatOperationTurnFence;
+    phase: 'checking' | 'unknown';
+  } | null>(null);
+  const operationCancellationRef = useRef<typeof operationCancellation>(null);
+  const activeOrdinaryOperationRef = useRef<(ChatOperationTurnFence & { taskId?: string }) | null>(
+    null,
+  );
+  const ordinaryTurnTokenRef = useRef(0);
+  const setOperationCancellationState = (state: typeof operationCancellation) => {
+    operationCancellationRef.current = state;
+    setOperationCancellation(state);
+  };
   const [isCancellingAsync, startCancelTransition] = useTransition();
   const [activity, setActivity] = useState<ChatActivityItem[]>([]);
   /** Live provenance for the current streaming turn (the persisted part covers reloads). */
@@ -193,6 +261,42 @@ export function ChatClient({
   const forceRef = useRef(false);
   /** A failed send can put the exact text back into the composer without guesswork. */
   const [lastSubmittedText, setLastSubmittedText] = useState('');
+  const admittingTurnRef = useRef(false);
+  const mountedGenerationRef = useRef(0);
+  const previousFormSessionScopeRef = useRef(formSessionScope);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: each conversation change invalidates outstanding send observations.
+  useEffect(
+    () => () => {
+      mountedGenerationRef.current += 1;
+    },
+    [conversationId],
+  );
+  useLayoutEffect(() => {
+    const previous = previousFormSessionScopeRef.current;
+    previousFormSessionScopeRef.current = formSessionScope;
+    if (!previous || previous === formSessionScope) return;
+    // A newly supplied scope came from the authenticated server render. Discard
+    // the old session's local drafts and invalidate callbacks from its requests.
+    mountedGenerationRef.current += 1;
+    pendingOperationIdRef.current = null;
+    activeOrdinaryOperationRef.current = null;
+    operationCancellationRef.current = null;
+    setOperationCancellation(null);
+    volatileFormConflictRef.current = null;
+    setAsyncTurn(null);
+    setInput('');
+    saveFormDraft(null);
+    try {
+      clearCardFormSessionStorage(window.sessionStorage, previous);
+    } catch {
+      setFormError('The previous browser session draft could not be cleared.');
+    }
+  }, [formSessionScope, saveFormDraft]);
+  const pendingOperationIdRef = useRef<{
+    id: string;
+    autonomous: boolean;
+    force: boolean;
+  } | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   /** What the autosize effect last wrote, and the text it measured — see below. */
@@ -249,6 +353,9 @@ export function ChatClient({
   /** Lets a fresh turn wake the poll instead of waiting out an idle interval. */
   const pokePollRef = useRef<(() => void) | null>(null);
 
+  const setMessagesForReceiptRef = useRef<
+    ((update: (messages: UIMessage[]) => UIMessage[]) => void) | null
+  >(null);
   const transport = useMemo(
     () =>
       new DefaultChatTransport({
@@ -258,14 +365,20 @@ export function ChatClient({
         // size flat and prevents a client from selecting model context.
         prepareSendMessagesRequest: ({ messages, body }) => {
           const latestUser = [...messages].reverse().find((message) => message.role === 'user');
+          const cardFormOperation = cardFormOperationRef.current;
+          const isCardFormOperation =
+            !!cardFormOperation &&
+            cardFormOperation.submission.operationId === pendingOperationIdRef.current?.id;
           // Read the toggle through a ref so the memoized transport always sees
           // its current value without re-creating on every keystroke.
           return {
             body: {
               ...body,
-              autonomous: autonomousRef.current,
-              force: forceRef.current,
+              autonomous: pendingOperationIdRef.current?.autonomous ?? autonomousRef.current,
+              force: pendingOperationIdRef.current?.force ?? forceRef.current,
+              clientOperationId: pendingOperationIdRef.current?.id ?? latestUser?.id,
               messages: latestUser ? [latestUser] : [],
+              ...(isCardFormOperation ? { cardFormSubmission: cardFormOperation.submission } : {}),
             },
           };
         },
@@ -275,14 +388,222 @@ export function ChatClient({
           // flag clears here — error responses included, it can never leak into
           // an unrelated later send.
           forceRef.current = false;
-          const response = await fetch(info, init);
+          const generation = mountedGenerationRef.current;
+          const formGeneration = cardFormCallbackGeneration();
+          const operationId = pendingOperationIdRef.current?.id;
+          const activeOrdinary = activeOrdinaryOperationRef.current;
+          const capturedOrdinaryTurn =
+            activeOrdinary && activeOrdinary.clientOperationId === operationId
+              ? activeOrdinary
+              : null;
+          const cardFormOperation = cardFormOperationRef.current;
+          const isCardFormOperation =
+            !!cardFormOperation && cardFormOperation.submission.operationId === operationId;
+          const headers = new Headers(init?.headers);
+          if (isCardFormOperation) headers.set('x-chat-card-form', 'card-form-v1');
+          const response = await fetch(info, { ...init, headers });
+          if (
+            generation !== mountedGenerationRef.current ||
+            currentConversationIdRef.current !== conversationId ||
+            formGeneration !== cardFormCallbackGeneration() ||
+            operationId !== pendingOperationIdRef.current?.id
+          )
+            return response;
+          if (capturedOrdinaryTurn && response.status === 409) {
+            const body = (await response
+              .clone()
+              .json()
+              .catch(() => null)) as unknown;
+            if (
+              generation !== mountedGenerationRef.current ||
+              currentConversationIdRef.current !== conversationId ||
+              operationId !== pendingOperationIdRef.current?.id ||
+              !isCurrentChatOperation(activeOrdinaryOperationRef.current, capturedOrdinaryTurn)
+            )
+              return response;
+            if (isCancelledBeforeAdmissionSend(body, capturedOrdinaryTurn)) {
+              // A cancellation-first send is a terminal receipt, never an
+              // accepted stream or a reason to mint a replacement operation.
+              activeOrdinaryOperationRef.current = null;
+              pendingOperationIdRef.current = null;
+              operationCancellationRef.current = null;
+              setOperationCancellation(null);
+              setAsyncTurn(null);
+              setActivity([]);
+              setAsyncNote({
+                text: 'This message was stopped before it was admitted. No task started.',
+                retryable: false,
+              });
+              setMessagesForReceiptRef.current?.((rows) =>
+                rows.filter(
+                  (message) =>
+                    !(
+                      message.role === 'user' &&
+                      message.id === capturedOrdinaryTurn.clientOperationId
+                    ),
+                ),
+              );
+              return response;
+            }
+          }
+          let blockedOnActiveTask = false;
+          if (isCardFormOperation && cardFormOperation && response.status === 409) {
+            const body = (await response
+              .clone()
+              .json()
+              .catch(() => null)) as unknown;
+            if (
+              generation !== mountedGenerationRef.current ||
+              formGeneration !== cardFormCallbackGeneration()
+            )
+              return response;
+            const conflict = parseActiveCardFormConflict(body);
+            if (conflict) {
+              const current = formDraftRef.current;
+              if (current?.operation?.submission.operationId === operationId) {
+                try {
+                  saveFormDraft(
+                    blockCardFormDraftForTask({
+                      storage: getFormStorage(),
+                      draft: current,
+                      operationId,
+                      taskId: conflict.taskId,
+                      taskStatus: conflict.taskStatus,
+                    }),
+                  );
+                  setInput(cardFormOperation.submission.ownerMessageText);
+                  setFormError(
+                    'Another request for this form is still running. Your message remains an unsent draft. Send it again after that task finishes.',
+                  );
+                  setAsyncNote(null);
+                  setAsyncActionError(null);
+                  setAsyncTurn({ taskId: conflict.taskId, cursor: cursorRef.current ?? '' });
+                  pendingOperationIdRef.current = null;
+                  blockedOnActiveTask = true;
+                  setMessagesForReceiptRef.current?.((currentMessages) =>
+                    currentMessages.filter(
+                      (message) => !(message.role === 'user' && message.id === operationId),
+                    ),
+                  );
+                } catch {
+                  volatileFormConflictRef.current = { taskId: conflict.taskId, operationId };
+                  setInput(cardFormOperation.submission.ownerMessageText);
+                  setAsyncTurn({ taskId: conflict.taskId, cursor: cursorRef.current ?? '' });
+                  pendingOperationIdRef.current = null;
+                  setFormError(
+                    'Another form request is active. This message is still saved here; check that task before trying again.',
+                  );
+                }
+              }
+            }
+          }
+          if (blockedOnActiveTask) return response;
+          if (isCardFormOperation && response.status === 409) {
+            const body = (await response
+              .clone()
+              .json()
+              .catch(() => null)) as unknown;
+            if (
+              generation !== mountedGenerationRef.current ||
+              formGeneration !== cardFormCallbackGeneration()
+            )
+              return response;
+            const stale = parseStaleCardFormConflict(body);
+            const current = formDraftRef.current;
+            if (
+              stale &&
+              operationId &&
+              current?.operation?.submission.operationId === operationId
+            ) {
+              const submission = current.operation.submission;
+              saveFormDraft(
+                releaseStaleCardFormOperation({
+                  storage: getFormStorage(),
+                  draft: current,
+                  operationId,
+                }),
+              );
+              pendingOperationIdRef.current = null;
+              volatileFormConflictRef.current = null;
+              setInput(submission.ownerMessageText);
+              setFormError(
+                'This card changed before your message was accepted. Review its current form, then send again.',
+              );
+              setMessagesForReceiptRef.current?.((rows) =>
+                rows.filter((message) => !(message.role === 'user' && message.id === operationId)),
+              );
+              return response;
+            }
+          }
+          const ownerMessageId = response.headers.get('x-owner-message-id');
+          if (ownerMessageId && operationId) {
+            setMessagesForReceiptRef.current?.((current) =>
+              current.map((message) =>
+                message.role === 'user' && message.id === operationId
+                  ? {
+                      ...message,
+                      metadata: {
+                        ...(message.metadata as object | undefined),
+                        durableMessageId: ownerMessageId,
+                      },
+                    }
+                  : message,
+              ),
+            );
+          }
           const modelId = response.headers.get('x-model-id');
           const degraded = response.headers.get('x-model-degraded') === 'true';
           setFallbackNote(degraded && modelId ? `responded with ${modelId} (fallback)` : null);
           setLiveRecall(decodeRecallHeader(response.headers.get('x-recall')));
           const taskId = response.headers.get('x-async-task');
           const cursor = response.headers.get('x-message-cursor');
+          if (
+            taskId &&
+            capturedOrdinaryTurn &&
+            isCurrentChatOperation(activeOrdinaryOperationRef.current, capturedOrdinaryTurn)
+          )
+            activeOrdinaryOperationRef.current = { ...capturedOrdinaryTurn, taskId };
           setAsyncTurn(taskId && cursor ? { taskId, cursor } : null);
+          if (isCardFormOperation && cardFormOperation && operationId) {
+            if (taskId && cursor) {
+              try {
+                const current = formDraftRef.current;
+                if (current?.operation?.submission.operationId === operationId) {
+                  saveFormDraft(
+                    recordCardFormTask({
+                      storage: getFormStorage(),
+                      draft: current,
+                      operationId,
+                      taskId,
+                      cursor,
+                    }),
+                  );
+                  if (inputRef.current.trim() === cardFormOperation.submission.ownerMessageText)
+                    setInput('');
+                }
+              } catch {
+                volatileFormConflictRef.current = { taskId, operationId };
+                setAsyncTurn({ taskId, cursor });
+                setFormError('The task started. Check its status before trying again.');
+              }
+            } else if (response.status === 400 || response.status === 422) {
+              const current = formDraftRef.current;
+              if (current?.operation?.submission.operationId === operationId) {
+                const released = { ...current, operation: undefined };
+                try {
+                  saveCardFormDraft(getFormStorage(), released);
+                  saveFormDraft(released);
+                  setFormError(
+                    'This form could not be sent. Review the current card and try again.',
+                  );
+                } catch {
+                  setFormError(
+                    'This form was rejected, but its local retry state could not be saved. Keep this chat open and retry when browser storage is available.',
+                  );
+                }
+              }
+            }
+          }
           if (taskId) {
             setAsyncNote(null);
             setAsyncActionError(null);
@@ -290,7 +611,7 @@ export function ChatClient({
           return response;
         }) as typeof fetch,
       }),
-    [conversationId],
+    [conversationId, getFormStorage, saveFormDraft],
   );
 
   const { messages, sendMessage, setMessages, status, error, clearError, stop } = useChat({
@@ -309,12 +630,54 @@ export function ChatClient({
    * enters the message list — the presence UI reports the work instead, so
    * nothing here has to recognise and drop a placeholder.
    */
+  setMessagesForReceiptRef.current = setMessages;
   const log = useMemo(() => orderChatLog(messages, logOrderRef.current), [messages]);
   logRef.current = log;
 
   useEffect(() => {
     setSelectedModel(modelOverride);
   }, [modelOverride]);
+
+  useEffect(() => {
+    saveFormDraft(null);
+    pendingOperationIdRef.current = null;
+    activeOrdinaryOperationRef.current = null;
+    operationCancellationRef.current = null;
+    setOperationCancellation(null);
+    setFormError(null);
+    try {
+      if (!formSessionScope) {
+        setFormError('Form drafts are unavailable for this browser session.');
+        return;
+      }
+      const draft = readCardFormDraft(getFormStorage(), conversationId);
+      if (!draft) return;
+      saveFormDraft(draft);
+      if (draft.blockedByTask) {
+        setInput(draft.blockedByTask.submission.ownerMessageText);
+        setAsyncTurn({ taskId: draft.blockedByTask.taskId, cursor: cursorRef.current ?? '' });
+      } else if (draft.operation) {
+        const operation = draft.operation;
+        pendingOperationIdRef.current = {
+          id: operation.submission.operationId,
+          autonomous: false,
+          force: false,
+        };
+        if (operation.taskId && operation.cursor) {
+          setAsyncTurn({ taskId: operation.taskId, cursor: operation.cursor });
+          if (draft.composerText !== undefined) setInput(draft.composerText);
+        } else {
+          setInput(operation.submission.ownerMessageText);
+        }
+      } else if (draft.composerText !== undefined) {
+        setInput(draft.composerText);
+      }
+    } catch {
+      setFormError(
+        'The saved form request could not be restored. Keep this chat open and try again.',
+      );
+    }
+  }, [conversationId, formSessionScope, getFormStorage, saveFormDraft]);
 
   // The elevated mode belongs to exactly one turn. Wait until useChat has
   // accepted the request so the memoized transport can read the submitted
@@ -326,9 +689,122 @@ export function ChatClient({
     }
   }, [status]);
 
-  // One poll for the whole thread, for as long as the page is open — the
-  // synchronization half of the chat lives in use-chat-polling.ts so this
-  // component owns presentation only.
+  const formCallbackGenerationAtRender = cardFormCallbackGeneration();
+
+  const handleFormTaskTerminal = useCallback(
+    (taskId: string, status: 'done' | 'failed' | 'cancelled') => {
+      if (formCallbackGenerationAtRender !== cardFormCallbackGeneration()) return;
+      const current = formDraftRef.current;
+      if (!current) return;
+      const ownsTask =
+        current.operation?.taskId === taskId ||
+        current.blockedByTask?.taskId === taskId ||
+        volatileFormConflictRef.current?.taskId === taskId;
+      if (ownsTask && asyncTurnRef.current?.taskId === taskId) {
+        // The exact form observer can finish before foreground polling sees
+        // an assistant message. Release that turn without touching a reply.
+        setAsyncTurn(null);
+        setAsyncNote(null);
+        setActivity([]);
+        turnRef.current = null;
+      }
+      try {
+        const blocked = current.blockedByTask;
+        if (blocked?.taskId === taskId) {
+          const released = releaseBlockedCardFormDraft({
+            storage: getFormStorage(),
+            draft: current,
+            taskId,
+            status,
+          });
+          saveFormDraft(released);
+          setInput((text) => text || released.composerText || blocked.submission.ownerMessageText);
+          setFormError(
+            'The earlier request has finished. Review this message and press Send to try again.',
+          );
+          return;
+        }
+        const volatile = volatileFormConflictRef.current;
+        if (volatile?.taskId === taskId && ['done', 'failed', 'cancelled'].includes(status)) {
+          const submission = current.operation?.submission;
+          volatileFormConflictRef.current = null;
+          pendingOperationIdRef.current = null;
+          if (submission) {
+            const released = {
+              ...current,
+              operation: undefined,
+              reviewed: true,
+              composerText: submission.ownerMessageText,
+              releasedBlockedTask: true,
+            };
+            try {
+              saveCardFormDraft(getFormStorage(), released);
+            } catch {
+              /* Keep the exact task result in this tab if storage is unavailable. */
+            }
+            saveFormDraft(released);
+            setInput((text) => text || submission.ownerMessageText);
+          }
+          setFormError(
+            'The earlier request has finished. Review this message and press Send to try again.',
+          );
+          return;
+        }
+        const settled = settleCardFormTask({
+          storage: getFormStorage(),
+          draft: current,
+          taskId,
+          status,
+        });
+        if (
+          current.operation?.taskId === taskId &&
+          ['done', 'failed', 'cancelled'].includes(status)
+        ) {
+          pendingOperationIdRef.current = null;
+          if (settled === null) {
+            saveFormDraft(null);
+            setInput((text) =>
+              text === current.operation?.submission.ownerMessageText ? '' : text,
+            );
+            setFormError(null);
+          } else {
+            saveFormDraft(settled);
+            setInput((text) => text || settled.composerText || '');
+            setFormError(
+              'This request did not finish. Review the message and press Send to try again.',
+            );
+          }
+          return;
+        }
+        saveFormDraft(settled);
+      } catch {
+        setFormError(
+          'The exact task finished, but its local status could not be saved. Reload this chat to confirm.',
+        );
+      }
+    },
+    [formCallbackGenerationAtRender, getFormStorage, saveFormDraft],
+  );
+  const volatileFormTask = volatileFormConflictRef.current;
+  const observedFormTask = formDraft?.blockedByTask
+    ? { taskId: formDraft.blockedByTask.taskId }
+    : formDraft?.operation?.taskId
+      ? { taskId: formDraft.operation.taskId, cursor: formDraft.operation.cursor }
+      : volatileFormTask
+        ? { taskId: volatileFormTask.taskId, cursor: cursorRef.current ?? undefined }
+        : null;
+  useCardFormTaskObserver({
+    conversationId,
+    task: observedFormTask,
+    onTerminal: handleFormTaskTerminal,
+    onUnavailable: () =>
+      setFormError(
+        'The form task could not be checked in this session. Keep its message and retry after refreshing Activity.',
+      ),
+  });
+
+  // One poll for the whole thread, for as long as the page is open. Form tasks
+  // have their own exact observer so a parked task cannot lock the composer.
   useChatPolling({
     conversationId,
     setMessages,
@@ -344,6 +820,7 @@ export function ChatClient({
     setActivity,
     setLiveRecall,
     setPollTrouble,
+    onTaskTerminal: handleFormTaskTerminal,
   });
 
   // Sending a turn must not wait out an idle interval before the poll notices
@@ -355,7 +832,17 @@ export function ChatClient({
   // One instant for every relative day label, taken from the server's clock, so
   // the markup the browser hydrates matches the markup it was sent.
   const renderedNow = useMemo(() => new Date(renderedAt), [renderedAt]);
-  const busy = status === 'submitted' || status === 'streaming' || asyncTurn !== null;
+  const observedFormTaskId = observedFormTask?.taskId;
+  const formAdmissionAwaitingReceipt =
+    !!formDraft?.operation &&
+    !formDraft.operation.taskId &&
+    pendingOperationIdRef.current?.id === formDraft.operation.submission.operationId;
+  const cancellationUnresolved = operationCancellation?.turn.conversationId === conversationId;
+  const busy =
+    status === 'submitted' ||
+    status === 'streaming' ||
+    (asyncTurn !== null && asyncTurn.taskId !== observedFormTaskId) ||
+    cancellationUnresolved;
 
   // Pinned to 'default' by owner decision (see chat-cues.test.ts) — the call
   // is constant-time, so it needs no memo of its own; the attribute below stays
@@ -502,7 +989,12 @@ export function ChatClient({
     }
     if (entry.command === '/signout') {
       setInput('');
-      void signOutAction();
+      void requestBrowserSignOut()
+        .then((destination) => {
+          clearCardFormSessionStorage(window.sessionStorage);
+          window.location.assign(destination);
+        })
+        .catch(() => setAsyncActionError('Could not sign out. Try again.'));
       return;
     }
     setInput(entry.command);
@@ -740,33 +1232,201 @@ export function ChatClient({
     });
   };
 
-  const sendTurn = (text: string, clearComposer: boolean) => {
+  const sendTurn = (
+    text: string,
+    clearComposer: boolean,
+    retryOperation?: { id: string; autonomous: boolean; force: boolean },
+  ) => {
+    const pendingCancel = operationCancellationRef.current;
+    if (pendingCancel && pendingCancel.turn.conversationId === conversationId) {
+      forceRef.current = false;
+      setAsyncActionError(
+        'Stop is still unconfirmed. Retry Stop with the same message before sending another turn.',
+      );
+      return;
+    }
+    const unresolved = formDraftRef.current;
+    const operation = unresolved?.operation;
+    const volatileConflict = volatileFormConflictRef.current;
+    if (operation && !operation.taskId) {
+      const exactReplay =
+        retryOperation?.id === operation.submission.operationId &&
+        text.trim() === operation.submission.ownerMessageText;
+      const ownerReplyDuringKnownConflict =
+        volatileConflict?.operationId === operation.submission.operationId &&
+        text.trim() !== operation.submission.ownerMessageText;
+      if (!exactReplay && !ownerReplyDuringKnownConflict) {
+        forceRef.current = false;
+        setFormError(
+          volatileConflict?.operationId === operation.submission.operationId
+            ? 'This message is still waiting on that task. Send a different reply or wait for the task to finish.'
+            : 'This request has not been confirmed yet. Retry the same message before starting another turn.',
+        );
+        return;
+      }
+    }
+    if (
+      unresolved?.blockedByTask &&
+      text.trim() === unresolved.blockedByTask.submission.ownerMessageText
+    ) {
+      forceRef.current = false;
+      setFormError(
+        'Another request for this form is still running. Send a different reply or wait for that task to finish.',
+      );
+      return;
+    }
+    if (busy || admittingTurnRef.current || !text.trim()) return;
+    admittingTurnRef.current = true;
     stickToBottomRef.current = true;
     setAtBottom(true);
     setUnseenCount(0);
     setLastSubmittedText(text);
+    pendingOperationIdRef.current = retryOperation ?? {
+      id: crypto.randomUUID(),
+      autonomous: autonomousRef.current,
+      force: forceRef.current,
+    };
+    const operationId = pendingOperationIdRef.current.id;
+    const isFormOperation = unresolved?.operation?.submission.operationId === operationId;
+    if (isFormOperation) {
+      activeOrdinaryOperationRef.current = null;
+      setOperationCancellationState(null);
+    } else {
+      const current = activeOrdinaryOperationRef.current;
+      if (
+        !current ||
+        current.conversationId !== conversationId ||
+        current.clientOperationId !== operationId ||
+        current.scopeGeneration !== mountedGenerationRef.current
+      ) {
+        ordinaryTurnTokenRef.current += 1;
+        activeOrdinaryOperationRef.current = {
+          conversationId,
+          clientOperationId: operationId,
+          turnToken: ordinaryTurnTokenRef.current,
+          scopeGeneration: mountedGenerationRef.current,
+        };
+      }
+    }
     if (clearComposer) setInput('');
     setFallbackNote(null);
     setModelError(null);
     setLiveRecall(null);
     if (error) clearError();
     resetAutonomyAfterSubmitRef.current = autonomous;
-    void sendMessage({ text });
+    void sendMessage({
+      id: pendingOperationIdRef.current.id,
+      role: 'user',
+      parts: [{ type: 'text', text }],
+    }).finally(() => {
+      admittingTurnRef.current = false;
+    });
   };
 
   const submitCurrentMessage = () => {
+    if (previousFormSessionScopeRef.current !== formSessionScope) {
+      setFormError('The signed-in session changed. Wait for this chat to refresh before sending.');
+      return;
+    }
+    const savedOperation = formDraftRef.current?.operation;
+    if (
+      savedOperation &&
+      !savedOperation.taskId &&
+      volatileFormConflictRef.current?.operationId !== savedOperation.submission.operationId
+    ) {
+      if (busy) return;
+      const exactText = savedOperation.submission.ownerMessageText;
+      setInput(exactText);
+      pendingOperationIdRef.current = {
+        id: savedOperation.submission.operationId,
+        autonomous: false,
+        force: false,
+      };
+      sendTurn(exactText, false, {
+        id: savedOperation.submission.operationId,
+        autonomous: false,
+        force: false,
+      });
+      return;
+    }
     const text = input.trim();
+    const currentDraft = formDraftRef.current;
+    if (
+      currentDraft &&
+      !currentDraft.reviewed &&
+      !(currentDraft.releasedBlockedTask && currentDraft.composerText !== text)
+    ) {
+      setFormError('Review this form and its message, or clear the saved answers, before sending.');
+      return;
+    }
     if (!text || busy) return;
     // Slash commands are local composer controls, never conversation messages.
     if (/^\/model(?:\s.*)?$/i.test(text)) return;
     if (commandPaletteOpen) return;
+    const draft = formDraftRef.current;
+    if (
+      draft?.reviewed &&
+      !draft.blockedByTask &&
+      !draft.operation &&
+      !(draft.releasedBlockedTask && draft.composerText !== text)
+    ) {
+      let form: CardForm | null = null;
+      for (const message of logRef.current) {
+        const parts = message.parts as Array<{ type?: string; data?: unknown }>;
+        for (const part of parts) {
+          if (part.type !== 'data-card') continue;
+          const card = part.data as Record<string, unknown> | undefined;
+          if (
+            card?.kind !== 'generated-card' ||
+            card.id !== draft.identity.cardId ||
+            card.revisionId !== draft.identity.revisionId
+          )
+            continue;
+          const spec = card.spec as Record<string, unknown> | undefined;
+          form = findCardForm(spec, draft.identity.formId);
+          if (form) break;
+        }
+        if (form) break;
+      }
+      if (!form) {
+        setFormError(
+          'This card version is no longer available. Review the current card before sending.',
+        );
+        return;
+      }
+      try {
+        const frozen = beginCardFormOperation({
+          storage: getFormStorage(),
+          draft,
+          form,
+          ownerMessageText: text,
+          createId: () => window.crypto.randomUUID(),
+        });
+        saveFormDraft(frozen);
+        setFormError(null);
+        pendingOperationIdRef.current = {
+          id: frozen.operation?.submission.operationId ?? '',
+          autonomous: false,
+          force: false,
+        };
+        sendTurn(text, false, {
+          id: frozen.operation?.submission.operationId ?? '',
+          autonomous: false,
+          force: false,
+        });
+        return;
+      } catch (error) {
+        setFormError(error instanceof Error ? error.message : 'This form could not be sent.');
+        return;
+      }
+    }
     sendTurn(text, true);
   };
 
   // The off-course card's fix: the same words again, but routed around the
   // classifier straight to the executor, where the tools are.
   const runForReal = (text: string) => {
-    if (busy || text.trim() === '') return;
+    if (busy || admittingTurnRef.current || text.trim() === '') return;
     forceRef.current = true;
     sendTurn(text, false);
   };
@@ -783,6 +1443,94 @@ export function ChatClient({
   runForRealRef.current = runForReal;
   const handleSend = useCallback((text: string) => sendTurnRef.current(text, false), []);
   const handleRunForReal = useCallback((text: string) => runForRealRef.current(text), []);
+
+  const handleFormChange = useCallback(
+    (identity: CardFormIdentity, _form: CardForm, values: CardFormValues) => {
+      try {
+        const wasReviewed = formDraftRef.current?.reviewed === true;
+        const next = updateCardFormValues({
+          storage: getFormStorage(),
+          current: formDraftRef.current,
+          identity,
+          values,
+        });
+        saveFormDraft(next);
+        if (wasReviewed) setInput('');
+        setFormError(null);
+      } catch (error) {
+        setFormError(error instanceof Error ? error.message : 'Could not save this form draft.');
+      }
+    },
+    [getFormStorage, saveFormDraft],
+  );
+
+  const handleFormReview = useCallback(
+    (identity: CardFormIdentity, form: CardForm, values: CardFormValues) => {
+      try {
+        const draft = updateCardFormValues({
+          storage: getFormStorage(),
+          current: formDraftRef.current,
+          identity,
+          values,
+        });
+        const reviewed = markCardFormReviewed(
+          getFormStorage(),
+          draft,
+          formatCardFormMessage(form, values),
+        );
+        saveFormDraft(reviewed);
+        setFormError(null);
+        setInput(formatCardFormMessage(form, values));
+        window.requestAnimationFrame(() => textareaRef.current?.focus());
+      } catch (error) {
+        setFormError(error instanceof Error ? error.message : 'Could not prepare this message.');
+      }
+    },
+    [getFormStorage, saveFormDraft],
+  );
+
+  const handleFormDiscard = useCallback(
+    (identity: CardFormIdentity) => {
+      const current = formDraftRef.current;
+      if (
+        !current ||
+        current.operation ||
+        current.blockedByTask ||
+        current.identity.conversationId !== identity.conversationId
+      )
+        return;
+      try {
+        discardCardFormDraft(getFormStorage(), identity.conversationId);
+        saveFormDraft(null);
+        setFormError(null);
+      } catch {
+        setFormError('Could not clear the saved form answers.');
+      }
+    },
+    [getFormStorage, saveFormDraft],
+  );
+
+  const handleFormCarry = useCallback(
+    (identity: CardFormIdentity, form: CardForm) => {
+      const current = formDraftRef.current;
+      if (!current) return;
+      try {
+        const carried = carryCardFormDraft({
+          storage: getFormStorage(),
+          draft: current,
+          identity,
+          form,
+        });
+        saveFormDraft(carried);
+        setFormError(null);
+      } catch (error) {
+        setFormError(
+          error instanceof Error ? error.message : 'Could not carry these answers forward.',
+        );
+      }
+    },
+    [getFormStorage, saveFormDraft],
+  );
 
   const closeModelPicker = () => {
     // You reach the picker by typing "/model" over whatever was in the
@@ -806,28 +1554,164 @@ export function ChatClient({
     });
   };
 
+  const cancelOrdinaryOperation = (captured: ChatOperationTurnFence) => {
+    if (operationCancellationRef.current?.phase === 'checking') return;
+    const current = activeOrdinaryOperationRef.current;
+    if (
+      !isCurrentChatOperation(current, captured) ||
+      mountedGenerationRef.current !== captured.scopeGeneration ||
+      currentConversationIdRef.current !== captured.conversationId ||
+      conversationId !== captured.conversationId ||
+      pendingOperationIdRef.current?.id !== captured.clientOperationId
+    )
+      return;
+    setAsyncActionError(null);
+    setOperationCancellationState({ turn: captured, phase: 'checking' });
+    startCancelTransition(async () => {
+      const outcome = await requestChatOperationCancellation({
+        conversationId: captured.conversationId,
+        clientOperationId: captured.clientOperationId,
+      });
+      if (
+        mountedGenerationRef.current !== captured.scopeGeneration ||
+        currentConversationIdRef.current !== captured.conversationId ||
+        conversationId !== captured.conversationId ||
+        !isCurrentChatOperation(activeOrdinaryOperationRef.current, captured)
+      )
+        return;
+      if (outcome.kind === 'unknown') {
+        setOperationCancellationState({ turn: captured, phase: 'unknown' });
+        setAsyncActionError(
+          'Stop is unconfirmed. Retry Stop to check the same message; do not send it again yet.',
+        );
+        return;
+      }
+      setOperationCancellationState(null);
+      setAsyncActionError(null);
+      pendingOperationIdRef.current = null;
+      if (outcome.outcome === 'cancelled_before_admission') {
+        activeOrdinaryOperationRef.current = null;
+        setAsyncTurn(null);
+        setActivity([]);
+        setAsyncNote({
+          text: 'This message was stopped before it was admitted. No task started.',
+          retryable: false,
+        });
+        setMessagesForReceiptRef.current?.((rows) =>
+          rows.filter(
+            (message) => !(message.role === 'user' && message.id === captured.clientOperationId),
+          ),
+        );
+        return;
+      }
+      if (outcome.outcome === 'cancelled' || outcome.outcome === 'already_cancelled') {
+        activeOrdinaryOperationRef.current = { ...captured, taskId: outcome.taskId };
+        setAsyncTurn({ taskId: outcome.taskId, cursor: cursorRef.current ?? '' });
+        setAsyncNote({
+          text: 'Cancellation was recorded. A dispatched effect may still be in progress.',
+          retryable: false,
+        });
+        return;
+      }
+      activeOrdinaryOperationRef.current = null;
+      setAsyncTurn(null);
+      setActivity([]);
+      setAsyncNote({ text: 'This message had already finished.', retryable: false });
+    });
+  };
+
+  const stopCurrentTurn = () => {
+    const operationId = pendingOperationIdRef.current?.id;
+    const formOperation = formDraftRef.current?.operation;
+    const isFormOperation = !!formOperation && formOperation.submission.operationId === operationId;
+    const streaming = status === 'submitted' || status === 'streaming';
+    if (isFormOperation && !formOperation.taskId) {
+      // This operation has no ordinary cancellation identity. Keep its frozen
+      // form receipt and request body intact until the server answers.
+      return;
+    }
+    if (streaming) stop();
+    if (
+      isFormOperation &&
+      formOperation.taskId &&
+      asyncTurnRef.current?.taskId === formOperation.taskId
+    ) {
+      cancelAsyncTurn();
+      return;
+    }
+
+    const ordinary = activeOrdinaryOperationRef.current;
+    if (
+      ordinary &&
+      ordinary.conversationId === conversationId &&
+      ordinary.clientOperationId === operationId &&
+      ordinary.scopeGeneration === mountedGenerationRef.current
+    ) {
+      cancelOrdinaryOperation(ordinary);
+      return;
+    }
+    if (asyncTurnRef.current) cancelAsyncTurn();
+  };
+
   const cancelAsyncTurn = () => {
     if (!asyncTurn || isCancellingAsync) return;
     const taskId = asyncTurn.taskId;
+    const capturedConversationId = conversationId;
+    const capturedConversationRef = currentConversationIdRef;
+    const capturedScopeGeneration = mountedGenerationRef.current;
+    const currentOrdinary = activeOrdinaryOperationRef.current;
+    const capturedOrdinary = currentOrdinary?.taskId === taskId ? currentOrdinary : null;
+    const isCurrentCancellation = () =>
+      mountedGenerationRef.current === capturedScopeGeneration &&
+      capturedConversationRef.current === capturedConversationId &&
+      conversationId === capturedConversationId &&
+      asyncTurnRef.current?.taskId === taskId &&
+      (!capturedOrdinary ||
+        (isCurrentChatOperation(activeOrdinaryOperationRef.current, capturedOrdinary) &&
+          activeOrdinaryOperationRef.current?.taskId === taskId));
     setAsyncActionError(null);
     startCancelTransition(async () => {
       try {
-        await cancelTask(taskId);
-        setAsyncNote({ text: 'Stopped by you.', retryable: true });
+        const result = await cancelChatTask(taskId);
+        if (!isCurrentCancellation()) return;
+        if (result.outcome === 'not_found' || result.outcome === 'no_longer_retriable') {
+          setAsyncActionError(
+            'This task is no longer available. Refresh Activity to see its current state.',
+          );
+          return;
+        }
+        setAsyncNote({
+          text:
+            result.outcome === 'cancelled'
+              ? 'Stop requested. The task will stop at its next checkpoint.'
+              : result.outcome === 'already_cancelled'
+                ? 'This task was already stopped.'
+                : 'This task had already finished.',
+          retryable: result.outcome === 'cancelled' || result.outcome === 'already_cancelled',
+        });
+        if (
+          formDraftRef.current?.operation?.taskId === taskId ||
+          formDraftRef.current?.blockedByTask?.taskId === taskId
+        ) {
+          pokePollRef.current?.();
+          return;
+        }
         setAsyncTurn(null);
         setActivity([]);
       } catch {
+        if (!isCurrentCancellation()) return;
         setAsyncActionError('Could not stop this task. Try again or open Activity.');
       }
     });
   };
 
   const errorInfo: ChatErrorInfo | null = error ? chatErrorInfo(error) : null;
+  const visibleFormDraft = formDraftScope === formSessionScope ? formDraft : null;
   /** A failed turn can always be resent as-is; the draft is the escape hatch. */
   const retryLastTurn = () => {
     if (lastSubmittedText.trim() === '') return;
     clearError();
-    sendTurn(lastSubmittedText, false);
+    sendTurn(lastSubmittedText, false, pendingOperationIdRef.current ?? undefined);
   };
 
   return (
@@ -997,6 +1881,14 @@ export function ChatClient({
                 initialMessageIds={initialMessageIds}
                 onSend={handleSend}
                 onRunForReal={handleRunForReal}
+                conversationId={conversationId}
+                formDraft={visibleFormDraft}
+                formSessionScope={formSessionScope}
+                formError={formError}
+                onChangeForm={handleFormChange}
+                onReviewForm={handleFormReview}
+                onCarryForm={handleFormCarry}
+                onDiscardForm={handleFormDiscard}
               />
               {/* Nothing transient is written here any more.
                *
@@ -1010,7 +1902,9 @@ export function ChatClient({
                * is left in the log is what stays true after the work ends.
                *
                * An error is one of those things, so it still lands here. */}
-              {asyncTurn && asyncActionError ? (
+              {(asyncTurn && asyncActionError) ||
+              (operationCancellation?.turn.conversationId === conversationId &&
+                operationCancellation.phase === 'unknown') ? (
                 <p
                   role="alert"
                   className="chat-action-error mt-6 rounded-xl border px-4 py-3 text-sm leading-6"
@@ -1284,7 +2178,32 @@ export function ChatClient({
                     : undefined
               }
               value={input}
-              onChange={(event) => setInput(event.target.value)}
+              disabled={Boolean(
+                formDraft?.operation &&
+                  !formDraft.operation.taskId &&
+                  !volatileFormConflictRef.current,
+              )}
+              onChange={(event) => {
+                const nextText = event.target.value;
+                setInput(nextText);
+                const current = formDraftRef.current;
+                if (
+                  current?.reviewed &&
+                  !current.blockedByTask &&
+                  !current.releasedBlockedTask &&
+                  (!current.operation || current.operation.taskId !== undefined)
+                ) {
+                  try {
+                    const updated = { ...current, composerText: nextText };
+                    saveCardFormDraft(getFormStorage(), updated);
+                    saveFormDraft(updated);
+                  } catch {
+                    setFormError(
+                      'This browser could not save the message draft. Keep this chat open.',
+                    );
+                  }
+                }
+              }}
               onKeyDown={(event) => {
                 // While the /model palette is open the arrows drive it, Enter picks
                 // the highlighted model, and Escape closes it — so none of those
@@ -1353,17 +2272,62 @@ export function ChatClient({
                 the card reads as a single well with the controls resting in it,
                 and the round send button agrees with the corners instead of
                 fighting them. */}
-            {status === 'submitted' || status === 'streaming' ? (
+            {operationCancellation?.turn.conversationId === conversationId ? (
               <button
                 type="button"
-                onClick={() => stop()}
-                title="Stop generating"
-                className={`inline-flex size-10 shrink-0 items-center justify-center rounded-full border border-white/25 bg-white/15 text-stage-strong motion-safe:animate-[pop-in_120ms_ease-out] motion-safe:transition-colors hover:bg-white/25 ${focusRing}`}
+                disabled={operationCancellation.phase === 'checking'}
+                onClick={() => cancelOrdinaryOperation(operationCancellation.turn)}
+                title={operationCancellation.phase === 'checking' ? 'Checking stop' : 'Retry stop'}
+                aria-label={
+                  operationCancellation.phase === 'checking' ? 'Checking stop' : 'Retry stop'
+                }
+                className={`inline-flex size-10 shrink-0 items-center justify-center rounded-full border border-white/25 bg-white/15 text-stage-strong motion-safe:transition-colors hover:bg-white/25 disabled:cursor-not-allowed ${focusRing}`}
+              >
+                {operationCancellation.phase === 'checking' ? (
+                  <Loader2 className="size-4 motion-safe:animate-spin" aria-hidden="true" />
+                ) : (
+                  <Square className="size-3 fill-current" aria-hidden="true" />
+                )}
+              </button>
+            ) : asyncTurn &&
+              asyncTurn.taskId === observedFormTaskId &&
+              status !== 'submitted' &&
+              status !== 'streaming' ? (
+              <button
+                type="button"
+                disabled={isCancellingAsync}
+                onClick={cancelAsyncTurn}
+                title="Stop this task"
+                aria-label={isCancellingAsync ? 'Stopping the task' : 'Stop this task'}
+                className={`inline-flex size-10 shrink-0 items-center justify-center rounded-full border border-white/25 bg-white/15 text-stage-strong motion-safe:transition-colors hover:bg-white/25 disabled:cursor-not-allowed ${focusRing}`}
               >
                 <Square className="size-3 fill-current" aria-hidden="true" />
-                <span className="sr-only">Stop</span>
               </button>
-            ) : asyncTurn ? (
+            ) : null}
+            {(status === 'submitted' || status === 'streaming') &&
+            operationCancellation?.turn.conversationId !== conversationId ? (
+              <button
+                type="button"
+                disabled={formAdmissionAwaitingReceipt}
+                onClick={stopCurrentTurn}
+                title={
+                  formAdmissionAwaitingReceipt
+                    ? 'Waiting for form receipt'
+                    : 'Stop generating and request cancellation'
+                }
+                aria-label={formAdmissionAwaitingReceipt ? 'Waiting for form receipt' : 'Stop'}
+                className={`inline-flex size-10 shrink-0 items-center justify-center rounded-full border border-white/25 bg-white/15 text-stage-strong motion-safe:animate-[pop-in_120ms_ease-out] motion-safe:transition-colors hover:bg-white/25 disabled:cursor-wait disabled:opacity-70 ${focusRing}`}
+              >
+                {formAdmissionAwaitingReceipt ? (
+                  <Loader2 className="size-4 motion-safe:animate-spin" aria-hidden="true" />
+                ) : (
+                  <>
+                    <Square className="size-3 fill-current" aria-hidden="true" />
+                    <span className="sr-only">Stop</span>
+                  </>
+                )}
+              </button>
+            ) : asyncTurn && asyncTurn.taskId !== observedFormTaskId ? (
               // The spinner IS the stop control. It used to be an inert badge
               // saying "busy" while the button that could actually stop the
               // work sat further up the log — so the one thing on screen that
@@ -1372,7 +2336,7 @@ export function ChatClient({
               <button
                 type="button"
                 disabled={isCancellingAsync}
-                onClick={cancelAsyncTurn}
+                onClick={stopCurrentTurn}
                 title="Stop this task"
                 aria-label={isCancellingAsync ? 'Stopping the task' : 'Stop this task'}
                 className={`group/stop inline-flex size-10 shrink-0 items-center justify-center rounded-full border border-white/25 bg-white/15 text-stage-strong motion-safe:transition-colors hover:bg-white/25 disabled:cursor-not-allowed ${focusRing}`}

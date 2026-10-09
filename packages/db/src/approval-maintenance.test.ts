@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { eq, inArray } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { expect, it } from 'vitest';
-import { createPostgresApprovalRepository } from './approval-repository.js';
+import { createPostgresApprovalRepository, resolveApproval } from './approval-repository.js';
 import { createDb, type Db } from './client.js';
 import { agents, approvals, maintenanceCursors, tasks, toolCalls } from './schema.js';
 
@@ -11,6 +11,20 @@ function testDatabaseUrl(): string {
   if (!DATABASE_URL || !new URL(DATABASE_URL).pathname.endsWith('_test'))
     throw new Error('Requires isolated _test database');
   return DATABASE_URL;
+}
+
+async function waitBounded<T>(promise: Promise<T>, message: string, timeoutMs = 5_000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function createTask(
@@ -100,6 +114,173 @@ async function fixture() {
     },
   };
 }
+
+it('does not accept an answer after a pending approval expires', async () => {
+  const f = await fixture();
+  try {
+    const taskId = await f.task({ pendingApprovals: [] });
+    const approvalId = await f.approval(taskId, new Date(Date.now() - 1_000));
+    await f.db
+      .update(tasks)
+      .set({ state: { pendingApprovals: [{ approvalId }] } })
+      .where(eq(tasks.id, taskId));
+
+    const result = await f.repository.resolve({
+      approvalId,
+      decision: 'approved',
+      via: 'web',
+      deferNotification: true,
+    });
+    expect(result.ok).toBe(false);
+    const [approval] = await f.db.select().from(approvals).where(eq(approvals.id, approvalId));
+    const [task] = await f.db.select().from(tasks).where(eq(tasks.id, taskId));
+    expect(approval?.status).toBe('pending');
+    expect(task).toMatchObject({ status: 'waiting_approval', queueGeneration: 0 });
+  } finally {
+    await f.dispose();
+  }
+});
+
+it('resolves only strictly before the answer deadline without relying on the expiry sweep', async () => {
+  const f = await fixture();
+  try {
+    const cases = [
+      { label: 'before', deadline: sql`clock_timestamp() + interval '1 second'`, expected: true },
+      { label: 'at-write-time', deadline: sql`clock_timestamp()`, expected: false },
+      { label: 'after', deadline: sql`clock_timestamp() - interval '1 second'`, expected: false },
+    ];
+    for (const scenario of cases) {
+      const taskId = await f.task({ pendingApprovals: [] });
+      const approvalId = await f.approval(taskId, new Date(Date.now() + 60_000));
+      await f.db
+        .update(tasks)
+        .set({ state: { pendingApprovals: [{ approvalId }] } })
+        .where(eq(tasks.id, taskId));
+
+      // Use server clock samples, not transaction-start now(). The at-write-time
+      // sample has elapsed by the later decision-time check, which is fail-closed.
+      const result = await f.db.transaction(async (tx) => {
+        await tx
+          .update(approvals)
+          .set({ expiresAt: scenario.deadline })
+          .where(eq(approvals.id, approvalId));
+        return resolveApproval(tx as unknown as Db, {
+          approvalId,
+          decision: 'approved',
+          via: 'web',
+          deferNotification: true,
+        });
+      });
+      expect(result.ok, scenario.label).toBe(scenario.expected);
+      const [approval] = await f.db.select().from(approvals).where(eq(approvals.id, approvalId));
+      const [task] = await f.db.select().from(tasks).where(eq(tasks.id, taskId));
+      expect(approval?.status, scenario.label).toBe(scenario.expected ? 'approved' : 'pending');
+      expect(task?.status, scenario.label).toBe(scenario.expected ? 'pending' : 'waiting_approval');
+      expect(task?.queueGeneration, scenario.label).toBe(scenario.expected ? 1 : 0);
+    }
+  } finally {
+    await f.dispose();
+  }
+});
+
+it('rejects an answer whose resolver transaction began before expiry but waited on the task lock', async () => {
+  const f = await fixture();
+  let taskId = '';
+  let approvalId = '';
+  let deadline = new Date(0);
+  let releaseTask!: () => void;
+  let signalTaskLock!: () => void;
+  let signalResolverStarted!: () => void;
+  const holdTask = new Promise<void>((resolve) => {
+    releaseTask = resolve;
+  });
+  const taskLocked = new Promise<void>((resolve) => {
+    signalTaskLock = resolve;
+  });
+  const resolverStarted = new Promise<void>((resolve) => {
+    signalResolverStarted = resolve;
+  });
+  let holder: Promise<void> | undefined;
+  let resolving: Promise<Awaited<ReturnType<typeof resolveApproval>>> | undefined;
+  try {
+    taskId = await f.task({ pendingApprovals: [] });
+    approvalId = await f.approval(taskId, new Date(Date.now() + 60_000));
+    await f.db
+      .update(tasks)
+      .set({ state: { pendingApprovals: [{ approvalId }] } })
+      .where(eq(tasks.id, taskId));
+    deadline = new Date(Date.now() + 5_000);
+    await f.db.update(approvals).set({ expiresAt: deadline }).where(eq(approvals.id, approvalId));
+
+    holder = f.db.transaction(async (tx) => {
+      await tx.select().from(tasks).where(eq(tasks.id, taskId)).for('update');
+      signalTaskLock();
+      await holdTask;
+    });
+    await waitBounded(taskLocked, 'task lock was not acquired in time');
+
+    const resolverPromise = f.db.transaction(async (tx) => {
+      await tx.execute(sql`set local lock_timeout = '8s'`);
+      await tx.execute(sql`set local statement_timeout = '10s'`);
+      await tx.execute(sql`set local application_name = 'pg02-approval-deadline-lock'`);
+      const started = await tx.execute<{ started_before_deadline: boolean }>(
+        sql`select transaction_timestamp() < ${deadline.toISOString()}::timestamptz as started_before_deadline`,
+      );
+      expect(started[0]?.started_before_deadline).toBe(true);
+      signalResolverStarted();
+      return resolveApproval(tx as unknown as Db, {
+        approvalId,
+        decision: 'approved',
+        via: 'web',
+        deferNotification: true,
+      });
+    });
+    resolving = resolverPromise;
+    await waitBounded(
+      Promise.race([
+        resolverStarted,
+        resolverPromise.then(() => {
+          throw new Error('resolver completed before it could wait on the task lock');
+        }),
+      ]),
+      'resolver did not start in time',
+    );
+
+    let queued = false;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const rows = await f.db.execute<{ waiting: boolean }>(sql`
+        select exists (
+          select 1 from pg_stat_activity
+          where datname = current_database()
+            and application_name = 'pg02-approval-deadline-lock'
+            and wait_event_type = 'Lock'
+            and query like '%"tasks"%'
+        ) as waiting
+      `);
+      if (rows[0]?.waiting) {
+        queued = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(queued).toBe(true);
+    const remainingMs = deadline.getTime() - Date.now();
+    if (remainingMs > 0) await new Promise((resolve) => setTimeout(resolve, remainingMs + 25));
+
+    releaseTask();
+    await holder;
+    expect((await resolving).ok).toBe(false);
+    const [approval] = await f.db.select().from(approvals).where(eq(approvals.id, approvalId));
+    const [task] = await f.db.select().from(tasks).where(eq(tasks.id, taskId));
+    expect(approval?.status).toBe('pending');
+    expect(task).toMatchObject({ status: 'waiting_approval', queueGeneration: 0 });
+  } finally {
+    releaseTask?.();
+    if (holder) await holder.catch(() => {});
+    if (resolving) await resolving.catch(() => {});
+    await f.dispose();
+  }
+}, 15_000);
 
 it('expires multiple approvals for one task and wakes it once', async () => {
   const f = await fixture();

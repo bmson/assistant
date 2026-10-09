@@ -1,6 +1,8 @@
+import { getAgent } from '@assistant/core/chat';
 import { registerWatchTools } from '@assistant/tools/watches';
 import { defineModule } from '../platform.js';
 import { matchEmailWatches, reapExpiredWatches } from './email-watches.js';
+import { drainWatchFireEffects } from './fire.js';
 import { watchesMeta } from './meta.js';
 import { pollDueWebWatches } from './web-watches.js';
 
@@ -27,7 +29,55 @@ export const watchesModule = defineModule({
             );
           },
         ],
+        durableEmailObservers: [
+          {
+            identity: { key: 'watches.email-match', version: 1, workClass: 'idempotent_db' },
+            prepare: async (_services, source) =>
+              source.authenticated ? { kind: 'prepared', result: {} } : { kind: 'no_op' },
+            apply: async (services, source) => {
+              await matchEmailWatches(
+                {
+                  watches: services.persistence.watches,
+                  messages: services.persistence.messages,
+                  tasks: services.persistence.tasks,
+                  notifyOwner: services.ownerNotifier.notifyOwner,
+                },
+                {
+                  agentId: source.agentId,
+                  messageId: source.messageId ?? source.sourceId.replace(/^gmail:/, ''),
+                  from: source.from,
+                  subject: source.subject,
+                  body: source.body,
+                  authenticated: source.authenticated,
+                },
+              );
+              return { kind: 'complete' };
+            },
+          },
+        ],
         sweepSteps: [
+          {
+            name: 'drainWatchFireEffects',
+            reportKey: 'watchFireEffectsDrained',
+            portable: true,
+            run: async (services) => {
+              const agentId =
+                services.config.PERSISTENCE_DRIVER === 'firestore'
+                  ? services.config.FIRESTORE_AGENT_ID
+                  : (await getAgent(services.db)).id;
+              if (!agentId) return 0;
+              const result = await drainWatchFireEffects(
+                {
+                  watches: services.persistence.watches,
+                  messages: services.persistence.messages,
+                  tasks: services.persistence.tasks,
+                  notifyOwner: services.ownerNotifier.notifyOwner,
+                },
+                agentId,
+              );
+              return result.delivered + result.failed + result.unknown;
+            },
+          },
           {
             name: 'reapExpiredWatches',
             // Preserves the /internal/sweep response key from the hardcoded era.
@@ -45,6 +95,7 @@ export const watchesModule = defineModule({
               pollDueWebWatches({
                 watches: services.persistence.watches,
                 messages: services.persistence.messages,
+                tasks: services.persistence.tasks,
                 notifyOwner: services.ownerNotifier.notifyOwner,
               }),
           },

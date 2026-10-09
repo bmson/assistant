@@ -1,14 +1,21 @@
-import type {
-  KnowledgeGraphProjectionEntity,
-  KnowledgeGraphSyncClaim,
-  KnowledgeGraphSyncRepository,
-  KnowledgeGraphSyncSource,
+import {
+  boundGraphRelationToSource,
+  canonicalizeKnowledgeAssertionDirection,
+  type KnowledgeGraphProjectionEntity,
+  type KnowledgeGraphSyncClaim,
+  type KnowledgeGraphSyncRepository,
+  type KnowledgeGraphSyncSource,
+  knowledgeAssertionEvidenceId,
+  knowledgeAssertionId,
+  knowledgeAssertionSemanticKey,
 } from '@assistant/persistence';
 import { and, eq, gt, isNull, lt, lte, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import {
   agents,
   contacts,
+  knowledgeGraphAssertionEvidence,
+  knowledgeGraphAssertions,
   knowledgeGraphEntities,
   knowledgeGraphEntityAliases,
   knowledgeGraphRelations,
@@ -73,7 +80,11 @@ function betterLabel(existing: string, incoming: string): string {
   return incoming.length > existing.length ? incoming : existing;
 }
 
-async function liveSource(tx: Db, source: KnowledgeGraphSyncSource, now: Date): Promise<boolean> {
+async function liveSource(
+  tx: Db,
+  source: KnowledgeGraphSyncSource,
+  now: Date,
+): Promise<{ validFrom: Date | null; validUntil: Date | null } | null> {
   const [memory] = await tx
     .select({
       id: memories.id,
@@ -84,6 +95,8 @@ async function liveSource(tx: Db, source: KnowledgeGraphSyncSource, now: Date): 
       category: memories.category,
       quarantined: memories.quarantined,
       expiresAt: memories.expiresAt,
+      validFrom: memories.validFrom,
+      validUntil: memories.validUntil,
     })
     .from(memories)
     .where(eq(memories.id, source.id))
@@ -95,17 +108,21 @@ async function liveSource(tx: Db, source: KnowledgeGraphSyncSource, now: Date): 
     memory.content !== source.content ||
     memory.contentHash !== source.contentHash ||
     memory.subjectContactId !== source.subjectContactId ||
+    (source.validFrom !== undefined &&
+      (memory.validFrom?.getTime() ?? null) !== (source.validFrom?.getTime() ?? null)) ||
+    (source.validUntil !== undefined &&
+      (memory.validUntil?.getTime() ?? null) !== (source.validUntil?.getTime() ?? null)) ||
     memory.category !== 'knowledge' ||
     memory.quarantined ||
     (memory.expiresAt && memory.expiresAt <= now)
   )
-    return false;
+    return null;
   const [tombstone] = await tx
     .select({ id: memoryTombstones.id })
     .from(memoryTombstones)
     .where(eq(memoryTombstones.contentHash, source.contentHash))
     .limit(1);
-  return !tombstone;
+  return tombstone ? null : memory;
 }
 
 async function resolveEntity(
@@ -187,8 +204,12 @@ export function createPostgresKnowledgeGraphSyncRepository(db: Db): KnowledgeGra
         content: memories.content,
         contentHash: memories.contentHash,
         confidence: memories.confidence,
+        originTrust: memories.originTrust,
+        ownerConfirmed: memories.ownerConfirmed,
         subjectContactId: memories.subjectContactId,
         createdAt: memories.createdAt,
+        validFrom: memories.validFrom,
+        validUntil: memories.validUntil,
       })
       .from(memories)
       .leftJoin(knowledgeGraphSources, eq(knowledgeGraphSources.memoryId, memories.id))
@@ -311,7 +332,8 @@ export function createPostgresKnowledgeGraphSyncRepository(db: Db): KnowledgeGra
     replaceProjection(input) {
       return db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
-        if (!(await liveSource(txDb, input.source, input.now))) return null;
+        const live = await liveSource(txDb, input.source, input.now);
+        if (!live) return null;
         const [owned] = await txDb
           .select({ memoryId: knowledgeGraphSources.memoryId })
           .from(knowledgeGraphSources)
@@ -321,18 +343,133 @@ export function createPostgresKnowledgeGraphSyncRepository(db: Db): KnowledgeGra
         if (!owned) return null;
         const fingerprints: string[] = [];
         const touched = new Set<string>();
-        for (const relation of input.relations) {
+        const priorRows = await txDb
+          .select({
+            fingerprint: knowledgeGraphRelations.sourceFingerprint,
+            assertionId: knowledgeGraphRelations.assertionId,
+            reviewStatus: knowledgeGraphRelations.reviewStatus,
+          })
+          .from(knowledgeGraphRelations)
+          .where(eq(knowledgeGraphRelations.sourceMemoryId, input.source.id));
+        const priorAssertionByFingerprint = new Map(
+          priorRows.map((row) => [row.fingerprint, row.assertionId]),
+        );
+        const priorAssertionIds = new Set(
+          priorRows.flatMap((row) => (row.assertionId ? [row.assertionId] : [])),
+        );
+        for (const proposed of input.relations) {
+          const relation = boundGraphRelationToSource(proposed, {
+            ...live,
+            content: input.source.content,
+          });
+          if (!relation) continue;
           const subjectEntityId = await resolveEntity(txDb, input.source.agentId, relation.subject);
           const objectEntityId = await resolveEntity(txDb, input.source.agentId, relation.object);
           fingerprints.push(relation.sourceFingerprint);
           touched.add(relation.subject.canonicalKey);
           touched.add(relation.object.canonicalKey);
+          const meaning = canonicalizeKnowledgeAssertionDirection({
+            subjectEntityId,
+            predicate: relation.predicate,
+            objectEntityId,
+            assertion: relation.assertion,
+            validFrom: relation.validFrom,
+            validUntil: relation.validUntil,
+          });
+          const semanticKey = knowledgeAssertionSemanticKey(input.source.agentId, meaning);
+          const assertionId = knowledgeAssertionId(input.source.agentId, semanticKey);
+          const priorAssertionId = priorAssertionByFingerprint.get(relation.sourceFingerprint);
+          if (priorAssertionId && priorAssertionId !== assertionId) {
+            await txDb
+              .delete(knowledgeGraphAssertionEvidence)
+              .where(
+                and(
+                  eq(knowledgeGraphAssertionEvidence.agentId, input.source.agentId),
+                  eq(knowledgeGraphAssertionEvidence.sourceMemoryId, input.source.id),
+                  eq(knowledgeGraphAssertionEvidence.sourceFingerprint, relation.sourceFingerprint),
+                ),
+              );
+            priorAssertionIds.add(priorAssertionId);
+          }
+          const [assertionRow] = await txDb
+            .insert(knowledgeGraphAssertions)
+            .values({
+              id: assertionId,
+              agentId: input.source.agentId,
+              semanticKey,
+              subjectEntityId: meaning.subjectEntityId,
+              predicate: meaning.predicate,
+              objectEntityId: meaning.objectEntityId,
+              assertion: meaning.assertion,
+              qualifiers: 'qualifiers' in meaning ? (meaning.qualifiers ?? {}) : {},
+              validFrom: meaning.validFrom,
+              validUntil: meaning.validUntil,
+              lifecycle: 'current',
+              reviewStatus:
+                priorRows.find((row) => row.fingerprint === relation.sourceFingerprint)
+                  ?.reviewStatus ?? 'unreviewed',
+              updatedAt: input.now,
+            } as typeof knowledgeGraphAssertions.$inferInsert)
+            .onConflictDoUpdate({
+              target: knowledgeGraphAssertions.id,
+              set: { lifecycle: 'current', updatedAt: input.now },
+            })
+            .returning({ reviewStatus: knowledgeGraphAssertions.reviewStatus });
+          await txDb
+            .insert(knowledgeGraphAssertionEvidence)
+            .values({
+              id: knowledgeAssertionEvidenceId(
+                input.source.agentId,
+                assertionId,
+                input.source.id,
+                relation.sourceFingerprint,
+              ),
+              agentId: input.source.agentId,
+              assertionId,
+              sourceMemoryId: input.source.id,
+              sourceFingerprint: relation.sourceFingerprint,
+              sourceContentHash: input.source.contentHash,
+              evidenceQuote: relation.evidenceQuote,
+              sourceAuthor:
+                input.source.ownerConfirmed && input.source.originTrust === 'owner'
+                  ? 'owner'
+                  : input.source.originTrust === 'other'
+                    ? 'other'
+                    : 'unknown',
+              sourceTrust: input.source.originTrust ?? 'unknown',
+              independent: false,
+              spanStart: relation.evidenceSpanStart ?? null,
+              spanEnd: relation.evidenceSpanEnd ?? null,
+              extractionVersion: input.extractionVersion,
+              observedAt: input.now,
+            })
+            .onConflictDoUpdate({
+              target: knowledgeGraphAssertionEvidence.id,
+              set: {
+                sourceContentHash: input.source.contentHash,
+                evidenceQuote: relation.evidenceQuote,
+                sourceTrust: 'unknown',
+                extractionVersion: input.extractionVersion,
+                evidenceRevision: sql`${knowledgeGraphAssertionEvidence.evidenceRevision} + 1`,
+                observedAt: input.now,
+              },
+            });
+          await txDb
+            .update(knowledgeGraphAssertions)
+            .set({
+              evidenceRevision: sql`${knowledgeGraphAssertions.evidenceRevision} + 1`,
+              updatedAt: input.now,
+            })
+            .where(eq(knowledgeGraphAssertions.id, assertionId));
           await txDb
             .insert(knowledgeGraphRelations)
             .values({
               agentId: input.source.agentId,
               subjectEntityId,
               predicate: relation.predicate,
+              assertion: relation.assertion,
+              assertionId,
+              reviewStatus: assertionRow?.reviewStatus ?? 'unreviewed',
               objectEntityId,
               sourceMemoryId: input.source.id,
               evidenceQuote: relation.evidenceQuote,
@@ -351,6 +488,9 @@ export function createPostgresKnowledgeGraphSyncRepository(db: Db): KnowledgeGra
                 agentId: input.source.agentId,
                 subjectEntityId,
                 predicate: relation.predicate,
+                assertion: relation.assertion,
+                assertionId,
+                reviewStatus: assertionRow?.reviewStatus ?? 'unreviewed',
                 objectEntityId,
                 evidenceQuote: relation.evidenceQuote,
                 ordinal: relation.ordinal,
@@ -370,9 +510,46 @@ export function createPostgresKnowledgeGraphSyncRepository(db: Db): KnowledgeGra
                 : undefined,
             ),
           );
+        await txDb
+          .delete(knowledgeGraphAssertionEvidence)
+          .where(
+            and(
+              eq(knowledgeGraphAssertionEvidence.agentId, input.source.agentId),
+              eq(knowledgeGraphAssertionEvidence.sourceMemoryId, input.source.id),
+              fingerprints.length > 0
+                ? notInArray(knowledgeGraphAssertionEvidence.sourceFingerprint, fingerprints)
+                : undefined,
+            ),
+          );
+        for (const priorAssertionId of priorAssertionIds) {
+          const [evidence] = await txDb
+            .select({ id: knowledgeGraphAssertionEvidence.id })
+            .from(knowledgeGraphAssertionEvidence)
+            .where(eq(knowledgeGraphAssertionEvidence.assertionId, priorAssertionId))
+            .limit(1);
+          if (!evidence)
+            await txDb
+              .update(knowledgeGraphAssertions)
+              .set({
+                lifecycle: 'retracted',
+                semanticRevision: sql`${knowledgeGraphAssertions.semanticRevision} + 1`,
+                updatedAt: input.now,
+              })
+              .where(
+                and(
+                  eq(knowledgeGraphAssertions.id, priorAssertionId),
+                  eq(knowledgeGraphAssertions.ownerAuthored, false),
+                ),
+              );
+        }
         const [finished] = await txDb
           .update(knowledgeGraphSources)
-          .set({ status: 'ready', lastError: null, nextRetryAt: null, updatedAt: input.now })
+          .set({
+            status: 'ready',
+            lastError: input.lastError ?? null,
+            nextRetryAt: null,
+            updatedAt: input.now,
+          })
           .where(activeClaim(input.source, input.claim, input.extractionVersion))
           .returning({ memoryId: knowledgeGraphSources.memoryId });
         if (!finished) throw new Error('Knowledge graph source claim lost');

@@ -4,12 +4,19 @@ import type {
   OwnerContextRepository,
   OwnerLocationPing,
 } from '@assistant/persistence';
+import {
+  commitmentIsActive,
+  isOwnerContextCommitmentSourceEligible,
+  isOwnerContextFixtureConversationMetadata,
+  isOwnerContextFixtureMessageSource,
+} from '@assistant/persistence';
 import type { QueryDocumentSnapshot } from '@google-cloud/firestore';
 import { privacyErasureIsActive } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
-const SNOOZED_PAGE_SIZE = 100;
-const MAX_SNOOZED_SCAN = 10_000;
+const COMMITMENT_PAGE_SIZE = 100;
+const MAX_COMMITMENT_SCAN = 10_000;
+const PROVENANCE_READ_BATCH_SIZE = 100;
 
 function boundedCommitmentLimit(limit: number): number {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 60) {
@@ -119,24 +126,162 @@ export class FirestoreOwnerContextRepository implements OwnerContextRepository {
     const limit = boundedCommitmentLimit(requestedLimit);
     const base = this.store.collection('commitments').where('agentId', '==', agentId);
     const [open, snoozed] = await Promise.all([
-      base.where('status', '==', 'open').orderBy('updatedAt', 'desc').limit(limit).get(),
+      this.listOpenStatusCommitments(base, agentId, now, limit),
       this.listElapsedSnoozes(base, agentId, now, limit),
     ]);
-    const rows: OwnerCommitment[] = [];
-    for (const doc of [...open.docs, ...snoozed]) {
-      const row = decodeRecord<OwnerCommitment>(doc.data());
-      if (
-        row.agentId !== agentId ||
-        !decodedIdentityMatches(doc, row) ||
-        !(row.updatedAt instanceof Date) ||
-        (row.status !== 'open' &&
-          !(row.status === 'snoozed' && row.snoozedUntil instanceof Date && row.snoozedUntil < now))
-      ) {
-        continue;
+    return [...open, ...snoozed]
+      .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
+      .slice(0, limit);
+  }
+
+  private async listOpenStatusCommitments(
+    base: FirebaseFirestore.Query,
+    agentId: string,
+    now: Date,
+    limit: number,
+  ): Promise<OwnerCommitment[]> {
+    const eligible: OwnerCommitment[] = [];
+    let cursor: QueryDocumentSnapshot | undefined;
+    let scanned = 0;
+    while (eligible.length < limit && scanned < MAX_COMMITMENT_SCAN) {
+      const pageLimit = Math.min(COMMITMENT_PAGE_SIZE, MAX_COMMITMENT_SCAN - scanned);
+      let query = base
+        .where('status', 'in', ['open', 'stale'])
+        .orderBy('updatedAt', 'desc')
+        .limit(pageLimit);
+      if (cursor) query = query.startAfter(cursor);
+      const page = await query.get();
+      if (page.empty) break;
+      scanned += page.size;
+      const candidates: OwnerCommitment[] = [];
+      for (const doc of page.docs) {
+        const row = decodeRecord<OwnerCommitment>(doc.data());
+        if (
+          row.agentId === agentId &&
+          decodedIdentityMatches(doc, row) &&
+          row.updatedAt instanceof Date &&
+          commitmentIsActive(row, now)
+        ) {
+          candidates.push(row);
+        }
       }
-      rows.push(row);
+      eligible.push(...(await this.filterEligibleCommitmentProvenance(candidates, agentId)));
+      cursor = page.docs.at(-1);
+      if (page.size < pageLimit) break;
     }
-    return rows.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime()).slice(0, limit);
+    if (eligible.length < limit && scanned >= MAX_COMMITMENT_SCAN && cursor) {
+      const overflow = await base
+        .where('status', 'in', ['open', 'stale'])
+        .orderBy('updatedAt', 'desc')
+        .startAfter(cursor)
+        .limit(1)
+        .get();
+      if (!overflow.empty) {
+        throw new Error(`Owner context commitment scan exceeded ${MAX_COMMITMENT_SCAN}`);
+      }
+    }
+    return eligible.slice(0, limit);
+  }
+
+  async filterEligibleCommitmentProvenance(
+    rows: OwnerCommitment[],
+    agentId: string,
+  ): Promise<OwnerCommitment[]> {
+    const candidates = rows.filter((row) =>
+      isOwnerContextCommitmentSourceEligible({
+        agentId: row.agentId,
+        sourceMessageId: row.sourceMessageId,
+        sourceOccurrenceKey: row.sourceOccurrenceKey,
+        reopenedFromId: row.reopenedFromId,
+        reopenOperationId: row.reopenOperationId,
+      }),
+    );
+    const conversationIds = [...new Set(candidates.map((row) => row.conversationId))].filter(
+      (id) => typeof id === 'string' && id.length > 0 && id.length <= 1000,
+    );
+    const messageIds = [
+      ...new Set(
+        candidates.flatMap((row) =>
+          typeof row.sourceMessageId === 'string' &&
+          row.sourceMessageId.length > 0 &&
+          row.sourceMessageId.length <= 1000 &&
+          !isOwnerContextFixtureMessageSource(row.sourceMessageId)
+            ? [row.sourceMessageId]
+            : [],
+        ),
+      ),
+    ];
+    const [conversationDocs, messageDocs] = await Promise.all([
+      this.readDocuments('conversations', conversationIds),
+      this.readDocuments('messages', messageIds),
+    ]);
+    const conversationsById = new Map(
+      conversationDocs.map((snapshot) => {
+        const row = snapshot.exists
+          ? decodeRecord<{ id?: unknown; agentId?: unknown; metadata?: unknown }>(snapshot.data())
+          : null;
+        return [
+          row && decodedIdentityMatches(snapshot, row) ? (row.id as string) : '',
+          row,
+        ] as const;
+      }),
+    );
+    const messagesById = new Map(
+      messageDocs.map((snapshot) => {
+        const row = snapshot.exists
+          ? decodeRecord<{
+              id?: unknown;
+              conversationId?: unknown;
+              role?: unknown;
+              channelMessageId?: unknown;
+              hiddenAt?: unknown;
+            }>(snapshot.data())
+          : null;
+        return [
+          row && decodedIdentityMatches(snapshot, row) ? (row.id as string) : '',
+          row,
+        ] as const;
+      }),
+    );
+    return candidates.filter((commitment) => {
+      const conversation = conversationsById.get(commitment.conversationId);
+      if (
+        !conversation ||
+        conversation.id !== commitment.conversationId ||
+        conversation.agentId !== agentId ||
+        isOwnerContextFixtureConversationMetadata(conversation.metadata)
+      ) {
+        return false;
+      }
+      if (commitment.sourceMessageId === null || commitment.sourceMessageId === undefined) {
+        return true;
+      }
+      const message = messagesById.get(commitment.sourceMessageId);
+      return (
+        message?.id === commitment.sourceMessageId &&
+        message.conversationId === commitment.conversationId &&
+        message.role === 'user' &&
+        (message.hiddenAt === null || message.hiddenAt === undefined) &&
+        !isOwnerContextFixtureMessageSource(message.channelMessageId)
+      );
+    });
+  }
+
+  private async readDocuments(collection: string, ids: string[]) {
+    const snapshots: FirebaseFirestore.DocumentSnapshot[] = [];
+    for (let offset = 0; offset < ids.length; offset += PROVENANCE_READ_BATCH_SIZE) {
+      const batch = ids.slice(offset, offset + PROVENANCE_READ_BATCH_SIZE);
+      const references = batch.flatMap((id) => {
+        try {
+          return [this.store.doc(collection, id)];
+        } catch {
+          // Malformed candidate keys are excluded; valid lookup failures propagate.
+          return [];
+        }
+      });
+      if (references.length) snapshots.push(...(await this.store.db.getAll(...references)));
+    }
+    return snapshots;
   }
 
   private async listElapsedSnoozes(
@@ -144,12 +289,12 @@ export class FirestoreOwnerContextRepository implements OwnerContextRepository {
     agentId: string,
     now: Date,
     limit: number,
-  ): Promise<QueryDocumentSnapshot[]> {
-    const eligible: QueryDocumentSnapshot[] = [];
+  ): Promise<OwnerCommitment[]> {
+    const eligible: OwnerCommitment[] = [];
     let cursor: QueryDocumentSnapshot | undefined;
     let scanned = 0;
-    while (eligible.length < limit && scanned < MAX_SNOOZED_SCAN) {
-      const pageLimit = Math.min(SNOOZED_PAGE_SIZE, MAX_SNOOZED_SCAN - scanned);
+    while (eligible.length < limit && scanned < MAX_COMMITMENT_SCAN) {
+      const pageLimit = Math.min(COMMITMENT_PAGE_SIZE, MAX_COMMITMENT_SCAN - scanned);
       let query = base
         .where('status', '==', 'snoozed')
         .orderBy('updatedAt', 'desc')
@@ -158,26 +303,26 @@ export class FirestoreOwnerContextRepository implements OwnerContextRepository {
       const page = await query.get();
       if (page.empty) break;
       scanned += page.size;
+      const candidates: OwnerCommitment[] = [];
       for (const doc of page.docs) {
-        const row = decodeRecord<Partial<OwnerCommitment>>(doc.data());
+        const row = decodeRecord<OwnerCommitment>(doc.data());
         if (
           row.agentId === agentId &&
           row.status === 'snoozed' &&
           row.snoozedUntil instanceof Date &&
-          row.snoozedUntil < now &&
+          row.snoozedUntil <= now &&
           row.updatedAt instanceof Date &&
-          decodedIdentityMatches(doc, row)
+          decodedIdentityMatches(doc, row) &&
+          commitmentIsActive(row, now)
         ) {
-          eligible.push(doc);
+          candidates.push(row);
         }
-        if (eligible.length === limit) break;
       }
+      eligible.push(...(await this.filterEligibleCommitmentProvenance(candidates, agentId)));
       cursor = page.docs.at(-1);
       if (page.size < pageLimit) break;
     }
-    // Keep each request and the total query cost bounded. Exceeding this gate
-    // fails closed instead of silently returning a wrongly ranked older row.
-    if (eligible.length < limit && scanned >= MAX_SNOOZED_SCAN && cursor) {
+    if (eligible.length < limit && scanned >= MAX_COMMITMENT_SCAN && cursor) {
       const overflow = await base
         .where('status', '==', 'snoozed')
         .orderBy('updatedAt', 'desc')
@@ -185,9 +330,9 @@ export class FirestoreOwnerContextRepository implements OwnerContextRepository {
         .limit(1)
         .get();
       if (!overflow.empty) {
-        throw new Error(`Owner context snoozed commitment scan exceeded ${MAX_SNOOZED_SCAN}`);
+        throw new Error(`Owner context snoozed commitment scan exceeded ${MAX_COMMITMENT_SCAN}`);
       }
     }
-    return eligible;
+    return eligible.slice(0, limit);
   }
 }

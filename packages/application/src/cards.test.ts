@@ -16,7 +16,7 @@ import {
   tasks,
 } from '@assistant/db';
 import type { GeneratedCardRepository } from '@assistant/persistence';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { listSavedCards, requestSavedCardRefresh, savedCardRefreshId } from './cards.js';
 import { hydrateChatApprovals } from './chat.js';
@@ -95,6 +95,268 @@ afterAll(async () => {
 });
 
 describe('saved card source refresh', () => {
+  it('rejects a refresh action against a revision the owner is no longer viewing', async () => {
+    const card = await save();
+    const result = await requestSavedCardRefresh(
+      db,
+      agentId,
+      card.id,
+      undefined,
+      randomUUID(),
+      randomUUID(),
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: 409,
+      error: 'This card changed. Reload it before starting another refresh.',
+    });
+    const refreshTasks = await db
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.agentId, agentId),
+          sql`${tasks.trigger}->'payload'->>'refreshCardId' = ${card.id}`,
+        ),
+      );
+    expect(refreshTasks).toEqual([]);
+  });
+
+  it('rejects reusing an operation ID for a newer card revision', async () => {
+    const card = await save();
+    const operationId = randomUUID();
+    const first = await requestSavedCardRefresh(
+      db,
+      agentId,
+      card.id,
+      conversationId,
+      operationId,
+      card.revisionId,
+    );
+    if (!first.ok) throw new Error(first.error);
+    taskIds.push(first.taskId);
+
+    const currentRevisionId = randomUUID();
+    const [priorRevision] = await db
+      .select()
+      .from(generatedCardRevisions)
+      .where(eq(generatedCardRevisions.id, card.revisionId));
+    if (!priorRevision) throw new Error('card revision missing');
+    await db.insert(generatedCardRevisions).values({ ...priorRevision, id: currentRevisionId });
+    await db
+      .update(generatedCards)
+      .set({ currentRevisionId })
+      .where(eq(generatedCards.id, card.id));
+    const replay = await requestSavedCardRefresh(
+      db,
+      agentId,
+      card.id,
+      conversationId,
+      operationId,
+      currentRevisionId,
+    );
+
+    expect(replay).toMatchObject({
+      ok: false,
+      status: 409,
+      error: 'This card changed. Reload it before starting another refresh.',
+    });
+    expect(
+      await db
+        .select({ id: tasks.id })
+        .from(tasks)
+        .where(
+          and(
+            eq(tasks.agentId, agentId),
+            sql`${tasks.trigger}->'payload'->>'refreshCardId' = ${card.id}`,
+          ),
+        ),
+    ).toHaveLength(1);
+  });
+
+  it('does not reuse an active task bound to an older card revision', async () => {
+    const card = await save();
+    const first = await requestSavedCardRefresh(
+      db,
+      agentId,
+      card.id,
+      conversationId,
+      randomUUID(),
+      card.revisionId,
+    );
+    if (!first.ok) throw new Error(first.error);
+    taskIds.push(first.taskId);
+
+    const currentRevisionId = randomUUID();
+    const [priorRevision] = await db
+      .select()
+      .from(generatedCardRevisions)
+      .where(eq(generatedCardRevisions.id, card.revisionId));
+    if (!priorRevision) throw new Error('card revision missing');
+    await db.insert(generatedCardRevisions).values({ ...priorRevision, id: currentRevisionId });
+    await db
+      .update(generatedCards)
+      .set({ currentRevisionId })
+      .where(eq(generatedCards.id, card.id));
+    const result = await requestSavedCardRefresh(
+      db,
+      agentId,
+      card.id,
+      conversationId,
+      randomUUID(),
+      currentRevisionId,
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: 409,
+      error: 'This card changed. Reload it before starting another refresh.',
+    });
+    expect(
+      await db
+        .select({ id: tasks.id })
+        .from(tasks)
+        .where(
+          and(
+            eq(tasks.agentId, agentId),
+            sql`${tasks.trigger}->'payload'->>'refreshCardId' = ${card.id}`,
+          ),
+        ),
+    ).toHaveLength(1);
+  });
+
+  it('replays the original acknowledged operation even while a later refresh is active', async () => {
+    const card = await save();
+    const operationId = randomUUID();
+    const first = await requestSavedCardRefresh(
+      db,
+      agentId,
+      card.id,
+      conversationId,
+      operationId,
+      card.revisionId,
+    );
+    if (!first.ok) throw new Error(first.error);
+    taskIds.push(first.taskId);
+    await db.update(tasks).set({ status: 'done' }).where(eq(tasks.id, first.taskId));
+    const later = await requestSavedCardRefresh(
+      db,
+      agentId,
+      card.id,
+      conversationId,
+      randomUUID(),
+      card.revisionId,
+    );
+    if (!later.ok) throw new Error(later.error);
+    taskIds.push(later.taskId);
+    expect(later.taskId).not.toBe(first.taskId);
+    const replay = await requestSavedCardRefresh(
+      db,
+      agentId,
+      card.id,
+      conversationId,
+      operationId,
+      card.revisionId,
+    );
+    expect(replay).toMatchObject({ ok: true, taskId: first.taskId });
+    expect(
+      await db
+        .select({ id: tasks.id })
+        .from(tasks)
+        .where(
+          and(
+            eq(tasks.agentId, agentId),
+            sql`${tasks.trigger}->'payload'->>'refreshCardId' = ${card.id}`,
+          ),
+        ),
+    ).toHaveLength(2);
+  });
+
+  it('does not acknowledge an unbound operation while another revision-bound refresh is active', async () => {
+    const card = await save();
+    const firstOperationId = randomUUID();
+    const retryOperationId = randomUUID();
+    const first = await requestSavedCardRefresh(
+      db,
+      agentId,
+      card.id,
+      conversationId,
+      firstOperationId,
+      card.revisionId,
+    );
+    if (!first.ok) throw new Error(first.error);
+    taskIds.push(first.taskId);
+
+    const whileFirstRuns = await requestSavedCardRefresh(
+      db,
+      agentId,
+      card.id,
+      conversationId,
+      retryOperationId,
+      card.revisionId,
+    );
+    expect(whileFirstRuns).toEqual({
+      ok: false,
+      status: 409,
+      error: 'A refresh is already running. Check its status before trying again.',
+    });
+    expect(
+      await db
+        .select({ id: tasks.id })
+        .from(tasks)
+        .where(
+          and(
+            eq(tasks.agentId, agentId),
+            sql`${tasks.trigger}->'payload'->>'refreshCardId' = ${card.id}`,
+          ),
+        ),
+    ).toHaveLength(1);
+
+    await db.update(tasks).set({ status: 'done' }).where(eq(tasks.id, first.taskId));
+    const retry = await requestSavedCardRefresh(
+      db,
+      agentId,
+      card.id,
+      conversationId,
+      retryOperationId,
+      card.revisionId,
+    );
+    if (!retry.ok) throw new Error(retry.error);
+    taskIds.push(retry.taskId);
+    expect(retry.taskId).not.toBe(first.taskId);
+    const [persistedRetry] = await db
+      .select({ externalEventId: tasks.externalEventId })
+      .from(tasks)
+      .where(eq(tasks.id, retry.taskId));
+    expect(persistedRetry?.externalEventId).toBe(
+      `saved-card-refresh:${agentId}:${card.id}:${retryOperationId}`,
+    );
+
+    // Treat the successful retry response as lost, then replay after its task is terminal.
+    await db.update(tasks).set({ status: 'done' }).where(eq(tasks.id, retry.taskId));
+    const replayAfterCompletion = await requestSavedCardRefresh(
+      db,
+      agentId,
+      card.id,
+      conversationId,
+      retryOperationId,
+      card.revisionId,
+    );
+    expect(replayAfterCompletion).toMatchObject({ ok: true, taskId: retry.taskId });
+    expect(
+      await db
+        .select({ id: tasks.id })
+        .from(tasks)
+        .where(
+          and(
+            eq(tasks.agentId, agentId),
+            sql`${tasks.trigger}->'payload'->>'refreshCardId' = ${card.id}`,
+          ),
+        ),
+    ).toHaveLength(2);
+  });
+
   it('serializes racing refresh taps into one owned task with original source references', async () => {
     const card = await save();
     const results = await Promise.all([

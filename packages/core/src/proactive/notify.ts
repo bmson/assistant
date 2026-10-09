@@ -1,3 +1,4 @@
+import { type NotificationDeliveryResult, notificationLeg } from '@assistant/persistence';
 /**
  * The one shape a proactive producer uses to reach the owner.
  *
@@ -13,28 +14,36 @@
  * never a lost one — the dashboard copy is already posted.
  */
 export type ProactiveNotifier = (input: {
+  deliveryKey?: string;
   taskId?: string;
   conversationId: string | null;
   text: string;
   urgency?: 'ambient' | 'interrupt';
-}) => Promise<void>;
+}) => Promise<NotificationDeliveryResult | void>;
 
-/**
- * Send a phone leg without letting a channel outage break the producer.
- *
- * Every caller here has already persisted the owner-visible copy, so a failed
- * ping costs the buzz and nothing else. Returns whether the leg was attempted
- * and succeeded, which the job summaries report.
- */
+/** Only a separate phone/provider leg counts as a ping; the notice already exists. */
+export function hasAcknowledgedPhoneDelivery(receipt: NotificationDeliveryResult): boolean {
+  return receipt.legs.some((leg) => leg.channel !== 'dashboard' && leg.status === 'delivered');
+}
+
+export async function proactiveNotificationOutcome(
+  notify: ProactiveNotifier | undefined,
+  input: { deliveryKey?: string; taskId?: string; conversationId: string | null; text: string },
+): Promise<NotificationDeliveryResult> {
+  if (!notify) return notificationLeg('phone', 'skipped', 'no-notifier');
+  try {
+    const receipt = await notify({ ...input, urgency: 'ambient' });
+    return receipt ?? notificationLeg('phone', 'unknown', 'missing-notification-receipt');
+  } catch (error) {
+    console.error('proactive ping failed', error);
+    return notificationLeg('phone', 'failed', 'notification-error');
+  }
+}
+
+/** A held/absent/ambiguous phone leg cannot turn a persisted notice into a failed question. */
 export async function pingOwner(
   notify: ProactiveNotifier | undefined,
-  input: { taskId?: string; conversationId: string | null; text: string },
+  input: { deliveryKey?: string; taskId?: string; conversationId: string | null; text: string },
 ): Promise<boolean> {
-  if (!notify) return false;
-  return notify({ ...input, urgency: 'ambient' })
-    .then(() => true)
-    .catch((err) => {
-      console.error('proactive ping failed', err);
-      return false;
-    });
+  return hasAcknowledgedPhoneDelivery(await proactiveNotificationOutcome(notify, input));
 }

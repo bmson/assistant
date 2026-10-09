@@ -168,6 +168,7 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
         !validDocumentIdentifier(approval.id) ||
         documentKey(approval.id) !== approvalSnapshot.ref.id ||
         !validPersistedDate(approval.requestedAt) ||
+        !validPersistedDate(approval.expiresAt) ||
         approval.status !== 'pending' ||
         !validDocumentIdentifier(approval.taskId) ||
         !validDocumentIdentifier(approval.toolCallId)
@@ -187,6 +188,7 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
         tool.toolName.length === 0
       )
         return null;
+      if (approval.expiresAt <= validDate(this.store.now(), 'Invalid approval time')) return null;
       return { approval, toolName: tool.toolName };
     } catch {
       return null;
@@ -583,6 +585,8 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
       if (!selected?.exists || selected.get('status') !== 'pending')
         return { ok: false, reason: 'no pending approval matched (already resolved or expired?)' };
       const approval = decodeRecord<Records['approvals']>(selected.data());
+      if (!(approval.expiresAt instanceof Date) || !Number.isFinite(approval.expiresAt.getTime()))
+        return { ok: false, reason: 'no pending approval matched (already resolved or expired?)' };
       const taskRef = this.store.doc('tasks', approval.taskId);
       const toolRef = this.store.doc('toolCalls', approval.toolCallId);
       const [task, tool] = await tx.getAll(taskRef, toolRef);
@@ -594,14 +598,19 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
         throw new Error('Approval task owner is missing');
       if (input.expectedAgentId && agentId !== input.expectedAgentId)
         return { ok: false, reason: 'no pending approval matched (already resolved or expired?)' };
+      const requestedPolicy = input.via === 'web' ? input.policy : undefined;
+      const ownerRef = requestedPolicy ? this.store.doc('agents', agentId) : null;
+      if (ownerRef) {
+        const owner = await tx.get(ownerRef);
+        if (!owner.exists || owner.get('id') !== agentId)
+          throw new Error('Approval task owner is unavailable');
+      }
       const erasure = await tx.get(this.store.doc('privacyErasureJobs', agentId));
       if (
         erasure.exists &&
         (erasure.get('agentId') !== agentId || erasure.get('status') !== 'complete')
       )
         throw new Error('Privacy erasure is in progress');
-      const now = this.store.now();
-      const requestedPolicy = input.via === 'web' ? input.policy : undefined;
       if (
         requestedPolicy &&
         (requestedPolicy.agentId !== task.get('agentId') ||
@@ -620,6 +629,12 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
         ? this.store.doc('approvalPolicies', resolvedPolicyId)
         : null;
       const existingPolicy = policyRef ? await tx.get(policyRef) : null;
+      // Sample the installation clock only after every transactional read. A
+      // slow task/tool/privacy/policy read must not let an answer cross its
+      // deadline while retaining an earlier `now` value.
+      const now = validDate(this.store.now(), 'Invalid approval time');
+      if (approval.expiresAt.getTime() <= now.getTime())
+        return { ok: false, reason: 'no pending approval matched (already resolved or expired?)' };
       tx.update(
         selected.ref,
         encodeRecord({
@@ -631,7 +646,10 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
         }),
       );
       tx.update(toolRef, { status: input.decision });
-      if (policyRef && requestedPolicy) {
+      if (policyRef && requestedPolicy && ownerRef) {
+        // The owner document is the Firestore serialization point shared with
+        // approved-call claims and every policy writer.
+        tx.update(ownerRef, { updatedAt: now });
         if (policyKey && !keySnapshot?.exists) tx.create(policyKey, { policyId: resolvedPolicyId });
         if (existingPolicy?.exists) tx.update(policyRef, { enabled: true, updatedAt: now });
         else

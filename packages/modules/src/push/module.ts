@@ -1,7 +1,12 @@
 import { getAgent } from '@assistant/core/chat';
 import { ApnsClient } from '@assistant/tools/modules/push';
 import { defineModule, type ModuleHooks } from '../platform.js';
-import { notifyApprovalsByPush, notifyOwnerByPush, type PushChannelDeps } from './channel.js';
+import {
+  drainPushNotificationOutbox,
+  notifyApprovalsByPush,
+  notifyOwnerByPush,
+  type PushChannelDeps,
+} from './channel.js';
 import { pushMeta } from './meta.js';
 
 /**
@@ -35,6 +40,7 @@ export const pushModule = defineModule<ApnsClient>({
     const channelDeps: PushChannelDeps = {
       apns: client,
       devices,
+      notificationOutbox: persistence.notificationOutbox,
       owner: firestore
         ? async () => {
             const owner = await persistence.executionContext.getAgent(config.FIRESTORE_AGENT_ID);
@@ -50,6 +56,13 @@ export const pushModule = defineModule<ApnsClient>({
         notifyApprovals: (approvalsToPing) =>
           notifyApprovalsByPush(channelDeps, [...approvalsToPing]),
       },
+      sweepSteps: [
+        {
+          name: 'drainPushNotificationOutbox',
+          portable: true,
+          run: async () => drainPushNotificationOutbox(channelDeps),
+        },
+      ],
     };
     return { exports: client, hooks };
   },

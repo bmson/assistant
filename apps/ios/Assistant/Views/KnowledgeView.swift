@@ -1,5 +1,40 @@
 import SwiftUI
 
+enum KnowledgeEditSaveOutcome: Equatable {
+    case saved
+    case nameNotConfirmed
+    case typeNotConfirmed(nameChanged: Bool)
+    case mergeNotConfirmed(nameChanged: Bool, typeChanged: Bool)
+}
+
+/// Keeps the existing multi-request edit path ordered until it can be
+/// replaced by a single versioned server operation. A destructive merge is
+/// never attempted after an unconfirmed prerequisite.
+@MainActor
+func performKnowledgeEditInOrder(
+    itemID: String,
+    originalLabel: String,
+    originalKind: String,
+    submittedLabel: String,
+    submittedKind: String,
+    mergeTargetID: String,
+    update: (String, String, String) async -> Bool,
+    merge: (String, String) async -> Bool
+) async -> KnowledgeEditSaveOutcome {
+    let nameChanged = submittedLabel != originalLabel
+    let typeChanged = submittedKind != originalKind
+    if nameChanged, !(await update(itemID, "rename", submittedLabel)) {
+        return .nameNotConfirmed
+    }
+    if typeChanged, !(await update(itemID, "retype", submittedKind)) {
+        return .typeNotConfirmed(nameChanged: nameChanged)
+    }
+    if !mergeTargetID.isEmpty, !(await merge(itemID, mergeTargetID)) {
+        return .mergeNotConfirmed(nameChanged: nameChanged, typeChanged: typeChanged)
+    }
+    return .saved
+}
+
 /// Housekeeping for the knowledge map: derived items that lost their source,
 /// connections nobody has confirmed, facts that expired or were superseded.
 /// Browsing and editing connections happens on the map itself; this is the
@@ -452,6 +487,7 @@ struct KnowledgeItemEditor: View {
     @State private var searchTask: Task<Void, Never>?
     @State private var searching = false
     @State private var saving = false
+    @State private var saveStatus: String?
 
     init(
         item: KnowledgeEntity, duplicates: [KnowledgeDuplicate],
@@ -466,6 +502,14 @@ struct KnowledgeItemEditor: View {
 
     var body: some View {
         AssistantForm {
+            if let saveStatus {
+                Section {
+                    Text(saveStatus)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityAddTraits(.updatesFrequently)
+                }
+            }
             Section("Display name") { TextField("Name", text: $label) }
             Section("Type") {
                 Picker("Type", selection: $kind) {
@@ -541,9 +585,12 @@ struct KnowledgeItemEditor: View {
                 .foregroundStyle(.secondary)
             }
         }
+        .disabled(saving)
         .navigationTitle("Edit item")
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel") { dismiss() }.disabled(saving)
+            }
             ToolbarItem(placement: .confirmationAction) {
                 Button(saving ? "Saving…" : "Save") { save() }.disabled(saving || label.isEmpty)
             }
@@ -573,31 +620,51 @@ struct KnowledgeItemEditor: View {
     }
 
     private func save() {
+        guard !saving else { return }
         saving = true
+        saveStatus = nil
+        // Freeze the submitted edit. The view stays disabled until each
+        // dependent server mutation has either been confirmed or stopped.
+        let submittedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let submittedKind = kind
+        let submittedTargetID = mergeTargetId
         Task {
-            let renamed: Bool
-            if label == item.displayLabel {
-                renamed = true
-            } else {
-                renamed = await model.updateKnowledgeItem(
-                    id: item.id, action: "rename", value: label)
-            }
-            let retyped: Bool
-            if kind == item.kind {
-                retyped = true
-            } else {
-                retyped = await model.updateKnowledgeItem(
-                    id: item.id, action: "retype", value: kind)
-            }
-            let merged: Bool
-            if mergeTargetId.isEmpty {
-                merged = true
-            } else {
-                merged = await model.mergeKnowledgeItem(id: item.id, targetId: mergeTargetId)
+            let outcome = await performKnowledgeEditInOrder(
+                itemID: item.id,
+                originalLabel: item.displayLabel,
+                originalKind: item.kind,
+                submittedLabel: submittedLabel,
+                submittedKind: submittedKind,
+                mergeTargetID: submittedTargetID,
+                update: { id, action, value in
+                    await model.updateKnowledgeItem(id: id, action: action, value: value)
+                },
+                merge: { id, targetID in
+                    await model.mergeKnowledgeItem(id: id, targetId: targetID)
+                }
+            )
+            switch outcome {
+            case .saved:
+                break
+            case .nameNotConfirmed:
+                saveStatus = "The name change was not confirmed. Type change and merge were not attempted."
+            case let .typeNotConfirmed(nameChanged):
+                saveStatus = nameChanged
+                    ? "The name change succeeded, but the type change was not confirmed. Merge was not attempted."
+                    : "The type change was not confirmed. Merge was not attempted."
+            case let .mergeNotConfirmed(nameChanged, typeChanged):
+                let changed = nameChanged && typeChanged
+                    ? "Name and type changes succeeded"
+                    : nameChanged ? "Name change succeeded" : typeChanged ? "Type change succeeded" : nil
+                if let changed {
+                    saveStatus = "\(changed), but the merge was not confirmed. Check the item before retrying."
+                } else {
+                    saveStatus = "The merge was not confirmed. Check the item before retrying."
+                }
             }
             saving = false
-            if renamed && retyped && merged {
-                await didSave(mergeTargetId.isEmpty ? item.id : mergeTargetId)
+            if outcome == .saved {
+                await didSave(submittedTargetID.isEmpty ? item.id : submittedTargetID)
                 dismiss()
             }
         }

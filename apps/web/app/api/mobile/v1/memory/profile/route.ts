@@ -15,6 +15,7 @@ import {
   readPrivacyErasureFence,
 } from '@assistant/firestore';
 import { forgetOwnerLongTermMemory } from '@/lib/memory-erasure';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import {
   getDb,
   getFirestoreInstallationStore,
@@ -65,7 +66,16 @@ export async function GET(request: Request): Promise<Response> {
 
 export async function POST(request: Request): Promise<Response> {
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
-  const body = (await request.json().catch(() => null)) as {
+  const mutationBody = await readMobileMutationBody(request, [
+    'action',
+    'confirm',
+    'description',
+    'donts',
+    'dos',
+    'signature',
+  ]);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as {
     action?: unknown;
     confirm?: unknown;
     description?: unknown;

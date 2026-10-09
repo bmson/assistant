@@ -1,5 +1,6 @@
 import { loadConfig } from '@assistant/config';
 import { runFirestoreSettingsMutation } from '@/lib/firestore-settings-mutation';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getApplication } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -14,7 +15,9 @@ export async function POST(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid policy id' }, { status: 400 });
-  const body = (await request.json().catch(() => null)) as { enabled?: unknown } | null;
+  const mutationBody = await readMobileMutationBody(request, ['enabled']);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as { enabled?: unknown } | null;
   if (typeof body?.enabled !== 'boolean') {
     return mobileJson({ error: 'enabled must be a boolean' }, { status: 400 });
   }

@@ -291,6 +291,8 @@ private struct ModelConnectionDetailView: View {
     @State private var newModel = ""
     @State private var inputPrice = ""
     @State private var outputPrice = ""
+    @State private var inputPriceFromListing = false
+    @State private var outputPriceFromListing = false
     @State private var actionFailed = false
     @State private var showingRemovalConfirmation = false
 
@@ -330,6 +332,7 @@ private struct ModelConnectionDetailView: View {
                             actionFailed = false
                             Task {
                                 listing = await model.testModelProvider(id: connectionID)
+                                refreshListedPrices(resetManualEntries: false)
                                 actionFailed = listing == nil
                                 isTesting = false
                             }
@@ -401,10 +404,8 @@ private struct ModelConnectionDetailView: View {
             }
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .onChange(of: newModel) { _, value in
-                    guard let match = listing?.first(where: { $0.model == value }) else { return }
-                    if let price = match.promptCostPerMTok { inputPrice = price }
-                    if let price = match.completionCostPerMTok { outputPrice = price }
+                .onChange(of: newModel) { _, _ in
+                    refreshListedPrices(resetManualEntries: true)
                 }
             if let listing, !listing.isEmpty {
                 let matches = listing.filter {
@@ -416,13 +417,23 @@ private struct ModelConnectionDetailView: View {
                 }
             }
             AssistantField("Input price (USD per million tokens)") {
-                TextField("$ per million input tokens", text: $inputPrice)
+                TextField("$ per million input tokens", text: Binding(
+                    get: { inputPrice },
+                    set: { inputPrice = $0; inputPriceFromListing = false }
+                ))
                     .keyboardType(.decimalPad)
             }
+            Text(inputPriceFromListing ? "Input: provider listing estimate" : "Input: enter your estimate when the listing has no price")
+                .font(.caption).foregroundStyle(.secondary)
             AssistantField("Output price (USD per million tokens)") {
-                TextField("$ per million output tokens", text: $outputPrice)
+                TextField("$ per million output tokens", text: Binding(
+                    get: { outputPrice },
+                    set: { outputPrice = $0; outputPriceFromListing = false }
+                ))
                     .keyboardType(.decimalPad)
             }
+            Text(outputPriceFromListing ? "Output: provider listing estimate" : "Output: enter your estimate when the listing has no price")
+                .font(.caption).foregroundStyle(.secondary)
             Button("Add model") {
                 let chosen = listing?.first { $0.model == newModel }
                 run {
@@ -447,6 +458,18 @@ private struct ModelConnectionDetailView: View {
             Text("Add a model")
         } footer: {
             Text("Prices keep your spending caps accurate; a model without them can’t be used. Test the connection to pick from its models.")
+        }
+    }
+
+    private func refreshListedPrices(resetManualEntries: Bool) {
+        let match = listing?.first { $0.model == newModel }
+        if resetManualEntries || inputPriceFromListing || inputPrice.isEmpty {
+            inputPrice = match?.promptCostPerMTok ?? ""
+            inputPriceFromListing = match?.promptCostPerMTok != nil
+        }
+        if resetManualEntries || outputPriceFromListing || outputPrice.isEmpty {
+            outputPrice = match?.completionCostPerMTok ?? ""
+            outputPriceFromListing = match?.completionCostPerMTok != nil
         }
     }
 

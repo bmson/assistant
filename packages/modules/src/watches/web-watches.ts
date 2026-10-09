@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { WatchRow } from '@assistant/db';
 import {
   extractWebText,
@@ -9,7 +10,7 @@ import {
   type WebWatchState,
   webWatchOutcome,
 } from '@assistant/tools';
-import type { WatchFireDeps } from './fire.js';
+import { recordWatchFire, type WatchFireDeps } from './fire.js';
 
 /**
  * Web-watch polling (`watch.poll_web`). Unlike email watches, which are driven
@@ -122,35 +123,33 @@ async function pollOne(
     return false;
   }
   const fingerprint = fingerprintText(observed.text);
-  const result = await deps.watches.recordFire({
-    watchId: watch.id,
-    agentId: watch.agentId,
-    // Idempotency net; the atomic claim already bounds a poll to once per
-    // window, and outcome is measured against the persisted prior state.
-    triggerRef: `web:${fingerprint}`,
-    summary: noticeText(watch, match, outcome.summary),
-    excerpt: '',
-    now,
-    state,
-    expectedNextPollAt: watch.nextPollAt,
-  });
-  if (!result.recorded) return false;
+  const transitionId = createHash('sha256')
+    .update(
+      JSON.stringify([
+        watch.id,
+        watch.nextPollAt.toISOString(),
+        prior.fingerprint ?? null,
+        prior.present ?? null,
+        fingerprint,
+        outcome.nextState.present ?? null,
+      ]),
+    )
+    .digest('hex');
   const text = noticeText(watch, match, outcome.summary);
-  if (watch.conversationId)
-    await deps.messages
-      .append({
-        conversationId: watch.conversationId,
-        role: 'assistant',
-        origin: 'assistant',
-        parts: [{ type: 'text', text }],
-        text,
-        channelMessageId: `watch-fire:${watch.id}:${fingerprint.slice(0, 16)}`,
-      })
-      .catch((err) => console.error('watch notice failed', err));
-  await deps
-    .notifyOwner({ text, urgency: 'ambient' })
-    .catch((err) => console.error('watch owner notification failed', err));
-  return true;
+  const delivery = await recordWatchFire(
+    deps,
+    watch,
+    {
+      triggerRef: `web:${transitionId}`,
+      text,
+      excerpt: '',
+      channelMessageId: `watch-fire:${watch.id}:${transitionId}`,
+      state,
+      expectedNextPollAt: watch.nextPollAt,
+    },
+    now,
+  );
+  return delivery.recorded;
 }
 
 /**

@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 const auth = vi.hoisted(() => ({ isMobileAuthed: vi.fn() }));
 vi.mock('@/mobile-auth', () => ({
   isMobileAuthed: auth.isMobileAuthed,
-  mobileJson: (body: unknown) => Response.json(body),
+  mobileJson: (body: unknown, init?: ResponseInit) => Response.json(body, init),
   mobileUnauthorized: () => Response.json({ error: 'unauthorized' }, { status: 401 }),
 }));
 vi.mock('@/lib/agent-readiness-source', () => ({
@@ -75,7 +75,6 @@ describe.skipIf(!localEmulator)('Firestore mobile workspace with PostgreSQL offl
         monthlyLimitMicros: 50_000_000,
         softPct: 80,
       }),
-      store.doc('agents', foreignAgentId).set({ id: foreignAgentId, name: 'Foreign' }),
     ]);
   });
 
@@ -95,6 +94,15 @@ describe.skipIf(!localEmulator)('Firestore mobile workspace with PostgreSQL offl
     const result = await getFirestoreMobileWorkspace(source);
     expect(result).toMatchObject({
       chats: { current: [], archived: [] },
+      sectionPagination: {
+        chats: {
+          current: { loaded: 0, hasMore: false, complete: true, archived: false },
+          archived: { loaded: 0, hasMore: false, complete: true, archived: true },
+        },
+        skills: { loaded: 0, hasMore: false, complete: true },
+        anomalies: { loaded: 0, hasMore: false, complete: true },
+        improvements: { loaded: 0, hasMore: false, complete: true },
+      },
       memory: { ownerName: 'Owner', ownerContactId, facts: [] },
       settings: { agent: { name: 'Owner Assistant' }, goalAutomationCount: 0 },
       costs: { dailySpentUsd: 0, monthlySpentUsd: 0, heldUsd: 0 },
@@ -123,6 +131,113 @@ describe.skipIf(!localEmulator)('Firestore mobile workspace with PostgreSQL offl
     await expect(getFirestoreMobileWorkspace({ read: async () => null })).rejects.toThrow(
       'Privacy erasure is in progress',
     );
+    await store.doc('privacyErasureJobs', agentId).delete();
+  });
+
+  it('marks a malformed memory section unavailable while independent screens remain available', async () => {
+    await store.doc('contacts', 'broken-contact').set({
+      id: 'different-document-id',
+      name: 'Malformed',
+      trust: 'owner',
+    });
+    try {
+      const { getFirestoreMobileWorkspace } = await import('./firestore-mobile-workspace.js');
+      const result = await getFirestoreMobileWorkspace({ read: async () => null });
+      expect(result.sectionAvailability.memory).toMatchObject({
+        status: 'unavailable',
+        version: 1,
+      });
+      expect(result.sectionAvailability.chats).toMatchObject({ status: 'available', version: 1 });
+      expect(result.sectionAvailability.settings).toMatchObject({
+        status: 'available',
+        version: 1,
+      });
+      expect(result.sectionAvailability.costs).toMatchObject({ status: 'available', version: 1 });
+      expect(result.chats).toEqual({ current: [], archived: [] });
+      expect(result.memory.facts).toEqual([]);
+
+      const { GET } = await import('../app/api/mobile/v1/workspace/route.js');
+      const legacyClient = await GET(new Request('http://localhost/api/mobile/v1/workspace'));
+      expect(legacyClient.status).toBe(503);
+      const sectionAwareClient = await GET(
+        new Request('http://localhost/api/mobile/v1/workspace', {
+          headers: { 'x-assistant-workspace-sections': '1' },
+        }),
+      );
+      expect(sectionAwareClient.status).toBe(200);
+      expect(await sectionAwareClient.json()).toMatchObject({
+        sectionAvailability: { memory: { status: 'unavailable', version: 1 } },
+      });
+    } finally {
+      await store.doc('contacts', 'broken-contact').delete();
+    }
+  });
+
+  it('keeps costs available when only provider billing exceeds its read budget', async () => {
+    const { getFirestoreMobileWorkspace } = await import('./firestore-mobile-workspace.js');
+    const result = await getFirestoreMobileWorkspace(
+      { read: async () => null },
+      {
+        billingTimeoutMs: 5,
+        billingReader: async () => new Promise((resolve) => setTimeout(() => resolve([]), 50)),
+      },
+    );
+    expect(result.sectionAvailability.billing).toMatchObject({ status: 'unavailable', version: 1 });
+    expect(result.sectionAvailability.costs).toMatchObject({ status: 'available', version: 1 });
+    expect(result.sectionAvailability.chats).toMatchObject({ status: 'available', version: 1 });
+    expect(result.costs.billing).toEqual([]);
+    expect(result.costs.dailySpentUsd).toBe(0);
+  });
+
+  it('isolates a bounded memory contact scan overflow from other workspace sections', async () => {
+    const overflowContactIds = Array.from(
+      { length: 500 },
+      (_, index) => `overflow-contact-${index}`,
+    );
+    await Promise.all(
+      overflowContactIds.map((id) =>
+        store
+          .doc('contacts', id)
+          .set({ id, name: id, trust: 'known', aliases: [], relationship: '' }),
+      ),
+    );
+    try {
+      const { getFirestoreMobileWorkspace } = await import('./firestore-mobile-workspace.js');
+      const result = await getFirestoreMobileWorkspace({ read: async () => null });
+      expect(result.sectionAvailability.memory).toMatchObject({
+        status: 'unavailable',
+        version: 1,
+      });
+      expect(result.sectionAvailability.chats).toMatchObject({ status: 'available', version: 1 });
+      expect(result.sectionAvailability.skills).toMatchObject({ status: 'available', version: 1 });
+    } finally {
+      await Promise.all(overflowContactIds.map((id) => store.doc('contacts', id).delete()));
+    }
+  });
+
+  it('rejects a partial workspace if privacy erasure changes during composition', async () => {
+    let startRead: (() => void) | undefined;
+    let finishRead: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      startRead = resolve;
+    });
+    const delayedRead = new Promise<null>((resolve) => {
+      finishRead = () => resolve(null);
+    });
+    const { getFirestoreMobileWorkspace } = await import('./firestore-mobile-workspace.js');
+    const pending = getFirestoreMobileWorkspace(
+      {
+        read: async () => {
+          startRead?.();
+          return delayedRead;
+        },
+      },
+      { sectionTimeoutMs: 2_000 },
+    );
+    await started;
+    await store.doc('privacyErasureJobs', agentId).set({ agentId, status: 'active' });
+    finishRead?.();
+    await expect(pending).rejects.toThrow('Privacy erasure');
     await store.doc('privacyErasureJobs', agentId).delete();
   });
 

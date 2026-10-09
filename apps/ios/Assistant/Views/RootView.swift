@@ -298,17 +298,6 @@ struct RootView: View {
         ZStack {
             AssistantTheme.canvas(for: colorScheme).ignoresSafeArea()
 
-            RadialGradient(
-                colors: [
-                    AssistantTheme.accent(for: colorScheme).opacity(colorScheme == .dark ? 0.13 : 0.08),
-                    .clear,
-                ],
-                center: .center,
-                startRadius: 0,
-                endRadius: 220
-            )
-            .ignoresSafeArea()
-
             VStack(spacing: 18) {
                 Text("Waking your assistant")
                     .font(.headline)
@@ -390,7 +379,9 @@ struct CardsView: View {
                 } else {
                     ForEach(model.savedCards) { card in
                         if let parsed = MessageResponseCard(part: card.messagePart) {
-                            SavedResponseCard(card: parsed, refresh: { id in await model.refreshSavedCard(id: id) }) {
+                            SavedResponseCard(card: parsed, refresh: { id, revision in
+                                await model.refreshSavedCard(id: id, revisionId: revision)
+                            }) {
                                 _ = await model.dismissCard(card)
                             }
                         }
@@ -430,7 +421,7 @@ struct CardsView: View {
 /// card supplies content only here, avoiding a second rounded card and seam.
 struct SavedResponseCard: View {
     let card: MessageResponseCard
-    var refresh: ((String) async -> String?)? = nil
+    var refresh: ((String, String?) async -> String?)? = nil
     let dismiss: () async -> Void
     @State private var dismissing = false
     @Environment(\.colorScheme) private var colorScheme

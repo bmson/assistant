@@ -25,12 +25,14 @@ export async function listAnomalies(db: Db) {
   return listOpenAnomalies(db, agent.id);
 }
 
-export function dismissAnomalyRecord(db: Db, anomalyId: string): Promise<void> {
-  return dismissAnomaly(db, anomalyId);
+export async function dismissAnomalyRecord(db: Db, anomalyId: string): Promise<boolean> {
+  const agent = await getAgent(db);
+  return dismissAnomaly(db, anomalyId, agent.id);
 }
 
-export async function suspendAnomalyRecord(db: Db, anomalyId: string): Promise<void> {
-  await suspendAnomalyPolicy(db, anomalyId);
+export async function suspendAnomalyRecord(db: Db, anomalyId: string): Promise<boolean> {
+  const agent = await getAgent(db);
+  return (await suspendAnomalyPolicy(db, anomalyId, agent.id)).suspended;
 }
 
 export async function listImprovementProposals(db: Db) {
@@ -94,18 +96,25 @@ export async function editAssistantSkill(
   if (!patch.name.trim() || !patch.steps.trim()) {
     return { error: 'Name and steps are required.' };
   }
-  await updateSkill(db, router, skillId, patch);
-  return {};
+  const agent = await getAgent(db);
+  try {
+    await updateSkill(db, router, skillId, agent.id, patch);
+    return {};
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : 'Skill could not be updated.' };
+  }
 }
 
-export function deleteAssistantSkill(db: Db, skillId: string): Promise<void> {
-  return deleteSkill(db, skillId);
+export async function deleteAssistantSkill(db: Db, skillId: string): Promise<boolean> {
+  const agent = await getAgent(db);
+  return deleteSkill(db, skillId, agent.id);
 }
 
-export function setAssistantSkillDeprecated(
+export async function setAssistantSkillDeprecated(
   db: Db,
   skillId: string,
   deprecated: boolean,
-): Promise<void> {
-  return setSkillDeprecated(db, skillId, deprecated);
+): Promise<boolean> {
+  const agent = await getAgent(db);
+  return setSkillDeprecated(db, skillId, deprecated, agent.id);
 }

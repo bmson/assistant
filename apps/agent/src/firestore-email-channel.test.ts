@@ -116,9 +116,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore email thread re
         messageId: 'g1',
       },
     });
-    expect(await deliverEmailFinal(deps(), triage, 'Done — **booked**.')).toBe(true);
+    expect(await deliverEmailFinal(deps(), triage, 'Done — **booked**.')).toMatchObject({
+      status: 'accepted',
+    });
     const followUp = await task({ conversationId, type: 'adhoc', trust: 'owner' });
-    expect(await deliverEmailFinal(deps(), followUp, 'Also moved the call.')).toBe(true);
+    expect(await deliverEmailFinal(deps(), followUp, 'Also moved the call.')).toMatchObject({
+      status: 'accepted',
+    });
 
     expect(sent.map((mail) => mail.threadId)).toEqual([
       `gmail-thread-${conversationId}`,
@@ -142,7 +146,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore email thread re
       payload: { threadId: 'x', from: 'grace@friend.test', subject: 'Hi' },
     });
     const followUp = await task({ conversationId: strangerThread, type: 'adhoc', trust: 'owner' });
-    expect(await deliverEmailFinal(deps(), followUp, 'Reply')).toBe(false);
+    expect(await deliverEmailFinal(deps(), followUp, 'Reply')).toMatchObject({
+      status: 'rejected',
+    });
 
     const spoof = await task({
       conversationId: await thread(),
@@ -150,14 +156,16 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore email thread re
       trust: 'owner',
       payload: { threadId: 't', from: 'mallory@spoof.test', subject: 'Hi' },
     });
-    expect(await deliverEmailFinal(deps(), spoof, 'Reply')).toBe(false);
+    expect(await deliverEmailFinal(deps(), spoof, 'Reply')).toMatchObject({ status: 'rejected' });
 
     const chat = await task({
       conversationId: await thread('chat'),
       type: 'adhoc',
       trust: 'owner',
     });
-    expect(await deliverEmailFinal(deps(), chat, 'Reply')).toBe(false);
+    expect(await deliverEmailFinal(deps(), chat, 'Reply')).toMatchObject({
+      status: 'not_applicable',
+    });
     expect(sent).toEqual([]);
   });
 });

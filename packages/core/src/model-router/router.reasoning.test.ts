@@ -14,6 +14,8 @@ const stubs = vi.hoisted(() => ({
   reconcileReservation: vi.fn(async () => {}),
   releaseReservation: vi.fn(async () => {}),
   reserveCost: vi.fn(async () => ({ ok: true as const, reservationId: 'reservation-1' })),
+  beginCostAttempt: vi.fn(async () => true),
+  markCostAttemptUnknown: vi.fn(async () => {}),
 }));
 
 vi.mock('@openrouter/ai-sdk-provider', () => ({
@@ -32,6 +34,8 @@ vi.mock('../cost.js', async (importOriginal) => ({
   reconcileReservation: stubs.reconcileReservation,
   releaseReservation: stubs.releaseReservation,
   reserveCost: stubs.reserveCost,
+  beginCostAttempt: stubs.beginCostAttempt,
+  markCostAttemptUnknown: stubs.markCostAttemptUnknown,
 }));
 
 function provider(overrides: Partial<ModelProvider> = {}): ModelProvider {
@@ -73,6 +77,7 @@ function routerWith(modelProvider: ModelProvider, thinking = true, modelId = 've
 beforeEach(() => {
   vi.clearAllMocks();
   stubs.reserveCost.mockResolvedValue({ ok: true, reservationId: 'reservation-1' });
+  stubs.beginCostAttempt.mockResolvedValue(true);
   stubs.generateText.mockResolvedValue({ text: 'answer', toolCalls: [], toolResults: [] });
   stubs.generateObject.mockResolvedValue({ object: { needsAction: false } });
 });
@@ -129,6 +134,66 @@ describe('reasoning is spent only where it earns its latency', () => {
       'maxRetries',
     );
     expect(stubs.generateText).toHaveBeenCalledTimes(1);
+  });
+  it('adds structured schemas and tool schemas to the prepared input reservation', async () => {
+    const router = routerWith(provider(), false);
+    await router.object('classify', {
+      prompt: 'x',
+      maxRetries: 0,
+      schema: z.object({ value: z.string() }),
+    });
+    const baselineObjectCall = stubs.reserveCost.mock.calls[0] as unknown as
+      | [unknown, { estimatedUsd: number }]
+      | undefined;
+    const baselineObjectEstimate = baselineObjectCall?.[1].estimatedUsd ?? 0;
+    stubs.reserveCost.mockClear();
+    await router.object('classify', {
+      prompt: 'x',
+      maxRetries: 0,
+      schema: z.object(
+        Object.fromEntries(Array.from({ length: 18 }, (_, index) => [`field${index}`, z.string()])),
+      ),
+    });
+    const objectCall = stubs.reserveCost.mock.calls[0] as unknown as
+      | [unknown, { estimatedUsd: number }]
+      | undefined;
+    const objectEstimate = objectCall?.[1].estimatedUsd;
+    expect(objectEstimate).toBeGreaterThan(baselineObjectEstimate);
+
+    stubs.reserveCost.mockClear();
+    await router.step('draft', {
+      prompt: 'x',
+      maxRetries: 0,
+      tools: {
+        'large.lookup': {
+          description: 'Lookup a record',
+          inputSchema: z.object({ value: z.string() }),
+        },
+      } as never,
+    });
+    const baselineStepCall = stubs.reserveCost.mock.calls[0] as unknown as
+      | [unknown, { estimatedUsd: number }]
+      | undefined;
+    const baselineStepEstimate = baselineStepCall?.[1].estimatedUsd ?? 0;
+    stubs.reserveCost.mockClear();
+    await router.step('draft', {
+      prompt: 'x',
+      maxRetries: 0,
+      tools: {
+        'large.lookup': {
+          description: 'Lookup a record with a detailed input contract',
+          inputSchema: z.object(
+            Object.fromEntries(
+              Array.from({ length: 18 }, (_, index) => [`field${index}`, z.string()]),
+            ),
+          ),
+        },
+      } as never,
+    });
+    const stepCall = stubs.reserveCost.mock.calls[0] as unknown as
+      | [unknown, { estimatedUsd: number }]
+      | undefined;
+    expect(stepCall?.[1].estimatedUsd).toBeGreaterThan(baselineStepEstimate);
   });
   it('turns reasoning off for a classifier, and does not reserve headroom it will not use', async () => {
     const optionsFor = vi.fn(() => undefined);
@@ -417,9 +482,15 @@ describe('provider routing for calls a person is waiting on', () => {
     const router = new ModelRouter(repo, 'unused', 'off', provider({ chat }));
 
     await router.route('draft');
-    expect(chat).toHaveBeenCalledWith('vendor/model-test', { interactive: true });
+    expect(chat).toHaveBeenCalledWith(
+      'vendor/model-test',
+      expect.objectContaining({ interactive: true }),
+    );
 
     await router.route('batch');
-    expect(chat).toHaveBeenLastCalledWith('vendor/model-test', { interactive: false });
+    expect(chat).toHaveBeenLastCalledWith(
+      'vendor/model-test',
+      expect.objectContaining({ interactive: false }),
+    );
   });
 });

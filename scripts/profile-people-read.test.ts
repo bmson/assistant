@@ -65,6 +65,7 @@ function fact(
     expiresAt: null,
     createdAt: new Date('2026-09-21T10:11:12.345Z'),
     ...patch,
+    embeddingSpaceKey: patch.embeddingSpaceKey ?? null,
   };
 }
 

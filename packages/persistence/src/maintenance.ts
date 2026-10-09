@@ -51,6 +51,7 @@ export interface MaintenanceRepository {
    */
   embedMissingMessages(input: {
     batch: number;
+    embeddingSpaceKey: string;
     embed: (texts: string[]) => Promise<number[][]>;
   }): Promise<number>;
   purgeExpired(input: {

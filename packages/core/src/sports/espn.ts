@@ -92,8 +92,22 @@ function recs(value: unknown): Raw[] {
 
 /** Logos only from ESPN's own image CDN, over https. */
 function logoUrl(value: unknown): string | undefined {
-  const url = typeof value === 'string' ? value : '';
-  return /^https:\/\/[a-z0-9.-]*espncdn\.com\/[\w./-]+\.(?:png|svg)$/i.test(url) ? url : undefined;
+  if (typeof value !== 'string') return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' &&
+      !url.username &&
+      !url.password &&
+      (url.hostname === 'espncdn.com' || url.hostname.endsWith('.espncdn.com')) &&
+      !url.port &&
+      !url.search &&
+      !url.hash &&
+      /\.(?:png|svg)$/i.test(url.pathname)
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function espnLink(value: unknown): string | undefined {

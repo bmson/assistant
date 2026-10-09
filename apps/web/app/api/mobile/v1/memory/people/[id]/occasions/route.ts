@@ -1,6 +1,7 @@
 import { addPersonOccasion } from '@assistant/application/profile';
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import { FirestoreProfileOccasionCommandRepository } from '@assistant/firestore';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getDb, getFirestoreInstallationStore } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -15,7 +16,17 @@ export async function POST(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid person id' }, { status: 400 });
-  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+  const mutationBody = await readMobileMutationBody(request, [
+    'kind',
+    'label',
+    'month',
+    'day',
+    'year',
+    'leadDays',
+    'notes',
+  ]);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as Record<string, unknown> | null;
   if (!body || Array.isArray(body)) {
     return mobileJson({ error: 'invalid occasion body' }, { status: 400 });
   }

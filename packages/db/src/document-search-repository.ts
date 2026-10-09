@@ -11,6 +11,7 @@ export function createPostgresDocumentSearchRepository(db: Db): DocumentSearchRe
       const vec = JSON.stringify(input.embedding);
       const filters = [
         eq(documentChunks.agentId, input.agentId),
+        eq(documentChunks.embeddingSpaceKey, input.embeddingSpaceKey),
         eq(documents.status, 'ready'),
         sql`1 - (${documentChunks.embedding} <=> ${vec}::vector) >= ${input.minSimilarity}`,
       ];

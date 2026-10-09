@@ -31,10 +31,19 @@ pass. It produces nothing installable.
 - Automatic signing left on (`CODE_SIGN_STYLE = Automatic`), which is how the project ships.
   Xcode provisions both targets on first archive.
 
-The app declares `NSSupportsLiveActivities` and registers the `assistant://` URL scheme. It
-requests notification authorization at runtime and posts only local notifications — there is
-no APNs provider integration and no push entitlement to configure. Delivery after a force
-quit would need one; see the README.
+The app registers for remote notifications and declares the `aps-environment` entitlement.
+The server has an APNs provider, enabled when `APNS_KEY_ID`, `APNS_TEAM_ID`,
+`APNS_PRIVATE_KEY`, and `APNS_BUNDLE_ID` are configured. Set the bundle ID to the app's
+registered identifier and use the matching Apple key and team. Confirm that the archived
+app's signed entitlements contain the production APNs environment before release; the checked-in
+entitlements file says `development` and is not proof of the archive's final signing value.
+Notification permission is still requested from the owner in the app. The payloads use generic
+lock-screen copy and open the authenticated app for details.
+
+Live Activities are supported, but the app starts one only while an approval is waiting and the
+pending approval count is positive. Ordinary work progress and completion stay in the app's
+Activity view and notification path; they do not create a Dynamic Island activity. This is a
+deliberate privacy and attention policy reflected in `LiveActivityManager.shouldPresentSystemActivity`.
 
 ## Releasing a build
 
@@ -66,11 +75,11 @@ you are about to hand to testers is the natural moment:
 - **M3** — start a long-running turn and read the expanded island's centre label.
 - **M8** — set text to the largest non-accessibility size and open the menu.
 
-**P8** is the shipping decision itself: the project targets iPhone and iPad
-(`TARGETED_DEVICE_FAMILY = "1,2"`) and allows landscape, and nothing in the app is designed
-for either. Restricting to iPhone portrait before the first public build is a one-line
-change in each of the project settings and `Info.plist`; widening later is easy, narrowing
-after people have installed it on an iPad is not.
+The project targets iPhone and iPad (`TARGETED_DEVICE_FAMILY = "1,2"`). The app's current
+orientation declarations allow portrait on iPhone and portrait plus upside-down portrait on
+iPad; they do not allow landscape. The iPad layout has not had a separate release qualification
+in this guide. Decide its supported-device policy before changing the target family or
+orientation contract, then verify the signed archive's supported orientations.
 
 ## Automating it
 

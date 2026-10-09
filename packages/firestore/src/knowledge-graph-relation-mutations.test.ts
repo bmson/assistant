@@ -2,8 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getFirestoreKnowledgeGraphRelation } from './knowledge-graph-read.js';
 import { FirestoreKnowledgeGraphRelationMutationRepository } from './knowledge-graph-relation-mutations.js';
+import { embeddingSpaceKey } from './memory.js';
 import { createInstallationStore } from './store.js';
 
+const space = { provider: 'vertex', model: 'fixture', dimensions: 1, revision: 'v1' };
 const emulator = /^(?:127\.0\.0\.1|localhost):\d+$/.test(process.env.FIRESTORE_EMULATOR_HOST ?? '');
 
 describe.skipIf(!emulator)('Firestore owner knowledge relationship review', () => {
@@ -49,6 +51,7 @@ describe.skipIf(!emulator)('Firestore owner knowledge relationship review', () =
       expiresAt: null,
       quarantined: false,
       embedding: [0.1],
+      embeddingSpace: embeddingSpaceKey(space),
       ownerConfirmed: true,
       originTrust: 'owner',
     });
@@ -82,7 +85,14 @@ describe.skipIf(!emulator)('Firestore owner knowledge relationship review', () =
   });
 
   it('reads one source-backed relation and retains evidence across confirmation and rejection', async () => {
-    const before = await getFirestoreKnowledgeGraphRelation(store, agentId, 1, relationId, now);
+    const before = await getFirestoreKnowledgeGraphRelation(
+      store,
+      agentId,
+      1,
+      relationId,
+      now,
+      space,
+    );
     expect(before).toMatchObject({
       id: relationId,
       reviewStatus: 'unreviewed',
@@ -91,14 +101,14 @@ describe.skipIf(!emulator)('Firestore owner knowledge relationship review', () =
     });
     expect(await repository.review(relationId, 'confirmed')).toBe(true);
     expect(
-      await getFirestoreKnowledgeGraphRelation(store, agentId, 1, relationId, now),
+      await getFirestoreKnowledgeGraphRelation(store, agentId, 1, relationId, now, space),
     ).toMatchObject({
       reviewStatus: 'confirmed',
       inRecall: true,
     });
     expect(await repository.review(relationId, 'rejected')).toBe(true);
     expect(
-      await getFirestoreKnowledgeGraphRelation(store, agentId, 1, relationId, now),
+      await getFirestoreKnowledgeGraphRelation(store, agentId, 1, relationId, now, space),
     ).toMatchObject({
       reviewStatus: 'rejected',
       inRecall: false,

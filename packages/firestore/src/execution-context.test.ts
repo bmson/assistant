@@ -1,3 +1,4 @@
+import { Timestamp } from '@google-cloud/firestore';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FirestoreExecutionContextRepository } from './execution-context.js';
 import type { InstallationStore } from './store.js';
@@ -19,6 +20,19 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
     async function addConversation(id: string, agentId: string, channel: 'chat' | 'email') {
       await store.doc('conversations', id).set({ id, agentId, channel });
     }
+    it('rejects a normalized impossible checkpoint date before querying replies', async () => {
+      await addConversation('invalid-date-chat', 'agent-a', 'chat');
+      await expect(
+        repository.getOwnerRepliesAfter({
+          agentId: 'agent-a',
+          conversationId: 'invalid-date-chat',
+          after: {
+            createdAt: new Date('2026-03-01T00:00:00Z'),
+            exactCreatedAt: '2026-02-30T00:00:00.123456Z',
+          },
+        }),
+      ).rejects.toThrow('Invalid conversation watermark');
+    });
 
     function message(input: {
       id: string;
@@ -131,6 +145,16 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect(history.map((row) => row.text)).toEqual(
         Array.from({ length: 20 }, (_, index) => `history-${index + 5}`),
       );
+      const wider = {
+        agentId: 'agent-a',
+        conversationId: 'email-a',
+        before: new Date('2026-09-12T11:00:00Z'),
+        limit: 100,
+      };
+      expect(await repository.seedHistory(wider)).toHaveLength(25);
+      await expect(repository.seedHistory({ ...wider, limit: 101 })).rejects.toThrow(
+        'between 1 and 100',
+      );
       await expect(
         repository.seedHistory({
           agentId: 'agent-b',
@@ -138,6 +162,49 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           before: new Date('2026-09-12T11:00:00Z'),
         }),
       ).resolves.toEqual([]);
+    });
+
+    it('round-trips stored sub-millisecond cursors without replay after a row is removed', async () => {
+      await addConversation('nano-chat', 'agent-a', 'chat');
+      const seconds = Date.parse('2026-09-12T10:00:00Z') / 1000;
+      for (const [index, nanos] of [123456000, 123789000].entries()) {
+        await store.doc('messages', `nano-${index}`).set({
+          ...message({
+            id: `nano-${index}`,
+            conversationId: 'nano-chat',
+            at: new Date(seconds * 1000),
+            text: `nano-${index}`,
+          }),
+          createdAt: new Timestamp(seconds, nanos),
+        });
+      }
+      const baseline = await repository.getLatestOwnerReplyCursor({
+        agentId: 'agent-a',
+        conversationId: 'nano-chat',
+      });
+      expect(baseline?.cursor?.exactCreatedAt).toBe('2026-09-12T10:00:00.123789000Z');
+      const rows = await repository.getOwnerRepliesAfter({
+        agentId: 'agent-a',
+        conversationId: 'nano-chat',
+        after: { createdAt: new Date(seconds * 1000) },
+      });
+      expect(rows.map((r) => r.exactCreatedAt)).toEqual([
+        '2026-09-12T10:00:00.123456000Z',
+        '2026-09-12T10:00:00.123789000Z',
+      ]);
+      const last = rows.at(-1);
+      if (!last) throw new Error('missing row');
+      await store.doc('messages', last.id).delete();
+      const cursor = JSON.parse(
+        JSON.stringify({ exactCreatedAt: last.exactCreatedAt, id: last.id }),
+      );
+      expect(
+        await repository.getOwnerRepliesAfter({
+          agentId: 'agent-a',
+          conversationId: 'nano-chat',
+          after: { ...cursor, createdAt: last.createdAt },
+        }),
+      ).toEqual([]);
     });
 
     it('baselines the latest stable cursor and reads timestamp ties exactly once', async () => {
@@ -158,7 +225,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
 
       await expect(
         repository.getLatestOwnerReplyCursor({ agentId: 'agent-a', conversationId: 'chat-a' }),
-      ).resolves.toEqual({ cursor: { createdAt: at, id: 'tie-4' } });
+      ).resolves.toEqual({
+        cursor: {
+          createdAt: at,
+          exactCreatedAt: at.toISOString().replace(/(\.\d{3})Z$/, '$1000000Z'),
+          id: 'tie-4',
+        },
+      });
       const newer = await repository.getOwnerRepliesAfter({
         agentId: 'agent-a',
         conversationId: 'chat-a',

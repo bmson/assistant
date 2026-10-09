@@ -1,6 +1,7 @@
 import { loadConfig } from '@assistant/config';
 import { getAgent } from '@assistant/core/chat';
 import {
+  correctOwnerKnowledgeGraphFactWithRepository,
   countRelativeDateSources,
   createOwnerKnowledgeGraphFact,
   createOwnerKnowledgeGraphFactWithRepository,
@@ -13,12 +14,21 @@ import {
   retryQuarantinedKnowledgeGraphSources as retryQuarantinedSources,
   retypeGraphEntity,
 } from '@assistant/core/memory/knowledge-graph';
-import type { OwnerKnowledgeGraphFactRepository } from '@assistant/persistence';
+import type {
+  DerivableKnowledgeAssertion,
+  DerivedKnowledgeView,
+  KnowledgeAssertionEndpointView,
+  OwnerGraphCorrectionDisposition,
+  OwnerGraphCorrectionTarget,
+  OwnerKnowledgeGraphFactRepository,
+} from '@assistant/persistence';
+import { deriveSharedParentViews, knowledgeAssertionEndpointView } from '@assistant/persistence';
 
 export { GRAPH_EXTRACTION_VERSION } from '@assistant/core/memory/knowledge-graph';
 
 import {
   type Db,
+  knowledgeGraphAssertions,
   knowledgeGraphEntities,
   knowledgeGraphRelations,
   knowledgeGraphSources,
@@ -95,6 +105,10 @@ export interface KnowledgeGraphRelationView {
     originTrust: string;
   };
   presentation: RelationshipPresentation;
+  /** Safe wording for each endpoint; inverse text falls back to evidence when uncertain. */
+  endpointViews?: KnowledgeAssertionEndpointView[];
+  /** Only source-backed current premises participate; each result carries its complete lineage. */
+  derivedRelations?: DerivedKnowledgeView[];
 }
 
 /** An advisory merge hint, mirroring the contact-level duplicate suggestions. */
@@ -145,6 +159,8 @@ export interface KnowledgeGraphOverview {
    */
   selectedActiveRelationTotal: number;
   duplicates: KnowledgeGraphDuplicate[];
+  derivedRelations?: DerivedKnowledgeView[];
+  derivedCoverage?: 'complete' | 'bounded_incomplete';
 }
 
 /** A bounded, evidence-ready queue for the owner’s review workflow. */
@@ -183,6 +199,7 @@ async function readKnowledgeGraphRelations(
       validFrom: knowledgeGraphRelations.validFrom,
       validUntil: knowledgeGraphRelations.validUntil,
       hasEvidence: sql<boolean>`${knowledgeGraphRelations.evidenceQuote} IS NOT NULL`,
+      evidenceQuote: knowledgeGraphRelations.evidenceQuote,
       subjectId: subject.id,
       subjectLabel: displayLabel(subject),
       subjectKind: subject.kind,
@@ -203,11 +220,24 @@ async function readKnowledgeGraphRelations(
       checkpointStatus: knowledgeGraphSources.status,
       checkpointContentHash: knowledgeGraphSources.contentHash,
       checkpointVersion: knowledgeGraphSources.extractionVersion,
+      assertionId: knowledgeGraphRelations.assertionId,
+      assertionSemanticRevision: knowledgeGraphAssertions.semanticRevision,
+      assertionLifecycle: knowledgeGraphAssertions.lifecycle,
+      assertionReviewStatus: knowledgeGraphAssertions.reviewStatus,
+      assertionEvidenceCount: sql<number>`(
+        SELECT COUNT(*)::int FROM knowledge_graph_assertion_evidence evidence
+        WHERE evidence.assertion_id = ${knowledgeGraphRelations.assertionId}
+          AND evidence.agent_id = ${agent.id}
+      )`,
     })
     .from(knowledgeGraphRelations)
     .innerJoin(subject, eq(knowledgeGraphRelations.subjectEntityId, subject.id))
     .innerJoin(object, eq(knowledgeGraphRelations.objectEntityId, object.id))
     .innerJoin(memories, eq(knowledgeGraphRelations.sourceMemoryId, memories.id))
+    .leftJoin(
+      knowledgeGraphAssertions,
+      eq(knowledgeGraphRelations.assertionId, knowledgeGraphAssertions.id),
+    )
     .leftJoin(knowledgeGraphSources, eq(knowledgeGraphSources.memoryId, memories.id))
     .where(
       and(
@@ -236,7 +266,9 @@ async function readKnowledgeGraphRelations(
       canonicalKey: row.objectCanonicalKey,
     },
     confidence: Number(row.confidence),
-    reviewStatus: asReviewStatus(row.reviewStatus),
+    reviewStatus: asReviewStatus(
+      row.assertionId ? (row.assertionReviewStatus ?? 'unreviewed') : row.reviewStatus,
+    ),
     reviewedAt: row.reviewedAt,
     validFrom: row.validFrom,
     validUntil: row.validUntil,
@@ -244,6 +276,8 @@ async function readKnowledgeGraphRelations(
     // the owner still needs to see and decide on their evidence.
     inRecall:
       row.reviewStatus !== 'rejected' &&
+      (row.assertionId === null ||
+        (row.assertionLifecycle === 'current' && row.assertionReviewStatus !== 'rejected')) &&
       row.checkpointStatus === 'ready' &&
       row.checkpointContentHash === row.memoryContentHash &&
       (row.checkpointVersion ?? 0) >= GRAPH_EXTRACTION_VERSION &&
@@ -263,6 +297,25 @@ async function readKnowledgeGraphRelations(
       predicate: row.predicate,
       objectLabel: row.objectLabel,
     }),
+    endpointViews:
+      row.assertionId && row.assertionLifecycle === 'current' && row.assertionSemanticRevision
+        ? [row.subjectId, row.objectId].flatMap((focusEntityId) => {
+            const view = knowledgeAssertionEndpointView({
+              assertionId: row.assertionId as string,
+              semanticRevision: row.assertionSemanticRevision as number,
+              subjectEntityId: row.subjectId,
+              subjectLabel: row.subjectLabel,
+              predicate: row.predicate,
+              objectEntityId: row.objectId,
+              objectLabel: row.objectLabel,
+              evidenceQuote: row.evidenceQuote,
+              evidenceCount: Number(row.assertionEvidenceCount ?? 0),
+              reviewStatus: asReviewStatus(row.assertionReviewStatus ?? row.reviewStatus),
+              focusEntityId,
+            });
+            return view ? [view] : [];
+          })
+        : [],
   }));
 }
 
@@ -316,6 +369,13 @@ export function asGraphEntityKind(value: string | undefined): GraphEntityKind | 
 export function activeKnowledgeGraphWhere(agentId: string) {
   return and(
     eq(knowledgeGraphRelations.agentId, agentId),
+    sql`(${knowledgeGraphRelations.assertionId} IS NULL OR EXISTS (
+      SELECT 1 FROM knowledge_graph_assertions AS assertion
+      WHERE assertion.id = ${knowledgeGraphRelations.assertionId}
+        AND assertion.agent_id = ${agentId}
+        AND assertion.lifecycle = 'current'
+        AND assertion.review_status <> 'rejected'
+    ))`,
     ne(knowledgeGraphRelations.reviewStatus, 'rejected'),
     eq(memories.category, 'knowledge'),
     eq(memories.quarantined, false),
@@ -342,6 +402,16 @@ function activeKnowledgeGraphRelationForMemorySql(
     active_relation.agent_id = ${agentId}
     AND active_relation.source_memory_id = ${memoryId}
     AND active_relation.review_status <> 'rejected'
+    AND (
+      active_relation.assertion_id IS NULL
+      OR EXISTS (
+        SELECT 1 FROM knowledge_graph_assertions AS assertion
+        WHERE assertion.id = active_relation.assertion_id
+          AND assertion.agent_id = ${agentId}
+          AND assertion.lifecycle = 'current'
+          AND assertion.review_status <> 'rejected'
+      )
+    )
     AND active_memory.category = 'knowledge'
     AND active_memory.quarantined = false
     AND (active_memory.expires_at IS NULL OR active_memory.expires_at > now())
@@ -554,6 +624,8 @@ export async function getKnowledgeGraphOverview(
       selectedRelationTotal: 0,
       selectedActiveRelationTotal: 0,
       duplicates: [],
+      derivedRelations: [],
+      derivedCoverage: 'complete',
     };
   }
 
@@ -566,60 +638,114 @@ export async function getKnowledgeGraphOverview(
       eq(knowledgeGraphRelations.objectEntityId, selected.id),
     ),
   );
-  const [relationRows, [selectedRelationRow], [selectedActiveRow], duplicates] = await Promise.all([
-    db
-      .select({
-        id: knowledgeGraphRelations.id,
-        predicate: knowledgeGraphRelations.predicate,
-        confidence: knowledgeGraphRelations.confidence,
-        reviewStatus: knowledgeGraphRelations.reviewStatus,
-        reviewedAt: knowledgeGraphRelations.reviewedAt,
-        validFrom: knowledgeGraphRelations.validFrom,
-        validUntil: knowledgeGraphRelations.validUntil,
-        hasEvidence: sql<boolean>`${knowledgeGraphRelations.evidenceQuote} IS NOT NULL`,
-        subjectId: subject.id,
-        subjectLabel: displayLabel(subject),
-        subjectKind: subject.kind,
-        subjectCanonicalKey: subject.canonicalKey,
-        objectId: object.id,
-        objectLabel: displayLabel(object),
-        objectKind: object.kind,
-        objectCanonicalKey: object.canonicalKey,
-        sourceMemoryId: memories.id,
-        sourceContent: memories.content,
-        sourceCreatedAt: memories.createdAt,
-        sourceOwnerConfirmed: memories.ownerConfirmed,
-        sourceOriginTrust: memories.originTrust,
-        memoryContentHash: memories.contentHash,
-        memoryQuarantined: memories.quarantined,
-        memoryExpiresAt: memories.expiresAt,
-        memoryEmbedded: sql<boolean>`${memories.embedding} IS NOT NULL`,
-        checkpointStatus: knowledgeGraphSources.status,
-        checkpointContentHash: knowledgeGraphSources.contentHash,
-        checkpointVersion: knowledgeGraphSources.extractionVersion,
-      })
-      .from(knowledgeGraphRelations)
-      .innerJoin(subject, eq(knowledgeGraphRelations.subjectEntityId, subject.id))
-      .innerJoin(object, eq(knowledgeGraphRelations.objectEntityId, object.id))
-      .innerJoin(memories, eq(knowledgeGraphRelations.sourceMemoryId, memories.id))
-      .leftJoin(knowledgeGraphSources, eq(knowledgeGraphSources.memoryId, memories.id))
-      .where(incidentToSelected)
-      .orderBy(
-        asc(
-          sql`CASE ${knowledgeGraphRelations.reviewStatus} WHEN 'unreviewed' THEN 0 WHEN 'confirmed' THEN 1 ELSE 2 END`,
-        ),
-        desc(knowledgeGraphRelations.createdAt),
-      )
-      .limit(RELATION_LIMIT),
-    db.select({ value: count() }).from(knowledgeGraphRelations).where(incidentToSelected),
-    db
-      .select({ value: count() })
-      .from(knowledgeGraphRelations)
-      .innerJoin(memories, eq(knowledgeGraphRelations.sourceMemoryId, memories.id))
-      .innerJoin(knowledgeGraphSources, eq(knowledgeGraphSources.memoryId, memories.id))
-      .where(and(incidentToSelected, activeKnowledgeGraphWhere(agent.id))),
-    findDuplicateKnowledgeGraphEntities(db, selected),
-  ]);
+  const [relationRows, [selectedRelationRow], [selectedActiveRow], duplicates, derivedRows] =
+    await Promise.all([
+      db
+        .select({
+          id: knowledgeGraphRelations.id,
+          predicate: knowledgeGraphRelations.predicate,
+          confidence: knowledgeGraphRelations.confidence,
+          reviewStatus: knowledgeGraphRelations.reviewStatus,
+          reviewedAt: knowledgeGraphRelations.reviewedAt,
+          validFrom: knowledgeGraphRelations.validFrom,
+          validUntil: knowledgeGraphRelations.validUntil,
+          hasEvidence: sql<boolean>`${knowledgeGraphRelations.evidenceQuote} IS NOT NULL`,
+          evidenceQuote: knowledgeGraphRelations.evidenceQuote,
+          subjectId: subject.id,
+          subjectLabel: displayLabel(subject),
+          subjectKind: subject.kind,
+          subjectCanonicalKey: subject.canonicalKey,
+          objectId: object.id,
+          objectLabel: displayLabel(object),
+          objectKind: object.kind,
+          objectCanonicalKey: object.canonicalKey,
+          sourceMemoryId: memories.id,
+          sourceContent: memories.content,
+          sourceCreatedAt: memories.createdAt,
+          sourceOwnerConfirmed: memories.ownerConfirmed,
+          sourceOriginTrust: memories.originTrust,
+          memoryContentHash: memories.contentHash,
+          memoryQuarantined: memories.quarantined,
+          memoryExpiresAt: memories.expiresAt,
+          memoryEmbedded: sql<boolean>`${memories.embedding} IS NOT NULL`,
+          assertionId: knowledgeGraphRelations.assertionId,
+          assertionSemanticRevision: knowledgeGraphAssertions.semanticRevision,
+          assertionLifecycle: knowledgeGraphAssertions.lifecycle,
+          assertionReviewStatus: knowledgeGraphAssertions.reviewStatus,
+          assertionEvidenceCount: sql<number>`(
+          SELECT COUNT(*)::int FROM knowledge_graph_assertion_evidence evidence
+          WHERE evidence.assertion_id = ${knowledgeGraphRelations.assertionId}
+            AND evidence.agent_id = ${agent.id}
+        )`,
+          checkpointStatus: knowledgeGraphSources.status,
+          checkpointContentHash: knowledgeGraphSources.contentHash,
+          checkpointVersion: knowledgeGraphSources.extractionVersion,
+        })
+        .from(knowledgeGraphRelations)
+        .innerJoin(subject, eq(knowledgeGraphRelations.subjectEntityId, subject.id))
+        .innerJoin(object, eq(knowledgeGraphRelations.objectEntityId, object.id))
+        .innerJoin(memories, eq(knowledgeGraphRelations.sourceMemoryId, memories.id))
+        .leftJoin(
+          knowledgeGraphAssertions,
+          eq(knowledgeGraphRelations.assertionId, knowledgeGraphAssertions.id),
+        )
+        .leftJoin(knowledgeGraphSources, eq(knowledgeGraphSources.memoryId, memories.id))
+        .where(incidentToSelected)
+        .orderBy(
+          asc(
+            sql`CASE ${knowledgeGraphRelations.reviewStatus} WHEN 'unreviewed' THEN 0 WHEN 'confirmed' THEN 1 ELSE 2 END`,
+          ),
+          desc(knowledgeGraphRelations.createdAt),
+        )
+        .limit(RELATION_LIMIT),
+      db.select({ value: count() }).from(knowledgeGraphRelations).where(incidentToSelected),
+      db
+        .select({ value: count() })
+        .from(knowledgeGraphRelations)
+        .innerJoin(memories, eq(knowledgeGraphRelations.sourceMemoryId, memories.id))
+        .innerJoin(knowledgeGraphSources, eq(knowledgeGraphSources.memoryId, memories.id))
+        .where(and(incidentToSelected, activeKnowledgeGraphWhere(agent.id))),
+      findDuplicateKnowledgeGraphEntities(db, selected),
+      db
+        .select({
+          id: knowledgeGraphAssertions.id,
+          semanticRevision: knowledgeGraphAssertions.semanticRevision,
+          subjectEntityId: knowledgeGraphAssertions.subjectEntityId,
+          predicate: knowledgeGraphAssertions.predicate,
+          objectEntityId: knowledgeGraphAssertions.objectEntityId,
+          assertion: knowledgeGraphAssertions.assertion,
+          lifecycle: knowledgeGraphAssertions.lifecycle,
+          reviewStatus: knowledgeGraphAssertions.reviewStatus,
+          subjectLabel: displayLabel(subject),
+          objectLabel: displayLabel(object),
+        })
+        .from(knowledgeGraphAssertions)
+        .innerJoin(
+          knowledgeGraphRelations,
+          eq(knowledgeGraphRelations.assertionId, knowledgeGraphAssertions.id),
+        )
+        .innerJoin(subject, eq(knowledgeGraphAssertions.subjectEntityId, subject.id))
+        .innerJoin(object, eq(knowledgeGraphAssertions.objectEntityId, object.id))
+        .innerJoin(memories, eq(knowledgeGraphRelations.sourceMemoryId, memories.id))
+        .innerJoin(knowledgeGraphSources, eq(knowledgeGraphSources.memoryId, memories.id))
+        .where(
+          and(
+            eq(knowledgeGraphAssertions.agentId, agent.id),
+            inArray(knowledgeGraphAssertions.predicate, ['parent_of', 'father_of', 'mother_of']),
+            activeKnowledgeGraphWhere(agent.id),
+            sql`${knowledgeGraphAssertions.assertion}->>'polarity' = 'positive'`,
+            sql`${knowledgeGraphAssertions.assertion}->>'modality' = 'asserted'`,
+          ),
+        )
+        .groupBy(
+          knowledgeGraphAssertions.id,
+          subject.preferredLabel,
+          subject.label,
+          object.preferredLabel,
+          object.label,
+        )
+        .limit(1001),
+    ]);
   const now = new Date();
   const relations = relationRows.map((row) => ({
     id: row.id,
@@ -637,7 +763,9 @@ export async function getKnowledgeGraphOverview(
       canonicalKey: row.objectCanonicalKey,
     },
     confidence: Number(row.confidence),
-    reviewStatus: asReviewStatus(row.reviewStatus),
+    reviewStatus: asReviewStatus(
+      row.assertionId ? (row.assertionReviewStatus ?? 'unreviewed') : row.reviewStatus,
+    ),
     reviewedAt: row.reviewedAt,
     validFrom: row.validFrom,
     validUntil: row.validUntil,
@@ -645,6 +773,8 @@ export async function getKnowledgeGraphOverview(
     // edge GraphRAG currently cannot traverse without hiding it from review.
     inRecall:
       row.reviewStatus !== 'rejected' &&
+      (row.assertionId === null ||
+        (row.assertionLifecycle === 'current' && row.assertionReviewStatus !== 'rejected')) &&
       row.checkpointStatus === 'ready' &&
       row.checkpointContentHash === row.memoryContentHash &&
       (row.checkpointVersion ?? 0) >= GRAPH_EXTRACTION_VERSION &&
@@ -664,7 +794,44 @@ export async function getKnowledgeGraphOverview(
       predicate: row.predicate,
       objectLabel: row.objectLabel,
     }),
+    endpointViews:
+      row.assertionId && row.assertionLifecycle === 'current' && row.assertionSemanticRevision
+        ? [row.subjectId, row.objectId].flatMap((focusEntityId) => {
+            const view = knowledgeAssertionEndpointView({
+              assertionId: row.assertionId as string,
+              semanticRevision: row.assertionSemanticRevision as number,
+              subjectEntityId: row.subjectId,
+              subjectLabel: row.subjectLabel,
+              predicate: row.predicate,
+              objectEntityId: row.objectId,
+              objectLabel: row.objectLabel,
+              evidenceQuote: row.evidenceQuote,
+              evidenceCount: Number(row.assertionEvidenceCount ?? 0),
+              reviewStatus: asReviewStatus(row.assertionReviewStatus ?? row.reviewStatus),
+              focusEntityId,
+            });
+            return view ? [view] : [];
+          })
+        : [],
   }));
+  const derivedCoverage = derivedRows.length > 1000 ? 'bounded_incomplete' : 'complete';
+  const derivedRelations =
+    derivedCoverage === 'complete'
+      ? deriveSharedParentViews(
+          derivedRows.map((row) => ({
+            ...row,
+            lifecycle: 'current' as const,
+            reviewStatus:
+              row.reviewStatus === 'confirmed' ? ('confirmed' as const) : ('unreviewed' as const),
+          })) as DerivableKnowledgeAssertion[],
+          new Map(
+            derivedRows.flatMap((row) => [
+              [row.subjectEntityId, row.subjectLabel],
+              [row.objectEntityId, row.objectLabel],
+            ]),
+          ),
+        ).filter((row) => row.subjectEntityId === selected.id || row.objectEntityId === selected.id)
+      : [];
   return {
     totalEntities: Number(entityTotal?.value ?? 0),
     totalRelations: Number(relationTotal?.value ?? 0),
@@ -680,6 +847,8 @@ export async function getKnowledgeGraphOverview(
     entityPages,
     selected,
     relations,
+    derivedRelations,
+    derivedCoverage,
     selectedRelationTotal: Number(selectedRelationRow?.value ?? 0),
     selectedActiveRelationTotal: Number(selectedActiveRow?.value ?? 0),
     duplicates,
@@ -1122,17 +1291,74 @@ export async function reviewKnowledgeGraphRelation(
 ): Promise<boolean> {
   if (!UUID_RE.test(relationId)) return false;
   const agent = await getAgent(db);
-  const updated = await db
-    .update(knowledgeGraphRelations)
-    .set({ reviewStatus, reviewedAt: sql`now()` })
-    .where(
-      and(
-        eq(knowledgeGraphRelations.id, relationId),
-        eq(knowledgeGraphRelations.agentId, agent.id),
-      ),
-    )
-    .returning({ id: knowledgeGraphRelations.id });
-  return updated.length > 0;
+  return db.transaction(async (tx) => {
+    const scoped = tx as unknown as Db;
+    const [relation] = await scoped
+      .select({ assertionId: knowledgeGraphRelations.assertionId })
+      .from(knowledgeGraphRelations)
+      .where(
+        and(
+          eq(knowledgeGraphRelations.id, relationId),
+          eq(knowledgeGraphRelations.agentId, agent.id),
+        ),
+      )
+      .for('update')
+      .limit(1);
+    if (!relation) return false;
+    if (relation.assertionId) {
+      const [assertion] = await scoped
+        .select({
+          semanticRevision: knowledgeGraphAssertions.semanticRevision,
+          semanticKey: knowledgeGraphAssertions.semanticKey,
+        })
+        .from(knowledgeGraphAssertions)
+        .where(
+          and(
+            eq(knowledgeGraphAssertions.id, relation.assertionId),
+            eq(knowledgeGraphAssertions.agentId, agent.id),
+          ),
+        )
+        .for('update')
+        .limit(1);
+      if (!assertion) throw new Error('Canonical knowledge assertion is missing');
+      await scoped
+        .update(knowledgeGraphAssertions)
+        .set({
+          reviewStatus,
+          reviewedRevision: assertion.semanticRevision,
+          reviewedPayloadHash: assertion.semanticKey,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(knowledgeGraphAssertions.id, relation.assertionId),
+            eq(knowledgeGraphAssertions.agentId, agent.id),
+            eq(knowledgeGraphAssertions.semanticRevision, assertion.semanticRevision),
+            eq(knowledgeGraphAssertions.semanticKey, assertion.semanticKey),
+          ),
+        );
+      await scoped
+        .update(knowledgeGraphRelations)
+        .set({ reviewStatus, reviewedAt: sql`now()` })
+        .where(
+          and(
+            eq(knowledgeGraphRelations.assertionId, relation.assertionId),
+            eq(knowledgeGraphRelations.agentId, agent.id),
+          ),
+        );
+      return true;
+    }
+    await scoped
+      .update(knowledgeGraphRelations)
+      .set({ reviewStatus, reviewedAt: sql`now()` })
+      .where(
+        and(
+          eq(knowledgeGraphRelations.id, relationId),
+          eq(knowledgeGraphRelations.agentId, agent.id),
+        ),
+      );
+    return true;
+  });
 }
 
 /**
@@ -1152,25 +1378,96 @@ export async function correctKnowledgeGraphRelation(
     objectKind: string;
     objectId?: string;
     note: string;
+    sourceDisposition?: OwnerGraphCorrectionDisposition;
   },
-): Promise<{ error?: string; relationId?: string }> {
+): Promise<{
+  error?: string;
+  relationId?: string;
+  memoryId?: string;
+  sourceDisposition?: OwnerGraphCorrectionDisposition;
+  alreadyApplied?: boolean;
+}> {
   if (!UUID_RE.test(relationId)) return { error: 'That relationship no longer exists.' };
   const agent = await getAgent(db);
   const [existing] = await db
-    .select({ id: knowledgeGraphRelations.id })
+    .select({
+      relationId: knowledgeGraphRelations.id,
+      sourceMemoryId: memories.id,
+      sourceContentHash: memories.contentHash,
+      reviewStatus: knowledgeGraphRelations.reviewStatus,
+      source: memories.source,
+      sourceOriginTrust: memories.originTrust,
+      sourceOwnerConfirmed: memories.ownerConfirmed,
+      sourceSupersededById: memories.supersededById,
+      sourceExpiresAt: memories.expiresAt,
+      correctedByRelationId: knowledgeGraphRelations.correctedByRelationId,
+      correctionSourceContentHash: knowledgeGraphRelations.correctionSourceContentHash,
+      correctionDisposition: knowledgeGraphRelations.correctionDisposition,
+    })
     .from(knowledgeGraphRelations)
+    .innerJoin(memories, eq(knowledgeGraphRelations.sourceMemoryId, memories.id))
     .where(
       and(
         eq(knowledgeGraphRelations.id, relationId),
         eq(knowledgeGraphRelations.agentId, agent.id),
+        eq(memories.agentId, agent.id),
       ),
     )
     .limit(1);
   if (!existing) return { error: 'That relationship no longer exists.' };
-  const result = await addOwnerKnowledgeGraphFact(db, router, input);
-  if (result.error) return result;
-  await reviewKnowledgeGraphRelation(db, existing.id, 'rejected');
-  return result;
+  if (existing.correctedByRelationId) {
+    const [replacement] = await db
+      .select({ id: knowledgeGraphRelations.id, memoryId: knowledgeGraphRelations.sourceMemoryId })
+      .from(knowledgeGraphRelations)
+      .where(
+        and(
+          eq(knowledgeGraphRelations.id, existing.correctedByRelationId),
+          eq(knowledgeGraphRelations.agentId, agent.id),
+        ),
+      )
+      .limit(1);
+    return replacement
+      ? {
+          relationId: replacement.id,
+          memoryId: replacement.memoryId,
+          sourceDisposition:
+            existing.correctionDisposition === 'whole_fact' ? 'whole_fact' : 'graph_only',
+          alreadyApplied: true,
+        }
+      : {
+          error: 'The saved correction receipt needs repair before this fact can be changed again.',
+        };
+  }
+  const disposition: OwnerGraphCorrectionDisposition = input.sourceDisposition ?? 'graph_only';
+  const { sourceDisposition: _sourceDisposition, ...fact } = input;
+  const target: OwnerGraphCorrectionTarget = {
+    ...existing,
+    correctionDisposition:
+      existing.correctionDisposition === 'graph_only' ||
+      existing.correctionDisposition === 'whole_fact'
+        ? existing.correctionDisposition
+        : null,
+  };
+  const isKind = (value: string): value is GraphEntityKind =>
+    (GRAPH_ENTITY_KINDS as readonly string[]).includes(value);
+  return createOwnerKnowledgeGraphFact(
+    { db, router, agentId: agent.id },
+    {
+      subject: {
+        label: fact.subjectLabel,
+        kind: isKind(fact.subjectKind) ? fact.subjectKind : 'topic',
+        id: fact.subjectId,
+      },
+      predicate: fact.predicate,
+      object: {
+        label: fact.objectLabel,
+        kind: isKind(fact.objectKind) ? fact.objectKind : 'topic',
+        id: fact.objectId,
+      },
+      note: fact.note,
+    },
+    { target, disposition },
+  );
 }
 
 /**
@@ -1286,5 +1583,51 @@ export async function addOwnerKnowledgeGraphFactFromRepository(
       },
       note: input.note,
     },
+  );
+}
+
+/** Portable-store correction; the repository commits replacement and retirement together. */
+export async function correctOwnerKnowledgeGraphFactFromRepository(
+  repository: OwnerKnowledgeGraphFactRepository,
+  router: EmbeddingPort,
+  relationId: string,
+  input: {
+    subjectLabel: string;
+    subjectKind: string;
+    subjectId?: string;
+    subjectContactId?: string;
+    predicate: string;
+    objectLabel: string;
+    objectKind: string;
+    objectId?: string;
+    note: string;
+    sourceDisposition?: OwnerGraphCorrectionDisposition;
+  },
+) {
+  const isKind = (value: string): value is GraphEntityKind =>
+    (GRAPH_ENTITY_KINDS as readonly string[]).includes(value);
+  if (!input.subjectId && !isKind(input.subjectKind))
+    return { error: 'Choose a valid source type.' };
+  if (!input.objectId && !isKind(input.objectKind)) return { error: 'Choose a valid target type.' };
+  const { sourceDisposition = 'graph_only', ...fact } = input;
+  return correctOwnerKnowledgeGraphFactWithRepository(
+    { repository, router },
+    relationId,
+    {
+      subject: {
+        label: fact.subjectLabel,
+        kind: isKind(fact.subjectKind) ? fact.subjectKind : 'topic',
+        id: fact.subjectId,
+        contactId: fact.subjectContactId,
+      },
+      predicate: fact.predicate,
+      object: {
+        label: fact.objectLabel,
+        kind: isKind(fact.objectKind) ? fact.objectKind : 'topic',
+        id: fact.objectId,
+      },
+      note: fact.note,
+    },
+    sourceDisposition,
   );
 }

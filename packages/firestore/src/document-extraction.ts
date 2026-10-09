@@ -5,6 +5,7 @@ import {
   type DocumentExtractionRepository,
   type EmbeddingSpace,
   type Records,
+  snapshotEmbeddingSpace,
   validateEmbedding,
 } from '@assistant/persistence';
 import { FieldValue } from '@google-cloud/firestore';
@@ -42,6 +43,7 @@ function cursorFrom(state: unknown): DocumentExtractionCursor {
       : {};
   const index = value.index ?? 0;
   const total = value.total ?? 0;
+  const embeddingSpaceKey = value.embeddingSpaceKey;
   if (
     !Number.isSafeInteger(index) ||
     (index as number) < 0 ||
@@ -49,7 +51,16 @@ function cursorFrom(state: unknown): DocumentExtractionCursor {
     (total as number) < 0
   )
     throw new Error('Document extraction task cursor is malformed');
-  return { index: index as number, total: total as number };
+  if (
+    embeddingSpaceKey !== undefined &&
+    (typeof embeddingSpaceKey !== 'string' || !/^[a-f0-9]{64}$/.test(embeddingSpaceKey))
+  )
+    throw new Error('Document extraction task embedding space is malformed');
+  return {
+    index: index as number,
+    total: total as number,
+    ...(typeof embeddingSpaceKey === 'string' ? { embeddingSpaceKey } : {}),
+  };
 }
 
 function stateWithCursor(
@@ -69,13 +80,16 @@ function stateWithCursor(
 /** Firestore extraction state writes fenced by owner, task generation, lease, and erasure. */
 export class FirestoreDocumentExtractionRepository implements DocumentExtractionRepository {
   readonly kind = 'document-extraction-repository' as const;
+  readonly space?: EmbeddingSpace;
 
   constructor(
     readonly store: InstallationStore,
     readonly configuredAgentId: string,
     /** Stamped on new chunk vectors so `documents.search` matches only this space. */
-    readonly space?: EmbeddingSpace,
-  ) {}
+    space?: EmbeddingSpace,
+  ) {
+    this.space = space ? snapshotEmbeddingSpace(space) : undefined;
+  }
 
   async load(fence: DocumentExtractionFence): Promise<{
     document: DocumentRow;
@@ -167,7 +181,12 @@ export class FirestoreDocumentExtractionRepository implements DocumentExtraction
       if (
         taskCursor.index !== input.cursor.index ||
         (taskCursor.total !== input.cursor.total &&
-          !(taskCursor.index === 0 && taskCursor.total === 0))
+          !(taskCursor.index === 0 && taskCursor.total === 0)) ||
+        (taskCursor.embeddingSpaceKey &&
+          taskCursor.embeddingSpaceKey !== input.cursor.embeddingSpaceKey) ||
+        (taskCursor.index > 0 &&
+          (!taskCursor.embeddingSpaceKey ||
+            taskCursor.embeddingSpaceKey !== input.cursor.embeddingSpaceKey))
       )
         return false;
       if (input.cursor.index === 0) {
@@ -251,6 +270,8 @@ export class FirestoreDocumentExtractionRepository implements DocumentExtraction
           chunk.charCount !== chunk.text.length ||
           !chunk.text ||
           (chunk.embedding !== null &&
+            (!this.space || chunk.embeddingSpaceKey !== embeddingSpaceKey(this.space))) ||
+          (chunk.embedding !== null &&
             (chunk.embedding.length !== 1536 ||
               chunk.embedding.some((value) => !Number.isFinite(value)))),
       )
@@ -287,7 +308,8 @@ export class FirestoreDocumentExtractionRepository implements DocumentExtraction
             stored.chunkIndex !== expected.chunkIndex ||
             stored.text !== expected.text ||
             stored.charCount !== expected.charCount ||
-            JSON.stringify(stored.embedding) !== JSON.stringify(expected.embedding)
+            JSON.stringify(stored.embedding) !== JSON.stringify(expected.embedding) ||
+            stored.embeddingSpaceKey !== expected.embeddingSpaceKey
           )
             throw new Error('Document extraction retry conflicts with a stored chunk');
         } else if (existingCursor.index !== start) {

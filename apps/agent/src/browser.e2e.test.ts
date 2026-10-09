@@ -1,3 +1,4 @@
+import type { Config } from '@assistant/config';
 import type { BrowserPlan, InboundEvent, ModelRouter, StepCallOutcome } from '@assistant/core';
 import {
   completeTask,
@@ -13,11 +14,19 @@ import {
   costEvents,
   costReservations,
   createDb,
+  createPostgresExecutionPersistence,
   type Db,
+  executionJobCallbackReceipts,
   files,
   tasks,
   toolCalls,
 } from '@assistant/db';
+import {
+  browserModule,
+  type ModulePlatformContext,
+  type ModuleServices,
+  noopOwnerNotifier,
+} from '@assistant/modules';
 import {
   AmbiguousBrowserJobLaunchError,
   type BrowserJobLaunchInput,
@@ -130,6 +139,53 @@ function makeDispatcher(launches: BrowserJobLaunchInput[]) {
   return new ToolDispatcher(db, registry);
 }
 
+async function invokeBrowserModuleCallback(
+  taskId: string,
+  token: string,
+  result: Record<string, unknown>,
+) {
+  const config = {
+    BROWSER_DRIVER: 'local',
+    PUBLIC_URL: 'http://localhost:8787',
+    PROFILE_ENC_KEY: 'synthetic-only',
+    GCP_PROJECT: 'synthetic-project',
+    GCP_LOCATION: 'us-central1',
+    BROWSER_JOB_NAME: 'synthetic-browser',
+    WORKSPACE_BUCKET: 'synthetic-bucket',
+    TRACES_BUCKET: '',
+    ASSISTANT_WORKSPACE_ID: 'synthetic',
+  } as unknown as Config;
+  const registry = new ToolRegistry();
+  const persistence = createPostgresExecutionPersistence(db);
+  const runtime = browserModule.create({
+    config,
+    registry,
+    router: {} as ModelRouter,
+    repoRoot: process.cwd(),
+    workspacePrefix: 'fs13-test',
+    workspaceRoot: process.cwd(),
+    persistence,
+  } as unknown as ModulePlatformContext);
+  const route = runtime.hooks?.webhooks?.find((hook) => hook.path === '/browser/callback');
+  if (!route) throw new Error('module callback route is not installed');
+  const services = {
+    config,
+    db,
+    router: {} as ModelRouter,
+    registry,
+    dispatcher: {} as never,
+    workspace: {} as never,
+    ownerNotifier: noopOwnerNotifier,
+    emailObservers: [],
+    persistence,
+  } as unknown as ModuleServices;
+  return route.handler(services, {
+    json: async <T>() => ({ taskId, token, result }) as T,
+    form: async () => ({}),
+    header: () => undefined,
+  });
+}
+
 function event(): InboundEvent {
   return { source: 'internal', agentId, trust: 'owner', payload: {} };
 }
@@ -198,12 +254,30 @@ describe('browser job end-to-end (integration, scripted model)', () => {
       screenshots: [],
       tracePath: 'traces/test.zip',
     };
-    const cb = await recordBrowserJobResult(db, {
-      taskId: task.id,
-      token: launches[0]?.callbackToken ?? '',
-      result: jobResult,
-    });
-    expect(cb.ok).toBe(true);
+    const token = launches[0]?.callbackToken ?? '';
+    const [cb, concurrentRetry] = await Promise.all([
+      invokeBrowserModuleCallback(task.id, token, jobResult),
+      invokeBrowserModuleCallback(task.id, token, jobResult),
+    ]);
+    expect(cb).toEqual({ status: 200, json: { ok: true } });
+    expect(concurrentRetry).toEqual(cb);
+    const [acceptedTask] = await db.select().from(tasks).where(eq(tasks.id, task.id));
+    expect(acceptedTask?.queueGeneration).toBe((row?.queueGeneration ?? 0) + 1);
+    const receipts = await db
+      .select()
+      .from(executionJobCallbackReceipts)
+      .where(eq(executionJobCallbackReceipts.taskId, task.id));
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]?.tokenHash).toBe(hashCallbackToken(token));
+    expect(receipts[0]?.idempotencyKey).not.toContain(token);
+    const acceptedFiles = await db.select().from(files).where(eq(files.taskId, task.id));
+    const duplicate = await invokeBrowserModuleCallback(task.id, token, jobResult);
+    expect(duplicate).toEqual(cb);
+    const [afterDuplicate] = await db.select().from(tasks).where(eq(tasks.id, task.id));
+    expect(afterDuplicate?.queueGeneration).toBe(acceptedTask?.queueGeneration);
+    expect(await db.select().from(files).where(eq(files.taskId, task.id))).toHaveLength(
+      acceptedFiles.length,
+    );
 
     [row] = await db.select().from(tasks).where(eq(tasks.id, task.id));
     expect(row?.status).toBe('pending');
@@ -213,12 +287,17 @@ describe('browser job end-to-end (integration, scripted model)', () => {
     expect(inventoried.map((f) => f.workspacePath)).toContain('traces/test.zip');
 
     // A second callback with the same token must not overwrite the accepted result
-    const replay = await recordBrowserJobResult(db, {
-      taskId: task.id,
-      token: launches[0]?.callbackToken ?? '',
-      result: { ok: false, error: 'replay' },
+    const replay = await invokeBrowserModuleCallback(task.id, token, {
+      ok: false,
+      error: 'changed payload',
     });
-    expect(replay).toMatchObject({ ok: false, status: 409 });
+    expect(replay).toMatchObject({ status: 409 });
+    expect(
+      await db
+        .select()
+        .from(executionJobCallbackReceipts)
+        .where(eq(executionJobCallbackReceipts.taskId, task.id)),
+    ).toHaveLength(1);
 
     // Run 2: settles the job result from tool_calls and finishes
     const run2 = await executeTask({ db, router, dispatcher }, task.id);
@@ -230,13 +309,12 @@ describe('browser job end-to-end (integration, scripted model)', () => {
     expect(browse?.status).toBe('succeeded');
     expect(browse?.result).toMatchObject(jobResult);
 
-    // After settling, late callbacks are rejected
-    const late = await recordBrowserJobResult(db, {
-      taskId: task.id,
-      token: launches[0]?.callbackToken ?? '',
-      result: { ok: true },
-    });
-    expect(late).toMatchObject({ ok: false, status: 409 });
+    // An identical delivery can recover the original HTTP outcome even after
+    // executor settlement; different content remains rejected by the receipt.
+    expect(await invokeBrowserModuleCallback(task.id, token, jobResult)).toEqual(cb);
+    expect(
+      await invokeBrowserModuleCallback(task.id, token, { ok: true, outputs: [] }),
+    ).toMatchObject({ status: 409 });
   });
 
   it('rejects a browser callback after terminal cancellation', async (ctx) => {
@@ -297,11 +375,12 @@ describe('browser job end-to-end (integration, scripted model)', () => {
     expect(run3.outcome).toBe('done');
   });
 
-  it('parallel browser.execute calls in one step launch only one job', async (ctx) => {
+  it('approves a queued read-only browser job after taint and returns both results before the next model request', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const launches: BrowserJobLaunchInput[] = [];
     const dispatcher = makeDispatcher(launches);
     // A model that spams two browser.execute calls in a single step
+    const modelResultIds: string[][] = [];
     const router = {
       async object() {
         return {
@@ -312,6 +391,17 @@ describe('browser job end-to-end (integration, scripted model)', () => {
         };
       },
       async step(_role: string, callOpts: { messages?: ModelMessage[] }) {
+        modelResultIds.push(
+          (callOpts.messages ?? []).flatMap((message) =>
+            message.role === 'tool' && Array.isArray(message.content)
+              ? message.content.flatMap((part) =>
+                  part.type === 'tool-result' && typeof part.toolCallId === 'string'
+                    ? [part.toolCallId]
+                    : [],
+                )
+              : [],
+          ),
+        );
         const transcript = JSON.stringify(callOpts.messages ?? []);
         if (!transcript.includes('"toolName":"browser.execute"')) {
           return {
@@ -327,25 +417,114 @@ describe('browser job end-to-end (integration, scripted model)', () => {
         }
         return { ok: true, modelId: 'fake/model', degraded: false, text: 'done', toolCalls: [] };
       },
+      async embed(texts: string[]) {
+        return texts.map(() => new Array(1536).fill(0.01));
+      },
     } as unknown as ModelRouter;
 
-    const { task } = await enqueueTask(db, { event: event(), type: 'adhoc' });
+    const { task } = await enqueueTask(db, {
+      event: { ...event(), payload: { text: 'Please browse the HN front page twice.' } },
+      type: 'adhoc',
+    });
     createdTaskIds.push(task.id);
 
     const run1 = await executeTask({ db, router, dispatcher }, task.id);
     expect(run1.outcome).toBe('sleeping');
-    expect(launches).toHaveLength(1); // second call refused, not launched
+    expect(launches).toHaveLength(1); // the second call stays queued until the first callback
 
     const [row] = await db.select().from(tasks).where(eq(tasks.id, task.id));
     const state = row?.state as {
-      pendingJob?: { callbackTokenHash: string };
+      pendingJob?: { callbackTokenHash: string; toolCallId: string };
       contextWindow: unknown[];
+      pendingToolBatch?: { calls: Array<{ toolCallId: string; status: string }> };
     };
     expect(state.pendingJob?.callbackTokenHash).toBe(
       hashCallbackToken(launches[0]?.callbackToken ?? ''),
     );
-    // the refused call got an explanatory error result in the window
-    expect(JSON.stringify(state.contextWindow)).toContain('already running');
+    expect(state.pendingJob?.toolCallId).toBe('call_a');
+    expect(state.pendingToolBatch?.calls).toMatchObject([
+      { toolCallId: 'call_a', status: 'job' },
+      { toolCallId: 'call_b', status: 'queued' },
+    ]);
+    expect(JSON.stringify(state.contextWindow)).not.toContain('already running');
+
+    const firstToken = launches[0]?.callbackToken ?? '';
+    const firstResult = { ok: true, outputs: [{ action: 'extract', text: 'first result' }] };
+    const firstCallback = await invokeBrowserModuleCallback(task.id, firstToken, firstResult);
+    expect(firstCallback).toEqual({ status: 200, json: { ok: true } });
+    const run2 = await executeTask({ db, router, dispatcher }, task.id);
+    expect(run2.outcome).toBe('parked');
+    expect(launches).toHaveLength(1);
+    const [approval] = await db.select().from(approvals).where(eq(approvals.taskId, task.id));
+    expect(approval?.status).toBe('pending');
+    expect(approval?.summary).toContain('read the HN front page');
+    expect((approval?.payload as { plan?: BrowserPlan } | undefined)?.plan).toEqual(readOnlyPlan);
+
+    await resolveApproval(db, {
+      approvalId: approval?.id,
+      decision: 'approved',
+      via: 'web',
+    });
+    const run3 = await executeTask({ db, router, dispatcher }, task.id);
+    expect(run3.outcome).toBe('sleeping');
+    expect(launches).toHaveLength(2);
+    expect(launches[1]?.plan).toEqual(readOnlyPlan);
+
+    const secondToken = launches[1]?.callbackToken ?? '';
+    const secondResult = { ok: true, outputs: [{ action: 'extract', text: 'second result' }] };
+    const secondCallback = await invokeBrowserModuleCallback(task.id, secondToken, secondResult);
+    expect(secondCallback).toEqual({ status: 200, json: { ok: true } });
+    expect(secondToken).not.toBe(firstToken);
+    const launchReceipts = await db
+      .select()
+      .from(executionJobCallbackReceipts)
+      .where(eq(executionJobCallbackReceipts.taskId, task.id));
+    expect(launchReceipts).toHaveLength(2);
+    expect(new Set(launchReceipts.map((receipt) => receipt.idempotencyKey)).size).toBe(2);
+    expect(new Set(launchReceipts.map((receipt) => receipt.tokenHash))).toEqual(
+      new Set([hashCallbackToken(firstToken), hashCallbackToken(secondToken)]),
+    );
+    const run4 = await executeTask({ db, router, dispatcher }, task.id);
+    expect(run4.outcome).toBe('done');
+    const [serialStateRow] = await db.select().from(tasks).where(eq(tasks.id, task.id));
+    const serialState = serialStateRow?.state as {
+      pendingJob?: { toolCallId: string } | null;
+      pendingToolBatch?: { calls: Array<{ toolCallId: string; status: string }> } | null;
+      contextWindow: unknown[];
+    };
+    const serializedCalls = await db
+      .select({
+        status: toolCalls.status,
+        toolName: toolCalls.toolName,
+        decision: toolCalls.decision,
+      })
+      .from(toolCalls)
+      .where(eq(toolCalls.taskId, task.id));
+    expect(launches).toHaveLength(2);
+    expect(serialState.pendingJob ?? null).toBeNull();
+    expect(serialState.pendingToolBatch ?? null).toBeNull();
+    expect(serializedCalls).toHaveLength(2);
+    expect(serializedCalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: 'succeeded',
+          toolName: 'browser.execute',
+          decision: expect.objectContaining({ modelToolCallId: 'call_a' }),
+        }),
+        expect.objectContaining({
+          status: 'succeeded',
+          toolName: 'browser.execute',
+          decision: expect.objectContaining({ modelToolCallId: 'call_b' }),
+        }),
+      ]),
+    );
+    const transcript = JSON.stringify(serialState.contextWindow);
+    expect(transcript).toContain('call_a');
+    expect(transcript).toContain('call_b');
+    expect(transcript).toContain('first result');
+    expect(transcript).toContain('second result');
+    expect(modelResultIds).toHaveLength(2);
+    expect(modelResultIds[1]?.sort()).toEqual(['call_a', 'call_b']);
   });
 
   it('accepts a fast callback while launch still owns the task lease', async (ctx) => {

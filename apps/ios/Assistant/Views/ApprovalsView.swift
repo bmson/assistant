@@ -4,7 +4,6 @@ struct ApprovalsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var decisionInFlightID: String?
     @State private var decisionSuccessFeedback = 0
@@ -132,59 +131,11 @@ struct ApprovalsView: View {
 
     @ViewBuilder
     private func approvalHeader(_ item: PendingApproval) -> some View {
-        let tool = HStack(spacing: 10) {
-            AssistantGlyph(systemName: "checkmark.shield.fill", tint: AssistantTheme.warning(for: colorScheme))
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Approval needed")
-                    .font(.caption.weight(.bold))
-                    .textCase(.uppercase)
-                    .tracking(0.65)
-                    .foregroundStyle(AssistantTheme.warningInk(for: colorScheme))
-                Text(item.toolName.sentenceCaseIdentifier)
-                    .font(.caption)
-                    .foregroundStyle(AssistantTheme.warningInk(for: colorScheme).opacity(0.74))
-            }
-        }
-
-        if usesAccessibilityLayout {
-            VStack(alignment: .leading, spacing: 10) {
-                tool
-                approvalCode(item)
-            }
-        } else {
-            HStack {
-                tool
-                Spacer()
-                approvalCode(item)
-            }
-        }
-    }
-
-    private func approvalCode(_ item: PendingApproval) -> some View {
-        // One fixed-height slot holding both states. The spinner used to be
-        // 44pt tall against the badge's ~26, so confirming a decision grew the
-        // card header by 18pt and snapped it back — on the most consequential
-        // screen in the app.
-        ZStack {
-            if decisionInFlightID == item.id {
-                ProgressView()
-                    .controlSize(.small)
-                    .accessibilityLabel("Applying decision")
-            } else {
-                Text(item.approval.shortCode)
-                    .font(.caption.monospaced().weight(.semibold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 7)
-                    .background(
-                        AssistantTheme.warning(for: colorScheme).opacity(0.12),
-                        in: Capsule()
-                    )
-            }
-        }
-        .frame(minHeight: 28)
-        .animation(
-            reduceMotion ? nil : .easeOut(duration: 0.18),
-            value: decisionInFlightID
+        ApprovalRequestHeader(
+            toolName: item.toolName.sentenceCaseIdentifier,
+            shortCode: item.approval.shortCode,
+            isApplying: decisionInFlightID == item.id,
+            usesAccessibilityLayout: usesAccessibilityLayout
         )
     }
 

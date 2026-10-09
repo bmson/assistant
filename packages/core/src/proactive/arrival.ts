@@ -1,19 +1,13 @@
-import { createPostgresLocationPingRepository, type Db } from '@assistant/db';
+import {
+  createPostgresLocationPingRepository,
+  createPostgresTaskRepository,
+  type Db,
+} from '@assistant/db';
 import type { LocationPingRepository, TaskRepository } from '@assistant/persistence';
 import { InboundEventSchema } from '../events.js';
 import { enqueueTask } from '../workflow/machine.js';
 
-/**
- * Arrival nudges ("restaurant recommendations when I get somewhere"). A ping
- * landing somewhere the owner has NOT been in the last day and a half is an
- * arrival worth one considered look — mealtime in a new place earns a couple
- * of nearby picks; anything routine earns silence. The bounds are structural,
- * not prompt luck: at most one nudge per place-grid per day (idempotency key)
- * and one per 12 hours overall (cooldown), so a day of errands cannot become
- * a drip feed, and a lost/crash-replayed ping cannot send the same note twice.
- */
-
-/** Farther than this from every recent ping counts as "somewhere new". */
+/** Arrival detection uses location only for the transient decision, never in task text. */
 const ARRIVAL_DISTANCE_KM = 1.5;
 const ARRIVAL_WINDOW_HOURS = 36;
 const ARRIVAL_COOLDOWN_HOURS = 12;
@@ -21,11 +15,13 @@ const ARRIVAL_MAX_ACCURACY_M = 200;
 const ARRIVAL_DWELL_MS = 3 * 60_000;
 const ARRIVAL_CONFIRMATION_WINDOW_MS = 30 * 60_000;
 const ARRIVAL_STATIONARY_RADIUS_KM = 0.2;
+export const ARRIVAL_OBSERVATION_TTL_MS = 5 * 60_000;
 
 export interface ArrivalPing {
+  /** Opaque owner-scoped location-ping id, valid for at most five minutes. */
+  observationId: string;
   lat: number;
   lng: number;
-  label?: string;
   accuracyM?: number | null;
   capturedAt: Date;
 }
@@ -55,7 +51,8 @@ function accurate(ping: ArrivalPing): boolean {
 /** Two separated observations suggest a stop; a single drive-by never does. */
 export function hasConfirmedArrival(ping: ArrivalPing, earlier: ArrivalPing[], now: Date): boolean {
   const age = now.getTime() - ping.capturedAt.getTime();
-  if (!accurate(ping) || !Number.isFinite(age) || age < -5_000 || age > 5 * 60_000) return false;
+  if (!accurate(ping) || !Number.isFinite(age) || age < -5_000 || age > ARRIVAL_OBSERVATION_TTL_MS)
+    return false;
   const history = earlier
     .filter((row) => row.capturedAt < ping.capturedAt)
     .sort((a, b) => b.capturedAt.getTime() - a.capturedAt.getTime());
@@ -63,8 +60,8 @@ export function hasConfirmedArrival(ping: ArrivalPing, earlier: ArrivalPing[], n
   let index = 0;
   for (; index < history.length; index++) {
     const row = history[index];
-    if (!row) break;
     if (
+      !row ||
       !accurate(row) ||
       ping.capturedAt.getTime() - row.capturedAt.getTime() > ARRIVAL_CONFIRMATION_WINDOW_MS ||
       haversineKm(ping.lat, ping.lng, row.lat, row.lng) > ARRIVAL_STATIONARY_RADIUS_KM
@@ -73,8 +70,6 @@ export function hasConfirmedArrival(ping: ArrivalPing, earlier: ArrivalPing[], n
     dwellStart = row.capturedAt.getTime();
   }
   if (ping.capturedAt.getTime() - dwellStart < ARRIVAL_DWELL_MS) return false;
-  // The confirming observations must not veto their own arrival. Older
-  // history still prevents routine places from generating another nudge.
   const baseline = history.slice(index).filter(accurate);
   return (
     baseline.length > 0 &&
@@ -82,8 +77,7 @@ export function hasConfirmedArrival(ping: ArrivalPing, earlier: ArrivalPing[], n
   );
 }
 
-/** Owner-local calendar date — the "same place, same day" dedupe granularity. */
-function zonedDateKey(timeZone: string, at: Date): string {
+function localDay(timeZone: string, at: Date): string {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone,
     year: 'numeric',
@@ -92,66 +86,66 @@ function zonedDateKey(timeZone: string, at: Date): string {
   }).format(at);
 }
 
-/**
- * Evaluate a just-recorded app ping and, on a genuine arrival, enqueue the
- * arrival task. Returns true when a task was created. Never throws into the
- * ingest path — a nudge is a bonus, the ping itself is the payload.
- */
 export function maybeEnqueueArrivalNudge(
   db: Db,
   agent: { id: string; timezone: string },
   ping: ArrivalPing,
-  now: Date = new Date(),
+  now = new Date(),
 ): Promise<boolean> {
   return maybeEnqueueArrivalNudgeWithRepository(
     createPostgresLocationPingRepository(db),
-    db,
+    createPostgresTaskRepository(db),
     agent,
     ping,
     now,
   );
 }
 
-/** The same arrival decision over portable ping and task repositories. */
 export async function maybeEnqueueArrivalNudgeWithRepository(
   locations: LocationPingRepository,
   tasks: Db | TaskRepository,
   agent: { id: string; timezone: string },
   ping: ArrivalPing,
-  now: Date = new Date(),
+  now = new Date(),
 ): Promise<boolean> {
-  if (!accurate(ping)) return false;
+  if (!ping.observationId || !accurate(ping)) return false;
+  const expiresAt = new Date(ping.capturedAt.getTime() + ARRIVAL_OBSERVATION_TTL_MS);
+  if (
+    expiresAt <= now ||
+    !(await locations.isArrivalObservationActive(agent.id, ping.observationId, now))
+  )
+    return false;
 
   const windowStart = new Date(now.getTime() - ARRIVAL_WINDOW_HOURS * 3600e3);
-  // Strictly before: the just-recorded ping must not veto itself.
-  const recent = await locations.recent(agent.id, {
-    from: windowStart,
-    before: ping.capturedAt,
-  });
-  if (!hasConfirmedArrival(ping, recent, now)) return false;
+  const recent = await locations.recent(agent.id, { from: windowStart, before: ping.capturedAt });
+  const decisionPing: ArrivalPing = { ...ping };
+  const decisionHistory: ArrivalPing[] = recent.map((row) => ({
+    ...row,
+    observationId: '',
+  }));
+  if (!hasConfirmedArrival(decisionPing, decisionHistory, now)) return false;
 
   const cooldownStart = new Date(now.getTime() - ARRIVAL_COOLDOWN_HOURS * 3600e3);
   if (await locations.hasArrivalTaskSince(agent.id, cooldownStart)) return false;
 
-  const grid = `${ping.lat.toFixed(2)},${ping.lng.toFixed(2)}`;
-  const date = zonedDateKey(agent.timezone, now);
-  const where = ping.label?.trim() || 'an unlabeled place';
+  // A daily owner-scoped key prevents bursts without encoding a place or keeping
+  // a per-place location trail. The reference is useless after its short expiry.
+  const externalEventId = `arrival:${agent.id}:${localDay(agent.timezone, now)}`;
   const event = InboundEventSchema.parse({
     source: 'internal',
-    externalEventId: `arrival:${agent.id}:${date}:${grid}`,
+    externalEventId,
     agentId: agent.id,
     trust: 'assistant',
     payload: {
+      kind: 'arrival',
+      arrivalObservationId: ping.observationId,
+      arrivalExpiresAt: expiresAt.toISOString(),
+      completionPolicy: { version: 1, kind: 'successful_silent' },
       instruction:
-        `Accurate location observations at least three minutes apart suggest the owner has stopped near a new area: ${where} ` +
-        `(lat ${ping.lat.toFixed(4)}, lng ${ping.lng.toFixed(4)}). Decide whether one proactive note is worth a push right now. ` +
-        'These are approximate observations, not proof of being inside a particular venue. Check current ambient location; if it has changed or is unavailable, send nothing. ' +
-        'Around a local mealtime, one or two well-rated, currently-open restaurant or café picks within a short walk are ' +
-        'genuinely useful — run web.search at most once, and only recommend places the search actually returned. ' +
-        'In an unfamiliar city or neighbourhood, one concrete orientation tip is welcome. ' +
-        'If it is neither mealtime nor somewhere worth remarking on, or the search finds nothing solid, send nothing and ' +
-        'finish with an empty reply — no message is the right answer most of the time. ' +
-        'When you do reach out, send ONE short message via owner.notify with ping=true naming the area and the pick(s), and stop.',
+        'The owner explicitly opted into one generic arrival check after a confirmed stationary stop. ' +
+        'The short-lived location reference is only a freshness gate. Never read, reveal, mention, infer, or store any coordinate, address, city, or venue from it. ' +
+        'If useful, send one brief notification: “You’ve arrived. Would you like help with anything nearby?” Otherwise finish silently. ' +
+        'Do not search for places or create follow-up work.',
     },
   });
   const { created } = await enqueueTask(tasks, {

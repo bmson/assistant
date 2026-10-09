@@ -3,7 +3,7 @@ import { loadVoiceContext } from '@assistant/core';
 import { createFirestoreExecutionPersistence } from '@assistant/firestore';
 import { deliverSmsFinal, handleInboundSms, type SmsChannelDeps } from '@assistant/modules';
 import type { ExecutionPersistence } from '@assistant/persistence';
-import { ToolRegistry } from '@assistant/tools';
+import { AmbiguousTwilioDeliveryError, ToolRegistry } from '@assistant/tools';
 import { FieldValue } from '@google-cloud/firestore';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -171,15 +171,66 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
     it('replies to the bound owner number and meters every send against the channel limit', async () => {
       await inbound('SM-1', 'What is on today?');
       const [task] = (await store.collection('tasks').where('type', '==', 'sms_turn').get()).docs;
-      const row = task?.data() as { id: string; conversationId: string; trust: string };
+      const row = task?.data() as {
+        id: string;
+        type: string;
+        conversationId: string;
+        trust: string;
+      };
 
-      await deliverSmsFinal(deps, row, 'Two meetings and a dentist visit.');
+      expect(
+        await deliverSmsFinal(
+          deps,
+          row as never,
+          'Two meetings and a dentist visit.',
+          'sms-attempt-1',
+        ),
+      ).toMatchObject({ status: 'accepted' });
       expect(sent).toEqual([{ to: OWNER_PHONE, body: 'Two meetings and a dentist visit.' }]);
+      const changedOwnerPhone = {
+        ...deps,
+        config: { ...deps.config, OWNER_PHONE: '+18885559999' },
+      } as unknown as SmsChannelDeps;
+      expect(
+        await deliverSmsFinal(
+          changedOwnerPhone,
+          row as never,
+          'do not send to the old owner number',
+          'sms-attempt-2',
+        ),
+      ).toMatchObject({ status: 'rejected', reason: 'owner-phone-binding-changed' });
+      expect(sent).toHaveLength(1);
+
+      const ambiguousSms = {
+        ...deps,
+        twilio: {
+          ...deps.twilio,
+          send: async () => {
+            throw new AmbiguousTwilioDeliveryError('provider response lost after acceptance');
+          },
+        },
+      } as unknown as SmsChannelDeps;
+      expect(
+        await deliverSmsFinal(
+          ambiguousSms,
+          row as never,
+          'provider may already have sent this',
+          'sms-attempt-ambiguous',
+        ),
+      ).toMatchObject({ status: 'unknown', reason: 'provider-outcome-unknown' });
+      expect(sent).toHaveLength(1);
       const events = await store.collection('costEvents').where('source', '==', 'twilio_sms').get();
-      expect(events.size).toBe(1);
+      expect(events.size).toBe(2);
 
       // A foreign or non-SMS conversation never receives the reply.
-      await deliverSmsFinal(deps, { ...row, conversationId: randomUUID() }, 'nope');
+      expect(
+        await deliverSmsFinal(
+          deps,
+          { ...row, conversationId: randomUUID() } as never,
+          'nope',
+          'sms-attempt-3',
+        ),
+      ).toMatchObject({ status: 'rejected' });
       expect(sent).toHaveLength(1);
 
       await store.doc('rateLimits', 'channel:sms').set({
@@ -188,9 +239,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         maxPerDay: null,
         updatedAt: new Date(),
       });
-      await expect(notifyOwnerBySms(deps, { text: 'One more' })).rejects.toThrow(
-        'SMS channel rate limit exceeded',
-      );
+      await expect(notifyOwnerBySms(deps, { text: 'One more' })).resolves.toEqual({
+        legs: [{ channel: 'sms', status: 'failed', reason: 'channel-rate-limit' }],
+      });
       expect(sent).toHaveLength(1);
     });
 
@@ -221,9 +272,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       await sample('Dear team, please find attached', 'email_professional', 1);
       await sample('Stale space', 'sms', 1, { ...SPACE, revision: '2' });
 
-      const router = { embed: async () => [axis(1)] } as unknown as Parameters<
-        typeof loadVoiceContext
-      >[1];
+      const router = {
+        embeddingSpace: async () => SPACE,
+        embed: async () => [axis(1)],
+      } as unknown as Parameters<typeof loadVoiceContext>[1];
       expect(await loadVoiceContext(voice, router, 'sms', 'late again')).toEqual({
         description: 'Brief and warm',
         dos: ['use first names'],

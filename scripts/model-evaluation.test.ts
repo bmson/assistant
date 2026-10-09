@@ -47,6 +47,39 @@ describe('isolated evaluation accounting', () => {
     );
   });
 
+  it('keeps an ambiguous dispatched evaluation attempt held until late usage reconciliation', async () => {
+    const ledger = new EvaluationLedger(1);
+    const reservation = await ledger.reserve({ source: 'model', estimatedUsd: 0.7 });
+    if (!reservation.ok) throw new Error('fixture reservation failed');
+    const metadata = {
+      provider: 'synthetic',
+      model: 'fixture-model',
+      role: 'reason',
+      requestDigest: 'sha256:fixture',
+      inputTokenEstimate: 10,
+      outputTokenLimit: 20,
+      reasoning: 'disabled' as const,
+    };
+    expect(await ledger.beginAttempt(reservation.reservationId, metadata)).toBe(true);
+    expect(await ledger.beginAttempt(reservation.reservationId, metadata)).toBe(false);
+    await ledger.markAttemptUnknown(reservation.reservationId, 'response stream interrupted', {
+      requestId: 'synthetic-request-1',
+    });
+    await ledger.release(reservation.reservationId);
+    expect(ledger.heldUsd).toBe(0.7);
+    expect(ledger.unknownLiabilities.get(reservation.reservationId)).toMatchObject({
+      reason: 'response stream interrupted',
+      providerReceipt: { requestId: 'synthetic-request-1' },
+    });
+    await ledger.reconcile(reservation.reservationId, {
+      usd: 0.2,
+      evidence: { basis: 'provider_reported' },
+    });
+    expect(ledger.heldUsd).toBe(0);
+    expect(ledger.unknownLiabilities.has(reservation.reservationId)).toBe(false);
+    expect(ledger.entries.at(-1)).toEqual({ usd: 0.2, basis: 'provider_reported' });
+  });
+
   it.each([0, -1, NaN, Infinity])('refuses an unsafe run budget %s', (budget) => {
     expect(() => new EvaluationLedger(budget)).toThrow();
   });

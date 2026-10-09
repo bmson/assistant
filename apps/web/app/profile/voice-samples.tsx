@@ -8,9 +8,7 @@ import {
   CountBadge,
   cardBodyClass,
   cardFooterClass,
-  cardHeaderClass,
   cardShellClass,
-  cardTitleClass,
   fileInputClass,
   MetaLine,
   selectClass,
@@ -71,19 +69,15 @@ export function VoiceSamplesPanel({
   const purgeable = auto + uploaded;
 
   return (
-    <section className={`${cardShellClass} mt-6`}>
+    <section aria-label="Writing voice samples and profile" className={`${cardShellClass} mt-6`}>
       <div className={cardBodyClass}>
-        <div className={cardHeaderClass}>
-          <div className="min-w-0">
-            <h2 className={cardTitleClass}>Your writing voice</h2>
-            <p className="mt-1 max-w-2xl text-xs leading-5 text-muted">
-              The assistant learns from your own sent messages so its drafts sound more like you.
-              Forwarded and quoted text is skipped.
-            </p>
-          </div>
+        <div>
           <CountBadge>
             {total} {total === 1 ? 'sample' : 'samples'}
           </CountBadge>
+          <p className="mt-1 text-xs leading-5 text-muted">
+            Only your own sent messages are used; forwarded and quoted text is excluded.
+          </p>
         </div>
         {/* The pill already carries the total — the breakdown is one quiet
             line, not a grid of three boxed figures. */}
@@ -160,7 +154,9 @@ export function VoiceSamplesPanel({
                 </label>
               </div>
               <p className="mt-2 text-xs leading-5 text-muted">
-                Gmail Takeout <code>.mbox</code>, plain text, or JSON · up to 25MB
+                Gmail Takeout <code>.mbox</code>, plain text, or JSON · up to 25MB. Only your
+                configured email address is used from archives; plain text is treated as writing you
+                confirm is yours. Quoted and forwarded text is excluded.
               </p>
             </div>
             <button type="submit" className={btn.primary}>

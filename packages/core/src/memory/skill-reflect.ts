@@ -1,16 +1,27 @@
-import { type Db, skills, tasks, toolCalls } from '@assistant/db';
+import {
+  bumpSkillLibraryRevision,
+  type Db,
+  lockPostgresPrivacyObservationFence,
+  postgresPrivacyObservationFence,
+  readSkillLibraryRevision,
+  skillLibraryRevisions,
+  skills,
+  tasks,
+  toolCalls,
+} from '@assistant/db';
 import {
   type ExecutionPersistence,
+  embeddingSpaceIdentityKey,
   type ReflectionTask,
+  type SkillReflectionCommitResult,
   type SkillReflectionRepository,
   skillEmbeddingText,
 } from '@assistant/persistence';
-import { and, desc, eq, gte, inArray } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { BudgetReservationError, nextDailyReset, nextMonthlyReset } from '../cost.js';
 import { isUnparseableObjectError, type ModelRouter } from '../model-router/router.js';
 import { withSpan } from '../otel.js';
-import { writeSkill } from './skills.js';
 
 /**
  * Skill reflection (Phase 26): nightly, review recently completed tasks that did
@@ -116,13 +127,18 @@ export async function runSkillReflection(
     if (candidates.length === 0) return result;
 
     // Skip tasks that already taught a skill (idempotent across nightly runs).
-    const alreadySourced = new Set(await store.sourcedTaskIds(candidates.map((t) => t.id)));
+    const alreadyProcessed = new Set(await store.sourcedTaskIds(candidates.map((t) => t.id)));
 
-    const eligible = candidates.filter((t) => !taskIsTainted(t) && !alreadySourced.has(t.id));
+    const eligible = candidates.filter((t) => !taskIsTainted(t) && !alreadyProcessed.has(t.id));
 
     for (const task of eligible) {
       if (result.tasksReviewed >= MAX_TASKS) break;
       await deps.heartbeat?.();
+
+      // This generation is an optimistic snapshot of the entire skill library.
+      // Any owner create/edit/rename/deprecate/delete while the model or embedder
+      // is running makes this draft stale, including create-then-rename races.
+      const expectedLibraryRevision = await store.libraryRevision(task.agentId);
 
       const calls = await store.toolCalls(task.id);
       const succeeded = calls.filter((c) => c.status === 'succeeded');
@@ -145,7 +161,7 @@ export async function runSkillReflection(
 
       const outcome = await router
         .object<z.infer<typeof SkillDraftSchema>>('batch', {
-          taskId: opts.taskId,
+          taskId: task.id,
           schema: SkillDraftSchema,
           system: REFLECT_SYSTEM,
           prompt: transcript,
@@ -167,9 +183,14 @@ export async function runSkillReflection(
       const draft = outcome.object;
       const name = draft.name.trim().slice(0, 200);
       const steps = draft.steps.trim();
-      if (!draft.worthSkill || !name || !steps) continue;
-      // Reflection must not clobber a hand-authored skill.
-      if (await store.ownerAuthored(task.agentId, name)) continue;
+      if (!draft.worthSkill || !name || !steps) {
+        await store.commitReflection({
+          agentId: task.agentId,
+          taskId: task.id,
+          expectedLibraryRevision,
+        });
+        continue;
+      }
       const skill = {
         name,
         preconditions: draft.preconditions.trim(),
@@ -179,9 +200,21 @@ export async function runSkillReflection(
         // The task is owner/assistant-trust and passed the taint gate above.
         originTrust: task.trust === 'owner' ? ('owner' as const) : ('assistant' as const),
       };
-      const [embedding] = await router.embed([skillEmbeddingText(skill)]);
-      if (embedding && (await store.saveReflected(task.agentId, skill, embedding)))
-        result.skillsDrafted += 1;
+      const embeddingSpace = await router.embeddingSpace();
+      const embeddingSpaceKey = embeddingSpaceIdentityKey(embeddingSpace);
+      const [embedding] = await router.embed([skillEmbeddingText(skill)], {
+        expectedSpace: embeddingSpace,
+      });
+      if (!embedding) continue;
+      const committed = await store.commitReflection({
+        agentId: task.agentId,
+        taskId: task.id,
+        expectedLibraryRevision,
+        skill,
+        embedding,
+        embeddingSpaceKey,
+      });
+      if (committed.status === 'created') result.skillsDrafted += 1;
     }
 
     return result;
@@ -214,11 +247,33 @@ function postgresSkillReflection(db: Db): SkillReflectionRepository {
         .orderBy(desc(tasks.createdAt))
         .limit(limit),
     async sourcedTaskIds(taskIds) {
-      const rows = await db
-        .select({ sourceTaskId: skills.sourceTaskId })
-        .from(skills)
-        .where(inArray(skills.sourceTaskId, taskIds));
-      return rows.map((r) => r.sourceTaskId).filter((id): id is string => Boolean(id));
+      if (taskIds.length === 0) return [];
+      const [skillRows, taskRows] = await Promise.all([
+        db
+          .select({ sourceTaskId: skills.sourceTaskId })
+          .from(skills)
+          .where(inArray(skills.sourceTaskId, taskIds)),
+        db
+          .select({ id: tasks.id, state: tasks.state })
+          .from(tasks)
+          .where(inArray(tasks.id, taskIds)),
+      ]);
+      return [
+        ...skillRows.map((row) => row.sourceTaskId).filter((id): id is string => Boolean(id)),
+        ...taskRows
+          .filter((row) => {
+            const state = row.state as { skillReflectionReceipt?: unknown } | null;
+            return Boolean(state?.skillReflectionReceipt);
+          })
+          .map((row) => row.id),
+      ];
+    },
+    async libraryRevision(agentId) {
+      const [library, privacy] = await Promise.all([
+        readSkillLibraryRevision(db, agentId),
+        postgresPrivacyObservationFence(db, agentId),
+      ]);
+      return JSON.stringify({ library, privacy });
     },
     toolCalls: (taskId) =>
       db
@@ -231,25 +286,137 @@ function postgresSkillReflection(db: Db): SkillReflectionRepository {
         .from(toolCalls)
         .where(eq(toolCalls.taskId, taskId))
         .orderBy(toolCalls.step),
-    async ownerAuthored(agentId, name) {
-      const [existing] = await db
-        .select({ ownerAuthored: skills.ownerAuthored })
-        .from(skills)
-        .where(and(eq(skills.agentId, agentId), eq(skills.name, name)));
-      return existing?.ownerAuthored ?? false;
-    },
-    async saveReflected(agentId, skill, embedding) {
-      const [existing] = await db
-        .select({ id: skills.id })
-        .from(skills)
-        .where(and(eq(skills.agentId, agentId), eq(skills.name, skill.name)));
-      const row = await writeSkill(
-        db,
-        { agentId, ...skill, ownerAuthored: false },
-        embedding,
-        false,
-      );
-      return Boolean(row) && !existing;
+    async commitReflection(input) {
+      return db.transaction(async (tx): Promise<SkillReflectionCommitResult> => {
+        const observedPrivacyFence = await lockPostgresPrivacyObservationFence(
+          tx as unknown as Db,
+          input.agentId,
+        );
+        let expectedFence: { library?: unknown; privacy?: unknown };
+        try {
+          expectedFence = JSON.parse(input.expectedLibraryRevision) as {
+            library?: unknown;
+            privacy?: unknown;
+          };
+        } catch {
+          throw new Error('Skill reflection revision token is malformed');
+        }
+        if (expectedFence.privacy !== observedPrivacyFence) return { status: 'ineligible' };
+        const [task] = await tx
+          .select({
+            id: tasks.id,
+            agentId: tasks.agentId,
+            status: tasks.status,
+            trust: tasks.trust,
+            trigger: tasks.trigger,
+            state: tasks.state,
+          })
+          .from(tasks)
+          .where(and(eq(tasks.id, input.taskId), eq(tasks.agentId, input.agentId)))
+          .limit(1)
+          .for('update');
+        if (task?.status !== 'done' || taskIsTainted(task)) return { status: 'ineligible' };
+        const state = (task.state ?? {}) as Record<string, unknown>;
+        if (state.skillReflectionReceipt) return { status: 'already_processed' };
+
+        await tx
+          .insert(skillLibraryRevisions)
+          .values({ agentId: input.agentId })
+          .onConflictDoNothing({ target: skillLibraryRevisions.agentId });
+        const [generation] = await tx
+          .select({ revision: skillLibraryRevisions.revision })
+          .from(skillLibraryRevisions)
+          .where(eq(skillLibraryRevisions.agentId, input.agentId))
+          .for('update');
+        if (!generation) throw new Error('Skill library revision is unavailable');
+
+        let status: SkillReflectionCommitResult['status'];
+        let skillId: string | null = null;
+        if (!input.skill) {
+          status = 'no_skill';
+        } else if (generation.revision.toString() !== expectedFence.library) {
+          status = 'superseded';
+        } else {
+          const [existing] = await tx
+            .select({ id: skills.id, ownerAuthored: skills.ownerAuthored })
+            .from(skills)
+            .where(and(eq(skills.agentId, input.agentId), eq(skills.name, input.skill.name)))
+            .limit(1);
+          if (existing?.ownerAuthored) {
+            status = 'owner_authored';
+            skillId = existing.id;
+          } else if (existing) {
+            const [updated] = await tx
+              .update(skills)
+              .set({
+                preconditions: input.skill.preconditions,
+                steps: input.skill.steps,
+                gotchas: input.skill.gotchas,
+                embedding: input.embedding,
+                embeddingSpaceKey: input.embeddingSpaceKey ?? null,
+                deprecated: false,
+                lastVerifiedAt: sql`now()`,
+                updatedAt: sql`now()`,
+              })
+              .where(
+                and(
+                  eq(skills.id, existing.id),
+                  eq(skills.agentId, input.agentId),
+                  eq(skills.ownerAuthored, false),
+                ),
+              )
+              .returning({ id: skills.id });
+            if (!updated) {
+              status = 'superseded';
+            } else {
+              status = 'revised';
+              skillId = updated.id;
+              await bumpSkillLibraryRevision(tx, input.agentId);
+            }
+          } else {
+            const [created] = await tx
+              .insert(skills)
+              .values({
+                ...input.skill,
+                agentId: input.agentId,
+                embedding: input.embedding,
+                embeddingSpaceKey: input.embeddingSpaceKey ?? null,
+                ownerAuthored: false,
+                lastVerifiedAt: sql`now()`,
+              })
+              .returning({ id: skills.id });
+            status = 'created';
+            skillId = created?.id ?? null;
+            await bumpSkillLibraryRevision(tx, input.agentId);
+          }
+        }
+        await tx
+          .update(tasks)
+          .set({
+            state: {
+              ...state,
+              skillReflectionReceipt: {
+                status,
+                author: 'reflection',
+                skillId,
+                libraryRevision: generation.revision.toString(),
+                recordedAt: new Date().toISOString(),
+              },
+            },
+            updatedAt: sql`now()`,
+          })
+          .where(
+            and(
+              eq(tasks.id, input.taskId),
+              eq(tasks.agentId, input.agentId),
+              eq(tasks.status, 'done'),
+            ),
+          );
+        if ((status === 'created' || status === 'revised') && skillId) return { status, skillId };
+        if (status === 'created' || status === 'revised')
+          throw new Error('Committed skill reflection did not return a skill identity');
+        return { status };
+      });
     },
   };
 }

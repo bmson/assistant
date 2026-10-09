@@ -1,11 +1,15 @@
 import { stripBackgroundNoticeEcho } from '../chat-card.js';
+import { communicationReceipt } from '../communication-receipt.js';
 import {
   explicitlyRequestsRepetition,
   gradeAuditedOutput,
   repairPresentationDefects,
 } from '../model-router/audit-graders.js';
+import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
 import { correctFlightWriteClaims } from './flight-write-contract.js';
-import { gmailThreadIdsToRead, type PersonalReadRequest } from './read-intent.js';
+import { detectFutureWatchIntent, type FutureWatchIntent } from './future-watch-intent.js';
+import type { PersonalReadRequest } from './read-intent.js';
+import { effectiveReminders } from './reminder-state.js';
 import { isDurableSave, isMemoryWriteRequest, savedWorkSummary } from './saved-work.js';
 
 /**
@@ -100,7 +104,7 @@ const READ_ACTIONS =
   'checked|reviewed|looked (?:at|through|over|in|into)|went (?:through|over)|searched|scanned|read through|pulled up|examined|inspected';
 const RESEARCH_OBJECTS =
   'research|companies|company list|target companies|job boards?|sources?|search results?';
-const BACKGROUND_OBJECTS = 'mission|task|watcher|monitoring|tracker';
+const BACKGROUND_OBJECTS = 'mission|task|watch(?:er|es)?|monitor(?:ing)?|tracker';
 
 const FIRST_PERSON_PREFIX = String.raw`\b(?:i|we|the assistant)(?:['’]ve\s+|\s+(?:(?:have|has|had|just|already|successfully|now|am|are|was|were)\s+)*)`;
 
@@ -140,12 +144,26 @@ function completedActionClaim(
     String.raw`\b${article}${object}\b[^.\n]{0,70}\b(?:has|have|was|were|is|are)\s+(?:been\s+)?${status}\b`,
     'i',
   );
-  const terseObjectStatus = new RegExp(String.raw`\b${object}\b\s*(?::|-|—)?\s*${status}\b`, 'i');
+  const terseObjectStatus = new RegExp(
+    String.raw`${clauseStart}${article}${object}\b\s*(?::|-|—)?\s*${status}\b`,
+    'im',
+  );
+  const assistantObjectStatus = [...text.matchAll(new RegExp(objectStatus.source, 'gi'))].some(
+    (match) => {
+      const before = text.slice(Math.max(0, (match.index ?? 0) - 80), match.index);
+      const after = text.slice((match.index ?? 0) + match[0].length);
+      // Explicit source actors do not claim the assistant performed the work.
+      return (
+        !/\b(?:his|her|their|its|[\p{L}]+['’]s)\s*$/iu.test(before) &&
+        !/^\s+by\s+(?!me\b|us\b|the assistant\b)\S+/i.test(after)
+      );
+    },
+  );
 
   return (
     actionBeforeObject.test(text) ||
     firstPersonAction.test(text) ||
-    objectStatus.test(text) ||
+    assistantObjectStatus ||
     terseObjectStatus.test(text)
   );
 }
@@ -164,6 +182,26 @@ function firstPersonCompletedAction(text: string, actions: string): boolean {
  */
 const backgroundPromise =
   /\b(?:i|we)(?:\s+will|['’]ll)\s+(?:continue|keep)\b|\b(?:i|we)[^.\n]{0,80}\b(?:silently|in the background|while you(?:'|’)re away)\b|\b(?:starting|proceeding|running)\s+(?:silently|in the background)\b|\b(?:silently|in the background|real[- ]time tracker|mission launched)\b/i;
+const futureWatchPromise =
+  /\b(?:i|we)(?:\s+will|['’]ll)\s+(?:watch|monitor|keep\s+(?:watching|monitoring|an\s+eye\s+on)|notify|alert|ping|let\s+you\s+know)\b[^.!?\n]{0,120}\b(?:if|when|once|until)\b|\b(?:watch|monitoring)\b[^.!?\n]{0,100}\bactive\b/i;
+const withoutFutureWatchPromise = (text: string): string =>
+  text
+    .split(/(?<=[.!?])\s+|\n+/)
+    .filter((sentence) => sentence.trim() && !futureWatchPromise.test(sentence))
+    .join('\n')
+    .trim();
+
+/** Preserve useful turn results while naming the missing future-watch receipt. */
+export function withMissingFutureWatchNotice(text: string): string {
+  const usefulAnswer = withoutFutureWatchPromise(text);
+  if (
+    /\b(?:no active watch|watch\b[^.!?\n]{0,60}\b(?:not|never|could not|couldn't|cannot)\b[^.!?\n]{0,30}\b(?:confirmed|created|active)|(?:could not|couldn't|cannot) confirm\b[^.!?\n]{0,40}\bwatch)\b/i.test(
+      usefulAnswer,
+    )
+  )
+    return usefulAnswer;
+  return `${usefulAnswer ? `${usefulAnswer}\n\n` : ''}No active watch has been confirmed for this request, so I cannot promise a future notification.`;
+}
 const backgroundApplicationPromise =
   /\b(?:i|we)(?:\s+will|['’]ll)\s+(?:continue|keep)\s+(?:applying|submitting|filing|completing)\b|\b(?:continue|keep)\s+(?:applying|submitting|filing)\s+(?:to|for)\b/i;
 const progressClaim =
@@ -180,6 +218,15 @@ const countedTracker =
 // it does not fire on ordinary prose.
 const passiveOutbound =
   /\b(?:has|have|was|were)\s+been\s+(?:contacted|emailed|texted|messaged|notified|pinged|reached\s+out\s+to)\b/i;
+// An explicit negative status is not a claim that this turn completed an
+// outbound effect. Remove only the negated clause before checking positive
+// completion claims, so another affirmative clause remains evidence-gated.
+const NEGATED_OUTBOUND_STATUS =
+  /\bno\s+(?:new\s+)?(?:(?:emails?|messages?|texts?|calls?|replies|follow-ups?)\s+(?:(?:was|were)\s+|(?:has|have)\s+been\s+)|outreach\s+(?:was\s+|has\s+been\s+))(?:sent|delivered|contacted|emailed|texted|messaged|called|replied|forwarded|notified|pinged)\b/gi;
+
+function withoutNegatedOutboundStatus(text: string): string {
+  return text.replace(NEGATED_OUTBOUND_STATUS, '');
+}
 // A completed claim that a fact was written to long-term memory/the owner
 // profile. Requires a completion verb near the memory/profile object, so a
 // future-tense "I'll keep that in mind" does not trip it.
@@ -236,8 +283,145 @@ export function isSimulatedApprovalNotice(text: string): boolean {
   );
 }
 
+export type ActiveWatchReceipt =
+  | {
+      channel: 'email';
+      watchId: string;
+      expiresAt: string;
+      expectedSenderEmails: string[];
+      keywords: string[];
+    }
+  | {
+      channel: 'web';
+      watchId: string;
+      expiresAt: string;
+      url: string;
+      mode: 'change' | 'contains' | 'absent';
+      pattern?: string;
+    };
+
+/** Parse a current-task receipt for an unexpired, active watch. */
+export function activeWatchReceipt(
+  evidence: ActionEvidence,
+  nowMs = Date.now(),
+): ActiveWatchReceipt | undefined {
+  if (
+    evidence.fromCurrentTask === false ||
+    evidence.status !== 'succeeded' ||
+    (evidence.toolName !== 'watch.create' && evidence.toolName !== 'watch.web')
+  )
+    return undefined;
+  const result = record(evidence.result);
+  if (
+    !result ||
+    result.ok === false ||
+    result.status !== 'active' ||
+    typeof result.watchId !== 'string' ||
+    !result.watchId.trim() ||
+    typeof result.expiresAt !== 'string'
+  )
+    return undefined;
+  const expiry = Date.parse(result.expiresAt);
+  if (!Number.isFinite(expiry) || expiry <= nowMs) return undefined;
+  if (evidence.toolName === 'watch.create') {
+    const senders = result.expectedSenderEmails;
+    if (
+      !Array.isArray(senders) ||
+      senders.length === 0 ||
+      !senders.every(
+        (sender) => typeof sender === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(sender),
+      )
+    )
+      return undefined;
+    return {
+      channel: 'email',
+      watchId: result.watchId,
+      expiresAt: new Date(expiry).toISOString(),
+      expectedSenderEmails: [...new Set(senders.map((sender) => sender.toLowerCase()))],
+      keywords: Array.isArray(result.keywords)
+        ? result.keywords.filter((keyword): keyword is string => typeof keyword === 'string')
+        : [],
+    };
+  }
+  if (
+    typeof result.url !== 'string' ||
+    !['change', 'contains', 'absent'].includes(String(result.mode))
+  )
+    return undefined;
+  let url: URL;
+  try {
+    url = new URL(result.url);
+  } catch {
+    return undefined;
+  }
+  if (
+    (url.protocol !== 'https:' && url.protocol !== 'http:') ||
+    url.username ||
+    url.password ||
+    (result.mode !== 'change' && (typeof result.pattern !== 'string' || !result.pattern.trim()))
+  )
+    return undefined;
+  return {
+    channel: 'web',
+    watchId: result.watchId,
+    expiresAt: new Date(expiry).toISOString(),
+    url: url.href,
+    mode: result.mode as 'change' | 'contains' | 'absent',
+    ...(typeof result.pattern === 'string' ? { pattern: result.pattern } : {}),
+  };
+}
+
+function watchMatchesRequest(
+  receipt: ActiveWatchReceipt,
+  intent: FutureWatchIntent,
+  evidence: ActionEvidence[],
+): boolean {
+  if (receipt.channel !== intent.channel) return false;
+  if (receipt.channel === 'web') {
+    if (intent.explicitUrls.length === 0) return false;
+    return intent.explicitUrls.some((raw) => {
+      try {
+        return new URL(raw).href === receipt.url;
+      } catch {
+        return false;
+      }
+    });
+  }
+  if (intent.explicitEmails.length > 0) {
+    return intent.explicitEmails.some((email) => receipt.expectedSenderEmails.includes(email));
+  }
+  const targetTerms = intent.targetTerms.map((term) => term.toLowerCase());
+  if (targetTerms.length === 0) return false;
+  const resolved = new Set<string>();
+  for (const row of evidence) {
+    if (
+      row.fromCurrentTask === false ||
+      row.status !== 'succeeded' ||
+      row.toolName !== 'gmail.search'
+    )
+      continue;
+    const result = record(row.result);
+    if (result?.complete !== true || !Array.isArray(result.results)) continue;
+    for (const match of result.results) {
+      const item = record(match);
+      if (!item) continue;
+      const from = typeof item.from === 'string' ? item.from.toLowerCase() : '';
+      const subject = typeof item.subject === 'string' ? item.subject.toLowerCase() : '';
+      if (!targetTerms.some((term) => from.includes(term) || subject.includes(term))) continue;
+      for (const email of from.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi) ?? []) {
+        resolved.add(email.toLowerCase());
+      }
+    }
+  }
+  return resolved.size === 1 && receipt.expectedSenderEmails.includes([...resolved][0] ?? '');
+}
+
 function successful(evidence: ActionEvidence): boolean {
   if (evidence.status !== 'succeeded') return false;
+  if (evidence.toolName === 'watch.create' || evidence.toolName === 'watch.web')
+    return Boolean(activeWatchReceipt(evidence));
+  if (evidence.toolName === 'gmail.send' || evidence.toolName === 'sms.send')
+    return !!communicationReceipt(evidence);
   if (!evidence.result || typeof evidence.result !== 'object') return true;
 
   const result = evidence.result as Record<string, unknown>;
@@ -318,7 +502,12 @@ function inScope(kind: ActionKind, item: ActionEvidence): boolean {
   return !CURRENT_TASK_ONLY.has(kind) || item.fromCurrentTask !== false;
 }
 
-function supports(kind: ActionKind, evidence: ActionEvidence[], currentTaskOnly = false): boolean {
+function supports(
+  kind: ActionKind,
+  evidence: ActionEvidence[],
+  currentTaskOnly = false,
+  requestText?: string,
+): boolean {
   const usable = evidence.filter(
     (item) =>
       successful(item) &&
@@ -368,15 +557,9 @@ function supports(kind: ActionKind, evidence: ActionEvidence[], currentTaskOnly 
     case 'calendar':
       return names.some((name) => /^calendar\.(create|update|cancel|delete)/.test(name));
     case 'reminder_create':
-      return usable.some((item) => {
-        const result = record(item.result);
-        return (
-          item.toolName === 'reminder.create' &&
-          result?.created !== false &&
-          typeof result?.reminderId === 'string' &&
-          result.reminderId.trim().length > 0
-        );
-      });
+      return [...effectiveReminders(usable).values()].some(
+        (state) => state.created && state.enabled,
+      );
     case 'reminder_cancel':
       return usable.some(
         (item) => item.toolName === 'reminder.cancel' && record(item.result)?.cancelled === true,
@@ -404,11 +587,19 @@ function supports(kind: ActionKind, evidence: ActionEvidence[], currentTaskOnly 
     case 'research':
       return names.some((name) => name === 'web.fetch' || name === 'browser.execute');
     case 'background':
-      return names.some(
-        (name) =>
-          name === 'mission.update' ||
-          name === 'task.schedule' ||
-          name === 'applications.watch_confirmation',
+      return (
+        names.some(
+          (name) =>
+            name === 'mission.update' ||
+            name === 'task.schedule' ||
+            name === 'applications.watch_confirmation',
+        ) ||
+        usable.some((item) => {
+          const receipt = activeWatchReceipt(item);
+          if (!receipt) return false;
+          const intent = requestText ? detectFutureWatchIntent(requestText) : null;
+          return !intent || watchMatchesRequest(receipt, intent, evidence);
+        })
       );
     // Both tools persist owner information. A successful function invocation
     // can still return saved:false (e.g. a forgotten/tombstoned fact).
@@ -477,6 +668,7 @@ function freshArtifactEditClaim(text: string, kind: 'workspace' | 'spreadsheet' 
 function claimedKinds(text: string): ActionKind[] {
   const kinds = new Set<ActionKind>();
   const lower = text.toLowerCase();
+  const outboundClaimText = withoutNegatedOutboundStatus(text);
 
   if (
     completedActionClaim(
@@ -517,7 +709,7 @@ function claimedKinds(text: string): ActionKind[] {
   }
   if (
     completedActionClaim(
-      text,
+      outboundClaimText,
       OUTBOUND_OBJECTS,
       'sent|delivered|contacted|emailed|texted|messaged|called|replied|forwarded|reached out to|notified|pinged',
       // "confirmed" is not a send. It is what booking and travel mail says about
@@ -526,10 +718,10 @@ function claimedKinds(text: string): ActionKind[] {
       'sent|delivered|contacted|emailed|texted|messaged|called|replied|forwarded|reached out to|notified|pinged',
     ) ||
     firstPersonCompletedAction(
-      text,
+      outboundClaimText,
       'sent|delivered|contacted|emailed|texted|messaged|called|replied|forwarded|reached out to|notified|pinged',
     ) ||
-    passiveOutbound.test(text)
+    passiveOutbound.test(outboundClaimText)
   ) {
     kinds.add('outbound');
   }
@@ -603,6 +795,7 @@ function claimedKinds(text: string): ActionKind[] {
   }
   if (
     backgroundPromise.test(text) ||
+    futureWatchPromise.test(text) ||
     completedActionClaim(
       text,
       BACKGROUND_OBJECTS,
@@ -739,7 +932,9 @@ function toolKind(name: string): ActionKind | undefined {
   if (
     name === 'mission.update' ||
     name === 'task.schedule' ||
-    name === 'applications.watch_confirmation'
+    name === 'applications.watch_confirmation' ||
+    name === 'watch.create' ||
+    name === 'watch.web'
   ) {
     return 'background';
   }
@@ -772,6 +967,8 @@ function describeTool(name: string): string | undefined {
   if (name === 'occasions.save') return 'the occasion was saved in People';
   if (name === 'application.submit') return 'the application was submitted';
   if (name === 'applications.watch_confirmation') return 'the confirmation watch was created';
+  if (name === 'watch.create') return 'the email watch is active';
+  if (name === 'watch.web') return 'the web watch is active';
   if (name === 'mission.update' || name === 'task.schedule') {
     return 'the background task was created or updated';
   }
@@ -800,7 +997,11 @@ function verifiedActionDescriptions(
     const kind = toolKind(item.toolName);
     if (kind !== undefined && citable(kind, item) && supports(kind, [item])) {
       const described = describeTool(item.toolName);
-      if (described) descriptions.add(`${described}${when}`);
+      if (described) {
+        const receipt = activeWatchReceipt(item);
+        const withExpiry = receipt ? `${described} until ${receipt.expiresAt}` : described;
+        descriptions.add(`${withExpiry}${when}`);
+      }
     }
     if (citable('application', item) && browserApplicationConfirmed(item)) {
       descriptions.add(`the portal returned an explicit application confirmation${when}`);
@@ -844,31 +1045,18 @@ const CONSTRUCTIBLE_GOOGLE_HOSTS = new Set([
 const BARE_URL_RE = /https?:\/\/[^\s<>"'`)\]]+/gi;
 const MARKDOWN_LINK_RE = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gi;
 
-interface NormalizedUrl {
-  normalized: string;
-  noQuery: string;
-  host: string;
-  idSegments: string[];
-}
-
-function normalizeUrl(raw: string): NormalizedUrl | null {
+function normalizeUrl(raw: string): URL | null {
   const cleaned = raw.replace(/[.,;:!?'")\]]+$/, '');
   try {
-    const u = new URL(cleaned);
-    const host = u.hostname.toLowerCase();
-    const path = u.pathname.replace(/\/+$/, '');
-    const base = `${u.protocol}//${host}${path}`.toLowerCase();
-    return {
-      normalized: `${base}${u.search}`.toLowerCase(),
-      noQuery: base,
-      host,
-      // Lowercased to match the lowercased corpus. Google ids are technically
-      // case-sensitive, but rewrite-not-block tolerates that tiny leniency.
-      idSegments: path
-        .split('/')
-        .filter((s) => s.length >= 16)
-        .map((s) => s.toLowerCase()),
-    };
+    const url = new URL(cleaned);
+    // Resource, action, port, path case and fragment retain their meaning.
+    for (const key of [...url.searchParams.keys()]) {
+      if (
+        /^(?:utm|utm_source|utm_medium|utm_campaign|utm_term|utm_content|gclid|fbclid)$/.test(key)
+      )
+        url.searchParams.delete(key);
+    }
+    return url;
   } catch {
     return null;
   }
@@ -883,7 +1071,7 @@ function normalizeUrl(raw: string): NormalizedUrl | null {
  * loses the href; a bare URL is removed; one trailing note explains the strip.
  * This keeps the false-positive cost to a single link rather than a blanked
  * answer. A link is evidenced when the corpus (tool results + trigger + the
- * owner/tool turns) contains it (with or without its query string). Google
+ * owner/tool turns) contains the same canonical resource URL. Google
  * doc/drive/calendar/mail links the model reconstructs from an id are allowed
  * only when that id is itself in the corpus; a Google Maps link the model
  * composes from an address is always allowed.
@@ -892,17 +1080,39 @@ export function enforceUrlProvenance(
   text: string,
   corpus: string,
 ): { text: string; strippedUrls: string[] } {
-  const haystack = corpus.toLowerCase();
+  const sourceUrls = new Set(
+    (corpus.match(/https?:\/\/[^\s<>"'`\\)\]]+/g) ?? [])
+      .map((value) => normalizeUrl(value)?.href)
+      .filter((value): value is string => Boolean(value)),
+  );
   const stripped: string[] = [];
   const isEvidenced = (raw: string): boolean => {
     const n = normalizeUrl(raw);
-    if (!n) return true; // unparseable — leave it rather than mangle the text
-    if (haystack.includes(n.normalized) || haystack.includes(n.noQuery)) return true;
-    if (n.host === 'www.google.com' && n.noQuery.includes('/maps')) return true;
-    if (CONSTRUCTIBLE_GOOGLE_HOSTS.has(n.host)) {
-      // A bare app link (no id) is harmless; an id-bearing link must cite an
-      // id the evidence actually produced.
-      return n.idSegments.length === 0 || n.idSegments.every((seg) => haystack.includes(seg));
+    if (!n) return false;
+    if (sourceUrls.has(n.href)) return true;
+    if (n.protocol !== 'https:' || n.port || n.username || n.password) return false;
+    if (n.hostname === 'www.google.com' && /^\/maps\/(?:search|dir)\/?$/.test(n.pathname))
+      return true;
+    if (CONSTRUCTIBLE_GOOGLE_HOSTS.has(n.hostname)) {
+      if (n.pathname === '/' && !n.search && !n.hash) return true;
+      const match =
+        n.hostname === 'docs.google.com'
+          ? /^\/(?:document|spreadsheets|presentation)\/d\/([A-Za-z0-9_-]+)\/(?:edit|view|preview)$/.exec(
+              n.pathname,
+            )
+          : n.hostname === 'drive.google.com'
+            ? /^\/file\/d\/([A-Za-z0-9_-]+)\/view$/.exec(n.pathname)
+            : null;
+      // Constructed links bind exact provider IDs; navigation parameters
+      // require an actual source URL rather than a guessed destination.
+      return (
+        !n.search &&
+        !n.hash &&
+        Boolean(
+          match?.[1] &&
+            new RegExp(`(?:^|[^A-Za-z0-9_-])${match[1]}(?:$|[^A-Za-z0-9_-])`).test(corpus),
+        )
+      );
     }
     return false;
   };
@@ -1027,9 +1237,20 @@ function matchingGmailThreadRows(
     return (
       typeof threadId === 'string' &&
       threadIds.has(threadId) &&
-      resultItems(row, 'messages').length > 0
+      resultItems(row, 'messages').length > 0 &&
+      record(row.result)?.complete === true
     );
   });
+}
+
+function gmailMetadataCoverageComplete(searches: ActionEvidence[]): boolean {
+  if (searches.length === 0) return false;
+  const last = record(searches.at(-1)?.result) ?? {};
+  const unavailable = searches.reduce((count, row) => {
+    const items = record(row.result)?.unavailable;
+    return count + (Array.isArray(items) ? items.length : 0);
+  }, 0);
+  return last.complete !== false && last.hasMore !== true && unavailable === 0;
 }
 
 function matchingPrivateReadRows(
@@ -1069,7 +1290,9 @@ function requiredReadGaps(
   const gmailSearches = matchingGmailSearchRows(request, current);
   const gmailHits = gmailSearches.flatMap((row) => resultItems(row, 'results'));
   const gmailThreads = matchingGmailThreadRows(gmailSearches, current);
-  const expectedThreadIds = gmailThreadIdsToRead(gmailSearches);
+  const expectedThreadIds = [
+    ...new Set(gmailHits.map((hit) => stringField(hit, 'threadId')).filter(Boolean)),
+  ];
   const readThreadIds = new Set(
     gmailThreads
       .map((row) => record(row.args)?.threadId)
@@ -1089,6 +1312,16 @@ function requiredReadGaps(
   } else if (request.requiresThreadRead && gmailHits.length > 0 && missingThreadIds.length > 0) {
     labels.push(
       `successful reads of ${missingThreadIds.length} matching Gmail ${missingThreadIds.length === 1 ? 'thread' : 'threads'}`,
+    );
+    unsupported.push('inbox_read');
+  }
+  if (
+    request.kind !== 'calendar' &&
+    gmailSearches.length > 0 &&
+    !gmailMetadataCoverageComplete(gmailSearches)
+  ) {
+    labels.push(
+      'a complete Gmail metadata search, including remaining pages and unavailable message metadata',
     );
     unsupported.push('inbox_read');
   }
@@ -1541,6 +1774,568 @@ const CARDINALS: Record<string, number> = {
   ten: 10,
 };
 
+const MONTH_NUMBER: Record<string, number> = {
+  jan: 1,
+  january: 1,
+  feb: 2,
+  february: 2,
+  mar: 3,
+  march: 3,
+  apr: 4,
+  april: 4,
+  may: 5,
+  jun: 6,
+  june: 6,
+  jul: 7,
+  july: 7,
+  aug: 8,
+  august: 8,
+  sep: 9,
+  sept: 9,
+  september: 9,
+  oct: 10,
+  october: 10,
+  nov: 11,
+  november: 11,
+  dec: 12,
+  december: 12,
+};
+
+function claimUnits(text: string): string[] {
+  return text
+    .replace(/\s+and\s+(?=(?:the\s+)?[A-Z\d])/g, '\n')
+    .split(/\n+|(?<=[.!?;])\s+/)
+    .map((unit) => unit.trim().replace(/^\s*[-*+]\s*/, ''))
+    .filter(Boolean);
+}
+
+function eventClaimMatches(unit: string, event: ClaimFact & { kind: 'calendar_event' }): boolean {
+  const words = groundingWords(unit);
+  const text = words.join(' ');
+  return (
+    draftMentions(event.summary, words, text) ||
+    (event.location.length > 0 && draftMentions(event.location, words, text))
+  );
+}
+
+function explicitCivilDates(unit: string): string[] {
+  const dates: string[] = [];
+  for (const [date] of unit.matchAll(/\b(20\d{2}-\d{2}-\d{2})\b/g)) dates.push(date);
+  for (const match of unit.matchAll(
+    /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(20\d{2}))?\b/gi,
+  )) {
+    const month = MONTH_NUMBER[(match[1] ?? '').toLowerCase()];
+    const day = Number(match[2]);
+    const year = Number(match[3]) || null;
+    if (month && day >= 1 && day <= 31) dates.push(`${year ?? '*'}-${month}-${day}`);
+  }
+  for (const match of unit.matchAll(/\b(\d{1,2})\/(\d{1,2})(?:\/(20\d{2}))?\b/g)) {
+    const month = Number(match[1]);
+    const day = Number(match[2]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31)
+      dates.push(`${Number(match[3]) || '*'}-${month}-${day}`);
+  }
+  return dates;
+}
+
+function eventLocalDay(value: string, timeZone?: string): string | null {
+  return zonedClock(value, timeZone)?.day ?? null;
+}
+
+function datesMatchEvent(
+  unit: string,
+  event: ClaimFact & { kind: 'calendar_event' },
+  timeZone?: string,
+): boolean {
+  const day = eventLocalDay(event.start, timeZone);
+  if (!day) return false;
+  for (const date of explicitCivilDates(unit)) {
+    const [yearText, monthText, dayText] = date.split('-');
+    if (
+      Number(monthText) !== Number(day.slice(5, 7)) ||
+      Number(dayText) !== Number(day.slice(8, 10)) ||
+      (yearText !== '*' && Number(yearText) !== Number(day.slice(0, 4)))
+    )
+      return false;
+  }
+  const weekdayMatch = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.exec(unit);
+  if (weekdayMatch) {
+    const expected = new Date(`${day}T12:00:00Z`).toLocaleDateString('en-US', {
+      weekday: 'long',
+      timeZone: 'UTC',
+    });
+    if (expected.toLowerCase() !== weekdayMatch[1]?.toLowerCase()) return false;
+  }
+  return true;
+}
+
+function calendarRelationshipReasons(
+  text: string,
+  request: PersonalReadRequest,
+  events: Record<string, unknown>[],
+  facts: ClaimFact[],
+): string[] {
+  const eventFacts = facts.filter(
+    (fact): fact is ClaimFact & { kind: 'calendar_event' } => fact.kind === 'calendar_event',
+  );
+  const reasons: string[] = [];
+  if (!eventFacts.length) return reasons;
+  for (const unit of claimUnits(text)) {
+    const clocks = [
+      ...statedClocks(unit),
+      ...[...unit.matchAll(ISO_INSTANT_RE)]
+        .map(([instant]) => zonedClock(instant, request.timeZone)?.minutes)
+        .filter((minute): minute is number => typeof minute === 'number' && minute >= 0),
+    ];
+    const dates = explicitCivilDates(unit);
+    const names = [...unit.matchAll(PROPER_RUN_RE)].map((match) => match[1] ?? '');
+    PROPER_RUN_RE.lastIndex = 0;
+    const namedCalendar = names.some((name) =>
+      eventFacts.some((event) => {
+        const words = groundingWords(`${event.summary} ${event.location}`);
+        return groundingWords(name).some((token) => token.length >= 4 && words.includes(token));
+      }),
+    );
+    const freeClaim = FREE_CLAIM_RE.test(unit);
+    const calendarMarker =
+      /\b(?:calendar|schedule|agenda|event|appointment|meeting|interview|today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(
+        unit,
+      );
+    if (!clocks.length && !dates.length && !namedCalendar && !freeClaim) continue;
+    if (freeClaim) {
+      reasons.push('a free-time boundary is not established by event rows or a named search');
+      continue;
+    }
+    const candidates = eventFacts.filter((event) => eventClaimMatches(unit, event));
+    if (candidates.length !== 1) {
+      if (!candidates.length && !namedCalendar && !calendarMarker) continue;
+      reasons.push('date, time, or place is not joined to one matching calendar event');
+      continue;
+    }
+    const event = candidates[0];
+    if (!event) continue;
+    const expectedTimes = [event.start, event.end]
+      .map((value) => zonedClock(value, request.timeZone)?.minutes)
+      .filter((value): value is number => typeof value === 'number' && value >= 0);
+    if (clocks.some((clock) => !expectedTimes.includes(clock)))
+      reasons.push('a clock time does not belong to the named calendar event');
+    if (!datesMatchEvent(unit, event, request.timeZone))
+      reasons.push('a date does not belong to the named calendar event');
+    const prose = unit.replace(MARKDOWN_LINK_RE, ' ').replace(BARE_URL_RE, ' ');
+    for (const match of prose.matchAll(PROPER_RUN_RE)) {
+      const phrase = match[1] ?? '';
+      const normalized = groundingWords(phrase).join(' ');
+      if (!normalized) continue;
+      const sameEventWords = groundingWords(`${event.summary} ${event.location}`).join(' ');
+      if (!sameEventWords.includes(normalized))
+        reasons.push('a named place is not part of the same calendar event');
+    }
+  }
+  // Completeness applies to the searched window, not to the query's matches.
+  if (
+    request.firstToolName === 'calendar.search_events' &&
+    events.length > 0 &&
+    FREE_CLAIM_RE.test(text)
+  )
+    reasons.push('a named calendar search cannot establish free time around its matches');
+  return [...new Set(reasons)];
+}
+
+function exactTeamMatch(claim: string, team: string): boolean {
+  const tokens = groundingWords(team).filter(
+    (word) => word.length > 2 && !GROUNDING_STOPWORDS.has(word),
+  );
+  const claimTokens = groundingWords(claim);
+  const nickname = tokens.at(-1);
+  return (
+    tokens.length > 0 &&
+    (tokens.every((token) => claimTokens.includes(token)) ||
+      Boolean(nickname && nickname.length >= 4 && claimTokens.includes(nickname)))
+  );
+}
+
+function normalizedPlace(value: string): string {
+  return groundingWords(value).join(' ');
+}
+
+function exactPlaceMatch(claim: string, fact: string): boolean {
+  const expected = normalizedPlace(fact);
+  return expected.length > 0 && normalizedPlace(claim) === expected;
+}
+
+const LIVE_TEMPERATURE_RE = /(-?\d{1,3})\s*°\s*([CF])?\b|(-?\d{1,3})\s+degrees\s*([CF])?\b/gi;
+const PLACE_WORD = String.raw`[\p{L}][\p{L}\p{M}'’.-]*`;
+const PLACE_PHRASE = String.raw`${PLACE_WORD}(?:\s+${PLACE_WORD}){0,3}`;
+
+function localTemperatureQualifiers(unit: string, match: RegExpMatchArray): string {
+  const start = match.index ?? 0;
+  const priorTemperatureEnds = [...unit.matchAll(LIVE_TEMPERATURE_RE)]
+    .filter((prior) => (prior.index ?? 0) < start)
+    .map((prior) => (prior.index ?? 0) + prior[0].length);
+  const previousEnd = priorTemperatureEnds.at(-1) ?? 0;
+  return unit.slice(previousEnd, start).toLowerCase();
+}
+
+function claimedPlaceForTemperature(
+  unit: string,
+  match: RegExpMatchArray,
+  facts: Array<Extract<ClaimFact, { kind: 'temperature' }>>,
+): string | undefined {
+  const temperatureAt = match.index ?? 0;
+  const candidates: Array<{ value: string; at: number }> = [];
+  const add = (value: string, at: number) => {
+    let place = value.trim().replace(/[.,;:!?]+$/u, '');
+    const trailingContext = new Set([
+      'today',
+      'tomorrow',
+      'tonight',
+      'currently',
+      'now',
+      'right',
+      'forecast',
+      'temperature',
+      'weather',
+      'is',
+      'was',
+      'will',
+      'be',
+    ]);
+    const words = place.split(/\s+/u);
+    while (words.length > 1) {
+      const lastWord = words.at(-1)?.toLowerCase();
+      if (!lastWord || !trailingContext.has(lastWord)) break;
+      words.pop();
+    }
+    place = words.join(' ');
+    if (place) candidates.push({ value: place, at });
+  };
+
+  // Prefer an explicit prepositional location. This accepts lowercase names
+  // while preserving the actual phrase the response attached to the reading.
+  const preposition = new RegExp(`\\b(?:in|for)\\s+(${PLACE_PHRASE})`, 'giu');
+  for (const place of unit.matchAll(preposition)) {
+    const value = place[1] ?? '';
+    const at = place.index ?? 0;
+    if (value) add(value, at);
+  }
+
+  // A sentence can put the city before the reading ("Paris is currently
+  // 20°C"). Ignore common grammatical subjects so "It is 20°C" stays
+  // location-neutral.
+  const leadingPlace = new RegExp(
+    `^\\s*(${PLACE_PHRASE})\\s+(?:is|was|will\\s+be|currently|right\\s+now)\\b`,
+    'iu',
+  ).exec(unit);
+  if (leadingPlace?.[1]) {
+    const value = leadingPlace[1].trim();
+    if (
+      !new Set(['it', 'the temperature', 'current temperature', 'the weather']).has(
+        value.toLowerCase(),
+      )
+    )
+      add(value, 0);
+  }
+
+  // Known place names also bind when the wording omits "in/for". Matching
+  // source names case-insensitively supports both sentence-initial and
+  // lowercase forms without treating arbitrary nouns as a location.
+  for (const fact of facts) {
+    const place = fact.place.trim();
+    if (!place) continue;
+    const escaped = place
+      .split(/\s+/u)
+      .map((part) => part.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'))
+      .join('\\s+');
+    const knownPlace = new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'giu');
+    for (const occurrence of unit.matchAll(knownPlace))
+      candidates.push({ value: place, at: occurrence.index ?? 0 });
+  }
+
+  const nearest = candidates
+    .filter((candidate) => Math.abs(candidate.at - temperatureAt) <= 160)
+    .sort(
+      (left, right) => Math.abs(left.at - temperatureAt) - Math.abs(right.at - temperatureAt),
+    )[0];
+  return nearest?.value;
+}
+
+function weekdayKey(value: string): string {
+  const normalized = value.toLowerCase();
+  const aliases: Record<string, string> = {
+    mon: 'monday',
+    monday: 'monday',
+    tue: 'tuesday',
+    tues: 'tuesday',
+    tuesday: 'tuesday',
+    wed: 'wednesday',
+    wednesday: 'wednesday',
+    thu: 'thursday',
+    thur: 'thursday',
+    thurs: 'thursday',
+    thursday: 'thursday',
+    fri: 'friday',
+    friday: 'friday',
+    sat: 'saturday',
+    saturday: 'saturday',
+    sun: 'sunday',
+    sunday: 'sunday',
+  };
+  return aliases[normalized] ?? normalized;
+}
+
+function liveRelationshipReasons(
+  text: string,
+  facts: ClaimFact[],
+  hasWeatherEvidence = false,
+): string[] {
+  const reasons: string[] = [];
+  const scoreFacts = facts.filter(
+    (fact): fact is Extract<ClaimFact, { kind: 'score' }> => fact.kind === 'score',
+  );
+  for (const unit of claimUnits(text)) {
+    const scoreClaim =
+      /\b(.+?)\s+(?:beat|beats|defeated|lost to)\s+(.+?)\s+(\d{1,3})\s*[-–—]\s*(\d{1,3})\b/i.exec(
+        unit,
+      );
+    if (scoreClaim) {
+      const winner = scoreClaim[1] ?? '';
+      const loser = scoreClaim[2] ?? '';
+      const first = Number(scoreClaim[3]);
+      const second = Number(scoreClaim[4]);
+      const matched = scoreFacts.some((fact) => {
+        const subjectIsAway = exactTeamMatch(winner, fact.away) && exactTeamMatch(loser, fact.home);
+        const subjectIsHome = exactTeamMatch(winner, fact.home) && exactTeamMatch(loser, fact.away);
+        if (!subjectIsAway && !subjectIsHome) return false;
+        const subjectScore = subjectIsAway ? fact.awayScore : fact.homeScore;
+        const opponentScore = subjectIsAway ? fact.homeScore : fact.awayScore;
+        if (first !== subjectScore || second !== opponentScore) return false;
+        return /lost to/i.test(scoreClaim[0])
+          ? subjectScore < opponentScore
+          : subjectScore > opponentScore;
+      });
+      if (!matched) reasons.push('a score and the teams it describes do not match one game record');
+    }
+    const temperatureFacts = facts.filter(
+      (fact): fact is Extract<ClaimFact, { kind: 'temperature' }> => fact.kind === 'temperature',
+    );
+    const temperatureClaims =
+      temperatureFacts.length || hasWeatherEvidence ? [...unit.matchAll(LIVE_TEMPERATURE_RE)] : [];
+    for (const match of temperatureClaims) {
+      const value = Number(match[1] ?? match[3]);
+      const unitName = (match[2] ?? match[4] ?? '').toUpperCase();
+      const qualifierContext = localTemperatureQualifiers(unit, match);
+      const qualifierWords =
+        /\b(high|maximum|low|minimum|current|currently|now|forecast|hourly|feels?\s+like)\b/i
+          .exec(qualifierContext)?.[1]
+          ?.toLowerCase();
+      const qualifier =
+        qualifierWords?.includes('high') || qualifierWords === 'maximum'
+          ? 'high'
+          : qualifierWords?.includes('low') || qualifierWords === 'minimum'
+            ? 'low'
+            : qualifierWords === 'hourly'
+              ? 'hourly'
+              : qualifierWords === 'current' ||
+                  qualifierWords === 'currently' ||
+                  qualifierWords === 'now'
+                ? 'current'
+                : undefined;
+      const metric = /\bfeels?\s+like\b/i.test(qualifierContext) ? 'feels_like' : 'temperature';
+      const place = claimedPlaceForTemperature(unit, match, temperatureFacts);
+      const weekday = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i
+        .exec(unit)?.[1]
+        ?.toLowerCase();
+      const isoDate = /\b(20\d{2}-\d{2}-\d{2})\b/.exec(unit)?.[1];
+      const relativeDate = /\b(today|tomorrow|tonight)\b/i.exec(unit)?.[1]?.toLowerCase();
+      const daypart = /\b(early[- ]morning|morning|midday|afternoon|evening|night)\b/i
+        .exec(unit)?.[1]
+        ?.toLowerCase()
+        .replace('-', ' ');
+      const clock = /\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)\b/i.exec(unit);
+      const claimedHour = clock
+        ? (Number(clock[1]) % 12) + (clock[3]?.toLowerCase() === 'pm' ? 12 : 0)
+        : undefined;
+      const forecastClaim = /\bforecast\b/i.test(qualifierContext);
+      const hourMatchesDaypart = (hour: number, label: string): boolean => {
+        const ranges: Record<string, readonly [number, number]> = {
+          'early morning': [5, 8],
+          morning: [8, 11],
+          midday: [11, 14],
+          afternoon: [14, 17],
+          evening: [17, 21],
+          night: [21, 24],
+        };
+        const range = ranges[label];
+        return Boolean(range && hour >= range[0] && hour < range[1]);
+      };
+      PROPER_RUN_RE.lastIndex = 0;
+      const matched = temperatureFacts.some((fact) => {
+        const dateMatches =
+          (!weekday || weekdayKey(fact.weekday) === weekdayKey(weekday)) &&
+          (!isoDate || fact.date === isoDate) &&
+          (!relativeDate ||
+            (relativeDate === 'today'
+              ? fact.scope === 'current' ||
+                (fact.requestedDate.length > 0 && fact.date === fact.requestedDate)
+              : fact.requestedDate.length > 0 && fact.date === fact.requestedDate));
+        const qualifierMatches = !qualifier || fact.qualifier === qualifier;
+        const hourMatches =
+          claimedHour === undefined
+            ? !daypart ||
+              fact.windowLabel.toLowerCase().replace('-', ' ') === daypart ||
+              (fact.hour !== null && hourMatchesDaypart(fact.hour, daypart))
+            : fact.hour === claimedHour;
+        const occurrenceBound =
+          fact.scope === 'current'
+            ? !forecastClaim &&
+              !weekday &&
+              !isoDate &&
+              relativeDate !== 'tomorrow' &&
+              claimedHour === undefined &&
+              !daypart
+            : Boolean(
+                weekday ||
+                  isoDate ||
+                  relativeDate ||
+                  forecastClaim ||
+                  claimedHour !== undefined ||
+                  daypart,
+              );
+        return (
+          fact.value === value &&
+          (!unitName || fact.unit === unitName) &&
+          fact.metric === metric &&
+          qualifierMatches &&
+          (!place || exactPlaceMatch(place, fact.place)) &&
+          dateMatches &&
+          hourMatches &&
+          occurrenceBound
+        );
+      });
+      if (!matched)
+        reasons.push(
+          'a temperature value, unit, qualifier, or place is not supported by one reading',
+        );
+    }
+  }
+  return reasons;
+}
+
+function liveRelationFallback(facts: ClaimFact[], reasons: string[]): string {
+  const lines: string[] = [];
+  for (const fact of facts) {
+    if (fact.kind === 'score') lines.push(`- ${fact.sourceLine}`);
+    if (fact.kind === 'temperature') {
+      const metric = fact.metric === 'feels_like' ? 'feels-like temperature' : 'temperature';
+      const qualifier = fact.qualifier === 'current' ? 'current' : fact.qualifier;
+      const day = fact.weekday || fact.date;
+      lines.push(
+        `- ${[
+          day,
+          fact.windowLabel || fact.window,
+          fact.hour === null ? '' : `${fact.hour}:00`,
+          qualifier,
+          metric,
+          fact.place,
+        ]
+          .filter(Boolean)
+          .join(' ')}: ${fact.value}°${fact.unit ?? ''}`,
+      );
+    }
+  }
+  const detail =
+    lines.length > 0 ? ` The returned readings are:\n${[...new Set(lines)].join('\n')}` : '';
+  const subject = reasons.some((reason) => reason.includes('temperature'))
+    ? 'temperature reading'
+    : 'scoreline';
+  return `I couldn't verify that ${subject} against one returned record, so I won't report the disputed figure as fact.${detail}`;
+}
+
+function actionRelationshipFailures(text: string, evidence: ActionEvidence[]): ActionKind[] {
+  const facts = evidenceClaimFacts(evidence);
+  const failures = new Set<ActionKind>();
+  const calendarFacts = facts.filter(
+    (fact): fact is Extract<ClaimFact, { kind: 'calendar_mutation' }> =>
+      fact.kind === 'calendar_mutation',
+  );
+  for (const unit of claimUnits(text)) {
+    const operationMatches = [
+      ...unit.matchAll(
+        /\b(create|created|add|added|schedule|scheduled|book|booked|cancel|cancelled|canceled|delete|deleted|remove|removed|update|updated|change|changed|move|moved|reschedule|rescheduled)\b/gi,
+      ),
+    ];
+    if (operationMatches.length > 0 && claimedKinds(unit).includes('calendar')) {
+      const requested = operationMatches.map((match) => {
+        const verb = (match[1] ?? '').toLowerCase();
+        if (/^(?:cancel|cancelled|canceled)$/.test(verb)) return ['cancel'];
+        if (/^(?:delete|deleted|remove|removed)$/.test(verb)) return ['delete', 'cancel'];
+        if (/^(?:update|updated|change|changed|move|moved|reschedule|rescheduled)$/.test(verb))
+          return ['update'];
+        return ['create'];
+      });
+      if (requested.some((ops) => !calendarFacts.some((fact) => ops.includes(fact.operation))))
+        failures.add('calendar');
+      const named = PROPER_RUN_RE.exec(unit)?.[1] ?? '';
+      PROPER_RUN_RE.lastIndex = 0;
+      if (named) {
+        const name = groundingWords(named).join(' ');
+        const operationFacts = calendarFacts.filter((fact) =>
+          requested.some((ops) => ops.includes(fact.operation)),
+        );
+        if (
+          operationFacts.length > 0 &&
+          !operationFacts.some((fact) => groundingWords(fact.summary).join(' ').includes(name))
+        )
+          failures.add('calendar');
+      }
+    }
+    if (claimedKinds(unit).includes('outbound')) {
+      const sendFacts = facts.filter(
+        (fact): fact is Extract<ClaimFact, { kind: 'outbound' }> => fact.kind === 'outbound',
+      );
+      const countMatch =
+        /\b(?:sent|emailed|texted|messaged|called|notified)\s+(?:(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+)?(?:emails?|messages?|texts?|calls?)\b/i.exec(
+          unit,
+        );
+      if (countMatch?.[1]) {
+        const requestedCount = CARDINALS[countMatch[1].toLowerCase()] ?? Number(countMatch[1]);
+        if (Number.isFinite(requestedCount) && requestedCount !== sendFacts.length)
+          failures.add('outbound');
+      }
+      const target =
+        /\b(?:to|for)\s+([\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+)\b/u.exec(
+          unit,
+        )?.[1] ??
+        /\b(?:to|for)\s+([A-Z][\p{L}\p{M}'’.-]*(?:\s+[A-Z][\p{L}\p{M}'’.-]*){0,2})\b/u.exec(
+          unit,
+        )?.[1] ??
+        /\b(?:emailed|texted|messaged|contacted|notified|called)\s+(?:an?\s+)?(?:email\s+to\s+)?([\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+)\b/u.exec(
+          unit,
+        )?.[1] ??
+        /\b(?:emailed|texted|messaged|contacted|notified|called)\s+(?:an?\s+)?([A-Z][\p{L}\p{M}'’.-]*(?:\s+[A-Z][\p{L}\p{M}'’.-]*){0,2})\b/u.exec(
+          unit,
+        )?.[1];
+      if (target) {
+        const targetEmail = target.includes('@') ? target.toLowerCase() : undefined;
+        const normalized = groundingWords(target);
+        const recipientMatch = sendFacts.some((fact) =>
+          fact.recipients.some((recipient) => {
+            if (targetEmail) return recipient.toLowerCase() === targetEmail;
+            const recipientWords = groundingWords(
+              recipient.replace(/@.*/, '').replace(/[._+-]/g, ' '),
+            );
+            return (
+              normalized.length > 0 && normalized.every((word) => recipientWords.includes(word))
+            );
+          }),
+        );
+        if (!recipientMatch) failures.add('outbound');
+      }
+    }
+  }
+  return [...failures];
+}
+
 /**
  * Past this many events an agenda stops being prose worth writing and the
  * ledger's flat list is genuinely the better answer, so coverage is not
@@ -1563,6 +2358,200 @@ function statedClocks(value: string): number[] {
     );
   }
   return found;
+}
+
+const FLIGHT_SOURCE = /\b(?:flight|flights|airline|itinerary|boarding|departure)\b/i;
+const FLIGHT_DEPARTURE_CLOCK =
+  /\b(?:departure(?:\s+time)?|departs?|departed|departing|leaves?)\s*(?:(?:is|was|will be)\s+)?(?:at\s+)?(?::\s*)?(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?|\d{1,2}:\d{2})\b/gi;
+
+type FlightDepartureFact = { day: string; minutes: number; subject: string; source: string };
+
+function requestedLocalDay(request: PersonalReadRequest): string | null {
+  const start = request.temporalIntent?.interval.start ?? request.timeWindow?.timeMin;
+  return start ? eventLocalDay(start, request.timeZone) : null;
+}
+
+function dateMatchesDay(sourceDate: string, day: string): boolean {
+  const [yearText, monthText, dayText] = sourceDate.split('-');
+  const [year, month, date] = day.split('-').map(Number);
+  return (
+    Number(monthText) === month &&
+    Number(dayText) === date &&
+    (yearText === '*' || Number(yearText) === year)
+  );
+}
+
+/** Keep departure clocks bound to their own dated, destination-matching mail. */
+function flightDepartureFacts(
+  request: PersonalReadRequest,
+  evidence: ActionEvidence[],
+): FlightDepartureFact[] {
+  const day = requestedLocalDay(request);
+  if (!day || request.queryTerms.length === 0) return [];
+  const current = currentSuccessfulEvidence(evidence);
+  const searches = matchingGmailSearchRows(request, current);
+  const threads = matchingGmailThreadRows(searches, current);
+  const facts = new Map<string, FlightDepartureFact>();
+  for (const thread of threads) {
+    for (const message of resultItems(thread, 'messages')) {
+      const source = [
+        stringField(message, 'subject'),
+        stringField(message, 'snippet'),
+        rawStringField(message, 'text'),
+      ]
+        .filter(Boolean)
+        .join(' ');
+      if (!FLIGHT_SOURCE.test(source)) continue;
+      const sourceWords = new Set(groundingWords(source));
+      if (
+        request.queryTerms.some((term) =>
+          groundingWords(term).some((word) => !sourceWords.has(word)),
+        )
+      )
+        continue;
+      const sourceDates = explicitCivilDates(source);
+      const oneDatedItinerary =
+        new Set(sourceDates).size === 1 && sourceDates.some((date) => dateMatchesDay(date, day));
+      const subject = stringField(message, 'subject');
+      // Airline confirmations commonly use standalone DEPARTURE / ARRIVAL
+      // headings followed by a date-and-time line. Keep each heading's bounded
+      // section separate so an arrival or onward departure cannot donate its
+      // clock to the requested leg.
+      const itineraryLines = rawStringField(message, 'text').split(/\r?\n/);
+      for (let index = 0; index < itineraryLines.length; index += 1) {
+        if (!/^\s*departure\s*$/i.test(itineraryLines[index] ?? '')) continue;
+        const section: string[] = [];
+        for (
+          let cursor = index + 1;
+          cursor < Math.min(itineraryLines.length, index + 7);
+          cursor += 1
+        ) {
+          const line = itineraryLines[cursor] ?? '';
+          if (/^\s*(?:arrival(?:\s+\+?\d+)?|departure)\s*$/i.test(line)) break;
+          section.push(line);
+        }
+        const sectionText = section.join(' ');
+        if (!explicitCivilDates(sectionText).some((date) => dateMatchesDay(date, day))) continue;
+        const clockLine = /\bat\s+(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?))\b/gi;
+        for (const match of sectionText.matchAll(clockLine)) {
+          for (const minutes of statedClocks(match[1] ?? ''))
+            facts.set(`${day}:${minutes}:${source}`, { day, minutes, subject, source });
+        }
+      }
+      // If a message contains outbound and return legs, bind each departure to
+      // its own clause date. A single dated itinerary may carry the date in a
+      // header sentence, so its departure clause can inherit that one date.
+      for (const clause of source.split(/[;.!?\n]+/)) {
+        const dateBound =
+          explicitCivilDates(clause).some((candidate) => dateMatchesDay(candidate, day)) ||
+          oneDatedItinerary;
+        if (!dateBound) continue;
+        FLIGHT_DEPARTURE_CLOCK.lastIndex = 0;
+        for (const match of clause.matchAll(FLIGHT_DEPARTURE_CLOCK)) {
+          for (const minutes of statedClocks(match[1] ?? ''))
+            facts.set(`${day}:${minutes}:${source}`, { day, minutes, subject, source });
+        }
+      }
+      FLIGHT_DEPARTURE_CLOCK.lastIndex = 0;
+    }
+  }
+  return [...facts.values()];
+}
+
+function flightIdentityReasons(draft: string, facts: FlightDepartureFact[]): string[] {
+  const sources = facts.map((fact) => fact.source);
+  if (sources.length === 0) return [];
+  const sourceWords = new Set(sources.flatMap(groundingWords));
+  const reasons: string[] = [];
+  const flightClaims = claimUnits(draft).filter((unit) => /\bflight\b/i.test(unit));
+  for (const claim of flightClaims) {
+    const beforeFlight = claim.slice(0, claim.search(/\bflight\b/i)).trim();
+    const candidate =
+      beforeFlight
+        .split(/\s+/)
+        .at(-1)
+        ?.replace(/[^\p{L}\p{N}'’-]/gu, '') ?? '';
+    const candidateWords = groundingWords(candidate);
+    const genericLead = /^(?:a|an|the|my|your|our|this|that)$/i.test(candidate);
+    if (
+      !genericLead &&
+      candidateWords.length > 0 &&
+      !candidateWords.every((word) => sourceWords.has(word))
+    )
+      reasons.push(`the named flight source “${candidate}” is not in the dated matching booking`);
+    if (/\b(?:direct(?:ly)?|non[ -]?stop)\b/i.test(claim)) {
+      const affirmativelyDirect = sources.some(
+        (source) =>
+          /\b(?:direct(?:ly)?|non[ -]?stop)\b/i.test(source) &&
+          !/\b(?:not|never|no)\s+(?:a\s+)?(?:direct|non[ -]?stop)\b/i.test(source),
+      );
+      if (!affirmativelyDirect)
+        reasons.push('a direct or nonstop route is not established by the dated matching booking');
+    }
+  }
+  return [...new Set(reasons)];
+}
+
+function flightClockLabel(minutes: number): string {
+  const hour24 = Math.floor(minutes / 60);
+  const minute = minutes % 60;
+  return `${hour24 % 12 || 12}:${String(minute).padStart(2, '0')} ${hour24 < 12 ? 'AM' : 'PM'}`;
+}
+
+type FlightCalendarClock = { minutes: number; label: string };
+
+function flightCalendarClocks(
+  request: PersonalReadRequest,
+  events: Record<string, unknown>[],
+): FlightCalendarClock[] {
+  const day = requestedLocalDay(request);
+  if (!day) return [];
+  const clocks = new Map<number, FlightCalendarClock>();
+  for (const event of events) {
+    const start = stringField(event, 'start');
+    if (!start || !/[T ]\d{2}:\d{2}/.test(start)) continue;
+    const parsed = zonedClock(start, request.timeZone);
+    if (!parsed || parsed.day !== day) continue;
+    const source = [
+      stringField(event, 'summary'),
+      stringField(event, 'description'),
+      stringField(event, 'location'),
+    ]
+      .filter(Boolean)
+      .join(' ');
+    const words = new Set(groundingWords(source));
+    if (
+      !FLIGHT_SOURCE.test(source) ||
+      request.queryTerms.some((term) => groundingWords(term).some((word) => !words.has(word)))
+    )
+      continue;
+    const label = /\bboarding\b/i.test(source)
+      ? 'calendar boarding entry'
+      : 'calendar flight entry';
+    clocks.set(parsed.minutes, { minutes: parsed.minutes, label });
+  }
+  return [...clocks.values()];
+}
+
+function flightSourcesAreComplete(
+  request: PersonalReadRequest,
+  evidence: ActionEvidence[],
+): boolean {
+  const current = currentSuccessfulEvidence(evidence);
+  const searches = matchingGmailSearchRows(request, current);
+  if (!gmailMetadataCoverageComplete(searches)) return false;
+  const expected = new Set(
+    searches
+      .flatMap((row) => resultItems(row, 'results'))
+      .map((item) => stringField(item, 'threadId'))
+      .filter(Boolean),
+  );
+  const read = new Set(
+    matchingGmailThreadRows(searches, current)
+      .map((row) => stringField(record(row.args) ?? {}, 'threadId'))
+      .filter(Boolean),
+  );
+  return [...expected].every((threadId) => read.has(threadId));
 }
 
 export interface ReadGrounding {
@@ -1649,6 +2638,35 @@ export function groundReadDraft(
   ];
 
   const reasons: string[] = [];
+
+  if (request.answerFocus === 'flight') {
+    const uncertainty =
+      /\b(?:could(?:n['’]t| not)|cannot|can['’]t|unable to|not sure|unclear|unconfirmed|conflicting|ambiguous)\b/i.test(
+        draft,
+      );
+    const facts = flightDepartureFacts(request, evidence);
+    const times = [...new Set(facts.map((fact) => fact.minutes))];
+    const calendarClocks = flightCalendarClocks(request, events);
+    const claims = claimUnits(draft).filter(
+      (unit) =>
+        /\b(?:flight|departure|depart|boarding|leave|leaves)\b/i.test(unit) &&
+        statedClocks(unit).length > 0,
+    );
+    reasons.push(...flightIdentityReasons(draft, facts));
+    if (claims.length === 0 && !uncertainty) {
+      reasons.push('does not state a verified departure time or an honest coverage gap');
+    } else if (claims.length > 0) {
+      if (!flightSourcesAreComplete(request, evidence)) {
+        reasons.push('the matching itinerary sources are incomplete or not fully read');
+      } else if (times.length !== 1) {
+        reasons.push('no single dated departure time is established by the matching itineraries');
+      } else if (calendarClocks.some((clock) => clock.minutes !== times[0])) {
+        reasons.push('the calendar flight entry conflicts with the date-matched booking message');
+      } else if (claims.some((unit) => statedClocks(unit).some((clock) => clock !== times[0]))) {
+        reasons.push('a departure time is not supported by the dated matching itinerary');
+      }
+    }
+  }
 
   // Mail confirmations often give a date but no weekday. Do not let a
   // paraphrase add an unverified weekday (for example calling Sep 5 Friday).
@@ -1793,6 +2811,17 @@ export function groundReadDraft(
     reasons.push('asserts free time without a complete window to read it from');
   }
 
+  reasons.push(
+    ...calendarRelationshipReasons(text, request, events, evidenceClaimFacts(current, live)),
+  );
+  reasons.push(
+    ...liveRelationshipReasons(
+      text,
+      evidenceClaimFacts(current, live),
+      current.some((row) => row.toolName === 'weather.lookup' && successful(row)),
+    ),
+  );
+
   // A row-shaped answer that has more rows than the ledger has items is
   // inventing one, whatever the invented row happens to be called. This is the
   // catch for a fabrication too plainly worded to read as a proper noun.
@@ -1833,6 +2862,8 @@ export function verifiedReadResponse(
     );
     const query = stringField(record(rows[0]?.args) ?? {}, 'query');
     if (files.length === 0) {
+      if (!rows.length || rows.some((row) => record(row.result)?.complete !== true))
+        return `No matching Drive files were returned${query ? ` for “${query}”` : ''} in this bounded lookup; coverage does not establish that none exist.`;
       return `I searched Drive${query ? ` for “${query}”` : ''} and found no matching files.`;
     }
     return [
@@ -1846,11 +2877,15 @@ export function verifiedReadResponse(
     ].join('\n');
   }
   if (request.kind === 'memory') {
+    const rows = matchingPrivateReadRows(request, current);
     const memories = uniqueRecords(
-      matchingPrivateReadRows(request, current).flatMap((row) => resultItems(row, 'memories')),
+      rows.flatMap((row) => resultItems(row, 'memories')),
       (memory) => stringField(memory, 'id') || stringField(memory, 'content'),
     );
-    if (memories.length === 0) return 'I found no supported saved memories for that.';
+    if (memories.length === 0)
+      return rows.length > 0 && rows.every((row) => record(row.result)?.complete === true)
+        ? 'I found no supported saved memories for that.'
+        : 'No matching saved memories were returned in this bounded lookup; it does not establish that no saved record exists.';
     return [
       `I found ${memories.length} saved ${memories.length === 1 ? 'record' : 'records'}:`,
       ...memories.map((memory) => {
@@ -1868,11 +2903,14 @@ export function verifiedReadResponse(
     ].join('\n');
   }
   if (request.kind === 'knowledge_graph') {
+    const rows = matchingPrivateReadRows(request, current);
     const relations = uniqueRecords(
-      matchingPrivateReadRows(request, current).flatMap((row) => resultItems(row, 'relationships')),
+      rows.flatMap((row) => resultItems(row, 'relationships')),
       (relation) => stringField(relation, 'id'),
     );
     if (relations.length === 0) {
+      if (!rows.length || rows.some((row) => record(row.result)?.complete !== true))
+        return 'No matching source-backed connections were returned in this bounded lookup; it does not establish that no connection exists.';
       return 'I found no active, source-backed knowledge-graph connections for that.';
     }
     return [
@@ -1931,6 +2969,30 @@ export function verifiedReadResponse(
             stringField(event, 'summary'),
           ].join('|'),
       );
+      if (request.answerFocus === 'flight') {
+        const complete = flightSourcesAreComplete(request, evidence);
+        const facts = complete ? flightDepartureFacts(request, evidence) : [];
+        const times = [...new Set(facts.map((fact) => fact.minutes))];
+        const calendarClocks = flightCalendarClocks(request, events);
+        const destination =
+          request.queryTerms
+            .filter(
+              (term) => !/^(?:flight|flights|airline|itinerary|boarding|departure)$/i.test(term),
+            )
+            .join(' ') || 'requested';
+        const conflict = calendarClocks.find(
+          (clock) => times.length === 1 && clock.minutes !== times[0],
+        );
+        if (conflict && times.length === 1)
+          return `The matching booking message lists departure at ${flightClockLabel(times[0] as number)}, while the ${conflict.label} shows ${flightClockLabel(conflict.minutes)}. They conflict, so I couldn't confirm which time is current.`;
+        if (times.length > 1)
+          return `I found conflicting departure times for the matching ${destination} itineraries, so I couldn't confirm which time is current.`;
+        if (times.length === 1)
+          return `The matching ${destination} booking message lists departure at ${flightClockLabel(times[0] as number)}.`;
+        if (calendarClocks.length > 0)
+          return `The calendar has a ${destination} flight entry, but the mail results did not confirm its departure time. I couldn't verify the flight time.`;
+        return `I couldn't confirm a departure time for a ${destination} flight ${request.timeWindow?.label ?? 'on the requested date'} from the calendar and mail results I read.`;
+      }
       const calendars = new Set<string>();
       const ranges = new Set<string>();
       const unavailable: string[] = [];
@@ -1963,15 +3025,19 @@ export function verifiedReadResponse(
       }
       if (events.length === 0) {
         lines.push(
-          calendarRows.length > 0
+          calendarRows.length > 0 && complete
             ? `Nothing on the calendar — no matching events${calendars.size > 0 ? ` across ${[...calendars].join(', ')}` : ''}.`
-            : '- Calendar: no successful event read.',
+            : calendarRows.length > 0
+              ? 'No matching calendar events were returned in the checked subset; coverage does not establish an empty calendar.'
+              : '- Calendar: no successful event read.',
         );
       } else {
         const multiDay = spansDays(request.timeWindow);
         const manyCalendars =
           new Set(events.map((event) => stringField(event, 'calendar')).filter(Boolean)).size > 1;
-        for (const event of events.slice(0, 20)) {
+        // Retrieval is already bounded by the read tool. A successful full
+        // agenda must not silently become a twenty-event display preview.
+        for (const event of events) {
           const summary = stringField(event, 'summary') || '(untitled event)';
           const rawStart = stringField(event, 'start');
           const rawEnd = stringField(event, 'end');
@@ -2064,16 +3130,56 @@ export function verifiedReadResponse(
         .map((row) => stringField(record(row.result) ?? {}, 'mailboxSearched'))
         .filter(Boolean),
     );
+    const unavailableMessageIds = [
+      ...new Set(
+        searches.flatMap((row) => {
+          const raw = record(row.result)?.unavailable;
+          return Array.isArray(raw)
+            ? raw.map((item) => stringField(record(item) ?? {}, 'messageId')).filter(Boolean)
+            : [];
+        }),
+      ),
+    ];
+    const metadataReturned = results.length;
+    const discovered = searches.reduce((maximum, row) => {
+      const result = record(row.result) ?? {};
+      const coverage = record(result.coverage) ?? {};
+      const count =
+        typeof result.matchingMessagesEstimate === 'number'
+          ? result.matchingMessagesEstimate
+          : typeof coverage.discovered === 'number'
+            ? coverage.discovered
+            : 0;
+      return Math.max(maximum, count);
+    }, metadataReturned + unavailableMessageIds.length);
+    const lastSearch = record(searches.at(-1)?.result) ?? {};
+    const metadataHasMore = lastSearch.hasMore === true;
+    const metadataComplete =
+      searches.length > 0 &&
+      lastSearch.complete !== false &&
+      !metadataHasMore &&
+      unavailableMessageIds.length === 0;
+    const matchedThreadIds = [
+      ...new Set(results.map((row) => stringField(row, 'threadId')).filter(Boolean)),
+    ];
+    const openedThreadIds = new Set(
+      threadRows
+        .map((row) => record(row.args)?.threadId)
+        .filter((id): id is string => typeof id === 'string'),
+    );
+    const openedThreads = matchedThreadIds.filter((id) => openedThreadIds.has(id)).length;
     if (results.length === 0) {
       lines.push(
-        searches.length > 0
+        metadataComplete
           ? 'Nothing in the mail — no matching messages were returned.'
-          : '- Gmail: no successful search.',
+          : searches.length > 0
+            ? 'No matching mail was returned in the checked subset; coverage does not establish that no matching message exists.'
+            : '- Gmail: no successful search.',
       );
     } else {
       // Sender first, in the rundown shape: who it is from is what decides
       // whether the owner opens it.
-      for (const message of results.slice(0, 10)) {
+      for (const message of results) {
         const subject = stringField(message, 'subject') || '(no subject)';
         const from = stringField(message, 'from');
         const date = stringField(message, 'date');
@@ -2083,7 +3189,7 @@ export function verifiedReadResponse(
         );
       }
     }
-    for (const message of threadMessages.slice(0, 10)) {
+    for (const message of threadMessages) {
       const subject = stringField(message, 'subject') || '(no subject)';
       const from = stringField(message, 'from');
       const rawText = rawStringField(message, 'text');
@@ -2095,8 +3201,24 @@ export function verifiedReadResponse(
         `  ↳ ${subject}${from ? ` (${from})` : ''}${excerpt ? `: ${excerpt}` : ''}${links.length > 0 ? ` — ${links.join(', ')}` : ''}`,
       );
     }
-    if (searches.some((row) => record(row.result)?.complete === false)) {
-      lines.push('Heads up: there were more matches than this lookup opened.');
+    if (searches.length > 0) {
+      const queryText =
+        [...queries].map((query) => `“${query}”`).join(', ') || 'the requested query';
+      const scope =
+        discovered === metadataReturned + unavailableMessageIds.length
+          ? `${discovered} discovered message${discovered === 1 ? '' : 's'}`
+          : `about ${discovered} matching messages`;
+      lines.push(
+        `Mail coverage: searched ${queryText}; ${scope}; metadata returned for ${metadataReturned}; ${unavailableMessageIds.length} unavailable; ${openedThreads} of ${matchedThreadIds.length} matching threads opened${matchedThreadIds.length > openedThreads ? ` (${matchedThreadIds.length - openedThreads} remain unopened)` : ''}${metadataHasMore ? '; more metadata pages remain' : metadataComplete ? '; metadata search complete' : '; metadata coverage is partial'}.`,
+      );
+      if (!request.requiresThreadRead && threadMessages.length === 0) {
+        lines.push(
+          'Thread bodies were not opened because the requested sender/subject metadata was sufficient.',
+        );
+      }
+      if (unavailableMessageIds.length > 0) {
+        lines.push(`Metadata unavailable for message IDs: ${unavailableMessageIds.join(', ')}.`);
+      }
     }
     // The query goes last: it is how the owner knows what to re-ask, not the
     // headline of the answer.
@@ -2143,6 +3265,8 @@ export function enforcePersonalReadResponse(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
 ): ResponseContractResult {
+  if (request.temporalIssue)
+    return { text: request.temporalIssue, blocked: true, unsupported: ['calendar_read'] };
   const gaps = requiredReadGaps(request, evidence);
   if (gaps.labels.length > 0) return coverageGapResponse(request, evidence, gaps);
 
@@ -2167,8 +3291,73 @@ function enforcePersonalReadGrounding(
 ): ResponseContractResult | undefined {
   const request = opts?.readRequest;
   if (!request) return undefined;
+  if (request.temporalIssue)
+    return { text: request.temporalIssue, blocked: true, unsupported: ['calendar_read'] };
   const gaps = requiredReadGaps(request, evidence);
   if (gaps.labels.length > 0) return coverageGapResponse(request, evidence, gaps);
+  if (request.answerFocus === 'flight')
+    return { text: verifiedReadResponse(request, evidence), blocked: false, unsupported: [] };
+  if (request.kind === 'memory' || request.kind === 'knowledge_graph') {
+    const rows = matchingPrivateReadRows(request, currentSuccessfulEvidence(evidence));
+    const facts = rows.flatMap((row) =>
+      resultItems(row, request.kind === 'memory' ? 'memories' : 'relationships'),
+    );
+    const normalize = (value: string) =>
+      value
+        .toLowerCase()
+        .replace(/[_—→]/g, ' ')
+        .replace(/[^\p{L}\p{N}\s]/gu, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    const views = facts.map((fact) => ({
+      fact,
+      statements:
+        request.kind === 'memory'
+          ? [stringField(fact, 'content')]
+          : [
+              stringField(fact, 'evidenceQuote'),
+              stringField(fact, 'sourceMemory'),
+              [
+                stringField(fact, 'subjectLabel'),
+                stringField(fact, 'predicate'),
+                stringField(fact, 'objectLabel'),
+              ].join(' '),
+            ],
+    }));
+    // Compatibility bridge until a versioned ResponsePlan carries fact IDs.
+    // Match whole supported statements, never a bag of names from different
+    // edges. This deliberately admits narrow source wording and preserves the
+    // existing fallback for free-form claims we cannot prove deterministically.
+    const units = text
+      .split(/(?<=[.!?])\s+|\n+/)
+      .map((unit) =>
+        normalize(
+          unit
+            .replace(/^\s*[-*]\s*/, '')
+            .replace(/^According to (?:the )?(?:saved memory|source),?\s*/i, ''),
+        ),
+      )
+      .filter(Boolean);
+    const qualifiers = new Set([
+      'not ownerconfirmed',
+      'not owner confirmed',
+      'this is unconfirmed',
+    ]);
+    const substantive = units.filter((unit) => !qualifiers.has(unit));
+    const selected = substantive.map((unit) =>
+      views.find((view) => view.statements.some((statement) => normalize(statement) === unit)),
+    );
+    const needsQualifier = selected.some(
+      (view) => view && (view.fact.unconfirmed === true || view.fact.ownerConfirmed !== true),
+    );
+    if (
+      substantive.length > 0 &&
+      selected.every(Boolean) &&
+      request.queryTerms.every((term) => normalize(text).includes(normalize(term))) &&
+      (!needsQualifier || units.some((unit) => qualifiers.has(unit)))
+    )
+      return undefined;
+  }
   if (request.kind === 'drive' || request.kind === 'memory' || request.kind === 'knowledge_graph') {
     return {
       text: verifiedReadResponse(request, evidence),
@@ -2248,21 +3437,33 @@ export function enforceResponseContract(
   }
   // A saved place preference is not a scheduled arrival reminder. Require a
   // current durable schedule before promising a future alert.
+  const requestedWatch = detectFutureWatchIntent(opts?.requestText ?? '');
+  const hasReminderReceipt = evidence.some(
+    (row) =>
+      row.fromCurrentTask !== false &&
+      successful(row) &&
+      (supports('reminder_create', [row]) ||
+        (row.toolName === 'task.schedule' &&
+          record(row.result)?.scheduled === true &&
+          Boolean(record(row.result)?.taskId))),
+  );
+  const hasRequestedWatch = requestedWatch
+    ? supports('background', evidence, true, opts?.requestText)
+    : false;
   if (
     /\b(?:i|we)(?:['’]ll| will)\s+(?:remind|alert|notify|ping)\s+you\b/i.test(text) &&
-    !evidence.some(
-      (row) =>
-        row.fromCurrentTask !== false &&
-        successful(row) &&
-        (supports('reminder_create', [row]) ||
-          (row.toolName === 'task.schedule' &&
-            record(row.result)?.scheduled === true &&
-            Boolean(record(row.result)?.taskId))),
-    )
+    !hasReminderReceipt &&
+    !hasRequestedWatch
   ) {
     const saved = savedWorkSummary(evidence);
     return {
-      text: `${saved ? `${saved}\n\n` : ''}No reminder has been scheduled for this request, so I cannot promise an automatic alert.`,
+      text: requestedWatch
+        ? withMissingFutureWatchNotice(
+            [withoutFutureWatchPromise(text), saved]
+              .filter((value, index, rows) => Boolean(value) && rows.indexOf(value) === index)
+              .join('\n\n'),
+          )
+        : `${saved ? `${saved}\n\n` : ''}No reminder has been scheduled for this request, so I cannot promise an automatic alert.`,
       blocked: true,
       unsupported: ['background'],
     };
@@ -2273,9 +3474,16 @@ export function enforceResponseContract(
     opts?.requestText ?? '',
     explicitlyRequestsRepetition(opts?.requestText ?? ''),
   );
-  text = flightCorrection.text;
+  text =
+    opts?.readRequest?.answerFocus === 'flight' && flightCorrection.flightUpdateReceipt
+      ? flightCorrection.flightUpdateReceipt
+      : flightCorrection.text;
   const readGrounding = enforcePersonalReadGrounding(text, evidence, opts);
   if (readGrounding) {
+    // A request-scoped successful flight update takes precedence over the
+    // earlier read snapshot, including when the model already used its time.
+    if (opts?.readRequest?.answerFocus === 'flight' && flightCorrection.flightUpdateReceipt)
+      return { ...readGrounding, text: flightCorrection.flightUpdateReceipt, blocked: true };
     // Some private-read paths render directly from the ledger and return early.
     // Run the same narrow flight-write check on that deterministic reply too.
     const correctedRead = correctFlightWriteClaims(
@@ -2287,6 +3495,25 @@ export function enforceResponseContract(
     return correctedRead.changed
       ? { ...readGrounding, text: correctedRead.text, blocked: true }
       : readGrounding;
+  }
+  // A public live lookup need not be a calendar/email PersonalReadRequest.
+  // Keep weather and sports claims under the same typed record check before
+  // publication, including pure lookups with no private-read context.
+  if (opts?.liveCorpus !== undefined && !opts.readRequest) {
+    const liveFacts = evidenceClaimFacts(evidence, opts.liveCorpus);
+    const liveReasons = liveRelationshipReasons(
+      text,
+      liveFacts,
+      evidence.some((row) => row.toolName === 'weather.lookup' && successful(row)),
+    );
+    if (liveReasons.length > 0) {
+      return {
+        text: liveRelationFallback(liveFacts, liveReasons),
+        blocked: false,
+        unsupported: [],
+        groundingFallback: liveReasons,
+      };
+    }
   }
   const claimed = claimedKinds(text);
   // Short receipts and pronouns still claim the requested effect. Do not let
@@ -2327,15 +3554,29 @@ export function enforceResponseContract(
   ) {
     claimed.push('memory');
   }
-  const unsupported = claimed.filter(
-    (kind) =>
-      !supports(
-        kind,
-        evidence,
-        (kind === 'workspace' || kind === 'spreadsheet' || kind === 'presentation') &&
-          freshArtifactEditClaim(text, kind),
+  const relationshipFailures = actionRelationshipFailures(text, evidence);
+  const unsupported = [
+    ...new Set([
+      ...claimed.filter(
+        (kind) =>
+          !supports(
+            kind,
+            evidence,
+            (kind === 'workspace' || kind === 'spreadsheet' || kind === 'presentation') &&
+              freshArtifactEditClaim(text, kind),
+            opts?.requestText,
+          ),
       ),
-  );
+      ...relationshipFailures,
+    ]),
+  ];
+  if (unsupported.length === 1 && unsupported[0] === 'background' && requestedWatch) {
+    return {
+      text: withMissingFutureWatchNotice(text),
+      blocked: true,
+      unsupported,
+    };
+  }
   if (unsupported.length === 0) {
     if (memoryRequest && claimed.includes('memory')) {
       const saved = savedWorkSummary(evidence);

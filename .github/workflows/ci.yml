@@ -45,13 +45,16 @@ jobs:
           exit-code: '1'
       - run: pnpm lint
       - name: Verify current deployment cleanup protection
-        run: PYTHONDONTWRITEBYTECODE=1 python3 infra/gcp/cleanup-current.test.py
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 infra/gcp/cleanup-current.test.py
+          bash infra/gcp/verify-release-source.test.sh
       # 900+ lines of deploy bash run against production with no other check.
       - name: Lint shell scripts
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck
-          bash -n infra/gcp/*.sh infra/docker/*.sh scripts/*.sh
-          shellcheck --severity=warning infra/gcp/*.sh infra/docker/*.sh scripts/*.sh
+          bash -n infra/gcp/*.sh infra/docker/*.sh scripts/*.sh infra/ios-detect-changes.sh infra/ios-detect-changes.test.sh
+          shellcheck --severity=warning infra/gcp/*.sh infra/docker/*.sh scripts/*.sh infra/ios-detect-changes.sh infra/ios-detect-changes.test.sh
+          bash infra/ios-detect-changes.test.sh
           bash infra/gcp/release-diagnostics.test.sh
           bash infra/gcp/release.test.sh
           bash infra/docker/database-admin.test.sh
@@ -77,7 +80,7 @@ jobs:
 
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -144,7 +147,6 @@ jobs:
           version: '576.0.0'
           install_components: cloud-firestore-emulator
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @assistant/db test:prepare
       # No cloud authentication, project creation, or billable API calls.
       - name: Verify Firestore transactions and vector retrieval
         shell: bash

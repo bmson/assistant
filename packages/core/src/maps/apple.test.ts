@@ -188,7 +188,7 @@ describe('normalizeDirections', () => {
     // Shared joints between step paths are not repeated.
     expect(decodePolyline(result?.polyline ?? '')).toHaveLength(3);
     expect(result?.mapsUrl).toBe(
-      'https://maps.apple.com/?saddr=37.7857%2C-122.4011&daddr=37.7786%2C-122.3893&dirflg=d',
+      'https://maps.apple.com/directions?source=37.7857%2C-122.4011&destination=37.7786%2C-122.3893&mode=driving',
     );
   });
 
@@ -213,7 +213,10 @@ describe('appleDirections', () => {
       calls.push({ url, auth: new Headers(init?.headers).get('authorization') ?? '' });
       if (url.endsWith('/token'))
         return Response.json({ accessToken: 'access-1', expiresInSeconds: 1800 });
-      return Response.json(body);
+      return Response.json({
+        ...body,
+        routes: body.routes.map((route) => ({ ...route, transportType: 'Walking' })),
+      });
     };
     const origin = { lat: 37.7857, lng: -122.4011 };
     const input = {
@@ -257,4 +260,22 @@ describe('appleDirections', () => {
       }),
     ).toEqual({ error: 'No route found to "Atlantis".' });
   });
+});
+
+it('preserves cycling in the external Maps link and refuses a provider driving route', () => {
+  const input = {
+    mode: 'cycling' as const,
+    destinationQuery: 'Oracle Park',
+    originLabel: 'Start',
+    originIsCurrent: false,
+    now: new Date('2026-10-07Z'),
+  };
+  expect(normalizeDirections(body, input)).toBeUndefined();
+  const result = normalizeDirections(
+    { ...body, routes: body.routes.map((route) => ({ ...route, transportType: 'CYCLING' })) },
+    input,
+  );
+  expect(result?.mode).toBe('cycling');
+  expect(new URL(result?.mapsUrl ?? '').searchParams.get('mode')).toBe('cycling');
+  expect(result?.mapsUrl).not.toContain('dirflg=d');
 });

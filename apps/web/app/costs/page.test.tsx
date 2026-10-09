@@ -138,12 +138,12 @@ describe.skipIf(!localEmulator)('Firestore costs page with PostgreSQL offline', 
     expect((await store.doc('budgets', 'task_default').get()).get('limitUsd')).toBe('3.25');
   });
 
-  it('keeps blank and invalid cap values unchanged', async () => {
+  it('rejects invalid cap updates atomically', async () => {
     const form = new FormData();
     form.set('task_default', '0');
     form.set('daily', 'not a number');
     form.set('monthly', '10001');
-    await actions.updateCaps(form);
+    await expect(actions.updateCaps(form)).rejects.toThrow('whole-cent USD amount');
 
     expect(mocks.db).not.toHaveBeenCalled();
     expect((await store.doc('coordination', 'budget-policy').get()).data()).toMatchObject({

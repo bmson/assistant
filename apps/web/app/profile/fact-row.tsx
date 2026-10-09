@@ -2,7 +2,7 @@
 
 import { LoaderCircle } from 'lucide-react';
 import Link from 'next/link';
-import { type ReactNode, useState, useTransition } from 'react';
+import { type ReactNode, useRef, useState, useTransition } from 'react';
 import {
   approveQuarantined,
   confirmFact,
@@ -80,14 +80,21 @@ export function FactRow({ fact, quarantine = false }: { fact: FactView; quaranti
   const [error, setError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
+  const inFlight = useRef(false);
 
   const confidencePct = Math.round(fact.confidence * 100);
   const runAction = (name: string, action: () => Promise<unknown>) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setError(null);
     setPendingAction(name);
     startTransition(async () => {
       try {
         await action();
+      } catch {
+        setError('That change could not be saved. Your draft is kept here.');
       } finally {
+        inFlight.current = false;
         setPendingAction(null);
       }
     });
@@ -309,6 +316,7 @@ export function FactRow({ fact, quarantine = false }: { fact: FactView; quaranti
       {editing ? (
         <div className="flex flex-col gap-2 border-t border-edge p-4">
           <textarea
+            disabled={pending}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             rows={2}
@@ -320,7 +328,11 @@ export function FactRow({ fact, quarantine = false }: { fact: FactView; quaranti
               fresh extraction.
             </p>
           ) : null}
-          {error ? <p className="text-xs text-red-600 dark:text-red-400">{error}</p> : null}
+          {error ? (
+            <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+              {error}
+            </p>
+          ) : null}
           <div className="flex flex-wrap items-center gap-2">
             <ActionButton
               variant="primary"

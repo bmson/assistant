@@ -6,6 +6,8 @@ const stubs = vi.hoisted(() => ({
   streamText: vi.fn(),
   releaseReservation: vi.fn(async () => {}),
   reserveCost: vi.fn(async () => ({ ok: true as const, reservationId: 'reservation-1' })),
+  beginCostAttempt: vi.fn(async () => true),
+  markCostAttemptUnknown: vi.fn(async () => {}),
 }));
 
 vi.mock('@openrouter/ai-sdk-provider', () => ({
@@ -21,6 +23,8 @@ vi.mock('../cost.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../cost.js')>()),
   reserveCost: stubs.reserveCost,
   releaseReservation: stubs.releaseReservation,
+  beginCostAttempt: stubs.beginCostAttempt,
+  markCostAttemptUnknown: stubs.markCostAttemptUnknown,
 }));
 
 import { ModelRouter } from './router.js';

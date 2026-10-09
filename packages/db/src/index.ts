@@ -5,12 +5,17 @@ export { createPostgresApprovalPolicyRepository } from './approval-policy-reposi
 export { createPostgresApprovalRepository } from './approval-repository.js';
 export { createPostgresAuditInvestigationRepository } from './audit-investigation-repository.js';
 export { createPostgresCallSessionRepository } from './call-session-repository.js';
+export { createPostgresCardFormAdmissionRepository } from './card-form-admission-repository.js';
 export { createPostgresCardRefreshRepository } from './card-refresh-repository.js';
+export { notChatAdmissionCancellationSql } from './chat-admission-projection.js';
 export * from './client.js';
+export { createPostgresConversationSearchRepository } from './conversation-search-repository.js';
 export { createPostgresCostRepository } from './cost-repository.js';
+export { admitPostgresCuriosityQuestion } from './curiosity-admission-repository.js';
 export { createPostgresDeviceTokenRepository } from './device-token-repository.js';
 export { createPostgresDocumentProcessorRepository } from './document-processor-repository.js';
 export { createPostgresDocumentSearchRepository } from './document-search-repository.js';
+export { createPostgresEmailAttachmentCustodyRepository } from './email-attachment-custody-repository.js';
 export { createPostgresEmailSyncRepository } from './email-sync-repository.js';
 export * from './entities.js';
 export { createPostgresExecutionContextRepository } from './execution-context-repository.js';
@@ -24,8 +29,10 @@ export {
   postgresActiveGraphWhere,
 } from './graph-recall-repository.js';
 export { createPostgresHistoryRecallRepository } from './history-recall-repository.js';
+export { assertPostgresInstallationOwner } from './installation-owner.js';
 export { createPostgresKnowledgeGraphSyncRepository } from './knowledge-graph-sync-repository.js';
 export { createPostgresLocationPingRepository } from './location-ping-repository.js';
+export { createPostgresMemoryEmbeddingRefreshRepository } from './memory-embedding-refresh-repository.js';
 export { createPostgresMemorySupersedeRepository } from './memory-supersede-repository.js';
 export { createPostgresMemoryToolRepository } from './memory-tool-repository.js';
 export { createPostgresMessageRepository } from './message-repository.js';
@@ -34,11 +41,21 @@ export { createPostgresModelCatalogRepository } from './model-catalog-repository
 export * from './model-config.js';
 export { createPostgresModelConnectionRepository } from './model-connection-repository.js';
 export { createPostgresModelRoutingRepository } from './model-routing-repository.js';
+export { createPostgresNotificationOutboxRepository } from './notification-outbox-repository.js';
 export { createPostgresNotificationsConversationRepository } from './notifications-conversation-repository.js';
 export { createPostgresNudgePolicyRepository } from './nudge-policy-repository.js';
 export { createPostgresOwnerCardCompilationRepository } from './owner-card-compilation-repository.js';
-export { createPostgresOwnerContextRepository } from './owner-context-repository.js';
-export { createPostgresPrivacyErasureRepository } from './privacy-erasure-repository.js';
+export {
+  createPostgresOwnerContextRepository,
+  listEligibleOwnerCommitments,
+} from './owner-context-repository.js';
+export {
+  assertPostgresPrivacyObservationFence,
+  createPostgresPrivacyErasureRepository,
+  lockPostgresPrivacyObservationFence,
+  postgresPrivacyObservationFence,
+  withPostgresPrivacyObservationFence,
+} from './privacy-erasure-repository.js';
 export { createPostgresPrivacyExportRepository } from './privacy-export-repository.js';
 export { createPostgresProfileOverviewRepository } from './profile-full-overview-repository.js';
 export { createPostgresProfileLibraryRepository } from './profile-library-repository.js';
@@ -50,15 +67,21 @@ export { createPostgresProfilePeopleReadRepository } from './profile-people-read
 export { createPostgresPulseAdmissionRepository } from './pulse-admission-repository.js';
 export { createPostgresRecallFeedbackRepository } from './recall-feedback-repository.js';
 export { createPostgresRecallMetricsRepository } from './recall-metrics-repository.js';
+export { createPostgresRecallSurfacingRepository } from './recall-surfacing-repository.js';
 export { createPostgresReminderRepository } from './reminder-repository.js';
+export { assertPostgresRestoreRehearsalReadOnly } from './restore-readonly.js';
 export { createPostgresScheduleRepository } from './schedule-repository.js';
 export * from './schema.js';
+export { createPostgresSecurityIncidentRepository } from './security-incident-repository.js';
 export { createPostgresSelfRepairRepository } from './self-repair-repository.js';
 export { createPostgresSettingsRepository } from './settings-repository.js';
 export { createPostgresSkillContextRepository } from './skill-context-repository.js';
+export { bumpSkillLibraryRevision, readSkillLibraryRevision } from './skill-library-revision.js';
 export { createPostgresSmsChannelRepository } from './sms-channel-repository.js';
+export * from './task-discovery-repository.js';
 export { createPostgresTaskLeaseRepository } from './task-lease-repository.js';
 export { createPostgresTaskRepository } from './task-lifecycle-repository.js';
+export { lockPostgresToolCallReceiptKeys } from './tool-call-receipt-lock.js';
 export { createPostgresToolExecutionRepository } from './tool-execution-repository.js';
 export { createPostgresVoiceContextRepository } from './voice-context-repository.js';
 export { createPostgresWatchRepository } from './watch-repository.js';

@@ -2,12 +2,21 @@ import type { Db } from '@assistant/db';
 import type { LanguageModel } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import type { ProviderRequestProfile } from './provider.js';
 
 const stubs = vi.hoisted(() => ({
   generateText: vi.fn(),
   generateObject: vi.fn(),
+  streamText: vi.fn(),
   releaseReservation: vi.fn(async () => {}),
-  reserveCost: vi.fn(async () => ({ ok: true as const, reservationId: 'reservation-1' })),
+  reserveCost: vi.fn(
+    async (): ReturnType<typeof import('../cost.js').reserveCost> => ({
+      ok: true,
+      reservationId: 'reservation-1',
+    }),
+  ),
+  beginCostAttempt: vi.fn(async () => true),
+  markCostAttemptUnknown: vi.fn(async () => {}),
 }));
 
 vi.mock('@openrouter/ai-sdk-provider', () => ({
@@ -18,15 +27,23 @@ vi.mock('ai', async (importOriginal) => ({
   ...(await importOriginal<typeof import('ai')>()),
   generateText: stubs.generateText,
   generateObject: stubs.generateObject,
+  streamText: stubs.streamText,
 }));
 
 vi.mock('../cost.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../cost.js')>()),
   reserveCost: stubs.reserveCost,
   releaseReservation: stubs.releaseReservation,
+  beginCostAttempt: stubs.beginCostAttempt,
+  markCostAttemptUnknown: stubs.markCostAttemptUnknown,
 }));
 
-import { isProviderCapabilityError, ModelRouter } from './router.js';
+import {
+  getProviderAttemptEvidence,
+  isProviderCapabilityError,
+  ModelCallFallbackAttemptError,
+  ModelRouter,
+} from './router.js';
 
 /** The DOMException our per-call deadline (AbortSignal.timeout) aborts with. */
 function deadlineTimeout() {
@@ -62,9 +79,18 @@ function makeRouter() {
     completionCostPerMTok: 1,
   } as const;
   const fallback = { ...primary, modelId: 'test/fallback', degraded: true };
-  const route = vi
-    .spyOn(router, 'route')
-    .mockImplementation(async (_role, options) => (options?.forceFallback ? fallback : primary));
+  const route = vi.spyOn(router, 'route').mockImplementation(async (_role, options) => {
+    const selected = options?.forceFallback ? fallback : primary;
+    const requestProfile = options?.requestProfile
+      ? ({
+          ...options.requestProfile,
+          reasoning: 'unsupported',
+          privacy: 'deny',
+          maxPrice: { prompt: 1, completion: 1 },
+        } satisfies ProviderRequestProfile)
+      : undefined;
+    return { ...selected, ...(requestProfile ? { requestProfile } : {}) };
+  });
   const meter = vi.fn(async () => {});
   (
     router as unknown as { meterWithoutRepeatingProviderWork: typeof meter }
@@ -130,6 +156,7 @@ describe('ModelRouter timeout retry', () => {
     vi.clearAllMocks();
     stubs.generateText.mockReset();
     stubs.generateObject.mockReset();
+    stubs.streamText.mockReset();
     stubs.reserveCost.mockResolvedValue({ ok: true, reservationId: 'reservation-1' });
   });
 
@@ -154,9 +181,19 @@ describe('ModelRouter timeout retry', () => {
     stubs.generateText
       .mockRejectedValueOnce(error)
       .mockRejectedValueOnce(new Error('fallback failed'));
-    await expect(router.step('reason', { prompt: 'Check tomorrow.', tools: {} })).rejects.toBe(
-      error,
-    );
+    const failure = router.step('reason', { prompt: 'Check tomorrow.', tools: {} });
+    await expect(failure).rejects.toBeInstanceOf(ModelCallFallbackAttemptError);
+    const thrown = await failure.catch((caught: unknown) => caught);
+    expect(thrown).toMatchObject({ cause: error, lastCause: expect.any(Error) });
+    expect(getProviderAttemptEvidence(thrown)).toMatchObject([
+      {
+        selection: 'primary',
+        outcome: 'failed',
+        failureKind: 'provider_capability',
+        fallbackAttempted: true,
+      },
+      { selection: 'fallback', outcome: 'failed' },
+    ]);
     expect(stubs.generateText).toHaveBeenCalledTimes(2);
   });
 
@@ -169,6 +206,15 @@ describe('ModelRouter timeout retry', () => {
       ok: true,
       modelId: 'test/fallback',
       text: 'Complete.',
+      attempts: [
+        {
+          selection: 'primary',
+          outcome: 'failed',
+          fallbackAttempted: true,
+          requestProfile: { tools: 'none', output: 'text', streaming: false },
+        },
+        { selection: 'fallback', outcome: 'succeeded' },
+      ],
     });
     expect(stubs.generateText).toHaveBeenCalledTimes(2);
   });
@@ -198,6 +244,10 @@ describe('ModelRouter timeout retry', () => {
     const outcome = await router.step('reason', { prompt: 'go', tools: {} });
 
     expect(outcome.ok).toBe(true);
+    expect(outcome.attempts).toMatchObject([
+      { selection: 'primary', outcome: 'failed', failureKind: 'timeout' },
+      { selection: 'primary', outcome: 'succeeded' },
+    ]);
     expect(stubs.generateText).toHaveBeenCalledTimes(2);
     // The timed-out try must not hold budget: its reservation was released
     // and the retry made its own.
@@ -212,9 +262,15 @@ describe('ModelRouter timeout retry', () => {
     const { router } = makeRouter();
     stubs.generateText.mockRejectedValue(deadlineTimeout());
 
-    await expect(router.step('reason', { prompt: 'go', tools: {} })).rejects.toMatchObject({
+    const failure = router.step('reason', { prompt: 'go', tools: {} });
+    await expect(failure).rejects.toMatchObject({
       name: 'TimeoutError',
     });
+    const thrown = await failure.catch((caught: unknown) => caught);
+    expect(getProviderAttemptEvidence(thrown)).toMatchObject([
+      { outcome: 'failed', failureKind: 'timeout' },
+      { outcome: 'failed', failureKind: 'timeout' },
+    ]);
     expect(stubs.generateText).toHaveBeenCalledTimes(2);
   });
 
@@ -241,7 +297,11 @@ describe('ModelRouter timeout retry', () => {
       .mockRejectedValueOnce(paymentError)
       .mockRejectedValueOnce(new Error('fallback unavailable'));
 
-    await expect(router.step('reason', { prompt: 'go', tools: {} })).rejects.toBe(paymentError);
+    const failure = router.step('reason', { prompt: 'go', tools: {} });
+    await expect(failure).rejects.toBeInstanceOf(ModelCallFallbackAttemptError);
+    const thrown = await failure.catch((caught: unknown) => caught);
+    expect(thrown).toMatchObject({ cause: paymentError, lastCause: expect.any(Error) });
+    expect(getProviderAttemptEvidence(thrown)).toHaveLength(2);
     expect(stubs.generateText).toHaveBeenCalledTimes(2);
   });
 
@@ -325,6 +385,69 @@ describe('ModelRouter timeout retry', () => {
     expect(outcome.ok && outcome.text).toBe('ok');
     expect(stubs.generateText).toHaveBeenCalledTimes(2);
   });
+
+  it('stream() updates its returned attempt receipt when the stream finishes', async () => {
+    const { router } = makeRouter();
+    let finished: Promise<void> | undefined;
+    let finishSignal: Promise<void> | undefined;
+    stubs.streamText.mockImplementation((options) => {
+      finishSignal = new Promise((resolve) => {
+        setTimeout(() => {
+          finished = options.onFinish({ finishReason: 'stop', text: 'done', usage: {} });
+          resolve();
+        }, 0);
+      });
+      return {
+        text: Promise.resolve('done'),
+        toUIMessageStreamResponse: () => new Response(),
+        toUIMessageStream: () => new ReadableStream(),
+      };
+    });
+
+    const outcome = await router.stream('draft', { prompt: 'write' });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error('stream was unexpectedly blocked');
+    expect(outcome.attempts[0]).toMatchObject({ outcome: 'started', method: 'stream' });
+    await finishSignal;
+    await finished;
+    expect(outcome.attempts[0]).toMatchObject({
+      outcome: 'succeeded',
+      selection: 'primary',
+      modelId: 'test/model',
+    });
+    expect(outcome.attempts[0]?.elapsedMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('stream() reports asynchronous provider errors on the returned attempt receipt', async () => {
+    const { router } = makeRouter();
+    const failure = new Error('stream transport failed');
+    let failed: Promise<void> | undefined;
+    let failureSignal: Promise<void> | undefined;
+    stubs.streamText.mockImplementation((options) => {
+      failureSignal = new Promise((resolve) => {
+        setTimeout(() => {
+          failed = options.onError({ error: failure });
+          resolve();
+        }, 0);
+      });
+      return {
+        text: Promise.resolve(''),
+        toUIMessageStreamResponse: () => new Response(),
+        toUIMessageStream: () => new ReadableStream(),
+      };
+    });
+
+    const outcome = await router.stream('draft', { prompt: 'write' });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error('stream was unexpectedly blocked');
+    await failureSignal;
+    await failed;
+    expect(outcome.attempts[0]).toMatchObject({
+      outcome: 'failed',
+      failureKind: 'provider_rejected',
+    });
+    expect(getProviderAttemptEvidence(failure)).toEqual(outcome.attempts);
+  });
 });
 
 describe('ModelRouter.object provider-capability fallback', () => {
@@ -346,6 +469,10 @@ describe('ModelRouter.object provider-capability fallback', () => {
       ok: true,
       modelId: 'test/fallback',
       object: { answer: 'ok' },
+      attempts: [
+        { method: 'object', selection: 'primary', outcome: 'failed', fallbackAttempted: true },
+        { method: 'object', selection: 'fallback', outcome: 'succeeded' },
+      ],
     });
     expect(stubs.generateObject).toHaveBeenCalledTimes(2);
   });
@@ -359,10 +486,74 @@ describe('ModelRouter.object provider-capability fallback', () => {
     const outcome = await router.object('extract', { prompt: 'go', schema });
 
     expect(outcome.ok && outcome.object).toEqual({ answer: 'ok' });
+    expect(outcome.attempts).toMatchObject([
+      {
+        selection: 'primary',
+        outcome: 'failed',
+        failureKind: 'provider_capability',
+        fallbackAttempted: true,
+      },
+      { selection: 'fallback', outcome: 'succeeded' },
+    ]);
     expect(stubs.generateObject).toHaveBeenCalledTimes(2);
     // Second routing decision must ask for the role's fallback model.
     expect(route.mock.calls[0]?.[1]?.forceFallback).toBeFalsy();
     expect(route.mock.calls[2]?.[1]?.forceFallback).toBe(true);
+  });
+
+  it.each([
+    ['provider capability', () => removedModelError(), 'provider_capability'],
+    [
+      'structured output',
+      () =>
+        Object.assign(new Error('invalid schema output'), { name: 'AI_NoObjectGeneratedError' }),
+      'structured_output',
+    ],
+  ])(
+    'retains the primary %s attempt when fallback budget is blocked',
+    async (_label, failure, failureKind) => {
+      const { router } = makeRouter();
+      stubs.generateObject.mockRejectedValueOnce((failure as () => Error)());
+      stubs.reserveCost
+        .mockResolvedValueOnce({ ok: true, reservationId: 'primary-reservation' })
+        .mockResolvedValueOnce({
+          ok: false,
+          reason: 'task budget exceeded',
+          resumeAt: new Date('2026-10-10T00:00:00Z'),
+        });
+      const outcome = await router.object('extract', { prompt: 'go', schema });
+      expect(outcome).toMatchObject({
+        ok: false,
+        decision: { mode: 'park' },
+        attempts: [
+          {
+            method: 'object',
+            selection: 'primary',
+            outcome: 'failed',
+            failureKind,
+            fallbackAttempted: false,
+          },
+        ],
+      });
+      expect(outcome.attempts).toHaveLength(1);
+      expect(stubs.generateObject).toHaveBeenCalledTimes(1);
+      expect(stubs.beginCostAttempt).toHaveBeenCalledTimes(1);
+      expect(stubs.reserveCost).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('initial budget block has no provider attempt', async () => {
+    const { router } = makeRouter();
+    stubs.reserveCost.mockResolvedValue({
+      ok: false,
+      reason: 'monthly budget exceeded',
+      resumeAt: new Date('2026-11-01T00:00:00Z'),
+    });
+    const outcome = await router.object('extract', { prompt: 'go', schema });
+    expect(outcome).toMatchObject({ ok: false, decision: { mode: 'block' } });
+    expect(outcome.attempts ?? []).toEqual([]);
+    expect(stubs.generateObject).not.toHaveBeenCalled();
+    expect(stubs.beginCostAttempt).not.toHaveBeenCalled();
   });
 
   it('object() still surfaces transient errors without a model switch', async () => {
@@ -396,6 +587,16 @@ describe('ModelRouter.object provider-capability fallback', () => {
     const outcome = await router.object('extract', { prompt: 'go', schema });
 
     expect(outcome.ok && outcome.object).toEqual({ answer: 'ok' });
+    expect(outcome.attempts).toMatchObject([
+      { selection: 'primary', outcome: 'failed', failureKind: 'timeout', fallbackAttempted: true },
+      {
+        selection: 'primary',
+        outcome: 'failed',
+        failureKind: 'provider_capability',
+        fallbackAttempted: true,
+      },
+      { selection: 'fallback', outcome: 'succeeded' },
+    ]);
     expect(stubs.generateObject).toHaveBeenCalledTimes(3);
     expect(route.mock.calls[4]?.[1]?.forceFallback).toBe(true);
   });

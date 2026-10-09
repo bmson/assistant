@@ -8,6 +8,7 @@ import {
   getFirestoreKnowledgeCuration,
   getFirestoreKnowledgeWorkspace,
 } from '@/lib/firestore-knowledge';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getDb, getOwnerMemoryCommands } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -22,7 +23,9 @@ export async function GET(request: Request): Promise<Response> {
 
 export async function POST(request: Request): Promise<Response> {
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
-  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+  const mutationBody = await readMobileMutationBody(request, ['action', 'memoryId']);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as Record<string, unknown> | null;
   const action = typeof body?.action === 'string' ? body.action : '';
   const memoryId = typeof body?.memoryId === 'string' ? body.memoryId : '';
   const curation =

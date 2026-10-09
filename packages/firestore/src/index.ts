@@ -10,11 +10,16 @@ export { FirestoreAuditInvestigationRepository } from './audit-investigation.js'
 export { FirestoreBriefingRepository } from './briefing.js';
 export { FirestoreBudgetCapsRepository } from './budget-caps.js';
 export { FirestoreCallSessionRepository } from './call-sessions.js';
+export { createFirestoreCardFormAdmissionRepository } from './card-form-admission.js';
 export { createFirestoreCardRefreshRepository } from './card-refresh.js';
 export { FirestoreCommitmentMaintenanceRepository } from './commitment-maintenance.js';
 export { FirestoreCommitmentMutationRepository } from './commitment-mutations.js';
-export { getFirestoreCommitmentOverview } from './commitment-overview.js';
+export {
+  getFirestoreClosedCommitmentOverview,
+  getFirestoreCommitmentOverview,
+} from './commitment-overview.js';
 export { FirestoreContactLookupRepository } from './contact-lookup.js';
+export { conversationDocument, repairConversationProjectionPage } from './conversation-document.js';
 export { FirestoreConversationSearchRepository } from './conversation-search.js';
 export { FirestoreConversationSegmentationRepository } from './conversation-segmentation.js';
 export { FirestoreCostRepository } from './costs.js';
@@ -26,6 +31,7 @@ export { FirestoreDocumentProcessorRepository } from './document-processor.js';
 export { FirestoreDocumentSearchRepository } from './document-search.js';
 export { FirestoreDocumentReadRepository } from './documents.js';
 export { FirestoreDreamRepository } from './dream.js';
+export { FirestoreEmailAttachmentCustodyRepository } from './email-attachment-custody.js';
 export { FirestoreEmailExtractionRepository } from './email-extraction.js';
 export { FirestoreEmailSyncRepository } from './email-sync.js';
 export { createFirestoreExecutionPersistence } from './execution.js';
@@ -43,6 +49,7 @@ export { FirestoreGraphRecallRepository } from './graph-recall.js';
 export { FirestoreHistoryRecallRepository } from './history-recall.js';
 export { FirestoreImportOverviewRepository } from './import-overview.js';
 export { FirestoreImportCommandRepository, FirestoreImportJobRepository } from './imports.js';
+export { assertFirestoreInstallationOwner } from './installation-owner.js';
 export { FirestoreKnowledgeGraphCurationRepository } from './knowledge-graph-curation.js';
 export {
   getFirestoreKnowledgeGraphOverview,
@@ -61,6 +68,7 @@ export {
 } from './mcp-connections.js';
 export { embeddingSpaceKey, FirestoreMemoryRepository } from './memory.js';
 export { FirestoreMemoryConsolidationRepository } from './memory-consolidation.js';
+export { FirestoreMemoryEmbeddingRefreshRepository } from './memory-embedding-refresh.js';
 export { FirestoreMemoryExtractionRepository } from './memory-extraction.js';
 export { FirestoreMemorySupersedeRepository } from './memory-supersede.js';
 export { FirestoreMemoryToolRepository } from './memory-tools.js';
@@ -72,6 +80,7 @@ export {
   FirestoreModelConnectionRepository,
 } from './model-connections.js';
 export { FirestoreModelRoutingRepository } from './model-routing.js';
+export { FirestoreNotificationOutboxRepository } from './notification-outbox.js';
 export { FirestoreOccasionToolRepository } from './occasion-tools.js';
 export {
   createWakeIntent,
@@ -106,6 +115,7 @@ export { FirestoreOwnerKnowledgeGraphFactRepository } from './owner-knowledge-gr
 export { FirestoreOwnerNoticeRepository, firestoreOwnerNotices } from './owner-notices.js';
 export {
   getFirestoreMobilePeopleDirectory,
+  getFirestoreMobilePeopleDirectoryPage,
   getFirestorePeopleDirectory,
   getFirestorePersonDetail,
 } from './people-directory.js';
@@ -133,6 +143,7 @@ export { FirestoreProfilePeopleRemovalRepository } from './profile-people-remova
 export { FirestorePulseRepository } from './pulse.js';
 export { FirestoreRecallFeedbackRepository } from './recall-feedback.js';
 export { FirestoreRecallMetricsRepository } from './recall-metrics.js';
+export { FirestoreRecallSurfacingRepository } from './recall-surfacing.js';
 export { FirestoreReminderDeliveryRepository, FirestoreReminderRepository } from './reminders.js';
 export {
   checkFirestoreRuntimeData,
@@ -154,11 +165,12 @@ export { FirestoreSkillContextRepository } from './skill-context.js';
 export { FirestoreSkillMutationRepository } from './skill-mutations.js';
 export { FirestoreSkillReflectionRepository } from './skill-reflection.js';
 export { FirestoreSmsChannelRepository } from './sms-channel.js';
-export { createInstallationStore, decodeRecord, InstallationStore } from './store.js';
+export { createInstallationStore, decodeRecord, documentKey, InstallationStore } from './store.js';
 export { FirestoreSuggestionDecisionRepository } from './suggestion-decisions.js';
 export { FirestoreSuggestionRepository, suggestionIdFor } from './suggestions.js';
 export { FirestoreTaskActivityRepository } from './task-activity.js';
 export { FirestoreTaskActivityCommandRepository } from './task-activity-commands.js';
+export * from './task-discovery.js';
 export { FirestoreTaskRepository } from './task-lifecycle.js';
 export { FirestoreTaskLeaseRepository } from './tasks.js';
 export { FirestoreToolExecutionRepository } from './tool-execution.js';

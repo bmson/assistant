@@ -16,7 +16,8 @@ import type {
   DocumentSearchHit,
   DocumentSearchRepository,
 } from '@assistant/persistence';
-import { and, eq, sql } from 'drizzle-orm';
+import { embeddingSpaceIdentityKey } from '@assistant/persistence';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { BudgetReservationError } from '../cost.js';
 import type { ModelRouter } from '../model-router/router.js';
 import { withSpan } from '../otel.js';
@@ -88,11 +89,21 @@ export async function extractDocumentText(
  */
 export function chunkText(
   text: string,
-  opts: { size?: number; overlap?: number; max?: number } = {},
+  opts: { size?: number; overlap?: number; max?: number; requireComplete?: boolean } = {},
 ): string[] {
   const size = opts.size ?? CHUNK_CHARS;
   const overlap = opts.overlap ?? CHUNK_OVERLAP;
   const max = opts.max ?? MAX_CHUNKS;
+  if (
+    !Number.isInteger(size) ||
+    !Number.isInteger(overlap) ||
+    !Number.isInteger(max) ||
+    size <= 0 ||
+    overlap < 0 ||
+    overlap >= size ||
+    max < 1
+  )
+    throw new Error('Invalid document chunk limits');
   const normalized = text
     .replace(/\r\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
@@ -100,6 +111,7 @@ export function chunkText(
   if (!normalized) return [];
   const chunks: string[] = [];
   let i = 0;
+  let complete = false;
   while (i < normalized.length && chunks.length < max) {
     let end = Math.min(i + size, normalized.length);
     if (end < normalized.length) {
@@ -111,9 +123,16 @@ export function chunkText(
     }
     const chunk = normalized.slice(i, end).trim();
     if (chunk) chunks.push(chunk);
-    if (end >= normalized.length) break;
+    if (end >= normalized.length) {
+      complete = true;
+      break;
+    }
     i = Math.max(end - overlap, i + 1);
   }
+  if (opts.requireComplete && !complete)
+    throw new Error(
+      `Document exceeds the ${max}-chunk indexing limit; the full document has not been indexed`,
+    );
   return chunks;
 }
 
@@ -137,6 +156,7 @@ function extractPayload(task: TaskRow): DocumentExtractPayload {
 interface DocumentExtractCursor {
   index: number;
   total: number;
+  embeddingSpaceKey?: string;
 }
 
 export interface DocumentExtractOutcome {
@@ -208,8 +228,16 @@ export async function runDocumentExtraction(
       file = loaded.file;
     } else {
       const postgresDb = requireDocumentDb(db);
-      [doc] = await postgresDb.select().from(documents).where(eq(documents.id, documentId));
-      if (doc) [file] = await postgresDb.select().from(files).where(eq(files.id, doc.fileId));
+      [doc] = await postgresDb
+        .select()
+        .from(documents)
+        .where(and(eq(documents.id, documentId), eq(documents.agentId, task.agentId)));
+
+      if (doc)
+        [file] = await postgresDb
+          .select()
+          .from(files)
+          .where(and(eq(files.id, doc.fileId), eq(files.agentId, task.agentId)));
     }
     if (!doc) return { done: true, summary: `document ${documentId}: gone — nothing to do` };
     if (doc.status === 'ready') {
@@ -302,29 +330,22 @@ export async function runDocumentExtraction(
       }
     }
 
-    const chunks = chunkText(fullText);
+    const chunks = chunkText(fullText, { requireComplete: true });
     const charCount = fullText.length;
-    if (chunks.length === 0 && !lifecycle) {
-      await requireDocumentDb(db)
-        .update(documents)
-        .set({
-          status: 'ready',
-          extractor,
-          chunkCount: 0,
-          charCount,
-          error: null,
-          updatedAt: sql`now()`,
-        })
-        .where(eq(documents.id, documentId));
-      return { done: true, summary: `document ${doc.title}: empty` };
-    }
     const state = (task.state ?? {}) as Record<string, unknown>;
     const plannerState = (state.plannerState ?? {}) as Record<string, unknown>;
+    const embeddingSpace = await router.embeddingSpace();
+    const embeddingSpaceKey = embeddingSpaceIdentityKey(embeddingSpace);
     const cursor: DocumentExtractCursor = {
       index: 0,
       total: chunks.length,
       ...((plannerState.documentExtract as Partial<DocumentExtractCursor>) ?? {}),
     };
+    if (cursor.embeddingSpaceKey && cursor.embeddingSpaceKey !== embeddingSpaceKey)
+      throw new Error(
+        'Document extraction embedding space changed; resume requires an explicit reindex',
+      );
+    cursor.embeddingSpaceKey = embeddingSpaceKey;
 
     // First lease claims a clean document. Firestore deliberately rejects a
     // restart with existing chunks because unbounded cleanup cannot be safely
@@ -352,6 +373,60 @@ export async function runDocumentExtraction(
       }
     }
 
+    const checkpoint = async (storage: Db = requireDocumentDb(db), heartbeat = true) => {
+      if (heartbeat) await deps.heartbeat?.();
+      plannerState.documentExtract = cursor;
+      state.plannerState = plannerState;
+      if (!lifecycle) {
+        const updated = await storage
+          .update(tasks)
+          .set({
+            state,
+            progress: `extract ${doc.title}: ${cursor.index}/${cursor.total} chunks`,
+            progressPercent: cursor.total
+              ? Math.min(100, Math.round((cursor.index / cursor.total) * 100))
+              : 100,
+            reclaimCount: 0,
+            updatedAt: sql`now()`,
+          })
+          .where(
+            and(
+              eq(tasks.id, task.id),
+              eq(tasks.agentId, task.agentId),
+              inArray(tasks.status, ['pending', 'running']),
+              ...(task.leaseToken
+                ? [
+                    eq(tasks.status, 'running'),
+                    eq(tasks.leaseToken, task.leaseToken),
+                    sql`${tasks.lockedUntil} > now()`,
+                  ]
+                : []),
+            ),
+          )
+          .returning({ id: tasks.id });
+        if (!updated.length) throw new Error('Document extraction task lease lost');
+      }
+    };
+
+    const finalizeDirect = async (chunkCount: number) => {
+      await requireDocumentDb(db).transaction(async (tx) => {
+        const updated = await tx
+          .update(documents)
+          .set({
+            status: 'ready',
+            extractor,
+            chunkCount,
+            charCount,
+            error: null,
+            updatedAt: sql`now()`,
+          })
+          .where(and(eq(documents.id, documentId), eq(documents.agentId, task.agentId)))
+          .returning({ id: documents.id });
+        if (!updated.length) throw new Error('Document was deleted before extraction finalized');
+        await checkpoint(tx as unknown as Db, false);
+      });
+    };
+
     if (chunks.length === 0) {
       const state = (task.state ?? {}) as Record<string, unknown>;
       const plannerState = (state.plannerState ?? {}) as Record<string, unknown>;
@@ -371,39 +446,10 @@ export async function runDocumentExtraction(
             summary: `document ${doc.title}: extraction lease or owner fence lost`,
           };
       } else {
-        await requireDocumentDb(db)
-          .update(documents)
-          .set({
-            status: 'ready',
-            extractor,
-            chunkCount: 0,
-            charCount,
-            error: null,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(documents.id, documentId));
+        await finalizeDirect(0);
       }
       return { done: true, summary: `document ${doc.title}: empty` };
     }
-
-    const checkpoint = async () => {
-      await deps.heartbeat?.();
-      plannerState.documentExtract = cursor;
-      state.plannerState = plannerState;
-      if (!lifecycle)
-        await requireDocumentDb(db)
-          .update(tasks)
-          .set({
-            state,
-            progress: `extract ${doc.title}: ${cursor.index}/${cursor.total} chunks`,
-            progressPercent: cursor.total
-              ? Math.min(100, Math.round((cursor.index / cursor.total) * 100))
-              : 100,
-            reclaimCount: 0,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(tasks.id, task.id));
-    };
 
     const stopAt = Math.min(cursor.index + CHUNKS_PER_RUN, chunks.length);
     while (cursor.index < stopAt) {
@@ -411,7 +457,7 @@ export async function runDocumentExtraction(
       const batch = chunks.slice(start, stopAt);
       let embeddings: number[][];
       try {
-        embeddings = await router.embed(batch, { taskId: task.id });
+        embeddings = await router.embed(batch, { taskId: task.id, expectedSpace: embeddingSpace });
       } catch (err) {
         if (err instanceof BudgetReservationError) {
           if (lifecycle)
@@ -444,6 +490,7 @@ export async function runDocumentExtraction(
             text,
             charCount: text.length,
             embedding: embeddings[i] ?? null,
+            embeddingSpaceKey: embeddings[i] ? embeddingSpaceKey : null,
           })),
           cursor,
           state: nextState,
@@ -459,22 +506,32 @@ export async function runDocumentExtraction(
           };
         Object.assign(state, nextState);
       } else {
-        await requireDocumentDb(db)
-          .insert(documentChunks)
-          .values(
-            batch.map((text, i) => ({
-              documentId,
-              agentId: doc.agentId,
-              chunkIndex: start + i,
-              text,
-              charCount: text.length,
-              embedding: embeddings[i],
-            })),
-          )
-          .onConflictDoNothing({
-            target: [documentChunks.documentId, documentChunks.chunkIndex],
-          });
-        await checkpoint();
+        await requireDocumentDb(db).transaction(async (tx) => {
+          const [current] = await tx
+            .select({ id: documents.id })
+            .from(documents)
+            .where(and(eq(documents.id, documentId), eq(documents.agentId, task.agentId)))
+            .for('key share');
+          if (!current)
+            throw new Error('Document was deleted during extraction; no new chunks were stored');
+          await tx
+            .insert(documentChunks)
+            .values(
+              batch.map((text, i) => ({
+                documentId,
+                agentId: doc.agentId,
+                chunkIndex: start + i,
+                text,
+                charCount: text.length,
+                embedding: embeddings[i],
+                embeddingSpaceKey: embeddingSpaceKey,
+              })),
+            )
+            .onConflictDoNothing({
+              target: [documentChunks.documentId, documentChunks.chunkIndex],
+            });
+          await checkpoint(tx as unknown as Db, false);
+        });
       }
     }
 
@@ -492,18 +549,7 @@ export async function runDocumentExtraction(
             done: true,
             summary: `document ${doc.title}: extraction lease or owner fence lost`,
           };
-      } else
-        await requireDocumentDb(db)
-          .update(documents)
-          .set({
-            status: 'ready',
-            extractor,
-            chunkCount: chunks.length,
-            charCount,
-            error: null,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(documents.id, documentId));
+      } else await finalizeDirect(chunks.length);
       return {
         done: true,
         summary: `document ${doc.title}: extracted ${chunks.length} chunks (${charCount} chars)`,
@@ -551,6 +597,7 @@ export async function searchDocumentChunks(
   input: {
     agentId: string;
     embedding: number[];
+    embeddingSpaceKey: string;
     limit: number;
     documentId?: string;
     minSimilarity?: number;

@@ -1,3 +1,4 @@
+import { allowedArtifactPath } from '@assistant/persistence/artifact-path';
 import { z } from 'zod';
 import { type BrowserJobPendingResult, isBrowserJobPending } from './browse.js';
 import { type CallPendingResult, isCallPending } from './phone-call.js';
@@ -40,12 +41,24 @@ export const CodeSpecSchema = z.object({
   inputs: z
     .array(
       z.object({
-        workspacePath: z.string().min(1).max(300),
+        workspacePath: z
+          .string()
+          .min(1)
+          .max(300)
+          .refine((value) => {
+            try {
+              allowedArtifactPath(value, CODE_INPUT_PREFIXES);
+              return true;
+            } catch {
+              return false;
+            }
+          }, 'input path is outside the allowed namespace'),
         as: z
           .string()
           .min(1)
           .max(100)
-          .regex(/^[\w.-]+$/, 'a bare filename (no path separators)'),
+          .regex(/^[\w.-]+$/, 'a bare filename (no path separators)')
+          .refine((value) => value !== '.' && value !== '..', 'a file name is required'),
       }),
     )
     .max(10)

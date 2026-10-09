@@ -1,5 +1,6 @@
 'use server';
 
+import { decideOwnerEmailObligation } from '@assistant/application/email-obligations';
 import {
   addPersonOccasion,
   createPerson,
@@ -35,6 +36,7 @@ import {
 import { forgetOwnerLongTermMemory } from '@/lib/memory-erasure';
 import {
   getDb,
+  getEmailObligationRepository,
   getFirestoreInstallationStore,
   getOwnerMemoryCommands,
   getWorkspace,
@@ -57,6 +59,27 @@ function revalidateProfile(): void {
 export async function resolveCommitmentAction(id: string): Promise<void> {
   await requireOwner();
   await getOwnerMemoryCommands().resolveCommitment(id, 'Owner confirmed this loop is resolved.');
+  revalidateProfile();
+}
+
+export async function decideEmailObligationAction(
+  channelMessageId: string,
+  expectedVersion: number,
+  decision: 'confirm_open' | 'resolve' | 'snooze' | 'reopen',
+): Promise<void> {
+  await requireOwner();
+  const now = new Date();
+  const changed = await decideOwnerEmailObligation(getEmailObligationRepository(), {
+    channelMessageId,
+    expectedVersion,
+    decision,
+    now,
+    ...(decision === 'snooze' ? { snoozedUntil: new Date(now.getTime() + 24 * 3600_000) } : {}),
+  });
+  if (!changed)
+    throw new Error(
+      'This email source changed or was already updated. Refresh and review the latest message.',
+    );
   revalidateProfile();
 }
 
@@ -90,6 +113,23 @@ export async function correctCommitmentFormAction(id: string, formData: FormData
     String(formData.get('details') ?? ''),
     String(formData.get('nextAction') ?? ''),
   );
+}
+
+export async function reopenCommitmentAction(
+  id: string,
+  expectedUpdatedAt: string,
+  operationId: string,
+): Promise<void> {
+  await requireOwner();
+  const timestamp = new Date(expectedUpdatedAt);
+  if (!Number.isFinite(timestamp.getTime()))
+    throw new Error('Refresh this closed loop to reopen it.');
+  const result = await getOwnerMemoryCommands().reopenCommitment(id, timestamp, operationId);
+  if (!result)
+    throw new Error(
+      'This closed loop changed or newer evidence is already open. Refresh and review it.',
+    );
+  revalidateProfile();
 }
 
 export async function confirmFact(memoryId: string): Promise<void> {

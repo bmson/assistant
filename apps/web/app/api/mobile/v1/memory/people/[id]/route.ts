@@ -13,6 +13,7 @@ import {
   mergeFirestorePeople,
   recompileFirestoreProfileCard,
 } from '@/lib/firestore-profile-commands';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getDb, getFirestoreInstallationStore } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -48,7 +49,15 @@ export async function PATCH(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid person id' }, { status: 400 });
-  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+  const mutationBody = await readMobileMutationBody(request, [
+    'action',
+    'aliases',
+    'name',
+    'relationship',
+    'targetId',
+  ]);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as Record<string, unknown> | null;
   if (!body || Array.isArray(body)) {
     return mobileJson({ error: 'invalid person body' }, { status: 400 });
   }
@@ -77,7 +86,9 @@ export async function POST(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid person id' }, { status: 400 });
-  const body = (await request.json().catch(() => null)) as {
+  const mutationBody = await readMobileMutationBody(request, ['action', 'targetId']);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as {
     action?: unknown;
     targetId?: unknown;
   } | null;

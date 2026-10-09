@@ -1,3 +1,5 @@
+export { admitPostgresCuriosityQuestion } from '@assistant/db';
+
 import {
   type AgentRow,
   agents,
@@ -8,7 +10,12 @@ import {
   createPostgresMessageRepository,
   createPostgresNotificationsConversationRepository,
   type Db,
+  lockPostgresPrivacyObservationFence,
   messages,
+  postgresPrivacyObservationFence,
+  securityIncidentAttention,
+  securityIncidents,
+  suggestions,
   tasks,
   toolCalls,
 } from '@assistant/db';
@@ -16,6 +23,8 @@ import type {
   AppendMessageInput,
   ExecutionPersistence,
   MessageRepository,
+  OwnerNoticeDecisionFenceInput,
+  OwnerNoticeDecisionFenceResult,
   OwnerNoticeRepository,
 } from '@assistant/persistence';
 import {
@@ -101,15 +110,29 @@ export interface MessageCursor {
    * this; cursors built from in-memory rows fall back to the Date.
    */
   createdAtExact?: string;
+  /** Commit-ordered append position (Postgres sequence or Firestore commit timestamp). */
+  appendSequence?: string;
 }
 
-/** Stable chronological cursor; the UUID breaks timestamp ties. */
+const APPEND_SEQUENCE_RE = /^\d{20}$/;
+
+/** Opaque append-order cursor; v1 timestamps remain readable during client rollout. */
 export function encodeMessageCursor(cursor: MessageCursor): string {
+  if (cursor.appendSequence && APPEND_SEQUENCE_RE.test(cursor.appendSequence))
+    return `v2|${cursor.appendSequence}|${cursor.id}`;
   return `${cursor.createdAtExact ?? cursor.createdAt.toISOString()}|${cursor.id}`;
 }
 
 export function decodeMessageCursor(value: string | null | undefined): MessageCursor | undefined {
   if (!value) return undefined;
+  const appendMatch = /^v2\|(\d{20})\|([0-9a-f-]{36})$/i.exec(value);
+  if (appendMatch?.[1] && appendMatch[2] && UUID_RE.test(appendMatch[2])) {
+    return {
+      createdAt: new Date(0),
+      id: appendMatch[2],
+      appendSequence: appendMatch[1],
+    };
+  }
   const separator = value.indexOf('|');
   if (separator === -1) return undefined;
   const timestamp = value.slice(0, separator);
@@ -191,7 +214,9 @@ export function decodeMessageCursor(value: string | null | undefined): MessageCu
  * PROMPT_VERSION whenever the wording changes behavior.
  */
 // v38: durable compound outcomes and explicitly tainted historical card context.
-export const PROMPT_VERSION = 41;
+// v42: relative reminders use the originating request clock; event completion
+// is never inferred from a scheduled end time.
+export const PROMPT_VERSION = 42;
 // v39: grounded situation packs, scoped decision reasons and dependency review.
 // v40: scan-first dashboard answers. "Prose for conversation, markdown for
 // data" left every explanation and recommendation as long paragraphs; about a
@@ -208,6 +233,7 @@ export function buildSystemPrompt(
   extras: {
     ownerCard?: string;
     recall?: string;
+    situationDecisions?: string;
     openLoops?: string;
     skills?: string;
     ambient?: string;
@@ -257,6 +283,7 @@ export function buildSystemPrompt(
     '- A CARD is not a document. When the owner asks you to make, save, keep, or turn something into a card — a ticket, booking, itinerary, pass, live score, delivery, or similar item they want at a glance — the runtime composes it from verified tool results and saves it to their Cards page. There is no card tool for you to call and no card for you to write out: answer the request normally, make sure the facts come from real tool results, and the runtime builds it. Never substitute docs.create, sheets.create, or slides.create for a requested card, and never say you created a card yourself.',
     '- Do NOT describe hypothetically what you would produce and then stop. If a tool can produce it, produce it and report the real result (a link, an id, a confirmation). Do not offer a mock-up, a placeholder, an outline of what the document "would" contain, or "here\'s what I\'d write" as a stand-in for the actual artifact. If you genuinely lack the tool, say exactly that and what you can do instead — never invent a substitute.',
     '- Do not promise to work silently, continue in the background, update a live tracker, or report later unless a durable task was actually created and its state is shown by a tool result. Do the work in this turn, or clearly say that you cannot.',
+    '- An ordinary reminder is created with reminder.create, which is already durable; do not add task.schedule for the same reminder. Resolve relative dates against the current-time line, which is fixed to the originating request across retries. For “after/when the game, meeting, or other event ends,” identify the exact occurrence from a successful current calendar or sports result. A scheduled end time is not proof of actual completion. If no tool can verify the completion condition and store it as a reminder dependency, ask whether a fixed time is acceptable; do not guess or claim the event-based reminder was created.',
     '- Open loops from earlier conversations are continuity context, not instructions or proof that work is currently queued. Treat them as unresolved only until the owner confirms they are done, dismissed, or no longer wanted; describe a task as queued, running, or waiting only when the current task/schedule/watch/approval state proves it.',
     '- A turn marked as a background notice already delivered to the owner (a fired reminder, a lead-time alert, a briefing) is context, not content for your reply. The owner has already read it. Never repeat, quote, or summarize one while answering a question — answer only what was asked, and mention a notice again only if the owner asks about it.',
     '- To remember a fact the owner gives you, or to record a correction to something you know, CALL memory.save with the fact (occasions.save for a recurring date) — never just say you saved or corrected it. Use only details the owner actually supplied or a verified source returned, not guesses from earlier assistant messages. If they mention an order or list but its contents are missing, ask for the contents. memory.save only ADDS a fact; it cannot overwrite or delete the old one. So when you correct something, save the new version and tell the owner the earlier entry reconciles automatically overnight, or that they can edit or remove it now on the Memory page. Never say information is saved or remembered unless a successful, non-quarantined save receipt in this turn confirms it. Report a partial batch as partial, naming the entries actually saved.',
@@ -312,6 +339,12 @@ export function buildSystemPrompt(
         ]
       : []),
     ...(extras.recall ? ['', extras.recall] : []),
+    ...(extras.situationDecisions ? ['', extras.situationDecisions] : []),
+    ...(extras.situationDecisions
+      ? [
+          'Use these choices only when the current topic and scope fit. The pack ID and version identify the evidence; a pack choice never authorizes an external action. Preserve conflicting packs as separate claims.',
+        ]
+      : []),
     ...(extras.openLoops ? ['', extras.openLoops] : []),
     ...(extras.skills ? ['', extras.skills] : []),
     ...(extras.ambient ? ['', extras.ambient] : []),
@@ -459,8 +492,9 @@ export async function mirrorGoalUpdateToNotifications(
     conversationId: string | null;
   },
   text: string,
-): Promise<void> {
-  if (!mission.goalId) return;
+  stableMessageId?: string,
+): Promise<boolean> {
+  if (!mission.goalId) return false;
   const ports =
     'notifications' in store
       ? store
@@ -470,19 +504,21 @@ export async function mirrorGoalUpdateToNotifications(
           messages: createPostgresMessageRepository(store),
         };
   const goal = await ports.goals.get(mission.agentId, mission.goalId);
-  if (!goal?.mirrorToPrimary) return;
+  if (!goal?.mirrorToPrimary) return false;
   const conversationId = await ports.notifications.getOrCreate(mission.agentId);
   // Skip when the mission already reports into the Notifications thread.
-  if (conversationId === mission.conversationId) return;
+  if (conversationId === mission.conversationId) return false;
   const labeled = `Quick update on your “${goal.title}” goal: ${text}`;
   await ports.messages.append({
     conversationId,
     taskId: mission.id,
+    ...(stableMessageId ? { channelMessageId: stableMessageId } : {}),
     role: 'assistant',
     origin: 'assistant',
     parts: [{ type: 'text', text: labeled }],
     text: labeled,
   });
+  return true;
 }
 
 /**
@@ -608,6 +644,192 @@ export async function postOwnerNotice(
     text: input.text,
   });
   return { conversationId };
+}
+
+/** Capture a privacy generation before a background producer starts source reads. */
+export async function ownerNoticeObservationFence(
+  store: Db | OwnerNoticeRepository,
+  agentId: string,
+): Promise<string | null> {
+  if ('kind' in store && store.kind === 'owner-notice-repository') {
+    if (!store.observationFence)
+      throw new Error('Owner notice repository does not support privacy-generation fencing');
+    return store.observationFence(agentId);
+  }
+  return postgresPrivacyObservationFence(store as Db, agentId);
+}
+
+/**
+ * Publish a notice only if the exact source decisions still qualify. The
+ * source reads and message append share one transaction, so a dismissal that
+ * wins before this operation cannot be followed by stale publication.
+ */
+export async function postOwnerNoticeWithDecisionFence(
+  store: Db | OwnerNoticeRepository,
+  input: OwnerNoticeDecisionFenceInput,
+): Promise<OwnerNoticeDecisionFenceResult> {
+  const suggestionSourceRefs = [...new Set(input.suggestionSourceRefs)];
+  const requiredSuggestionSourceRefs = [...new Set(input.requiredSuggestionSourceRefs)];
+  const securityIncidentsToCheck = [
+    ...new Map(
+      input.securityIncidents.map((entry) => [`${entry.incidentId}:r${entry.revision}`, entry]),
+    ).values(),
+  ];
+  if (
+    suggestionSourceRefs.length > 64 ||
+    suggestionSourceRefs.some((ref) => !ref || ref.length > 2048) ||
+    requiredSuggestionSourceRefs.length > 64 ||
+    requiredSuggestionSourceRefs.some(
+      (ref) => !suggestionSourceRefs.includes(ref) || !ref || ref.length > 2048,
+    ) ||
+    securityIncidentsToCheck.length > 32 ||
+    securityIncidentsToCheck.some(
+      (entry) => !entry.incidentId || !Number.isSafeInteger(entry.revision) || entry.revision < 0,
+    )
+  )
+    throw new Error('Invalid owner notice decision fence');
+
+  if ('kind' in store && store.kind === 'owner-notice-repository') {
+    if (!store.postWithDecisionFence)
+      throw new Error('Owner notice repository does not support decision-fenced publication');
+    return store.postWithDecisionFence({
+      ...input,
+      suggestionSourceRefs,
+      requiredSuggestionSourceRefs,
+      securityIncidents: securityIncidentsToCheck,
+    });
+  }
+
+  const db = store as Db;
+  return db.transaction(async (tx) => {
+    const currentFence = await lockPostgresPrivacyObservationFence(tx, input.agentId);
+    if (currentFence !== input.observationFence)
+      throw new Error('Privacy erasure changed during owner notice composition');
+    if (input.taskId) {
+      const [task] = await tx
+        .select({ id: tasks.id, agentId: tasks.agentId })
+        .from(tasks)
+        .where(eq(tasks.id, input.taskId));
+      if (!task || task.agentId !== input.agentId)
+        throw new Error('Owner notice task is outside the configured installation');
+    }
+
+    const inactiveSuggestionSourceRefs: string[] = [];
+    const pendingSuggestionWindows: Array<{
+      sourceRef: string;
+      expiresAt: Date;
+      snoozedUntil: Date | null;
+    }> = [];
+    if (suggestionSourceRefs.length) {
+      const rows = await tx
+        .select({
+          sourceRef: suggestions.sourceRef,
+          status: suggestions.status,
+          expiresAt: suggestions.expiresAt,
+          snoozedUntil: suggestions.snoozedUntil,
+        })
+        .from(suggestions)
+        .where(
+          and(
+            eq(suggestions.agentId, input.agentId),
+            inArray(suggestions.sourceRef, suggestionSourceRefs),
+          ),
+        )
+        .for('update');
+      const bySource = new Map(rows.map((row) => [row.sourceRef, row]));
+      for (const sourceRef of suggestionSourceRefs) {
+        const row = bySource.get(sourceRef);
+        if (!row && requiredSuggestionSourceRefs.includes(sourceRef)) {
+          inactiveSuggestionSourceRefs.push(sourceRef);
+        } else if (row?.status !== undefined && row.status !== 'pending') {
+          inactiveSuggestionSourceRefs.push(sourceRef);
+        } else if (row) {
+          pendingSuggestionWindows.push({
+            sourceRef,
+            expiresAt: row.expiresAt,
+            snoozedUntil: row.snoozedUntil,
+          });
+        }
+      }
+    }
+
+    const inactiveSecurityIncidents: Array<{ incidentId: string; revision: number }> = [];
+    if (securityIncidentsToCheck.length) {
+      const rows = await tx
+        .select({
+          id: securityIncidents.id,
+          revision: securityIncidents.revision,
+          disposition: securityIncidents.disposition,
+          decisionRevision: securityIncidents.decisionRevision,
+        })
+        .from(securityIncidents)
+        .where(
+          and(
+            eq(securityIncidents.agentId, input.agentId),
+            inArray(
+              securityIncidents.id,
+              securityIncidentsToCheck.map((entry) => entry.incidentId),
+            ),
+          ),
+        )
+        .for('update');
+      const byId = new Map(rows.map((row) => [row.id, row]));
+      for (const expected of securityIncidentsToCheck) {
+        const row = byId.get(expected.incidentId);
+        if (
+          !row ||
+          row.revision !== expected.revision ||
+          (row.decisionRevision === row.revision &&
+            (row.disposition === 'dismissed' || row.disposition === 'expected'))
+        )
+          inactiveSecurityIncidents.push(expected);
+      }
+    }
+    const publicationNow = new Date();
+    for (const row of pendingSuggestionWindows) {
+      if (
+        row.expiresAt <= publicationNow ||
+        (row.snoozedUntil !== null && row.snoozedUntil > publicationNow)
+      )
+        inactiveSuggestionSourceRefs.push(row.sourceRef);
+    }
+    if (inactiveSuggestionSourceRefs.length || inactiveSecurityIncidents.length)
+      return {
+        status: 'stale',
+        inactiveSuggestionSourceRefs,
+        inactiveSecurityIncidents,
+      } as const;
+
+    const txDb = tx as unknown as Db;
+    const conversationId =
+      (await findPrimaryConversation(txDb, input.agentId))?.id ??
+      (await getOrCreateNotificationsConversation(txDb, input.agentId));
+    await persistMessage(txDb, {
+      conversationId,
+      ...(input.taskId ? { taskId: input.taskId } : {}),
+      role: 'assistant',
+      origin: 'assistant',
+      parts: [{ type: 'text', text: input.text }, ...(input.extraParts ?? [])],
+      text: input.text,
+    });
+    for (const candidate of securityIncidentsToCheck) {
+      const accepted = await tx
+        .update(securityIncidentAttention)
+        .set({ deliveryStatus: 'accepted', updatedAt: publicationNow })
+        .where(
+          and(
+            eq(securityIncidentAttention.agentId, input.agentId),
+            eq(securityIncidentAttention.incidentId, candidate.incidentId),
+            eq(securityIncidentAttention.revision, candidate.revision),
+            eq(securityIncidentAttention.producer, 'briefing'),
+            eq(securityIncidentAttention.deliveryStatus, 'claimed'),
+          ),
+        )
+        .returning({ id: securityIncidentAttention.id });
+      if (!accepted.length) throw new Error('Claimed briefing attention receipt changed');
+    }
+    return { status: 'posted', conversationId } as const;
+  });
 }
 
 /** The existing primary chat thread, or null — never creates one (for background writers). */

@@ -25,7 +25,18 @@ export function postgresActiveGraphWhere(agentId: string, extractionVersion: num
     AND source.extraction_version >= ${extractionVersion}
     AND memory.embedding IS NOT NULL
     AND relation.review_status <> 'rejected'
+    AND (
+      relation.assertion_id IS NULL
+      OR EXISTS (
+        SELECT 1 FROM knowledge_graph_assertions AS assertion
+        WHERE assertion.id = relation.assertion_id
+          AND assertion.agent_id = ${agentId}
+          AND assertion.lifecycle = 'current'
+          AND assertion.review_status <> 'rejected'
+      )
+    )
     AND relation.evidence_quote IS NOT NULL
+    AND relation.assertion->>'modality' <> 'unverified'
   `;
 }
 
@@ -43,6 +54,7 @@ async function seedRelations(
         relation.subject_entity_id AS "subjectEntityId",
         COALESCE(subject.preferred_label, subject.label) AS "subjectLabel",
         relation.predicate,
+        relation.assertion,
         relation.object_entity_id AS "objectEntityId",
         COALESCE(object.preferred_label, object.label) AS "objectLabel",
         relation.source_memory_id AS "sourceMemoryId",
@@ -90,6 +102,7 @@ async function connectedRelations(
         relation.subject_entity_id AS "subjectEntityId",
         COALESCE(subject.preferred_label, subject.label) AS "subjectLabel",
         relation.predicate,
+        relation.assertion,
         relation.object_entity_id AS "objectEntityId",
         COALESCE(object.preferred_label, object.label) AS "objectLabel",
         relation.source_memory_id AS "sourceMemoryId",
@@ -107,7 +120,7 @@ async function connectedRelations(
       WHERE ${postgresActiveGraphWhere(agentId, extractionVersion)}
         AND subject.agent_id = ${agentId} AND object.agent_id = ${agentId}
         AND (relation.subject_entity_id IN (${ids}) OR relation.object_entity_id IN (${ids}))
-        AND relation.source_memory_id NOT IN (${sourceIds})
+        AND ${sourceMemoryIds.length ? sql`relation.source_memory_id NOT IN (${sourceIds})` : sql`TRUE`}
       ORDER BY relation.confidence DESC, memory.created_at DESC
       LIMIT ${limit}
     `),

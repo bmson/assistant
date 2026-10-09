@@ -7,6 +7,7 @@ import {
   type MemoryProminence,
   type ProfileMemoryManagementRepository,
   type Records,
+  snapshotEmbeddingSpace,
   validateEmbedding,
 } from '@assistant/persistence';
 import { type DocumentSnapshot, FieldValue, type Transaction } from '@google-cloud/firestore';
@@ -14,7 +15,9 @@ import { embeddingSpaceKey } from './memory.js';
 import { privacyErasureIsActive } from './privacy-erasure.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
-type Memory = Records['memories'];
+type Memory = Pick<Records['memories'], 'id' | 'agentId' | 'contentHash'> & {
+  importance?: number;
+};
 
 function managed(row: Memory): ManagedMemory {
   return { id: row.id, agentId: row.agentId, contentHash: row.contentHash };
@@ -32,11 +35,14 @@ export class FirestoreProfileMemoryManagementRepository
   implements ProfileMemoryManagementRepository
 {
   readonly kind = 'profile-memory-management-repository' as const;
+  readonly embeddingSpace: EmbeddingSpace;
 
   constructor(
     readonly store: InstallationStore,
-    readonly embeddingSpace: EmbeddingSpace,
-  ) {}
+    embeddingSpace: EmbeddingSpace,
+  ) {
+    this.embeddingSpace = snapshotEmbeddingSpace(embeddingSpace);
+  }
 
   private async configuredAgentOrNull(tx: Transaction): Promise<string | null> {
     const configured = await tx.get(this.store.collection('agents').limit(2));
@@ -59,8 +65,25 @@ export class FirestoreProfileMemoryManagementRepository
 
   private owned(snapshot: DocumentSnapshot, agentId: string): Memory | null {
     if (!snapshot.exists) return null;
-    const row = decodeRecord<Memory>(snapshot.data());
-    return row.id && documentKey(row.id) === snapshot.id && row.agentId === agentId ? row : null;
+    const decoded = decodeRecord<unknown>(snapshot.data());
+    if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) return null;
+    const row = decoded as Record<string, unknown>;
+    if (
+      typeof row.id !== 'string' ||
+      documentKey(row.id) !== snapshot.id ||
+      row.agentId !== agentId ||
+      typeof row.contentHash !== 'string' ||
+      !row.contentHash
+    )
+      return null;
+    return {
+      id: row.id,
+      agentId,
+      contentHash: row.contentHash,
+      ...(typeof row.importance === 'number' && Number.isFinite(row.importance)
+        ? { importance: row.importance }
+        : {}),
+    };
   }
 
   private invalidateOwnerCard(tx: Transaction, agentId: string, now: Date): void {
@@ -138,6 +161,8 @@ export class FirestoreProfileMemoryManagementRepository
     if (!input.content || !input.contentHash || !input.expectedContentHash)
       throw new Error('Invalid profile memory correction');
     validateEmbedding(this.embeddingSpace, input.embedding);
+    if (input.embeddingSpaceKey !== embeddingSpaceKey(this.embeddingSpace))
+      throw new Error('Memory embedding space changed');
     const retrievalRevision = randomUUID();
     return this.store.db.runTransaction(async (tx) => {
       const agentId = await this.configuredAgent(tx);
@@ -181,6 +206,7 @@ export class FirestoreProfileMemoryManagementRepository
           content: input.content,
           contentHash: input.contentHash,
           embedding: FieldValue.vector(input.embedding),
+          embeddingSpaceKey: embeddingSpaceKey(this.embeddingSpace),
           embeddingSpace: embeddingSpaceKey(this.embeddingSpace),
           retrievalRevision,
           confidence: '1.00',
@@ -251,7 +277,10 @@ export class FirestoreProfileMemoryManagementRepository
       );
       tx.delete(snapshot.ref);
       this.invalidateOwnerCard(tx, agentId, now);
-      return { status: 'updated', memory: managed(row) };
+      return {
+        status: 'updated',
+        memory: { id: row.id, agentId: row.agentId, contentHash: row.contentHash },
+      };
     });
   }
 
@@ -262,7 +291,7 @@ export class FirestoreProfileMemoryManagementRepository
           ? { pinned: true }
           : level === 'minor'
             ? { pinned: false, importance: 1 }
-            : { pinned: false, importance: row.importance <= 1 ? 3 : row.importance };
+            : { pinned: false, importance: (row.importance ?? 3) <= 1 ? 3 : (row.importance ?? 3) };
       tx.update(snapshot.ref, patch);
       this.invalidateOwnerCard(tx, agentId, now);
       return { status: 'updated', memory: managed(row) };
@@ -282,6 +311,8 @@ export class FirestoreProfileMemoryManagementRepository
   ): Promise<MemoryMutation> {
     validateCreate(input);
     validateEmbedding(this.embeddingSpace, input.embedding);
+    if (input.embeddingSpaceKey !== embeddingSpaceKey(this.embeddingSpace))
+      throw new Error('Memory embedding space changed');
     const id = randomUUID();
     const retrievalRevision = randomUUID();
     return this.store.db.runTransaction(async (tx) => {
@@ -312,12 +343,13 @@ export class FirestoreProfileMemoryManagementRepository
       if (memorySnapshot?.exists) return { status: 'duplicate' };
 
       const now = this.store.now();
-      const row: Memory = {
+      const row: Records['memories'] = {
         id,
         createdAt: now,
         agentId,
         expiresAt: null,
         embedding: input.embedding,
+        embeddingSpaceKey: input.embeddingSpaceKey ?? null,
         sourceTaskId: null,
         kind: 'fact',
         confidence: '1.00',
@@ -344,6 +376,7 @@ export class FirestoreProfileMemoryManagementRepository
         encodeRecord({
           ...row,
           embedding: FieldValue.vector(input.embedding),
+          embeddingSpaceKey: input.embeddingSpaceKey,
           embeddingSpace: embeddingSpaceKey(this.embeddingSpace),
           retrievalRevision,
         }),

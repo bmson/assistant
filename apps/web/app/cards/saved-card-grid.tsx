@@ -55,12 +55,12 @@ export function SavedCardGrid({ cards, timeZone }: { cards: Card[]; timeZone: st
           <ResponseCards
             cards={[card]}
             timeZone={timeZone}
-            onRefresh={async (id) => {
-              const result = await refreshSavedCardInline(id);
+            onRefresh={async (id, revisionId, operationId) => {
+              const result = await refreshSavedCardInline(id, revisionId, operationId);
               if (result.ok) {
                 setAttempts((current) => ({
                   ...current,
-                  [id]: { revision: card.revisionId, taskId: result.taskId, state: 'refreshing' },
+                  [id]: { revision: revisionId, taskId: result.taskId, state: 'refreshing' },
                 }));
                 setPaused(false);
                 setPollGeneration((value) => value + 1);

@@ -5,6 +5,7 @@ import {
   type EmbeddingSpace,
   type Records,
   type SegmentableMessage,
+  snapshotEmbeddingSpace,
   validateEmbedding,
   validateSkillEmbeddingSpace,
 } from '@assistant/persistence';
@@ -16,8 +17,7 @@ import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from 
 const PAGE = 200;
 /**
  * Messages read per conversation per run while collecting segmentable turns.
- * Unembedded and empty rows are skipped, so the job reads past them; this caps
- * that walk the way the PostgreSQL job's row limit caps its own.
+ * A bounded scan cap prevents one job from walking an unbounded transcript.
  */
 const SCAN_LIMIT = 5_000;
 const TRUSTED = ['owner', 'assistant'];
@@ -32,13 +32,15 @@ export class FirestoreConversationSegmentationRepository
 {
   readonly kind = 'conversation-segmentation-repository' as const;
   private readonly spaceKey: string;
+  readonly space: EmbeddingSpace;
 
   constructor(
     readonly store: InstallationStore,
-    readonly space: EmbeddingSpace,
+    space: EmbeddingSpace,
   ) {
-    validateSkillEmbeddingSpace(space);
-    this.spaceKey = embeddingSpaceKey(space);
+    this.space = snapshotEmbeddingSpace(space);
+    validateSkillEmbeddingSpace(this.space);
+    this.spaceKey = embeddingSpaceKey(this.space);
   }
 
   async recentConversations(agentId: string, limit: number): Promise<Array<{ id: string }>> {
@@ -59,6 +61,7 @@ export class FirestoreConversationSegmentationRepository
     agentId: string,
     conversationId: string,
     limit: number,
+    embeddingSpaceKey: string,
   ): Promise<SegmentableMessage[]> {
     const conversation = await this.store.doc('conversations', conversationId).get();
     if (
@@ -71,12 +74,15 @@ export class FirestoreConversationSegmentationRepository
       .collection('conversationSegments')
       .where('conversationId', '==', conversationId)
       .orderBy('endedAt', 'desc')
+      .orderBy('endMessageId', 'desc')
       .limit(1)
       .get();
-    const endedAt = latest.docs[0]
-      ? decodeRecord<Records['conversationSegments']>(latest.docs[0].data()).endedAt
+    const latestSegment = latest.docs[0]
+      ? decodeRecord<Records['conversationSegments']>(latest.docs[0].data())
       : null;
-    const after = endedAt instanceof Date ? endedAt : null;
+    const endedAt = latestSegment?.endedAt instanceof Date ? latestSegment.endedAt : null;
+    const endMessageId =
+      typeof latestSegment?.endMessageId === 'string' ? latestSegment.endMessageId : null;
 
     const rows: SegmentableMessage[] = [];
     let scanned = 0;
@@ -86,8 +92,8 @@ export class FirestoreConversationSegmentationRepository
         .collection('messages')
         .where('conversationId', '==', conversationId)
         .where('role', 'in', ['user', 'assistant']);
-      if (after) query = query.where('createdAt', '>', after);
       query = query.orderBy('createdAt', 'asc').orderBy('id', 'asc').limit(PAGE);
+      if (endedAt && endMessageId) query = query.startAfter(endedAt, endMessageId);
       if (cursor) query = query.startAfter(cursor);
       const page = await query.get();
       for (const doc of page.docs) {
@@ -97,10 +103,11 @@ export class FirestoreConversationSegmentationRepository
           documentKey(row.id) !== doc.id ||
           (row.role !== 'user' && row.role !== 'assistant') ||
           typeof row.text !== 'string' ||
+          (typeof row.channelMessageId === 'string' &&
+            (row.channelMessageId.startsWith('visual-qa:') ||
+              row.channelMessageId.startsWith('readability-'))) ||
           row.text.length === 0 ||
-          !(row.createdAt instanceof Date) ||
-          row.embeddingSpace !== this.spaceKey ||
-          !Array.isArray(row.embedding)
+          !(row.createdAt instanceof Date)
         )
           continue;
         rows.push({
@@ -108,7 +115,17 @@ export class FirestoreConversationSegmentationRepository
           role: row.role,
           text: row.text,
           createdAt: row.createdAt,
-          embedding: row.embedding,
+          embeddingSpaceKey:
+            typeof row.embeddingSpaceKey === 'string'
+              ? row.embeddingSpaceKey
+              : typeof row.embeddingSpace === 'string'
+                ? row.embeddingSpace
+                : null,
+          embedding:
+            (row.embeddingSpaceKey ?? row.embeddingSpace) === embeddingSpaceKey &&
+            Array.isArray(row.embedding)
+              ? row.embedding
+              : null,
         });
         if (rows.length >= limit) break;
       }
@@ -144,13 +161,18 @@ export class FirestoreConversationSegmentationRepository
         endMessageId: input.endMessageId,
         summary: input.summary,
         messageCount: input.messageCount,
+        embeddingSpaceKey: input.embedding ? this.spaceKey : null,
         startedAt: input.startedAt,
         endedAt: input.endedAt,
       };
       tx.create(this.store.doc('conversationSegments', id), {
         ...encodeRecord(segment),
         ...(input.embedding
-          ? { embedding: FieldValue.vector(input.embedding), embeddingSpace: this.spaceKey }
+          ? {
+              embedding: FieldValue.vector(input.embedding),
+              embeddingSpace: this.spaceKey,
+              embeddingSpaceKey: this.spaceKey,
+            }
           : { embedding: null }),
       });
       return true;

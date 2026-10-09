@@ -2,7 +2,6 @@ import {
   archiveGoalRecord,
   changeGoalAutonomy,
   changeGoalStatus,
-  type GoalInput,
   getGoalRecord,
   restoreGoalRecord,
   startExistingGoalWork,
@@ -10,6 +9,8 @@ import {
 } from '@assistant/application/goals';
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import { FirestoreGoalMutationRepository, FirestoreGoalReadRepository } from '@assistant/firestore';
+import { readBoundedJson } from '@/lib/bounded-json';
+import { parseGoalInput } from '@/lib/goal-input';
 import {
   getDb,
   getFirestoreGoalScheduleUpdate,
@@ -44,39 +45,6 @@ export async function GET(
   return goal ? mobileJson({ goal }) : mobileJson({ error: 'goal not found' }, { status: 404 });
 }
 
-function goalInput(body: unknown): GoalInput | { error: string } {
-  if (!body || typeof body !== 'object' || Array.isArray(body))
-    return { error: 'invalid goal body' };
-  const value = body as Record<string, unknown>;
-  const title = typeof value.title === 'string' ? value.title.trim() : '';
-  if (!title) return { error: 'Title is required.' };
-  const priority = typeof value.priority === 'number' ? value.priority : 3;
-  if (!Number.isInteger(priority) || priority < 1 || priority > 5) {
-    return { error: 'Priority must be between 1 and 5.' };
-  }
-  const targetDateValue = value.targetDate;
-  let targetDate: Date | null = null;
-  if (typeof targetDateValue === 'string' && targetDateValue.trim()) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDateValue)) {
-      return { error: 'Target date must be YYYY-MM-DD.' };
-    }
-    targetDate = new Date(`${targetDateValue}T00:00:00Z`);
-    if (Number.isNaN(targetDate.getTime())) return { error: 'Target date is not valid.' };
-  } else if (targetDateValue != null && targetDateValue !== '') {
-    return { error: 'Target date must be YYYY-MM-DD.' };
-  }
-  const text = (key: string) => (typeof value[key] === 'string' ? value[key].trim() : '');
-  return {
-    title,
-    description: text('description'),
-    priority,
-    targetDate,
-    progress: text('progress'),
-    nextAction: text('nextAction'),
-    mirrorToPrimary: value.mirrorToPrimary === true,
-  };
-}
-
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -84,7 +52,9 @@ export async function PATCH(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid goal id' }, { status: 400 });
-  const input = goalInput(await request.json().catch(() => null));
+  const parsed = await readBoundedJson(request);
+  if (!parsed.ok) return mobileJson({ error: parsed.error }, { status: parsed.status });
+  const input = parseGoalInput(parsed.value);
   if ('error' in input) return mobileJson({ error: input.error }, { status: 400 });
   try {
     const config = loadConfig();
@@ -115,7 +85,9 @@ export async function POST(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid goal id' }, { status: 400 });
-  const body = (await request.json().catch(() => null)) as {
+  const parsed = await readBoundedJson(request);
+  if (!parsed.ok) return mobileJson({ error: parsed.error }, { status: parsed.status });
+  const body = parsed.value as {
     action?: unknown;
     enabled?: unknown;
     status?: unknown;

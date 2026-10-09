@@ -4,6 +4,7 @@ import {
   answerLooksCardShaped,
   GenerativeCardSpecV1Schema,
   generateEvidenceCard,
+  generateEvidenceCardOutcome,
   numericFactValue,
   scoreboardCardSpec,
   validateGroundedCard,
@@ -272,6 +273,28 @@ const flightCard = {
 };
 
 describe('the layout vocabulary', () => {
+  it('retains sanitation inside a section even when the outer block count is unchanged', () => {
+    const parsed = GenerativeCardSpecV1Schema.parse({
+      ...flightCard,
+      blocks: [
+        {
+          type: 'section',
+          title: 'Before boarding',
+          blocks: [
+            { type: 'countdown', dateFact: 'board' },
+            { type: 'metrics', factIds: ['gate', 'seat'] },
+          ],
+        },
+      ],
+    });
+    expect(validateGroundedCard(parsed, flightEvidence)?.blocks).toEqual([
+      {
+        type: 'section',
+        title: 'Before boarding',
+        blocks: [{ type: 'metrics', factIds: ['gate', 'seat'] }],
+      },
+    ]);
+  });
   it('accepts a grounded card built from the richer blocks', () => {
     const parsed = GenerativeCardSpecV1Schema.parse(flightCard);
     expect(validateGroundedCard(parsed, flightEvidence)).toEqual(parsed);
@@ -412,6 +435,147 @@ describe('actions the phone performs', () => {
   });
 });
 
+describe('durable generated-card composition outcomes', () => {
+  it('returns a typed card for a validated deterministic confirmation', async () => {
+    const outcome = await generateEvidenceCardOutcome({
+      router: {
+        object: async () => {
+          throw new Error('deterministic hotel confirmation must not call the router');
+        },
+      } as unknown as ModelRouter,
+      sourceText: 'Make a hotel card',
+      explicitRequest: true,
+      sourceKey: 'gmail:synthetic-hotel',
+      evidence: [
+        {
+          toolName: 'gmail.read_thread',
+          status: 'succeeded',
+          result: { messages: [{ text: 'Check-in begins at 3 PM.' }] },
+        },
+      ],
+    });
+    expect(outcome.kind).toBe('card');
+    if (outcome.kind === 'card') {
+      expect(outcome.payload.kind).toBe('generated-card');
+      expect(outcome.payload.spec.title).toBe('Hotel reservation');
+    }
+  });
+
+  it('distinguishes prefilter no-op, thrown provider failure, and returned failure', async () => {
+    let prefilterCalls = 0;
+    const skipped = await generateEvidenceCardOutcome({
+      router: {
+        object: async () => {
+          prefilterCalls += 1;
+          throw new Error('must not be called');
+        },
+      } as unknown as ModelRouter,
+      sourceText: 'A routine note with no saved object.',
+      evidence: [],
+    });
+    expect(skipped).toEqual({ kind: 'no_op' });
+    expect(prefilterCalls).toBe(0);
+
+    let thrownCalls = 0;
+    const thrown = await generateEvidenceCardOutcome({
+      router: {
+        object: async () => {
+          thrownCalls += 1;
+          throw new Error('bounded synthetic router failure');
+        },
+      } as unknown as ModelRouter,
+      sourceText: 'routine note',
+      evidence: [],
+      explicitRequest: true,
+    });
+    expect(thrown).toEqual({ kind: 'unknown' });
+    expect(thrownCalls).toBe(1);
+
+    let returnedCalls = 0;
+    const budgetBlocked = await generateEvidenceCardOutcome({
+      router: {
+        object: async () => {
+          returnedCalls += 1;
+          return {
+            ok: false as const,
+            decision: { mode: 'park' as const, reason: 'synthetic budget park' },
+            attempts: [],
+          };
+        },
+      } as unknown as ModelRouter,
+      sourceText: 'routine note',
+      evidence: [],
+      explicitRequest: true,
+    });
+    expect(budgetBlocked).toEqual({ kind: 'budget_blocked', mode: 'park' });
+    expect(returnedCalls).toBe(1);
+
+    const ambiguousReturnedFailure = await generateEvidenceCardOutcome({
+      router: {
+        object: async () => {
+          returnedCalls += 1;
+          return {
+            ok: false as const,
+            decision: { mode: 'block' as const, reason: 'synthetic fallback budget block' },
+            attempts: [{ provider: 'synthetic', outcome: 'failed' }],
+          };
+        },
+      } as unknown as ModelRouter,
+      sourceText: 'routine note',
+      evidence: [],
+      explicitRequest: true,
+    });
+    expect(ambiguousReturnedFailure).toEqual({ kind: 'unknown' });
+    expect(returnedCalls).toBe(2);
+  });
+
+  it('keeps budget blocking nullable for legacy callers', async () => {
+    await expect(
+      generateEvidenceCard({
+        router: {
+          object: async () => ({
+            ok: false as const,
+            decision: { mode: 'block' as const, reason: 'synthetic budget block' },
+            attempts: [],
+          }),
+        } as unknown as ModelRouter,
+        sourceText: 'routine note',
+        evidence: [],
+        explicitRequest: true,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it('keeps the legacy nullable facade while exposing returned non-card as no-op', async () => {
+    let calls = 0;
+    const router = {
+      object: async () => {
+        calls += 1;
+        return { ok: true as const, object: { cardable: false } };
+      },
+    } as unknown as ModelRouter;
+    await expect(
+      generateEvidenceCardOutcome({
+        router,
+        sourceText: 'routine note',
+        evidence: [],
+        explicitRequest: true,
+        sourceKey: 'gmail:synthetic-event',
+      }),
+    ).resolves.toEqual({ kind: 'no_op' });
+    await expect(
+      generateEvidenceCard({
+        router,
+        sourceText: 'routine note',
+        evidence: [],
+        explicitRequest: true,
+        sourceKey: 'gmail:synthetic-event',
+      }),
+    ).resolves.toBeNull();
+    expect(calls).toBe(2);
+  });
+});
+
 describe('an explicitly requested card', () => {
   it('reaches the compiler even though the request carries no cardable keyword', async () => {
     const asked = stubRouter();
@@ -460,6 +624,63 @@ describe('an explicitly requested card', () => {
     expect(ambient.calls[0]).not.toContain('73535835545212');
   });
 });
+
+it('omits a booking PIN from a deterministic hotel card while preserving safe check-in information', async () => {
+  const result = await generateEvidenceCard({
+    router: {
+      object: async () => {
+        throw new Error('not needed');
+      },
+    } as unknown as ModelRouter,
+    sourceText: 'Create a card for my hotel reservation',
+    explicitRequest: true,
+    evidence: [
+      {
+        toolName: 'gmail.read_thread',
+        status: 'succeeded',
+        result: {
+          messages: [{ text: 'Harbor Hotel. Check-in October 12 at 3 PM. Booking PIN: 892174.' }],
+        },
+      },
+    ],
+  });
+  expect(result).not.toBeNull();
+  expect(JSON.stringify(result?.spec)).not.toContain('892174');
+  expect(JSON.stringify(result?.spec)).toContain('Check-in October 12 at 3 PM');
+});
+
+it.each([
+  ['Account identifier: ACCT-77031.', 'ACCT-77031'],
+  [
+    'Bearer link: https://hotel.example/claim/eyJhbGciOiJIUzI1NiJ9.secret.',
+    'https://hotel.example/claim/eyJhbGciOiJIUzI1NiJ9.secret',
+  ],
+])(
+  'omits accepted alternate hotel secrets from a deterministic card: %s',
+  async (secretSentence, secret) => {
+    const result = await generateEvidenceCard({
+      router: {
+        object: async () => {
+          throw new Error('not needed');
+        },
+      } as unknown as ModelRouter,
+      sourceText: 'Create a card for my hotel reservation',
+      explicitRequest: true,
+      evidence: [
+        {
+          toolName: 'gmail.read_thread',
+          status: 'succeeded',
+          result: {
+            messages: [{ text: `Harbor Hotel. Check-in October 12 at 3 PM. ${secretSentence}` }],
+          },
+        },
+      ],
+    });
+    expect(result).not.toBeNull();
+    expect(JSON.stringify(result?.spec)).not.toContain(secret);
+    expect(JSON.stringify(result?.spec)).toContain('Check-in October 12 at 3 PM');
+  },
+);
 
 it('creates a short hotel confirmation card directly from literal email evidence', async () => {
   const details = 'Harbor Hotel. Check-in September 5, 2026 at 4 PM. Total $105.85.';

@@ -3,6 +3,7 @@ export * from './canary.js';
 export * from './chat.js';
 export * from './chat-card.js';
 export * from './code-exec.js';
+export * from './communication-receipt.js';
 export * from './config.js';
 export * from './cost.js';
 export * from './email-provenance.js';

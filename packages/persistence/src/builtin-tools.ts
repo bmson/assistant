@@ -1,4 +1,10 @@
-import type { SituationPackView } from './situations-schema.js';
+import { createHash } from 'node:crypto';
+import type { SituationDecisionContext, SituationPackView } from './situations-schema.js';
+
+/** Stable, opaque revision for one exact persisted conversation message body. */
+export function conversationMessageSourceRevision(messageId: string, text: string): string {
+  return createHash('sha256').update(messageId).update('\0').update(text).digest('hex');
+}
 
 /** Occasion fields the `occasions.save` tool records for one named person. */
 export interface OccasionToolSaveInput {
@@ -52,16 +58,52 @@ export interface ContactLookupRepository {
 }
 
 export interface ConversationSearchMatch {
+  messageId: string;
+  /** Revision of this exact message body, suitable for stale-source checks. */
+  sourceRevision: string;
   conversationId: string;
   text: string;
   createdAt: Date;
 }
 
 /** Owner-scoped message search behind `conversations.search`. */
+export interface ConversationSearchSourceRef {
+  messageId: string;
+  conversationId: string;
+  sourceRevision: string;
+}
+
+export interface ConversationSearchRefreshResult {
+  /** Whether each supplied reference still names the same visible owner source. */
+  unchangedSourceRefs: boolean[];
+  /** Bounded literal substring results, never represented as semantic ranking. */
+  matches: ConversationSearchMatch[];
+  mode: 'text';
+  /** Exact erasure generation observed while validating references and reading matches. */
+  observationGeneration: string | null;
+}
+
 export interface ConversationSearchRepository {
+  /** Validate exact stored search source identities without rerunning a query. */
+  validateSources?(input: {
+    agentId: string;
+    currentConversationId?: string;
+    sourceRefs: ConversationSearchSourceRef[];
+  }): Promise<{ unchangedSourceRefs: boolean[]; observationGeneration: string | null }>;
+  refreshForResume(input: {
+    agentId: string;
+    currentConversationId?: string;
+    query: string;
+    limit: number;
+    sourceRefs: ConversationSearchSourceRef[];
+  }): Promise<ConversationSearchRefreshResult>;
   semantic(input: {
     agentId: string;
     embedding: number[];
+    /** Identity reported by the model router for this exact query vector. */
+    embeddingSpaceKey: string;
+    /** Authenticated current task conversation; only this thread bypasses an erase cutoff. */
+    currentConversationId?: string;
     limit: number;
   }): Promise<Array<ConversationSearchMatch & { similarity: number }>>;
   /** Case-insensitive substring match, newest first. */
@@ -69,6 +111,8 @@ export interface ConversationSearchRepository {
     agentId: string;
     query: string;
     limit: number;
+    /** Authenticated current task conversation; only this thread bypasses an erase cutoff. */
+    currentConversationId?: string;
   }): Promise<ConversationSearchMatch[]>;
 }
 
@@ -115,4 +159,14 @@ export interface SituationToolRepository {
   decisions(agentId: string, query: string, packId?: string): Promise<SituationDecisionMatch[]>;
   /** Tool commands never carry owner confirmation. */
   command(agentId: string, input: unknown): Promise<SituationCommandResult>;
+}
+
+/** Read-only situation choices used to ground owner chat before planning. */
+export interface SituationDecisionContextRepository {
+  readonly kind: 'situation-decision-context-repository';
+  retrieve(input: {
+    agentId: string;
+    discussionFrame: string;
+    limit?: number;
+  }): Promise<SituationDecisionContext[]>;
 }

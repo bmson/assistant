@@ -69,31 +69,24 @@ describe('diffCalendarEvents — the boring but critical cases', () => {
     expect(diffCalendarEvents(current, [], NOW, true)).toEqual([]);
   });
 
-  it('never reads an absent CURRENT list as "everything was cancelled" — callers must not pass one for a failed read', () => {
-    // This is the shape a caller would produce by mistake if it degraded a
-    // failed calendar read to `current: []` instead of skipping the diff
-    // entirely (see the safety contract on `diffCalendarEvents`, and
-    // `pulse.ts`'s `syncCalendarSnapshot`, which never calls this function on
-    // that path). The function itself cannot tell a genuinely empty
-    // (complete) read from a failed one — that is why the contract puts the
-    // burden on the caller — but it must still behave sanely: every prior
-    // upcoming event is reported gone, never silently swallowed or thrown.
-    const previous = [
-      snapshot({ eventId: 'evt-1' }),
-      snapshot({ eventId: 'evt-2', summary: 'Other meeting' }),
-    ];
-    const changes = diffCalendarEvents([], previous, NOW, true);
+  it('reports a missing event as unverified even when the bounded window is complete', () => {
+    const changes = diffCalendarEvents(
+      [],
+      [snapshot({ eventId: 'evt-1' }), snapshot({ eventId: 'evt-2' })],
+      NOW,
+      true,
+    );
     expect(changes).toHaveLength(2);
-    expect(changes.every((c) => c.kind === 'cancelled')).toBe(true);
+    expect(changes.every((c) => c.kind === 'unverified')).toBe(true);
   });
 });
 
 describe('diffCalendarEvents — cancelled', () => {
-  it('flags a previously-upcoming event missing from a complete read', () => {
+  it('keeps an absent upcoming event unverified instead of inferring cancellation', () => {
     const changes = diffCalendarEvents([], [snapshot()], NOW, true);
     expect(changes).toEqual([
       {
-        kind: 'cancelled',
+        kind: 'unverified',
         calendarId: 'work@example.com',
         eventId: 'evt-1',
         iCalUID: 'evt-1@google.com',

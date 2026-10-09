@@ -17,6 +17,13 @@ export interface ConsolidationFact {
   createdAt: Date;
   validFrom: Date | null;
   validUntil: Date | null;
+  /** Import sources whose content contributes to this fact, when known. */
+  importSources?: string[];
+  /** Exact source-unit audit spans retained when a fact is rewritten. */
+  importSourceProvenance?: Array<{
+    source: string;
+    sourceUnitProvenance: import('./import-jobs.js').ImportUnitProvenance[];
+  }>;
   /** Opaque optimistic concurrency token from the storage adapter. */
   version: string;
 }
@@ -33,6 +40,7 @@ export interface ConsolidationMerge {
   content: string;
   contentHash: string;
   embedding: number[];
+  embeddingSpaceKey: string;
   kind: string;
   confidence: string;
   importance: number;

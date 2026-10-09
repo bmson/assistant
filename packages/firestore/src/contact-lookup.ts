@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { ContactLookupRepository, ContactLookupRow, Records } from '@assistant/persistence';
 import type { DocumentReference, Transaction } from '@google-cloud/firestore';
+import { assertPrivacyErasureGenerationInTransaction } from './privacy-erasure.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 /** Contacts are read whole; an installation past this bound fails instead of matching a subset. */
@@ -48,6 +49,21 @@ export function matchSubjectContact(
   if (!name || ASSISTANT_ALIASES.has(name.toLowerCase())) return null;
   const owner = rows.find((row) => row.trust === 'owner');
   const lower = name.toLowerCase();
+  const exact = rows.filter((row) =>
+    [row.name, ...(row.aliases ?? [])].some(
+      (candidate) => candidate.trim().toLowerCase() === lower,
+    ),
+  );
+  if (lower !== 'owner') {
+    if (exact.length > 1) return null;
+    if (exact[0]) return { contactId: exact[0].id };
+    const prefixes = rows.filter((row) =>
+      [row.name, ...(row.aliases ?? [])].some((candidate) =>
+        namePrefixMatch(lower, candidate.toLowerCase()),
+      ),
+    );
+    if (prefixes.length > 1) return null;
+  }
   const ownerMatch = owner
     ? [owner.name, ...(owner.aliases ?? [])].find((candidate) =>
         namePrefixMatch(lower, candidate.toLowerCase()),
@@ -79,9 +95,9 @@ export function contactNameRef(store: InstallationStore, name: string): Document
 export function stageNewContact(
   tx: Transaction,
   store: InstallationStore,
-  input: { name: string; relationship?: string; now: Date },
+  input: { name: string; relationship?: string; now: Date; replaceMarker?: boolean; id?: string },
 ): string {
-  const id = randomUUID();
+  const id = input.id ?? randomUUID();
   const contact: Records['contacts'] = {
     id,
     name: input.name.trim(),
@@ -95,7 +111,9 @@ export function stageNewContact(
     notes: '',
   };
   tx.create(store.doc('contacts', id), encodeRecord(contact));
-  tx.create(contactNameRef(store, input.name), { contactId: id, createdAt: input.now });
+  if (input.replaceMarker)
+    tx.set(contactNameRef(store, input.name), { contactId: id, createdAt: input.now });
+  else tx.create(contactNameRef(store, input.name), { contactId: id, createdAt: input.now });
   return id;
 }
 
@@ -110,14 +128,44 @@ export async function resolveFirestoreSubjectContact(
   agentId: string,
   subject: string,
   relationship?: string,
+  observedPrivacyGeneration?: string | null,
 ): Promise<string | null> {
   const matched = matchSubjectContact(await ownedContacts(store, agentId), subject);
   if (!matched || 'contactId' in matched) return matched?.contactId ?? null;
   const keyRef = contactNameRef(store, matched.create);
   return store.db.runTransaction(async (tx) => {
+    if (observedPrivacyGeneration !== undefined)
+      await assertPrivacyErasureGenerationInTransaction(
+        tx,
+        store,
+        agentId,
+        observedPrivacyGeneration,
+      );
     const existing = await tx.get(keyRef);
-    if (existing.exists) return String(existing.get('contactId'));
-    return stageNewContact(tx, store, { name: matched.create, relationship, now: store.now() });
+    if (existing.exists) {
+      const contactId = existing.get('contactId');
+      const target =
+        typeof contactId === 'string' ? await tx.get(store.doc('contacts', contactId)) : undefined;
+      if (
+        target?.exists &&
+        target.get('id') === contactId &&
+        (target.get('agentId') === undefined || target.get('agentId') === agentId) &&
+        [
+          target.get('name'),
+          ...(Array.isArray(target.get('aliases')) ? target.get('aliases') : []),
+        ].some(
+          (name) =>
+            typeof name === 'string' && name.trim().toLowerCase() === matched.create.toLowerCase(),
+        )
+      )
+        return contactId;
+    }
+    return stageNewContact(tx, store, {
+      name: matched.create,
+      relationship,
+      now: store.now(),
+      replaceMarker: existing.exists,
+    });
   });
 }
 

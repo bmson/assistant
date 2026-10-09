@@ -1,5 +1,6 @@
 import { approveAndRememberApproval, decideApproval } from '@assistant/application/approvals';
 import { withApprovalDecisionStore } from '@/lib/approval-store';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
 export const dynamic = 'force-dynamic';
@@ -13,8 +14,10 @@ export async function POST(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid approval id' }, { status: 400 });
+  const mutationBody = await readMobileMutationBody(request, ['action', 'decision', 'payload']);
+  if (!mutationBody.ok) return mutationBody.response;
 
-  const body = (await request.json().catch(() => null)) as {
+  const body = mutationBody.value as {
     action?: unknown;
     decision?: unknown;
     payload?: unknown;

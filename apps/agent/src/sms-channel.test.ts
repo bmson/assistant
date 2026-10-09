@@ -284,8 +284,14 @@ describe('sms channel trust boundary (unit)', () => {
 
     await deliverSmsFinal(
       deps,
-      { id: 'task-unknown', conversationId: 'conversation-unknown', trust: 'unknown' },
+      {
+        id: 'task-unknown',
+        type: 'sms_turn',
+        conversationId: 'conversation-unknown',
+        trust: 'unknown',
+      },
       'private answer',
+      'task-unknown:final:1',
     );
 
     expect(sentSms).toHaveLength(before);

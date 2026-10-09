@@ -121,10 +121,9 @@ describe.skipIf(!localEmulator)('Firestore mobile location pings with PostgreSQL
     expect((await store.collection('locationPings').get()).size).toBe(0);
   });
 
-  it('enqueues one arrival nudge after a confirmed stop somewhere new', async () => {
-    // Routine baseline far away earlier today, then a confirming fix here.
+  it('does not create arrival tasks without the separate arrival opt-in', async () => {
     await seedPing(51.5, -0.12, minutesAgo(600));
-    await seedPing(64.14, -21.94, minutesAgo(5));
+    await seedPing(64.14, -21.94, minutesAgo(4));
     const body = {
       lat: 64.1401,
       lng: -21.9401,
@@ -134,12 +133,48 @@ describe.skipIf(!localEmulator)('Firestore mobile location pings with PostgreSQL
       capturedAt: new Date().toISOString(),
     };
     expect((await post(body)).status).toBe(200);
-    const tasks = await arrivalTasks();
-    expect(tasks).toHaveLength(1);
-    expect(tasks[0]).toMatchObject({ trust: 'assistant', type: 'adhoc', status: 'pending' });
+    expect(await arrivalTasks()).toEqual([]);
 
-    // The cooldown keeps a second stop from adding another nudge.
+    // A replay also leaves no identifiable task key behind.
     expect((await post({ ...body, capturedAt: new Date().toISOString() })).status).toBe(200);
-    expect(await arrivalTasks()).toHaveLength(1);
+    expect(await arrivalTasks()).toEqual([]);
+  });
+
+  it('creates a location-free task only with an expiring opted-in observation reference', async () => {
+    const oldPlaceAt = minutesAgo(60);
+    const dwellAt = minutesAgo(4);
+    const capturedAt = new Date();
+    await seedPing(51.5, -0.12, oldPlaceAt);
+    await seedPing(64.1401, -21.9401, dwellAt);
+
+    const response = await post({
+      lat: 64.1402,
+      lng: -21.9402,
+      accuracyM: 20,
+      label: 'sensitive venue name',
+      source: 'app',
+      arrivalOptIn: true,
+      capturedAt: capturedAt.toISOString(),
+    });
+    expect(response.status).toBe(200);
+    const matches = await arrivalTasks();
+    expect(matches).toHaveLength(1);
+    const task = matches[0] as Record<string, unknown>;
+    const serialized = JSON.stringify(task);
+    expect(serialized).toContain('arrivalObservationId');
+    expect(serialized).toContain('arrivalExpiresAt');
+    expect(serialized).not.toContain('sensitive venue name');
+    expect(serialized).not.toContain('64.1402');
+    expect(serialized).not.toContain('-21.9402');
+    expect(task.externalEventId).toMatch(new RegExp(`^arrival:${agentId}:\\d{4}-\\d{2}-\\d{2}$`));
+
+    const trigger = task.trigger as { payload?: Record<string, unknown> } | undefined;
+    const payload = trigger?.payload ?? {};
+    const observationId = payload.arrivalObservationId as string;
+    const observation = await store.doc('locationPings', observationId).get();
+    expect(observation.get('arrivalExpiresAt')?.toDate()).toBeInstanceOf(Date);
+    await store.doc('locationPings', observationId).update({ arrivalExpiresAt: minutesAgo(1) });
+    const expired = await store.doc('locationPings', observationId).get();
+    expect(expired.get('arrivalExpiresAt')?.toDate().getTime()).toBeLessThan(Date.now());
   });
 });

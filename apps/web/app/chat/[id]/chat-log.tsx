@@ -16,6 +16,7 @@
  * change. During a stream that leaves exactly one row re-rendering per token.
  */
 
+import type { CardForm, CardFormValues } from '@assistant/persistence/card-form';
 import type { UIMessage } from 'ai';
 import Link from 'next/link';
 import { memo } from 'react';
@@ -37,6 +38,7 @@ import { recordRecallFeedbackAction } from '../actions';
 import { ActionChips } from './action-chips';
 import { ApprovalGroup } from './approval-group';
 import { ApprovalSummaryCard } from './approval-summary';
+import type { CardFormDraft, CardFormIdentity } from './card-form-operations';
 import type { InlineApprovalPart } from './inline-approval';
 import { InlineBudgetRequest, type InlineBudgetRequestPart } from './inline-budget-request';
 import { type InlineSuggestionPart, SuggestionCard } from './inline-suggestion';
@@ -56,6 +58,7 @@ import {
   cardsReplaceProse,
   ResponseCards,
   rendersAllCards,
+  rendersSomeCards,
   responseCardPayloads,
 } from './response-card';
 import { standaloneResponseCards } from './suggestion-context';
@@ -78,6 +81,14 @@ interface ChatMessageRowProps {
   renderedNow: Date;
   onSend: (text: string) => void;
   onRunForReal: (text: string) => void;
+  conversationId?: string;
+  formSessionScope?: string;
+  formDraft?: CardFormDraft | null;
+  formError?: string | null;
+  onChangeForm?: (identity: CardFormIdentity, form: CardForm, values: CardFormValues) => void;
+  onReviewForm?: (identity: CardFormIdentity, form: CardForm, values: CardFormValues) => void;
+  onCarryForm?: (identity: CardFormIdentity, form: CardForm) => void;
+  onDiscardForm?: (identity: CardFormIdentity) => void;
 }
 
 const ChatMessageRow = memo(function ChatMessageRow({
@@ -93,6 +104,14 @@ const ChatMessageRow = memo(function ChatMessageRow({
   renderedNow,
   onSend,
   onRunForReal,
+  conversationId,
+  formSessionScope,
+  formDraft,
+  formError,
+  onChangeForm,
+  onReviewForm,
+  onCarryForm,
+  onDiscardForm,
 }: ChatMessageRowProps) {
   const parts = message.parts as Array<
     UIMessage['parts'][number] | InlineApprovalPart | InlineBudgetRequestPart | InlineSuggestionPart
@@ -173,8 +192,16 @@ const ChatMessageRow = memo(function ChatMessageRow({
   // reply itself, which summarizes an answer rather than being one.
   const allCards = message.role === 'assistant' ? responseCardPayloads(parts) : [];
   const cards = standaloneResponseCards(allCards, suggestionParts);
-  const renderCards = cards.length > 0 && rendersAllCards(cards) && noticeKind === null;
-  const richAnswer = allCards.length > 0 && rendersAllCards(allCards) && noticeKind === null;
+  const cardContext = {
+    onSendAvailable: !busy && Boolean(onSend),
+    onCardFormReviewAvailable: Boolean(
+      conversationId && formSessionScope && onReviewForm && onChangeForm,
+    ),
+  };
+  const renderCards =
+    cards.length > 0 && rendersSomeCards(cards, cardContext) && noticeKind === null;
+  const richAnswer =
+    allCards.length > 0 && rendersAllCards(allCards, cardContext) && noticeKind === null;
   const hasText =
     renderedTextParts.length > 0 &&
     noticeKind === null &&
@@ -302,7 +329,15 @@ const ChatMessageRow = memo(function ChatMessageRow({
         <ResponseCards
           cards={cards}
           timeZone={agentTimezone}
-          onSend={onSend}
+          conversationId={conversationId}
+          formSessionScope={formSessionScope}
+          formDraft={formDraft}
+          formError={formError}
+          onChangeForm={onChangeForm}
+          onReviewForm={onReviewForm}
+          onCarryForm={onCarryForm}
+          onDiscardForm={onDiscardForm}
+          onSend={busy ? undefined : onSend}
           onRefresh={refreshSavedCardInline}
         />
       ) : null}
@@ -340,6 +375,14 @@ export interface ChatLogProps {
   initialMessageIds: Set<string>;
   onSend: (text: string) => void;
   onRunForReal: (text: string) => void;
+  conversationId?: string;
+  formSessionScope?: string;
+  formDraft?: CardFormDraft | null;
+  formError?: string | null;
+  onChangeForm?: (identity: CardFormIdentity, form: CardForm, values: CardFormValues) => void;
+  onReviewForm?: (identity: CardFormIdentity, form: CardForm, values: CardFormValues) => void;
+  onCarryForm?: (identity: CardFormIdentity, form: CardForm) => void;
+  onDiscardForm?: (identity: CardFormIdentity) => void;
 }
 
 /**
@@ -357,6 +400,14 @@ export const ChatLog = memo(function ChatLog({
   initialMessageIds,
   onSend,
   onRunForReal,
+  conversationId,
+  formSessionScope,
+  formDraft,
+  formError,
+  onChangeForm,
+  onReviewForm,
+  onCarryForm,
+  onDiscardForm,
 }: ChatLogProps) {
   // Carried forward as the list is walked rather than re-scanned backwards from
   // each row, which turned a long thread into quadratic work.
@@ -382,6 +433,14 @@ export const ChatLog = memo(function ChatLog({
             renderedNow={renderedNow}
             onSend={onSend}
             onRunForReal={onRunForReal}
+            conversationId={conversationId}
+            formSessionScope={formSessionScope}
+            formDraft={formDraft}
+            formError={formError}
+            onChangeForm={onChangeForm}
+            onReviewForm={onReviewForm}
+            onCarryForm={onCarryForm}
+            onDiscardForm={onDiscardForm}
           />
         );
       })}

@@ -3,13 +3,22 @@ import {
   completeTask,
   enqueueTask,
   markTaskNeedsAttention,
+  notifyTaskEnqueued,
   persistMessage,
 } from '@assistant/core';
 import type { Db } from '@assistant/db';
 import type {
+  ApplicationConfirmationNoticeFence,
   ApplicationConfirmationRepository,
   ApplicationConfirmationRecord as ApplicationConfirmationRow,
+  EmailContentProvenanceSnapshot,
+  EmailObserverEffectFence,
   ExecutionPersistence,
+} from '@assistant/persistence';
+import {
+  applicationConfirmationSourceDigest,
+  applicationConfirmationTokenInSource,
+  notificationDeliveryKey,
 } from '@assistant/persistence';
 import {
   type ApplicationActionState,
@@ -61,6 +70,46 @@ export interface ApplicationConfirmationInput {
   /** True only for Gmail receiver-authenticated, From-aligned SPF/DKIM/DMARC. */
   authenticated: boolean;
   now?: Date;
+  /** Optional atomic source/observer fence for durable email-observer callers. */
+  emailObserverEffectFence?: EmailObserverEffectFence;
+  /** Authored-span provenance captured with the canonical direct-email source. */
+  emailContentProvenance?: EmailContentProvenanceSnapshot | null;
+}
+
+export type ApplicationConfirmationRoute = 'application_confirmation' | 'email_triage';
+
+/**
+ * Resolve the one durable direct-mail route without claiming a watch, expiring
+ * rows, creating tasks, or notifying anyone. The result is frozen with the
+ * atomic email admission; a later worker applies exactly that branch. A match
+ * that becomes stale after this read stays on the application path and is
+ * surfaced for review rather than falling through to generic triage.
+ */
+export async function routeApplicationConfirmation(
+  deps: ApplicationConfirmationDeps,
+  input: ApplicationConfirmationInput,
+): Promise<ApplicationConfirmationRoute> {
+  if (!input.authenticated) return 'email_triage';
+  const from = input.from.trim().toLowerCase();
+  if (!from || !input.messageId) return 'email_triage';
+
+  const applications = deps.persistence.applications;
+  const confirmationMessageId = `gmail:${input.messageId}`;
+  if (await applications.byConfirmationMessage(input.agentId, confirmationMessageId))
+    return 'application_confirmation';
+
+  const candidates = await applications.awaitingFrom(input.agentId, from, input.now ?? new Date());
+  if (candidates.length === 0) return 'email_triage';
+  return candidates.some((candidate) =>
+    applicationConfirmationTokenInSource({
+      tokenHash: candidate.confirmationTokenHash,
+      subject: input.subject,
+      body: input.body,
+      provenance: input.emailContentProvenance,
+    }),
+  )
+    ? 'application_confirmation'
+    : 'email_triage';
 }
 
 /** Hash bounded opaque-token candidates without exposing raw email to a privileged task. */
@@ -91,6 +140,7 @@ async function postNotice(
   taskId: string,
   text: string,
   suffix: string,
+  applicationConfirmationNoticeFence?: ApplicationConfirmationNoticeFence,
 ): Promise<void> {
   if (!record.conversationId) return;
   await persistMessage(deps.persistence.messages, {
@@ -101,6 +151,7 @@ async function postNotice(
     parts: [{ type: 'text', text }],
     text,
     channelMessageId: `application-confirmation-notice:${taskId}:${suffix}`,
+    ...(applicationConfirmationNoticeFence ? { applicationConfirmationNoticeFence } : {}),
   });
 }
 
@@ -108,7 +159,33 @@ async function reportAmbiguous(
   deps: ApplicationConfirmationDeps,
   input: ApplicationConfirmationInput,
   matches: ApplicationConfirmationRow[],
-): Promise<void> {
+): Promise<{ recorded: boolean; applicationIds: string[] }> {
+  if (input.emailObserverEffectFence) {
+    const committed = await deps.persistence.applications.recordAmbiguousObserver({
+      emailObserverEffectFence: input.emailObserverEffectFence,
+    });
+    if (committed.kind === 'not_ambiguous') return { recorded: false, applicationIds: [] };
+    const delivery = await deps.notifyOwner({
+      taskId: committed.taskId,
+      text: `An authenticated confirmation from ${committed.from} matched ${committed.applicationIds.length} application watches; I changed nothing and it needs your review.`,
+      deliveryKey: notificationDeliveryKey(
+        'email-observer',
+        input.agentId,
+        `gmail:${input.messageId}`,
+        'google.application-confirmation',
+        '1',
+        'ambiguous',
+      ),
+      emailObserverEffectFence: input.emailObserverEffectFence,
+    });
+    if (
+      !delivery ||
+      delivery.legs.some((leg) => leg.status === 'unknown' || leg.status === 'failed')
+    )
+      throw new Error('application_confirmation_notice_unknown');
+    return { recorded: true, applicationIds: committed.applicationIds };
+  }
+
   const { task, created } = await enqueueTask(deps.persistence.tasks, {
     type: 'adhoc',
     event: {
@@ -146,12 +223,22 @@ async function reportAmbiguous(
       `ambiguous:${record.id}`,
     );
   }
-  await deps
-    .notifyOwner({
-      taskId: task.id,
-      text: `An authenticated confirmation from ${input.from.toLowerCase()} matched ${matches.length} application watches; I changed nothing and it needs your review.`,
-    })
-    .catch((err) => console.error('ambiguous confirmation owner notification failed', err));
+  const delivery = await deps.notifyOwner({
+    taskId: task.id,
+    text: `An authenticated confirmation from ${input.from.toLowerCase()} matched ${matches.length} application watches; I changed nothing and it needs your review.`,
+    deliveryKey: notificationDeliveryKey(
+      'email-observer',
+      input.agentId,
+      `gmail:${input.messageId}`,
+      'google.application-confirmation',
+      '1',
+      'ambiguous',
+    ),
+    emailObserverEffectFence: input.emailObserverEffectFence,
+  });
+  if (!delivery || delivery.legs.some((leg) => leg.status === 'unknown' || leg.status === 'failed'))
+    throw new Error('application_confirmation_notice_unknown');
+  return { recorded: true, applicationIds: matches.map((record) => record.id) };
 }
 
 async function enqueueAuthorizedUpdate(
@@ -159,6 +246,39 @@ async function enqueueAuthorizedUpdate(
   input: ApplicationConfirmationInput,
   record: ApplicationConfirmationRow,
 ): Promise<ApplicationConfirmationResult> {
+  if (input.emailObserverEffectFence) {
+    const confirmationMessageId = `gmail:${input.messageId}`;
+    const handoff = await deps.persistence.applications.claimAndEnqueue(record.id, {
+      confirmationMessageId,
+      confirmationFrom: input.from.trim().toLowerCase(),
+      now: input.now ?? new Date(),
+      emailObserverEffectFence: input.emailObserverEffectFence,
+      confirmationTokenHash: record.confirmationTokenHash,
+      sourceDigest: applicationConfirmationSourceDigest({
+        confirmationMessageId,
+        confirmationFrom: input.from.trim().toLowerCase(),
+        subject: input.subject,
+        body: input.body,
+      }),
+    });
+    if (!handoff) {
+      const current = await deps.persistence.applications.get(record.id);
+      if (current?.status === 'confirmation_received')
+        throw new Error('application_confirmation_handoff_missing');
+      return current
+        ? { kind: 'replay', applicationId: current.id, status: current.status }
+        : { kind: 'ignored' };
+    }
+    notifyTaskEnqueued(handoff.task, handoff.created);
+    if (handoff.task.status === 'done') {
+      return { kind: 'replay', applicationId: record.id, status: 'updated' };
+    }
+    if (handoff.task.status === 'needs_attention' || handoff.task.status === 'failed') {
+      return { kind: 'replay', applicationId: record.id, status: handoff.record.status };
+    }
+    return { kind: 'in_progress', applicationId: record.id };
+  }
+
   const { task } = await enqueueTask(deps.persistence.tasks, {
     type: 'adhoc',
     event: {
@@ -265,8 +385,13 @@ async function setActionOutcome(
   const current = await loadApplicationRecord(deps, id);
   if (!current) throw new Error('application confirmation disappeared during execution');
   const state = normalizedActionState(current);
+  const actionOutcome = {
+    ...(state[action] ?? {}),
+    status,
+    error: error.slice(0, 2_000),
+  };
   const updated = await deps.persistence.applications.updateActionState(id, {
-    actionState: { ...state, [action]: { status, error: error.slice(0, 2_000) } },
+    actionState: { ...state, [action]: actionOutcome },
     now: new Date(),
   });
   if (!updated) throw new Error('failed to checkpoint application action outcome');
@@ -403,6 +528,28 @@ export async function executeApplicationConfirmationTask(
   const claimed = await claimTask(tasks, queued.id, generation);
   if (!claimed) return { outcome: 'not_claimable', applicationId };
 
+  const producerGenerationPresent = Object.hasOwn(trigger.payload, 'producerPrivacyGeneration');
+  const producerGeneration = trigger.payload.producerPrivacyGeneration;
+  if (
+    !producerGenerationPresent ||
+    (producerGenerationPresent &&
+      typeof producerGeneration !== 'string' &&
+      producerGeneration !== null) ||
+    (producerGenerationPresent &&
+      (record.producerPrivacyGeneration !== producerGeneration ||
+        !(await deps.persistence.applications.isPrivacyGenerationCurrent(
+          claimed.agentId,
+          producerGeneration as string | null,
+        ))))
+  ) {
+    await markTaskNeedsAttention(
+      tasks,
+      claimed,
+      'The owner privacy generation changed after this confirmation was queued; no Google update was attempted.',
+    );
+    return { outcome: 'needs_attention', applicationId };
+  }
+
   if (plannedActions(record).length === 0) {
     await markTaskNeedsAttention(tasks, claimed, 'No pre-authorized confirmation action exists.');
     return { outcome: 'needs_attention', applicationId };
@@ -430,6 +577,20 @@ export async function executeApplicationConfirmationTask(
   if (record.status === 'confirmation_received') {
     for (const action of plannedActions(record)) {
       if (state[action]?.status !== 'pending') continue;
+      if (
+        producerGenerationPresent &&
+        !(await deps.persistence.applications.isPrivacyGenerationCurrent(
+          claimed.agentId,
+          producerGeneration as string | null,
+        ))
+      ) {
+        await markTaskNeedsAttention(
+          tasks,
+          claimed,
+          'The owner privacy generation changed before the next Google update; no further action was attempted.',
+        );
+        return { outcome: 'needs_attention', applicationId };
+      }
       const definition = ACTION_TOOL[action];
       const outcome = await deps.dispatcher.dispatch({
         task: claimed,
@@ -502,14 +663,30 @@ export async function executeApplicationConfirmationTask(
   if (finalRecord) record = finalRecord;
 
   const copy = resultCopy(record, state);
-  await postNotice(deps, record, claimed.id, copy.notice, status);
+  const noticeFence = producerGenerationPresent
+    ? {
+        agentId: claimed.agentId,
+        taskId: claimed.id,
+        taskLeaseToken: claimed.leaseToken ?? '',
+        taskQueueGeneration: claimed.queueGeneration,
+        applicationId: record.id,
+        confirmationMessageId: record.confirmationMessageId ?? '',
+        producerPrivacyGeneration: producerGeneration as string | null,
+      }
+    : undefined;
+  await postNotice(deps, record, claimed.id, copy.notice, status, noticeFence);
   // The confirmation-email -> Sheet/Doc update is the flagship "send me
   // updates" milestone and it completes long after the owner's original
   // message, on an internal task that never routes through the channel
   // deliverers. Push the outcome to the owner's channel so an SMS/email-
   // originated flow is not silently finished on the dashboard alone.
   await deps
-    .notifyOwner({ taskId: claimed.id, text: copy.notice })
+    .notifyOwner({
+      taskId: claimed.id,
+      text: copy.notice,
+      deliveryKey: notificationDeliveryKey('application-confirmation-result', claimed.id, status),
+      ...(noticeFence ? { applicationConfirmationNoticeFence: noticeFence } : {}),
+    })
     .catch((err) => console.error('application confirmation owner notification failed', err));
   if (status === 'updated') {
     await completeTask(tasks, claimed, { status: 'done', progress: copy.progress });
@@ -567,7 +744,9 @@ export async function processApplicationConfirmation(
   if (!from || !input.messageId) return { kind: 'ignored' };
 
   const applications = deps.persistence.applications;
-  await applications.expireDue(now, input.agentId);
+  // A durable observer claim fences its own atomic watch transition below.
+  // Do not mutate unrelated expired watches from this still-unfenced path.
+  if (!input.emailObserverEffectFence) await applications.expireDue(now, input.agentId);
 
   const confirmationMessageId = `gmail:${input.messageId}`;
   const alreadyClaimed = await applications.byConfirmationMessage(
@@ -589,19 +768,73 @@ export async function processApplicationConfirmation(
   if (candidates.length === 0) return { kind: 'ignored' };
 
   const hashes = confirmationTokenHashes(`${input.subject}\n${input.body}`);
-  const matches = candidates.filter((candidate) => hashes.has(candidate.confirmationTokenHash));
+  const matches = input.emailObserverEffectFence
+    ? candidates.filter((candidate) =>
+        applicationConfirmationTokenInSource({
+          tokenHash: candidate.confirmationTokenHash,
+          subject: input.subject,
+          body: input.body,
+          provenance: input.emailContentProvenance,
+        }),
+      )
+    : candidates.filter((candidate) => hashes.has(candidate.confirmationTokenHash));
   if (matches.length === 0) return { kind: 'ignored' };
   if (matches.length > 1) {
-    await reportAmbiguous(deps, input, matches);
-    return { kind: 'ambiguous', applicationIds: matches.map((record) => record.id) };
+    const ambiguous = await reportAmbiguous(deps, input, matches);
+    if (!ambiguous.recorded) return { kind: 'ignored' };
+    return { kind: 'ambiguous', applicationIds: ambiguous.applicationIds };
   }
 
   const match = matches[0] as ApplicationConfirmationRow;
-  const claimed = await applications.claim(match.id, {
+  const baseClaimInput = {
     confirmationMessageId,
     confirmationFrom: from,
     now,
-  });
+  };
+  const claimInput = input.emailObserverEffectFence
+    ? {
+        ...baseClaimInput,
+        emailObserverEffectFence: input.emailObserverEffectFence,
+        confirmationTokenHash: match.confirmationTokenHash,
+        sourceDigest: applicationConfirmationSourceDigest({
+          confirmationMessageId,
+          confirmationFrom: from,
+          subject: input.subject,
+          body: input.body,
+        }),
+      }
+    : baseClaimInput;
+  if (input.emailObserverEffectFence) {
+    const handoff = await applications.claimAndEnqueue(match.id, {
+      ...claimInput,
+      emailObserverEffectFence: input.emailObserverEffectFence,
+      confirmationTokenHash: match.confirmationTokenHash,
+      sourceDigest: applicationConfirmationSourceDigest({
+        confirmationMessageId,
+        confirmationFrom: from,
+        subject: input.subject,
+        body: input.body,
+      }),
+    });
+    if (!handoff) {
+      const current = await applications.get(match.id);
+      if (current?.status === 'confirmation_received')
+        throw new Error('application_confirmation_handoff_missing');
+      if (current?.status === 'awaiting_confirmation')
+        throw new Error('application_confirmation_claim_rejected');
+      return current
+        ? { kind: 'replay', applicationId: current.id, status: current.status }
+        : { kind: 'ignored' };
+    }
+    notifyTaskEnqueued(handoff.task, handoff.created);
+    if (handoff.task.status === 'done')
+      return { kind: 'replay', applicationId: match.id, status: 'updated' };
+    if (handoff.task.status === 'needs_attention' || handoff.task.status === 'failed')
+      return { kind: 'replay', applicationId: match.id, status: handoff.record.status };
+    return { kind: 'in_progress', applicationId: match.id };
+  }
+
+  const claimed = await applications.claim(match.id, claimInput);
   if (!claimed) {
     const current = await applications.get(match.id);
     return current

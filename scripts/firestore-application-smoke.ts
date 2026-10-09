@@ -10,7 +10,11 @@ import {
   FirestoreGeneratedCardRepository,
   type InstallationStore,
 } from '@assistant/firestore';
-import type { EmbeddingSpace, Records } from '@assistant/persistence';
+import {
+  type EmbeddingSpace,
+  embeddingSpaceIdentityKey,
+  type Records,
+} from '@assistant/persistence';
 import { FieldValue } from '@google-cloud/firestore';
 import { createProfileMemoryCommands } from '../packages/application/src/profile/memory-commands.js';
 
@@ -34,6 +38,7 @@ function smokeMemory(
     createdAt,
     expiresAt: null,
     embedding: [1, ...new Array(APPLICATION_SMOKE_SPACE.dimensions - 1).fill(0)],
+    embeddingSpaceKey: embeddingSpaceKey(APPLICATION_SMOKE_SPACE),
     sourceTaskId: null,
     kind: 'fact',
     confidence: '0.90',
@@ -143,6 +148,17 @@ export async function firestoreApplicationSmoke(
     async embed() {
       if (!embeddingAvailable) throw new Error('synthetic embedding failure');
       return [[0, 1, ...new Array(APPLICATION_SMOKE_SPACE.dimensions - 2).fill(0)]];
+    },
+    async embedWithIdentity(texts: string[]) {
+      if (!embeddingAvailable) throw new Error('synthetic embedding failure');
+      return {
+        embeddings: texts.map(() => [
+          0,
+          1,
+          ...new Array(APPLICATION_SMOKE_SPACE.dimensions - 2).fill(0),
+        ]),
+        embeddingSpaceKey: embeddingSpaceIdentityKey(APPLICATION_SMOKE_SPACE),
+      };
     },
   });
   const tasksBeforeFailure = (await store.collection('tasks').count().get()).data().count;

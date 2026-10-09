@@ -1,0 +1,453 @@
+{
+  "format": 1,
+  "purpose": "Source composition and route drift evidence only; not a deployment or configured-runtime receipt.",
+  "runtimeSources": {
+    "packages/config/src/index.ts": "d65963a4a350f41242da86910f085d60909f13b584aa710e4a0423f60437fe9b",
+    "apps/agent/src/deps.ts": "269bdf806704651db85e1d1e9233308e7509c3716e59cbaf7892a9f9c9249d39",
+    "apps/agent/src/index.ts": "6da57b60f853ca6622142a12b70bb31a73e8155eac30dd7d905218c19ca2fd56",
+    "apps/web/lib/server.ts": "df2cd83f7c34ac905715baccbcca0e63a033bec34b0b58e65a22d01b5b1106f5",
+    "apps/web/proxy.ts": "a310425a758a8794546989776ea540230a92b0e7ad694bbed036f64ef17b05d1",
+    "packages/db/drizzle/meta/_journal.json": "ec18e35a44da2424b10565655b4dbc21bd2ee4d9c5cbff957c100b521248074a",
+    "infra/gcp/release-contracts.json": "8319fc0dd0a793719338a4b0692320f8de1fc82510ef08af80c08a77379a8a41"
+  },
+  "latestPostgresMigration": "0126_application_confirmation_notice_lineage",
+  "postgresSchemaVersion": 126,
+  "releaseContracts": {
+    "agent": {
+      "apiContract": 1,
+      "peerApi": {
+        "min": 1,
+        "max": 1
+      },
+      "postgresSchema": {
+        "min": 125,
+        "max": 126
+      },
+      "currentPostgresSchemaCompatible": true
+    },
+    "web": {
+      "apiContract": 1,
+      "peerApi": {
+        "min": 1,
+        "max": 1
+      },
+      "postgresSchema": {
+        "min": 125,
+        "max": 126
+      },
+      "currentPostgresSchemaCompatible": true
+    },
+    "browser": {
+      "apiContract": 1,
+      "peerApi": {
+        "min": 1,
+        "max": 1
+      },
+      "postgresSchema": {
+        "min": 0,
+        "max": 125
+      },
+      "currentPostgresSchemaCompatible": false
+    },
+    "code": {
+      "apiContract": 1,
+      "peerApi": {
+        "min": 1,
+        "max": 1
+      },
+      "postgresSchema": {
+        "min": 0,
+        "max": 125
+      },
+      "currentPostgresSchemaCompatible": false
+    },
+    "processor": {
+      "apiContract": 1,
+      "peerApi": {
+        "min": 1,
+        "max": 1
+      },
+      "postgresSchema": {
+        "min": 0,
+        "max": 125
+      },
+      "currentPostgresSchemaCompatible": false
+    }
+  },
+  "agentWebSchemaCompatible": true,
+  "webApiRouteCount": 93,
+  "routes": {
+    "apps/web/app/api/audit/[id]/route.ts": {
+      "methods": ["GET"],
+      "sha256": "1967fff839a75511c2546be991475d4aad54a81a2def36b85f94123ea22dbe16"
+    },
+    "apps/web/app/api/auth/[...nextauth]/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "447ba29a07f6e6c6b9c2d47096763ee3808bde2f148326c742ef35c627d3b210"
+    },
+    "apps/web/app/api/card-image/route.ts": {
+      "methods": ["GET"],
+      "sha256": "d56605084ca4c53bc8c3967e60e30852eae85a4da53863e75be0dda3c30ad6b5"
+    },
+    "apps/web/app/api/chat/cancel/route.ts": {
+      "methods": ["POST"],
+      "sha256": "6f291e1e5c252e73c553a7547208ef242bd0b91992fc0e6858c7a24b58c08bf8"
+    },
+    "apps/web/app/api/chat/route.ts": {
+      "methods": ["POST"],
+      "sha256": "255eb5867ebdbea3a151b0268568cac6421dfe1f278cb19316277dbd58c5e2f2"
+    },
+    "apps/web/app/api/chat/status/route.ts": {
+      "methods": ["GET"],
+      "sha256": "6b81de814c1c3429deaad7451994a3864c093c594f54bbc4f24219444a9cf672"
+    },
+    "apps/web/app/api/documents/[id]/route.ts": {
+      "methods": ["GET"],
+      "sha256": "7887515a9f2713fcb62d184071c04ceae4b51d76aac2afb84b9a9836d869d92d"
+    },
+    "apps/web/app/api/documents/upload/route.ts": {
+      "methods": ["POST"],
+      "sha256": "b7581b7d4db25053a966d88c489b9401b1aff48b543179b39b13023dd99b5fcc"
+    },
+    "apps/web/app/api/files/route.ts": {
+      "methods": ["GET"],
+      "sha256": "258f01ce13712d143bdd8eeb63873ca66d70aac51071a7f589c4b7fe2782522a"
+    },
+    "apps/web/app/api/health/route.ts": {
+      "methods": ["GET"],
+      "sha256": "a0f8fe9980b1b100a7b2771e55e04c2543242b7c7d9ff06474d68bc03653e22b"
+    },
+    "apps/web/app/api/import/upload/route.ts": {
+      "methods": ["POST"],
+      "sha256": "503dbda09716e88ae8dc183f5ae2f90d1e5cf63117de6a642735c02d490e6a34"
+    },
+    "apps/web/app/api/live/scoreboard/route.ts": {
+      "methods": ["GET"],
+      "sha256": "d1ba9f65318da5598fb9dcd16407c053f29bf47ea521171c96bcd5e19f44a11d"
+    },
+    "apps/web/app/api/maps/snapshot/route.ts": {
+      "methods": ["GET"],
+      "sha256": "7f869b57778f7d43943ac1651852f29fefc9bb696219eb659d4556b6a6caf944"
+    },
+    "apps/web/app/api/mobile/v1/activity/[id]/route.ts": {
+      "methods": ["POST"],
+      "sha256": "92584425befe6dc625e5caa3093d55386017539af73530ad4d548efa11dd2a76"
+    },
+    "apps/web/app/api/mobile/v1/activity/foreground/route.ts": {
+      "methods": ["POST"],
+      "sha256": "2f2a4b2a970fcf3237e12b257f47ca3703bfc9c66bfef8e11367bba730803584"
+    },
+    "apps/web/app/api/mobile/v1/activity/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "0dd81eb334882a173b428ab9224e7f29f34bfd5a73d8097a595b99971725e0b3"
+    },
+    "apps/web/app/api/mobile/v1/anomalies/[id]/route.ts": {
+      "methods": ["POST"],
+      "sha256": "65f9889706716db546fa4c87fd52ef1dcd3feef6ec15387e59dcfce40ae18232"
+    },
+    "apps/web/app/api/mobile/v1/approvals/[id]/route.ts": {
+      "methods": ["POST"],
+      "sha256": "180da7b2659787731ffd158076f111cd342e75732a73d2d04c3b766ae7e13ece"
+    },
+    "apps/web/app/api/mobile/v1/bootstrap/route.ts": {
+      "methods": ["GET"],
+      "sha256": "114f4f3803727c84617b59c30df2679159257e8bba5b9135ef0ba953d312123a"
+    },
+    "apps/web/app/api/mobile/v1/calls/[id]/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "caccf381745475f9cd9f7915f5a6386c33589a2afda62e3146332c6f2b8f5339"
+    },
+    "apps/web/app/api/mobile/v1/calls/route.ts": {
+      "methods": ["GET"],
+      "sha256": "832384a350b9441367122a05570a8466ba0035713a556dfc5f913588cf57b2dd"
+    },
+    "apps/web/app/api/mobile/v1/cards/[id]/route.ts": {
+      "methods": ["POST"],
+      "sha256": "1ec351665a67cbc99a943ec26d6e4189adec37c9a1517d125acb5f96ce357b81"
+    },
+    "apps/web/app/api/mobile/v1/cards/route.ts": {
+      "methods": ["GET"],
+      "sha256": "e4bf887053d1cff239686b863ff3b53116975d5bb54eae34f7ee1392aec72e35"
+    },
+    "apps/web/app/api/mobile/v1/chat/cancel/route.ts": {
+      "methods": ["POST"],
+      "sha256": "e05355b355491e52c60dece42c3d232c5aa5ceb0f06c50e4dcced622313b18da"
+    },
+    "apps/web/app/api/mobile/v1/chat/forms/route.ts": {
+      "methods": ["POST"],
+      "sha256": "44a78429066937fc497afdf46f53e5d81e8e8d4ffc2f4d483e1302043bdcdeb4"
+    },
+    "apps/web/app/api/mobile/v1/chat/route.ts": {
+      "methods": ["POST"],
+      "sha256": "2e63385791b19c9a5e317acabfad573a5f07b52cc0c6dfa65d4f46c8b508a1e6"
+    },
+    "apps/web/app/api/mobile/v1/chat/status/route.ts": {
+      "methods": ["GET"],
+      "sha256": "ede4a4f39d356d1d36761a9bcccaa430c487052b8b48b040fff7b9d1329985ec"
+    },
+    "apps/web/app/api/mobile/v1/chats/[id]/messages/[messageId]/route.ts": {
+      "methods": ["POST"],
+      "sha256": "c6d61aa4225beb5731bbef269f96c61fe7298344e4c104ef6ae39200ae73ed65"
+    },
+    "apps/web/app/api/mobile/v1/chats/[id]/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "ee5ea7ed75e36dfeac3c307e79c83be1343a53ef4464acf04b51fa9c008de40d"
+    },
+    "apps/web/app/api/mobile/v1/chats/route.ts": {
+      "methods": ["POST"],
+      "sha256": "b78060a118ab1fb0907c54077c60e6c0e3a45f7efa2179e53a2b5f4563d611b6"
+    },
+    "apps/web/app/api/mobile/v1/costs/route.ts": {
+      "methods": ["PATCH"],
+      "sha256": "4d908925abaf79e1ed5c793e4a58aef5b87c3eace1ad750f398f6292c3fec4aa"
+    },
+    "apps/web/app/api/mobile/v1/devices/route.ts": {
+      "methods": ["POST"],
+      "sha256": "72941443e66af7950ff5381b7344e928160e452f57ea9247cf36fa209e31034f"
+    },
+    "apps/web/app/api/mobile/v1/documents/[id]/route.ts": {
+      "methods": ["DELETE", "GET"],
+      "sha256": "aaa275332751e7c662a6d654c650422d31fa527927f3d0086ba6a3e96bc9440d"
+    },
+    "apps/web/app/api/mobile/v1/documents/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "e336dc787ad92d5584799b6e122ada98dcfdc5fe44ba11594afed8ab2980417b"
+    },
+    "apps/web/app/api/mobile/v1/email-obligations/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "1a14207b341cc90da3b0e09a09d500b21dbcb505f52d30fd75b9e3119f4c168e"
+    },
+    "apps/web/app/api/mobile/v1/goals/[id]/route.ts": {
+      "methods": ["GET", "PATCH", "POST"],
+      "sha256": "46d3a1563726981963fe41ec3e89e857373b6e81ae100fb1f43d5619017a4fa5"
+    },
+    "apps/web/app/api/mobile/v1/goals/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "66bb19623a071f9c89bd9a5dcb30485e8b23fb7c0683b6f9406e386ace540498"
+    },
+    "apps/web/app/api/mobile/v1/imports/route.ts": {
+      "methods": ["POST"],
+      "sha256": "03591996d57d09634930e2ac3d49ccce66a836d48519e4a50ce6133f3c643330"
+    },
+    "apps/web/app/api/mobile/v1/improvements/[id]/route.ts": {
+      "methods": ["POST"],
+      "sha256": "258b357faf9753f5548414b8edaa56d83b65def090d471a26f23d99c904c781c"
+    },
+    "apps/web/app/api/mobile/v1/knowledge/[id]/route.ts": {
+      "methods": ["GET", "PATCH"],
+      "sha256": "37d68f36f9744243c0bdfddc03841493fbae7bd9c6a58c4c9fd2d8a0add341fd"
+    },
+    "apps/web/app/api/mobile/v1/knowledge/cleanup/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "4d6d20ab1bd69981c30d32d6369d918672b4071dc3214ea33957110ab90a275e"
+    },
+    "apps/web/app/api/mobile/v1/knowledge/graph/route.ts": {
+      "methods": ["GET"],
+      "sha256": "c658d44e15cc9c04c36b4228a8ef376c228d534ba24e16642663a4764d79a2dd"
+    },
+    "apps/web/app/api/mobile/v1/knowledge/relations/[id]/route.ts": {
+      "methods": ["DELETE", "GET", "POST"],
+      "sha256": "883d9be52f20842617f88e063525c7553dc476c775cca629042bf04cd3f7a41b"
+    },
+    "apps/web/app/api/mobile/v1/knowledge/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "8c70a9ea3a12a60e25c4c86909fd6a37aca8789879c63494c3f8293e093d5ebe"
+    },
+    "apps/web/app/api/mobile/v1/knowledge/sources/[id]/route.ts": {
+      "methods": ["DELETE", "GET", "PATCH"],
+      "sha256": "310c2230d96d11f920fa27640d0d59f69d2f128d99d0936e2238bb945daaf69d"
+    },
+    "apps/web/app/api/mobile/v1/knowledge/workspace/route.ts": {
+      "methods": ["GET"],
+      "sha256": "7be92dbffd5115191a5b79f0913ed30c2d3d8f34f5ff0c0d3e3843438f072e7c"
+    },
+    "apps/web/app/api/mobile/v1/live/scoreboard/route.ts": {
+      "methods": ["GET"],
+      "sha256": "0688f9fbbd573c253bec443855139fc084f2e975f8d983a374f1ed9a9099d929"
+    },
+    "apps/web/app/api/mobile/v1/location/route.ts": {
+      "methods": ["POST"],
+      "sha256": "e815144b7358cc1fed8ab41ed31cdb05fd8ea00eafcaf55cdf0af422156b4d1a"
+    },
+    "apps/web/app/api/mobile/v1/mcp/[id]/route.ts": {
+      "methods": ["DELETE", "POST"],
+      "sha256": "b4f198fdbc18e35be8b8aaa35832bc856c7208becb393c4cb1fae4286f011c09"
+    },
+    "apps/web/app/api/mobile/v1/mcp/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "6784a41cd0ffc352447c226cc9b958a183a64d8effd20baad5dde05b9e0e9e0f"
+    },
+    "apps/web/app/api/mobile/v1/memory/[id]/route.ts": {
+      "methods": ["PATCH", "POST"],
+      "sha256": "244df7dfae65ae1be31586a1e779bb5699010e31d244e917f4ac9c5908acbd3e"
+    },
+    "apps/web/app/api/mobile/v1/memory/commitments/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "4085626a7715b104b83ef0b2ccfa4c26e6337f59b82763e64f2404577deb42eb"
+    },
+    "apps/web/app/api/mobile/v1/memory/export/route.ts": {
+      "methods": ["GET"],
+      "sha256": "7aff785afadc9496b5363d0e0718d76ac83728a6529b44c2526f0ce725d81664"
+    },
+    "apps/web/app/api/mobile/v1/memory/library/route.ts": {
+      "methods": ["GET"],
+      "sha256": "1a1c4011cb8d0e4d7b09277d223271a2e9acd23a2592c0907093a8de2df65d6b"
+    },
+    "apps/web/app/api/mobile/v1/memory/occasions/[id]/route.ts": {
+      "methods": ["DELETE", "PATCH", "POST"],
+      "sha256": "ff31fd84fa32f18d02460dab63b8a2952301479a4d1a07eaaf0b60eec89ed011"
+    },
+    "apps/web/app/api/mobile/v1/memory/people/[id]/occasions/route.ts": {
+      "methods": ["POST"],
+      "sha256": "785020333747698e78e936fb688006a6d9e090c8990795560354cb581f99412a"
+    },
+    "apps/web/app/api/mobile/v1/memory/people/[id]/route.ts": {
+      "methods": ["DELETE", "GET", "PATCH", "POST"],
+      "sha256": "09254c0096f3ec33dcb28433ee7c6b599920c3098deb43c6b929457ccb1f2758"
+    },
+    "apps/web/app/api/mobile/v1/memory/people/route.ts": {
+      "methods": ["POST"],
+      "sha256": "0ea4220bd0336f59b7163d3947b439b202ae40a7da2dabb905c77c8e7608b70e"
+    },
+    "apps/web/app/api/mobile/v1/memory/profile/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "90da8802fe9066400a1a973990823766690066e323a7788836e81633990c69f9"
+    },
+    "apps/web/app/api/mobile/v1/memory/route.ts": {
+      "methods": ["POST"],
+      "sha256": "13a8251f97114051a219a336237c36aae8858219f797f06ef42a11586ff06482"
+    },
+    "apps/web/app/api/mobile/v1/overview/route.ts": {
+      "methods": ["GET"],
+      "sha256": "02da024f29ced63c916c243acd5cb748a3f4957d24f72d126436c25944ae4015"
+    },
+    "apps/web/app/api/mobile/v1/packs/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "395001aa1719430440702d0394e9484ad0daad3bd4ec468cc622e1a107fc736f"
+    },
+    "apps/web/app/api/mobile/v1/people/[id]/route.ts": {
+      "methods": ["GET"],
+      "sha256": "e107697b579dfecfec278670fccb703bea3810f5764f4943c3efa40e8a7809b6"
+    },
+    "apps/web/app/api/mobile/v1/people/route.ts": {
+      "methods": ["GET"],
+      "sha256": "74714b977b79d77e019d8a38bcc6550f0d96f90b9f9c066e13b99fcb3e3c5560"
+    },
+    "apps/web/app/api/mobile/v1/providers/[id]/route.ts": {
+      "methods": ["POST"],
+      "sha256": "eaa643adc694fc8634a71759417dc07fc99fbbcb0d1a430cd0e7db625503137f"
+    },
+    "apps/web/app/api/mobile/v1/providers/choice/route.ts": {
+      "methods": ["PUT"],
+      "sha256": "3a3ce0a7d5dd979f863bbec951a2ff8c9660b0ed3593fb621ecdb1270606990f"
+    },
+    "apps/web/app/api/mobile/v1/providers/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "2e22f6089c5a7646fb3c9b3692e28c6ddc768fde13fd7811f3c9ce1122089f7c"
+    },
+    "apps/web/app/api/mobile/v1/recall/sources/[sourceKey]/route.ts": {
+      "methods": ["GET", "PATCH"],
+      "sha256": "ae4ba15bee30c50bcfa77728ed80e51d741923a4c739cbe66824cd3582b38865"
+    },
+    "apps/web/app/api/mobile/v1/repairs/[id]/route.ts": {
+      "methods": ["POST"],
+      "sha256": "f1a5e1705ab11df63a6f195936d97ed09c7e783964622686ea2d85bf16da1ae4"
+    },
+    "apps/web/app/api/mobile/v1/repairs/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "b32dfc3113a65b3addc171f1a2c9c857f1e1ab91571a74919d890b3dece2bfac"
+    },
+    "apps/web/app/api/mobile/v1/settings/policies/[id]/route.ts": {
+      "methods": ["DELETE", "POST"],
+      "sha256": "2c8cf2c551f29b3870b9bd222ebc549551e93f493f2fbc22a33fabc6c631b79c"
+    },
+    "apps/web/app/api/mobile/v1/settings/reminders/[id]/route.ts": {
+      "methods": ["DELETE"],
+      "sha256": "452b51455b20a88de875709bff84fbe2b50af8e355a54da1693817d72ce6e2c1"
+    },
+    "apps/web/app/api/mobile/v1/settings/route.ts": {
+      "methods": ["PATCH"],
+      "sha256": "eb8508a1dc5139b5813e63bf04285d3a55d19e9e09bf850b8cb1baa0543af245"
+    },
+    "apps/web/app/api/mobile/v1/settings/schedules/[id]/route.ts": {
+      "methods": ["POST"],
+      "sha256": "9785945c06d574581d69284fe1468457268a3b400f7c7ea95106d751a2a970e5"
+    },
+    "apps/web/app/api/mobile/v1/skills/[id]/route.ts": {
+      "methods": ["DELETE", "PATCH", "POST"],
+      "sha256": "cb40740f66f9f8e1bb2572426f08fc065337eed43d8ee5c4958a169e45295f97"
+    },
+    "apps/web/app/api/mobile/v1/skills/route.ts": {
+      "methods": ["POST"],
+      "sha256": "85837026cc52a9db82ee5acf490d312413468a4cf24a5a266f0ca0cbcecbe700"
+    },
+    "apps/web/app/api/mobile/v1/suggestions/[id]/route.ts": {
+      "methods": ["POST"],
+      "sha256": "2860be63c4b4de45de077d57a008331000cf2a06b922eef7837ae07915d0ee3a"
+    },
+    "apps/web/app/api/mobile/v1/workspace/route.ts": {
+      "methods": ["GET"],
+      "sha256": "e1c2577e9555b505f5b890b79c3d9a872812dfd5255d50a9389f12431692ae55"
+    },
+    "apps/web/app/api/mobile/v1/workspace/sections/[section]/route.ts": {
+      "methods": ["GET"],
+      "sha256": "505529d5a57e7cb906d1fceb30c68463374e687aa82a746e2b07d7c92f27f996"
+    },
+    "apps/web/app/api/owner/browser-signout/route.ts": {
+      "methods": ["POST"],
+      "sha256": "5664484e09fb4c63aec9b01401e59844bf373b09ab72848c31f2f378bd0dc3c1"
+    },
+    "apps/web/app/api/owner/claim/route.ts": {
+      "methods": ["POST"],
+      "sha256": "d8f73e96af73f4de0bfe4c8d40a567b42ccb884c5398a26a8e11fdf195c9e596"
+    },
+    "apps/web/app/api/owner/devices/route.ts": {
+      "methods": ["DELETE", "GET", "POST"],
+      "sha256": "90876095702f39834457230cd254e187fe334e81460d3247b270563137c3a846"
+    },
+    "apps/web/app/api/owner/login/route.ts": {
+      "methods": ["POST"],
+      "sha256": "1708622d60d34ef609592faa61a3c78f3ff3a6a5f546667da6e70fef7fddaefb"
+    },
+    "apps/web/app/api/owner/logout/route.ts": {
+      "methods": ["POST"],
+      "sha256": "037fc8fe5e7e011441db064f81fb491e12f8a18bc4f992bc54e10e6482441646"
+    },
+    "apps/web/app/api/owner/passkeys/route.ts": {
+      "methods": ["DELETE", "GET", "POST"],
+      "sha256": "c3972b6dffd765f6db7104a26c2831984d541ec6df1b8bc566baf4cd9010882d"
+    },
+    "apps/web/app/api/owner/recovery/route.ts": {
+      "methods": ["POST"],
+      "sha256": "c7c5311b148f7943372ee35e4e6cd12c949f7531fc8979c4faf941259010466d"
+    },
+    "apps/web/app/api/owner/recovery-code/route.ts": {
+      "methods": ["POST"],
+      "sha256": "a0f1dac4746fbcbbf16300c67032ee0ae4147a643b173fce75422868894bfe98"
+    },
+    "apps/web/app/api/owner/status/route.ts": {
+      "methods": ["GET"],
+      "sha256": "bd25f59c024f5d52e3e9a0843ea34627abaf1e8d0e1fcfa0aeed9d649ed1a76c"
+    },
+    "apps/web/app/api/profile-export/route.ts": {
+      "methods": ["GET"],
+      "sha256": "103e39b96b2f403a76802393d4ce0ce37fa9a5d5b9f8c9d253aa3b847a489ce9"
+    },
+    "apps/web/app/api/ready/route.ts": {
+      "methods": ["GET"],
+      "sha256": "13efffcd2b25913a8e732452aa79f727f1fb3317197acc533ff9c54c357becc9"
+    },
+    "apps/web/app/api/recall/sources/[sourceKey]/route.ts": {
+      "methods": ["GET", "PATCH"],
+      "sha256": "7f05e2a1675d3b50e73d993d4f1b57bdecd42bc1fc5fd11851ed89cc8e2cd14c"
+    },
+    "apps/web/app/api/release-probe/route.ts": {
+      "methods": ["GET"],
+      "sha256": "f08508bf429df7d4b6faf68d4063ee8999fa061a53119bcc42b9f5455dba016d"
+    },
+    "apps/web/app/api/shell/status/route.ts": {
+      "methods": ["GET"],
+      "sha256": "c541ed8797ef5cf2ccbe8826d9fd178eb92566984595b881350489ce846a12f7"
+    }
+  }
+}

@@ -8,7 +8,7 @@ import {
   writingSamples,
 } from '@assistant/db';
 import {
-  embeddingModelId,
+  embeddingSpaceIdentityKey,
   type ImportCommandRepository,
   type ImportJobFence,
   type ImportJobRepository,
@@ -16,6 +16,7 @@ import {
   validateEmbedding,
 } from '@assistant/persistence';
 import { and, eq, inArray, like, or, sql } from 'drizzle-orm';
+import { addressParser } from 'postal-mime';
 import { loadConfig } from '../config.js';
 import { BudgetReservationError } from '../cost.js';
 import { quotesExternalContent } from '../email-provenance.js';
@@ -25,7 +26,7 @@ import { getQueueNotifier } from '../queue.js';
 import type { VoiceRegister } from '../voice.js';
 import { enqueueTask } from '../workflow/machine.js';
 import type { WorkspaceReader } from './import.js';
-import { type ImportKind, parseArchive } from './import-parsers.js';
+import { type ImportKind, parseArchiveDetailed } from './import-parsers.js';
 
 /**
  * Owner voice-sample bootstrap (Phase 5). The outbound voice-rewrite pipeline
@@ -51,7 +52,6 @@ export const UPLOAD_SAMPLE_PREFIX = 'upload:';
 export const VOICE_IMPORT_SOURCE_PREFIX = 'voice-samples';
 
 const MIN_UPLOAD_SAMPLE_CHARS = 40;
-const MAX_UPLOAD_SAMPLE_CHARS = 4000;
 const SAMPLES_PER_RUN = 40; // one lease's worth; well under the router's 100/embed-batch cap
 const MAX_UPLOAD_SAMPLES = 500; // plenty for nearest-5 retrieval; bounds cost and runtime
 const RESUME_DELAY_MS = 3_000;
@@ -82,33 +82,19 @@ export function isVoiceRegister(value: unknown): value is VoiceRegister {
   return typeof value === 'string' && VALID_REGISTERS.has(value);
 }
 
-/** Split the "From X — Subject: Y" header parsers build back into its parts. */
-function splitUnitHeader(header: string): { from: string; subject: string } {
-  const from = header.match(/^From (.*?)(?: — Subject:|$)/)?.[1]?.trim() ?? '';
-  const subject = header.match(/Subject:\s*(.*)$/)?.[1]?.trim() ?? '';
-  return { from, subject };
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * A predicate that recognises the owner as a message's author. Emails match as
- * a substring of the raw From value ("Name <addr>"); names/aliases match on a
- * word boundary so a short first name cannot match inside an unrelated address.
- */
-export function ownerAuthoredMatcher(identity: {
-  emails: string[];
-  names: string[];
-}): (from: string) => boolean {
-  const emails = identity.emails.map((e) => e.toLowerCase().trim()).filter(Boolean);
-  const names = identity.names.map((n) => n.toLowerCase().trim()).filter((n) => n.length >= 3);
-  const namePatterns = names.map((n) => new RegExp(`\\b${escapeRegExp(n)}\\b`));
+/** Match only an RFC mailbox identity. A display name is never owner evidence. */
+export function ownerAuthoredMatcher(identity: { emails: string[] }): (from: string) => boolean {
+  const emails = new Set(identity.emails.map((e) => e.toLowerCase().trim()).filter(Boolean));
   return (from: string) => {
-    const f = from.toLowerCase();
-    if (emails.some((e) => f.includes(e))) return true;
-    return namePatterns.some((pattern) => pattern.test(f));
+    const mailboxes = addressParser(from, { flatten: true });
+    const mailbox = mailboxes[0];
+    return (
+      mailboxes.length === 1 &&
+      mailbox !== undefined &&
+      'address' in mailbox &&
+      typeof mailbox.address === 'string' &&
+      emails.has(mailbox.address.toLowerCase())
+    );
   };
 }
 
@@ -117,8 +103,7 @@ async function loadOwnerIdentity(db: Db): Promise<(from: string) => boolean> {
   const [owner] = await db.select().from(contacts).where(eq(contacts.trust, 'owner')).limit(1);
   const configEmail = loadConfig().OWNER_EMAIL;
   const emails = [...(owner?.emails ?? []), configEmail].filter(Boolean);
-  const names = [owner?.name ?? '', ...(owner?.aliases ?? [])].filter(Boolean);
-  return ownerAuthoredMatcher({ emails, names });
+  return ownerAuthoredMatcher({ emails });
 }
 
 /**
@@ -126,26 +111,57 @@ async function loadOwnerIdentity(db: Db): Promise<(from: string) => boolean> {
  * deduped sample texts, in file order. A unit with a `From` header that is not
  * the owner is dropped (received mail in a full-mailbox export); a unit that
  * forwards or quotes external content is dropped whole. Units with no author
- * header (a plain-text writing corpus) are treated as the owner's own words.
+ * header are rejected. Plain text is accepted only when the caller explicitly
+ * confirms that the upload is the owner's raw writing corpus.
  */
-export function extractOwnerSamples(
+export async function extractOwnerSamples(
   kind: ImportKind,
   content: string,
   isOwnerAuthored: (from: string) => boolean,
-): string[] {
+  options: { ownerConfirmedRawText?: boolean; ownerConfirmedArchive?: boolean } = {},
+): Promise<{ samples: string[]; acceptedUnits: number; rejectedUnits: number; partial: boolean }> {
   const seen = new Set<string>();
   const samples: string[] = [];
-  for (const unit of parseArchive(kind, content)) {
-    const { from, subject } = splitUnitHeader(unit.header);
-    if (from && !isOwnerAuthored(from)) continue;
-    if (quotesExternalContent({ subject, body: unit.text })) continue;
-    const text = unit.text.trim();
-    if (text.length < MIN_UPLOAD_SAMPLE_CHARS || text.length > MAX_UPLOAD_SAMPLE_CHARS) continue;
+  const parsed = await parseArchiveDetailed(kind, content);
+  let rejectedUnits = parsed.diagnostics.rejectedUnits;
+  for (const unit of parsed.units) {
+    const subject = unit.header.match(/Subject:\s*(.*)$/)?.[1]?.trim() ?? '';
+    const ownerAuthor =
+      unit.authorEmail && options.ownerConfirmedArchive === true
+        ? isOwnerAuthored(`<${unit.authorEmail}>`)
+        : kind === 'text' && options.ownerConfirmedRawText === true;
+    if (!ownerAuthor) {
+      rejectedUnits += 1;
+      continue;
+    }
+    const quoteBoundary = /\n\[Quoted(?: or forwarded)? content begins\]\n/i.exec(unit.text);
+    const subjectForward = /^\s*(?:(?:fw|fwd)\s*:\s*)+/i.test(subject);
+    const unmarkedForward = unit.hasQuotedContent && !quoteBoundary;
+    if (subjectForward || unmarkedForward) {
+      rejectedUnits += 1;
+      continue;
+    }
+    const hasExternalQuote =
+      unit.hasQuotedContent || quotesExternalContent({ subject, body: unit.text });
+    const text = (quoteBoundary ? unit.text.slice(0, quoteBoundary.index) : unit.text).trim();
+    if (hasExternalQuote && !quoteBoundary) {
+      rejectedUnits += 1;
+      continue;
+    }
+    if (text.length < MIN_UPLOAD_SAMPLE_CHARS) {
+      rejectedUnits += 1;
+      continue;
+    }
     if (seen.has(text)) continue;
     seen.add(text);
     samples.push(text);
   }
-  return samples;
+  return {
+    samples,
+    acceptedUnits: samples.length,
+    rejectedUnits,
+    partial: parsed.diagnostics.partial,
+  };
 }
 
 interface VoiceIngestPayload {
@@ -153,6 +169,8 @@ interface VoiceIngestPayload {
   path: string;
   kind: ImportKind;
   register: VoiceRegister;
+  ownerConfirmedArchive: boolean;
+  ownerConfirmedRawText: boolean;
 }
 
 function voiceIngestPayload(task: TaskRow): VoiceIngestPayload {
@@ -161,18 +179,21 @@ function voiceIngestPayload(task: TaskRow): VoiceIngestPayload {
   const path = String(payload.path ?? '');
   const kind = String(payload.kind ?? 'text') as ImportKind;
   const register = payload.register;
+  const ownerConfirmedArchive = payload.ownerConfirmedArchive === true;
+  const ownerConfirmedRawText = payload.ownerConfirmedRawText === true;
   if (!source || !path) throw new Error('voice ingest payload needs source and path');
   if (kind !== 'mbox' && kind !== 'json' && kind !== 'text') {
     throw new Error(`unsupported voice ingest kind: ${kind}`);
   }
   if (!isVoiceRegister(register)) throw new Error(`voice ingest payload has no valid register`);
-  return { source, path, kind, register };
+  return { source, path, kind, register, ownerConfirmedArchive, ownerConfirmedRawText };
 }
 
 interface VoiceIngestCursor {
   index: number;
   saved: number;
   duplicates: number;
+  embeddingSpaceKey?: string;
 }
 
 export interface VoiceIngestOutcome {
@@ -220,7 +241,11 @@ export async function runVoiceIngest(
 
     const isOwnerAuthored = await loadOwnerIdentity(db);
     const content = await workspace.read(payload.path);
-    const allSamples = extractOwnerSamples(payload.kind, content, isOwnerAuthored);
+    const extraction = await extractOwnerSamples(payload.kind, content, isOwnerAuthored, {
+      ownerConfirmedRawText: payload.ownerConfirmedRawText,
+      ownerConfirmedArchive: payload.ownerConfirmedArchive,
+    });
+    const allSamples = extraction.samples;
     const capped = allSamples.length > MAX_UPLOAD_SAMPLES;
     const candidates = capped ? allSamples.slice(0, MAX_UPLOAD_SAMPLES) : allSamples;
     await deps.heartbeat?.();
@@ -233,6 +258,13 @@ export async function runVoiceIngest(
       duplicates: 0,
       ...((plannerState.voiceIngest as Partial<VoiceIngestCursor>) ?? {}),
     };
+    const expectedSpace = await router.embeddingSpace();
+    const embeddingSpaceKey = embeddingSpaceIdentityKey(expectedSpace);
+    if (cursor.embeddingSpaceKey && cursor.embeddingSpaceKey !== embeddingSpaceKey)
+      throw new Error('Voice import embedding space changed; resume requires an explicit reindex');
+    if (cursor.index > 0 && !cursor.embeddingSpaceKey)
+      throw new Error('Legacy voice import cursor has no embedding identity; resume is unsafe');
+    cursor.embeddingSpaceKey = embeddingSpaceKey;
 
     await db
       .update(importSources)
@@ -269,6 +301,7 @@ export async function runVoiceIngest(
         })
         .where(eq(importSources.id, sourceRow.id));
     };
+    await checkpoint();
 
     const stopAt = Math.min(cursor.index + SAMPLES_PER_RUN, candidates.length);
     while (cursor.index < stopAt) {
@@ -281,7 +314,12 @@ export async function runVoiceIngest(
           await db
             .select({ text: writingSamples.text })
             .from(writingSamples)
-            .where(inArray(writingSamples.text, batch))
+            .where(
+              and(
+                inArray(writingSamples.text, batch),
+                eq(writingSamples.embeddingSpaceKey, embeddingSpaceKey),
+              ),
+            )
         ).map((r) => r.text),
       );
       const fresh = batch.filter((text) => !existing.has(text));
@@ -290,7 +328,7 @@ export async function runVoiceIngest(
       if (fresh.length > 0) {
         let embeddings: number[][];
         try {
-          embeddings = await router.embed(fresh, { taskId: task.id });
+          embeddings = await router.embed(fresh, { taskId: task.id, expectedSpace });
         } catch (err) {
           // A budget stop never resets on its own — mark the source failed
           // (re-runnable) and surface it as needs_attention, mirroring import.
@@ -310,6 +348,7 @@ export async function runVoiceIngest(
             text,
             context: `${UPLOAD_SAMPLE_PREFIX}${payload.source}`,
             embedding: embeddings[i],
+            embeddingSpaceKey,
           })),
         );
         cursor.saved += fresh.length;
@@ -328,7 +367,7 @@ export async function runVoiceIngest(
         : '';
       return {
         done: true,
-        summary: `voice ingest ${payload.source}: complete — ${cursor.saved} samples (${cursor.duplicates} duplicates)${capNote}`,
+        summary: `voice ingest ${payload.source}: complete — ${cursor.saved} samples (${cursor.duplicates} duplicates); ${extraction.acceptedUnits} accepted, ${extraction.rejectedUnits} rejected${extraction.partial ? ', partial parse' : ''}${capNote}`,
       };
     }
     return {
@@ -389,10 +428,13 @@ async function runPortableVoiceIngest(
   if (!identity) throw lost();
   const isOwnerAuthored = ownerAuthoredMatcher({
     emails: [...identity.emails, loadConfig().OWNER_EMAIL].filter(Boolean),
-    names: identity.names,
   });
   const content = await workspace.read(payload.path);
-  const allSamples = extractOwnerSamples(payload.kind, content, isOwnerAuthored);
+  const extraction = await extractOwnerSamples(payload.kind, content, isOwnerAuthored, {
+    ownerConfirmedRawText: payload.ownerConfirmedRawText,
+    ownerConfirmedArchive: payload.ownerConfirmedArchive,
+  });
+  const allSamples = extraction.samples;
   const capped = allSamples.length > MAX_UPLOAD_SAMPLES;
   const candidates = capped ? allSamples.slice(0, MAX_UPLOAD_SAMPLES) : allSamples;
   await deps.heartbeat?.();
@@ -405,6 +447,12 @@ async function runPortableVoiceIngest(
     duplicates: 0,
     ...((plannerState.voiceIngest as Partial<VoiceIngestCursor>) ?? {}),
   };
+  const embeddingSpaceKey = embeddingSpaceIdentityKey(repository.embeddingSpace);
+  if (cursor.embeddingSpaceKey && cursor.embeddingSpaceKey !== embeddingSpaceKey)
+    throw new Error('Voice import embedding space changed; resume requires an explicit reindex');
+  if (cursor.index > 0 && !cursor.embeddingSpaceKey)
+    throw new Error('Legacy voice import cursor has no embedding identity; resume is unsafe');
+  cursor.embeddingSpaceKey = embeddingSpaceKey;
   const describe = (current: VoiceIngestCursor) =>
     voiceIngestProgress(payload.source, current, candidates.length);
   if (
@@ -416,18 +464,18 @@ async function runPortableVoiceIngest(
   )
     throw lost();
 
-  const expectedModelId = embeddingModelId(repository.embeddingSpace);
+  const expectedSpace = repository.embeddingSpace;
   const stopAt = Math.min(cursor.index + SAMPLES_PER_RUN, candidates.length);
   while (cursor.index < stopAt) {
     const batch = candidates.slice(cursor.index, stopAt);
     // Skip texts already stored (a prior run, an overlapping re-upload, or an
     // auto-captured sample) before paying to embed them.
-    const existing = await repository.existingSampleTexts(fence(), batch);
+    const existing = await repository.existingSampleTexts(fence(), batch, embeddingSpaceKey);
     const fresh = batch.filter((text) => !existing.has(text));
     let embeddings: number[][] = [];
     if (fresh.length > 0) {
       try {
-        embeddings = await router.embed(fresh, { taskId: task.id, expectedModelId });
+        embeddings = await router.embed(fresh, { taskId: task.id, expectedSpace });
       } catch (err) {
         // A budget stop never resets on its own — mark the source failed
         // (re-runnable) and surface it as needs_attention, mirroring import.
@@ -443,7 +491,11 @@ async function runPortableVoiceIngest(
       nextIndex: stopAt,
       register: payload.register,
       context: `${UPLOAD_SAMPLE_PREFIX}${payload.source}`,
-      samples: fresh.map((text, index) => ({ text, embedding: embeddings[index] ?? [] })),
+      samples: fresh.map((text, index) => ({
+        text,
+        embedding: embeddings[index] ?? [],
+        embeddingSpaceKey,
+      })),
       duplicates: batch.length - fresh.length,
       describe,
     });
@@ -458,7 +510,7 @@ async function runPortableVoiceIngest(
       : '';
     return {
       done: true,
-      summary: `voice ingest ${payload.source}: complete — ${cursor.saved} samples (${cursor.duplicates} duplicates)${capNote}`,
+      summary: `voice ingest ${payload.source}: complete — ${cursor.saved} samples (${cursor.duplicates} duplicates); ${extraction.acceptedUnits} accepted, ${extraction.rejectedUnits} rejected${extraction.partial ? ', partial parse' : ''}${capNote}`,
     };
   }
   return {
@@ -495,6 +547,8 @@ export async function startVoiceIngest(
     workspacePath: string;
     kind: ImportKind;
     register: VoiceRegister;
+    /** Explicit owner assertion used only for a raw text writing corpus. */
+    ownerConfirmedRawText?: boolean;
     budgetUsdLimit?: string;
   },
 ): Promise<{ sourceRow: ImportSourceRow; taskId: string }> {
@@ -555,6 +609,8 @@ export async function startVoiceIngest(
           path: input.workspacePath,
           kind: input.kind,
           register: input.register,
+          ownerConfirmedArchive: true,
+          ownerConfirmedRawText: input.ownerConfirmedRawText === true,
         },
       },
       type: 'adhoc',
@@ -582,6 +638,7 @@ export function startPortableVoiceIngest(
     workspacePath: string;
     kind: ImportKind;
     register: VoiceRegister;
+    ownerConfirmedRawText?: boolean;
     budgetUsdLimit?: string;
   },
 ): Promise<{ sourceId: string; taskId: string }> {
@@ -595,7 +652,11 @@ export function startPortableVoiceIngest(
     workspacePath: input.workspacePath,
     kind: input.kind,
     job: 'voice.ingest',
-    payload: { register: input.register },
+    payload: {
+      register: input.register,
+      ownerConfirmedArchive: true,
+      ownerConfirmedRawText: input.ownerConfirmedRawText === true,
+    },
     budgetUsdLimit: input.budgetUsdLimit ?? DEFAULT_VOICE_INGEST_BUDGET_USD,
   });
 }

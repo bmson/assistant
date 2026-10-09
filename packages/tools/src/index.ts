@@ -17,6 +17,7 @@ export * from './policies.js';
 export * from './registry.js';
 export * from './reminders.js';
 export * from './search.js';
+export * from './source-read-receipt.js';
 export * from './twilio/client.js';
 export * from './twilio/sms.js';
 export * from './types.js';

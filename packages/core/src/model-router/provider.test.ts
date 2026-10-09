@@ -1,13 +1,21 @@
 import type { Db } from '@assistant/db';
 import type { EmbeddingModel, LanguageModel } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import {
   createConfiguredModelProvider,
   createOpenRouterModelProvider,
   type ModelProvider,
   normalizeOpenRouterUsage,
+  providerErrorNodes,
+  providerStatusCode,
 } from './provider.js';
-import { EMBEDDING_DIMENSIONS, ModelRouter } from './router.js';
+import {
+  EMBEDDING_DIMENSIONS,
+  isProviderCapabilityError,
+  ModelFallbackAttemptError,
+  ModelRouter,
+} from './router.js';
 
 const stubs = vi.hoisted(() => ({
   openRouterChat: vi.fn(),
@@ -15,9 +23,12 @@ const stubs = vi.hoisted(() => ({
   embedMany: vi.fn(),
   generateObject: vi.fn(),
   generateText: vi.fn(),
+  streamText: vi.fn(),
   reconcileReservation: vi.fn(async () => {}),
   releaseReservation: vi.fn(async () => {}),
   reserveCost: vi.fn(async () => ({ ok: true as const, reservationId: 'reservation-1' })),
+  beginCostAttempt: vi.fn(async () => true),
+  markCostAttemptUnknown: vi.fn(async () => {}),
 }));
 
 vi.mock('@openrouter/ai-sdk-provider', () => ({
@@ -33,6 +44,7 @@ vi.mock('ai', async (importOriginal) => ({
   embedMany: stubs.embedMany,
   generateObject: stubs.generateObject,
   generateText: stubs.generateText,
+  streamText: stubs.streamText,
 }));
 
 vi.mock('../cost.js', async (importOriginal) => ({
@@ -40,6 +52,8 @@ vi.mock('../cost.js', async (importOriginal) => ({
   reconcileReservation: stubs.reconcileReservation,
   releaseReservation: stubs.releaseReservation,
   reserveCost: stubs.reserveCost,
+  beginCostAttempt: stubs.beginCostAttempt,
+  markCostAttemptUnknown: stubs.markCostAttemptUnknown,
 }));
 
 function provider(overrides: Partial<ModelProvider> = {}): ModelProvider {
@@ -83,18 +97,101 @@ beforeEach(() => {
 });
 
 describe('injected model providers', () => {
+  it('walks nested SDK errors by object depth, bounds cycles, and normalizes status codes', () => {
+    const unsupported = Object.assign(new Error('response format json_schema is not supported'), {
+      name: 'AI_APICallError',
+      statusCode: '400',
+    });
+    const root = new Error('provider wrapper') as Error & { errors: unknown[]; cause?: unknown };
+    root.errors = [undefined, null, { lastError: { cause: unsupported } }];
+    root.cause = root;
+
+    expect(isProviderCapabilityError(root)).toBe(true);
+    expect(providerErrorNodes(root)).toHaveLength(4);
+    expect(providerStatusCode('410')).toBe(410);
+    expect(providerStatusCode(410)).toBe(410);
+    expect(providerStatusCode('41x')).toBeUndefined();
+
+    let tooDeep: unknown = unsupported;
+    for (let index = 0; index < 12; index += 1) tooDeep = { cause: tooDeep };
+    expect(
+      providerErrorNodes(tooDeep).some(({ value }) => (value as unknown) === unsupported),
+    ).toBe(false);
+  });
+
+  it('gives provider authentication errors priority over sibling capability errors', () => {
+    const forbidden = Object.assign(new Error('forbidden'), {
+      name: 'AI_APICallError',
+      statusCode: 403,
+    });
+    const gone = Object.assign(new Error('model removed'), {
+      name: 'AI_APICallError',
+      statusCode: '410',
+    });
+    const wrapper = Object.assign(new Error('retry wrapper'), { errors: [gone, forbidden] });
+    expect(isProviderCapabilityError(wrapper)).toBe(false);
+    expect(isProviderCapabilityError(new Error('this feature is not supported'))).toBe(false);
+  });
+
   it('adds evaluation price ceilings without changing normal provider routing', () => {
     const normal = createOpenRouterModelProvider('unused');
     normal.chat('openai/gpt-6.1-sol', { interactive: true });
     expect(stubs.openRouterChat).toHaveBeenLastCalledWith('openai/gpt-6.1-sol', {
-      provider: { require_parameters: true, sort: 'latency' },
+      provider: { require_parameters: true, data_collection: 'deny', zdr: true },
+    });
+    normal.chat('openai/gpt-6.1-sol', {
+      interactive: true,
+      requestProfile: {
+        tools: 'required',
+        toolChoice: 'required',
+        output: 'json_schema',
+        streaming: false,
+        reasoning: 'enabled',
+        privacy: 'deny',
+        maxPrice: { prompt: 1.5, completion: 4, request: 0.03 },
+      },
+    });
+    expect(stubs.openRouterChat).toHaveBeenLastCalledWith('openai/gpt-6.1-sol', {
+      provider: {
+        require_parameters: true,
+        sort: 'latency',
+        data_collection: 'deny',
+        zdr: true,
+        max_price: { prompt: 1.5, completion: 4, request: 0.03 },
+      },
+    });
+    normal.chat('openai/gpt-oss-120b', {
+      interactive: true,
+      requestProfile: {
+        tools: 'required',
+        toolChoice: 'required',
+        output: 'json_schema',
+        streaming: false,
+        reasoning: 'enabled',
+        privacy: 'deny',
+        maxPrice: { prompt: 1.5, completion: 4, request: 0.03 },
+      },
+    });
+    expect(stubs.openRouterChat).toHaveBeenLastCalledWith('openai/gpt-oss-120b', {
+      provider: {
+        require_parameters: true,
+        sort: 'latency',
+        data_collection: 'deny',
+        zdr: true,
+        max_price: { prompt: 1.5, completion: 4, request: 0.03 },
+      },
     });
     const evaluation = createOpenRouterModelProvider('unused', {
       maxPrice: { prompt: 2, completion: 10, request: 0 },
     });
     evaluation.chat('openai/gpt-6.1-sol');
     expect(stubs.openRouterChat).toHaveBeenLastCalledWith('openai/gpt-6.1-sol', {
-      provider: { require_parameters: true, max_price: { prompt: 2, completion: 10, request: 0 } },
+      provider: {
+        require_parameters: true,
+        data_collection: 'deny',
+        zdr: true,
+        max_price: { prompt: 2, completion: 10, request: 0 },
+      },
     });
     expect(() =>
       createOpenRouterModelProvider('unused', { maxPrice: { prompt: NaN, completion: 10 } }),
@@ -126,16 +223,18 @@ describe('injected model providers', () => {
       location: 'global',
       apiKey: '',
     });
-    expect(
-      createConfiguredModelProvider({
-        ...config,
-        LLM_PROVIDER: 'vertex',
-        VERTEX_PROJECT: 'customer-project',
-        VERTEX_LOCATION: 'global',
-        FIRESTORE_EMBEDDING_SPACE:
-          '{"provider":"vertex","model":"gemini-embedding-001","dimensions":768,"revision":"v1"}',
-      }).embeddingOptions(),
-    ).toEqual({ vertex: { outputDimensionality: 768 } });
+    const configuredEmbeddingProvider = createConfiguredModelProvider({
+      ...config,
+      LLM_PROVIDER: 'vertex',
+      VERTEX_PROJECT: 'customer-project',
+      VERTEX_LOCATION: 'global',
+      FIRESTORE_EMBEDDING_SPACE:
+        '{"provider":"vertex","model":"gemini-embedding-001","dimensions":768,"revision":"v1"}',
+    });
+    expect(configuredEmbeddingProvider.embeddingOptions()).toEqual({
+      vertex: { outputDimensionality: 768 },
+    });
+    expect(configuredEmbeddingProvider.embeddingDimensions).toBe(768);
     expect(() =>
       createConfiguredModelProvider({
         ...config,
@@ -160,6 +259,85 @@ describe('injected model providers', () => {
     stubs.generateText.mockResolvedValue({ text: 'answer', response: { id: 'vertex-call' } });
     await router.generate('draft', { prompt: 'hello' });
     expect(values).toHaveBeenCalledWith(expect.objectContaining({ openrouterGenerationId: null }));
+  });
+
+  it('keeps tool-choice, schema, and streaming requirements in the router request profile', async () => {
+    const router = routerWithProvider(provider());
+    stubs.generateText.mockResolvedValue({ text: 'done', toolCalls: [] });
+    await router.step('draft', {
+      prompt: 'Find the source.',
+      tools: {
+        'docs.get': {
+          description: 'Read a document',
+          inputSchema: z.object({ documentId: z.string() }),
+        },
+      } as never,
+      toolChoice: 'required',
+    });
+    expect(vi.mocked(router.route).mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        requestProfile: {
+          tools: 'required',
+          toolChoice: 'required',
+          output: 'text',
+          streaming: false,
+        },
+      }),
+    );
+    expect(stubs.generateText).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        toolChoice: 'required',
+        tools: {
+          docs_get: expect.objectContaining({
+            description: 'Read a document',
+            inputSchema: expect.anything(),
+          }),
+        },
+      }),
+    );
+
+    const schema = z.object({ ok: z.boolean() });
+    stubs.generateObject.mockResolvedValue({ object: { ok: true }, finishReason: 'stop' });
+    await router.object('classify', { prompt: 'Return a verdict.', schema });
+    expect(vi.mocked(router.route).mock.calls.at(-1)?.[1]).toEqual(
+      expect.objectContaining({
+        requestProfile: { tools: 'none', output: 'json_schema', streaming: false },
+      }),
+    );
+    expect(stubs.generateObject).toHaveBeenLastCalledWith(
+      expect.objectContaining({ schema, prompt: 'Return a verdict.' }),
+    );
+    expect(stubs.generateObject).toHaveBeenLastCalledWith(
+      expect.objectContaining({ providerOptions: { vertex: { thinking: { budget: 1 } } } }),
+    );
+
+    const openAIProvider = provider({
+      kind: 'openai',
+      optionsFor: vi.fn(() => ({ openai: { reasoningEffort: 'low' } })),
+    });
+    const openAIRouter = routerWithProvider(openAIProvider);
+    stubs.generateObject.mockResolvedValue({ object: { ok: true }, finishReason: 'stop' });
+    await openAIRouter.object('classify', { prompt: 'Return a verdict.', schema });
+    expect(stubs.generateObject).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        providerOptions: { openai: { reasoningEffort: 'low', strictJsonSchema: false } },
+      }),
+    );
+
+    stubs.streamText.mockReturnValue({
+      text: Promise.resolve('answer'),
+      toUIMessageStreamResponse: () => new Response(),
+      toUIMessageStream: () => new ReadableStream({ start: (controller) => controller.close() }),
+    });
+    await router.stream('draft', { prompt: 'Say hello.' });
+    expect(vi.mocked(router.route).mock.calls.at(-1)?.[1]).toEqual(
+      expect.objectContaining({
+        requestProfile: { tools: 'none', output: 'text', streaming: true },
+      }),
+    );
+    expect(stubs.streamText).toHaveBeenCalledWith(
+      expect.objectContaining({ model: expect.anything(), prompt: 'Say hello.' }),
+    );
   });
 
   it('does not confuse OpenRouter google models with future Vertex identities', () => {
@@ -300,6 +478,14 @@ describe('injected model providers', () => {
           estimatedUsd: number;
           promptCostPerMTok: number;
           completionCostPerMTok: number;
+          requestProfile?: {
+            tools: 'none' | 'optional' | 'required';
+            output: 'text' | 'json' | 'json_schema';
+            streaming: boolean;
+            reasoning: 'enabled' | 'disabled' | 'unsupported';
+            privacy: 'deny';
+            maxPrice: { prompt: number; completion: number };
+          };
         }): Promise<void>;
       }
     ).meter.bind(router);
@@ -313,6 +499,14 @@ describe('injected model providers', () => {
       estimatedUsd: 0.012345,
       promptCostPerMTok: 100,
       completionCostPerMTok: 100,
+      requestProfile: {
+        tools: 'none',
+        output: 'text',
+        streaming: false,
+        reasoning: 'unsupported',
+        privacy: 'deny',
+        maxPrice: { prompt: 100, completion: 100 },
+      },
     });
 
     expect(stubs.reconcileReservation).toHaveBeenCalledWith(
@@ -321,7 +515,14 @@ describe('injected model providers', () => {
       expect.objectContaining({
         usd: 0,
         quantity: 5,
-        evidence: expect.objectContaining({ basis: 'provider_reported', provider: 'vertex' }),
+        evidence: expect.objectContaining({
+          basis: 'provider_reported',
+          provider: 'vertex',
+          request: expect.objectContaining({
+            providerPriceCeilingPerMTok: { prompt: 100, completion: 100 },
+            rateSource: 'model-row-catalog',
+          }),
+        }),
       }),
     );
   });
@@ -330,12 +531,19 @@ describe('injected model providers', () => {
     expect(
       normalizeOpenRouterUsage({
         usage: { inputTokens: 2, outputTokens: 3 },
-        providerMetadata: { openrouter: { usage: {} } },
+        providerMetadata: { openrouter: { provider_name: 'Example Endpoint', usage: {} } },
         finalStep: {
           providerMetadata: { openrouter: { usage: { cost: 0.004 } } },
         },
       }).costUsd,
     ).toBe(0.004);
+    expect(
+      normalizeOpenRouterUsage({
+        providerMetadata: {
+          openrouter: { provider_name: 'Example Endpoint', usage: { cost: 0.004 } },
+        },
+      }).endpointName,
+    ).toBe('Example Endpoint');
     expect(
       normalizeOpenRouterUsage({
         usage: { inputTokens: 2, outputTokens: 3 },
@@ -381,14 +589,13 @@ describe('injected model providers', () => {
         completionCostPerMTok: 1,
       });
 
-      expect(stubs.reconcileReservation).toHaveBeenCalledWith(
+      expect(stubs.markCostAttemptUnknown).toHaveBeenCalledWith(
         expect.anything(),
         'reservation-1',
-        expect.objectContaining({ usd: 0.012345 }),
+        'provider returned without complete usage or authoritative cost',
+        {},
       );
-      expect((stubs.reconcileReservation.mock.calls as unknown[][])[0]?.[2]).not.toHaveProperty(
-        'quantity',
-      );
+      expect(stubs.reconcileReservation).not.toHaveBeenCalled();
     },
   );
 
@@ -421,12 +628,103 @@ describe('injected model providers', () => {
       promptCostPerMTok: 1,
       completionCostPerMTok: 1,
     });
-    expect((stubs.reconcileReservation.mock.calls as unknown[][])[0]?.[2]).toEqual(
-      expect.objectContaining({ usd: 0.012345 }),
+    expect(stubs.markCostAttemptUnknown).toHaveBeenCalledWith(
+      expect.anything(),
+      'reservation-1',
+      'provider returned without complete usage or authoritative cost',
+      {},
     );
-    expect((stubs.reconcileReservation.mock.calls as unknown[][])[0]?.[2]).not.toHaveProperty(
-      'quantity',
+    expect(stubs.reconcileReservation).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['disabled', { enabled: false, capabilities: { embedding: true } }, 'disabled'],
+    ['wrong modality', { enabled: true, capabilities: { embedding: false } }, 'does not support'],
+  ])(
+    'rejects an embedding model that is %s before reserving cost or calling the provider',
+    async (_label, model, message) => {
+      const db = {
+        select: () => ({
+          from: () => ({
+            where: async () =>
+              selectCount++ === 0
+                ? [{ role: 'embed', primaryModel: 'vertex/text-embedding' }]
+                : [{ id: 'vertex/text-embedding', promptCostPerMTok: '1', ...model }],
+          }),
+        }),
+      } as unknown as Db;
+      let selectCount = 0;
+      const modelProvider = provider();
+      const router = new ModelRouter(db, 'unused', 'off', modelProvider);
+
+      await expect(router.embed(['hello'])).rejects.toThrow(message);
+      expect(stubs.reserveCost).not.toHaveBeenCalled();
+      expect(modelProvider.textEmbeddingModel).not.toHaveBeenCalled();
+    },
+  );
+
+  it('validates the configured 768-dimensional embedding space', async () => {
+    let selectCount = 0;
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: async () =>
+            selectCount++ === 0
+              ? [{ role: 'embed', primaryModel: 'vertex/gemini-embedding-001' }]
+              : [
+                  {
+                    id: 'vertex/gemini-embedding-001',
+                    promptCostPerMTok: '1',
+                    enabled: true,
+                    capabilities: { embedding: true },
+                  },
+                ],
+        }),
+      }),
+    } as unknown as Db;
+    const modelProvider = provider({
+      embeddingDimensions: 768,
+      textEmbeddingModel: vi.fn(() => ({}) as EmbeddingModel),
+    });
+    const router = new ModelRouter(db, 'unused', 'off', modelProvider);
+    (
+      router as unknown as { meterWithoutRepeatingProviderWork: (input: unknown) => Promise<void> }
+    ).meterWithoutRepeatingProviderWork = async () => {};
+    stubs.embedMany.mockResolvedValue({ embeddings: [new Array(768).fill(0)] });
+
+    await expect(router.embed(['hello'], { expectedDimensions: 768 })).resolves.toEqual([
+      new Array(768).fill(0),
+    ]);
+    expect(modelProvider.textEmbeddingModel).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a deterministic embedding-width mismatch before paid provider work', async () => {
+    let selectCount = 0;
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: async () =>
+            selectCount++ === 0
+              ? [{ role: 'embed', primaryModel: 'vertex/gemini-embedding-001' }]
+              : [
+                  {
+                    id: 'vertex/gemini-embedding-001',
+                    promptCostPerMTok: '1',
+                    enabled: true,
+                    capabilities: { embedding: true },
+                  },
+                ],
+        }),
+      }),
+    } as unknown as Db;
+    const modelProvider = provider({ embeddingDimensions: 768 });
+    const router = new ModelRouter(db, 'unused', 'off', modelProvider);
+
+    await expect(router.embed(['hello'], { expectedDimensions: 1_536 })).rejects.toThrow(
+      'do not match the configured embedding space',
     );
+    expect(stubs.reserveCost).not.toHaveBeenCalled();
+    expect(modelProvider.textEmbeddingModel).not.toHaveBeenCalled();
   });
 
   it('meters authoritative embedding provider metadata and does not invent usage', async () => {
@@ -440,7 +738,14 @@ describe('injected model providers', () => {
             selectCount += 1;
             return selectCount === 1
               ? [{ role: 'embed', primaryModel: 'vertex/text-embedding' }]
-              : [{ id: 'vertex/text-embedding', promptCostPerMTok: '1' }];
+              : [
+                  {
+                    id: 'vertex/text-embedding',
+                    promptCostPerMTok: '1',
+                    enabled: true,
+                    capabilities: { embedding: true },
+                  },
+                ];
           },
         }),
       }),
@@ -552,6 +857,135 @@ describe('injected model providers', () => {
     );
   });
 
+  it('retains primary and fallback failures when the configured fallback also fails', async () => {
+    const router = routerWithProvider(provider());
+    vi.mocked(router.route).mockImplementation(
+      async (_role, options) =>
+        ({
+          ok: true,
+          model: {} as LanguageModel,
+          modelId: options?.forceFallback ? 'vertex:fallback' : 'vertex:primary',
+          degraded: options?.forceFallback === true,
+          thinking: true,
+          decision: { mode: 'primary' },
+          params: {},
+          promptCostPerMTok: 1,
+          completionCostPerMTok: 1,
+        }) as never,
+    );
+    const primary = Object.assign(new Error('model retired'), {
+      name: 'AI_APICallError',
+      statusCode: 410,
+    });
+    const fallback = Object.assign(new Error('temporary provider outage'), {
+      name: 'AI_APICallError',
+      statusCode: 503,
+    });
+    stubs.generateObject.mockRejectedValueOnce(primary).mockRejectedValueOnce(fallback);
+    const { z } = await import('zod');
+
+    let caught: unknown;
+    try {
+      await router.object('reason', {
+        prompt: 'hello',
+        schema: z.object({ answer: z.string() }),
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ModelFallbackAttemptError);
+    expect(caught).toMatchObject({
+      name: 'ModelFallbackAttemptError',
+      fallbackAttempted: true,
+      attemptEvidence: {
+        role: 'reason',
+        primaryModelId: 'vertex:primary',
+        fallbackModelId: 'vertex:fallback',
+        primaryFailure: primary,
+        fallbackFailure: fallback,
+      },
+    });
+    expect((caught as ModelFallbackAttemptError).attemptEvidence.elapsedMs).toBeGreaterThanOrEqual(
+      0,
+    );
+    expect(stubs.generateObject).toHaveBeenCalledTimes(2);
+  });
+
+  it('routes an opted-in transient failure through one fallback and returns degraded metadata', async () => {
+    const router = routerWithProvider(provider());
+    vi.mocked(router.route).mockImplementation(
+      async (_role, options) =>
+        ({
+          ok: true,
+          model: {} as LanguageModel,
+          modelId: options?.forceFallback ? 'vertex:fallback' : 'vertex:primary',
+          degraded: options?.forceFallback === true,
+          thinking: true,
+          decision: { mode: 'primary' },
+          params: {},
+          promptCostPerMTok: 1,
+          completionCostPerMTok: 1,
+        }) as never,
+    );
+    stubs.generateObject
+      .mockRejectedValueOnce(
+        Object.assign(new Error('temporary outage'), {
+          name: 'AI_APICallError',
+          statusCode: 503,
+        }),
+      )
+      .mockResolvedValueOnce({ object: { answer: 'ok' }, finishReason: 'stop' });
+    const { z } = await import('zod');
+
+    const result = await router.object('reason', {
+      prompt: 'hello',
+      schema: z.object({ answer: z.string() }),
+      fallbackOnTransientProviderError: true,
+    });
+    expect(result).toMatchObject({ ok: true, modelId: 'vertex:fallback', degraded: true });
+    expect(stubs.generateObject).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives a timeout fallback a fresh bounded signal after the primary deadline fires', async () => {
+    const router = routerWithProvider(provider());
+    vi.mocked(router.route).mockImplementation(
+      async (_role, options) =>
+        ({
+          ok: true,
+          model: {} as LanguageModel,
+          modelId: options?.forceFallback ? 'vertex:fallback' : 'vertex:primary',
+          degraded: options?.forceFallback === true,
+          thinking: true,
+          decision: { mode: 'primary' },
+          params: {},
+          promptCostPerMTok: 1,
+          completionCostPerMTok: 1,
+        }) as never,
+    );
+    stubs.generateObject
+      .mockRejectedValueOnce(Object.assign(new Error('deadline'), { name: 'TimeoutError' }))
+      .mockResolvedValueOnce({ object: { answer: 'recovered' }, finishReason: 'stop' });
+    const { z } = await import('zod');
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await router.object('reason', {
+      prompt: 'hello',
+      schema: z.object({ answer: z.string() }),
+      abortSignal: controller.signal,
+      fallbackOnTransientProviderError: true,
+    });
+    const primaryCall = stubs.generateObject.mock.calls[0]?.[0] as {
+      abortSignal: AbortSignal;
+    };
+    const fallbackCall = stubs.generateObject.mock.calls[1]?.[0] as {
+      abortSignal: AbortSignal;
+    };
+    expect(primaryCall.abortSignal.aborted).toBe(true);
+    expect(fallbackCall.abortSignal.aborted).toBe(false);
+    expect(result).toMatchObject({ ok: true, modelId: 'vertex:fallback', degraded: true });
+  });
+
   it('keeps provider-specific options and cache hints isolated', async () => {
     const modelProvider = provider();
     const router = routerWithProvider(modelProvider);
@@ -578,7 +1012,7 @@ describe('injected model providers', () => {
     expect(JSON.stringify(args)).not.toContain('openrouter');
   });
 
-  it('reconciles unknown successful usage to the positive estimate', async () => {
+  it('keeps successful provider calls with absent usage as unknown liabilities', async () => {
     const modelProvider = provider({ normalizeUsage: vi.fn(() => ({})) });
     const router = routerWithProvider(modelProvider);
     const meter = (
@@ -607,15 +1041,13 @@ describe('injected model providers', () => {
       completionCostPerMTok: 1,
     });
 
-    expect(stubs.reconcileReservation).toHaveBeenCalledWith(
+    expect(stubs.markCostAttemptUnknown).toHaveBeenCalledWith(
       expect.anything(),
       'reservation-1',
-      expect.objectContaining({
-        usd: 0.012345,
-        description: 'draft:vertex/gemini-test estimated: provider usage unavailable',
-        evidence: expect.objectContaining({ basis: 'preflight_estimate' }),
-      }),
+      'provider returned without complete usage or authoritative cost',
+      {},
     );
+    expect(stubs.reconcileReservation).not.toHaveBeenCalled();
   });
 
   it('does not derive cost from partial token usage', async () => {
@@ -647,12 +1079,13 @@ describe('injected model providers', () => {
       completionCostPerMTok: 1,
     });
 
-    const actual = (stubs.reconcileReservation.mock.calls as unknown[][])[0]?.[2] as {
-      usd?: number;
-      quantity?: number;
-    };
-    expect(actual.usd).toBe(0.012345);
-    expect(actual).not.toHaveProperty('quantity');
+    expect(stubs.markCostAttemptUnknown).toHaveBeenCalledWith(
+      expect.anything(),
+      'reservation-1',
+      'provider returned without complete usage or authoritative cost',
+      {},
+    );
+    expect(stubs.reconcileReservation).not.toHaveBeenCalled();
   });
 
   it('validates embedding shape after provider success and retains the reservation', async () => {
@@ -665,7 +1098,14 @@ describe('injected model providers', () => {
             selectCount += 1;
             return selectCount === 1
               ? [{ role: 'embed', primaryModel: 'vertex/text-embedding' }]
-              : [{ id: 'vertex/text-embedding', promptCostPerMTok: '1' }];
+              : [
+                  {
+                    id: 'vertex/text-embedding',
+                    promptCostPerMTok: '1',
+                    enabled: true,
+                    capabilities: { embedding: true },
+                  },
+                ];
           },
         }),
       }),
@@ -699,7 +1139,14 @@ describe('injected model providers', () => {
             selectCount += 1;
             return selectCount === 1
               ? [{ role: 'embed', primaryModel: 'vertex/text-embedding' }]
-              : [{ id: 'vertex/text-embedding', promptCostPerMTok: '1' }];
+              : [
+                  {
+                    id: 'vertex/text-embedding',
+                    promptCostPerMTok: '1',
+                    enabled: true,
+                    capabilities: { embedding: true },
+                  },
+                ];
           },
         }),
       }),
@@ -726,7 +1173,14 @@ describe('injected model providers', () => {
             selectCount += 1;
             return selectCount === 1
               ? [{ role: 'embed', primaryModel: 'vertex/text-embedding' }]
-              : [{ id: 'vertex/text-embedding', promptCostPerMTok: '1' }];
+              : [
+                  {
+                    id: 'vertex/text-embedding',
+                    promptCostPerMTok: '1',
+                    enabled: true,
+                    capabilities: { embedding: true },
+                  },
+                ];
           },
         }),
       }),
@@ -756,7 +1210,14 @@ describe('injected model providers', () => {
             selectCount += 1;
             return selectCount === 1
               ? [{ role: 'embed', primaryModel: 'vertex/text-embedding' }]
-              : [{ id: 'vertex/text-embedding', promptCostPerMTok: '1' }];
+              : [
+                  {
+                    id: 'vertex/text-embedding',
+                    promptCostPerMTok: '1',
+                    enabled: true,
+                    capabilities: { embedding: true },
+                  },
+                ];
           },
         }),
       }),

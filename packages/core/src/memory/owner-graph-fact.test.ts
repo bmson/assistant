@@ -15,6 +15,9 @@ function fakeRepository() {
     async entity() {
       return null;
     },
+    async correctionTarget() {
+      return null;
+    },
     async createAtomic(input) {
       created.push(input);
       return { memoryId: 'memory-1', relationId: 'relation-1' };
@@ -24,6 +27,9 @@ function fakeRepository() {
 }
 
 const router = {
+  async embeddingSpace() {
+    return { provider: 'test', model: 'embedding', dimensions: 3, revision: '1' };
+  },
   async embed(texts: string[]) {
     return texts.map(() => [1, 0, 0]);
   },

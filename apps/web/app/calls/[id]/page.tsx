@@ -27,7 +27,9 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
 
   return (
     <PageShell size="reading">
-      {call.active ? <AutoRefresh intervalMs={2_000} /> : null}
+      {call.active ? (
+        <AutoRefresh intervalMs={2_000} maxIntervalMs={2_000} refreshWhileEditing />
+      ) : null}
       <PageHeader
         title={call.contactName ?? call.to}
         back={{ href: '/calls', label: 'Calls' }}
@@ -55,7 +57,11 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
             callId={call.id}
             checkin={
               call.openCheckin
-                ? { id: call.openCheckin.id, question: call.openCheckin.question }
+                ? {
+                    id: call.openCheckin.id,
+                    question: call.openCheckin.question,
+                    revision: call.openCheckin.revision,
+                  }
                 : null
             }
           />
@@ -93,9 +99,7 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
         <Card className="mt-3">
           {call.transcript.length === 0 ? (
             <p className="text-sm text-muted">
-              {call.active
-                ? 'Waiting for the conversation to start…'
-                : 'Nothing was said on this call.'}
+              {call.active ? 'Waiting for the conversation to start…' : 'No transcript available.'}
             </p>
           ) : (
             <ol className="flex flex-col gap-3">
@@ -132,9 +136,15 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
                   <p className="text-muted">
                     {checkin.answer
                       ? `You answered: ${checkin.answer}`
-                      : call.active
-                        ? 'Waiting for your answer.'
-                        : 'No answer given.'}
+                      : checkin.deliveryStatus === 'superseded'
+                        ? 'Replaced by a newer question.'
+                        : checkin.deliveryStatus === 'failed'
+                          ? 'The notice could not be delivered.'
+                          : checkin.expiresAt && Date.parse(checkin.expiresAt) <= Date.now()
+                            ? 'This question expired without an answer.'
+                            : checkin.deliveryStatus === 'delivered' && call.active
+                              ? 'Waiting for your answer.'
+                              : 'No answer given.'}
                   </p>
                 </li>
               ))}

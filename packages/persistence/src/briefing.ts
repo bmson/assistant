@@ -1,3 +1,16 @@
+import type { Records } from './records.js';
+
+export type BriefingBookingOccurrence = Pick<
+  Records['emailBookingOccurrences'],
+  | 'bookingKey'
+  | 'lifecycle'
+  | 'dates'
+  | 'sourceChannelMessageId'
+  | 'sourceReceivedAt'
+  | 'sourceAuthenticated'
+  | 'version'
+>;
+
 /** Mail the briefing reads from the email-ingest pass. */
 export interface BriefingMail {
   fromEmail: string;
@@ -7,11 +20,14 @@ export interface BriefingMail {
   importance: number;
   dates: unknown;
   channelMessageId: string;
+  authenticated: boolean;
 }
 
 export interface BriefingInputs {
   /** Mail ingested inside the window, most important first. */
   mail: BriefingMail[];
+  /** Latest authenticated, explicitly identified booking lifecycles. */
+  bookings: BriefingBookingOccurrence[];
   /** Unarchived work that stopped for the owner inside the window, newest first. */
   attention: Array<{ title: string | null; progress: string }>;
   /** Unexpired approvals on unarchived work. */

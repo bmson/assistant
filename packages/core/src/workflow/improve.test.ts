@@ -22,6 +22,12 @@ import { enqueueTask } from './machine.js';
 
 const DATABASE_URL =
   process.env.DATABASE_URL ?? 'postgres://assistant:assistant@localhost:5432/assistant';
+const IMPROVE_SPACE = {
+  provider: 'test',
+  model: 'improve-fixture',
+  dimensions: 1536,
+  revision: '1',
+} as const;
 const TEST_EVENT_IDS = [
   'xtest-improve-source',
   'xtest-improve-quality-0',
@@ -29,6 +35,9 @@ const TEST_EVENT_IDS = [
 ] as const;
 
 const fakeRouter = {
+  async embeddingSpace() {
+    return IMPROVE_SPACE;
+  },
   async embed(texts: string[]) {
     return texts.map(() => new Array(1536).fill(0.03));
   },
@@ -246,6 +255,9 @@ describe('self-improvement loop', () => {
 
     let reviewPrompt = '';
     const recordingRouter = {
+      async embeddingSpace() {
+        return IMPROVE_SPACE;
+      },
       async embed(texts: string[]) {
         return texts.map(() => new Array(1536).fill(0.03));
       },
@@ -325,6 +337,9 @@ describe('self-improvement loop', () => {
 
     let reviewPrompt = '';
     const recordingRouter = {
+      async embeddingSpace() {
+        return IMPROVE_SPACE;
+      },
       async embed(texts: string[]) {
         return texts.map(() => new Array(1536).fill(0.03));
       },

@@ -32,6 +32,7 @@ export function NotificationForm({
         <label className="flex min-w-0 flex-col gap-1.5">
           <span className={labelClass}>Quiet from</span>
           <input
+            disabled={pending}
             type="time"
             value={quietStart}
             onChange={(e) => {
@@ -44,6 +45,7 @@ export function NotificationForm({
         <label className="flex min-w-0 flex-col gap-1.5">
           <span className={labelClass}>Quiet until</span>
           <input
+            disabled={pending}
             type="time"
             value={quietEnd}
             onChange={(e) => {
@@ -56,6 +58,7 @@ export function NotificationForm({
         <label className="flex min-w-0 flex-col gap-1.5">
           <span className={labelClass}>Daily ping limit</span>
           <input
+            disabled={pending}
             type="number"
             min={1}
             max={100}
@@ -82,13 +85,19 @@ export function NotificationForm({
           disabled={pending}
           onClick={() =>
             startTransition(async () => {
-              const result = await updateNotificationSettings({
-                quietStart,
-                quietEnd,
-                ambientDailyCap,
-              });
-              if (result.error) setError(result.error);
-              else setSaved(true);
+              setError(null);
+              setSaved(false);
+              try {
+                const result = await updateNotificationSettings({
+                  quietStart,
+                  quietEnd,
+                  ambientDailyCap,
+                });
+                if (result.error) setError(result.error);
+                else setSaved(true);
+              } catch {
+                setError('The settings could not be saved. Your entries are kept here.');
+              }
             })
           }
           className={btn.primary}

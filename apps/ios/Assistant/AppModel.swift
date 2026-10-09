@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import SwiftUI
 import UIKit
+import CoreLocation
 
 enum AssistantRoute: String, Hashable, Identifiable, CaseIterable, Sendable {
     case chat
@@ -143,6 +144,13 @@ final class AppModel {
     private(set) var archivedActivity: ActivityList?
     private(set) var archivedGoals: GoalsDashboard?
     private(set) var workspace: WorkspaceResponse?
+    private(set) var workspacePagesLoading: Set<String> = []
+    private(set) var workspacePageErrors: [String: String] = [:]
+    private(set) var documentPageLoading = false
+    private(set) var documentPageError: String?
+    private(set) var peoplePagination: CursorPagination?
+    private(set) var peoplePageLoading = false
+    private(set) var peoplePageError: String?
     private(set) var memoryReviewCount = 0
     private(set) var mcpConnections: [McpConnection] = []
     private(set) var modelProviders: ModelProviderSettings?
@@ -164,6 +172,16 @@ final class AppModel {
             }
         }
     }
+    private(set) var isCancellingSend = false
+    private(set) var isCardFormAdmissionPending = false
+    var canCancelCurrentSend: Bool {
+        (isSending && !isCardFormAdmissionPending && (ordinaryTurn != nil || resumableTurn?.taskId != nil))
+            || (ordinaryTurn != nil && !isCardFormAdmissionPending)
+    }
+    var hasRequestedCancellationForCurrentSend: Bool {
+        ordinaryTurn?.cancellationRequested == true
+    }
+    @ObservationIgnored private var cancelRequestedWithoutTaskID = false
     private(set) var toolActivity: [ToolActivity] = []
     private(set) var activityThought: AssistantThought?
     private(set) var activityDetail: String?
@@ -205,6 +223,23 @@ final class AppModel {
 
     private(set) var serverURL: String
     @ObservationIgnored private var client: APIClient?
+    private(set) var cardFormSession: CardFormMobileSession?
+    private var cardFormSessionInitializationFailure: Error?
+    private(set) var cardFormComposerBinding: CardFormComposerBinding?
+    private(set) var cardFormUnknownOperationId: String?
+    private(set) var cardFormUnknownOperationIds = Set<String>()
+    private(set) var cardFormRecoveryReady = true
+    private(set) var cardFormStateRevision = 0
+    private(set) var cardFormTaskRevision = 0
+    private(set) var cardFormActiveOperationId: String?
+    private(set) var cardFormActiveTaskId: String?
+    private(set) var cardFormActiveOwnerMessageTexts: [CardFormScope: String] = [:]
+    @ObservationIgnored private var cardFormTerminalTaskStatuses: [String: String] = [:]
+    @ObservationIgnored private var cardFormObservedTaskStatuses: [String: String] = [:]
+    @ObservationIgnored private var cardFormTaskStatusObservers: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var cardFormTaskObserverIDs: [String: UUID] = [:]
+    @ObservationIgnored private var cardFormTaskCursors: [String: String] = [:]
+    @ObservationIgnored private var cardFormPreparationVersion = 0
     @ObservationIgnored private var connectionVersion = 0
     @ObservationIgnored private var pairingAttemptVersion = 0
     @ObservationIgnored private var cursor: String?
@@ -228,16 +263,32 @@ final class AppModel {
     @ObservationIgnored private var suggestionsBeingAnswered: Set<String> = []
     @ObservationIgnored private var pendingNotificationDestination: AssistantNotificationDestination?
     @ObservationIgnored private var notificationNavigationVersion = 0
+    @ObservationIgnored private var conversationIntentGeneration = 0
     @ObservationIgnored private var isResolvingNotification = false
     @ObservationIgnored private var notificationTurnSettlements = NotificationTurnSettlements()
     @ObservationIgnored private var cardsBeingRefreshed: Set<String> = []
     @ObservationIgnored private var cardRefreshMarkers: [String: CardRefreshMarker] = [:]
+    /// Kept across a lost refresh receipt so retrying the same immutable card
+    /// revision reuses its server idempotency key.
+    @ObservationIgnored private var cardRefreshOperations: [String: String] = [:]
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var idleTask: Task<Void, Never>?
     @ObservationIgnored private var idlePollingVersion = 0
     /// The turn in flight, kept so returning to the foreground can pick the
     /// reply back up. Backgrounding cancels `pollTask`; the server carries on.
     @ObservationIgnored private var resumableTurn: (taskId: String?, streamID: String)?
+    private struct OrdinaryTurn {
+        let token: UUID
+        let operationId: String
+        let conversationId: String
+        let streamID: String
+        let userMessageID: String
+        let ownerText: String
+        let requestBody: Data
+        var taskId: String?
+        var cancellationRequested: Bool
+    }
+    @ObservationIgnored private var ordinaryTurn: OrdinaryTurn?
     /// When the app was last backgrounded, for deciding whether the connection
     /// pool has had time to go stale.
     @ObservationIgnored private var backgroundedAt: Date?
@@ -261,25 +312,35 @@ final class AppModel {
 
     private let defaults: UserDefaults
     private let storeConnectionToken: (String) throws -> Void
+    private let enqueueAutomaticSpeech: @MainActor (ChatMessage) -> Void
     private let serverKey = "assistant.server-url"
     private let configuredKey = "assistant.connection-configured"
     /// More → Assistant context owns this toggle; the model only reads it.
     static let shareLocationKey = "assistant.share-location"
-    /// The background-arrival toggle; LocationManager owns the monitoring.
-    static let shareLocationBackgroundKey = "assistant.share-location-background"
+    static let arrivalNudgesKey = "assistant.arrival-nudges"
     /// One-time notification ask after a successful pairing (APNs opt-in).
     private let pushPromptedKey = "assistant.push-prompted"
     @ObservationIgnored private var lastLocationPostAt: Date?
     @ObservationIgnored private var lastForegroundReportAt: Date?
+    @ObservationIgnored private var locationConsentGeneration = 0
+    private let captureCurrentPlace: @MainActor () async -> (location: CLLocation, label: String)?
 
     init(
         apiClient: APIClient? = nil,
         initialMessages: [ChatMessage] = [],
         defaults: UserDefaults = .standard,
-        storeConnectionToken: @escaping (String) throws -> Void = { try KeychainStore.saveToken($0) }
+        storeConnectionToken: @escaping (String) throws -> Void = { try KeychainStore.saveToken($0) },
+        enqueueAutomaticSpeech: @escaping @MainActor (ChatMessage) -> Void = { message in
+            SpeechPlayer.shared.enqueue(SpeakableText.passages(for: message), for: message.id)
+        },
+        captureCurrentPlace: @escaping @MainActor () async -> (location: CLLocation, label: String)? = {
+            await LocationManager.shared.captureCurrentPlace()
+        }
     ) {
         self.defaults = defaults
         self.storeConnectionToken = storeConnectionToken
+        self.enqueueAutomaticSpeech = enqueueAutomaticSpeech
+        self.captureCurrentPlace = captureCurrentPlace
         messages = initialMessages
         serverURL = defaults.string(forKey: serverKey) ?? "http://localhost:3000"
         hasSavedConnection = defaults.bool(forKey: configuredKey)
@@ -297,31 +358,17 @@ final class AppModel {
         // Approve/Deny straight from a notification. The handler goes through
         // the same client call as the in-app buttons, then refreshes so the
         // badge and the Approvals sheet agree with the server.
-        NotificationManager.shared.approvalDecisionHandler = { [weak self] approvalId, decision in
-            guard let self else { return }
-            _ = await self.decideApproval(id: approvalId, decision: decision)
+        NotificationManager.shared.approvalDecisionHandler = { [weak self] approvalId, decision, ownerID in
+            guard let self, self.bootstrap?.identity.id == ownerID,
+                  self.overview?.approvals.pending.contains(where: { $0.id == approvalId }) == true else { return false }
+            return await self.decideApproval(id: approvalId, decision: decision)
         }
         // APNs token upload for proactive pushes. A rotation re-fires this;
         // a failure is retried on the next launch's registration callback.
-        NotificationManager.shared.deviceTokenHandler = { [weak self] token in
-            guard let client = self?.client else { throw APIError.invalidResponse }
+        NotificationManager.shared.deviceTokenHandler = { [weak self] token, scope in
+            guard let self, self.pushRegistrationScope == scope,
+                  let client = self.client else { throw APIError.invalidResponse }
             try await client.postDeviceToken(DeviceTokenBody(token: token))
-        }
-        // Background arrival pings (significant-change wakes). Best-effort —
-        // the server's arrival gate decides whether a nudge is warranted.
-        LocationManager.shared.backgroundHandler = { [weak self] location, label in
-            guard let client = self?.client else { return }
-            try? await client.postLocationPing(LocationPingBody(
-                lat: location.coordinate.latitude,
-                lng: location.coordinate.longitude,
-                label: label,
-                accuracyM: location.horizontalAccuracy >= 0
-                    ? Int(location.horizontalAccuracy.rounded())
-                    : nil,
-                capturedAt: AssistantFormatters.internetDateTime.string(from: location.timestamp),
-                timeZone: TimeZone.current.identifier,
-                source: "ios-app-background"
-            ))
         }
     }
 
@@ -332,6 +379,10 @@ final class AppModel {
     }
 
     var agentName: String { bootstrap?.identity.name ?? "Assistant" }
+    private var pushRegistrationScope: String? {
+        guard let client, let ownerID = bootstrap?.identity.id else { return nil }
+        return "\(client.configuration.baseURL.absoluteString)|\(ownerID)"
+    }
     var presence: AssistantPresence {
         if isSending { return .working }
         return bootstrap?.shell.dashboard.presence ?? .idle
@@ -581,7 +632,10 @@ final class AppModel {
         isLoading = true
         errorMessage = nil
         var version = connectionVersion
+        let pairingAttempt = pairingAttemptVersion
         let overviewVersion = version
+        let hadNativeFormProjection = client.nativeCardFormsEnabled
+        client.disableNativeCardForms()
         defer {
             // Cancellation ends the loading state too, but an old connection
             // must not dismiss a newer connection's loading indicator.
@@ -600,18 +654,35 @@ final class AppModel {
             // its original scope. A replacement owner needs a new read.
             async let overviewResult = fetchOverview(client)
             let response = try await client.bootstrap()
-            guard connectionIsCurrent(client, version: version) else { return }
+            guard connectionIsCurrent(client, version: version), pairingAttempt == pairingAttemptVersion else { return }
+            if let existingOwner = bootstrap?.identity.id, existingOwner != response.identity.id {
+                connectionVersion += 1
+                resetConnectedState()
+                version = connectionVersion
+            }
+            try await prepareCardFormSession(for: client, ownerId: response.identity.id, pairingAttempt: pairingAttempt)
+            guard connectionIsCurrent(client, version: version), pairingAttempt == pairingAttemptVersion else { return }
             apply(response)
             version = connectionVersion
             clearRecoveredError(from: .bootstrap)
             await resolvePendingNotificationDestination()
+            guard connectionIsCurrent(client, version: version) else { return }
+            await refreshConversationForNewlyEnabledForms(
+                using: client, wasEnabled: false, version: version
+            )
             guard connectionIsCurrent(client, version: version) else { return }
             let result = version == overviewVersion
                 ? await overviewResult : await fetchOverview(client)
             guard connectionIsCurrent(client, version: version) else { return }
             await finishConnectionSetup(using: client, version: version, prefetchedOverview: result)
         } catch {
-            guard connectionIsCurrent(client, version: version) else { return }
+            guard connectionIsCurrent(client, version: version), pairingAttempt == pairingAttemptVersion else { return }
+            if hadNativeFormProjection,
+               let session = cardFormSession,
+               session.serverIdentity == client.configuration.baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")),
+               session.ownerId == bootstrap?.identity.id {
+                client.enableNativeCardForms()
+            }
             reportError(error, source: .bootstrap, retry: { [weak self] in
                 guard let self else { return }
                 await self.connect()
@@ -634,6 +705,7 @@ final class AppModel {
         guard connectionIsCurrent(client, version: version) else { return }
         hasSavedConnection = true
         defaults.set(true, forKey: configuredKey)
+        NotificationManager.shared.setRegistrationScope(pushRegistrationScope)
         await resolvePendingNotificationDestination()
         guard connectionIsCurrent(client, version: version) else { return }
         if let prefetchedOverview {
@@ -677,12 +749,17 @@ final class AppModel {
     /// app refreshes context without turning the radio into a tracker.
     func shareLocationIfEnabled(force: Bool = false) async {
         guard defaults.bool(forKey: Self.shareLocationKey), let client else { return }
+        let consentGeneration = locationConsentGeneration
         let version = connectionVersion
+        let arrivalOptIn = defaults.bool(forKey: Self.arrivalNudgesKey)
         if !force,
            let last = lastLocationPostAt,
-           Date().timeIntervalSince(last) < 15 * 60 { return }
-        guard let place = await LocationManager.shared.captureCurrentPlace() else { return }
-        guard connectionIsCurrent(client, version: version) else { return }
+           Date().timeIntervalSince(last) < (defaults.bool(forKey: Self.arrivalNudgesKey) ? 3 * 60 : 15 * 60) { return }
+        guard let place = await captureCurrentPlace() else { return }
+        guard connectionIsCurrent(client, version: version),
+              defaults.bool(forKey: Self.shareLocationKey),
+              defaults.bool(forKey: Self.arrivalNudgesKey) == arrivalOptIn,
+              locationConsentGeneration == consentGeneration else { return }
         let ping = LocationPingBody(
             lat: place.location.coordinate.latitude,
             lng: place.location.coordinate.longitude,
@@ -692,9 +769,13 @@ final class AppModel {
                 : nil,
             capturedAt: AssistantFormatters.internetDateTime.string(from: place.location.timestamp),
             timeZone: TimeZone.current.identifier,
-            source: "ios-app"
+            source: "ios-app",
+            arrivalOptIn: arrivalOptIn
         )
         do {
+            guard defaults.bool(forKey: Self.shareLocationKey),
+                  defaults.bool(forKey: Self.arrivalNudgesKey) == arrivalOptIn,
+                  locationConsentGeneration == consentGeneration else { return }
             try await client.postLocationPing(ping)
             guard connectionIsCurrent(client, version: version) else { return }
             lastLocationPostAt = Date()
@@ -703,13 +784,598 @@ final class AppModel {
         }
     }
 
+    func locationSharingPreferenceChanged(enabled: Bool) {
+        locationConsentGeneration += 1
+        if !enabled { lastLocationPostAt = nil }
+    }
+
+    func arrivalNudgesPreferenceChanged() {
+        locationConsentGeneration += 1
+        lastLocationPostAt = nil
+    }
+
+    private func prepareCardFormSession(for client: APIClient, ownerId: String, pairingAttempt: Int? = nil) async throws {
+        cardFormPreparationVersion &+= 1
+        let preparationVersion = cardFormPreparationVersion
+        let expectedConnectionVersion = connectionVersion
+        func attemptIsCurrent() -> Bool {
+            guard !Task.isCancelled,
+                  self.cardFormPreparationVersion == preparationVersion,
+                  self.connectionVersion == expectedConnectionVersion else { return false }
+            if let pairingAttempt { return self.pairingAttemptVersion == pairingAttempt }
+            return self.client?.configuration == client.configuration
+        }
+
+        let serverIdentity = client.configuration.baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard attemptIsCurrent() else { return }
+
+        if let current = cardFormSession,
+           current.serverIdentity == serverIdentity, current.ownerId == ownerId {
+            // A reset can clear the in-memory fences while keeping the same
+            // encrypted partition. Restore it before advertising form support.
+            client.disableNativeCardForms()
+            cardFormRecoveryReady = false
+            let hadKnownRecoveryFence = hasKnownCardFormRecoveryFence
+            do {
+                let unsettled = try await current.restoreUnsettled()
+                guard attemptIsCurrent(), cardFormSession === current else { return }
+                publishCardFormRecovery(unsettled)
+                cardFormRecoveryReady = true
+                cardFormSessionInitializationFailure = nil
+                client.enableNativeCardForms()
+            } catch {
+                guard attemptIsCurrent(), cardFormSession === current else { return }
+                // A known unknown operation cannot be forgotten just because
+                // encrypted storage could not be read during reconnect. Keep
+                // sends fenced until a later successful restore.
+                cardFormRecoveryReady = !hadKnownRecoveryFence
+                cardFormSessionInitializationFailure = error
+                client.disableNativeCardForms()
+            }
+            return
+        }
+
+        client.disableNativeCardForms()
+        cardFormRecoveryReady = false
+        if let current = cardFormSession {
+            self.client?.disableNativeCardForms()
+            do {
+                try await current.closeAndRotate()
+            } catch {
+                guard attemptIsCurrent() else { return }
+                cardFormSession = nil
+                cardFormComposerBinding = nil
+                cardFormRecoveryReady = true
+                cardFormSessionInitializationFailure = error
+                cardFormActiveOwnerMessageTexts.removeAll()
+                client.disableNativeCardForms()
+                throw error
+            }
+            guard attemptIsCurrent() else { return }
+            cardFormSession = nil
+            cardFormComposerBinding = nil
+            cardFormActiveOwnerMessageTexts.removeAll()
+            cardFormStateRevision += 1
+        }
+
+        do {
+            let candidateSession = try CardFormMobileSession(serverIdentity: serverIdentity, ownerId: ownerId)
+            let unsettled = try await candidateSession.restoreUnsettled()
+            guard attemptIsCurrent() else { return }
+            cardFormSession = candidateSession
+            publishCardFormRecovery(unsettled)
+            cardFormRecoveryReady = true
+            cardFormSessionInitializationFailure = nil
+            client.enableNativeCardForms()
+        } catch let error as CardFormMobileSessionError {
+            guard attemptIsCurrent() else { return }
+            if case .invalidIdentity = error { throw error }
+            cardFormSession = nil
+            cardFormRecoveryReady = true
+            cardFormSessionInitializationFailure = error
+            client.disableNativeCardForms()
+        } catch {
+            guard attemptIsCurrent() else { return }
+            cardFormSession = nil
+            cardFormRecoveryReady = true
+            cardFormSessionInitializationFailure = error
+            client.disableNativeCardForms()
+        }
+    }
+
+    private func publishCardFormRecovery(_ unsettled: [CardFormDraft]) {
+        cardFormActiveOperationId = nil
+        cardFormActiveTaskId = nil
+        cardFormActiveOwnerMessageTexts.removeAll()
+        cardFormObservedTaskStatuses.removeAll()
+        cardFormTerminalTaskStatuses.removeAll()
+        cardFormUnknownOperationIds = Set(unsettled.compactMap { draft in
+            guard case .outcomeUnknown = draft.phase else { return nil }
+            return draft.frozenSubmission?.operationId
+        })
+        // A live request in this process is not unknown yet, but it still
+        // fences ordinary Send until its exact response settles.
+        for draft in unsettled {
+            if case .submitting = draft.phase, let operationId = draft.frozenSubmission?.operationId {
+                cardFormUnknownOperationIds.insert(operationId)
+            }
+            guard case let .activeForm(pointer) = draft.phase else { continue }
+            cardFormActiveOperationId = draft.frozenSubmission?.operationId
+            cardFormActiveTaskId = pointer.taskId
+            if let ownerText = draft.frozenSubmission?.ownerMessageText {
+                cardFormActiveOwnerMessageTexts[draft.scope] = ownerText
+            }
+            cardFormObservedTaskStatuses[pointer.taskId] = pointer.taskStatus
+        }
+        cardFormUnknownOperationId = cardFormUnknownOperationIds.sorted().first
+        cardFormStateRevision += 1
+        cardFormTaskRevision += 1
+    }
+
+    /// Bootstrap on a new client is intentionally projected without native
+    /// forms until the encrypted owner session is ready. Refetch the selected
+    /// conversation once at that boundary so a safe prose fallback can become
+    /// an interactive form without changing the server's stored message.
+    private func refreshConversationForNewlyEnabledForms(
+        using client: APIClient, wasEnabled: Bool, version: Int
+    ) async {
+        guard !wasEnabled, client.nativeCardFormsEnabled,
+              connectionIsCurrent(client, version: version),
+              let conversationId else { return }
+        do {
+            let latest = try await client.conversation(id: conversationId)
+            guard connectionIsCurrent(client, version: version),
+                  self.conversationId == conversationId,
+                  latest.conversation.id == conversationId else { return }
+            setActiveConversation(latest)
+        } catch {
+            // Bootstrap prose remains readable if this optional capability
+            // refresh fails; the next conversation refresh can recover it.
+        }
+    }
+
+    func attachCardFormToComposer(scope: CardFormScope, form: CardFormDescriptor) {
+        guard scope.conversationId == conversationId,
+              scope.ownerId == bootstrap?.identity.id,
+              scope.sessionId == cardFormSession?.sessionId else { return }
+        cardFormComposerBinding = CardFormComposerBinding(scope: scope, form: form)
+        // Explicitly re-attaching a reviewed form is the only transition that
+        // makes its previously blocked message eligible for a new operation.
+        cardFormActiveOwnerMessageTexts.removeValue(forKey: scope)
+    }
+
+    func detachCardFormFromComposer() {
+        cardFormComposerBinding = nil
+    }
+
+    func sendCardForm(_ rawText: String, onFrozen: @escaping @MainActor () -> Void) {
+        guard cardFormRecoveryReady, cardFormUnknownOperationIds.isEmpty,
+              cardFormUnknownOperationId == nil else {
+            errorMessage = "Check the saved form request before sending another message."
+            return
+        }
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !isSending, resumableTurn == nil,
+              let binding = cardFormComposerBinding,
+              let session = cardFormSession,
+              let client, binding.scope.conversationId == conversationId,
+              binding.scope.ownerId == bootstrap?.identity.id,
+              binding.scope.sessionId == session.sessionId else { return }
+        isSending = true
+        isCardFormAdmissionPending = true
+        errorMessage = nil
+        let version = connectionVersion
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let pending = try await session.beginSubmission(binding.scope, form: binding.form, ownerMessageText: text)
+                guard self.connectionIsCurrent(client, version: version), self.conversationId == binding.scope.conversationId else {
+                    // The request has not left the device yet. Keep the exact
+                    // persisted body recoverable instead of leaving a local
+                    // `submitting` spinner with no sender.
+                    let unknown = CardFormAdmissionResult(
+                        operationId: pending.submission.operationId, outcome: .outcomeUnknown
+                    )
+                    try? await session.record(unknown, scope: binding.scope)
+                    if self.connectionIsCurrent(client, version: version),
+                       self.conversationId == binding.scope.conversationId,
+                       self.cardFormSession === session {
+                        self.isCardFormAdmissionPending = false
+                        self.cardFormUnknownOperationIds.insert(pending.submission.operationId)
+                        self.cardFormUnknownOperationId = pending.submission.operationId
+                        self.cardFormStateRevision += 1
+                        self.cardFormTaskRevision += 1
+                        self.isSending = false
+                        self.errorMessage = "The saved form request needs a safe retry before another message can be sent."
+                    }
+                    return
+                }
+                self.cardFormTaskRevision += 1
+                onFrozen()
+                await self.submitCardForm(pending, binding: binding, session: session, client: client, version: version)
+            } catch {
+                guard self.connectionIsCurrent(client, version: version),
+                      self.cardFormSession === session,
+                      self.conversationId == binding.scope.conversationId else { return }
+                self.isSending = false
+                self.isCardFormAdmissionPending = false
+                if let draftError = error as? CardFormDraftError {
+                    switch draftError {
+                    case let .missingRequiredValue(fieldId):
+                        self.errorMessage = "Complete the required \(binding.form.fields.first(where: { $0.id == fieldId })?.label ?? "answer") before sending."
+                    case let .invalidValue(fieldId) where binding.form.fields.first(where: { $0.id == fieldId })?.type == .date:
+                        self.errorMessage = "Enter a valid calendar date before sending."
+                    case .invalidValue:
+                        self.errorMessage = "Check the form answers and try again."
+                    case .requestTooLarge:
+                        self.errorMessage = "Some answers make this request too large. Shorten an answer and review it again."
+                    default:
+                        self.reportError(error)
+                    }
+                } else {
+                    self.reportError(error)
+                }
+            }
+        }
+    }
+
+    func retryCardForm(scope: CardFormScope, form: CardFormDescriptor) {
+        guard !isSending, resumableTurn == nil,
+              let session = cardFormSession, let client,
+              scope.ownerId == bootstrap?.identity.id, scope.sessionId == session.sessionId,
+              scope.conversationId == conversationId, scope.cardId == form.cardId, scope.formId == form.formId else { return }
+        let binding = CardFormComposerBinding(scope: scope, form: form)
+        cardFormComposerBinding = binding
+        isSending = true
+        isCardFormAdmissionPending = true
+        errorMessage = nil
+        let version = connectionVersion
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let pending = try await session.retryUnknown(scope)
+                guard self.connectionIsCurrent(client, version: version),
+                      self.cardFormSession === session,
+                      self.conversationId == scope.conversationId else { return }
+                self.cardFormTaskRevision += 1
+                await self.submitCardForm(pending, binding: binding, session: session, client: client, version: version)
+            } catch {
+                guard self.connectionIsCurrent(client, version: version),
+                      self.cardFormSession === session,
+                      self.conversationId == scope.conversationId else { return }
+                self.isSending = false
+                self.isCardFormAdmissionPending = false
+                self.reportError(error)
+            }
+        }
+    }
+
+    private func submitCardForm(
+        _ pending: CardFormPendingRequest,
+        binding: CardFormComposerBinding,
+        session: CardFormMobileSession,
+        client: APIClient,
+        version: Int
+    ) async {
+        cardFormUnknownOperationId = pending.submission.operationId
+        cardFormUnknownOperationIds.insert(pending.submission.operationId)
+        let response = try? await client.submitCardForm(pending)
+        // Keep the shared Stop control unavailable until the encrypted local
+        // receipt is classified; the POST response alone is not the task receipt.
+        // A response can arrive after the owner changes conversations. Settle
+        // the encrypted operation for its original scope before deciding which
+        // visible conversation is allowed to consume the result.
+        guard cardFormSession === session else { return }
+        let admission = response?.admission ?? CardFormAdmissionResult(
+            operationId: pending.submission.operationId, outcome: .outcomeUnknown
+        )
+        let recorded: Bool
+        do {
+            recorded = try await session.record(admission, scope: binding.scope)
+        } catch {
+            guard cardFormSession === session,
+                  connectionIsCurrent(client, version: version),
+                  conversationId == binding.scope.conversationId else { return }
+            isSending = false
+            reportError(error)
+            return
+        }
+        guard cardFormSession === session else { return }
+        let isVisibleBinding = connectionIsCurrent(client, version: version)
+            && conversationId == binding.scope.conversationId
+        if isVisibleBinding { isCardFormAdmissionPending = false }
+        guard recorded else {
+            // A later response for this operation already settled it. Do not
+            // let a late timeout or rejection recreate the unknown fence.
+            cardFormUnknownOperationIds.remove(pending.submission.operationId)
+            if cardFormUnknownOperationId == pending.submission.operationId {
+                cardFormUnknownOperationId = cardFormUnknownOperationIds.sorted().first
+            }
+            if isVisibleBinding { isSending = false }
+            cardFormStateRevision += 1
+            return
+        }
+        cardFormStateRevision += 1
+        cardFormTaskRevision += 1
+        func preserveUnsentOwnerText() {
+            let draftScope = conversationDrafts.scope(conversationID: binding.scope.conversationId)
+            conversationDrafts.preserveUnsent(pending.submission.ownerMessageText, in: draftScope)
+            if isVisibleBinding {
+                restorableDraft = pending.submission.ownerMessageText
+                composerRecoveryRevision += 1
+            }
+        }
+        switch admission.outcome {
+        case let .accepted(receipt):
+            cardFormUnknownOperationIds.remove(pending.submission.operationId)
+            if cardFormUnknownOperationId == pending.submission.operationId {
+                cardFormUnknownOperationId = cardFormUnknownOperationIds.sorted().first
+            }
+            if cardFormActiveOperationId == pending.submission.operationId {
+                cardFormActiveOperationId = nil
+                cardFormActiveTaskId = nil
+            }
+            cardFormActiveOwnerMessageTexts.removeValue(forKey: binding.scope)
+            if cardFormComposerBinding?.scope == binding.scope { cardFormComposerBinding = nil }
+            cardFormTerminalTaskStatuses.removeValue(forKey: receipt.taskId)
+            rememberCardFormTaskStatus(receipt.taskStatus, taskId: receipt.taskId)
+            if isVisibleBinding {
+                startCardFormTaskObservation(scope: binding.scope, form: binding.form, receipt: receipt)
+            }
+            guard isVisibleBinding else {
+                if receipt.taskStatus == "done" || receipt.taskStatus == "failed" || receipt.taskStatus == "cancelled" {
+                    cardFormTerminalTaskStatuses[receipt.taskId] = receipt.taskStatus
+                }
+                return
+            }
+            if let messageCursor = response?.messageCursor { cursor = messageCursor }
+            // The server returns the exact durable user-message ID. Add that
+            // row immediately so the ordinary log does not wait for a cursor
+            // that already advanced past this admission.
+            if !messages.contains(where: { $0.id == receipt.messageId }) {
+                messages.append(.optimistic(role: .user, text: pending.submission.ownerMessageText, id: receipt.messageId))
+                messages = logOrder.ordered(messages)
+            }
+            resumableTurn = (taskId: receipt.taskId, streamID: "form-\(pending.submission.operationId)")
+            setActivityThought(.startingWork, proposedDetail: pending.submission.ownerMessageText)
+            pollTask?.cancel()
+            let streamID = "form-\(pending.submission.operationId)"
+            pollTask = Task { [weak self] in await self?.pollForReply(taskId: receipt.taskId, streamID: streamID) }
+        case let .rejected(status, code):
+            cardFormUnknownOperationIds.remove(pending.submission.operationId)
+            if cardFormUnknownOperationId == pending.submission.operationId {
+                cardFormUnknownOperationId = cardFormUnknownOperationIds.sorted().first
+            }
+            if cardFormComposerBinding?.scope == binding.scope { cardFormComposerBinding = nil }
+            preserveUnsentOwnerText()
+            guard isVisibleBinding else { return }
+            isSending = false
+            errorMessage = code == "stale_revision"
+                ? "This card changed. Refresh it and review the updated form before sending."
+                : "The form was not accepted. Review it and try again."
+            errorRetry = nil
+            _ = status
+        case let .activeForm(pointer):
+            cardFormUnknownOperationIds.remove(pending.submission.operationId)
+            if cardFormUnknownOperationId == pending.submission.operationId {
+                cardFormUnknownOperationId = cardFormUnknownOperationIds.sorted().first
+            }
+            cardFormActiveOperationId = pending.submission.operationId
+            cardFormActiveTaskId = pointer.taskId
+            cardFormActiveOwnerMessageTexts[binding.scope] = pending.submission.ownerMessageText
+            if cardFormComposerBinding?.scope == binding.scope { cardFormComposerBinding = nil }
+            cardFormTerminalTaskStatuses.removeValue(forKey: pointer.taskId)
+            rememberCardFormTaskStatus(pointer.taskStatus, taskId: pointer.taskId)
+            if isVisibleBinding {
+                startCardFormTaskObservation(scope: binding.scope, form: binding.form, taskId: pointer.taskId, fallbackStatus: pointer.taskStatus)
+            }
+            preserveUnsentOwnerText()
+            guard isVisibleBinding else { return }
+            isSending = false
+            errorMessage = "Another form request is active. You can reply in chat, or review this form again when it finishes."
+            errorRetry = nil
+        case .outcomeUnknown:
+            cardFormUnknownOperationIds.insert(pending.submission.operationId)
+            cardFormUnknownOperationId = pending.submission.operationId
+            guard isVisibleBinding else { return }
+            isSending = false
+            errorMessage = "The form result is still unknown. Retry the same submission to check it safely."
+            errorRetry = { [weak self] in await self?.retryCardForm(scope: binding.scope, form: binding.form) }
+        }
+    }
+
+    func cardFormTaskStatus(_ taskId: String) -> String? { cardFormObservedTaskStatuses[taskId] }
+
+    func openCardForm(_ form: CardFormDescriptor) async throws -> (CardFormScope, CardFormDraft) {
+        guard let conversationId, let ownerId = bootstrap?.identity.id, let client else {
+            throw CardFormMobileSessionError.invalidIdentity
+        }
+        if cardFormSession == nil {
+            try await prepareCardFormSession(for: client, ownerId: ownerId)
+        }
+        guard let session = cardFormSession, ownerId == session.ownerId else {
+            throw cardFormSessionInitializationFailure ?? CardFormMobileSessionError.secureStorageUnavailable
+        }
+        let result = try await session.open(conversationId: conversationId, form: form)
+        if case .outcomeUnknown = result.1.phase, let operationId = result.1.frozenSubmission?.operationId {
+            cardFormUnknownOperationIds.insert(operationId)
+            cardFormUnknownOperationId = operationId
+        }
+        if case let .activeForm(pointer) = result.1.phase {
+            cardFormActiveOperationId = result.1.frozenSubmission?.operationId
+            cardFormActiveTaskId = pointer.taskId
+            if let ownerText = result.1.frozenSubmission?.ownerMessageText {
+                cardFormActiveOwnerMessageTexts[result.0] = ownerText
+            }
+            rememberCardFormTaskStatus(pointer.taskStatus, taskId: pointer.taskId)
+            startCardFormTaskObservation(scope: result.0, form: form, taskId: pointer.taskId, fallbackStatus: pointer.taskStatus)
+        }
+        if case let .accepted(receipt) = result.1.phase {
+            rememberCardFormTaskStatus(cardFormObservedTaskStatuses[receipt.taskId] ?? receipt.taskStatus, taskId: receipt.taskId)
+            startCardFormTaskObservation(scope: result.0, form: form, receipt: receipt)
+        }
+        return result
+    }
+
+    func setCardFormValue(
+        scope: CardFormScope, form: CardFormDescriptor, fieldId: String, value: CardFormValue?
+    ) async throws -> CardFormDraft {
+        guard let session = cardFormSession, scope.ownerId == session.ownerId, scope.sessionId == session.sessionId,
+              scope.conversationId == conversationId else { throw CardFormMobileSessionError.invalidIdentity }
+        let result = try await session.setValue(value, fieldId: fieldId, conversationId: scope.conversationId, form: form)
+        cardFormStateRevision += 1
+        return result.1
+    }
+
+    func reviewCardForm(scope: CardFormScope, form: CardFormDescriptor, carryCompatibleValues: Bool) async throws -> CardFormDraft {
+        guard let session = cardFormSession, scope.ownerId == session.ownerId, scope.sessionId == session.sessionId,
+              scope.conversationId == conversationId else { throw CardFormMobileSessionError.invalidIdentity }
+        let result = try await session.reviewRevision(conversationId: scope.conversationId, form: form, carryCompatibleValues: carryCompatibleValues)
+        cardFormStateRevision += 1
+        return result.1
+    }
+
+    func resumeRejectedCardForm(scope: CardFormScope) async throws -> CardFormDraft {
+        guard let session = cardFormSession, scope.ownerId == session.ownerId, scope.sessionId == session.sessionId else {
+            throw CardFormMobileSessionError.invalidIdentity
+        }
+        let draft = try await session.resumeEditingAfterRejection(scope)
+        cardFormStateRevision += 1
+        return draft
+    }
+
+    func refreshCardFormTask(scope: CardFormScope, receipt: CardFormAdmissionReceipt) async {
+        _ = await refreshCardFormTask(scope: scope, taskId: receipt.taskId)
+    }
+
+    private func refreshCardFormTask(scope: CardFormScope, taskId: String) async -> Bool {
+        guard let client, scope.conversationId == conversationId,
+              scope.ownerId == bootstrap?.identity.id, scope.sessionId == cardFormSession?.sessionId else { return false }
+        let version = connectionVersion
+        do {
+            let updates = try await client.updates(
+                conversationId: scope.conversationId, taskId: taskId,
+                cursor: cardFormTaskCursors[taskId], waitMilliseconds: 0
+            )
+            guard connectionIsCurrent(client, version: version), self.conversationId == scope.conversationId,
+                  self.cardFormSession?.sessionId == scope.sessionId else { return false }
+            if let nextCursor = updates.nextCursor { cardFormTaskCursors[taskId] = nextCursor }
+            if let status = updates.taskStatus { observeCardFormTask(status, taskId: taskId) }
+            return true
+        } catch APIError.unauthorized {
+            return false
+        } catch APIError.server(status: 401, message: _) {
+            return false
+        } catch APIError.server(status: 403, message: _) {
+            return false
+        } catch {
+            // Keep the durable receipt fenced; a transient read can be retried.
+            return true
+        }
+    }
+
+    private func startCardFormTaskObservation(
+        scope: CardFormScope, form: CardFormDescriptor, receipt: CardFormAdmissionReceipt
+    ) {
+        startCardFormTaskObservation(
+            scope: scope, form: form, taskId: receipt.taskId, fallbackStatus: receipt.taskStatus
+        )
+    }
+
+    func observeActiveCardFormTask(
+        scope: CardFormScope, form: CardFormDescriptor, pointer: CardFormActiveTaskPointer
+    ) {
+        startCardFormTaskObservation(
+            scope: scope, form: form, taskId: pointer.taskId, fallbackStatus: pointer.taskStatus
+        )
+    }
+
+    private func startCardFormTaskObservation(
+        scope: CardFormScope, form: CardFormDescriptor, taskId: String, fallbackStatus: String
+    ) {
+        guard !["done", "failed", "cancelled"].contains(cardFormObservedTaskStatuses[taskId] ?? fallbackStatus),
+              let client else { return }
+        cardFormTaskStatusObservers.removeValue(forKey: taskId)?.cancel()
+        let observerId = UUID()
+        cardFormTaskObserverIDs[taskId] = observerId
+        let version = connectionVersion
+        cardFormTaskStatusObservers[taskId] = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled,
+                  self.cardFormTaskObserverIDs[taskId] == observerId,
+                  self.connectionIsCurrent(client, version: version),
+                  self.conversationId == scope.conversationId,
+                  self.cardFormSession?.sessionId == scope.sessionId {
+                let shouldContinue = await self.refreshCardFormTask(scope: scope, taskId: taskId)
+                if !shouldContinue || ["done", "failed", "cancelled"].contains(self.cardFormObservedTaskStatuses[taskId] ?? fallbackStatus) {
+                    break
+                }
+                try? await Task.sleep(for: .seconds(15))
+            }
+            if self.cardFormTaskObserverIDs[taskId] == observerId {
+                self.cardFormTaskObserverIDs.removeValue(forKey: taskId)
+                self.cardFormTaskStatusObservers.removeValue(forKey: taskId)
+                self.cardFormTaskCursors.removeValue(forKey: taskId)
+            }
+        }
+    }
+
+    private func rememberCardFormTaskStatus(_ status: String, taskId: String) {
+        cardFormObservedTaskStatuses[taskId] = status
+        if ["done", "failed", "cancelled"].contains(status) {
+            cardFormTerminalTaskStatuses[taskId] = status
+        }
+    }
+
+    private func observeCardFormTask(_ status: String, taskId: String) {
+        guard cardFormObservedTaskStatuses[taskId] != nil else { return }
+        rememberCardFormTaskStatus(status, taskId: taskId)
+        cardFormTaskRevision += 1
+        if ["done", "failed", "cancelled"].contains(status) {
+            cardFormTerminalTaskStatuses[taskId] = status
+            // Keep the old owner text blocked until the owner explicitly
+            // reviews and re-attaches the form; the terminal task only enables that action.
+            cardFormTaskObserverIDs.removeValue(forKey: taskId)
+            cardFormTaskCursors.removeValue(forKey: taskId)
+            cardFormTaskStatusObservers.removeValue(forKey: taskId)?.cancel()
+        }
+        cardFormStateRevision += 1
+    }
+
+    func startNextCardFormEntry(scope: CardFormScope, taskId: String) async throws -> CardFormDraft {
+        guard let status = cardFormTerminalTaskStatuses[taskId],
+              let session = cardFormSession, scope.ownerId == bootstrap?.identity.id,
+              scope.sessionId == session.sessionId else { throw CardFormDraftError.taskNotTerminal }
+        let draft = try await session.startNextEntry(scope, taskId: taskId, status: status)
+        cardFormActiveOperationId = nil
+        cardFormActiveTaskId = nil
+        // Keep the blocked owner text until attachCardFormToComposer proves
+        // the owner explicitly reviewed a fresh entry.
+        cardFormStateRevision += 1
+        cardFormTaskRevision += 1
+        return draft
+    }
+
     func saveConnection(serverURL: String, token: String) async -> Bool {
         pairingAttemptVersion += 1
         let attempt = pairingAttemptVersion
         do {
             let configuration = try Self.configuration(urlString: serverURL, token: token)
             let candidate = client?.replacingConfiguration(configuration) ?? APIClient(configuration: configuration)
+            let hadNativeFormProjection = candidate.nativeCardFormsEnabled
             let verified = try await candidate.bootstrap()
+            guard !Task.isCancelled, attempt == pairingAttemptVersion else { return false }
+            let normalized = configuration.baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let keepsCurrentSession = client?.configuration == configuration
+                && bootstrap?.identity.id == verified.identity.id
+            if !keepsCurrentSession {
+                let sameCardFormPartition = cardFormSession?.serverIdentity == normalized
+                    && cardFormSession?.ownerId == verified.identity.id
+                    && hasKnownCardFormRecoveryFence
+                connectionVersion += 1
+                resetConnectedState(preserveCardFormRecoveryFence: sameCardFormPartition)
+            }
+            try await prepareCardFormSession(for: candidate, ownerId: verified.identity.id, pairingAttempt: attempt)
             guard !Task.isCancelled, attempt == pairingAttemptVersion else { return false }
             // Verify first: a failed candidate must preserve the existing
             // client, credential, owner state, and unsent conversation drafts.
@@ -723,19 +1389,16 @@ final class AppModel {
             } catch {
                 keychainWarning = "Connected, but this device refused to store the key (\(error.localizedDescription)). You will need to enter it again next launch."
             }
-            let normalized = configuration.baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            let keepsCurrentSession = client?.configuration == configuration
-                && bootstrap?.identity.id == verified.identity.id
-            if !keepsCurrentSession {
-                connectionVersion += 1
-                resetConnectedState()
-            }
             self.serverURL = normalized
             defaults.set(normalized, forKey: serverKey)
             client = candidate
             apply(verified, preservingLocalMessages: keepsCurrentSession && isSending)
             showingConnection = false
             let version = connectionVersion
+            await refreshConversationForNewlyEnabledForms(
+                using: candidate, wasEnabled: hadNativeFormProjection, version: version
+            )
+            guard connectionIsCurrent(candidate, version: version) else { return false }
             await finishConnectionSetup(using: candidate, version: version)
             guard connectionIsCurrent(candidate, version: version) else { return false }
             if let keychainWarning { errorMessage = keychainWarning }
@@ -747,11 +1410,24 @@ final class AppModel {
         return false
     }
 
-    private func resetConnectedState() {
+    private var hasKnownCardFormRecoveryFence: Bool {
+        !cardFormUnknownOperationIds.isEmpty
+            || cardFormUnknownOperationId != nil
+            || cardFormActiveOperationId != nil
+            || cardFormActiveTaskId != nil
+            || !cardFormActiveOwnerMessageTexts.isEmpty
+    }
+
+    private func resetConnectedState(preserveCardFormRecoveryFence: Bool = false) {
+        NotificationManager.shared.setRegistrationScope(nil)
         stopIdlePolling()
         pollTask?.cancel()
         pollTask = nil
         resumableTurn = nil
+        ordinaryTurn = nil
+        isCardFormAdmissionPending = false
+        isCancellingSend = false
+        cancelRequestedWithoutTaskID = false
         pendingNotificationDestination = nil
         notificationNavigationVersion += 1
         notificationTurnSettlements = NotificationTurnSettlements()
@@ -783,6 +1459,7 @@ final class AppModel {
         suggestionAnswers.removeAll()
         cardsBeingRefreshed.removeAll()
         cardRefreshMarkers.removeAll()
+        cardRefreshOperations.removeAll()
         messages = []
         logOrder.reset()
         cursor = nil
@@ -794,6 +1471,26 @@ final class AppModel {
         lastForegroundReportAt = nil
         restorableDraft = nil
         packDiscussionDraft = nil
+        cardFormComposerBinding = nil
+        if !preserveCardFormRecoveryFence {
+            cardFormUnknownOperationId = nil
+            cardFormUnknownOperationIds.removeAll()
+            cardFormActiveOperationId = nil
+            cardFormActiveTaskId = nil
+            cardFormActiveOwnerMessageTexts.removeAll()
+            cardFormRecoveryReady = true
+        } else {
+            cardFormRecoveryReady = false
+        }
+        cardFormTaskRevision += 1
+        cardFormTaskStatusObservers.values.forEach { $0.cancel() }
+        cardFormTaskStatusObservers.removeAll()
+        cardFormTaskObserverIDs.removeAll()
+        cardFormTaskCursors.removeAll()
+        cardFormPreparationVersion &+= 1
+        cardFormTerminalTaskStatuses.removeAll()
+        cardFormObservedTaskStatuses.removeAll()
+        cardFormStateRevision += 1
         conversationDrafts.reset()
         composerRecoveryRevision += 1
         navigationPath = []
@@ -821,7 +1518,10 @@ final class AppModel {
     func refreshAll(reportFailure: Bool = true) async {
         guard let client else { return }
         var version = connectionVersion
+        let pairingAttempt = pairingAttemptVersion
         let overviewVersion = version
+        let hadNativeFormProjection = client.nativeCardFormsEnabled
+        client.disableNativeCardForms()
         // Kept separate for the same reason `connect()` separates them: these
         // fetch different things, and a failing dashboard query should not
         // throw away a bootstrap that arrived perfectly well.
@@ -830,13 +1530,30 @@ final class AppModel {
         async let overviewResult = fetchOverview(client)
         do {
             let response = try await client.bootstrap()
-            guard connectionIsCurrent(client, version: version) else { return }
+            guard connectionIsCurrent(client, version: version), pairingAttempt == pairingAttemptVersion else { return }
+            if let existingOwner = bootstrap?.identity.id, existingOwner != response.identity.id {
+                connectionVersion += 1
+                resetConnectedState()
+                version = connectionVersion
+            }
+            try await prepareCardFormSession(for: client, ownerId: response.identity.id, pairingAttempt: pairingAttempt)
+            guard connectionIsCurrent(client, version: version), pairingAttempt == pairingAttemptVersion else { return }
             apply(response, preservingLocalMessages: isSending)
             version = connectionVersion
             clearRecoveredError(from: .bootstrap)
             await resolvePendingNotificationDestination()
-        } catch {
             guard connectionIsCurrent(client, version: version) else { return }
+            await refreshConversationForNewlyEnabledForms(
+                using: client, wasEnabled: false, version: version
+            )
+        } catch {
+            guard connectionIsCurrent(client, version: version), pairingAttempt == pairingAttemptVersion else { return }
+            if hadNativeFormProjection,
+               let session = cardFormSession,
+               session.serverIdentity == client.configuration.baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")),
+               session.ownerId == bootstrap?.identity.id {
+                client.enableNativeCardForms()
+            }
             if reportFailure {
                 reportError(error, source: .bootstrap, retry: { [weak self] in
                     guard let self else { return }
@@ -925,7 +1642,8 @@ final class AppModel {
         guard isSending, pollTask == nil, let turn = resumableTurn else { return }
         pollTask = Task { [weak self] in
             guard let self else { return }
-            await self.pollForReply(taskId: turn.taskId, streamID: turn.streamID)
+            await self.pollForReply(taskId: turn.taskId, streamID: turn.streamID,
+                ordinaryTurnToken: self.ordinaryTurn?.token)
         }
     }
 
@@ -936,6 +1654,7 @@ final class AppModel {
             let response = try await client.overview()
             guard connectionIsCurrent(client, version: version) else { return }
             overview = withLocalApprovalDecisions(response)
+            documentPageError = nil
             clearRecoveredError(from: .overview)
             await reconcileBaselineActivity()
             guard connectionIsCurrent(client, version: version) else { return }
@@ -949,6 +1668,20 @@ final class AppModel {
             })
         }
         catch { }
+    }
+
+    func activityDiscoveryPage(archived: Bool, query: String, filter: String, cursor: String?) async -> ActivityList? {
+        guard let client else { return nil }
+        let version = connectionVersion
+        do {
+            let page = try await client.activity(archived: archived, query: query, filter: filter, cursor: cursor)
+            guard connectionIsCurrent(client, version: version) else { return nil }
+            return page
+        } catch {
+            guard connectionIsCurrent(client, version: version) else { return nil }
+            reportError(error)
+            return nil
+        }
     }
 
     func refreshArchivedActivity(reportFailure: Bool = true) async {
@@ -1031,15 +1764,16 @@ final class AppModel {
         }
     }
 
-    func archiveOldActivity() async -> Bool {
-        guard let client else { return false }
+    func archiveOldActivity(operationId: String? = nil) async -> ArchiveOldActivityProgress? {
+        guard let client else { return nil }
+        errorMessage = nil
         do {
-            try await client.archiveOldActivity()
+            let progress = try await client.archiveOldActivity(operationId: operationId)
             reconcileAfterMutation(archivedActivity: true)
-            return true
+            return progress
         } catch {
             reportError(error)
-            return false
+            return nil
         }
     }
 
@@ -1261,6 +1995,83 @@ final class AppModel {
     /// a reply that was wrong, a thread of tests, an answer three screens long.
     /// Removed here first — the gesture should feel immediate — and put back if
     /// the server refuses, which is the only way this can be wrong.
+    func setRecallSourceSuppressed(
+        conversationId: String,
+        messageId: String,
+        source: MessageRecallSource,
+        suppressed: Bool
+    ) async -> RecallSourceControlOutcome {
+        guard source.hasCurrentLedgerReference,
+              let surfaceKey = source.surfaceKey,
+              let sourceRevision = source.sourceRevision,
+              let client,
+              self.conversationId == conversationId,
+              let current = messages.first(where: { $0.id == messageId }),
+              current.isDurableLogRow,
+              current.recallSources.contains(where: {
+                  $0.surfaceKey == surfaceKey && $0.sourceRevision == sourceRevision
+              }) else { return .stale }
+
+        let version = connectionVersion
+        let ownerID = bootstrap?.identity.id
+        do {
+            try await client.setRecallSourceSuppressed(
+                surfaceKey: surfaceKey,
+                sourceRevision: sourceRevision,
+                suppressed: suppressed
+            )
+            guard connectionIsCurrent(client, version: version),
+                  bootstrap?.identity.id == ownerID,
+                  self.conversationId == conversationId,
+                  messages.contains(where: { message in
+                      message.id == messageId && message.recallSources.contains(where: {
+                          $0.surfaceKey == surfaceKey && $0.sourceRevision == sourceRevision
+                      })
+                  }) else { return .discarded }
+            return .updated
+        } catch APIError.server(status: 409, message: _) {
+            return .stale
+        } catch {
+            return .failed
+        }
+    }
+
+    func recallSourceSuppressed(
+        conversationId: String,
+        messageId: String,
+        source: MessageRecallSource
+    ) async -> Bool? {
+        guard source.hasCurrentLedgerReference,
+              let surfaceKey = source.surfaceKey,
+              let sourceRevision = source.sourceRevision,
+              let client,
+              self.conversationId == conversationId,
+              messages.contains(where: { message in
+                  message.id == messageId && message.isDurableLogRow && message.recallSources.contains(where: {
+                      $0.surfaceKey == surfaceKey && $0.sourceRevision == source.sourceRevision
+                  })
+              }) else { return nil }
+        let version = connectionVersion
+        let ownerID = bootstrap?.identity.id
+        do {
+            let suppressed = try await client.recallSourceSuppressed(
+                surfaceKey: surfaceKey,
+                sourceRevision: sourceRevision
+            )
+            guard connectionIsCurrent(client, version: version),
+                  bootstrap?.identity.id == ownerID,
+                  self.conversationId == conversationId,
+                  messages.contains(where: { message in
+                      message.id == messageId && message.isDurableLogRow && message.recallSources.contains(where: {
+                          $0.surfaceKey == surfaceKey && $0.sourceRevision == source.sourceRevision
+                      })
+                  }) else { return nil }
+            return suppressed
+        } catch {
+            return nil
+        }
+    }
+
     func hideMessage(_ message: ChatMessage) async {
         guard let client, let conversationId, message.isDurableLogRow else { return }
         guard let index = messages.firstIndex(where: { $0.id == message.id }) else { return }
@@ -1295,11 +2106,44 @@ final class AppModel {
         }
     }
 
+    /// Persist an acknowledgement only after the native chat row is visible.
+    /// The bounded retry handles the short interval between reply persistence
+    /// and the task's terminal `done` transition; replay is idempotent server-side.
+    func acknowledgeMessageDelivery(conversationId: String, messageId: String) async -> Bool {
+        guard let client, self.conversationId == conversationId else { return false }
+        let version = connectionVersion
+        let ownerID = bootstrap?.identity.id
+        for attempt in 0..<6 {
+            if attempt > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(250_000_000 * (1 << min(attempt - 1, 4))))
+            }
+            guard connectionVersion == version,
+                  self.client?.configuration == client.configuration,
+                  bootstrap?.identity.id == ownerID,
+                  self.conversationId == conversationId else { return false }
+            do {
+                try await client.acknowledgeMessageDelivery(
+                    conversationId: conversationId,
+                    messageId: messageId
+                )
+                return true
+            } catch {
+                continue
+            }
+        }
+        return false
+    }
+
     /// Put the last hidden message back. The thread is re-read rather than
     /// patched: the message belongs wherever the server says it does, and
     /// anything that landed while the bar was on screen belongs there too.
     func undoHiddenMessage() async {
         guard let client, let undo = hiddenMessageUndo else { return }
+        let connectionRevision = connectionVersion
+        let ownerID = bootstrap?.identity.id
+        let navigationRevision = notificationNavigationVersion
+        let intentGeneration = conversationIntentGeneration
+        let conversationID = undo.conversationId
         hiddenMessageUndo = nil
         hiddenMessageUndoExpiry?.cancel()
         hiddenMessageUndoExpiry = nil
@@ -1311,9 +2155,24 @@ final class AppModel {
             )
             // A reload during a turn would throw away the stream in flight.
             // The message is unhidden either way and returns on the next read.
-            guard !isSending, conversationId == undo.conversationId else { return }
-            setActiveConversation(try await client.conversation(id: undo.conversationId))
+            guard connectionIsCurrent(client, version: connectionRevision),
+                  bootstrap?.identity.id == ownerID,
+                  notificationNavigationVersion == navigationRevision,
+                  conversationIntentGeneration == intentGeneration,
+                  !isSending, self.conversationId == conversationID else { return }
+            let restored = try await client.conversation(id: conversationID)
+            guard connectionIsCurrent(client, version: connectionRevision),
+                  bootstrap?.identity.id == ownerID,
+                  notificationNavigationVersion == navigationRevision,
+                  conversationIntentGeneration == intentGeneration,
+                  !isSending, self.conversationId == conversationID else { return }
+            setActiveConversation(restored)
         } catch {
+            guard connectionIsCurrent(client, version: connectionRevision),
+                  bootstrap?.identity.id == ownerID,
+                  notificationNavigationVersion == navigationRevision,
+                  conversationIntentGeneration == intentGeneration,
+                  self.conversationId == conversationID else { return }
             reportError(error)
         }
     }
@@ -1379,6 +2238,189 @@ final class AppModel {
     }
 
     @discardableResult
+    func loadMoreWorkspace(_ section: WorkspacePageSection, archived: Bool = false) async -> Bool {
+        guard let client, let initial = workspace, let index = initial.sectionPagination else { return false }
+        let connection = connectionVersion
+        let ownerID = bootstrap?.identity.id
+        let workspaceGeneration = initial.generatedAt
+        let key = section == .chats ? "chats-\(archived ? "archived" : "current")" : section.rawValue
+        guard !workspacePagesLoading.contains(key) else { return false }
+        let pagination: WorkspaceSectionPagination?
+        if section == .chats {
+            pagination = archived ? index.chats?.archived : index.chats?.current
+        } else {
+            switch section {
+            case .skills: pagination = index.skills
+            case .anomalies: pagination = index.anomalies
+            case .improvements: pagination = index.improvements
+            case .chats: pagination = nil
+            case .importSources: pagination = index.importSources
+            case .importFiles: pagination = index.importFiles
+            }
+        }
+        guard let pagination, pagination.pageSize == 50, pagination.hasMore,
+              let cursor = pagination.nextCursor else { return false }
+        if section == .importSources && pagination.consistency != "live-keyset" { return false }
+        if section == .importFiles && !["process-snapshot", "provider-token"].contains(pagination.consistency ?? "") {
+            return false
+        }
+
+        workspacePagesLoading.insert(key)
+        defer { workspacePagesLoading.remove(key) }
+        workspacePageErrors.removeValue(forKey: key)
+        do {
+            func update(_ current: WorkspaceSectionPagination, count: Int, response: WorkspacePageResponseMetadata) -> WorkspaceSectionPagination {
+                var updated = current
+                updated.loaded = count
+                updated.consistency = response.consistency
+                updated.hasMore = response.hasMore
+                updated.complete = response.complete
+                updated.nextCursor = response.nextCursor
+                return updated
+            }
+            func isCurrent(_ response: WorkspacePageResponseMetadata, sectionName: String, actualSection: String) -> Bool {
+                guard connectionIsCurrent(client, version: connection),
+                      bootstrap?.identity.id == ownerID,
+                      let current = workspace, current.generatedAt == workspaceGeneration,
+                      let currentIndex = current.sectionPagination else { return false }
+                let currentPagination: WorkspaceSectionPagination?
+                if section == .chats {
+                    currentPagination = archived ? currentIndex.chats?.archived : currentIndex.chats?.current
+                } else {
+                    switch section {
+                    case .skills: currentPagination = currentIndex.skills
+                    case .anomalies: currentPagination = currentIndex.anomalies
+                    case .improvements: currentPagination = currentIndex.improvements
+                    case .chats: currentPagination = nil
+                    case .importSources: currentPagination = currentIndex.importSources
+                    case .importFiles: currentPagination = currentIndex.importFiles
+                    }
+                }
+                let expectedConsistency: String
+                switch section {
+                case .importFiles:
+                    expectedConsistency = currentIndex.importFiles?.consistency ?? ""
+                case .importSources:
+                    expectedConsistency = "live-keyset"
+                default:
+                    expectedConsistency = "live-keyset"
+                }
+                return actualSection == sectionName
+                    && response.version == 1
+                    && response.consistency == expectedConsistency
+                    && response.pageSize == 50
+                    && response.hasMore == (response.nextCursor != nil)
+                    && response.complete == !response.hasMore
+                    && (response.nextCursor == nil || response.nextCursor != cursor)
+                    && (currentPagination?.nextCursor == cursor)
+            }
+            func appendUnique<Item: Identifiable>(_ incoming: [Item], to existing: inout [Item]) where Item.ID == String {
+                var ids = Set(existing.map(\.id))
+                for item in incoming where ids.insert(item.id).inserted {
+                    existing.append(item)
+                }
+            }
+            switch section {
+            case .chats:
+                let page: WorkspaceSectionPage<WorkspaceChat> = try await client.workspacePage(
+                    section: .chats, cursor: cursor, archived: archived
+                )
+                guard page.availability.isAvailable,
+                      page.items.count <= page.pagination.pageSize,
+                      isCurrent(page.pagination, sectionName: section.rawValue, actualSection: page.section),
+                      var loaded = workspace else {
+                    throw APIError.invalidResponse
+                }
+                if archived {
+                    appendUnique(page.items, to: &loaded.chats.archived)
+                    if var chatPages = loaded.sectionPagination?.chats {
+                        chatPages.archived = update(chatPages.archived, count: loaded.chats.archived.count, response: page.pagination)
+                        loaded.sectionPagination?.chats = chatPages
+                    }
+                } else {
+                    appendUnique(page.items, to: &loaded.chats.current)
+                    if var chatPages = loaded.sectionPagination?.chats {
+                        chatPages.current = update(chatPages.current, count: loaded.chats.current.count, response: page.pagination)
+                        loaded.sectionPagination?.chats = chatPages
+                    }
+                }
+                workspace = loaded
+            case .skills:
+                let page: WorkspaceSectionPage<WorkspaceSkill> = try await client.workspacePage(section: section, cursor: cursor)
+                guard page.availability.isAvailable, page.items.count <= page.pagination.pageSize,
+                      isCurrent(page.pagination, sectionName: section.rawValue, actualSection: page.section),
+                      var loaded = workspace else {
+                    throw APIError.invalidResponse
+                }
+                appendUnique(page.items, to: &loaded.skills)
+                if let current = loaded.sectionPagination?.skills {
+                    loaded.sectionPagination?.skills = update(current, count: loaded.skills.count, response: page.pagination)
+                }
+                workspace = loaded
+            case .anomalies:
+                let page: WorkspaceSectionPage<WorkspaceAnomaly> = try await client.workspacePage(section: section, cursor: cursor)
+                guard page.availability.isAvailable, page.items.count <= page.pagination.pageSize,
+                      isCurrent(page.pagination, sectionName: section.rawValue, actualSection: page.section),
+                      var loaded = workspace else {
+                    throw APIError.invalidResponse
+                }
+                appendUnique(page.items, to: &loaded.anomalies)
+                if let current = loaded.sectionPagination?.anomalies {
+                    loaded.sectionPagination?.anomalies = update(current, count: loaded.anomalies.count, response: page.pagination)
+                }
+                workspace = loaded
+            case .improvements:
+                let page: WorkspaceSectionPage<WorkspaceImprovement> = try await client.workspacePage(section: section, cursor: cursor)
+                guard page.availability.isAvailable, page.items.count <= page.pagination.pageSize,
+                      isCurrent(page.pagination, sectionName: section.rawValue, actualSection: page.section),
+                      var loaded = workspace else {
+                    throw APIError.invalidResponse
+                }
+                appendUnique(page.items, to: &loaded.improvements)
+                if let current = loaded.sectionPagination?.improvements {
+                    loaded.sectionPagination?.improvements = update(current, count: loaded.improvements.count, response: page.pagination)
+                }
+                workspace = loaded
+            case .importSources:
+                let page: WorkspaceSectionPage<WorkspaceImportSource> = try await client.workspacePage(
+                    section: section, cursor: cursor
+                )
+                guard page.availability.isAvailable, page.items.count <= page.pagination.pageSize,
+                      isCurrent(page.pagination, sectionName: section.rawValue, actualSection: page.section),
+                      var loaded = workspace, var imports = loaded.imports else {
+                    throw APIError.invalidResponse
+                }
+                appendUnique(page.items, to: &imports.sources)
+                loaded.imports = imports
+                if let current = loaded.sectionPagination?.importSources {
+                    loaded.sectionPagination?.importSources = update(current, count: imports.sources.count, response: page.pagination)
+                }
+                workspace = loaded
+            case .importFiles:
+                let page: WorkspaceSectionPage<WorkspaceImportFile> = try await client.workspacePage(
+                    section: section, cursor: cursor
+                )
+                guard page.availability.isAvailable, page.items.count <= page.pagination.pageSize,
+                      isCurrent(page.pagination, sectionName: section.rawValue, actualSection: page.section),
+                      var loaded = workspace, var imports = loaded.imports else {
+                    throw APIError.invalidResponse
+                }
+                appendUnique(page.items, to: &imports.unstartedFiles)
+                loaded.imports = imports
+                if let current = loaded.sectionPagination?.importFiles {
+                    loaded.sectionPagination?.importFiles = update(current, count: imports.unstartedFiles.count, response: page.pagination)
+                }
+                workspace = loaded
+            }
+            return true
+        } catch {
+            guard connectionIsCurrent(client, version: connection), bootstrap?.identity.id == ownerID else { return false }
+            workspacePageErrors[key] = "Couldn’t load more items. Check your connection and try again."
+            return false
+        }
+    }
+
+    @discardableResult
     func refreshCards(reportFailure: Bool = true) async -> Bool {
         guard let client else { return false }
         let version = connectionVersion
@@ -1403,7 +2445,7 @@ final class AppModel {
         }
     }
 
-    func refreshSavedCard(id: String) async -> String? {
+    func refreshSavedCard(id: String, revisionId: String? = nil) async -> String? {
         guard let client else { return "Connect to your assistant to refresh this card." }
         let version = connectionVersion
         guard cardsBeingRefreshed.insert(id).inserted else { return "This card is already refreshing." }
@@ -1414,13 +2456,22 @@ final class AppModel {
             return data
         }.first
         let saved = savedCards.first { $0.id == id }
-        var marker = CardRefreshMarker(revisionId: data?["revisionId"]?.string ?? saved?.revisionId,
+        let expectedRevisionId = revisionId ?? data?["revisionId"]?.string ?? saved?.revisionId
+        let operationKey = "\(id):\(expectedRevisionId ?? "legacy")"
+        let operationId = cardRefreshOperations[operationKey] ?? UUID().uuidString.lowercased()
+        cardRefreshOperations[operationKey] = operationId
+        var marker = CardRefreshMarker(revisionId: expectedRevisionId,
             updatedAt: data?["updatedAt"]?.string ?? saved?.updatedAt)
         do {
-            let result = try await client.refreshCard(id: id)
+            let result = try await client.refreshCard(
+                id: id,
+                expectedRevisionId: expectedRevisionId,
+                operationId: operationId
+            )
             guard connectionIdentityIsCurrent(client, version: version) else { return "Your connection changed. Check this card on its original assistant." }
             guard !Task.isCancelled else { return "The refresh could not be confirmed. Try again." }
             guard result.ok else { return "The refresh could not be started. Try again." }
+            cardRefreshOperations.removeValue(forKey: operationKey)
             marker.taskId = result.taskId
             cardRefreshMarkers[id] = marker
             messages = messages.map { $0.applyingCardRefreshes([id: marker]) }
@@ -1434,6 +2485,10 @@ final class AppModel {
             return nil
         } catch {
             guard connectionIdentityIsCurrent(client, version: version) else { return "Your connection changed. Check this card on its original assistant." }
+            if case let APIError.server(status: 409, _) = error {
+                cardRefreshOperations.removeValue(forKey: operationKey)
+                return "This card changed. Reload it before refreshing again."
+            }
             return Task.isCancelled || isRequestCancellation(error) ? "The refresh could not be confirmed. Try again." : error.localizedDescription
         }
     }
@@ -1897,11 +2952,11 @@ final class AppModel {
         return try? await client.phoneCall(id: id).call
     }
 
-    func answerCallCheckin(callId: String, checkinId: String, answer: String) async -> Bool {
+    func answerCallCheckin(callId: String, checkinId: String, revision: Int, answer: String) async -> Bool {
         guard let client else { return false }
         errorMessage = nil
         do {
-            try await client.answerCallCheckin(callId: callId, checkinId: checkinId, answer: answer)
+            try await client.answerCallCheckin(callId: callId, checkinId: checkinId, revision: revision, answer: answer)
             return true
         } catch {
             reportError(error)
@@ -2137,16 +3192,109 @@ final class AppModel {
     func loadPeople() async {
         guard let client else { return }
         let version = connectionVersion
+        let ownerID = bootstrap?.identity.id
         do {
             let response = try await client.people()
-            guard connectionIsCurrent(client, version: version) else { return }
+            guard connectionIsCurrent(client, version: version), bootstrap?.identity.id == ownerID else { return }
             people = response.people
+            peoplePagination = response.pagination.flatMap { $0.isSupported ? $0 : nil }
+            peopleGeneration = response.generatedAt
+            peoplePageError = response.pagination?.isSupported == true
+                ? nil
+                : "More people may be available, but this server did not provide a supported page cursor."
             peopleLoaded = true
         } catch where isRequestCancellation(error) {
             return
         } catch {
-            guard connectionIsCurrent(client, version: version) else { return }
+            guard connectionIsCurrent(client, version: version), bootstrap?.identity.id == ownerID else { return }
             reportError(error)
+        }
+    }
+
+    @discardableResult
+    func loadMorePeople() async -> Bool {
+        guard let client, let pagination = peoplePagination, pagination.hasMore,
+              let cursor = pagination.nextCursor, !peoplePageLoading else { return false }
+        let version = connectionVersion
+        let ownerID = bootstrap?.identity.id
+        let generation = peopleGeneration
+        peoplePageLoading = true
+        peoplePageError = nil
+        defer { peoplePageLoading = false }
+        do {
+            let response = try await client.peoplePage(cursor: cursor, limit: pagination.pageSize)
+            guard connectionIsCurrent(client, version: version), bootstrap?.identity.id == ownerID,
+                  peopleGeneration == generation, peoplePagination?.nextCursor == cursor else { return false }
+            guard let next = response.pagination, next.isSupported, next.pageSize == pagination.pageSize,
+                  next.nextCursor == nil || next.nextCursor != cursor,
+                  response.people.count <= next.pageSize else {
+                peoplePageError = "The people list returned an unsupported page. Refresh and try again."
+                return false
+            }
+            var ids = Set(people.map(\.id))
+            for person in response.people where ids.insert(person.id).inserted {
+                people.append(person)
+            }
+            peoplePagination = next
+            return true
+        } catch {
+            guard connectionIsCurrent(client, version: version), bootstrap?.identity.id == ownerID,
+                  peopleGeneration == generation else { return false }
+            peoplePageError = "Couldn’t load more people. Check your connection and try again."
+            return false
+        }
+    }
+
+    @ObservationIgnored private var peopleGeneration: String?
+
+    @discardableResult
+    func loadMoreDocuments() async -> Bool {
+        guard let client, let initial = overview,
+              let pagination = initial.documents.pagination, pagination.isSupported,
+              pagination.hasMore, let cursor = pagination.nextCursor,
+              !documentPageLoading else { return false }
+        let version = connectionVersion
+        let ownerID = bootstrap?.identity.id
+        let generation = initial.generatedAt
+        documentPageLoading = true
+        documentPageError = nil
+        defer { documentPageLoading = false }
+        do {
+            let page = try await client.documentsPage(cursor: cursor, limit: pagination.pageSize)
+            guard connectionIsCurrent(client, version: version), bootstrap?.identity.id == ownerID,
+                  let latest = overview, latest.generatedAt == generation,
+                  latest.documents.pagination?.nextCursor == cursor else { return false }
+            guard let next = page.pagination, next.isSupported, next.pageSize == pagination.pageSize,
+                  page.hasMore == next.hasMore,
+                  next.nextCursor == nil || next.nextCursor != cursor,
+                  page.documents.count <= next.pageSize else {
+                documentPageError = "The document list returned an unsupported page. Refresh and try again."
+                return false
+            }
+            var documents = latest.documents.documents
+            var ids = Set(documents.map(\.id))
+            for document in page.documents where ids.insert(document.id).inserted {
+                documents.append(document)
+            }
+            overview = withLocalApprovalDecisions(.init(
+                generatedAt: latest.generatedAt,
+                activity: latest.activity,
+                goals: latest.goals,
+                approvals: latest.approvals,
+                documents: DocumentsOverview(
+                    documents: documents,
+                    stats: page.stats,
+                    primaryConversationId: page.primaryConversationId,
+                    hasMore: next.hasMore,
+                    pagination: next
+                )
+            ))
+            return true
+        } catch {
+            guard connectionIsCurrent(client, version: version), bootstrap?.identity.id == ownerID,
+                  overview?.generatedAt == generation else { return false }
+            documentPageError = "Couldn’t load more documents. Check your connection and try again."
+            return false
         }
     }
 
@@ -2260,15 +3408,45 @@ final class AppModel {
         guard !text.isEmpty, !isSending,
               let client,
               let conversationId, let draftScope = composerDraftScope else { return }
+        guard cardFormRecoveryReady, cardFormUnknownOperationIds.isEmpty,
+              cardFormUnknownOperationId == nil else {
+            errorMessage = "Check the saved form request before sending another message."
+            return
+        }
+        if cardFormActiveOwnerMessageTexts.values.contains(where: {
+            text == $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }) {
+            errorMessage = "That form message is still unsent while the active request is running. You can send a different reply."
+            return
+        }
+        guard resumableTurn == nil, ordinaryTurn == nil else {
+            errorMessage = "The previous turn’s status is still unknown. Reconnect to check it before starting another turn."
+            return
+        }
         let version = connectionVersion
+        conversationIntentGeneration += 1
 
         let autonomous = override ?? nextMessageAutonomous
+        let clientOperationId = UUID().uuidString.lowercased()
+        let requestBody: Data
+        do {
+            requestBody = try client.encodeChatRequest(
+                conversationId: conversationId, text: text, clientOperationId: clientOperationId,
+                autonomous: autonomous, force: force, spoken: spoken, clientMessageId: UUID().uuidString
+            )
+        } catch {
+            reportError(error)
+            return
+        }
         nextMessageAutonomous = false
         errorMessage = nil
         isSending = true
+        isCancellingSend = false
+        cancelRequestedWithoutTaskID = false
         lastNotifiedTaskState = nil
         let localUser = ChatMessage.optimistic(role: .user, text: text)
         let streamID = "stream-\(UUID().uuidString)"
+        let turnToken = UUID()
         messages.append(localUser)
         messages.append(.optimistic(role: .assistant, text: "", id: streamID))
         // Neither row has a send time yet, so both anchor to the end of the
@@ -2283,6 +3461,17 @@ final class AppModel {
         // the stream is exactly the case this exists for, and at that point
         // there is no taskId yet. Polling by cursor alone still finds the reply.
         resumableTurn = (taskId: nil, streamID: streamID)
+        ordinaryTurn = OrdinaryTurn(
+            token: turnToken,
+            operationId: clientOperationId,
+            conversationId: conversationId,
+            streamID: streamID,
+            userMessageID: localUser.id,
+            ownerText: text,
+            requestBody: requestBody,
+            taskId: nil,
+            cancellationRequested: false
+        )
         pollTask = Task { [weak self] in
             guard let self else { return }
             // `ensure`, not `start`: starting ends every live activity first,
@@ -2293,48 +3482,68 @@ final class AppModel {
                 thought: .thinking,
                 detail: text
             )
-            guard self.connectionIsCurrent(client, version: version),
-                  self.conversationId == conversationId else { return }
+            guard self.isCurrentOrdinaryTurn(turnToken, client: client, version: version, conversationId: conversationId) else { return }
             do {
                 let receipt = try await client.sendMessage(
                     conversationId: conversationId,
                     text: text,
+                    clientOperationId: clientOperationId,
                     autonomous: autonomous,
                     force: force,
                     spoken: spoken,
+                    encodedRequestBody: requestBody,
                     onDelta: { [weak self] delta in
                         await self?.receive(delta: delta, streamID: streamID, client: client,
-                            version: version, conversationId: conversationId)
+                            version: version, conversationId: conversationId, turnToken: turnToken)
                     },
                     onCue: { [weak self] part in
                         await self?.receive(cue: part, streamID: streamID, client: client,
-                            version: version, conversationId: conversationId)
+                            version: version, conversationId: conversationId, turnToken: turnToken)
                     }
                 )
-                guard self.connectionIsCurrent(client, version: version),
-                      self.conversationId == conversationId else { return }
+                guard self.isCurrentOrdinaryTurn(turnToken, client: client, version: version, conversationId: conversationId) else { return }
                 if receipt.taskId != nil {
                     self.messages.removeAll { $0.id == streamID }
                     await self.publishThought(.startingWork, detail: text)
                 }
-                guard self.connectionIsCurrent(client, version: version),
-                      self.conversationId == conversationId else { return }
+                guard self.isCurrentOrdinaryTurn(turnToken, client: client, version: version, conversationId: conversationId) else { return }
                 if let receiptCursor = receipt.cursor { self.cursor = receiptCursor }
                 self.resumableTurn = (taskId: receipt.taskId, streamID: streamID)
-                await self.pollForReply(taskId: receipt.taskId, streamID: streamID)
+                self.ordinaryTurn?.taskId = receipt.taskId
+                if self.isCancellingSend, let taskId = receipt.taskId {
+                    await self.requestCancellation(
+                        taskId: taskId, client: client, version: version,
+                        conversationId: conversationId, turnToken: turnToken
+                    )
+                }
+                await self.pollForReply(taskId: receipt.taskId, streamID: streamID, ordinaryTurnToken: turnToken)
             } catch where isRequestCancellation(error) {
-                guard self.connectionIsCurrent(client, version: version),
-                      self.conversationId == conversationId else { return }
+                guard self.isCurrentOrdinaryTurn(turnToken, client: client, version: version, conversationId: conversationId) else { return }
                 // A cancelled socket is not evidence the send failed. Recover
                 // via the saved cursor; never replay the message POST.
-                await self.pollForReply(taskId: self.resumableTurn?.taskId, streamID: streamID)
+                await self.pollForReply(taskId: self.resumableTurn?.taskId, streamID: streamID, ordinaryTurnToken: turnToken)
+            } catch APIError.chatTurnCancelledBeforeAdmission(let cancelledConversation, let cancelledOperation) {
+                guard self.isCurrentOrdinaryTurn(turnToken, client: client, version: version, conversationId: conversationId),
+                      cancelledConversation == conversationId,
+                      cancelledOperation == clientOperationId else { return }
+                self.settleCancelledBeforeAdmission(turnToken: turnToken, text: text, draftScope: draftScope)
             } catch {
                 // URLSession's byte stream reports a cancelled task as
                 // URLError.cancelled rather than CancellationError, so a turn
                 // stopped from the composer would otherwise surface as an error
                 // banner. cancelSend owns the UI state in that case.
-                guard self.connectionIsCurrent(client, version: version),
-                      self.conversationId == conversationId else { return }
+                guard self.isCurrentOrdinaryTurn(turnToken, client: client, version: version, conversationId: conversationId) else { return }
+                if self.isCancellingSend {
+                    self.setActivityThought(.thinking, proposedDetail: "The stop outcome is unknown. Checking the conversation.")
+                    await self.pollForReply(taskId: self.resumableTurn?.taskId, streamID: streamID, ordinaryTurnToken: turnToken)
+                    return
+                }
+                if Self.isAmbiguousChatAdmissionError(error) {
+                    self.isSending = false
+                    self.errorMessage = "This turn’s outcome is unknown. Check the same turn before sending another message."
+                    self.setActivityThought(.thinking, proposedDetail: "Turn status unknown. Check this same operation.")
+                    return
+                }
                 self.messages.removeAll { $0.id == streamID && $0.text.isEmpty }
                 // The composer cleared the draft when it sent; a failed turn
                 // gives the words back rather than losing them to the failure.
@@ -2345,6 +3554,7 @@ final class AppModel {
                 let settlement = self.notificationTurnSettlements.begin()
                 defer { self.notificationTurnSettlements.finish(settlement) }
                 self.isSending = false
+                self.isCancellingSend = false
                 self.resumableTurn = nil
                 self.setActivityThought(.stopped, proposedDetail: error.localizedDescription)
                 await LiveActivityManager.shared.finish(
@@ -2352,11 +3562,12 @@ final class AppModel {
                     detail: error.localizedDescription,
                     succeeded: false
                 )
-                guard self.connectionIsCurrent(client, version: version),
-                      self.conversationId == conversationId else { return }
+                guard self.isCurrentOrdinaryTurn(turnToken, client: client, version: version, conversationId: conversationId) else { return }
                 self.clearThought(after: 4)
                 self.notificationTurnSettlements.finish(settlement)
                 await self.resolvePendingNotificationDestination()
+                guard self.ordinaryTurn?.token == turnToken else { return }
+                self.ordinaryTurn = nil
             }
         }
     }
@@ -2633,31 +3844,190 @@ final class AppModel {
         merge(updates.refreshed)
     }
 
-    /// Stops the turn in flight, keeping whatever text has already streamed in.
+    private static func isAmbiguousChatAdmissionError(_ error: Error) -> Bool {
+        guard let apiError = error as? APIError else { return true }
+        switch apiError {
+        case .transport, .invalidResponse, .decoding:
+            return true
+        case let .server(status, _):
+            return status == 409 || status >= 500
+        case .invalidServerURL, .chatTurnCancelledBeforeAdmission, .unauthorized:
+            return false
+        }
+    }
+
+    private func isCurrentOrdinaryTurn(
+        _ token: UUID,
+        client: APIClient,
+        version: Int,
+        conversationId: String
+    ) -> Bool {
+        connectionIsCurrent(client, version: version)
+            && self.conversationId == conversationId
+            && ordinaryTurn?.token == token
+            && ordinaryTurn?.conversationId == conversationId
+    }
+
+    private func settleCancelledBeforeAdmission(turnToken: UUID, text: String, draftScope: ComposerDraftScope) {
+        guard ordinaryTurn?.token == turnToken else { return }
+        let streamID = ordinaryTurn?.streamID
+        let userMessageID = ordinaryTurn?.userMessageID
+        messages.removeAll { $0.id == streamID || $0.id == userMessageID }
+        spokenTurn = nil
+        restorableDraft = text
+        conversationDrafts.preserveUnsent(text, in: draftScope)
+        composerRecoveryRevision += 1
+        ordinaryTurn = nil
+        resumableTurn = nil
+        isSending = false
+        isCancellingSend = false
+        cancelRequestedWithoutTaskID = false
+        errorMessage = "This message was cancelled before it entered the queue."
+        setActivityThought(.stopped, proposedDetail: "Cancelled before admission")
+    }
+
+    /// Requests cancellation of the server task when its identity is known.
+    /// Until the matching task status arrives, the outcome remains unresolved.
     func cancelSend() {
-        guard isSending else { return }
+        guard (isSending || ordinaryTurn != nil),
+              !isCancellingSend, !isCardFormAdmissionPending else { return }
+        isCancellingSend = true
+        stopSpeaking()
+        let detail = "Stop requested. Checking the server status."
+        setActivityThought(.thinking, proposedDetail: detail)
+        Task { await LiveActivityManager.shared.ensure(agentName: agentName, thought: .thinking, detail: detail) }
+        if var turn = ordinaryTurn, let client, let conversationId,
+           turn.conversationId == conversationId {
+            turn.cancellationRequested = true
+            ordinaryTurn = turn
+            cancelRequestedWithoutTaskID = turn.taskId == nil
+            let version = connectionVersion
+            if let taskId = turn.taskId {
+                Task { await requestCancellation(taskId: taskId, client: client, version: version,
+                    conversationId: conversationId, turnToken: turn.token) }
+            } else {
+                Task { await requestOperationCancellation(turnToken: turn.token, client: client,
+                    version: version, conversationId: conversationId) }
+            }
+            return
+        }
+        guard let taskId = resumableTurn?.taskId, let client, let conversationId else { return }
+        let version = connectionVersion
+        Task { await requestCancellation(taskId: taskId, client: client, version: version, conversationId: conversationId) }
+    }
+
+    private func requestOperationCancellation(
+        turnToken: UUID,
+        client: APIClient,
+        version: Int,
+        conversationId: String
+    ) async {
+        guard let turn = ordinaryTurn, turn.token == turnToken else { return }
+        do {
+            let receipt = try await client.cancelChatOperation(
+                conversationId: turn.conversationId, clientOperationId: turn.operationId
+            )
+            guard isCurrentOrdinaryTurn(turnToken, client: client, version: version, conversationId: conversationId),
+                  receipt.conversationId == turn.conversationId,
+                  receipt.clientOperationId == turn.operationId else { return }
+            if receipt.outcome == .cancelledBeforeAdmission, receipt.taskId == nil,
+               receipt.effectStatus == "not_started" {
+                settleCancelledBeforeAdmission(turnToken: turnToken, text: turn.ownerText,
+                    draftScope: conversationDrafts.scope(conversationID: conversationId))
+                return
+            }
+            if let taskId = receipt.taskId {
+                guard let taskStatus = receipt.taskStatus,
+                      ["cancelled", "done", "failed"].contains(taskStatus) else {
+                    throw APIError.invalidResponse
+                }
+                settleOperationCancellation(
+                    turnToken: turnToken,
+                    taskId: taskId,
+                    taskStatus: taskStatus,
+                    outcome: receipt.outcome
+                )
+            } else {
+                isCancellingSend = false
+                errorMessage = "The stop outcome is unknown. Retry checking this same turn before sending another message."
+                setActivityThought(.thinking, proposedDetail: "Stop status unknown. Checking the same turn.")
+            }
+        } catch {
+            guard isCurrentOrdinaryTurn(turnToken, client: client, version: version, conversationId: conversationId) else { return }
+            isCancellingSend = false
+            errorMessage = "The stop outcome is unknown. Retry checking this same turn before sending another message."
+            setActivityThought(.thinking, proposedDetail: "Stop status unknown. Checking the same turn.")
+        }
+    }
+
+    /// A terminal cancellation receipt is an authoritative task observation.
+    /// It lets the owner continue even if the original event stream never closes.
+    /// Cancellation does not promise that an external effect was rolled back.
+    private func settleOperationCancellation(
+        turnToken: UUID,
+        taskId: String,
+        taskStatus: String,
+        outcome: ChatOperationCancellationOutcome
+    ) {
+        guard let turn = ordinaryTurn, turn.token == turnToken,
+              turn.taskId == nil || turn.taskId == taskId else { return }
+        let notice: String
+        let detail: String
+        let thought: AssistantThought
+        switch (outcome, taskStatus) {
+        case (.cancelled, "cancelled"), (.alreadyCancelled, "cancelled"):
+            notice = "The task was cancelled. Any external action already started may still have taken effect."
+            detail = "Task cancelled; external effects are not reversed"
+            thought = .stopped
+        case (.alreadyTerminal, "done"):
+            notice = "This task finished before the stop request was processed."
+            detail = "Task finished before stop"
+            thought = .finished
+        case (.alreadyTerminal, "failed"):
+            notice = "This task failed before the stop request was processed."
+            detail = "Task failed before stop"
+            thought = .stopped
+        default:
+            return
+        }
         pollTask?.cancel()
         pollTask = nil
-        resumableTurn = nil
-        let settlement = notificationTurnSettlements.begin()
-        isSending = false
-        // Stopping a turn stops its voice too — a reply the owner cut off
-        // should not carry on talking.
-        stopSpeaking()
-        toolActivity = []
-        messages.removeAll { $0.id.hasPrefix("stream-") && $0.text.isEmpty }
-        let detail = "You stopped this turn"
-        setActivityThought(.stoppedByYou, proposedDetail: detail)
-        Task {
-            await LiveActivityManager.shared.finish(
-                thought: .stoppedByYou,
-                detail: detail,
-                succeeded: false
-            )
-            notificationTurnSettlements.finish(settlement)
-            await resolvePendingNotificationDestination()
+        if messages.contains(where: { $0.id == turn.streamID && $0.text.isEmpty }) {
+            messages.removeAll { $0.id == turn.streamID && $0.text.isEmpty }
         }
-        clearThought(after: 2)
+        spokenTurn = nil
+        ordinaryTurn = nil
+        resumableTurn = nil
+        isSending = false
+        isCancellingSend = false
+        cancelRequestedWithoutTaskID = false
+        errorMessage = notice
+        setActivityThought(thought, proposedDetail: detail)
+    }
+
+    private func requestCancellation(
+        taskId: String,
+        client: APIClient,
+        version: Int,
+        conversationId: String,
+        turnToken: UUID? = nil
+    ) async {
+        do {
+            try await client.updateActivity(id: taskId, action: "cancel")
+            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                  resumableTurn?.taskId == taskId,
+                  turnToken == nil || ordinaryTurn?.token == turnToken else { return }
+            setActivityThought(.thinking, proposedDetail: "Stop request received. Checking the task outcome.")
+        } catch {
+            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                  resumableTurn?.taskId == taskId,
+                  turnToken == nil || ordinaryTurn?.token == turnToken else { return }
+            // A timeout or conflict does not establish whether cancellation
+            // won. The existing poll continues to reconcile the same task.
+            isCancellingSend = false
+            errorMessage = "The stop request was not confirmed. I’m checking the current task status."
+            setActivityThought(.thinking, proposedDetail: "Stop status unknown. Checking the current task.")
+        }
     }
 
     func dismissError() { errorMessage = nil }
@@ -2733,6 +4103,15 @@ final class AppModel {
     }
 
     private func setActiveConversation(_ conversation: ConversationView) {
+        if conversation.conversation.id != self.conversationId,
+           ordinaryTurn == nil, resumableTurn == nil {
+            // A pending form admission belongs to the conversation being left.
+            // Its eventual response may still settle the encrypted operation,
+            // but it no longer owns the new conversation's composer state.
+            isSending = false
+            isCardFormAdmissionPending = false
+        }
+        conversationIntentGeneration += 1
         stopIdlePolling()
         // Another conversation's reply has no business still being read here.
         stopSpeaking()
@@ -2746,14 +4125,16 @@ final class AppModel {
         if isSceneActive { startIdlePolling() }
     }
 
-    private func receive(delta: String, streamID: String, client: APIClient, version: Int, conversationId: String) async {
-        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+    private func receive(delta: String, streamID: String, client: APIClient, version: Int, conversationId: String, turnToken: UUID? = nil) async {
+        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+              turnToken == nil || ordinaryTurn?.token == turnToken else { return }
         append(delta: delta, to: streamID)
         await publishThought(.replying, detail: "Writing a response")
     }
 
-    private func receive(cue: MessagePart, streamID: String, client: APIClient, version: Int, conversationId: String) {
-        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+    private func receive(cue: MessagePart, streamID: String, client: APIClient, version: Int, conversationId: String, turnToken: UUID? = nil) {
+        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+              turnToken == nil || ordinaryTurn?.token == turnToken else { return }
         append(cue: cue, to: streamID)
     }
 
@@ -2764,7 +4145,6 @@ final class AppModel {
         if let partIndex = messages[index].parts.lastIndex(where: { $0.type == "text" }) {
             messages[index].parts[partIndex].text = (messages[index].parts[partIndex].text ?? "") + delta
         }
-        speakArrivedText(streamID: id)
     }
 
     private func append(cue: MessagePart, to id: String) {
@@ -2779,46 +4159,37 @@ final class AppModel {
         messages[index].parts.append(cue)
     }
 
-    /// One turn's speech, from the first delta to the durable row that replaces
-    /// the streamed one. Keyed on the reply's own text rather than on a message
-    /// id, because the id changes underneath it halfway through.
+    /// Automatic speech is deferred until the durable response can be checked
+    /// for approvals and sensitive card content.
     private struct SpokenTurn {
         let streamID: String
-        var progress = SpeechProgress()
+        let previousAssistantMessageIDs: Set<String>
     }
 
-    /// Begin reading this turn aloud as it arrives, if the owner asked for that.
+    /// Record the durable replies that predate this turn so reconciliation
+    /// cannot accidentally read an older assistant row.
     private func beginSpeaking(streamID: String) {
         SpeechPlayer.shared.stop()
         guard speechAlwaysOn || SpeechSettings.speakRepliesAloud else {
             spokenTurn = nil
             return
         }
-        spokenTurn = SpokenTurn(streamID: streamID)
+        let previous = Set(messages.compactMap { message in
+            message.role == .assistant && !message.id.hasPrefix("stream-") ? message.id : nil
+        })
+        spokenTurn = SpokenTurn(streamID: streamID, previousAssistantMessageIDs: previous)
     }
 
-    /// Say whatever has finished arriving. Called on every delta; speaks only
-    /// blocks the stream has closed, so a half-written table is never described
-    /// by its first row and then described again.
-    private func speakArrivedText(streamID: String) {
-        guard var turn = spokenTurn, turn.streamID == streamID,
-              let message = messages.first(where: { $0.id == streamID }) else { return }
-        let passages = turn.progress.take(from: message.text, isFinal: false)
-        spokenTurn = turn
-        SpeechPlayer.shared.enqueue(passages, for: streamID)
-    }
-
-    /// The durable row landed. Read the tail the stream never closed — and, for
-    /// a reply that was all card and no prose, read the card.
+    /// Speak only after the durable row gives privacy classification the full
+    /// approval and card payload.
     private func finishSpeaking(for message: ChatMessage) {
-        guard var turn = spokenTurn, message.role == .assistant else { return }
+        guard let turn = spokenTurn,
+              message.role == .assistant,
+              message.id != turn.streamID,
+              !message.id.hasPrefix("stream-"),
+              !turn.previousAssistantMessageIDs.contains(message.id) else { return }
         spokenTurn = nil
-
-        var passages = turn.progress.take(from: message.text, isFinal: true)
-        if !turn.progress.hasSpoken {
-            passages = SpeakableText.passages(for: message)
-        }
-        SpeechPlayer.shared.enqueue(passages, for: message.id)
+        enqueueAutomaticSpeech(message)
     }
 
     func stopSpeaking() {
@@ -2826,13 +4197,14 @@ final class AppModel {
         SpeechPlayer.shared.stop()
     }
 
-    private func pollForReply(taskId: String?, streamID: String) async {
+    private func pollForReply(taskId: String?, streamID: String, ordinaryTurnToken: UUID? = nil) async {
         guard let client, let conversationId else { return }
         let version = connectionVersion
         let settled = Set(["done", "failed", "cancelled", "waiting_approval", "waiting_budget", "needs_attention"])
         let attention = Set(["waiting_approval", "waiting_budget", "needs_attention"])
         var grace = 0
         var finalStatus: String?
+        var receivedCurrentReply = false
         // A held poll waits on the server, so the loop is bounded by how long a
         // turn may legitimately take rather than by a count of ticks.
         let deadline = Date().addingTimeInterval(30 * 60)
@@ -2842,11 +4214,13 @@ final class AppModel {
         var gapMilliseconds: Int64 = 0
         while Date() < deadline {
             attempt += 1
-            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                  ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
             if gapMilliseconds > 0 {
                 try? await Task.sleep(for: .milliseconds(gapMilliseconds))
             }
-            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                  ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
             do {
                 let startedAt = Date()
                 let updates = try await client.updates(
@@ -2856,7 +4230,8 @@ final class AppModel {
                     refreshIds: unresolvedDecisionMessageIDs,
                     waitMilliseconds: PollingPolicy.holdMilliseconds
                 )
-                guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+                guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                  ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
                 let elapsedMilliseconds = Int64(Date().timeIntervalSince(startedAt) * 1_000)
                 let assistantBefore = messages.filter { !$0.id.hasPrefix("stream-") && $0.role == .assistant }.count
                 merge(updates.messages)
@@ -2869,7 +4244,8 @@ final class AppModel {
                         detail: "Step \(latestTool.step)"
                     )
                 }
-                guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+                guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                  ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
                 if let nextCursor = updates.nextCursor { cursor = nextCursor }
                 let assistantAfter = messages.filter { !$0.id.hasPrefix("stream-") && $0.role == .assistant }.count
                 gapMilliseconds = PollingPolicy.gapMilliseconds(
@@ -2884,19 +4260,24 @@ final class AppModel {
                 )
 
                 if taskId == nil, assistantAfter > assistantBefore {
+                    receivedCurrentReply = true
                     messages.removeAll { $0.id == streamID }
                     break
                 }
-                if let status = updates.taskStatus, settled.contains(status) {
-                    finalStatus = status
-                    grace += 1
-                    if assistantAfter > assistantBefore || grace >= 4 { break }
+                if let status = updates.taskStatus {
+                    if let taskId { observeCardFormTask(status, taskId: taskId) }
+                    if settled.contains(status) {
+                        finalStatus = status
+                        grace += 1
+                        if assistantAfter > assistantBefore || grace >= 4 { break }
+                    }
                 }
                 if updates.hasMore { continue }
             } catch {
                 // Same as above: a poll interrupted by cancelSend must not
                 // report itself as a failure.
-                guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+                guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                  ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
                 // A failed poll never held anything, so fall back to the timed
                 // cadence rather than retrying as fast as the network allows.
                 gapMilliseconds = PollingPolicy.replyIntervalMilliseconds(
@@ -2910,20 +4291,44 @@ final class AppModel {
                 }
             }
         }
-        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                  ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
+        if finalStatus == nil && (!receivedCurrentReply || cancelRequestedWithoutTaskID) {
+            spokenTurn = nil
+            isSending = false
+            isCancellingSend = false
+            errorMessage = "The task outcome is unknown. Reconnect to reconcile its status before starting another turn."
+            setActivityThought(.thinking, proposedDetail: "Task status unknown. Reconnect to check the outcome.")
+            return
+        }
+        if let turn = spokenTurn {
+            let durableReply = messages.reversed().first { message in
+                message.role == .assistant
+                    && !message.id.hasPrefix("stream-")
+                    && !turn.previousAssistantMessageIDs.contains(message.id)
+            }
+            if let durableReply { finishSpeaking(for: durableReply) }
+            else { spokenTurn = nil }
+        }
         toolActivity = []
+        if let taskId, let finalStatus, ["done", "failed", "cancelled"].contains(finalStatus) {
+            observeCardFormTask(finalStatus, taskId: taskId)
+        }
         let settlement = notificationTurnSettlements.begin()
         defer { notificationTurnSettlements.finish(settlement) }
         isSending = false
+        isCancellingSend = false
         resumableTurn = nil
         await refreshOverview(reportFailure: false)
-        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                  ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
         // A completed turn may have created or cancelled a reminder. Refresh
         // the secondary workspace projection at the same authoritative
         // boundary as the overview so More → Reminders cannot show a stale
         // inventory after returning from Chat.
         await refreshWorkspace(reportFailure: false)
-        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                  ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
 
         let reply = messages.reversed().first(where: { $0.role == .assistant && !$0.text.isEmpty })?.text
         if let finalStatus, attention.contains(finalStatus) {
@@ -2935,7 +4340,8 @@ final class AppModel {
                 detail: summary,
                 pendingCount: pendingApprovalCount
             )
-            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                  ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
             _ = await notifyOnce(
                 key: "\(taskId ?? streamID)-\(finalStatus)",
                 title: "\(agentName) needs you",
@@ -2943,7 +4349,8 @@ final class AppModel {
                 route: .approvals,
                 approvalId: pendingApproval?.id
             )
-            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                  ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
             await syncNotificationBadge()
         } else {
             let succeeded = finalStatus != "failed" && finalStatus != "cancelled"
@@ -2956,18 +4363,24 @@ final class AppModel {
                 body: succeeded ? "Your result is ready." : "Open the conversation for details.",
                 route: .chat
             )
-            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                  ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
             await LiveActivityManager.shared.finish(
                 thought: thought,
                 detail: detail,
                 succeeded: succeeded
             )
-            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                  ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
             clearThought(after: succeeded ? 1.8 : 4)
         }
-        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId else { return }
+        guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                  ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
         notificationTurnSettlements.finish(settlement)
         await resolvePendingNotificationDestination()
+        if let ordinaryTurnToken, ordinaryTurn?.token == ordinaryTurnToken {
+            ordinaryTurn = nil
+        }
     }
 
     /// The merge above can only add or replace by id. A state row delivered by
@@ -2999,9 +4412,6 @@ final class AppModel {
                 }
             }
             messages.append(message)
-            // The streamed row is gone; speech follows the reply onto its
-            // durable id rather than stopping where the stream did.
-            finishSpeaking(for: message)
         }
         messages = logOrder.ordered(messages)
     }

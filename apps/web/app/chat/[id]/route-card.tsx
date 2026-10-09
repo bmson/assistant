@@ -68,8 +68,8 @@ function snapshotSrc(data: Raw, scheme: 'light' | 'dark'): string | undefined {
 export function RouteCard({ data, timeZone }: { data: Raw; timeZone: string }) {
   const destination = rec(data.destination) ?? {};
   const origin = rec(data.origin) ?? {};
-  const seconds = num(data.durationSeconds) ?? 0;
-  const meters = num(data.distanceMeters) ?? 0;
+  const seconds = num(data.durationSeconds);
+  const meters = num(data.distanceMeters);
   const mode = str(data.mode) || 'driving';
   const leave = clock(str(data.departAt), timeZone);
   const arrive = clock(str(data.arriveAt), timeZone);
@@ -114,9 +114,13 @@ export function RouteCard({ data, timeZone }: { data: Raw; timeZone: string }) {
         </a>
       ) : null}
       <div className="flex items-baseline justify-between gap-3">
-        <p className="text-2xl font-semibold text-strong tabular-nums">{formatDuration(seconds)}</p>
+        <p className="text-2xl font-semibold text-strong tabular-nums">
+          {seconds !== undefined && seconds >= 0 ? formatDuration(seconds) : 'Duration unavailable'}
+        </p>
         <p className="text-sm text-muted tabular-nums">
-          {formatDistance(meters, timeZone)}
+          {meters !== undefined && meters >= 0
+            ? formatDistance(meters, timeZone)
+            : 'Distance unavailable'}
           {str(data.routeName) ? ` · via ${str(data.routeName)}` : ''}
         </p>
       </div>
@@ -138,17 +142,20 @@ export function RouteCard({ data, timeZone }: { data: Raw; timeZone: string }) {
             {steps.length} step{steps.length === 1 ? '' : 's'}
           </summary>
           <ol className="mt-2 list-decimal space-y-1 pl-5 text-strong">
-            {steps.map((step) => (
-              <li key={`${str(step.instruction)}-${num(step.distanceMeters)}`}>
-                {str(step.instruction)}
-                {num(step.distanceMeters) ? (
-                  <span className="text-xs text-muted">
-                    {' '}
-                    · {formatDistance(num(step.distanceMeters) ?? 0, timeZone)}
-                  </span>
-                ) : null}
-              </li>
-            ))}
+            {steps.map((step) => {
+              const distance = num(step.distanceMeters);
+              return (
+                <li key={`${str(step.instruction)}-${distance}`}>
+                  {str(step.instruction)}
+                  {distance !== undefined && distance >= 0 ? (
+                    <span className="text-xs text-muted">
+                      {' '}
+                      · {formatDistance(distance, timeZone)}
+                    </span>
+                  ) : null}
+                </li>
+              );
+            })}
           </ol>
         </details>
       ) : null}

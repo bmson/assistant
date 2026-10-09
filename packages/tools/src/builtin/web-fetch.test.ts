@@ -1,6 +1,9 @@
+import { createServer } from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  createNodeWebFetchIo,
   fetchPublicWebPage,
+  fetchPublicWebResponse,
   isPublicIpAddress,
   looksLikeBotChallenge,
   WEB_FETCH_MAX_BYTES,
@@ -185,6 +188,74 @@ describe('web.fetch network boundary', () => {
 
     expect(result.body).toBe('public');
     expect(result.finalUrl).toBe('https://public.example/');
+  });
+
+  it.each(['127.0.0.1', '169.254.169.254', '::ffff:127.0.0.1', 'fc00::1'])(
+    'does not call the transport when DNS includes prohibited address %s',
+    async (prohibited) => {
+      const get = vi.fn<WebFetchIo['get']>();
+      await expect(
+        fetchPublicWebResponse(
+          'https://rebind.example/image.png',
+          signal,
+          {},
+          {
+            resolve: async () => [
+              { address: '93.184.216.34', family: 4 },
+              { address: prohibited, family: prohibited.includes(':') ? 6 : 4 },
+            ],
+            get,
+          },
+        ),
+      ).rejects.toThrow(/private or non-routable/);
+      expect(get).not.toHaveBeenCalled();
+    },
+  );
+
+  it('passes the exact validated DNS address to the request transport', async () => {
+    const pinned = { address: '93.184.216.34', family: 4 as const };
+    const get = vi.fn<WebFetchIo['get']>(async () => response());
+    await fetchPublicWebResponse(
+      'https://rebind.example/image.png',
+      signal,
+      { accept: 'image/png' },
+      {
+        resolve: async () => [pinned],
+        get,
+      },
+    );
+    expect(get.mock.calls[0]?.[1]).toEqual(pinned);
+    expect(get.mock.calls[0]?.[3]).toEqual({ accept: 'image/png' });
+  });
+
+  it('uses the pinned IP for the actual socket while preserving the hostname', async () => {
+    let receivedHost: string | undefined;
+    const server = createServer((request, reply) => {
+      receivedHost = request.headers.host;
+      reply.writeHead(200, { 'content-type': 'image/png' });
+      reply.end('pinned');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('expected TCP listener');
+      const io = createNodeWebFetchIo();
+      const upstream = await io.get(
+        new URL(`http://hostname-must-not-resolve.invalid:${address.port}/image.png`),
+        { address: '127.0.0.1', family: 4 },
+        AbortSignal.timeout(2_000),
+        { accept: 'image/png' },
+      );
+      const chunks: Buffer[] = [];
+      for await (const chunk of upstream.body) chunks.push(Buffer.from(chunk));
+      expect(Buffer.concat(chunks).toString()).toBe('pinned');
+      expect(upstream.headers.contentType).toBe('image/png');
+      expect(receivedHost).toBe(`hostname-must-not-resolve.invalid:${address.port}`);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
   });
 
   it('stops streaming once the response byte limit is reached', async () => {

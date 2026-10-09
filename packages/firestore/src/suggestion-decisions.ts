@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { newTaskRecord, type Records, type TaskCreateInput } from '@assistant/persistence';
+import {
+  emailBookingOccurrenceId,
+  newTaskRecord,
+  type Records,
+  type TaskCreateInput,
+} from '@assistant/persistence';
 import type { DocumentSnapshot, Transaction } from '@google-cloud/firestore';
 import { createWakeIntent } from './outbox.js';
 import { privacyErasureIsActive, readPrivacyErasureFence } from './privacy-erasure.js';
@@ -19,17 +24,21 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 function deadline(row: Suggestion): Date | null {
   if (row.origin !== 'briefing') return null;
   const calendar =
-    /^Create a calendar event on the owner's own calendar with no attendees for: [\s\S]*\. It starts at (\S+)\. This came from an email from [\s\S]*\. Check the calendar first and do nothing if the event is already there\.$/.exec(
+    /^Create a calendar event on the owner's own calendar with no attendees for: [\s\S]*\. It starts at (\S+)(?: \([^)]+\))?\. This came from an email from [\s\S]*\. Check the calendar first[\s\S]*\.$/.exec(
+      row.proposedAction,
+    )?.[1];
+  const allDay =
+    /^Create an all-day calendar event on the owner's own calendar with no attendees for: [\s\S]*\. Use start (\d{4}-\d{2}-\d{2}), exclusive end \d{4}-\d{2}-\d{2}, and allDay true\./.exec(
       row.proposedAction,
     )?.[1];
   const reminder = /^Set a reminder two days before (\S+) about: /.exec(row.proposedAction)?.[1];
-  const raw = calendar ?? reminder;
+  const raw = calendar ?? allDay ?? reminder;
   if (
     !raw ||
     !/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?$/.test(raw)
   )
     return null;
-  const time = new Date(raw).getTime() - (reminder ? 2 * DAY_MS : 0);
+  const time = new Date(raw).getTime() + (allDay ? DAY_MS : 0) - (reminder ? 2 * DAY_MS : 0);
   return Number.isFinite(time) ? new Date(time) : null;
 }
 
@@ -120,6 +129,7 @@ export class FirestoreSuggestionDecisionRepository {
         archivedAt: null,
         modelOverride: null,
         lastReadAt: null,
+        messageSequence: 0,
         createdAt: now,
         updatedAt: now,
       },
@@ -202,6 +212,70 @@ export class FirestoreSuggestionDecisionRepository {
         });
         return { ok: true, snoozedUntil: until.toISOString() };
       }
+      let bookingOccurrence:
+        | {
+            agentId: string;
+            bookingKey: string;
+            version: number;
+            operation?: 'cancel_existing';
+            calendarEventId?: string;
+            bookingIdentity?: string;
+          }
+        | undefined;
+      if (
+        row.bookingCancellation &&
+        (!row.bookingCancellation.calendarEventId?.trim() ||
+          !row.bookingCancellation.bookingIdentity?.trim() ||
+          !row.bookingKey ||
+          !Number.isInteger(row.bookingVersion))
+      ) {
+        tx.update(snapshot.ref, { status: 'superseded', updatedAt: now });
+        return { ok: false, reason: 'This cancellation binding is incomplete.' };
+      }
+      if (row.bookingKey && row.bookingVersion !== null) {
+        const occurrenceRef = this.store.doc(
+          'emailBookingOccurrences',
+          emailBookingOccurrenceId(this.agentId, row.bookingKey),
+        );
+        const occurrenceSnapshot = await tx.get(occurrenceRef);
+        const occurrence = occurrenceSnapshot.exists
+          ? decodeRecord<Records['emailBookingOccurrences']>(occurrenceSnapshot.data())
+          : null;
+        if (
+          !occurrence ||
+          occurrence.agentId !== this.agentId ||
+          occurrence.bookingKey !== row.bookingKey ||
+          occurrence.version !== row.bookingVersion ||
+          occurrence.sourceAuthenticated !== true ||
+          !(row.bookingCancellation
+            ? occurrence.lifecycle === 'cancelled'
+            : ['confirmed', 'rescheduled'].includes(occurrence.lifecycle))
+        ) {
+          tx.update(snapshot.ref, { status: 'superseded', updatedAt: now });
+          return {
+            ok: false,
+            reason: 'This booking changed. Review the latest email before accepting.',
+          };
+        }
+        bookingOccurrence = {
+          agentId: this.agentId,
+          bookingKey: row.bookingKey,
+          version: row.bookingVersion,
+          ...(row.bookingCancellation
+            ? {
+                operation: 'cancel_existing' as const,
+                calendarEventId: row.bookingCancellation.calendarEventId,
+                bookingIdentity: row.bookingCancellation.bookingIdentity,
+              }
+            : {}),
+        };
+      } else if (row.bookingCancellation) {
+        tx.update(snapshot.ref, { status: 'superseded', updatedAt: now });
+        return {
+          ok: false,
+          reason: 'This booking cancellation is no longer current.',
+        };
+      }
       const destination = await this.destination(tx, row, now);
       const eventId = `suggestion:${id}`;
       const eventRef = this.store.doc(
@@ -221,6 +295,17 @@ export class FirestoreSuggestionDecisionRepository {
           instruction: row.proposedAction,
           taintedOrigin: true,
           suggestionId: id,
+          ...(row.origin === 'known_sender_reply'
+            ? {
+                acceptedProposal: {
+                  version: 1,
+                  suggestionId: id,
+                  kind: 'known_sender_reply',
+                  scopes: ['external_send'],
+                },
+              }
+            : {}),
+          ...(bookingOccurrence ? { bookingOccurrence } : {}),
         },
       } satisfies TaskCreateInput['trigger'];
       const task = newTaskRecord(

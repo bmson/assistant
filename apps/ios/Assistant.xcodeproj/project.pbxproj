@@ -57,6 +57,8 @@
 		B00000000000000000000089 /* Components/BriefingCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000089 /* Components/BriefingCardView.swift */; };
 		B0000000000000000000008A /* Components/ScoreboardCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000008A /* Components/ScoreboardCardView.swift */; };
 		B0000000000000000000008E /* Components/GeneratedCardBlocks.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000008E /* Components/GeneratedCardBlocks.swift */; };
+		B000000000000000000000AA /* Components/GeneratedCardCapabilityManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000AA /* Components/GeneratedCardCapabilityManifest.swift */; };
+		B000000000000000000000AB /* Components/ApprovalRequestHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000AB /* Components/ApprovalRequestHeader.swift */; };
 		B0000000000000000000008B /* Components/RouteCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000008B /* Components/RouteCardView.swift */; };
 		B00000000000000000000081 /* System/SpeechPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000081 /* System/SpeechPlayer.swift */; };
 		B00000000000000000000082 /* SpeakableTextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000082 /* SpeakableTextTests.swift */; };
@@ -70,6 +72,14 @@
 		B000000000000000000000A1 /* Models/ConversationDrafts.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A1 /* Models/ConversationDrafts.swift */; };
 		B000000000000000000000A2 /* ConversationDraftsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A2 /* ConversationDraftsTests.swift */; };
 		B000000000000000000000A3 /* NativeVisualReviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A3 /* NativeVisualReviewTests.swift */; };
+		B000000000000000000000A4 /* EncryptedCardFormDraftStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A4 /* EncryptedCardFormDraftStorage.swift */; };
+		B000000000000000000000A5 /* CardFormDrafts.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A5 /* CardFormDrafts.swift */; };
+		B000000000000000000000A6 /* EncryptedCardFormDraftStorageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A6 /* EncryptedCardFormDraftStorageTests.swift */; };
+		B000000000000000000000A7 /* CardFormDraftsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A7 /* CardFormDraftsTests.swift */; };
+		B000000000000000000000A8 /* CardFormMobileSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A8 /* CardFormMobileSession.swift */; };
+		B000000000000000000000A9 /* NativeCardFormParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A9 /* NativeCardFormParser.swift */; };
+		B000000000000000000000B0 /* NativeCardFormParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B0 /* NativeCardFormParserTests.swift */; };
+		B000000000000000000000B1 /* NativeCardFormView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B1 /* NativeCardFormView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -159,6 +169,8 @@
 		C00000000000000000000089 /* Components/BriefingCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/BriefingCardView.swift; sourceTree = "<group>"; };
 		C0000000000000000000008A /* Components/ScoreboardCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/ScoreboardCardView.swift; sourceTree = "<group>"; };
 		C0000000000000000000008E /* Components/GeneratedCardBlocks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/GeneratedCardBlocks.swift; sourceTree = "<group>"; };
+		C000000000000000000000AA /* Components/GeneratedCardCapabilityManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/GeneratedCardCapabilityManifest.swift; sourceTree = "<group>"; };
+		C000000000000000000000AB /* Components/ApprovalRequestHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/ApprovalRequestHeader.swift; sourceTree = "<group>"; };
 		C0000000000000000000008B /* Components/RouteCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/RouteCardView.swift; sourceTree = "<group>"; };
 		C00000000000000000000081 /* System/SpeechPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = System/SpeechPlayer.swift; sourceTree = "<group>"; };
 		C00000000000000000000082 /* SpeakableTextTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeakableTextTests.swift; sourceTree = "<group>"; };
@@ -171,6 +183,14 @@
 		C00000000000000000000087 /* RenderCostTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RenderCostTests.swift; sourceTree = "<group>"; };
 		C000000000000000000000A2 /* ConversationDraftsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationDraftsTests.swift; sourceTree = "<group>"; };
 		C000000000000000000000A3 /* NativeVisualReviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeVisualReviewTests.swift; sourceTree = "<group>"; };
+		C000000000000000000000A4 /* EncryptedCardFormDraftStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EncryptedCardFormDraftStorage.swift; sourceTree = "<group>"; };
+		C000000000000000000000A5 /* CardFormDrafts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CardFormDrafts.swift; sourceTree = "<group>"; };
+		C000000000000000000000A6 /* EncryptedCardFormDraftStorageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EncryptedCardFormDraftStorageTests.swift; sourceTree = "<group>"; };
+		C000000000000000000000A7 /* CardFormDraftsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CardFormDraftsTests.swift; sourceTree = "<group>"; };
+		C000000000000000000000A8 /* CardFormMobileSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CardFormMobileSession.swift; sourceTree = "<group>"; };
+		C000000000000000000000A9 /* NativeCardFormParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCardFormParser.swift; sourceTree = "<group>"; };
+		C000000000000000000000B0 /* NativeCardFormParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCardFormParserTests.swift; sourceTree = "<group>"; };
+		C000000000000000000000B1 /* NativeCardFormView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCardFormView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -227,6 +247,11 @@
 				C00000000000000000000004 /* Models/APIModels.swift */,
 				C00000000000000000000055 /* Models/PollingPolicy.swift */,
 				C000000000000000000000A1 /* Models/ConversationDrafts.swift */,
+				C000000000000000000000A5 /* CardFormDrafts.swift */,
+				C000000000000000000000A4 /* EncryptedCardFormDraftStorage.swift */,
+				C000000000000000000000A8 /* CardFormMobileSession.swift */,
+				C000000000000000000000A9 /* NativeCardFormParser.swift */,
+				C000000000000000000000B1 /* NativeCardFormView.swift */,
 				C00000000000000000000005 /* Networking/KeychainStore.swift */,
 				C00000000000000000000006 /* Networking/APIClient.swift */,
 				C00000000000000000000095 /* Components/CardActions.swift */,
@@ -264,6 +289,8 @@
 				C00000000000000000000089 /* Components/BriefingCardView.swift */,
 				C0000000000000000000008A /* Components/ScoreboardCardView.swift */,
 				C0000000000000000000008E /* Components/GeneratedCardBlocks.swift */,
+				C000000000000000000000AB /* Components/ApprovalRequestHeader.swift */,
+				C000000000000000000000AA /* Components/GeneratedCardCapabilityManifest.swift */,
 				C0000000000000000000008B /* Components/RouteCardView.swift */,
 				C00000000000000000000081 /* System/SpeechPlayer.swift */,
 				C00000000000000000000083 /* System/SpeechListener.swift */,
@@ -285,6 +312,9 @@
 				C00000000000000000000020 /* APIModelsTests.swift */,
 				C000000000000000000000A2 /* ConversationDraftsTests.swift */,
 				C000000000000000000000A3 /* NativeVisualReviewTests.swift */,
+				C000000000000000000000A7 /* CardFormDraftsTests.swift */,
+				C000000000000000000000A6 /* EncryptedCardFormDraftStorageTests.swift */,
+				C000000000000000000000B0 /* NativeCardFormParserTests.swift */,
 				C00000000000000000000050 /* AssistantMarkdownTests.swift */,
 				C00000000000000000000082 /* SpeakableTextTests.swift */,
 				C00000000000000000000085 /* SpeechVoiceTests.swift */,
@@ -440,6 +470,11 @@
 				B00000000000000000000004 /* Models/APIModels.swift in Sources */,
 				B00000000000000000000055 /* Models/PollingPolicy.swift in Sources */,
 				B000000000000000000000A1 /* Models/ConversationDrafts.swift in Sources */,
+				B000000000000000000000A5 /* CardFormDrafts.swift in Sources */,
+				B000000000000000000000A4 /* EncryptedCardFormDraftStorage.swift in Sources */,
+				B000000000000000000000A8 /* CardFormMobileSession.swift in Sources */,
+				B000000000000000000000A9 /* NativeCardFormParser.swift in Sources */,
+				B000000000000000000000B1 /* NativeCardFormView.swift in Sources */,
 				B00000000000000000000056 /* Components/MermaidDiagramView.swift in Sources */,
 				B00000000000000000000005 /* Networking/KeychainStore.swift in Sources */,
 				B00000000000000000000006 /* Networking/APIClient.swift in Sources */,
@@ -482,6 +517,8 @@
 				B00000000000000000000089 /* Components/BriefingCardView.swift in Sources */,
 				B0000000000000000000008A /* Components/ScoreboardCardView.swift in Sources */,
 				B0000000000000000000008E /* Components/GeneratedCardBlocks.swift in Sources */,
+				B000000000000000000000AB /* Components/ApprovalRequestHeader.swift in Sources */,
+				B000000000000000000000AA /* Components/GeneratedCardCapabilityManifest.swift in Sources */,
 				B0000000000000000000008B /* Components/RouteCardView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -493,6 +530,9 @@
 				B00000000000000000000012 /* APIModelsTests.swift in Sources */,
 				B000000000000000000000A2 /* ConversationDraftsTests.swift in Sources */,
 				B000000000000000000000A3 /* NativeVisualReviewTests.swift in Sources */,
+				B000000000000000000000A7 /* CardFormDraftsTests.swift in Sources */,
+				B000000000000000000000A6 /* EncryptedCardFormDraftStorageTests.swift in Sources */,
+				B000000000000000000000B0 /* NativeCardFormParserTests.swift in Sources */,
 				B00000000000000000000050 /* AssistantMarkdownTests.swift in Sources */,
 				B00000000000000000000060 /* APIClientRetryTests.swift in Sources */,
 				B00000000000000000000082 /* SpeakableTextTests.swift in Sources */,

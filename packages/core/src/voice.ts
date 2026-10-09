@@ -1,5 +1,6 @@
 import { createPostgresVoiceContextRepository, type Db } from '@assistant/db';
 import type { VoiceContextRepository } from '@assistant/persistence';
+import { embeddingSpaceIdentityKey } from '@assistant/persistence';
 import { z } from 'zod';
 import type { ModelRouter } from './model-router/router.js';
 
@@ -29,17 +30,24 @@ export async function captureOwnerWritingSample(
   if (text.length < MIN_SAMPLE_CHARS || text.length > MAX_SAMPLE_CHARS) return false;
   const voice = voiceStore(store);
   try {
-    if (await voice.hasSampleText(text)) return false;
+    const observedGeneration = await voice.observationGeneration();
     if ((await voice.countSamplesWithContextPrefix(AUTO_SAMPLE_PREFIX)) >= MAX_AUTO_SAMPLES)
       return false;
-    const [embedding] = await router.embed([text.slice(0, 4000)]);
+    const space = await router.embeddingSpace();
+    const embeddingSpaceKey = embeddingSpaceIdentityKey(space);
+    if (await voice.hasSampleText(text, embeddingSpaceKey)) return false;
+    const [embedding] = await router.embed([text.slice(0, 4000)], { expectedSpace: space });
     if (!embedding) return false;
-    await voice.addSample({
-      register: input.register,
-      text,
-      context: `${AUTO_SAMPLE_PREFIX}${input.context ?? 'email'}`,
-      embedding,
-    });
+    await voice.addSample(
+      {
+        register: input.register,
+        text,
+        context: `${AUTO_SAMPLE_PREFIX}${input.context ?? 'email'}`,
+        embedding,
+        embeddingSpaceKey,
+      },
+      observedGeneration,
+    );
     return true;
   } catch (err) {
     // Sampling is a nicety; a failed embed/insert must never affect triage.
@@ -77,15 +85,18 @@ export async function loadVoiceContext(
   draft: string,
 ): Promise<VoiceContext> {
   const voice = voiceStore(store);
+  const space = await router.embeddingSpace();
+  const embeddingSpaceKey = embeddingSpaceIdentityKey(space);
   const profile = await voice.profile();
   let samples: string[] = [];
-  if (await voice.hasSamples(register)) {
+  if (await voice.hasSamples(register, embeddingSpaceKey)) {
     // Best-effort: sample retrieval must never fail the outbound message. A
     // budget-blocked or erroring embed (router.embed throws) simply means no
     // nearest-sample context — the profile text alone still guides the rewrite.
     try {
-      const [embedding] = await router.embed([draft.slice(0, 2000)]);
-      if (embedding) samples = await voice.nearestSamples(register, embedding, 5);
+      const [embedding] = await router.embed([draft.slice(0, 2000)], { expectedSpace: space });
+      if (embedding)
+        samples = await voice.nearestSamples(register, embedding, embeddingSpaceKey, 5);
     } catch (err) {
       console.error('voice sample retrieval failed — continuing without samples', err);
     }

@@ -7,10 +7,23 @@ import {
   resetConfigForTest,
   validateAgentPersistenceConfig,
   validateProdConfig,
+  validateRestoreRehearsalConfig,
 } from './index.js';
 
 describe('config', () => {
   afterEach(() => resetConfigForTest());
+
+  it('bounds paid email observer work independently from triage volume', () => {
+    expect(
+      loadConfig({ EMAIL_OBSERVER_MAX_PAID_PER_DAY: '0' }).EMAIL_OBSERVER_MAX_PAID_PER_DAY,
+    ).toBe(0);
+    resetConfigForTest();
+    expect(
+      loadConfig({ EMAIL_OBSERVER_MAX_PAID_PER_DAY: '1000' }).EMAIL_OBSERVER_MAX_PAID_PER_DAY,
+    ).toBe(1000);
+    resetConfigForTest();
+    expect(() => loadConfig({ EMAIL_OBSERVER_MAX_PAID_PER_DAY: '1001' })).toThrow();
+  });
 
   it('applies defaults', () => {
     const config = loadConfig({});
@@ -25,6 +38,7 @@ describe('config', () => {
     expect(config.INTERNAL_AUTH_MODE).toBe('oidc');
     expect(config.AUTH_DEV_BYPASS).toBe(false);
     expect(config.AUTH_LOCALHOST_BYPASS).toBe(false);
+    expect(config.WEB_APP_PREVIEW_ENABLED).toBe(false);
     expect(config.MOBILE_API_TOKEN).toBe('');
     expect(config.CANARY_ENABLED).toBe(false);
     expect(config.VERTEX_MODEL_PROBE_ENABLED).toBe(false);
@@ -39,7 +53,9 @@ describe('config', () => {
       QUEUE_DRIVER: 'cloudtasks',
       AGENT_PORT: '9000',
       POSTGRES_SOURCE_WRITES_FENCED: 'true',
+      WEB_APP_PREVIEW_ENABLED: 'true',
     });
+    expect(config.WEB_APP_PREVIEW_ENABLED).toBe(true);
     expect(config.QUEUE_DRIVER).toBe('cloudtasks');
     expect(config.AGENT_PORT).toBe(9000);
     expect(config.POSTGRES_SOURCE_WRITES_FENCED).toBe(true);
@@ -71,6 +87,49 @@ describe('config', () => {
     );
   });
 
+  it('requires the complete isolated read-only restore rehearsal profile', () => {
+    const env = {
+      NODE_ENV: 'test',
+      RESTORE_REHEARSAL: 'true',
+      RESTORE_REHEARSAL_ROOT: '/tmp/assistant_restore_0123456789ab_files',
+      ASSISTANT_WORKSPACE_ID: 'restore-0123456789ab',
+      DATABASE_URL:
+        'postgres://assistant_restore_reader_0123456789ab:reader-password@127.0.0.1:55432/assistant_restore_0123456789ab_test',
+      PERSISTENCE_DRIVER: 'postgres',
+      QUEUE_DRIVER: 'inert',
+      POSTGRES_SOURCE_WRITES_FENCED: 'true',
+      FILES_DRIVER: 'local',
+      OTEL_EXPORTER: 'none',
+    };
+    expect(validateRestoreRehearsalConfig(loadConfig(env), env)).toEqual([]);
+
+    resetConfigForTest();
+    const wrongReaderIdentity = {
+      ...env,
+      DATABASE_URL:
+        'postgres://assistant_restore_reader_fedcba987654:reader-password@127.0.0.1:55432/assistant_restore_0123456789ab_test',
+    };
+    expect(
+      validateRestoreRehearsalConfig(loadConfig(wrongReaderIdentity), wrongReaderIdentity),
+    ).toContain(
+      'RESTORE_REHEARSAL requires the run-scoped assistant_restore_reader_<run ID> database role',
+    );
+
+    const unsafeEnv = { ...env, OPENROUTER_API_KEY: 'configured', QUEUE_DRIVER: 'local' };
+    resetConfigForTest();
+    expect(validateRestoreRehearsalConfig(loadConfig(unsafeEnv), unsafeEnv)).toEqual(
+      expect.arrayContaining([
+        'RESTORE_REHEARSAL requires QUEUE_DRIVER=inert',
+        'OPENROUTER_API_KEY must be empty during RESTORE_REHEARSAL',
+      ]),
+    );
+    resetConfigForTest();
+    const mismatchedIdentity = { ...env, ASSISTANT_WORKSPACE_ID: 'restore-abcdefabcdef' };
+    expect(
+      validateRestoreRehearsalConfig(loadConfig(mismatchedIdentity), mismatchedIdentity),
+    ).toContain('RESTORE_REHEARSAL database and workspace identities must use the same run ID');
+  });
+
   it('requires an explicit Firestore identity and permits every portable module', () => {
     const config = loadConfig({ PERSISTENCE_DRIVER: 'firestore' });
     expect(validateAgentPersistenceConfig(config, {})).toEqual(
@@ -87,6 +146,13 @@ describe('config', () => {
     expect(() => parseFirestoreEmbeddingSpace('{"provider":"test"}')).toThrow(
       'FIRESTORE_EMBEDDING_SPACE',
     );
+    const parsedSpace = parseFirestoreEmbeddingSpace(
+      '{"provider":"test","model":"unit","dimensions":1536,"revision":"r1"}',
+    );
+    expect(Object.isFrozen(parsedSpace)).toBe(true);
+    expect(() => {
+      (parsedSpace as { revision: string }).revision = 'changed';
+    }).toThrow();
     const env = {
       PERSISTENCE_DRIVER: 'firestore',
       GCP_PROJECT: 'demo-assistant-test',

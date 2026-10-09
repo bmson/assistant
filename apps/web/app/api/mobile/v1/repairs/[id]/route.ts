@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { decideOwnerRepair } from '@/lib/self-repair-server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -7,9 +8,11 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     .string()
     .uuid()
     .safeParse((await params).id);
+  const mutationBody = await readMobileMutationBody(request, ['action']);
+  if (!mutationBody.ok) return mutationBody.response;
   const body = z
     .object({ action: z.enum(['dismiss', 'retry', 'resolve', 'run_now']) })
-    .safeParse(await request.json().catch(() => null));
+    .safeParse(mutationBody.value);
   if (!id.success || !body.success)
     return mobileJson({ error: 'Invalid repair action' }, { status: 400 });
   try {

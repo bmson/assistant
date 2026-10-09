@@ -2,6 +2,7 @@ import { latestLocation, loadConfig } from '@assistant/core';
 import { appleDirections, type MapKitCredentials, type MapsFetch } from '@assistant/core/maps';
 import type { OwnerContextRepository } from '@assistant/persistence';
 import { z } from 'zod';
+import { canUseOwnerCurrentLocation } from './current-location-access.js';
 import { register } from './register.js';
 import type { ToolRegistry } from './registry.js';
 
@@ -31,7 +32,8 @@ export function registerMapsTools(
         arriveBy: z.string().datetime({ offset: true }).optional(),
         departAt: z.string().datetime({ offset: true }).optional(),
       }),
-      risk: 'autonomous',
+      risk: (args, ctx) =>
+        !args.origin?.trim() && !canUseOwnerCurrentLocation(ctx) ? 'forbidden' : 'autonomous',
       acceptsUntrustedInput: true,
       cacheTtlSeconds: 120,
       execute: async (args, ctx) => {
@@ -42,6 +44,8 @@ export function registerMapsTools(
           origin = args.origin;
           originLabel = args.origin;
         } else {
+          if (!canUseOwnerCurrentLocation(ctx))
+            return { error: 'An explicit trip origin is required for this request.' };
           const ping = await latestLocation(
             deps.ownerContext ?? ctx.db,
             ctx.agentId,

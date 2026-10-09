@@ -8,7 +8,7 @@ export interface RecallMetricInput {
   historyFailed: boolean;
   graphCandidates: number;
   graphUsed: number;
-  historyTier: 'segment' | 'message' | 'none';
+  historyTier: 'segment' | 'message' | 'blended' | 'none';
   historyUsed: number;
   sourceCount: number;
 }

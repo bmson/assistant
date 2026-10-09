@@ -28,7 +28,11 @@ export {
 export { calendarModule } from './google/calendar-module.js';
 export { type EmailSyncDeps, processMessage } from './google/email-sync.js';
 export { googleModule } from './google/module.js';
-export { emailIngestForwarded, gmailSyncEnabled } from './google/runtime.js';
+export {
+  emailIngestForwarded,
+  emailObserverWorkerEnabled,
+  gmailSyncEnabled,
+} from './google/runtime.js';
 export * from './install.js';
 export { mapsModule } from './maps/module.js';
 export * from './meta.js';

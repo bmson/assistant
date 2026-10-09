@@ -280,7 +280,7 @@ final class AssistantMarkdownTests: XCTestCase {
               {"type":"attention","title":"Needs you","items":[{"title":"Fetch public web page en.wikipedia.org/wiki/Berlin","meta":"A128DY"},{"title":"Job search","detail":"Waiting on whether to search remote only or specific locations."}]},
               {"type":"mail","title":"Mail worth reading","items":[{"title":"Delta","detail":"Your itinerary changed for Friday"}]}
             ]}},
-          {"type":"data-card","data":{"kind":"calendar-conflicts","id":"c1","title":"Schedule conflict","conflicts":[]}}
+          {"type":"data-card","data":{"kind":"calendar-conflicts","id":"c1","title":"Possible schedule conflict","complete":false,"conflicts":[{"id":"one","overlapStart":"2026-10-07T19:00:00Z","overlapEnd":"2026-10-07T20:00:00Z","evidenceNote":"Keep the earlier arrival time; identity is unverified.","groups":[{"events":[{"id":"a","title":"Arrival","start":"2026-10-07T18:15:00Z","calendar":"Family"}]},{"events":[{"id":"b","title":"Kickoff","start":"2026-10-07T19:00:00Z","calendar":"Team"}]}]}]}}
         ]}
         """#.utf8)
         let message = try JSONDecoder().decode(ChatMessage.self, from: data)
@@ -288,6 +288,10 @@ final class AssistantMarkdownTests: XCTestCase {
         let cards = message.parts.compactMap(MessageResponseCard.init(part:))
         guard case let .briefing(briefing)? = cards.first else { return XCTFail("expected a briefing card") }
         XCTAssertEqual(briefing.sections.count, 4)
+        guard case let .calendarConflicts(_, _, conflicts, complete)? = cards.last else { return XCTFail("expected overlap evidence") }
+        XCTAssertFalse(complete)
+        XCTAssertEqual(conflicts.first?.evidenceNote, "Keep the earlier arrival time; identity is unverified.")
+        XCTAssertEqual(conflicts.first?.groups.first?.first?.start, "2026-10-07T18:15:00Z")
         XCTAssertTrue(MessageResponseCard.replacesProse(cards))
 
         for (name, size, width) in [
@@ -340,6 +344,11 @@ final class AssistantMarkdownTests: XCTestCase {
         XCTAssertTrue(live)
         XCTAssertEqual(games.map(\.state), ["post", "in"])
         XCTAssertNil(games[1].away.logo, "logos only from the provider CDN")
+        XCTAssertNil(ScoreGame.approvedLogoURL("https://attackerespncdn.com/logo.png"))
+        XCTAssertNil(ScoreGame.approvedLogoURL("https://espncdn.com.attacker.test/logo.png"))
+        XCTAssertNil(ScoreGame.approvedLogoURL("https://user@espncdn.com/logo.png"))
+        XCTAssertNil(ScoreGame.approvedLogoURL("https://espncdn.com:8443/logo.png"))
+        XCTAssertEqual(ScoreGame.approvedLogoURL("https://a.espncdn.com/logo.png")?.host, "a.espncdn.com")
         XCTAssertEqual(liveScoreQuery(games), "mlb:2")
         XCTAssertFalse(MessageResponseCard.replacesProse(cards), "the reply stays above the board")
 
@@ -914,7 +923,7 @@ final class AssistantMarkdownTests: XCTestCase {
                 }
                 ForEach(["idle", "refreshing", "failed"], id: \.self) { state in
                     if let card = MessageResponseCard(part: RichMessageFixture.generated(state: state, stale: true)) {
-                        RichResponseCards(cards: [card], onRefresh: { _ in nil })
+                        RichResponseCards(cards: [card], onRefresh: { _, _ in nil })
                     }
                 }
             }
@@ -1238,5 +1247,19 @@ final class AssistantMarkdownTests: XCTestCase {
     func testInlineMarkdownForCardDetailsDoesNotExposeDelimiters() {
         let rendered = AssistantMarkdown.inlineAttributed("- 💨 **Wind:** 15 km/h")
         XCTAssertEqual(String(rendered.characters), "- 💨 Wind: 15 km/h")
+    }
+
+    func testFutureScoreboardBecomesPollEligibleAtTenMinuteBoundary() throws {
+        let value = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
+        {
+            "id":"game-1","league":"mlb","state":"pre",
+            "startsAt":"2026-10-06T20:00:00Z",
+            "home":{"name":"Home"},"away":{"name":"Away"}
+        }
+        """#.utf8))
+        let game = try XCTUnwrap(ScoreGame(value))
+        let kickoff = try XCTUnwrap(game.startsAt)
+        XCTAssertFalse(game.canChange(at: kickoff.addingTimeInterval(-601)))
+        XCTAssertTrue(game.canChange(at: kickoff.addingTimeInterval(-600)))
     }
 }

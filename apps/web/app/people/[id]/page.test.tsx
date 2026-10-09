@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { GRAPH_EXTRACTION_VERSION } from '@assistant/application/knowledge-graph';
 import { resetConfigForTest } from '@assistant/config';
-import { createInstallationStore } from '@assistant/firestore';
+import { createInstallationStore, embeddingSpaceKey } from '@assistant/firestore';
+import { FieldValue } from '@google-cloud/firestore';
 import { NextRequest } from 'next/server';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -39,6 +40,15 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
     installationId: foreignInstallationId,
   });
   const now = new Date();
+  const embeddingSpace = {
+    provider: 'vertex',
+    model: 'example-embedding',
+    dimensions: 768,
+    revision: 'fixture-v1',
+  } as const;
+  const embedding = Array.from({ length: embeddingSpace.dimensions }, (_, index) =>
+    index === 0 ? 1 : 0,
+  );
   let page: typeof import('./page.js');
   const params = (id: string) => ({ params: Promise.resolve({ id }) });
 
@@ -81,7 +91,8 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
       expiresAt: null,
       validFrom: null,
       validUntil: null,
-      embedding: [0.1],
+      embedding: FieldValue.vector(embedding),
+      embeddingSpace: embeddingSpaceKey(embeddingSpace),
       createdAt: now,
       ...patch,
     });

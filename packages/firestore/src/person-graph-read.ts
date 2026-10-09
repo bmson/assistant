@@ -1,5 +1,7 @@
-import type { Records } from '@assistant/persistence';
+import { type EmbeddingSpace, type Records, snapshotEmbeddingSpace } from '@assistant/persistence';
 import type { DocumentSnapshot, QueryDocumentSnapshot } from '@google-cloud/firestore';
+import { graphSourceEligible } from './graph-source-eligibility.js';
+import { decodeMemoryRecord } from './memory-record.js';
 import { getFirestorePersonDetail } from './people-directory.js';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
@@ -7,7 +9,7 @@ import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 const NEIGHBOR_LIMIT = 120;
 type Entity = Records['knowledgeGraphEntities'];
 type Relation = Records['knowledgeGraphRelations'];
-type Memory = Records['memories'];
+type Assertion = Records['knowledgeGraphAssertions'];
 type Source = Records['knowledgeGraphSources'];
 
 export interface FirestorePersonGraphEdge {
@@ -54,6 +56,7 @@ function activeEdge(
   entityId: string,
   extractionVersion: number,
   now: Date,
+  space: EmbeddingSpace | undefined,
 ): (FirestorePersonGraphEdge & { createdAt: Date }) | null {
   const row = decodeRecord<Relation>(doc.data());
   if (
@@ -67,16 +70,30 @@ function activeEdge(
     typeof row.objectEntityId !== 'string' ||
     typeof row.sourceMemoryId !== 'string' ||
     !(row.createdAt instanceof Date) ||
+    (row.assertionId != null &&
+      (typeof row.assertionId !== 'string' || row.assertionId.length === 0)) ||
     (row.validFrom !== null && typeof row.validFrom !== 'string') ||
     (row.validUntil !== null && typeof row.validUntil !== 'string') ||
     (row.subjectEntityId !== entityId && row.objectEntityId !== entityId)
   )
     return null;
   const read = (collection: string, id: string) => documents.get(store.doc(collection, id).path);
+  if (row.assertionId != null) {
+    const assertionDoc = read('knowledgeGraphAssertions', row.assertionId);
+    if (!assertionDoc?.exists) return null;
+    const assertion = decodeRecord<Assertion>(assertionDoc.data());
+    if (
+      assertion.id !== row.assertionId ||
+      assertion.agentId !== agentId ||
+      assertion.lifecycle !== 'current' ||
+      assertion.reviewStatus === 'rejected'
+    )
+      return null;
+  }
   const memoryDoc = read('memories', row.sourceMemoryId);
   const sourceDoc = read('knowledgeGraphSources', row.sourceMemoryId);
   if (!memoryDoc?.exists || !sourceDoc?.exists) return null;
-  const memory = decodeRecord<Memory>(memoryDoc.data());
+  const memory = decodeMemoryRecord(memoryDoc.data());
   const source = decodeRecord<Source>(sourceDoc.data());
   if (
     typeof memory.id !== 'string' ||
@@ -87,8 +104,19 @@ function activeEdge(
     memory.quarantined !== false ||
     (memory.expiresAt !== null &&
       (!(memory.expiresAt instanceof Date) || memory.expiresAt <= now)) ||
-    memory.embedding === null ||
-    memory.embedding === undefined ||
+    !space ||
+    !graphSourceEligible({
+      memory,
+      source,
+      agentId,
+      space,
+      storedSpace: memoryDoc.get('embeddingSpace'),
+      extractionVersion,
+      now,
+      tombstoned:
+        typeof memory.contentHash === 'string' &&
+        read('memoryTombstones', memory.contentHash)?.exists === true,
+    }) ||
     typeof memory.contentHash !== 'string' ||
     source.memoryId !== memory.id ||
     documentKey(source.memoryId) !== sourceDoc.id ||
@@ -127,7 +155,9 @@ export async function getFirestorePersonGraph(
   contactId: string,
   extractionVersion: number,
   now: Date = store.now(),
+  embeddingSpace?: EmbeddingSpace,
 ): Promise<FirestorePersonGraphRead | null> {
+  embeddingSpace = embeddingSpace ? snapshotEmbeddingSpace(embeddingSpace) : undefined;
   const contact = await getFirestorePersonDetail(store, configuredAgentId, contactId);
   if (!contact) return null;
   if (!Number.isInteger(extractionVersion) || extractionVersion < 1)
@@ -189,11 +219,27 @@ export async function getFirestorePersonGraph(
           const ref = store.doc(collection, id);
           refs.set(ref.path, ref);
         }
+        if (row.assertionId) {
+          const ref = store.doc('knowledgeGraphAssertions', row.assertionId);
+          refs.set(ref.path, ref);
+        }
       }
       const documents = new Map<string, DocumentSnapshot>();
       const allRefs = [...refs.values()];
       for (let offset = 0; offset < allRefs.length; offset += 200) {
         for (const snapshot of await tx.getAll(...allRefs.slice(offset, offset + 200)))
+          documents.set(snapshot.ref.path, snapshot);
+      }
+      const tombstoneRefs = new Map<string, FirebaseFirestore.DocumentReference>();
+      for (const doc of documents.values()) {
+        if (doc.ref.parent.id !== 'memories' || typeof doc.get('contentHash') !== 'string')
+          continue;
+        const ref = store.doc('memoryTombstones', doc.get('contentHash'));
+        tombstoneRefs.set(ref.path, ref);
+      }
+      const tombstoneList = [...tombstoneRefs.values()];
+      for (let offset = 0; offset < tombstoneList.length; offset += 200) {
+        for (const snapshot of await tx.getAll(...tombstoneList.slice(offset, offset + 200)))
           documents.set(snapshot.ref.path, snapshot);
       }
       const edges = [...candidates.values()]
@@ -206,6 +252,7 @@ export async function getFirestorePersonGraph(
             entity.id,
             extractionVersion,
             now,
+            embeddingSpace,
           );
           return edge ? [edge] : [];
         })

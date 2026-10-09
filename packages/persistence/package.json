@@ -5,8 +5,14 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./budget-caps": "./src/budget-caps.ts",
     "./situations": "./src/situations-schema.ts",
-    "./testing": "./src/contract-suite.ts"
+    "./testing": "./src/contract-suite.ts",
+    "./artifact-path": "./src/artifact-path.ts",
+    "./occasion-trust": "./src/occasion-trust.ts",
+    "./card-privacy": "./src/card-privacy.ts",
+    "./card-capabilities": "./src/card-capabilities.ts",
+    "./card-form": "./src/card-form.ts"
   },
   "dependencies": {
     "zod": "^4.6.5"

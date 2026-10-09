@@ -2,6 +2,310 @@ import Charts
 import MapKit
 import SwiftUI
 
+/// The app's negotiated, native-only generated-card vocabulary. Unknown or
+/// malformed nodes remain data, but they cannot stand in for the response
+/// prose when this build cannot render the complete composition.
+enum NativeGeneratedCardCatalog {
+    private static let limits = GeneratedCardCapabilityManifest.contract["limits"] as? [String: Any] ?? [:]
+    private static let rules = GeneratedCardCapabilityManifest.contract["rules"] as? [String: [String: Any]] ?? [:]
+
+    /// Validate the original wire spec before the decoder's display-oriented
+    /// compactMaps can omit malformed entries from its native model.
+    static func supportsComplete(
+        spec: [String: JSONValue],
+        validatedNativeForm: NativeCardForm? = nil
+    ) -> Bool {
+        guard GeneratedCardCapabilityManifest.contract["version"] as? Int == 1,
+              spec["version"]?.integerValue == 1,
+              let title = spec["title"]?.string, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let factsValue = spec["facts"], case let .array(rawFacts) = factsValue,
+              let blocksValue = spec["blocks"], case let .array(rawBlocks) = blocksValue else { return false }
+
+        let specLimits = limits["spec"] as? [String: Any] ?? [:]
+        let factLimits = limits["fact"] as? [String: Any] ?? [:]
+        let actionLimits = limits["action"] as? [String: Any] ?? [:]
+        let formBlocks = rawBlocks.flatMap { raw -> [JSONValue] in
+            guard case let .object(block) = raw else { return [] }
+            if block["type"]?.string == "section", case let .array(children)? = block["blocks"] {
+                return children.filter { child in
+                    guard case let .object(values) = child else { return false }
+                    return values["type"]?.string == "form"
+                }
+            }
+            return block["type"]?.string == "form" ? [raw] : []
+        }
+        guard formBlocks.count <= 1,
+              (formBlocks.isEmpty == (validatedNativeForm == nil)),
+              formBlocks.first.map({ $0.objectValue?["id"]?.string == validatedNativeForm?.descriptor.formId }) ?? (validatedNativeForm == nil),
+              within(rawFacts.count, specLimits["facts"], key: "min", maxKey: "max"),
+              within(rawBlocks.count, specLimits["blocks"], key: "min", maxKey: "max"),
+              let titleMax = number(specLimits["title"], key: "max"), title.utf16.count <= titleMax,
+              boundedText(spec["accessibilityLabel"], max: number(specLimits["accessibilityLabel"], key: "max")),
+              boundedText(spec["sourceLabel"], max: number(specLimits["sourceLabel"], key: "max")),
+              optionalBoundedText(spec["subtitle"], max: number(specLimits["subtitle"], key: "max")),
+              optionalEnum(spec["icon"], allowed: specLimits["icons"] as? [String]),
+              optionalEnum(spec["accent"], allowed: specLimits["accents"] as? [String]),
+              let factValueMax = number(factLimits["value"], key: "max"),
+              let idPattern = factLimits["idPattern"] as? String else { return false }
+
+        let rawActions: [JSONValue]
+        if let actions = spec["actions"] {
+            guard case let .array(values) = actions,
+                  let actionMax = number(specLimits["actions"], key: "max"),
+                  values.count <= actionMax else { return false }
+            rawActions = values
+        } else {
+            rawActions = []
+        }
+
+        var valuesById: [String: String] = [:]
+        var sensitiveIds = Set<String>()
+        for rawFact in rawFacts {
+            guard case let .object(fact) = rawFact,
+                  let id = fact["id"]?.string, matches(id, pattern: idPattern),
+                  let value = fact["value"]?.string,
+                  !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  value.utf16.count <= factValueMax,
+                  (fact["label"] == nil || boundedText(fact["label"], max: number(factLimits["label"], key: "max"))),
+                  boundedText(fact["source"], max: number(factLimits["source"], key: "max")),
+                  valuesById[id] == nil else { return false }
+            if let sensitive = fact["sensitive"], case .bool = sensitive {} else if fact["sensitive"] != nil { return false }
+            if fact["sensitive"] == .bool(true) { sensitiveIds.insert(id) }
+            valuesById[id] = value
+        }
+        guard rawActions.allSatisfy({ supportsAction($0, facts: valuesById, limits: actionLimits) }) else { return false }
+        return rawBlocks.allSatisfy {
+            supportsBlock(
+                $0,
+                facts: valuesById,
+                sensitive: sensitiveIds,
+                depth: 0,
+                validatedNativeFormId: validatedNativeForm?.descriptor.formId
+            )
+        }
+    }
+
+    static func supportsComplete(
+        _ blocks: [MessageResponseCard.GeneratedBlock],
+        facts: Set<String>
+    ) -> Bool {
+        !blocks.isEmpty && blocks.allSatisfy { block in
+            if block.type == "section" {
+                let sectionLimits = limits["section"] as? [String: Any] ?? [:]
+                guard let title = block.values["title"]?.string,
+                      !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      let titleMax = number(sectionLimits["title"], key: "max"),
+                      title.utf16.count <= titleMax,
+                      case let .array(children)? = block.values["blocks"],
+                      within(children.count, sectionLimits["blocks"], key: "min", maxKey: "max") else { return false }
+                return children.allSatisfy { child in
+                    guard case let .object(values) = child,
+                          let type = values["type"]?.string,
+                          type != "section" else { return false }
+                    return supportsLeaf(type, values: values, facts: facts)
+                }
+            }
+            return supportsLeaf(block.type, values: block.values, facts: facts)
+        }
+    }
+
+    private static func supportsLeaf(
+        _ type: String,
+        values: [String: JSONValue],
+        facts: Set<String>
+    ) -> Bool {
+        guard values["type"]?.string == type else { return false }
+        let factValues = Dictionary(uniqueKeysWithValues: facts.map { ($0, "fact") })
+        return supportsBlock(.object(values.merging(["type": .string(type)]) { current, _ in current }), facts: factValues, sensitive: [], depth: 1)
+    }
+
+    private static func supportsBlock(
+        _ raw: JSONValue,
+        facts: [String: String],
+        sensitive: Set<String>,
+        depth: Int,
+        validatedNativeFormId: String? = nil
+    ) -> Bool {
+        guard case let .object(block) = raw, let type = block["type"]?.string else { return false }
+        if type == "form" {
+            return block["id"]?.string == validatedNativeFormId
+        }
+        if type == "section" {
+            let sectionLimits = limits["section"] as? [String: Any] ?? [:]
+            guard depth == 0,
+                  let title = block["title"]?.string,
+                  !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let maxTitle = number(sectionLimits["title"], key: "max"), title.utf16.count <= maxTitle,
+                  case let .array(children)? = block["blocks"],
+                  within(children.count, sectionLimits["blocks"], key: "min", maxKey: "max") else { return false }
+            return children.allSatisfy {
+                supportsBlock(
+                    $0,
+                    facts: facts,
+                    sensitive: sensitive,
+                    depth: depth + 1,
+                    validatedNativeFormId: validatedNativeFormId
+                )
+            }
+        }
+        guard let rule = rules[type] else { return false }
+        let required = rule["required"] as? [String] ?? []
+        let optional = rule["optional"] as? [String] ?? []
+        for key in required where !hasFact(block[key], facts: facts) { return false }
+        for key in optional where block[key] != nil && !hasFact(block[key], facts: facts) { return false }
+
+        if let enums = rule["enums"] as? [String: [String]] {
+            for (key, allowed) in enums {
+                guard let value = block[key]?.string, allowed.contains(value) else { return false }
+            }
+        }
+        if let ids = rule["ids"] as? [String: Any] {
+            guard let field = ids["field"] as? String,
+                  case let .array(items)? = block[field],
+                  let min = number(ids, key: "min"), let max = number(ids, key: "max"),
+                  items.count >= min, items.count <= max,
+                  items.allSatisfy({ hasFact($0, facts: facts) }) else { return false }
+        }
+        if type == "table" && !validTable(block, facts: facts) { return false }
+        if type == "chart" && !validChart(block, facts: facts) { return false }
+        if type == "chart" && !validChartPrivacyAndValues(block, facts: facts, sensitive: sensitive) { return false }
+        if type == "map" {
+            guard case let .array(places)? = block["placeFactIds"],
+                  places.allSatisfy({ place in
+                      guard let id = place.string else { return false }
+                      return !sensitive.contains(id)
+                  }) else { return false }
+        }
+        if type == "stages" {
+            guard let current = block["currentFact"]?.string,
+                  case let .array(ids)? = block[(rule["ids"] as? [String: Any])?["field"] as? String ?? "factIds"],
+                  ids.contains(.string(current)) else { return false }
+        }
+        if type == "progress" {
+            guard let currentId = block["valueFact"]?.string,
+                  let current = facts[currentId], !sensitive.contains(currentId) else { return false }
+            if let rawTotal = block["totalFact"] {
+                guard let totalId = rawTotal.string, let total = facts[totalId],
+                      !sensitive.contains(totalId),
+                      GeneratedCardValue.fraction(value: current, total: total) != nil else { return false }
+            } else if GeneratedCardValue.fraction(value: current, total: nil) == nil {
+                return false
+            }
+        }
+        if type == "countdown" {
+            guard let dateId = block["dateFact"]?.string,
+                  let date = facts[dateId], !sensitive.contains(dateId),
+                  GeneratedCardValue.instant(date) != nil else { return false }
+        }
+        if type == "image" {
+            guard let ref = block["urlFact"]?.string,
+                  let value = facts[ref], safeHttpURL(value) else { return false }
+        }
+        return true
+    }
+
+    private static func validTable(_ block: [String: JSONValue], facts: [String: String]) -> Bool {
+        let tableLimits = limits["table"] as? [String: Any] ?? [:]
+        guard case let .array(columns)? = block["columns"],
+              within(columns.count, tableLimits["columns"], key: "min", maxKey: "max"),
+              let titleMax = number(tableLimits["columns"], key: "titleMax"),
+              columns.allSatisfy({ column in
+                  guard let text = column.string else { return false }
+                  return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && text.utf16.count <= titleMax
+              }),
+              case let .array(rows)? = block["rows"],
+              within(rows.count, tableLimits["rows"], key: "min", maxKey: "max") else { return false }
+        return rows.allSatisfy { row in
+            guard case let .array(cells) = row, cells.count == columns.count else { return false }
+            return cells.allSatisfy { hasFact($0, facts: facts) }
+        }
+    }
+
+    private static func validChart(_ block: [String: JSONValue], facts: [String: String]) -> Bool {
+        let chartLimits = limits["chart"] as? [String: Any] ?? [:]
+        guard case let .array(points)? = block["points"],
+              within(points.count, chartLimits["points"], key: "min", maxKey: "max") else { return false }
+        return points.allSatisfy { point in
+            guard case let .object(values) = point else { return false }
+            return hasFact(values["labelFact"], facts: facts) && hasFact(values["valueFact"], facts: facts)
+        }
+    }
+
+    private static func validChartPrivacyAndValues(
+        _ block: [String: JSONValue], facts: [String: String], sensitive: Set<String>
+    ) -> Bool {
+        guard case let .array(points)? = block["points"] else { return false }
+        return points.allSatisfy { point in
+            guard case let .object(values) = point,
+                  let labelId = values["labelFact"]?.string,
+                  let valueId = values["valueFact"]?.string,
+                  !sensitive.contains(labelId), !sensitive.contains(valueId),
+                  let figure = facts[valueId] else { return false }
+            return GeneratedCardValue.number(figure) != nil
+        }
+    }
+
+    private static func hasFact(_ value: JSONValue?, facts: [String: String]) -> Bool {
+        guard let key = value?.string, let fact = facts[key] else { return false }
+        return !fact.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func supportsAction(_ raw: JSONValue, facts: [String: String], limits: [String: Any]) -> Bool {
+        guard case let .object(action) = raw,
+              let id = action["id"]?.string,
+              let idPattern = limits["idPattern"] as? String, matches(id, pattern: idPattern),
+              let type = action["type"]?.string,
+              (limits["types"] as? [String])?.contains(type) == true,
+              boundedText(action["label"], max: number(limits["label"], key: "max")),
+              optionalBoundedText(action["prompt"], max: number(limits["prompt"], key: "max")) else { return false }
+        for key in ["factId", "startFact", "endFact", "locationFact"] {
+            if action[key] != nil && !hasFact(action[key], facts: facts) { return false }
+        }
+        if ["open_url", "copy_value", "reveal_sensitive"].contains(type) && action["factId"] == nil {
+            return false
+        }
+        return true
+    }
+
+    private static func boundedText(_ value: JSONValue?, max: Int?) -> Bool {
+        guard let value = value?.string, let max else { return false }
+        return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && value.utf16.count <= max
+    }
+
+    private static func optionalBoundedText(_ value: JSONValue?, max: Int?) -> Bool {
+        guard let value else { return true }
+        guard let text = value.string, let max else { return false }
+        return text.utf16.count <= max
+    }
+
+    private static func optionalEnum(_ value: JSONValue?, allowed: [String]?) -> Bool {
+        guard let value else { return true }
+        guard let text = value.string, let allowed else { return false }
+        return allowed.contains(text)
+    }
+
+    private static func safeHttpURL(_ value: String) -> Bool {
+        guard let components = URLComponents(string: value),
+              ["http", "https"].contains(components.scheme?.lowercased() ?? ""),
+              let host = components.host, !host.isEmpty,
+              components.user == nil, components.password == nil else { return false }
+        return true
+    }
+
+    private static func matches(_ value: String, pattern: String) -> Bool {
+        value.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    private static func number(_ object: Any?, key: String) -> Int? {
+        (object as? [String: Any])?[key] as? Int
+    }
+
+    private static func within(_ count: Int, _ object: Any?, key: String, maxKey: String) -> Bool {
+        guard let min = number(object, key: key), let max = number(object, key: maxKey) else { return false }
+        return count >= min && count <= max
+    }
+}
+
 /// The layout blocks a generated card gained beyond its first seven
 /// (docs/generative-ui.md). Every value is drawn as the composer lifted it
 /// out of the evidence. The only arithmetic here — a bar's fraction, a
@@ -19,6 +323,7 @@ struct GeneratedCardBlockView: View {
     var shownElsewhere: Set<String> = []
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .title3) private var metricMinimumColumnWidth: CGFloat = 136
 
     var body: some View {
         switch block.type {
@@ -63,12 +368,16 @@ struct GeneratedCardBlockView: View {
 
     // MARK: - Metrics
 
-    /// Two to four headline values abreast on one panel: Gate · Seat · Boards.
-    /// Each column is the same width, so values line up card to card.
+    /// Headline values share equal-width columns when the panel has room; on
+    /// a narrow phone, the grid keeps each label and value readable.
     private var metrics: some View {
         let items = ids("factIds").compactMap { facts[$0] }
         return LazyVGrid(
-            columns: CardStyle.columns(min(items.count, 4), accessibility: dynamicTypeSize.isAccessibilitySize),
+            columns: CardStyle.metricColumns(
+                itemCount: items.count,
+                accessibility: dynamicTypeSize.isAccessibilitySize,
+                minimumWidth: metricMinimumColumnWidth
+            ),
             alignment: .leading,
             spacing: CardStyle.partSpacing
         ) {
@@ -76,8 +385,7 @@ struct GeneratedCardBlockView: View {
                 VStack(alignment: .leading, spacing: CardStyle.labelSpacing) {
                     CardEyebrow(item.label)
                     value(item, font: CardStyle.figure)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .accessibilityElement(children: .combine)
             }
@@ -250,11 +558,13 @@ struct GeneratedCardBlockView: View {
     @ViewBuilder
     private var progress: some View {
         if let current = fact("valueFact"), !current.sensitive,
+           fact("totalFact")?.sensitive != true,
            let fraction = GeneratedCardValue.fraction(value: current.value, total: fact("totalFact")?.value) {
             let total = fact("totalFact")
+            let label = fact("labelFact").flatMap { $0.sensitive ? nil : $0.value } ?? current.label
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline) {
-                    CardEyebrow(fact("labelFact")?.value ?? current.label)
+                    CardEyebrow(label)
                     Spacer(minLength: 8)
                     Text(total.map { "\(current.value) / \($0.value)" } ?? current.value)
                         .font(CardStyle.value.monospacedDigit())
@@ -330,11 +640,12 @@ struct GeneratedCardBlockView: View {
     private var countdown: some View {
         if let target = fact("dateFact"), !target.sensitive,
            let instant = GeneratedCardValue.instant(target.value) {
+            let label = fact("labelFact").flatMap { $0.sensitive ? nil : $0.value } ?? target.label
             TimelineView(.everyMinute) { context in
                 let future = instant.date > context.date
                 HStack(alignment: .center, spacing: CardStyle.gutter) {
                     VStack(alignment: .leading, spacing: CardStyle.labelSpacing) {
-                        CardEyebrow(fact("labelFact")?.value ?? target.label)
+                        CardEyebrow(label)
                         HStack(alignment: .firstTextBaseline, spacing: 5) {
                             if future {
                                 Text("in").font(CardStyle.body).foregroundStyle(muted)
@@ -384,7 +695,7 @@ struct GeneratedCardBlockView: View {
         // weights line up on a receipt; words stay on the left.
         let numeric = columns.indices.map { index in
             !rows.isEmpty && rows.allSatisfy { row in
-                row.indices.contains(index) && facts[row[index]].map { GeneratedCardValue.number($0.value) != nil } == true
+                row.indices.contains(index) && facts[row[index]].map { !$0.sensitive && GeneratedCardValue.number($0.value) != nil } == true
             }
         }
         return Grid(alignment: .leading, horizontalSpacing: CardStyle.gutter, verticalSpacing: 10) {
@@ -555,22 +866,28 @@ private struct GeneratedPlacesMap: View {
                 .accessibilityHint("Opens in Maps.")
             }
         }
-        .task(id: places.map(\.id).joined(separator: ",")) {
-            pins = await resolve()
+        .task(id: places.map { "\($0.id)=\($0.value)" }.joined(separator: "\u{1f}")) {
+            pins = []
+            let nextPins = await resolve()
+            guard !Task.isCancelled else { return }
+            pins = nextPins
         }
     }
 
     private func resolve() async -> [Pin] {
         var resolved: [Pin] = []
         for place in places {
+            guard !Task.isCancelled else { return [] }
+            let pinID = "\(place.id):\(place.value)"
             if let coordinate = GeneratedCardValue.coordinate(place.value) {
-                resolved.append(.init(id: place.id, label: place.label, coordinate: coordinate))
+                resolved.append(.init(id: pinID, label: place.label, coordinate: coordinate))
                 continue
             }
             let request = MKLocalSearch.Request()
             request.naturalLanguageQuery = place.value
             guard let item = try? await MKLocalSearch(request: request).start().mapItems.first else { continue }
-            resolved.append(.init(id: place.id, label: place.label, coordinate: item.location.coordinate))
+            guard !Task.isCancelled else { return [] }
+            resolved.append(.init(id: pinID, label: place.label, coordinate: item.location.coordinate))
         }
         return resolved
     }
@@ -658,7 +975,7 @@ enum GeneratedCardValue {
 /// The generated card's grid and type scale, on a 4-point grid. Blocks sit
 /// 20 apart, the parts of a block 12 apart, a label 4 above its value, and
 /// columns split the card's width evenly across a 12-point gutter. Five text
-/// styles, all Dynamic Type: an uppercase eyebrow for labels, body and value
+/// styles, all Dynamic Type: a caption label, body and value
 /// for facts, a figure for anything read at a glance (a gate, a clock), and
 /// a display size for the one thing a block is about (an airport code).
 enum CardStyle {
@@ -669,7 +986,7 @@ enum CardStyle {
     static let panelPadding: CGFloat = 14
     static let panelRadius: CGFloat = 14
 
-    static let eyebrow = Font.caption2.weight(.semibold)
+    static let eyebrow = Font.caption.weight(.medium)
     static let body = Font.callout
     static let value = Font.callout.weight(.semibold)
     static let figure = Font.title3.weight(.semibold).monospacedDigit()
@@ -682,10 +999,19 @@ enum CardStyle {
             count: accessibility ? 1 : max(1, count)
         )
     }
+
+    /// Metric tiles adapt to available width while reserving a scaled minimum
+    /// reading width for labels and values. Accessibility sizes stay one column.
+    static func metricColumns(itemCount: Int, accessibility: Bool, minimumWidth: CGFloat) -> [GridItem] {
+        guard itemCount > 0 else { return [] }
+        if accessibility {
+            return [GridItem(.flexible(), spacing: gutter, alignment: .topLeading)]
+        }
+        return [GridItem(.adaptive(minimum: minimumWidth, maximum: .infinity), spacing: gutter, alignment: .topLeading)]
+    }
 }
 
-/// A label above a value: small, uppercase, muted — never competing with
-/// the value it names.
+/// A sentence-case supporting label above a value.
 struct CardEyebrow: View {
     let text: String
     @Environment(\.colorScheme) private var colorScheme
@@ -695,10 +1021,8 @@ struct CardEyebrow: View {
     var body: some View {
         Text(CardText.presentationLabel(text))
             .font(CardStyle.eyebrow)
-            .textCase(.uppercase)
-            .tracking(0.5)
             .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-            .lineLimit(1)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

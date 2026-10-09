@@ -1,9 +1,13 @@
-import type { ExecutionContextRepository } from '@assistant/persistence';
-import { and, asc, desc, eq, gt, inArray, lt, or } from 'drizzle-orm';
+import {
+  type ExecutionContextRepository,
+  MAX_EXECUTION_SEED_MESSAGES,
+  parseExactTimestamp,
+} from '@assistant/persistence';
+import { and, asc, desc, eq, inArray, lt, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { agents, conversations, goals, messages, tasks } from './schema.js';
 
-const MAX_SEED_MESSAGES = 20;
+const exactMessageTime = sql<string>`to_char(${messages.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') || '000Z'`;
 const MAX_FOLDED_REPLIES = 200;
 
 function boundedLimit(value: number | undefined, fallback: number, maximum: number): number {
@@ -37,8 +41,14 @@ export function createPostgresExecutionContextRepository(db: Db): ExecutionConte
         .limit(1);
       return row ?? null;
     },
-    async seedHistory({ agentId, conversationId, before, limit: requestedLimit }) {
-      const limit = boundedLimit(requestedLimit, MAX_SEED_MESSAGES, MAX_SEED_MESSAGES);
+    async seedHistory({
+      agentId,
+      conversationId,
+      before,
+      throughMessageId,
+      limit: requestedLimit,
+    }) {
+      const limit = boundedLimit(requestedLimit, 20, MAX_EXECUTION_SEED_MESSAGES);
       const rows = await db
         .select({ message: messages })
         .from(messages)
@@ -48,7 +58,9 @@ export function createPostgresExecutionContextRepository(db: Db): ExecutionConte
             eq(conversations.id, conversationId),
             eq(conversations.agentId, agentId),
             inArray(messages.role, ['user', 'assistant']),
-            lt(messages.createdAt, before),
+            throughMessageId
+              ? sql`(${messages.createdAt}, ${messages.id}) <= (select pinned.created_at, pinned.id from ${messages} as pinned where pinned.id = ${throughMessageId} and pinned.conversation_id = ${conversationId})`
+              : lt(messages.createdAt, before),
           ),
         )
         .orderBy(desc(messages.createdAt), desc(messages.id))
@@ -72,7 +84,11 @@ export function createPostgresExecutionContextRepository(db: Db): ExecutionConte
     },
     async getLatestOwnerReplyCursor({ agentId, conversationId }) {
       const [row] = await db
-        .select({ createdAt: messages.createdAt, id: messages.id })
+        .select({
+          createdAt: messages.createdAt,
+          exactCreatedAt: exactMessageTime,
+          id: messages.id,
+        })
         .from(messages)
         .innerJoin(conversations, eq(conversations.id, messages.conversationId))
         .where(
@@ -100,14 +116,19 @@ export function createPostgresExecutionContextRepository(db: Db): ExecutionConte
     },
     async getOwnerRepliesAfter({ agentId, conversationId, after, limit: requestedLimit }) {
       const limit = boundedLimit(requestedLimit, MAX_FOLDED_REPLIES, MAX_FOLDED_REPLIES);
+      const exact = after.exactCreatedAt;
+      if (exact) parseExactTimestamp(exact);
+      const suppliedAt = exact ?? after.createdAt.toISOString();
+      // Upgrade old millisecond checkpoints using their durable row identity.
+      const at =
+        after.id && (!exact || /\.\d{3}Z$/.test(exact))
+          ? sql`coalesce((select pinned.created_at from ${messages} as pinned where pinned.id = ${after.id} and pinned.conversation_id = ${conversationId}), ${suppliedAt}::timestamptz)`
+          : sql`${suppliedAt}::timestamptz`;
       const cursor = after.id
-        ? or(
-            gt(messages.createdAt, after.createdAt),
-            and(eq(messages.createdAt, after.createdAt), gt(messages.id, after.id)),
-          )
-        : gt(messages.createdAt, after.createdAt);
+        ? sql`(${messages.createdAt}, ${messages.id}) > (${at}, ${after.id}::uuid)`
+        : sql`${messages.createdAt} > ${at}`;
       const rows = await db
-        .select({ message: messages })
+        .select({ message: messages, exactCreatedAt: exactMessageTime })
         .from(messages)
         .innerJoin(conversations, eq(conversations.id, messages.conversationId))
         .where(
@@ -125,7 +146,7 @@ export function createPostgresExecutionContextRepository(db: Db): ExecutionConte
       if (rows.length > limit) {
         throw new Error(`Owner reply window exceeded ${limit} messages`);
       }
-      return rows.map(({ message }) => message);
+      return rows.map(({ message, exactCreatedAt }) => ({ ...message, exactCreatedAt }));
     },
     async noticeIds(agentId, rows) {
       const notices = new Set<string>();

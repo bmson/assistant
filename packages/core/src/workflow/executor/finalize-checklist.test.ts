@@ -16,6 +16,23 @@ import { stageFinalResponse } from './finalize.js';
 
 describe('checklist finalization boundary', () => {
   beforeEach(() => checkpoint.mockClear());
+  it('preserves the checked completed answer alongside the unfinished sibling', async () => {
+    const state = TaskStateSchema.parse({
+      requestChecklist: buildRequestChecklist('Find my hotel and remind me'),
+    });
+    const text = 'The booking confirmation identifies Harbor Hotel, check-in October 12 at 3 PM.';
+    const window: ModelMessage[] = [{ role: 'assistant', content: text }];
+    await stageFinalResponse({} as ExecutorDeps, {} as TaskLease, state, window, {
+      text,
+      outcome: 'done',
+      terminalStatus: 'done',
+      progress: text,
+      contractBlocked: false,
+    });
+    expect(state.pendingFinal?.text).toContain(text);
+    expect(state.pendingFinal?.text).toContain('Not completed: remind me');
+    expect(state.pendingFinal?.terminalStatus).toBe('needs_attention');
+  });
   it.each(['done', 'clarify'] as const)(
     'checkpoints an honest partial %s before any delivery',
     async (outcome) => {

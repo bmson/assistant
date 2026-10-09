@@ -11,6 +11,7 @@ import {
 import type { Db } from '@assistant/db';
 import type { OwnerContextRepository } from '@assistant/persistence';
 import { z } from 'zod';
+import { canUseOwnerCurrentLocation } from '../current-location-access.js';
 import { register } from '../register.js';
 import type { ToolRegistry } from '../registry.js';
 
@@ -469,11 +470,14 @@ export function registerWeatherTool(
           .optional()
           .describe('Local end hour, inclusive. Defaults to startHour + 2.'),
       }),
-      risk: 'autonomous',
+      risk: (args, ctx) =>
+        !args.place?.trim() && !canUseOwnerCurrentLocation(ctx) ? 'forbidden' : 'autonomous',
       acceptsUntrustedInput: true,
       cacheTtlSeconds: 900,
-      execute: async (args, ctx) =>
-        lookupWeather({
+      execute: async (args, ctx) => {
+        if (!args.place?.trim() && !canUseOwnerCurrentLocation(ctx))
+          return { error: 'An explicit place is required for this request.' };
+        return lookupWeather({
           db: deps.ownerContext ?? ctx.db,
           agentId: ctx.agentId,
           place: args.place,
@@ -487,7 +491,8 @@ export function registerWeatherTool(
             (deps.fetchImpl ?? fetch)(url, {
               signal: init?.signal ? AbortSignal.any([ctx.signal, init.signal]) : ctx.signal,
             }),
-        }),
+        });
+      },
     },
     // Deliberately neither networkEgress nor returnsUntrustedContent, unlike
     // web.fetch/web.search. The destination is hardwired to Open-Meteo — no

@@ -105,6 +105,18 @@ describe('PostgreSQL execution evidence repository', () => {
         toolName: 'docs.get',
         documentId: 'doc-1',
       }),
+    ).toBe(false);
+    await db
+      .update(toolCalls)
+      .set({ status: 'succeeded', result: { content: 'Current document' } })
+      .where(eq(toolCalls.id, ids.call));
+    expect(
+      await repository.hasConversationToolCall({
+        agentId: ids.agent,
+        conversationId: ids.conversation,
+        toolName: 'docs.get',
+        documentId: 'doc-1',
+      }),
     ).toBe(true);
     expect(
       await repository.hasConversationToolCall({

@@ -1,8 +1,8 @@
-# The Workspace code-execution job (Cloud Run Job, Phase 13). Credential-free:
-# no DB URL, no API keys — only the per-run CODE_JOB_INPUT env. Runs
-# model-authored JavaScript (node) or Python (python3) in an ephemeral
-# container. Network isolation is enforced at the Cloud Run level (no egress
-# connector), not inside the image.
+# The Workspace code-execution job (Cloud Run Job, Phase 13). The supervisor
+# has only per-run CODE_JOB_INPUT and its least-privileged service identity;
+# model-authored code must run through the Cloud Run sandbox launcher. The
+# sandbox gets no parent environment or metadata access and denies egress by
+# default. The launcher is enabled on the Cloud Run Job deployment.
 FROM node:22-slim
 WORKDIR /app
 
@@ -22,6 +22,7 @@ RUN pip install --no-cache-dir --break-system-packages \
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY workers/code-runner ./workers/code-runner
+COPY packages/persistence ./packages/persistence
 
 RUN pnpm install --frozen-lockfile --filter @assistant/code-runner...
 

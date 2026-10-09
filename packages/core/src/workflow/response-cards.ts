@@ -1,5 +1,7 @@
+import { sameCalendarOccurrence } from '@assistant/persistence';
 import type { LiveLookup } from './live-lookup.js';
 import type { PersonalReadRequest } from './read-intent.js';
+import { effectiveReminders } from './reminder-state.js';
 import type { ActionEvidence } from './response-contract.js';
 
 type RecordValue = Record<string, unknown>;
@@ -79,32 +81,6 @@ function details(
   return entries.flatMap(([label, value]) => (value ? [{ label, value }] : []));
 }
 
-function normalizedTitle(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/\b(?:calendar|copy|duplicate)\b/g, '')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
-
-function overlaps(a: RecordValue, b: RecordValue): boolean {
-  const aStart = Date.parse(string(a.start));
-  const aEnd = Date.parse(string(a.end));
-  const bStart = Date.parse(string(b.start));
-  const bEnd = Date.parse(string(b.end));
-  if (![aStart, aEnd, bStart, bEnd].every(Number.isFinite))
-    return string(a.start) === string(b.start);
-  return aStart < bEnd && bStart < aEnd;
-}
-
-function sameEvent(a: RecordValue, b: RecordValue): boolean {
-  const title = normalizedTitle(string(a.summary));
-  if (!title || title !== normalizedTitle(string(b.summary)) || !overlaps(a, b)) return false;
-  const aLocation = string(a.location).toLowerCase();
-  const bLocation = string(b.location).toLowerCase();
-  return !aLocation || !bLocation || aLocation === bLocation;
-}
-
 function formatTime(value: string, timeZone?: string): string {
   if (!timeZone) {
     const local = /T(\d{2}):(\d{2})/.exec(value);
@@ -157,17 +133,41 @@ export function calendarResponseCards(
   evidence: ActionEvidence[],
   request?: PersonalReadRequest | null,
 ): ResponseCard[] {
+  // A flight departure answer is reconciled against its dated booking. A raw
+  // calendar row would present an unverified airline/time as the answer again.
+  // Ordinary agenda requests still show their calendar entries below.
+  if (request?.answerFocus === 'flight') return [];
+  const updatedEventIds = new Set(
+    evidence.flatMap((row) => {
+      const result = record(row.result);
+      if (!succeeded(row) || row.toolName !== 'calendar.update_event' || result?.updated !== true)
+        return [];
+      const eventId = string(result.eventId);
+      return eventId ? [eventId] : [];
+    }),
+  );
   const events = evidence.flatMap((row) => {
     if (!succeeded(row) || !/^calendar\.(?:list_events|search_events)$/.test(row.toolName))
       return [];
     const result = record(row.result);
     return Array.isArray(result?.events)
-      ? result.events.map(record).filter((event): event is RecordValue => !!event)
+      ? result.events
+          .map(record)
+          .filter((event): event is RecordValue => !!event)
+          // A successful update supersedes a flight row read before the write.
+          // Keep its canonical receipt card; omit obsolete calendar copies.
+          .filter(
+            (event) =>
+              !updatedEventIds.has(string(event.eventId)) ||
+              !/\b(?:flight|airline|boarding|itinerary)\b/i.test(string(event.summary)),
+          )
       : [];
   });
   const groups: EventGroup[] = [];
   for (const event of events) {
-    const group = groups.find((candidate) => sameEvent(candidate[0], event));
+    const group = groups.find((candidate) =>
+      candidate.every((member) => sameCalendarOccurrence(member, event)),
+    );
     if (group) group.push(event);
     else groups.push([event]);
   }
@@ -567,20 +567,8 @@ export function reminderResponseCards(evidence: ActionEvidence[]): ResponseCard[
     });
   };
 
-  for (const row of evidence) {
-    if (!succeeded(row)) continue;
-    const result = record(row.result);
-    if (!result) continue;
-    if (row.toolName === 'reminder.create' && result.created !== false && result.ok !== false) {
-      add(result);
-    }
-    if (row.toolName === 'reminder.list' && Array.isArray(result.reminders)) {
-      result.reminders
-        .map(record)
-        .filter((reminder): reminder is RecordValue => !!reminder)
-        .forEach(add);
-    }
-  }
+  for (const state of effectiveReminders(evidence).values())
+    add({ ...state.value, enabled: state.enabled });
   return [...reminders.values()];
 }
 
@@ -781,6 +769,8 @@ export function scoreboardResponseCards(evidence: ActionEvidence[]): ResponseCar
   let fetchedAt = '';
   let timeZone = '';
   let selection = '';
+  let requestedDate = '';
+  let partialCoverage = false;
   for (const row of evidence) {
     if (!succeeded(row) || row.toolName !== 'sports.scores') continue;
     const result = record(row.result);
@@ -788,6 +778,9 @@ export function scoreboardResponseCards(evidence: ActionEvidence[]): ResponseCar
     fetchedAt = string(result.fetchedAt) || fetchedAt;
     timeZone = string(result.timeZone) || timeZone;
     selection = string(result.selection) || selection;
+    if (result.explicitDate === true && /^\d{4}-\d{2}-\d{2}$/.test(string(result.requestedDate)))
+      requestedDate = string(result.requestedDate);
+    if (record(result.coverage)?.complete === false) partialCoverage = true;
     for (const game of Array.isArray(result.games) ? result.games : []) {
       const value = record(game);
       const id = string(value?.id);
@@ -805,12 +798,17 @@ export function scoreboardResponseCards(evidence: ActionEvidence[]): ResponseCar
     {
       kind: 'scoreboard',
       id: `scoreboard-${rows.map((game) => string(game.id)).join('-')}`,
-      title:
+      title: [
         selection === 'last-and-next'
           ? 'Last result and next game'
           : labels.length === 1
             ? (labels[0] as string)
             : 'Scores',
+        requestedDate,
+        partialCoverage ? 'Partial coverage' : '',
+      ]
+        .filter(Boolean)
+        .join(' · '),
       fetchedAt,
       timeZone,
       // Shown under the reply, not instead of it: the one-line takeaway (and a
@@ -1118,10 +1116,10 @@ export function statusResponseCards(evidence: ActionEvidence[]): ResponseCard[] 
           kind: 'status' as const,
           id: `calendar-updated-${string(result.eventId) || index}`,
           title: 'Calendar event updated',
-          detail: string(args?.summary) || 'The event details were updated.',
+          detail: string(result.summary) || 'The event details were updated.',
           symbol: 'calendar.badge.checkmark',
           details: details([
-            ['Time', string(args?.start)],
+            ['Time', string(result.start)],
             ['Location', string(args?.location)],
             ['Invited', strings(args?.addAttendees).join(', ')],
           ]),

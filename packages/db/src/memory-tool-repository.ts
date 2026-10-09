@@ -1,15 +1,21 @@
 import {
   type EmbeddingSpace,
+  embeddingSpaceIdentityKey,
   type MemoryRecallResult,
   type MemorySaveInput,
   type MemorySaveResult,
   type MemoryToolRepository,
+  snapshotEmbeddingSpace,
   validateEmbedding,
   validateSkillEmbedding,
 } from '@assistant/persistence';
 import { and, eq, gt, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
-import { isTombstoned, resolveSubjectContact } from './entities.js';
+import { resolveSubjectContact } from './entities.js';
+import {
+  assertPostgresPrivacyObservationFence,
+  lockPostgresPrivacyObservationFence,
+} from './privacy-erasure-repository.js';
 import { memories, memoryTombstones } from './schema.js';
 
 const LEXICAL_MATCH_BONUS = 0.06;
@@ -26,6 +32,18 @@ function validateSave(input: MemorySaveInput, space: EmbeddingSpace | undefined)
     throw new Error('Invalid memory confidence');
   if (!Number.isInteger(input.importance) || input.importance < 1 || input.importance > 5)
     throw new Error('Invalid memory importance');
+  if (
+    input.embeddingSpaceKey !== undefined &&
+    input.embeddingSpaceKey !== null &&
+    !/^[a-f0-9]{64}$/.test(input.embeddingSpaceKey)
+  )
+    throw new Error('Invalid memory embedding space identity');
+  if (
+    space &&
+    input.embeddingSpaceKey &&
+    input.embeddingSpaceKey !== embeddingSpaceIdentityKey(space)
+  )
+    throw new Error('Memory embedding space identity does not match the configured space');
   validateVector(space, input.embedding);
   if (input.expiresAt && !Number.isFinite(input.expiresAt.getTime()))
     throw new Error('Invalid memory expiry');
@@ -44,22 +62,54 @@ export function createPostgresMemoryToolRepository(
   db: Db,
   embeddingSpace?: EmbeddingSpace,
 ): MemoryToolRepository {
+  const capturedEmbeddingSpace = embeddingSpace
+    ? snapshotEmbeddingSpace(embeddingSpace)
+    : undefined;
   return {
     kind: 'memory-tool-repository',
-    embeddingSpace,
+    embeddingSpace: capturedEmbeddingSpace,
+    observationGeneration: (agentId) =>
+      db.transaction((tx) => lockPostgresPrivacyObservationFence(tx as unknown as Db, agentId)),
+
+    async screenContentHash(agentId, contentHash) {
+      if (!agentId || !/^[a-f0-9]{64}$/.test(contentHash))
+        throw new Error('Invalid memory content hash preflight');
+      return db.transaction(async (tx) => {
+        const txDb = tx as unknown as Db;
+        const observed = await lockPostgresPrivacyObservationFence(txDb, agentId);
+        const [tombstone] = await tx
+          .select({ id: memoryTombstones.id })
+          .from(memoryTombstones)
+          .where(eq(memoryTombstones.contentHash, contentHash))
+          .limit(1);
+        let state: 'new' | 'duplicate' | 'tombstoned' = tombstone ? 'tombstoned' : 'new';
+        if (!tombstone) {
+          const [existing] = await tx
+            .select({ agentId: memories.agentId })
+            .from(memories)
+            .where(eq(memories.contentHash, contentHash))
+            .limit(1);
+          if (existing?.agentId === agentId) state = 'duplicate';
+          else if (existing) throw new Error('Memory duplicate preflight is unavailable');
+        }
+        await assertPostgresPrivacyObservationFence(txDb, agentId, observed);
+        return state;
+      });
+    },
 
     async save(input): Promise<MemorySaveResult> {
-      validateSave(input, embeddingSpace);
-      if (await isTombstoned(db, input.contentHash)) {
-        return { saved: false, duplicate: false, tombstoned: true, quarantined: input.quarantined };
-      }
-      const subject = input.subject
-        ? await resolveSubjectContact(db, {
-            subject: input.subject,
-            relationship: input.subjectRelationship,
-          })
-        : null;
+      validateSave(input, capturedEmbeddingSpace);
+      if (!input.embeddingSpaceKey)
+        throw new Error('Memory writes require an exact embedding space identity');
       return db.transaction(async (tx) => {
+        const txDb = tx as unknown as Db;
+        const observed = await lockPostgresPrivacyObservationFence(txDb, input.agentId);
+        if (input.observedPrivacyGeneration !== undefined)
+          await assertPostgresPrivacyObservationFence(
+            txDb,
+            input.agentId,
+            input.observedPrivacyGeneration,
+          );
         const [tombstone] = await tx
           .select({ id: memoryTombstones.id })
           .from(memoryTombstones)
@@ -72,6 +122,12 @@ export function createPostgresMemoryToolRepository(
             tombstoned: true,
             quarantined: input.quarantined,
           };
+        const subject = input.subject
+          ? await resolveSubjectContact(txDb, {
+              subject: input.subject,
+              relationship: input.subjectRelationship,
+            })
+          : null;
         const [row] = await tx
           .insert(memories)
           .values({
@@ -81,6 +137,9 @@ export function createPostgresMemoryToolRepository(
             content: input.content,
             contentHash: input.contentHash,
             embedding: input.embedding,
+            embeddingSpaceKey:
+              input.embeddingSpaceKey ??
+              (capturedEmbeddingSpace ? embeddingSpaceIdentityKey(capturedEmbeddingSpace) : null),
             importance: input.importance,
             confidence: input.confidence.toFixed(2),
             originTrust: input.originTrust,
@@ -92,6 +151,7 @@ export function createPostgresMemoryToolRepository(
           })
           .onConflictDoNothing({ target: memories.contentHash })
           .returning({ id: memories.id });
+        await assertPostgresPrivacyObservationFence(txDb, input.agentId, observed);
         return {
           ...(row ? { id: row.id } : {}),
           saved: Boolean(row),
@@ -111,7 +171,17 @@ export function createPostgresMemoryToolRepository(
         input.limit > 20
       )
         throw new Error('Invalid memory recall');
-      validateVector(embeddingSpace, input.embedding);
+      validateVector(capturedEmbeddingSpace, input.embedding);
+      const configuredSpaceKey = capturedEmbeddingSpace
+        ? embeddingSpaceIdentityKey(capturedEmbeddingSpace)
+        : undefined;
+      if (
+        input.embeddingSpaceKey &&
+        configuredSpaceKey &&
+        input.embeddingSpaceKey !== configuredSpaceKey
+      )
+        throw new Error('Memory recall identity does not match the configured embedding space');
+      const exactSpaceKey = input.embeddingSpaceKey ?? configuredSpaceKey;
       const now = input.now ?? new Date();
       if (!Number.isFinite(now.getTime())) throw new Error('Invalid memory recall time');
       const vector = JSON.stringify(input.embedding);
@@ -134,6 +204,7 @@ export function createPostgresMemoryToolRepository(
             validFrom: memories.validFrom,
             validUntil: memories.validUntil,
             source: memories.source,
+            embeddingSpaceKey: memories.embeddingSpaceKey,
             ownerConfirmed: memories.ownerConfirmed,
             createdAt: memories.createdAt,
             expiresAt: memories.expiresAt,
@@ -155,6 +226,7 @@ export function createPostgresMemoryToolRepository(
           .where(
             and(
               eq(memories.agentId, input.agentId),
+              exactSpaceKey ? eq(memories.embeddingSpaceKey, exactSpaceKey) : undefined,
               eq(memories.quarantined, false),
               isNull(memories.supersededById),
               isNotNull(memories.embedding),

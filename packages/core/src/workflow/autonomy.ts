@@ -20,11 +20,11 @@ import { z } from 'zod';
 export type AutonomyGrantSource = 'card' | 'composer' | 'goal';
 
 export const AutonomyGrantSchema = z.object({
-  grantedAt: z.string(),
+  grantedAt: z.iso.datetime(),
   grantedVia: z.enum(['card', 'composer', 'goal']),
-  approvalId: z.string().optional(),
-  expiresAt: z.string(),
-  revokedAt: z.string().nullable().optional(),
+  approvalId: z.string().min(1).optional(),
+  expiresAt: z.iso.datetime(),
+  revokedAt: z.iso.datetime().nullable().optional(),
 });
 
 export type AutonomyGrant = z.infer<typeof AutonomyGrantSchema>;
@@ -63,6 +63,14 @@ export function buildAutonomyGrant(input: {
   ttlHours?: number;
 }): AutonomyGrant {
   const ttl = input.ttlHours ?? AUTONOMY_GRANT_TTL_HOURS;
+  if (
+    !Number.isFinite(input.nowMs) ||
+    !Number.isFinite(ttl) ||
+    ttl <= 0 ||
+    ttl > AUTONOMY_GRANT_TTL_HOURS
+  ) {
+    throw new Error('Autonomy grants require a finite time and a positive TTL of at most 24 hours');
+  }
   return {
     grantedAt: new Date(input.nowMs).toISOString(),
     grantedVia: input.grantedVia,
@@ -86,8 +94,19 @@ export function activeAutonomyGrant(
   const parsed = AutonomyGrantSchema.safeParse(task.autonomyGrant);
   if (!parsed.success) return null;
   const grant = parsed.data;
-  if (grant.revokedAt) return null;
-  if (new Date(grant.expiresAt).getTime() <= nowMs) return null;
+  if (grant.revokedAt != null || !Number.isFinite(nowMs)) return null;
+  const grantedAt = Date.parse(grant.grantedAt);
+  const expiresAt = Date.parse(grant.expiresAt);
+  if (
+    !Number.isFinite(grantedAt) ||
+    !Number.isFinite(expiresAt) ||
+    grantedAt > nowMs ||
+    expiresAt <= nowMs ||
+    expiresAt <= grantedAt ||
+    expiresAt - grantedAt > AUTONOMY_GRANT_TTL_HOURS * 3_600_000
+  )
+    return null;
+  if (grant.grantedVia === 'card' && !grant.approvalId) return null;
   return grant;
 }
 

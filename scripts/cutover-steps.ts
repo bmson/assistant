@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type { MigrationBundle } from '../packages/persistence/src/migration.js';
 import {
@@ -578,7 +579,8 @@ function stepsDefinition(): StepDefinition[] {
         check(checks, 'gcloud has an active account', accounts.length > 0);
         const { inventory, pushEndpoints } = await captureInventory(config, deps);
         // Retried preflights overwrite this: nothing has changed production yet.
-        context.store.writePrivate('push-endpoints.json', `${JSON.stringify(pushEndpoints)}\n`, {
+        const pushEndpointEvidence = `${JSON.stringify(pushEndpoints)}\n`;
+        context.store.writePrivate('push-endpoints.json', pushEndpointEvidence, {
           overwrite: true,
         });
         const migrate = inventory.jobs.find((job) => job.name === 'assistant-migrate');
@@ -698,6 +700,7 @@ function stepsDefinition(): StepDefinition[] {
           result: {
             checks,
             inventory,
+            pushEndpointsSha256: sha256Hex(pushEndpointEvidence),
             databaseDependencies: databaseDependencies(inventory),
             neonEndpoint: {
               id: endpoint.id,
@@ -1812,6 +1815,79 @@ async function liveVerifyStep(context: StepContext): Promise<StepResult> {
   };
 }
 
+/**
+ * A fresh, read-only proof for the PostgreSQL retirement report. Historical
+ * cutover evidence establishes that the observation window elapsed; this pass
+ * checks who is serving now, what persistence that traffic uses, current
+ * health/readiness, dispatcher routing, and the source provider fence.
+ */
+export async function captureRetirementProof(
+  config: CutoverConfig,
+  deps: CutoverDeps,
+  store: EvidenceStore,
+) {
+  const outcome = await liveVerifyStep(makeContext(config, deps, store));
+  const inventory = outcome.result.inventory as Inventory;
+  const current = dispatchIdle(inventory);
+  const same = (a: string[], b: string[]) =>
+    canonicalJson([...a].sort()) === canonicalJson([...b].sort());
+  const expectedSubscriptions = config.dispatcher.pushSubscriptions.map((item) => item.name);
+  const runtimeHosts = new Set(
+    inventory.services
+      .filter((service) => config.services.some((target) => target.name === service.name))
+      .map((service) => hostOf(service.url))
+      .filter((host): host is string => Boolean(host)),
+  );
+  const dispatcherChecks = {
+    schedulerJobs: same(current.enabledSchedulerJobs, config.dispatcher.schedulerJobs),
+    queues: same(current.runningQueues, config.dispatcher.queues),
+    subscriptions: same(current.pushSubscriptions, expectedSubscriptions),
+    schedulerTargets: inventory.schedulerJobs
+      .filter((job) => job.state === 'ENABLED')
+      .every((job) => Boolean(job.targetHost && runtimeHosts.has(job.targetHost))),
+    subscriptionTargets: inventory.subscriptions
+      .filter((subscription) => subscription.pushHost)
+      .every((subscription) => runtimeHosts.has(subscription.pushHost as string)),
+  };
+  const services = outcome.result.services as Array<{
+    name: string;
+    ok: boolean;
+    probes?: {
+      health?: { ok?: boolean };
+      ready?: { ok?: boolean; database?: string | null };
+    };
+  }>;
+  const sourceStillFenced = outcome.result.sourceStillFenced as { passed?: boolean };
+  const configuredProbes =
+    config.services.length > 0 &&
+    config.services.every((target) => Boolean(target.health || target.ready)) &&
+    config.services.some((target) => target.ready?.expectDatabase === 'firestore');
+  const operationalChecks = {
+    liveVerifyPassed: outcome.passed,
+    healthAndReadyConfigured: configuredProbes,
+    healthAndReadyPassed: config.services.every((target) => {
+      const service = services.find((item) => item.name === target.name);
+      return Boolean(
+        service?.ok &&
+          (!target.health || service.probes?.health?.ok) &&
+          (!target.ready ||
+            (service.probes?.ready?.ok &&
+              service.probes.ready.database === target.ready.expectDatabase)),
+      );
+    }),
+    providerFencePassed: sourceStillFenced?.passed === true,
+    dispatcherMatches: Object.values(dispatcherChecks).every(Boolean),
+  };
+  return {
+    capturedAt: inventory.capturedAt,
+    inventory,
+    services,
+    sourceStillFenced,
+    dispatcher: { checks: dispatcherChecks, ok: Object.values(dispatcherChecks).every(Boolean) },
+    checks: operationalChecks,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Runner.
 
@@ -1828,6 +1904,86 @@ export function stepByName(name: string) {
 
 export function configSha256(config: CutoverConfig): string {
   return sha256Hex(canonicalJson(config));
+}
+
+type CutoverRunIdentity = {
+  format: 'assistant-cutover-run';
+  version: 1;
+  configSha256: string;
+};
+
+type CutoverIntent = {
+  format: 'assistant-cutover-intent';
+  version: 1;
+  step: StepName;
+  index: number;
+  attempt: number;
+  configSha256: string;
+  startedAt: string;
+};
+
+function assertEvidenceMatchesConfig(config: CutoverConfig, store: EvidenceStore): void {
+  const hash = configSha256(config);
+  const run = store.readRecord<CutoverRunIdentity>('cutover-run.json');
+  if (run) {
+    if (run.format !== 'assistant-cutover-run' || run.version !== 1 || run.configSha256 !== hash)
+      throw new Error('Cutover evidence belongs to a different configuration');
+  }
+
+  const ordered = STEPS.map((step) => store.read(step.index, step.name));
+  let previous: string | null = null;
+  let stopped = false;
+  for (let index = 0; index < ordered.length; index += 1) {
+    const evidence = ordered[index];
+    if (!evidence) {
+      stopped = true;
+      continue;
+    }
+    if (stopped) throw new Error('Cutover evidence has a gap in its ordered step chain');
+    if (evidence.configSha256 !== hash)
+      throw new Error('Cutover evidence belongs to a different configuration');
+    if (evidence.previousSha256 !== previous)
+      throw new Error(`${evidence.step}: previous evidence hash does not match`);
+    if (evidence.status !== 'passed') {
+      stopped = true;
+      continue;
+    }
+    previous = store.fileSha256(evidence.index, evidence.step);
+  }
+  if (!run) {
+    store.writeRecord('cutover-run.json', {
+      format: 'assistant-cutover-run',
+      version: 1,
+      configSha256: hash,
+    } satisfies CutoverRunIdentity);
+  }
+}
+
+function unresolvedCutoverIntents(
+  store: EvidenceStore,
+): Array<{ name: string; value: CutoverIntent }> {
+  const intents = store
+    .records<CutoverIntent>('cutover-intent-')
+    .filter(({ value }) => value.format === 'assistant-cutover-intent' && value.version === 1);
+  const resolutions = store.records<{
+    format?: unknown;
+    intent?: unknown;
+    configSha256?: unknown;
+  }>('cutover-resolved-');
+  const resolved = new Set(
+    resolutions
+      .filter(({ value }) => value.format === 'assistant-cutover-resolution')
+      .map(({ value }) => `${value.intent}:${value.configSha256}`),
+  );
+  return intents.filter(({ name, value }) => !resolved.has(`${name}:${value.configSha256}`));
+}
+
+function assertNoUnresolvedIntent(store: EvidenceStore): void {
+  const unresolved = unresolvedCutoverIntents(store)[0];
+  if (unresolved)
+    throw new Error(
+      `Cutover step ${unresolved.value.step} has an unresolved durable intent; reconcile or roll back before resuming`,
+    );
 }
 
 function makeContext(config: CutoverConfig, deps: CutoverDeps, store: EvidenceStore): StepContext {
@@ -1888,6 +2044,8 @@ export async function runCutoverStep(
   options: { confirm?: string } = {},
 ): Promise<StepEvidence> {
   validateCutoverConfig(config);
+  assertEvidenceMatchesConfig(config, store);
+  assertNoUnresolvedIntent(store);
   const step = stepByName(name);
   const hash = configSha256(config);
   const existing = store.read(step.index, step.name);
@@ -1908,6 +2066,19 @@ export async function runCutoverStep(
   if (step.mutating && options.confirm !== step.name)
     throw new Error(`Step ${name} changes production; rerun with --confirm ${name}`);
   const startedAt = deps.clock.now().toISOString();
+  const attempt = store.attempt(step.index, step.name);
+  const intentName = `cutover-intent-${String(step.index).padStart(2, '0')}-${step.name}-${attempt}.json`;
+  if (step.mutating) {
+    store.writeRecord(intentName, {
+      format: 'assistant-cutover-intent',
+      version: 1,
+      step: step.name,
+      index: step.index,
+      attempt,
+      configSha256: hash,
+      startedAt,
+    } satisfies CutoverIntent);
+  }
   let outcome: StepResult;
   let error: string | undefined;
   try {
@@ -1932,6 +2103,18 @@ export async function runCutoverStep(
     ...(error ? { error } : {}),
   };
   store.write(evidence);
+  if (step.mutating && !error) {
+    store.writeRecord(
+      `cutover-resolved-${String(step.index).padStart(2, '0')}-${step.name}-${attempt}.json`,
+      {
+        format: 'assistant-cutover-resolution',
+        intent: intentName,
+        configSha256: hash,
+        status: evidence.status,
+        completedAt: evidence.completedAt,
+      },
+    );
+  }
   return evidence;
 }
 
@@ -1944,11 +2127,29 @@ export async function rollbackCutover(
   store: EvidenceStore,
   options: { confirm?: string; acceptFirestoreDivergence?: boolean },
 ) {
+  validateCutoverConfig(config);
+  assertEvidenceMatchesConfig(config, store);
   if (options.confirm !== 'rollback')
     throw new Error('Rollback changes production; rerun with --confirm rollback');
   const context = makeContext(config, deps, store);
   const passed = (name: StepName) => store.read(stepByName(name).index, name)?.status === 'passed';
-  const attempted = (name: StepName) => store.read(stepByName(name).index, name) !== null;
+  const intents = store.records<CutoverIntent>('cutover-intent-').map(({ value }) => value);
+  const attempted = (name: StepName) =>
+    store.read(stepByName(name).index, name) !== null ||
+    intents.some((intent) => intent.step === name && intent.configSha256 === configSha256(config));
+  const preflight = context.evidence<{ inventory: Inventory; pushEndpointsSha256?: string }>(
+    'preflight',
+  );
+  const pushEndpointBytes = await deps.readFile(store.privatePath('push-endpoints.json'));
+  if (
+    typeof preflight.pushEndpointsSha256 !== 'string' ||
+    sha256Hex(pushEndpointBytes) !== preflight.pushEndpointsSha256
+  )
+    throw new Error('Rollback push-endpoint material does not match the preflight evidence');
+  const pushEndpoints = JSON.parse(pushEndpointBytes.toString('utf8')) as Record<
+    string,
+    PushTarget | string
+  >;
   if (
     (attempted('switch-services') || attempted('dispatcher')) &&
     !options.acceptFirestoreDivergence
@@ -1956,12 +2157,43 @@ export async function rollbackCutover(
     throw new Error(
       'Production already served from Firestore; writes made there will not return to PostgreSQL. Pass --accept-firestore-divergence to roll back anyway.',
     );
-  const preflight = context.evidence<{ inventory: Inventory }>('preflight').inventory;
+  const preflightInventory = preflight.inventory;
   const region = config.gcp.region;
   const actions: string[] = [];
+  const rollbackId = randomUUID();
+  const rollbackConfigSha256 = configSha256(config);
+  let actionSequence = 0;
+  store.writeRecord(`cutover-rollback-start-${rollbackId}.json`, {
+    format: 'assistant-cutover-rollback',
+    version: 1,
+    rollbackId,
+    configSha256: rollbackConfigSha256,
+    status: 'started',
+    startedAt: deps.clock.now().toISOString(),
+  });
   const run = async (label: string, args: string[]) => {
+    actionSequence += 1;
+    const actionId = `${rollbackId}-${String(actionSequence).padStart(3, '0')}`;
+    store.writeRecord(`cutover-rollback-action-${actionId}.json`, {
+      format: 'assistant-cutover-rollback-action',
+      version: 1,
+      rollbackId,
+      configSha256: rollbackConfigSha256,
+      action: label,
+      status: 'intent',
+      startedAt: deps.clock.now().toISOString(),
+    });
     await deps.gcloud.run(args);
     actions.push(label);
+    store.writeRecord(`cutover-rollback-done-${actionId}.json`, {
+      format: 'assistant-cutover-rollback-action',
+      version: 1,
+      rollbackId,
+      configSha256: rollbackConfigSha256,
+      action: label,
+      status: 'completed',
+      completedAt: deps.clock.now().toISOString(),
+    });
   };
   // 1. Stop the Firestore dispatch path first so only one dispatcher ever runs.
   if (attempted('dispatcher')) {
@@ -1988,16 +2220,69 @@ export async function rollbackCutover(
   // 2. Restore the PostgreSQL provider write capability.
   let unfence: Awaited<ReturnType<typeof removeNeonFence>> | null = null;
   if (attempted('fence')) {
+    actionSequence += 1;
+    const actionId = `${rollbackId}-${String(actionSequence).padStart(3, '0')}`;
+    store.writeRecord(`cutover-rollback-action-${actionId}.json`, {
+      format: 'assistant-cutover-rollback-action',
+      version: 1,
+      rollbackId,
+      configSha256: rollbackConfigSha256,
+      action: 're-enable Neon read-write endpoint',
+      status: 'intent',
+      startedAt: deps.clock.now().toISOString(),
+    });
     unfence = await removeNeonFence(deps.neon, deps.probe, neonTarget(config), {
       confirm: true,
       sourceUrl: await context.sourceUrl(),
       clock: deps.clock,
     });
     actions.push('re-enable Neon read-write endpoint');
+    store.writeRecord(`cutover-rollback-done-${actionId}.json`, {
+      format: 'assistant-cutover-rollback-action',
+      version: 1,
+      rollbackId,
+      configSha256: rollbackConfigSha256,
+      action: 're-enable Neon read-write endpoint',
+      status: 'completed',
+      completedAt: deps.clock.now().toISOString(),
+    });
   }
-  // 3. Route traffic back to the exact pre-cutover revisions.
+  // 3. Restore the source-write gate if quiesce was interrupted after changing it.
+  if (attempted('quiesce')) {
+    for (const name of config.appWriteGateServices) {
+      const original = preflightInventory.services.find((item) => item.name === name)?.config
+        .POSTGRES_SOURCE_WRITES_FENCED;
+      if (original !== undefined && original !== 'true' && original !== 'false')
+        throw new Error(`Cannot safely restore the prior source-write gate for ${name}`);
+      await run(
+        `restore source-write gate ${name}`,
+        original === undefined
+          ? [
+              'run',
+              'services',
+              'update',
+              name,
+              '--region',
+              region,
+              '--remove-env-vars=POSTGRES_SOURCE_WRITES_FENCED',
+              '--quiet',
+            ]
+          : [
+              'run',
+              'services',
+              'update',
+              name,
+              '--region',
+              region,
+              `--update-env-vars=^@^POSTGRES_SOURCE_WRITES_FENCED=${original}`,
+              '--quiet',
+            ],
+      );
+    }
+  }
+  // 4. Route traffic back to the exact pre-cutover revisions.
   const touched = new Set([...config.services.map((s) => s.name), ...config.appWriteGateServices]);
-  for (const service of preflight.services.filter((item) => touched.has(item.name))) {
+  for (const service of preflightInventory.services.filter((item) => touched.has(item.name))) {
     const revisions = service.traffic
       .filter((entry) => entry.percent > 0 && entry.revision)
       .map((entry) => `${entry.revision}=${entry.percent}`);
@@ -2012,12 +2297,9 @@ export async function rollbackCutover(
       `--to-revisions=${revisions.join(',')}`,
     ]);
   }
-  // 4. Resume the exact legacy dispatch resources recorded before quiesce.
-  const pushEndpoints = JSON.parse(
-    (await deps.readFile(store.privatePath('push-endpoints.json'))).toString('utf8'),
-  ) as Record<string, PushTarget | string>;
+  // 5. Resume the exact legacy dispatch resources recorded before quiesce.
   if (attempted('quiesce')) {
-    for (const job of preflight.schedulerJobs.filter((item) => item.state === 'ENABLED'))
+    for (const job of preflightInventory.schedulerJobs.filter((item) => item.state === 'ENABLED'))
       await run(`resume scheduler ${job.name}`, [
         'scheduler',
         'jobs',
@@ -2026,7 +2308,7 @@ export async function rollbackCutover(
         '--location',
         region,
       ]);
-    for (const queue of preflight.queues.filter((item) => item.state === 'RUNNING'))
+    for (const queue of preflightInventory.queues.filter((item) => item.state === 'RUNNING'))
       await run(`resume queue ${queue.name}`, [
         'tasks',
         'queues',
@@ -2043,7 +2325,7 @@ export async function rollbackCutover(
       );
   }
   const { inventory } = await captureInventory(config, deps);
-  const restoredTraffic = preflight.services
+  const restoredTraffic = preflightInventory.services
     .filter((item) => touched.has(item.name))
     .every((before) => {
       const after = inventory.services.find((item) => item.name === before.name);
@@ -2056,22 +2338,45 @@ export async function rollbackCutover(
         );
       return serving(before) === serving(after);
     });
+  const restoredSourceWriteGates = config.appWriteGateServices.every((name) => {
+    const before = preflightInventory.services.find((item) => item.name === name)?.config
+      .POSTGRES_SOURCE_WRITES_FENCED;
+    const after = inventory.services.find((item) => item.name === name)?.config
+      .POSTGRES_SOURCE_WRITES_FENCED;
+    return before === after;
+  });
   const legacyDispatch =
-    canonicalJson(dispatchIdle(preflight)) === canonicalJson(dispatchIdle(inventory));
+    canonicalJson(dispatchIdle(preflightInventory)) === canonicalJson(dispatchIdle(inventory));
   const result = {
     kind: 'cutover-rollback',
+    configSha256: rollbackConfigSha256,
+    rollbackId,
     completedAt: deps.clock.now().toISOString(),
     stepsReached: STEPS.filter((step) => passed(step.name)).map((step) => step.name),
     actions,
     unfence,
     restoredTraffic,
+    restoredSourceWriteGates,
     legacyDispatchRestored: legacyDispatch,
     // The Firestore target keeps its imported (and possibly activated) data. A new
     // cutover must import into a new empty database or installation.
     firestoreTargetRetained: config.firestoreDatabaseId,
-    passed: restoredTraffic && legacyDispatch && (unfence ? unfence.passed : true),
+    passed:
+      restoredTraffic &&
+      restoredSourceWriteGates &&
+      legacyDispatch &&
+      (unfence ? unfence.passed : true),
   };
   store.writeRecord(`rollback-${result.completedAt.replace(/[:.]/g, '')}.json`, result);
+  store.writeRecord(`cutover-rollback-result-${rollbackId}.json`, {
+    format: 'assistant-cutover-rollback',
+    version: 1,
+    rollbackId,
+    configSha256: rollbackConfigSha256,
+    status: result.passed ? 'completed' : 'verification-failed',
+    completedAt: result.completedAt,
+    passed: result.passed,
+  });
   return result;
 }
 

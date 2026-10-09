@@ -6,6 +6,7 @@ import {
   toolCache,
 } from '@assistant/db';
 import type {
+  CostAttemptMetadata,
   CostEventInput,
   CostRepository,
   CostTotals,
@@ -51,6 +52,21 @@ export function recordCostEvent(store: CostStore, input: CostEventInput): Promis
 }
 export function reserveCost(store: CostStore, input: ReserveCostInput): Promise<ReserveOutcome> {
   return costs(store).reserve(input);
+}
+export function beginCostAttempt(
+  store: CostStore,
+  id: string,
+  metadata: CostAttemptMetadata,
+): Promise<boolean> {
+  return costs(store).beginAttempt(id, metadata);
+}
+export function markCostAttemptUnknown(
+  store: CostStore,
+  id: string,
+  reason: string,
+  providerReceipt?: { requestId?: string; endpoint?: string },
+): Promise<void> {
+  return costs(store).markAttemptUnknown(id, reason, providerReceipt);
 }
 export function reconcileReservation(
   store: CostStore,

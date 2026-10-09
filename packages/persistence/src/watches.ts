@@ -5,6 +5,23 @@ export type WatchSuggestionContext = {
   watch: WatchRecord;
   fire: Records['watchFires'];
 };
+export type WatchFireEffectKind =
+  | 'dashboard_notice'
+  | 'owner_notification'
+  | 'suggestion_enqueue'
+  | 'suggestion_message';
+export type WatchFireEffectStatus =
+  | 'pending'
+  | 'sending'
+  | 'delivered'
+  | 'failed'
+  | 'unknown'
+  | 'skipped';
+export type WatchFireEffect = Records['watchFireEffects'];
+export type PreparedWatchSuggestion = {
+  suggestion: Records['suggestions'];
+  effect: WatchFireEffect;
+};
 
 export interface WatchCreateInput {
   agentId: string;
@@ -48,12 +65,33 @@ export interface WatchRepository {
     now: Date;
     state?: unknown;
     expectedNextPollAt?: Date;
-  }): Promise<{ recorded: boolean; watch: WatchRecord | null }>;
+  }): Promise<{ recorded: boolean; watch: WatchRecord | null; fireId?: string }>;
+  pendingFireEffects(agentId: string, limit?: number): Promise<WatchFireEffect[]>;
+  fireEffectsForFire(agentId: string, fireId: string): Promise<WatchFireEffect[]>;
+  claimFireEffect(input: {
+    agentId: string;
+    effectId: string;
+    now: Date;
+    leaseMs: number;
+  }): Promise<boolean>;
+  finishFireEffect(input: {
+    agentId: string;
+    effectId: string;
+    status: Exclude<WatchFireEffectStatus, 'pending' | 'sending'>;
+    result?: unknown;
+    now: Date;
+  }): Promise<boolean>;
+  recoverExpiredFireEffectClaims(agentId: string, now: Date): Promise<number>;
   getSuggestionContext(input: {
     agentId: string;
     watchId: string;
     triggerRef: string;
   }): Promise<WatchSuggestionContext | null>;
+  getPreparedSuggestion(input: {
+    agentId: string;
+    watchId: string;
+    triggerRef: string;
+  }): Promise<PreparedWatchSuggestion | null>;
   commitSuggestion(input: {
     agentId: string;
     watchId: string;

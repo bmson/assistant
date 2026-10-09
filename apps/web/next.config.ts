@@ -11,6 +11,9 @@ const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
 const nextConfig: NextConfig = {
   output: 'standalone',
   outputFileTracingRoot: workspaceRoot,
+  // Keep Firestore SDK classes (including FieldPath) from being duplicated
+  // between Next's server bundle and Node-loaded workspace packages.
+  serverExternalPackages: ['@google-cloud/firestore'],
   transpilePackages: [
     '@assistant/application',
     '@assistant/config',
@@ -30,10 +33,8 @@ const nextConfig: NextConfig = {
     return [{ source: '/', destination: '/settings', permanent: false }];
   },
   async headers() {
-    // The one non-self origin is jelly-ui.com, the nav-widget script loaded in
-    // app/layout.tsx. Everything else the page executes or fetches is served
-    // from this deployment, and this policy is what enforces that: a script
-    // tag injected from anywhere else simply will not run.
+    // Executable scripts and connections are confined to this deployment.
+    // The retired navigation widget no longer needs a third-party exception.
     //
     // 'unsafe-inline' for scripts is required by Next's app-router bootstrap
     // (inline flight-data pushes) plus the two no-flash <script> blocks in the
@@ -44,14 +45,12 @@ const nextConfig: NextConfig = {
       // Next's dev server serves webpack's eval-based module wrappers and React
       // Refresh; without 'unsafe-eval' in development no client JS runs at all,
       // so the page never hydrates. Production keeps the tighter policy.
-      `script-src 'self' 'unsafe-inline'${process.env.NODE_ENV === 'development' ? " 'unsafe-eval'" : ''} https://jelly-ui.com`,
-      "style-src 'self' 'unsafe-inline' https://jelly-ui.com",
+      `script-src 'self' 'unsafe-inline'${process.env.NODE_ENV === 'development' ? " 'unsafe-eval'" : ''}`,
+      "style-src 'self' 'unsafe-inline'",
       // Auth.js renders the Google provider's official icon from its CDN.
       "img-src 'self' data: blob: https://authjs.dev",
       "font-src 'self' data:",
-      // script-src covers jelly-ui's module imports; connect-src covers any
-      // fetch() the widget makes back to its own origin for assets.
-      "connect-src 'self' https://jelly-ui.com",
+      "connect-src 'self'",
       "object-src 'none'",
       "base-uri 'self'",
       // Auth.js posts to this app and then redirects that form navigation to

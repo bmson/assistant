@@ -71,4 +71,12 @@ describe('SuggestionCard', () => {
     expect(html).toContain('Snoozed');
     expect(html).not.toContain('Invalid Date');
   });
+
+  it('renders an unknown future terminal status as a closed receipt for an older client', () => {
+    const html = renderToStaticMarkup(
+      <SuggestionCard parts={[{ ...part, status: 'superseded' as never }]} />,
+    );
+    expect(html).toContain('Progress report — No longer available');
+    expect(html).not.toContain('data-decision-card="true"');
+  });
 });

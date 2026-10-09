@@ -28,6 +28,7 @@ export async function firestoreApprovalSmoke(store: InstallationStore) {
   const now = new Date();
   const agentId = randomUUID();
   const conversationId = randomUUID();
+  await store.doc('agents', agentId).set({ id: agentId, name: 'Approval smoke', timezone: 'UTC' });
   await store.doc('conversations', conversationId).set({
     id: conversationId,
     agentId,

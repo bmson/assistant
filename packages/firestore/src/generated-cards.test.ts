@@ -71,6 +71,17 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore generated-card 
       });
       expect(revised.card.id).toBe(left.card.id);
       expect(revised.revision.version).toBe(2);
+      await expect(
+        repository.createOrRevise({
+          ...first,
+          id: randomUUID(),
+          revisionId: randomUUID(),
+          spec: cardSpec('stale refresh result'),
+          targetCardId: revised.card.id,
+          targetRevisionId: left.revision.id,
+          touch: true,
+        }),
+      ).rejects.toThrow('refresh revision is stale');
       expect((await repository.list('agent-a')).map((row) => row.revision.id)).toEqual([
         revised.revision.id,
       ]);
@@ -132,6 +143,47 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore generated-card 
           Array.from({ length: 101 }, () => randomUUID()),
         ),
       ).rejects.toThrow('more than 100');
+    } finally {
+      await disposeStore(store);
+    }
+  });
+
+  it('bounds live cards without counting expired undismissed history', async () => {
+    const store = emulatorStore();
+    try {
+      const repository = new FirestoreGeneratedCardRepository(store);
+      const now = new Date();
+      const batch = store.db.batch();
+      for (let index = 0; index < 401; index++) {
+        const id = `expired-${index}`;
+        batch.set(
+          store.doc('generatedCards', id),
+          encodeRecord({
+            ...cardRecord(id, 'agent-a', `rev-${index}`),
+            expiresAt: new Date(now.getTime() - 1000),
+          }),
+        );
+      }
+      await batch.commit();
+      expect(await repository.list('agent-a', now)).toEqual([]);
+      const input = (id: string, expiresAt: Date | null) => ({
+        agentId: 'agent-a',
+        id,
+        revisionId: `revision-${id}`,
+        sourceFingerprint: `fingerprint-${id}`,
+        sourceLabel: 'test',
+        spec: cardSpec(id),
+        expiresAt,
+      });
+      await repository.createOrRevise(input('no-expiry', null));
+      await repository.createOrRevise(input('future', new Date(now.getTime() + 60_000)));
+      await repository.createOrRevise(input('at-boundary', now));
+      expect((await repository.list('agent-a', now)).map((row) => row.card.id).sort()).toEqual([
+        'at-boundary',
+        'future',
+        'no-expiry',
+      ]);
+      expect((await store.collection('generatedCards').get()).size).toBe(404);
     } finally {
       await disposeStore(store);
     }

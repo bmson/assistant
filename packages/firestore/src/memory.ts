@@ -1,13 +1,18 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { type EmbeddingSpace, type Records, validateEmbedding } from '@assistant/persistence';
+import { randomUUID } from 'node:crypto';
+import {
+  type EmbeddingSpace,
+  embeddingSpaceIdentityKey,
+  type Records,
+  snapshotEmbeddingSpace,
+  validateEmbedding,
+} from '@assistant/persistence';
 import { FieldValue } from '@google-cloud/firestore';
-import { privacyErasureIsActive } from './privacy-erasure.js';
-import { decodeRecord, encodeRecord, type InstallationStore } from './store.js';
+import { decodeMemoryRecord } from './memory-record.js';
+import { privacyErasureGeneration, privacyErasureIsActive } from './privacy-erasure.js';
+import { encodeRecord, type InstallationStore } from './store.js';
 
 export function embeddingSpaceKey(space: EmbeddingSpace): string {
-  return createHash('sha256')
-    .update(JSON.stringify([space.provider, space.model, space.dimensions, space.revision]))
-    .digest('hex');
+  return embeddingSpaceIdentityKey(space);
 }
 
 /**
@@ -18,8 +23,11 @@ export function memoryDocument(
   space: EmbeddingSpace,
   memory: Records['memories'],
 ): FirebaseFirestore.DocumentData {
+  space = snapshotEmbeddingSpace(space);
   if (!memory.embedding) throw new Error('Memory requires an embedding');
   validateEmbedding(space, memory.embedding);
+  if (memory.embeddingSpaceKey && memory.embeddingSpaceKey !== embeddingSpaceKey(space))
+    throw new Error('Memory embedding space changed');
   if (!memory.contentHash) throw new Error('Memory requires a content hash');
   return encodeRecord({
     ...memory,
@@ -31,12 +39,19 @@ export function memoryDocument(
 
 /** Initial vector feasibility adapter; graph/lexical ranking is still owned by the SQL runtime. */
 export class FirestoreMemoryRepository {
+  readonly space: EmbeddingSpace;
+
   constructor(
     readonly store: InstallationStore,
-    readonly space: EmbeddingSpace,
-  ) {}
+    space: EmbeddingSpace,
+  ) {
+    this.space = snapshotEmbeddingSpace(space);
+  }
 
-  async save(memory: Records['memories']): Promise<boolean> {
+  async save(
+    memory: Records['memories'],
+    observedPrivacyGeneration?: string | null,
+  ): Promise<boolean> {
     const document = memoryDocument(this.space, memory);
     const ref = this.store.doc('memories', memory.id);
     const hashRef = this.store.doc('memoryContentHashes', memory.contentHash);
@@ -50,6 +65,12 @@ export class FirestoreMemoryRepository {
       );
       if (erasure?.exists && privacyErasureIsActive(erasure.get('status')))
         throw new Error('Privacy erasure is in progress');
+      if (
+        observedPrivacyGeneration !== undefined &&
+        (!erasure ||
+          privacyErasureGeneration(erasure, memory.agentId) !== observedPrivacyGeneration)
+      )
+        throw new Error('Privacy erasure changed during memory source observation');
       if (tombstone?.exists) return false;
       if (existing?.exists || hash?.exists) return false;
       tx.create(ref, document);
@@ -132,7 +153,7 @@ export class FirestoreMemoryRepository {
             snapshot.get('retrievalRevision') !== candidate.get('retrievalRevision')
           )
             continue;
-          const row = decodeRecord<Records['memories']>(snapshot.data());
+          const row = decodeMemoryRecord(snapshot.data());
           if (
             row.agentId !== input.agentId ||
             row.quarantined ||
@@ -142,7 +163,7 @@ export class FirestoreMemoryRepository {
           )
             continue;
           const { embedding: _embedding, ...fields } = row;
-          // decodeRecord keeps additive database fields; explicitly omit vector/index metadata.
+          // Preserve additive database fields while omitting vector/index metadata.
           const {
             embeddingSpace: _space,
             retrievalRevision: _revision,

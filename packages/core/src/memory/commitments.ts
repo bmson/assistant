@@ -1,14 +1,21 @@
 import { createHash } from 'node:crypto';
-import { commitments, conversations, type Db, messages } from '@assistant/db';
 import {
-  COMMITMENT_STALE_AFTER_DAYS,
-  COMMITMENT_STALE_AFTER_DUE_DAYS,
+  commitments,
+  conversations,
+  createPostgresOwnerContextRepository,
+  type Db,
+  listEligibleOwnerCommitments,
+  lockPostgresPrivacyObservationFence,
+  messages,
+} from '@assistant/db';
+import {
   type CommitmentMaintenanceRepository,
+  type CommitmentMaintenanceResult,
   isOwnerContextRepository,
   type OwnerCommitment,
   type OwnerContextRepository,
 } from '@assistant/persistence';
-import { and, desc, eq, gte, inArray, lt, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { ModelRouter } from '../model-router/router.js';
 
@@ -22,6 +29,9 @@ const ExtractedCommitmentSchema = z.object({
   nextAction: z.string().max(240).default(''),
   dueAt: z.string().max(40).default(''),
   confidence: z.number().min(0.8).max(1).default(0.9),
+  // These IDs come from the owner-labeled transcript below. Titles and details
+  // are model-authored and can change on replay; owner message identity cannot.
+  sourceMessageIds: z.array(z.string().uuid()).min(1).max(12),
 });
 const CommitmentExtractionSchema = z.object({
   commitments: z.array(ExtractedCommitmentSchema).max(12),
@@ -47,13 +57,6 @@ export interface CommitmentExtractionResult {
 const MAX_CONVERSATIONS = 20;
 const MAX_MESSAGES = 80;
 const MIN_CONFIDENCE = 0.85;
-
-const DAY_MS = 24 * 3600 * 1000;
-
-// The staleness windows are shared with portable adapters through
-// @assistant/persistence, so both stores retire exactly the same loops.
-const STALE_AFTER_DAYS = COMMITMENT_STALE_AFTER_DAYS;
-const STALE_AFTER_DUE_DAYS = COMMITMENT_STALE_AFTER_DUE_DAYS;
 
 function hashCommitment(kind: string, title: string, details: string): string {
   return createHash('sha256')
@@ -84,13 +87,37 @@ const EXTRACTION_SYSTEM = [
   'If the owner clearly says an existing loop is done, cancelled, dismissed, or no longer needed, put its concise title in resolvedTitles. Otherwise leave resolvedTitles empty.',
   'Do not invent dates. dueAt must be an ISO timestamp only when the transcript states a concrete date/time.',
   'Use concise titles that make sense without the transcript. If there are no clear items, return an empty array.',
+  'For every commitment, include sourceMessageIds: the exact UUIDs of the owner messages that establish it, copied from the transcript labels. Never cite assistant messages. If no owner message establishes it, omit the commitment.',
 ].join('\n');
 
-function formatTranscript(rows: Array<{ role: string; text: string }>): string {
+function formatTranscript(rows: Array<{ id: string; role: string; text: string }>): string {
   return rows
-    .map((row) => `${row.role === 'user' ? 'owner' : 'assistant'}: ${row.text}`)
+    .map(
+      (row) => `[message_id=${row.id}] ${row.role === 'user' ? 'owner' : 'assistant'}: ${row.text}`,
+    )
     .join('\n')
     .slice(-8000);
+}
+
+function sourceOccurrenceKey(
+  agentId: string,
+  conversationId: string,
+  kind: CommitmentKind,
+  messageIds: string[],
+): string {
+  return `v1:${agentId}:${conversationId}:${kind}:${[...messageIds].sort().join(',')}`;
+}
+
+function citedOwnerMessages(
+  item: z.infer<typeof ExtractedCommitmentSchema>,
+  ordered: Array<{ id: string; role: string }>,
+): string[] | null {
+  const ownerIds = new Set(ordered.filter((row) => row.role === 'user').map((row) => row.id));
+  const ids = [...new Set(item.sourceMessageIds)];
+  if (ids.length !== item.sourceMessageIds.length || ids.some((id) => !ownerIds.has(id)))
+    return null;
+  const position = new Map(ordered.map((row, index) => [row.id, index]));
+  return ids.sort((a, b) => (position.get(a) ?? 0) - (position.get(b) ?? 0));
 }
 
 /** Extracts commitments asynchronously; it never creates or executes a task. */
@@ -121,6 +148,7 @@ export async function extractCommitments(
         eq(conversations.agentId, opts.agentId),
         gte(messages.createdAt, since),
         or(eq(messages.role, 'user'), eq(messages.role, 'assistant')),
+        sql`(${messages.channelMessageId} is null or (${messages.channelMessageId} not like 'visual-qa:%' and ${messages.channelMessageId} not like 'readability-%'))`,
       ),
     )
     .groupBy(messages.conversationId)
@@ -151,6 +179,7 @@ export async function extractCommitments(
           eq(messages.conversationId, conversationId),
           gte(messages.createdAt, since),
           or(eq(messages.role, 'user'), eq(messages.role, 'assistant')),
+          sql`(${messages.channelMessageId} is null or (${messages.channelMessageId} not like 'visual-qa:%' and ${messages.channelMessageId} not like 'readability-%'))`,
         ),
       )
       .orderBy(desc(messages.createdAt))
@@ -170,22 +199,18 @@ export async function extractCommitments(
     );
     if (!outcome.ok) continue;
     const activeRows = outcome.object.resolvedTitles.length
-      ? await deps.db
-          .select({ id: commitments.id, title: commitments.title })
-          .from(commitments)
-          .where(
-            and(
-              eq(commitments.agentId, opts.agentId),
-              inArray(commitments.status, ['open', 'snoozed']),
-            ),
-          )
-          .orderBy(desc(commitments.updatedAt))
-          .limit(60)
+      ? await listEligibleOwnerCommitments(deps.db, {
+          agentId: opts.agentId,
+          limit: 60,
+          visibility: 'resolvable',
+        })
       : [];
     for (const resolvedTitle of outcome.object.resolvedTitles) {
       const needle = normalizedTitle(resolvedTitle);
       if (needle.length < 3) continue;
-      const matches = activeRows.filter((row) => normalizedTitle(row.title) === needle);
+      const matches = activeRows.filter(
+        (row) => !row.reopenedFromId && normalizedTitle(row.title) === needle,
+      );
       const [match] = matches;
       if (matches.length === 1 && match) {
         await resolveCommitment(
@@ -196,19 +221,27 @@ export async function extractCommitments(
         );
       }
     }
-    const sourceMessageId = ordered.at(-1)?.id;
     for (const item of outcome.object.commitments) {
       if (item.confidence < MIN_CONFIDENCE) continue;
+      const sourceMessageIds = citedOwnerMessages(item, ordered);
+      if (!sourceMessageIds?.length) continue;
       const title = item.title.trim();
       const details = item.details.trim();
       const hash = hashCommitment(item.kind, title, details);
+      const occurrenceKey = sourceOccurrenceKey(
+        opts.agentId,
+        conversationId,
+        item.kind,
+        sourceMessageIds,
+      );
       const inserted = await deps.db
         .insert(commitments)
         .values({
           agentId: opts.agentId,
           conversationId,
-          sourceMessageId,
+          sourceMessageId: sourceMessageIds.at(-1),
           sourceTaskId: opts.taskId,
+          sourceOccurrenceKey: occurrenceKey,
           kind: item.kind,
           title,
           details,
@@ -217,10 +250,7 @@ export async function extractCommitments(
           confidence: item.confidence.toFixed(2),
           contentHash: hash,
         })
-        .onConflictDoNothing({
-          target: [commitments.agentId, commitments.contentHash],
-          where: sql`${commitments.status} IN ('open','snoozed')`,
-        })
+        .onConflictDoNothing()
         .returning({ id: commitments.id });
       if (inserted.length) saved += 1;
       else {
@@ -235,7 +265,7 @@ export async function extractCommitments(
           .update(commitments)
           .set({
             conversationId,
-            sourceMessageId,
+            sourceMessageId: sourceMessageIds.at(-1),
             sourceTaskId: opts.taskId,
             nextAction: item.nextAction.trim(),
             dueAt: parseDueAt(item.dueAt),
@@ -244,8 +274,9 @@ export async function extractCommitments(
           .where(
             and(
               eq(commitments.agentId, opts.agentId),
-              eq(commitments.contentHash, hash),
-              inArray(commitments.status, ['open', 'snoozed']),
+              eq(commitments.sourceOccurrenceKey, occurrenceKey),
+              inArray(commitments.status, ['open', 'snoozed', 'stale']),
+              isNull(commitments.resolvedAt),
             ),
           );
       }
@@ -307,17 +338,21 @@ async function extractPortableCommitments(
     for (const resolvedTitle of outcome.object.resolvedTitles) {
       const needle = normalizedTitle(resolvedTitle);
       if (needle.length < 3) continue;
-      const matches = activeRows.filter((row) => normalizedTitle(row.title) === needle);
+      const matches = activeRows.filter(
+        (row) => !row.reopenedFromId && normalizedTitle(row.title) === needle,
+      );
       const [match] = matches;
       if (matches.length === 1 && match && !resolveIds.includes(match.id))
         resolveIds.push(match.id);
     }
-    const items = outcome.object.commitments
-      .filter((item) => item.confidence >= MIN_CONFIDENCE)
-      .map((item) => {
-        const title = item.title.trim();
-        const details = item.details.trim();
-        return {
+    const items = outcome.object.commitments.flatMap((item) => {
+      if (item.confidence < MIN_CONFIDENCE) return [];
+      const sourceMessageIds = citedOwnerMessages(item, conversation.messages);
+      if (!sourceMessageIds?.length) return [];
+      const title = item.title.trim();
+      const details = item.details.trim();
+      return [
+        {
           kind: item.kind,
           title,
           details,
@@ -325,14 +360,22 @@ async function extractPortableCommitments(
           dueAt: parseDueAt(item.dueAt),
           confidence: item.confidence.toFixed(2),
           contentHash: hashCommitment(item.kind, title, details),
-        };
-      });
+          sourceMessageIds,
+          sourceMessageId: sourceMessageIds.at(-1) as string,
+          sourceOccurrenceKey: sourceOccurrenceKey(
+            opts.agentId,
+            conversation.conversationId,
+            item.kind,
+            sourceMessageIds,
+          ),
+        },
+      ];
+    });
     const applied = await repository.applyCommitments({
       agentId: opts.agentId,
       lease: opts.lease(),
       checkpointKey,
       conversationId: conversation.conversationId,
-      sourceMessageId: conversation.messages.at(-1)?.id ?? null,
       resolveIds,
       resolution: 'Owner confirmed this loop is resolved.',
       commitments: items,
@@ -352,20 +395,11 @@ export async function listOpenCommitments(
   const candidateLimit = Math.min(args.limit ?? 40, 60);
   const rows = isOwnerContextRepository(store)
     ? await store.listOpenCommitments({ agentId: args.agentId, now, limit: candidateLimit })
-    : await store
-        .select()
-        .from(commitments)
-        .where(
-          and(
-            eq(commitments.agentId, args.agentId),
-            or(
-              eq(commitments.status, 'open'),
-              and(eq(commitments.status, 'snoozed'), lt(commitments.snoozedUntil, now)),
-            ),
-          ),
-        )
-        .orderBy(desc(commitments.updatedAt))
-        .limit(candidateLimit);
+    : await createPostgresOwnerContextRepository(store).listOpenCommitments({
+        agentId: args.agentId,
+        now,
+        limit: candidateLimit,
+      });
   const terms = (args.query ?? '')
     .toLowerCase()
     .split(/\s+/)
@@ -382,6 +416,143 @@ export async function listOpenCommitments(
     .filter((entry) => entry.score > 0)
     .sort((a, b) => b.score - a.score || b.row.updatedAt.getTime() - a.row.updatedAt.getTime());
   return scored.slice(0, args.limit ?? 8).map((entry) => entry.row);
+}
+
+/** Recently closed loops stay available for an explicit, reviewable reopen. */
+export async function listRecentlyClosedCommitments(
+  db: Db,
+  args: { agentId: string; limit?: number },
+) {
+  const limit = Math.min(Math.max(args.limit ?? 12, 1), 30);
+  const candidates = await listEligibleOwnerCommitments(db, {
+    agentId: args.agentId,
+    limit: limit * 4,
+    visibility: 'closed',
+  });
+  const candidateIds = candidates.map((row) => row.id);
+  const children = candidateIds.length
+    ? await db
+        .select({ reopenedFromId: commitments.reopenedFromId })
+        .from(commitments)
+        .where(
+          and(
+            eq(commitments.agentId, args.agentId),
+            inArray(commitments.reopenedFromId, candidateIds),
+          ),
+        )
+    : [];
+  const reopened = new Set(children.map((row) => row.reopenedFromId));
+  return candidates.filter((row) => !reopened.has(row.id)).slice(0, limit);
+}
+
+/**
+ * Reopening is a new owner-authored occurrence. The closed source row and its
+ * model replay key are immutable, so old extraction output cannot undo closure.
+ */
+export async function reopenCommitment(
+  db: Db,
+  agentId: string,
+  id: string,
+  expectedUpdatedAt: Date,
+  operationId: string,
+): Promise<{ commitmentId: string; replay: boolean } | null> {
+  if (
+    !agentId ||
+    !id ||
+    !Number.isFinite(expectedUpdatedAt.getTime()) ||
+    !z.string().uuid().safeParse(operationId).success
+  )
+    return null;
+  try {
+    return await db.transaction(async (tx) => {
+      await lockPostgresPrivacyObservationFence(tx as unknown as Db, agentId);
+      const [replay] = await tx
+        .select({ id: commitments.id, reopenedFromId: commitments.reopenedFromId })
+        .from(commitments)
+        .where(
+          and(eq(commitments.agentId, agentId), eq(commitments.reopenOperationId, operationId)),
+        )
+        .limit(1);
+      if (replay) {
+        return replay.reopenedFromId === id ? { commitmentId: replay.id, replay: true } : null;
+      }
+
+      const [closed] = await tx
+        .select()
+        .from(commitments)
+        .where(
+          and(
+            eq(commitments.agentId, agentId),
+            eq(commitments.id, id),
+            eq(commitments.updatedAt, expectedUpdatedAt),
+            inArray(commitments.status, ['resolved', 'dismissed']),
+          ),
+        )
+        .for('update')
+        .limit(1);
+      if (!closed || !closed.resolvedAt) return null;
+
+      const [existingChild] = await tx
+        .select({ id: commitments.id })
+        .from(commitments)
+        .where(and(eq(commitments.agentId, agentId), eq(commitments.reopenedFromId, closed.id)))
+        .limit(1);
+      if (existingChild) return null;
+
+      const [newerOpen] = await tx
+        .select({ id: commitments.id })
+        .from(commitments)
+        .where(
+          and(
+            eq(commitments.agentId, agentId),
+            eq(commitments.contentHash, closed.contentHash),
+            inArray(commitments.status, ['open', 'snoozed', 'stale']),
+            isNull(commitments.resolvedAt),
+          ),
+        )
+        .limit(1);
+      if (newerOpen) return null;
+
+      const [created] = await tx
+        .insert(commitments)
+        .values({
+          agentId,
+          conversationId: closed.conversationId,
+          sourceMessageId: closed.sourceMessageId,
+          sourceTaskId: null,
+          sourceOccurrenceKey: `manual-reopen:v1:${agentId}:${operationId}`,
+          reopenedFromId: closed.id,
+          reopenOperationId: operationId,
+          kind: closed.kind,
+          title: closed.title,
+          details: closed.details,
+          nextAction: closed.nextAction,
+          dueAt: closed.dueAt,
+          confidence: closed.confidence,
+          contentHash: closed.contentHash,
+          status: 'open',
+          resolvedAt: null,
+          snoozedUntil: null,
+          resolution: null,
+        })
+        .onConflictDoNothing()
+        .returning({ id: commitments.id });
+      if (created) return { commitmentId: created.id, replay: false };
+      const [concurrent] = await tx
+        .select({ id: commitments.id, reopenedFromId: commitments.reopenedFromId })
+        .from(commitments)
+        .where(
+          and(eq(commitments.agentId, agentId), eq(commitments.reopenOperationId, operationId)),
+        )
+        .limit(1);
+      return concurrent?.reopenedFromId === id
+        ? { commitmentId: concurrent.id, replay: true }
+        : null;
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Privacy owner row is unavailable') return null;
+    throw error;
+  }
 }
 
 export function renderOpenCommitments(rows: OwnerCommitment[], maxChars = 1400): string {
@@ -416,7 +587,8 @@ export async function resolveCommitment(
       and(
         eq(commitments.id, id),
         eq(commitments.agentId, agentId),
-        inArray(commitments.status, ['open', 'snoozed']),
+        inArray(commitments.status, ['open', 'snoozed', 'stale']),
+        isNull(commitments.resolvedAt),
       ),
     )
     .returning({ id: commitments.id });
@@ -439,7 +611,8 @@ export async function snoozeCommitment(
       and(
         eq(commitments.id, id),
         eq(commitments.agentId, agentId),
-        inArray(commitments.status, ['open', 'snoozed']),
+        inArray(commitments.status, ['open', 'snoozed', 'stale']),
+        isNull(commitments.resolvedAt),
       ),
     )
     .returning({ id: commitments.id });
@@ -465,7 +638,8 @@ export async function dismissCommitment(
       and(
         eq(commitments.id, id),
         eq(commitments.agentId, agentId),
-        inArray(commitments.status, ['open', 'snoozed']),
+        inArray(commitments.status, ['open', 'snoozed', 'stale']),
+        isNull(commitments.resolvedAt),
       ),
     )
     .returning({ id: commitments.id });
@@ -485,7 +659,8 @@ export async function correctCommitment(
       and(
         eq(commitments.id, id),
         eq(commitments.agentId, agentId),
-        inArray(commitments.status, ['open', 'snoozed']),
+        inArray(commitments.status, ['open', 'snoozed', 'stale']),
+        isNull(commitments.resolvedAt),
       ),
     );
   if (!current) return false;
@@ -506,48 +681,48 @@ export async function correctCommitment(
       and(
         eq(commitments.id, id),
         eq(commitments.agentId, agentId),
-        inArray(commitments.status, ['open', 'snoozed']),
+        inArray(commitments.status, ['open', 'snoozed', 'stale']),
+        isNull(commitments.resolvedAt),
       ),
     )
     .returning({ id: commitments.id });
   return rows.length === 1;
 }
 
-/**
- * Retire loops nobody has touched. `stale` rather than `dismissed`: the row
- * stays for the record, but `listOpenCommitments` stops returning it, so it
- * leaves both the memory desk and the chat recall context.
- *
- * A snoozed loop is only eligible once its snooze has run out — snoozing is the
- * owner asking to be reminded later, not permission to forget.
- */
-export async function markStaleCommitments(
+/** Age alone never resolves or archives an owner obligation. */
+export async function maintainCommitments(
   store: Db | CommitmentMaintenanceRepository,
   agentId: string,
   now: Date = new Date(),
-): Promise<number> {
+): Promise<CommitmentMaintenanceResult> {
+  if (!agentId || !Number.isFinite(now.getTime()))
+    throw new Error('Invalid commitment maintenance');
   if ('kind' in store && store.kind === 'commitment-maintenance-repository')
-    return store.markStale(agentId, now);
+    return store.maintain(agentId, now);
   const db = store as Db;
-  const idle = Object.entries(STALE_AFTER_DAYS).map(([kind, days]) =>
-    and(
-      eq(commitments.kind, kind),
-      lt(commitments.updatedAt, new Date(now.getTime() - days * DAY_MS)),
-    ),
-  );
-  const rows = await db
+  // The predicates are rechecked by each update; a concurrent owner closure wins.
+  const woken = await db
     .update(commitments)
-    .set({ status: 'stale', updatedAt: now })
+    .set({ status: 'open', snoozedUntil: null, updatedAt: now })
     .where(
       and(
         eq(commitments.agentId, agentId),
-        or(
-          eq(commitments.status, 'open'),
-          and(eq(commitments.status, 'snoozed'), lt(commitments.snoozedUntil, now)),
-        ),
-        or(...idle, lt(commitments.dueAt, new Date(now.getTime() - STALE_AFTER_DUE_DAYS * DAY_MS))),
+        isNull(commitments.resolvedAt),
+        eq(commitments.status, 'snoozed'),
+        lte(commitments.snoozedUntil, now),
       ),
     )
     .returning({ id: commitments.id });
-  return rows.length;
+  const restored = await db
+    .update(commitments)
+    .set({ status: 'open', snoozedUntil: null, updatedAt: now })
+    .where(
+      and(
+        eq(commitments.agentId, agentId),
+        isNull(commitments.resolvedAt),
+        eq(commitments.status, 'stale'),
+      ),
+    )
+    .returning({ id: commitments.id });
+  return { woken: woken.length, restored: restored.length };
 }

@@ -1,5 +1,6 @@
-import type { Records, ShellStatusProjection, ShellStatusRepository } from '@assistant/persistence';
+import type { ShellStatusProjection, ShellStatusRepository } from '@assistant/persistence';
 import { FieldPath, type Query, type QueryDocumentSnapshot } from '@google-cloud/firestore';
+import { decodeMemoryRecord } from './memory-record.js';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
@@ -180,7 +181,7 @@ export class FirestoreShellStatusRepository implements ShellStatusRepository {
         ) as Query,
       'memories',
       (doc) => {
-        const memory = decodeRecord<Records['memories']>(doc.data());
+        const memory = decodeMemoryRecord(doc.data());
         if (!memory.id || documentKey(memory.id) !== doc.id || memory.agentId !== ownerAgentId)
           throw new Error('Malformed or foreign shell status memory');
         const unexpired = !memory.expiresAt || memory.expiresAt > now;

@@ -4,6 +4,7 @@ import type {
   Records,
 } from '@assistant/persistence';
 import { FieldPath, type Query, type QueryDocumentSnapshot } from '@google-cloud/firestore';
+import { decodeMemoryRecord } from './memory-record.js';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import { FirestoreProfileVoiceOverviewRepository } from './profile-overview.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
@@ -87,11 +88,17 @@ async function hydrateMemories(
   // document also carries its embedding (1,536 numbers), which this view never
   // reads and which made 250 facts several megabytes to fetch. Batches run side
   // by side instead of in turn.
-  const fieldMask = ['id', 'content', ...PROFILE_MEMORY_FIELDS];
+  const fieldMask = [
+    'id',
+    'content',
+    ...PROFILE_MEMORY_FIELDS,
+    'embeddingSpaceKey',
+    'embeddingSpace',
+  ];
   const read = await Promise.all(batches.map((batch) => store.db.getAll(...batch, { fieldMask })));
   for (const snapshot of read.flat()) {
     if (!snapshot.exists) throw new Error('Profile memory changed during read');
-    const row = decodeRecord<Records['memories']>(snapshot.data());
+    const row = decodeMemoryRecord(snapshot.data());
     if (!row.id || documentKey(row.id) !== snapshot.id || row.agentId !== agentId)
       throw new Error('Malformed or foreign Profile memory');
     hydrated.set(row.id, row);
@@ -123,15 +130,18 @@ function profileMemoryUnchanged(
   scanned: Records['memories'],
   hydrated: Records['memories'],
 ): boolean {
-  return PROFILE_MEMORY_FIELDS.every((field) => {
-    const before = scanned[field];
-    const after = hydrated[field];
-    if (before instanceof Date || after instanceof Date)
-      return (
-        before instanceof Date && after instanceof Date && before.getTime() === after.getTime()
-      );
-    return before === after;
-  });
+  return (
+    scanned.embeddingSpaceKey === hydrated.embeddingSpaceKey &&
+    PROFILE_MEMORY_FIELDS.every((field) => {
+      const before = scanned[field];
+      const after = hydrated[field];
+      if (before instanceof Date || after instanceof Date)
+        return (
+          before instanceof Date && after instanceof Date && before.getTime() === after.getTime()
+        );
+      return before === after;
+    })
+  );
 }
 
 async function configuredAgent(store: InstallationStore, pinnedAgentId?: string): Promise<string> {
@@ -236,12 +246,14 @@ export class FirestoreProfileOverviewRepository implements ProfileOverviewReposi
           'pinned',
           'originTrust',
           'sourceTaskId',
+          'embeddingSpaceKey',
+          'embeddingSpace',
           'validFrom',
           'validUntil',
         ) as Query,
       'memory',
       (doc) => {
-        const row = decodeRecord<Records['memories']>(doc.data());
+        const row = decodeMemoryRecord(doc.data());
         if (!row.id || documentKey(row.id) !== doc.id || row.agentId !== agentId)
           throw new Error('Malformed or foreign Memory hub record');
         const unexpired = !row.expiresAt || row.expiresAt > now;

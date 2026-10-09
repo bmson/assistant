@@ -4,12 +4,15 @@ import { listActivityWithRepository } from '@assistant/application/tasks';
 import { isModuleEnabled, loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import {
   FirestoreApprovalRepository,
-  FirestoreDocumentReadRepository,
   FirestoreGoalReadRepository,
   FirestoreTaskActivityRepository,
 } from '@assistant/firestore';
-import { coalesce } from '@/lib/coalesce';
-import { getApplication, getFirestoreInstallationStore } from '@/lib/server';
+import { mobilePageMetadata } from '@/lib/mobile-document-pages';
+import {
+  getApplication,
+  getFirestoreInstallationStore,
+  getMobileDocumentsPage,
+} from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
 export const dynamic = 'force-dynamic';
@@ -23,8 +26,8 @@ export async function GET(request: Request): Promise<Response> {
     if (problems.length) return mobileJson({ error: problems.join('; ') }, { status: 503 });
     const store = getFirestoreInstallationStore();
     try {
-      // Overlapping refreshes (foreground, a decision, a page opening) share one read.
-      const overview = await coalesce('mobile-overview', async () => {
+      // Each refresh starts its own read: an older in-flight snapshot cannot cross an owner mutation.
+      const overview = await (async () => {
         const [activity, goals, approvals, documents] = await Promise.all([
           listActivityWithRepository(
             new FirestoreTaskActivityRepository(store),
@@ -48,17 +51,25 @@ export async function GET(request: Request): Promise<Response> {
             20,
           ),
           isModuleEnabled(config, 'documents')
-            ? new FirestoreDocumentReadRepository(store, config.FIRESTORE_AGENT_ID)
-                .list(config.FIRESTORE_AGENT_ID)
-                .then((result) => result)
+            ? getMobileDocumentsPage({ limit: 50, cursor: null }).then((result) => ({
+                ...result,
+                pagination: mobilePageMetadata({
+                  limit: 50,
+                  hasMore: result.hasMore,
+                  nextCursor: result.nextCursor,
+                }),
+              }))
             : Promise.resolve({
                 documents: [],
                 stats: { total: 0, ready: 0, pending: 0, chunks: 0 },
                 primaryConversationId: null,
+                hasMore: false,
+                nextCursor: null,
+                pagination: mobilePageMetadata({ limit: 50, hasMore: false, nextCursor: null }),
               }),
         ]);
         return { generatedAt: new Date().toISOString(), activity, goals, approvals, documents };
-      });
+      })();
       return mobileJson(overview);
     } catch (error) {
       return mobileJson(
@@ -72,7 +83,26 @@ export async function GET(request: Request): Promise<Response> {
     application.listActivity({ archived: false, filter: 'all', limit: 50 }),
     application.listGoals(false),
     application.listApprovals(),
-    application.getDocuments(),
+    (async () => {
+      if (!isModuleEnabled(config, 'documents'))
+        return {
+          documents: [],
+          stats: { total: 0, ready: 0, pending: 0, chunks: 0 },
+          primaryConversationId: null,
+          hasMore: false,
+          nextCursor: null,
+          pagination: mobilePageMetadata({ limit: 50, hasMore: false, nextCursor: null }),
+        };
+      const result = await getMobileDocumentsPage({ limit: 50, cursor: null });
+      return {
+        ...result,
+        pagination: mobilePageMetadata({
+          limit: 50,
+          hasMore: result.hasMore,
+          nextCursor: result.nextCursor,
+        }),
+      };
+    })(),
   ]);
   return mobileJson({
     generatedAt: new Date().toISOString(),

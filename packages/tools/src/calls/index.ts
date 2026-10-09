@@ -12,7 +12,7 @@ import type { ToolRegistry } from '../registry.js';
 import { isAmbiguousTwilioDeliveryError } from '../twilio/client.js';
 import type { AssistantTool, ToolContext } from '../types.js';
 
-export { isAmbiguousTwilioDeliveryError } from '../twilio/client.js';
+export { AmbiguousTwilioDeliveryError, isAmbiguousTwilioDeliveryError } from '../twilio/client.js';
 export * from '../twilio/voice.js';
 
 export interface StartCallInput {

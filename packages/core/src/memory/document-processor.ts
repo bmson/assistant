@@ -1,11 +1,15 @@
 import { spawn } from 'node:child_process';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createPostgresDocumentProcessorRepository, type Db, type TaskRow } from '@assistant/db';
-import type { DocumentProcessorRepository, TaskRepository } from '@assistant/persistence';
+import {
+  type DocumentExtractionMetadata,
+  type DocumentProcessorRepository,
+  documentExtractionMetadata,
+  type TaskRepository,
+} from '@assistant/persistence';
 import { hashCallbackToken } from '../browse.js';
 import { withSpan } from '../otel.js';
 import { getQueueNotifier } from '../queue.js';
-import { enqueueTask } from '../workflow/machine.js';
 import type { CodeJobOutcome } from './jobs.js';
 
 /**
@@ -230,7 +234,7 @@ export async function runDocumentProcessing(
 
     // Retire documents that have burned through their launch budget before
     // selecting fresh work, so an exhausted row can never be claimed again.
-    await store.retireExhausted(PROCESSOR_MAX_ATTEMPTS, now);
+    await store.retireExhausted(PROCESSOR_MAX_ATTEMPTS, now, staleBefore);
     const rows = await store.claimable({
       ...(documentId ? { documentId } : {}),
       staleBefore,
@@ -248,6 +252,7 @@ export async function runDocumentProcessing(
           tokenHash: hashCallbackToken(callbackToken),
           now,
           staleBefore,
+          maxAttempts: PROCESSOR_MAX_ATTEMPTS,
         }))
       ) {
         skipped++;
@@ -277,7 +282,7 @@ export async function runDocumentProcessing(
           continue;
         }
         // A definite launch failure: release the claim so the next sweep retries.
-        await store.release(row.id, now);
+        await store.release(row.id, now, hashCallbackToken(callbackToken));
         console.error(`document processor launch failed for ${row.id}`, error);
       }
     }
@@ -304,12 +309,13 @@ export interface DocumentProcessorResult {
   /** 'text' on success, or 'unsupported' when the worker could not parse the format. */
   kind?: string;
   chars?: number;
+  structure?: unknown;
   error?: string;
 }
 
 export type DocumentProcessorCallbackOutcome =
   | { ok: true; documentId: string; enqueued: boolean }
-  | { ok: false; status: 400 | 403 | 404 | 409; error: string };
+  | { ok: false; status: 400 | 403 | 404 | 409 | 410 | 503; error: string; cleanupPath?: string };
 
 /**
  * The worker's one-shot callback. Verify the launch token against the document
@@ -329,32 +335,46 @@ export async function recordDocumentProcessorResult(
 
   const given = hashCallbackToken(input.token);
   const unsupported = input.result.kind === 'unsupported';
+  let extractionMetadata: DocumentExtractionMetadata | null;
+  try {
+    extractionMetadata = input.result.ok ? documentExtractionMetadata(input.result) : null;
+  } catch {
+    return { ok: false, status: 400, error: 'invalid extraction coverage' };
+  }
   const recorded = await processor.recordResult({
     documentId: input.documentId,
+    tokenHash: given,
+    resultDigest: createHash('sha256')
+      .update(
+        JSON.stringify({
+          ok: input.result.ok,
+          kind: input.result.kind ?? null,
+          chars: input.result.chars ?? null,
+          error: input.result.error ?? null,
+          extractionMetadata,
+        }),
+      )
+      .digest('hex'),
     tokenMatches: (stored) => tokensMatch(stored, given),
     ok: input.result.ok,
     unsupported,
     error: input.result.error ?? (unsupported ? 'format not supported' : 'processing failed'),
     // The path is derived here — a worker-reported path is never trusted.
     processedTextPath: extractedTextPath(input.documentId),
+    extractionMetadata,
     now: new Date(),
   });
   if (!recorded.ok) return recorded;
 
-  // Re-enter the existing resumable chunk+embed pipeline outside the txn.
-  if (recorded.extract) {
-    const { task } = await enqueueTask(portable?.tasks ?? (store as Db), {
-      event: {
-        source: 'internal',
-        agentId: recorded.agentId,
-        trust: 'assistant',
-        payload: { job: 'documents.extract', documentId: recorded.documentId },
-      },
-      type: 'adhoc',
-      budgetUsdLimit: '0.50',
-      deferNotification: true,
-    });
-    getQueueNotifier().notify(task.id, task.queueGeneration);
+  // The durable extraction task (and Firestore wake intent) already committed
+  // with callback consumption. Notification is only an acceleration; the due
+  // task backstop repairs a crash here without reprocessing source bytes.
+  if (recorded.wake && !recorded.replayed) {
+    try {
+      getQueueNotifier().notify(recorded.wake.id, recorded.wake.queueGeneration);
+    } catch (error) {
+      console.error('document extraction wake deferred to backstop', error);
+    }
   }
   return { ok: true, documentId: recorded.documentId, enqueued: recorded.extract };
 }

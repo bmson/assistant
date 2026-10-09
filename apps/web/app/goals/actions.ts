@@ -17,6 +17,7 @@ import { FirestoreGoalMutationRepository } from '@assistant/firestore';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { requireOwner } from '@/auth';
+import { parseGoalTargetDate } from '@/lib/goal-input';
 import {
   createFirestoreGoalWithWork,
   getDb,
@@ -50,22 +51,15 @@ function parseGoalForm(formData: FormData): { form: GoalInput } | { error: strin
     return { error: 'Priority must be between 1 and 5.' };
   }
 
-  const rawDate = field(formData, 'targetDate');
-  let targetDate: Date | null = null;
-  if (rawDate) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
-      return { error: 'Target date must be YYYY-MM-DD.' };
-    }
-    targetDate = new Date(`${rawDate}T00:00:00Z`);
-    if (Number.isNaN(targetDate.getTime())) return { error: 'Target date is not a valid date.' };
-  }
+  const parsedTargetDate = parseGoalTargetDate(field(formData, 'targetDate'));
+  if (!parsedTargetDate.ok) return { error: parsedTargetDate.error };
 
   return {
     form: {
       title,
       description: field(formData, 'description'),
       priority,
-      targetDate,
+      targetDate: parsedTargetDate.value,
       progress: field(formData, 'progress'),
       nextAction: field(formData, 'nextAction'),
       mirrorToPrimary: formData.get('mirrorToPrimary') != null,

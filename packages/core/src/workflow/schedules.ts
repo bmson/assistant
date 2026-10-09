@@ -12,11 +12,12 @@ import {
   schedules,
   tasks,
 } from '@assistant/db';
-import type {
-  GoalRuntimeRepository,
-  GoalSessionState,
-  ScheduleRepository,
-  TaskRepository,
+import {
+  GOAL_SUPERSEDED_PROGRESS,
+  type GoalRuntimeRepository,
+  type GoalSessionState,
+  type ScheduleRepository,
+  type TaskRepository,
 } from '@assistant/persistence';
 import { Cron } from 'croner';
 import { and, eq, like, notInArray, sql } from 'drizzle-orm';
@@ -25,7 +26,7 @@ import { InboundEventSchema } from '../events.js';
 import { isCodeJobEnabled } from '../memory/jobs.js';
 import { getQueueNotifier } from '../queue.js';
 import { buildAutonomyGrant } from './autonomy.js';
-import { completeTask, deriveTaskTitle, type TaskType } from './machine.js';
+import { deriveTaskTitle, type TaskType } from './machine.js';
 import {
   runScheduleBatch,
   type ScheduledTaskTemplate,
@@ -103,7 +104,7 @@ export async function clearGoalBlockedOnOwnerReply(db: Db, goalId: string): Prom
  * for its replacement. Distinct from an owner cancellation so the anti-thrash
  * check can still count the underlying stall.
  */
-export const GOAL_SESSION_SUPERSEDED = 'superseded by the next automatic session';
+export const GOAL_SESSION_SUPERSEDED = GOAL_SUPERSEDED_PROGRESS;
 
 /** Task types where the owner is present in the exchange (see executor's isUnattendedGoalSession). */
 const ATTENDED_GOAL_TASK_TYPES = ['chat_turn', 'sms_turn'];
@@ -592,13 +593,9 @@ export async function prepareGoalSession(
     state,
   );
   if (!verdict.fire) return { action: 'skip' };
-  for (const id of verdict.cancelTaskIds)
-    await completeTask(repositories.tasks, id, {
-      status: 'cancelled',
-      progress: GOAL_SESSION_SUPERSEDED,
-    });
   return {
     action: 'fire',
+    goalGuard: { goal, openTasks: state.openTasks, supersedeTaskIds: verdict.cancelTaskIds },
     instruction: goalAutomationInstruction(goal),
     ...(goal.autonomy && !goal.taintedOrigin
       ? {

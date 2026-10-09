@@ -91,6 +91,8 @@ function memoryCatalog(): ModelCatalogRepository & {
     roles,
     listModels: async () => [...models.values()],
     listRoles: async () => [...roles.values()],
+    listRoleRevisions: async () => [],
+    rollbackRoleRevision: async () => false,
     async upsertModel(input) {
       models.set(input.id, {
         ...input,
@@ -161,6 +163,36 @@ beforeEach(() => {
 });
 
 describe('AI provider settings', () => {
+  it('replaces non-text failover and refuses missing provider connections', async () => {
+    catalog.roles.get('reason')!.fallbackModel = 'openai/text-embedding-3-small';
+    expect(
+      await chooseTextModels(ports, {
+        mainModel: 'minimax/minimax-m2.7',
+        fastModel: 'openai/gpt-oss-120b',
+      }),
+    ).toEqual({ ok: true });
+    expect(catalog.roles.get('reason')?.fallbackModel).toBe('minimax/minimax-m2.7');
+    catalog.models.set('openai:disconnected', model('openai:disconnected'));
+    expect(
+      await chooseTextModels(ports, {
+        mainModel: 'openai:disconnected',
+        fastModel: 'openai/gpt-oss-120b',
+      }),
+    ).toEqual({ ok: false, error: expect.stringContaining('connection') });
+    catalog.models.set(
+      'openai/gpt-oss-120b',
+      model('openai/gpt-oss-120b', { capabilities: { realtime: true } }),
+    );
+    catalog.roles.get('reason')!.fallbackModel = 'openai/gpt-oss-120b';
+    expect(
+      await chooseTextModels(ports, {
+        mainModel: 'minimax/minimax-m2.7',
+        fastModel: 'minimax/minimax-m2.7',
+      }),
+    ).toEqual({ ok: true });
+    expect(catalog.roles.get('reason')?.fallbackModel).toBe('minimax/minimax-m2.7');
+  });
+
   it('shows the environment connection until the owner saves one, and never a key', async () => {
     const settings = await getModelProviderSettings(ports);
     expect(settings.connections).toEqual([
@@ -319,11 +351,45 @@ describe('AI provider settings', () => {
           promptCostPerMTok: '1.2500',
           completionCostPerMTok: '10.0000',
           thinking: true,
+          supportedParameters: ['tools', 'reasoning'],
         },
       ],
     });
     expect(fetchMock).toHaveBeenCalledWith(
       'https://openrouter.ai/api/v1/key',
+      expect.objectContaining({ headers: { authorization: 'Bearer or-key' } }),
+    );
+  });
+
+  it('persists only freshly rechecked OpenRouter request parameters for a selected model', async () => {
+    await saveModelConnection(ports, { kind: 'openrouter', apiKey: 'or-key' });
+    fetchMock.mockResolvedValue(
+      Response.json({
+        data: [
+          {
+            id: 'openai/gpt-5.1',
+            supported_parameters: ['tools', 'tool_choice', 'structured_outputs', 'reasoning'],
+          },
+        ],
+      }),
+    );
+    expect(
+      await addCatalogModel(ports, {
+        connectionId: 'openrouter',
+        model: 'openai/gpt-5.1',
+        promptCostPerMTok: 1.25,
+        completionCostPerMTok: 10,
+      }),
+    ).toEqual({ ok: true, id: 'openai/gpt-5.1' });
+    expect(catalog.models.get('openai/gpt-5.1')?.capabilities).toEqual(
+      expect.objectContaining({
+        supportedParameters: ['tools', 'tool_choice', 'structured_outputs', 'reasoning'],
+        capabilitySource: 'openrouter-model-catalog',
+        checkedAt: expect.any(String),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://openrouter.ai/api/v1/models',
       expect.objectContaining({ headers: { authorization: 'Bearer or-key' } }),
     );
   });

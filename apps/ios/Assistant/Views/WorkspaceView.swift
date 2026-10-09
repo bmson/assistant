@@ -1,4 +1,190 @@
+import Foundation
 import SwiftUI
+
+enum AssistantFileImportError: LocalizedError {
+    case tooLarge(limit: Int)
+    case timedOut
+
+    var errorDescription: String? {
+        switch self {
+        case let .tooLarge(limit):
+            return "This file is larger than the \(limit / (1024 * 1024)) MB import limit. Nothing was uploaded."
+        case .timedOut:
+            return "The file provider did not finish reading in time. Nothing was uploaded; try a local copy."
+        }
+    }
+}
+
+/// Coordinates file-provider URLs and reads at most `maxBytes + 1` on a
+/// background worker. The extra byte detects a changing or missing size
+/// value without ever loading an oversized file into memory.
+enum AssistantBoundedFileReader {
+    static let defaultLimit = 25 * 1024 * 1024
+    private static let chunkSize = 64 * 1024
+
+    static func read(
+        from url: URL,
+        maxBytes: Int = defaultLimit,
+        timeout: Duration = .seconds(45)
+    ) async throws -> Data {
+        precondition(maxBytes > 0)
+        let operation = FileReadOperation()
+        let completion = FileReadCompletion()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                completion.install(continuation)
+                Task.detached(priority: .userInitiated) {
+                    let result = Result {
+                        try readCoordinated(url, maxBytes: maxBytes, timeout: timeout, operation: operation)
+                    }
+                    completion.finish(result)
+                }
+                let timeoutTask = Task.detached(priority: .utility) {
+                    try? await Task.sleep(for: timeout)
+                    guard !Task.isCancelled else { return }
+                    completion.finish(.failure(AssistantFileImportError.timedOut))
+                    operation.cancel()
+                }
+                completion.install(timeoutTask)
+            }
+        } onCancel: {
+            operation.cancel()
+            completion.finish(.failure(CancellationError()))
+        }
+    }
+
+    private static func readCoordinated(
+        _ url: URL,
+        maxBytes: Int,
+        timeout: Duration,
+        operation: FileReadOperation
+    ) throws -> Data {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        guard url.startAccessingSecurityScopedResource() else {
+            // Local URLs do not require a security scope and return false.
+            // The actual coordinated read below remains the authority check.
+            return try coordinatedRead(url, maxBytes: maxBytes, deadline: deadline, operation: operation)
+        }
+        defer { url.stopAccessingSecurityScopedResource() }
+        return try coordinatedRead(url, maxBytes: maxBytes, deadline: deadline, operation: operation)
+    }
+
+    private static func coordinatedRead(
+        _ url: URL,
+        maxBytes: Int,
+        deadline: ContinuousClock.Instant,
+        operation: FileReadOperation
+    ) throws -> Data {
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        operation.install(coordinator)
+        var coordinationError: NSError?
+        var result: Result<Data, Error>?
+        coordinator.coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinationError) { coordinatedURL in
+            result = Result {
+                if operation.isCancelled { throw CancellationError() }
+                if let expectedSize = try? coordinatedURL.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                   expectedSize > maxBytes {
+                    throw AssistantFileImportError.tooLarge(limit: maxBytes)
+                }
+                let handle = try FileHandle(forReadingFrom: coordinatedURL)
+                operation.install(handle)
+                defer {
+                    operation.remove(handle)
+                    try? handle.close()
+                }
+
+                var data = Data()
+                while true {
+                    if operation.isCancelled { throw CancellationError() }
+                    if ContinuousClock.now >= deadline {
+                        throw AssistantFileImportError.timedOut
+                    }
+                    let remaining = maxBytes + 1 - data.count
+                    if remaining <= 0 { throw AssistantFileImportError.tooLarge(limit: maxBytes) }
+                    let chunk = try handle.read(upToCount: min(chunkSize, remaining))
+                    guard let chunk, !chunk.isEmpty else { break }
+                    data.append(chunk)
+                    if data.count > maxBytes { throw AssistantFileImportError.tooLarge(limit: maxBytes) }
+                }
+                return data
+            }
+        }
+        if let coordinationError { throw coordinationError }
+        guard let result else { throw CocoaError(.fileReadUnknown) }
+        return try result.get()
+    }
+}
+
+private final class FileReadOperation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var coordinator: NSFileCoordinator?
+    private var handle: FileHandle?
+
+    var isCancelled: Bool { lock.withLock { cancelled } }
+
+    func install(_ coordinator: NSFileCoordinator) {
+        let cancelNow = lock.withLock { () -> Bool in
+            self.coordinator = coordinator
+            return cancelled
+        }
+        if cancelNow { coordinator.cancel() }
+    }
+
+    func install(_ handle: FileHandle) {
+        let closeNow = lock.withLock { () -> Bool in
+            self.handle = handle
+            return cancelled
+        }
+        if closeNow { try? handle.close() }
+    }
+
+    func remove(_ handle: FileHandle) {
+        lock.withLock { if self.handle === handle { self.handle = nil } }
+    }
+
+    func cancel() {
+        let resources = lock.withLock { () -> (NSFileCoordinator?, FileHandle?) in
+            cancelled = true
+            return (coordinator, handle)
+        }
+        resources.0?.cancel()
+        if let handle = resources.1 { try? handle.close() }
+    }
+}
+
+private final class FileReadCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Data, Error>?
+    private var result: Result<Data, Error>?
+    private var timeoutTask: Task<Void, Never>?
+
+    func install(_ continuation: CheckedContinuation<Data, Error>) {
+        let pending = lock.withLock { () -> Result<Data, Error>? in
+            self.continuation = continuation
+            return result
+        }
+        if let pending { continuation.resume(with: pending) }
+    }
+
+    func install(_ timeoutTask: Task<Void, Never>) {
+        let cancelNow = lock.withLock { () -> Bool in
+            self.timeoutTask = timeoutTask
+            return result != nil
+        }
+        if cancelNow { timeoutTask.cancel() }
+    }
+
+    func finish(_ result: Result<Data, Error>) {
+        let values = lock.withLock { () -> (CheckedContinuation<Data, Error>?, Task<Void, Never>?) in
+            guard self.result == nil else { return (nil, nil) }
+            self.result = result
+            return (continuation, timeoutTask)
+        }
+        values.1?.cancel()
+        values.0?.resume(with: result)
+    }
+}
 import UniformTypeIdentifiers
 
 enum WorkspaceArea {
@@ -52,6 +238,41 @@ enum WorkspaceArea {
             "Changes the assistant has proposed from its own reliability and cost reviews."
         }
     }
+
+    var availabilityKeys: [String] {
+        switch self {
+        case .chats: ["chats"]
+        case .skills: ["skills"]
+        case .capabilities: ["capabilities"]
+        case .costs: ["costs"]
+        case .anomalies: ["anomalies"]
+        case .improvements: ["improvements"]
+        case .documents: []
+        }
+    }
+}
+
+struct WorkspaceAvailabilityNotice: View {
+    let title: String
+
+    var body: some View {
+        Label {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(title) unavailable")
+                    .font(.headline)
+                Text("This section could not be loaded. Refresh to try again.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        } icon: {
+            Image(systemName: "exclamationmark.arrow.circlepath")
+                .foregroundStyle(.orange)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityElement(children: .combine)
+    }
 }
 
 struct WorkspaceView: View {
@@ -73,6 +294,9 @@ struct WorkspaceView: View {
     @State private var showingIssueReporter = false
     @State private var issueReported = false
     @State private var workspaceActionInFlight: String?
+    @State private var fileImportTask: Task<Void, Never>?
+    @State private var fileImportID: UUID?
+    @State private var fileImportStage: String?
     @State private var isLoading = false
     @State private var loadFailed = false
     @State private var improvementReceipt: ImprovementDecisionResult?
@@ -86,6 +310,14 @@ struct WorkspaceView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
+
+                if fileImportStage == "reading" {
+                    ProgressView("Checking and reading file…")
+                        .accessibilityIdentifier("file-import-reading")
+                } else if fileImportStage == "uploading" {
+                    ProgressView("Uploading…")
+                        .accessibilityIdentifier("file-import-uploading")
+                }
 
                 if loadFailed {
                     AssistantLoadFailureState(
@@ -112,6 +344,7 @@ struct WorkspaceView: View {
         .toolbarBackground(area == .skills ? .visible : .hidden, for: .navigationBar)
         .toolbarBackground(AssistantTheme.canvas(for: colorScheme), for: .navigationBar)
         .refreshable { await refresh() }
+        .onDisappear { cancelFileImport() }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
             await load()
@@ -212,7 +445,8 @@ struct WorkspaceView: View {
             Text("This removes “\(skill.name)” and its usage history.")
         }
         .sheet(isPresented: $showingCostEditor) {
-            if let costs = model.workspace?.costs {
+            if model.workspace?.isSectionAvailable("costs") != false,
+               let costs = model.workspace?.costs {
                 NavigationStack { CostLimitsEditor(costs: costs) }
             }
         }
@@ -230,7 +464,66 @@ struct WorkspaceView: View {
     private var actionsUnavailable: Bool { workspaceActionInFlight != nil || isLoading || loadFailed }
 
     @ViewBuilder
+    private func loadMoreButton(
+        section: WorkspacePageSection,
+        pagination: WorkspaceSectionPagination?,
+        archived: Bool = false
+    ) -> some View {
+        if let pagination, pagination.hasMore {
+            let key = section == .chats ? "chats-\(archived ? "archived" : "current")" : section.rawValue
+            VStack(spacing: 8) {
+                Button {
+                    Task { _ = await model.loadMoreWorkspace(section, archived: archived) }
+                } label: {
+                    if model.workspacePagesLoading.contains(key) {
+                        ProgressView("Loading more")
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        Label("Load more · \(pagination.loaded) loaded", systemImage: "arrow.down.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(AssistantActionButtonStyle(kind: .secondary, fillsWidth: true))
+                .disabled(model.workspacePagesLoading.contains(key) || isLoading)
+                .accessibilityHint("Loads the next \(pagination.pageSize) items. More items are not loaded until requested.")
+                if let message = model.workspacePageErrors[key] {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        } else if pagination.map(\.hasMore) == nil && workspaceSectionCount(section, archived: archived) >= 50 {
+            Text("More items may be available, but this server did not provide a supported page cursor.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func workspaceSectionCount(_ section: WorkspacePageSection, archived: Bool) -> Int {
+        guard let workspace = model.workspace else { return 0 }
+        switch section {
+        case .chats: return archived ? workspace.chats.archived.count : workspace.chats.current.count
+        case .skills: return workspace.skills.count
+        case .anomalies: return workspace.anomalies.count
+        case .improvements: return workspace.improvements.count
+        case .importSources: return workspace.imports?.sources.count ?? 0
+        case .importFiles: return workspace.imports?.unstartedFiles.count ?? 0
+        }
+    }
+
+    @ViewBuilder
     private func workspaceContent(_ workspace: WorkspaceResponse) -> some View {
+        if let failedSection = area.availabilityKeys.first(where: { !workspace.isSectionAvailable($0) }) {
+            WorkspaceAvailabilityNotice(title: failedSection.capitalized)
+                .accessibilityIdentifier("workspace-section-unavailable-\(failedSection)")
+        } else {
+            workspaceContentAvailable(workspace)
+        }
+    }
+
+    @ViewBuilder
+    private func workspaceContentAvailable(_ workspace: WorkspaceResponse) -> some View {
         switch area {
         case .chats:
             chats(workspace.chats)
@@ -326,8 +619,9 @@ struct WorkspaceView: View {
                     .assistantCard(in: colorScheme)
                 }
             }
+            loadMoreButton(section: .chats, pagination: model.workspace?.sectionPagination?.chats?.current)
 
-            if !chats.archived.isEmpty {
+            if !chats.archived.isEmpty || model.workspace?.sectionPagination?.chats?.archived.hasMore == true {
                 DisclosureGroup("Archived chats (\(chats.archived.count))") {
                     VStack(spacing: 0) {
                         ForEach(chats.archived) { chat in
@@ -368,6 +662,7 @@ struct WorkspaceView: View {
                         }
                     }
                     .padding(.top, 8)
+                    loadMoreButton(section: .chats, pagination: model.workspace?.sectionPagination?.chats?.archived, archived: true)
                 }
                 .font(.subheadline.weight(.semibold))
                 .assistantPanel(in: colorScheme)
@@ -392,8 +687,38 @@ struct WorkspaceView: View {
                         documentCard(document)
                     }
                 }
+                if let pagination = documents.pagination, pagination.isSupported, pagination.hasMore {
+                    VStack(spacing: 8) {
+                        Button {
+                            Task { _ = await model.loadMoreDocuments() }
+                        } label: {
+                            if model.documentPageLoading {
+                                ProgressView("Loading more documents")
+                                    .frame(maxWidth: .infinity)
+                            } else {
+                                Label("Load more documents · \(documents.documents.count) loaded", systemImage: "arrow.down.circle")
+                                    .frame(maxWidth: .infinity)
+                            }
+                        }
+                        .buttonStyle(AssistantActionButtonStyle(kind: .secondary, fillsWidth: true))
+                        .disabled(model.documentPageLoading || isLoading)
+                        .accessibilityHint("Loads the next \(pagination.pageSize) documents. More are not loaded until requested.")
+                        if let message = model.documentPageError {
+                            Text(message)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                } else if documents.hasMore == true || documents.documents.count < documents.stats.total {
+                    Text("More documents may be available, but this server did not provide a supported page cursor.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
 
-                if let imports = model.workspace?.imports {
+                if model.workspace?.isSectionAvailable("imports") == false {
+                    WorkspaceAvailabilityNotice(title: "Backstory imports")
+                } else if let imports = model.workspace?.imports {
                     backstoryImports(imports)
                 }
             } else if !loadFailed {
@@ -429,6 +754,7 @@ struct WorkspaceView: View {
                     retiredSkills(retired)
                 }
             }
+            loadMoreButton(section: .skills, pagination: model.workspace?.sectionPagination?.skills)
         }
     }
 
@@ -509,7 +835,9 @@ struct WorkspaceView: View {
 
     private func costs(_ costs: WorkspaceCosts) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            if let billing = costs.billing {
+            if model.workspace?.isSectionAvailable("billing") == false {
+                WorkspaceAvailabilityNotice(title: "Provider billing")
+            } else if let billing = costs.billing {
                 sectionHeading("Provider billing")
                 ForEach(billing) { report in
                     providerBillingCard(report)
@@ -694,6 +1022,7 @@ struct WorkspaceView: View {
                     .assistantCard(in: colorScheme)
                 }
             }
+            loadMoreButton(section: .anomalies, pagination: model.workspace?.sectionPagination?.anomalies)
         }
     }
 
@@ -734,7 +1063,9 @@ struct WorkspaceView: View {
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("issue-report-success")
             }
-            if let repairs {
+            if model.workspace?.isSectionAvailable("repairs") == false {
+                WorkspaceAvailabilityNotice(title: "Code fixes")
+            } else if let repairs {
                 repairIssues(repairs)
             }
 
@@ -757,6 +1088,7 @@ struct WorkspaceView: View {
                     }
                 }
             }
+            loadMoreButton(section: .improvements, pagination: model.workspace?.sectionPagination?.improvements)
         }
     }
 
@@ -792,7 +1124,7 @@ struct WorkspaceView: View {
     }
 
     private func repairIssueCard(_ issue: WorkspaceRepairIssue, repairs: WorkspaceRepairs) -> some View {
-        let presentation = RepairPresentation(status: issue.status, manualRunRequested: issue.manualRunRequested == true)
+        let presentation = RepairPresentation(status: issue.status, manualRunRequested: issue.manualRunRequested == true, deploymentConfirmed: issue.deploymentConfirmed == true)
         let waitingForRefresh = repairAcknowledgedRevisions[issue.id] == issue.actionRevision
         return VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 10) {
@@ -813,7 +1145,8 @@ struct WorkspaceView: View {
                     if let reason = issue.waitingReason {
                         Text(reason).font(.caption).foregroundStyle(.secondary)
                     }
-                    if !issue.lastError.isEmpty { AssistantInlineFailure(message: issue.lastError) }
+                    if let outcome = issue.outcome { Text("\(outcome.message) \(outcome.nextStep)").font(.subheadline).foregroundStyle(.secondary) }
+                    else if !issue.lastError.isEmpty { AssistantInlineFailure(message: issue.lastError) }
                     if repairFailureID == issue.id {
                         AssistantInlineFailure(message: "Couldn’t confirm that request. Refresh the report before trying again.")
                     }
@@ -945,11 +1278,7 @@ struct WorkspaceView: View {
 
             if !improvement.rationale.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Label("Why this surfaced", systemImage: "scope")
-                        .font(.caption.weight(.bold))
-                        .textCase(.uppercase)
-                        .tracking(0.55)
-                        .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                    CardEyebrow("Why this surfaced")
                     Text(inlineMarkdown(improvement.rationale))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -1149,7 +1478,10 @@ struct WorkspaceView: View {
                 }
                 .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
             }
-            ForEach(imports.unstartedFiles) { file in
+            if imports.filesAvailability?.isAvailable == false {
+                WorkspaceAvailabilityNotice(title: "Workspace files")
+            }
+            ForEach(imports.filesAvailability?.isAvailable == false ? [] : imports.unstartedFiles) { file in
                 HStack {
                     Text(file.name)
                         .font(.subheadline)
@@ -1170,6 +1502,12 @@ struct WorkspaceView: View {
                     .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
                 }
                 .assistantCard(in: colorScheme)
+            }
+            if let pagination = model.workspace?.sectionPagination?.importFiles {
+                loadMoreButton(section: .importFiles, pagination: pagination)
+            }
+            if imports.sourceAvailability?.isAvailable == false {
+                WorkspaceAvailabilityNotice(title: "Import history")
             }
             ForEach(imports.sources) { source in
                 VStack(alignment: .leading, spacing: 9) {
@@ -1194,6 +1532,9 @@ struct WorkspaceView: View {
                     importActions(source)
                 }
                 .assistantCard(in: colorScheme)
+            }
+            if let pagination = model.workspace?.sectionPagination?.importSources {
+                loadMoreButton(section: .importSources, pagination: pagination)
             }
         }
     }
@@ -1804,48 +2145,74 @@ struct WorkspaceView: View {
     }
 
     private func uploadDocument(from url: URL) {
-        workspaceActionInFlight = "document-upload"
-        Task {
-            let accessed = url.startAccessingSecurityScopedResource()
-            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-            do {
-                let data = try Data(contentsOf: url)
-                guard data.count <= 25 * 1024 * 1024 else {
-                    model.errorMessage = "Documents must be 25 MB or smaller."
-                    workspaceActionInFlight = nil
-                    return
-                }
-                let type = UTType(filenameExtension: url.pathExtension)
-                _ = await model.uploadDocument(
-                    data: data,
-                    name: url.lastPathComponent,
-                    title: url.deletingPathExtension().lastPathComponent,
-                    mime: type?.preferredMIMEType ?? "application/octet-stream"
-                )
-            } catch {
-                model.reportError(error)
-            }
-            workspaceActionInFlight = nil
+        beginFileImport(url, action: "document-upload") { data in
+            let type = UTType(filenameExtension: url.pathExtension)
+            return await model.uploadDocument(
+                data: data,
+                name: url.lastPathComponent,
+                title: url.deletingPathExtension().lastPathComponent,
+                mime: type?.preferredMIMEType ?? "application/octet-stream"
+            )
         }
     }
 
     private func uploadBackstory(from url: URL) {
-        workspaceActionInFlight = "backstory-upload"
-        Task {
-            let accessed = url.startAccessingSecurityScopedResource()
-            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+        beginFileImport(url, action: "backstory-upload") { data in
+            await model.uploadImport(data: data, name: url.lastPathComponent)
+        }
+    }
+
+    private func beginFileImport(
+        _ url: URL,
+        action: String,
+        upload: @escaping (Data) async -> Bool
+    ) {
+        cancelFileImport(showStatus: false)
+        let requestID = UUID()
+        fileImportID = requestID
+        fileImportStage = "reading"
+        workspaceActionInFlight = action
+        fileImportTask = Task { @MainActor in
             do {
-                let data = try Data(contentsOf: url)
-                guard data.count <= 25 * 1024 * 1024 else {
-                    model.errorMessage = "Imports must be 25 MB or smaller."
-                    workspaceActionInFlight = nil
-                    return
+                let data = try await AssistantBoundedFileReader.read(from: url)
+                guard !Task.isCancelled, fileImportID == requestID else { return }
+                fileImportStage = "uploading"
+                let confirmed = await upload(data)
+                guard fileImportID == requestID else { return }
+                if !confirmed {
+                    model.errorMessage = "The upload status could not be confirmed. Check the workspace before retrying."
                 }
-                _ = await model.uploadImport(data: data, name: url.lastPathComponent)
+                finishFileImport(requestID)
             } catch {
-                model.reportError(error)
+                guard fileImportID == requestID else { return }
+                if !(error is CancellationError) { model.errorMessage = error.localizedDescription }
+                finishFileImport(requestID)
             }
+        }
+    }
+
+    private func finishFileImport(_ requestID: UUID) {
+        guard fileImportID == requestID else { return }
+        fileImportTask = nil
+        fileImportID = nil
+        fileImportStage = nil
+        workspaceActionInFlight = nil
+    }
+
+    private func cancelFileImport(showStatus: Bool = true) {
+        guard fileImportID != nil else { return }
+        let wasUploading = fileImportStage == "uploading"
+        self.fileImportID = nil
+        fileImportTask?.cancel()
+        fileImportTask = nil
+        fileImportStage = nil
+        if workspaceActionInFlight == "document-upload" || workspaceActionInFlight == "backstory-upload" {
             workspaceActionInFlight = nil
+        }
+        if showStatus {
+            model.errorMessage = wasUploading
+                ? "The screen closed while the upload was running. Its status is unknown; check the workspace before retrying."
+                : "The file read was cancelled before upload. Nothing was sent."
         }
     }
 

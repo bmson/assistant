@@ -50,6 +50,109 @@ describe('reminder tools', () => {
       .where(and(eq(schedules.agentId, agentId), like(schedules.name, 'reminder:%')));
   });
 
+  it('replays the persisted invocation without duplicating or moving a relative reminder', async () => {
+    if (!dbUp) throw new Error('Database unavailable');
+    let now = new Date('2027-01-01T10:00:00Z');
+    const context = {
+      ...ctx(),
+      now: () => now,
+      requestAt: new Date('2027-01-01T10:00:00Z'),
+      requestTimeZone: 'Pacific/Auckland',
+      execution: {
+        dbToolCallId: 'persisted-one',
+        modelToolCallId: 'model-one',
+        toolName: 'reminder.create',
+      },
+    };
+    const args = { text: 'Stable invocation', inMinutes: 10 };
+    const first = (await tool('reminder.create')?.execute(args, context)) as {
+      reminderId: string;
+      nextFires: string;
+      timezone: string;
+    };
+    now = new Date('2027-01-02T10:00:00Z');
+    expect(await tool('reminder.create')?.execute(args, context)).toEqual(first);
+    expect(first.nextFires).toBe('2027-01-01T10:10:00.000Z');
+    expect(first.timezone).toBe('Pacific/Auckland');
+    await expect(
+      tool('reminder.create')?.execute({ ...args, text: 'Different input' }, context),
+    ).rejects.toThrow('different input');
+    const second = (await tool('reminder.create')?.execute(args, {
+      ...context,
+      requestAt: now,
+      execution: { ...context.execution, dbToolCallId: 'persisted-two' },
+    })) as { reminderId: string };
+    expect(second.reminderId).not.toBe(first.reminderId);
+    await tool('reminder.cancel')?.execute({ reminderId: first.reminderId }, context);
+    expect(await tool('reminder.create')?.execute(args, context)).toMatchObject({
+      reminderId: first.reminderId,
+      enabled: false,
+      nextFires: null,
+    });
+  });
+
+  it('persists an event-completion watch only when the exact lookup result is bound', async () => {
+    if (!dbUp) return;
+    const now = new Date(Date.now() + 60_000);
+    const startsAt = new Date(now.getTime() + 60 * 60_000);
+    const eventDate = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(startsAt);
+    const dependency = {
+      provider: 'sports' as const,
+      eventId: 'fixture-event-completion',
+      league: 'mlb',
+      startsAt: startsAt.toISOString(),
+      eventDate,
+      timezone: 'America/Los_Angeles',
+      homeTeamId: 'sf',
+      awayTeamId: 'la',
+      homeTeam: 'San Francisco Giants',
+      awayTeam: 'Los Angeles Dodgers',
+      verifiedAt: now.toISOString(),
+    };
+    const context = {
+      ...ctx(),
+      now: () => now,
+      requestAt: now,
+      requestTimeZone: dependency.timezone,
+      verifiedReminderEvent: dependency,
+      execution: {
+        dbToolCallId: 'event-completion-watch',
+        modelToolCallId: 'event-completion-watch-model',
+        toolName: 'reminder.create',
+      },
+    };
+    await expect(
+      tool('reminder.create')?.execute(
+        { text: 'Tell me when it is over', afterEventId: 'other-event' },
+        context,
+      ),
+    ).rejects.toThrow('not bound');
+
+    const result = (await tool('reminder.create')?.execute(
+      { text: 'Tell me when it is over', afterEventId: dependency.eventId },
+      context,
+    )) as { reminderId: string; kind: string; cron: string; nextFires: string };
+    const [row] = await db.select().from(schedules).where(eq(schedules.id, result.reminderId));
+    const template = row?.taskTemplate as {
+      reminderKind?: string;
+      reminderEventDependency?: typeof dependency;
+    };
+    expect(result).toMatchObject({
+      kind: 'event_completion',
+      cron: '*/15 * * * *',
+      nextFires: startsAt.toISOString(),
+    });
+    expect(template).toMatchObject({
+      reminderKind: 'event_completion',
+      reminderEventDependency: dependency,
+    });
+  });
+
   it('builds a weekday cron from a time + weekday list', async () => {
     if (!dbUp) return;
     const result = (await tool('reminder.create')?.execute(
@@ -120,6 +223,17 @@ describe('reminder tools', () => {
     expect(result.kind).toBe('once');
     expect(result.nextFires).toBe('2026-09-03T18:10:00.000Z');
     expect(result.timezone).toBe((await getAgent(db)).timezone);
+  });
+
+  it('does not move an expired request-relative reminder forward on retry', async () => {
+    if (!dbUp) return;
+    const requestAt = new Date('2026-09-03T18:00:00.000Z');
+    await expect(
+      tool('reminder.create')?.execute(
+        { text: 'expired relative reminder', inMinutes: 10 },
+        { ...ctx(), now: () => new Date('2026-09-03T18:11:00.000Z'), requestAt },
+      ),
+    ).rejects.toThrow('request-relative reminder time has already passed');
   });
 
   it('lists active reminders and cancels one by id', async () => {

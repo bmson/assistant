@@ -1,17 +1,24 @@
+import { randomUUID } from 'node:crypto';
 import { getAgent } from '@assistant/core/chat';
 import { GRAPH_EXTRACTION_VERSION } from '@assistant/core/memory/knowledge-graph';
 import {
   agents,
   createDb,
+  createPostgresGraphRecallRepository,
+  createPostgresMemoryToolRepository,
   type Db,
+  knowledgeGraphAssertionEvidence,
+  knowledgeGraphAssertions,
   knowledgeGraphEntities,
   knowledgeGraphRelations,
   knowledgeGraphSources,
   memories,
 } from '@assistant/db';
+import { embeddingSpaceIdentityKey } from '@assistant/persistence';
 import { and, eq, inArray, like } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  addOwnerKnowledgeGraphFact,
   correctKnowledgeGraphRelation,
   findDuplicateKnowledgeGraphEntities,
   getKnowledgeGraphMapSummary,
@@ -57,6 +64,15 @@ function unitVector(): number[] {
   return vector;
 }
 
+const graphRouter = {
+  async embeddingSpace() {
+    return { provider: 'test', model: 'embedding', dimensions: 1536, revision: '1' };
+  },
+  async embed() {
+    return [unitVector()];
+  },
+};
+
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   try {
@@ -90,6 +106,7 @@ beforeAll(async () => {
         contentHash: `${MARKER}-source`,
         confidence: '0.90',
         embedding: unitVector(),
+        embeddingSpaceKey: embeddingSpaceIdentityKey(await graphRouter.embeddingSpace()),
       })
       .returning({ id: memories.id });
     if (!memory) throw new Error('test memory was not created');
@@ -240,6 +257,90 @@ describe('knowledge graph overview (integration)', () => {
 });
 
 describe('knowledge workspace map (integration)', () => {
+  it('returns both canonical endpoint views for a focused map edge', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const parentId = randomUUID();
+    const childId = randomUUID();
+    const assertionId = randomUUID();
+    const evidenceId = randomUUID();
+    const relationId = randomUUID();
+    await db.insert(knowledgeGraphEntities).values([
+      { id: parentId, agentId, canonicalKey: `${MARKER}:parent`, label: 'Parent', kind: 'person' },
+      { id: childId, agentId, canonicalKey: `${MARKER}:child`, label: 'Child', kind: 'person' },
+    ]);
+    await db.insert(knowledgeGraphAssertions).values({
+      id: assertionId,
+      agentId,
+      semanticKey: `${MARKER}:parent-of-child`,
+      subjectEntityId: parentId,
+      predicate: 'parent_of',
+      objectEntityId: childId,
+      assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
+      qualifiers: {},
+      semanticRevision: 3,
+      evidenceRevision: 1,
+      lifecycle: 'current',
+      reviewStatus: 'confirmed',
+      reviewedRevision: 3,
+    });
+    await db.insert(knowledgeGraphAssertionEvidence).values({
+      id: evidenceId,
+      agentId,
+      assertionId,
+      sourceMemoryId,
+      sourceFingerprint: `${MARKER}:parent-evidence`,
+      sourceContentHash: `${MARKER}:parent-content`,
+      evidenceQuote: 'Parent is the parent of Child',
+      sourceAuthor: 'owner',
+      sourceTrust: 'owner',
+      independent: false,
+      extractionVersion: GRAPH_EXTRACTION_VERSION,
+      evidenceRevision: 1,
+      observedAt: new Date(),
+    });
+    await db.insert(knowledgeGraphRelations).values({
+      id: relationId,
+      agentId,
+      subjectEntityId: parentId,
+      predicate: 'parent_of',
+      objectEntityId: childId,
+      sourceMemoryId,
+      sourceFingerprint: `${MARKER}:parent-edge`,
+      evidenceQuote: 'Parent is the parent of Child',
+      ordinal: 0,
+      confidence: '0.95',
+      reviewStatus: 'confirmed',
+      assertionId,
+    });
+    try {
+      const snapshot = await getKnowledgeMapSnapshot(db, { entityId: childId });
+      const edge = snapshot.edges.find((candidate) => candidate.id === relationId);
+      expect(edge?.endpointViews).toEqual([
+        expect.objectContaining({
+          focusEntityId: parentId,
+          direction: 'forward',
+          text: 'Parent is the parent of Child',
+          evidenceCount: 1,
+        }),
+        expect.objectContaining({
+          focusEntityId: childId,
+          direction: 'inverse',
+          text: 'Child is the child of Parent',
+          evidenceCount: 1,
+        }),
+      ]);
+    } finally {
+      await db.delete(knowledgeGraphRelations).where(eq(knowledgeGraphRelations.id, relationId));
+      await db
+        .delete(knowledgeGraphAssertionEvidence)
+        .where(eq(knowledgeGraphAssertionEvidence.id, evidenceId));
+      await db.delete(knowledgeGraphAssertions).where(eq(knowledgeGraphAssertions.id, assertionId));
+      await db
+        .delete(knowledgeGraphEntities)
+        .where(inArray(knowledgeGraphEntities.id, [parentId, childId]));
+    }
+  });
+
   it('fills older bridges between visible items while excluding rejected claims', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const initial = await getKnowledgeMapSnapshot(db, { entityId: hubId });
@@ -855,6 +956,55 @@ describe('knowledge graph neighborhood (integration)', () => {
     ).toBe(false);
   });
 
+  it('excludes an explicitly retired whole fact from raw and graph retrieval', async () => {
+    if (!dbUp) throw new Error('Requires isolated PostgreSQL fixture');
+    const first = await addOwnerKnowledgeGraphFact(db, graphRouter, {
+      subjectLabel: `${MARKER} whole fact subject`,
+      subjectKind: 'topic',
+      predicate: 'supports',
+      objectLabel: `${MARKER} whole fact target`,
+      objectKind: 'topic',
+      note: 'Standalone whole fact before correction',
+    });
+    if (!first.relationId) throw new Error(first.error ?? 'Missing whole fact');
+    const [prior] = await db
+      .select()
+      .from(knowledgeGraphRelations)
+      .where(eq(knowledgeGraphRelations.id, first.relationId));
+    if (!prior) throw new Error('Missing prior whole fact edge');
+    const result = await correctKnowledgeGraphRelation(db, graphRouter, first.relationId, {
+      subjectLabel: `${MARKER} whole fact subject`,
+      subjectKind: 'topic',
+      subjectId: prior.subjectEntityId,
+      predicate: 'relates_to',
+      objectLabel: `${MARKER} whole fact target`,
+      objectKind: 'topic',
+      objectId: prior.objectEntityId,
+      note: 'Standalone whole fact corrected',
+      sourceDisposition: 'whole_fact',
+    });
+    if (!result.memoryId || !result.relationId)
+      throw new Error(result.error ?? 'Whole fact correction failed');
+    const raw = await createPostgresMemoryToolRepository(db).recall({
+      agentId,
+      embedding: unitVector(),
+      query: 'Standalone whole fact corrected',
+      limit: 20,
+      embeddingSpaceKey: embeddingSpaceIdentityKey(await graphRouter.embeddingSpace()),
+    });
+    expect(raw.memories.map((row) => row.id)).toContain(result.memoryId);
+    expect(raw.memories.map((row) => row.id)).not.toContain(prior.sourceMemoryId);
+    const graph = await createPostgresGraphRecallRepository(db).connected({
+      agentId,
+      entityIds: [prior.subjectEntityId],
+      sourceMemoryIds: [],
+      limit: 100,
+      extractionVersion: GRAPH_EXTRACTION_VERSION,
+    });
+    expect(graph.map((row) => row.relationId)).toContain(result.relationId);
+    expect(graph.map((row) => row.relationId)).not.toContain(first.relationId);
+  });
+
   it('creates a corrected source-backed edge before retiring the prior edge', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const [old] = await db
@@ -862,37 +1012,108 @@ describe('knowledge graph neighborhood (integration)', () => {
         id: knowledgeGraphRelations.id,
         objectId: knowledgeGraphRelations.objectEntityId,
         reviewStatus: knowledgeGraphRelations.reviewStatus,
+        sourceMemoryId: knowledgeGraphRelations.sourceMemoryId,
+        correctedByRelationId: knowledgeGraphRelations.correctedByRelationId,
+        correctionSourceContentHash: knowledgeGraphRelations.correctionSourceContentHash,
+        correctionDisposition: knowledgeGraphRelations.correctionDisposition,
+        sourceContentHash: memories.contentHash,
       })
       .from(knowledgeGraphRelations)
+      .innerJoin(memories, eq(knowledgeGraphRelations.sourceMemoryId, memories.id))
       .where(eq(knowledgeGraphRelations.subjectEntityId, hubId))
       .limit(1);
     if (!old) throw new Error('fixture relation missing');
 
     let newRelationId: string | undefined;
     try {
-      const result = await correctKnowledgeGraphRelation(
-        db,
-        { embed: async () => [unitVector()] },
-        old.id,
-        {
+      await expect(
+        correctKnowledgeGraphRelation(db, graphRouter, old.id, {
           subjectLabel: `${MARKER} hub`,
           subjectKind: 'topic',
           subjectId: hubId,
-          predicate: 'correctly_relates_to',
-          objectLabel: `${MARKER} corrected spoke`,
+          predicate: 'whole_fact_must_be_refused',
+          objectLabel: `${MARKER} target`,
           objectKind: 'organization',
-          objectId: old.objectId,
-          note: 'The original relationship wording was inaccurate.',
-        },
-      );
+          note: 'This shared source also supports other edges.',
+          sourceDisposition: 'whole_fact',
+        }),
+      ).rejects.toThrow(/choose graph-only correction/i);
+
+      await expect(
+        correctKnowledgeGraphRelation(
+          db,
+          {
+            ...graphRouter,
+            embed: async () => {
+              await db
+                .update(memories)
+                .set({ contentHash: `${MARKER}-changed-during-review` })
+                .where(eq(memories.id, old.sourceMemoryId));
+              return [unitVector()];
+            },
+          },
+          old.id,
+          {
+            subjectLabel: `${MARKER} hub`,
+            subjectKind: 'topic',
+            subjectId: hubId,
+            predicate: 'stale_correction',
+            objectLabel: `${MARKER} stale target`,
+            objectKind: 'organization',
+            note: 'Must not apply to a changed source.',
+          },
+        ),
+      ).rejects.toThrow(/source changed/i);
+      await db
+        .update(memories)
+        .set({ contentHash: old.sourceContentHash })
+        .where(eq(memories.id, old.sourceMemoryId));
+      const unchanged = await db
+        .select({ correctedByRelationId: knowledgeGraphRelations.correctedByRelationId })
+        .from(knowledgeGraphRelations)
+        .where(eq(knowledgeGraphRelations.id, old.id))
+        .limit(1);
+      expect(unchanged[0]?.correctedByRelationId).toBe(old.correctedByRelationId);
+
+      const result = await correctKnowledgeGraphRelation(db, graphRouter, old.id, {
+        subjectLabel: `${MARKER} hub`,
+        subjectKind: 'topic',
+        subjectId: hubId,
+        predicate: 'correctly_relates_to',
+        objectLabel: `${MARKER} corrected spoke`,
+        objectKind: 'organization',
+        objectId: old.objectId,
+        note: 'The original relationship wording was inaccurate.',
+      });
 
       expect(result.error).toBeUndefined();
       newRelationId = result.relationId;
+      expect(result.sourceDisposition).toBe('graph_only');
+      expect(result.alreadyApplied).not.toBe(true);
       expect(newRelationId).toBeTruthy();
       if (!newRelationId) throw new Error('correction did not create a replacement relation');
+      const replay = await correctKnowledgeGraphRelation(db, graphRouter, old.id, {
+        subjectLabel: `${MARKER} hub`,
+        subjectKind: 'topic',
+        subjectId: hubId,
+        predicate: 'correctly_relates_to',
+        objectLabel: `${MARKER} corrected spoke`,
+        objectKind: 'organization',
+        objectId: old.objectId,
+        note: 'The original relationship wording was inaccurate.',
+      });
+      expect(replay).toMatchObject({
+        relationId: newRelationId,
+        sourceDisposition: 'graph_only',
+        alreadyApplied: true,
+      });
       const [oldAfter, newAfter] = await Promise.all([
         db
-          .select({ status: knowledgeGraphRelations.reviewStatus })
+          .select({
+            status: knowledgeGraphRelations.reviewStatus,
+            correctedByRelationId: knowledgeGraphRelations.correctedByRelationId,
+            correctionDisposition: knowledgeGraphRelations.correctionDisposition,
+          })
           .from(knowledgeGraphRelations)
           .where(eq(knowledgeGraphRelations.id, old.id))
           .limit(1),
@@ -906,9 +1127,43 @@ describe('knowledge graph neighborhood (integration)', () => {
           .where(eq(knowledgeGraphRelations.id, newRelationId))
           .limit(1),
       ]);
-      expect(oldAfter[0]?.status).toBe('rejected');
+      expect(oldAfter[0]).toMatchObject({
+        status: 'rejected',
+        correctedByRelationId: newRelationId,
+        correctionDisposition: 'graph_only',
+      });
+      const originalSource = await db
+        .select({ expiresAt: memories.expiresAt, supersededById: memories.supersededById })
+        .from(memories)
+        .where(eq(memories.id, old.sourceMemoryId))
+        .limit(1);
+      expect(originalSource[0]?.expiresAt).toBeNull();
+      expect(originalSource[0]?.supersededById).toBeNull();
       expect(newAfter[0]).toMatchObject({ status: 'confirmed' });
       expect(newAfter[0]?.source).toContain('The original relationship wording was inaccurate.');
+      const rawRecall = await createPostgresMemoryToolRepository(db).recall({
+        agentId,
+        embedding: unitVector(),
+        query: 'original relationship wording inaccurate',
+        limit: 20,
+        embeddingSpaceKey: embeddingSpaceIdentityKey(await graphRouter.embeddingSpace()),
+      });
+      expect(rawRecall.memories.map((row) => row.id)).toContain(old.sourceMemoryId);
+      const replacementMemory = await db
+        .select({ id: memories.id })
+        .from(memories)
+        .innerJoin(knowledgeGraphRelations, eq(knowledgeGraphRelations.sourceMemoryId, memories.id))
+        .where(eq(knowledgeGraphRelations.id, newRelationId));
+      expect(rawRecall.memories.map((row) => row.id)).toContain(replacementMemory[0]?.id);
+      const graphRecall = await createPostgresGraphRecallRepository(db).connected({
+        agentId,
+        entityIds: [old.objectId],
+        sourceMemoryIds: [],
+        limit: 100,
+        extractionVersion: GRAPH_EXTRACTION_VERSION,
+      });
+      expect(graphRecall.map((row) => row.relationId)).toContain(newRelationId);
+      expect(graphRecall.map((row) => row.relationId)).not.toContain(old.id);
     } finally {
       if (newRelationId) {
         const [replacement] = await db
@@ -922,7 +1177,12 @@ describe('knowledge graph neighborhood (integration)', () => {
       }
       await db
         .update(knowledgeGraphRelations)
-        .set({ reviewStatus: old.reviewStatus })
+        .set({
+          reviewStatus: old.reviewStatus,
+          correctedByRelationId: old.correctedByRelationId,
+          correctionSourceContentHash: old.correctionSourceContentHash,
+          correctionDisposition: old.correctionDisposition,
+        })
         .where(eq(knowledgeGraphRelations.id, old.id));
     }
   });

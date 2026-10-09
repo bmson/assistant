@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { FieldValue } from '@google-cloud/firestore';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { embeddingSpaceKey } from './memory.js';
 import { getFirestorePersonGraph } from './person-graph-read.js';
 import type { InstallationStore } from './store.js';
 import { disposeStore, emulatorStore } from './test-store.js';
 
+const space = { provider: 'vertex', model: 'fixture', dimensions: 2, revision: 'v1' };
 const emulatorHost = process.env.FIRESTORE_EMULATOR_HOST ?? '';
 const localEmulator = /^(?:127\.0\.0\.1|localhost):\d+$/.test(emulatorHost);
 
@@ -97,6 +99,7 @@ describe.skipIf(!localEmulator)('Firestore source-backed person graph', () => {
         quarantined: false,
         expiresAt: null,
         embedding: FieldValue.vector([1, 0]),
+        embeddingSpace: embeddingSpaceKey(space),
         contentHash: `hash-${id}`,
         ...memoryPatch,
       }),
@@ -110,6 +113,28 @@ describe.skipIf(!localEmulator)('Firestore source-backed person graph', () => {
     ]);
   }
 
+  it('rejects stale spaces, missing and malformed vectors, retired facts and tombstones', async () => {
+    await edge('current');
+    await edge(
+      'old-space',
+      {},
+      {
+        embeddingSpace: embeddingSpaceKey({ ...space, revision: 'old' }),
+      },
+    );
+    await edge('missing', {}, { embedding: null });
+    await edge('malformed', {}, { embedding: FieldValue.vector([1]) });
+    await edge('retired', {}, { supersededById: 'replacement' });
+    await edge('forgotten');
+    await store.doc('memoryTombstones', 'hash-forgotten').set({ contentHash: 'hash-forgotten' });
+    expect(
+      (await getFirestorePersonGraph(store, agentId, contactId, 2, undefined, space))?.edges.map(
+        (row) => row.id,
+      ),
+    ).toEqual(['current']);
+    expect((await getFirestorePersonGraph(store, agentId, contactId, 2))?.edges).toEqual([]);
+  });
+
   it('returns current sourced edges with stored direction and preferred other labels', async () => {
     await edge('location');
     await edge('incoming', {
@@ -118,7 +143,7 @@ describe.skipIf(!localEmulator)('Firestore source-backed person graph', () => {
       predicate: 'parent_of',
       reviewStatus: 'unreviewed',
     });
-    const result = await getFirestorePersonGraph(store, agentId, contactId, 2);
+    const result = await getFirestorePersonGraph(store, agentId, contactId, 2, undefined, space);
     expect(result).toEqual({
       entityId: selfId,
       edges: [
@@ -167,24 +192,61 @@ describe.skipIf(!localEmulator)('Firestore source-backed person graph', () => {
     await edge('foreign-entity');
     await store.doc('knowledgeGraphEntities', placeId).update({ agentId: otherAgentId });
     await edge('unquoted', { evidenceQuote: null });
-    const result = await getFirestorePersonGraph(store, agentId, contactId, 2);
+    const result = await getFirestorePersonGraph(store, agentId, contactId, 2, undefined, space);
     expect(result?.edges).toEqual([]);
     await store.doc('knowledgeGraphEntities', placeId).update({ agentId });
     expect(
-      (await getFirestorePersonGraph(store, agentId, contactId, 2))?.edges.map((row) => row.id),
+      (await getFirestorePersonGraph(store, agentId, contactId, 2, undefined, space))?.edges.map(
+        (row) => row.id,
+      ),
     ).toEqual(['active', 'foreign-entity']);
   });
 
+  it('uses the canonical owner decision even when a linked relation projection is stale', async () => {
+    await edge('canonical-rejected');
+    const assertionId = randomUUID();
+    await store.doc('knowledgeGraphRelations', 'canonical-rejected').update({ assertionId });
+    await store.doc('knowledgeGraphAssertions', assertionId).set({
+      id: assertionId,
+      agentId,
+      semanticKey: randomUUID(),
+      subjectEntityId: selfId,
+      predicate: 'lives_in',
+      objectEntityId: placeId,
+      assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
+      qualifiers: {},
+      validFrom: null,
+      validUntil: null,
+      semanticRevision: 1,
+      evidenceRevision: 1,
+      lifecycle: 'current',
+      reviewStatus: 'rejected',
+      reviewedRevision: 1,
+      reviewedPayloadHash: null,
+      ownerAuthored: false,
+      supersededById: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    expect(
+      (await getFirestorePersonGraph(store, agentId, contactId, 2, undefined, space))?.edges,
+    ).toEqual([]);
+  });
+
   it('refuses owner and missing contacts, mismatched agents, and active erasure', async () => {
-    expect(await getFirestorePersonGraph(store, agentId, ownerContactId, 2)).toBeNull();
-    expect(await getFirestorePersonGraph(store, agentId, randomUUID(), 2)).toBeNull();
-    await expect(getFirestorePersonGraph(store, otherAgentId, contactId, 2)).rejects.toThrow(
-      'exactly one configured agent',
-    );
+    expect(
+      await getFirestorePersonGraph(store, agentId, ownerContactId, 2, undefined, space),
+    ).toBeNull();
+    expect(
+      await getFirestorePersonGraph(store, agentId, randomUUID(), 2, undefined, space),
+    ).toBeNull();
+    await expect(
+      getFirestorePersonGraph(store, otherAgentId, contactId, 2, undefined, space),
+    ).rejects.toThrow('exactly one configured agent');
     await store.doc('privacyErasureJobs', agentId).set({ agentId, status: 'active' });
-    await expect(getFirestorePersonGraph(store, agentId, contactId, 2)).rejects.toThrow(
-      'Privacy erasure is in progress',
-    );
+    await expect(
+      getFirestorePersonGraph(store, agentId, contactId, 2, undefined, space),
+    ).rejects.toThrow('Privacy erasure is in progress');
   });
 
   it('fails closed above the relation scan bound', async () => {
@@ -200,8 +262,8 @@ describe.skipIf(!localEmulator)('Firestore source-backed person graph', () => {
       });
     }
     await batch.commit();
-    await expect(getFirestorePersonGraph(store, agentId, contactId, 2)).rejects.toThrow(
-      'relation scan bound reached',
-    );
+    await expect(
+      getFirestorePersonGraph(store, agentId, contactId, 2, undefined, space),
+    ).rejects.toThrow('relation scan bound reached');
   });
 });

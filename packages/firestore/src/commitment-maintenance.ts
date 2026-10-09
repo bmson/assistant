@@ -1,6 +1,7 @@
 import {
   type CommitmentMaintenanceRepository,
-  commitmentIsStale,
+  type CommitmentMaintenanceResult,
+  commitmentMaintenanceTransition,
   type Records,
 } from '@assistant/persistence';
 import type { QueryDocumentSnapshot } from '@google-cloud/firestore';
@@ -14,17 +15,17 @@ const PAGE = 200;
 const SCAN_LIMIT = 10_000;
 
 /**
- * The open-loop sweep on Firestore. Candidates are the owner's open and
- * snoozed loops; each retirement rechecks the row inside its own transaction,
- * so an owner resolving, snoozing, or editing a loop mid-sweep always wins.
+ * Wake elapsed snoozes and restore legacy age-retired obligations. Each
+ * transition rechecks the row transactionally, preserving concurrent closure.
  */
 export class FirestoreCommitmentMaintenanceRepository implements CommitmentMaintenanceRepository {
   readonly kind = 'commitment-maintenance-repository' as const;
 
   constructor(readonly store: InstallationStore) {}
 
-  async markStale(agentId: string, now: Date): Promise<number> {
-    if (!agentId) throw new Error('Commitment sweep requires an agent');
+  async maintain(agentId: string, now: Date): Promise<CommitmentMaintenanceResult> {
+    if (!agentId || !Number.isFinite(now.getTime()))
+      throw new Error('Commitment sweep requires an agent');
     const candidates: string[] = [];
     let scanned = 0;
     let cursor: QueryDocumentSnapshot | undefined;
@@ -32,7 +33,7 @@ export class FirestoreCommitmentMaintenanceRepository implements CommitmentMaint
       let query = this.store
         .collection('commitments')
         .where('agentId', '==', agentId)
-        .where('status', 'in', ['open', 'snoozed'])
+        .where('status', 'in', ['stale', 'snoozed'])
         .orderBy('updatedAt', 'desc')
         .limit(PAGE);
       if (cursor) query = query.startAfter(cursor);
@@ -42,7 +43,7 @@ export class FirestoreCommitmentMaintenanceRepository implements CommitmentMaint
         if (
           row.agentId === agentId &&
           documentKey(row.id) === doc.id &&
-          commitmentIsStale(row, now)
+          commitmentMaintenanceTransition(row, now)
         )
           candidates.push(row.id);
       }
@@ -53,20 +54,21 @@ export class FirestoreCommitmentMaintenanceRepository implements CommitmentMaint
       cursor = page.docs.at(-1);
     }
 
-    let retired = 0;
+    const result: CommitmentMaintenanceResult = { woken: 0, restored: 0 };
     for (const id of candidates) {
       const ref = this.store.doc('commitments', id);
       const changed = await this.store.db.runTransaction(async (tx) => {
         await assertPrivacyErasureInactiveInTransaction(tx, this.store, agentId);
         const snapshot = await tx.get(ref);
-        if (!snapshot.exists) return false;
+        if (!snapshot.exists) return null;
         const row = decodeRecord<Commitment>(snapshot.data());
-        if (row.agentId !== agentId || !commitmentIsStale(row, now)) return false;
-        tx.update(ref, { status: 'stale', updatedAt: now });
-        return true;
+        const transition = commitmentMaintenanceTransition(row, now);
+        if (row.agentId !== agentId || !transition) return null;
+        tx.update(ref, { status: 'open', snoozedUntil: null, updatedAt: now });
+        return transition;
       });
-      if (changed) retired++;
+      if (changed) result[changed]++;
     }
-    return retired;
+    return result;
   }
 }

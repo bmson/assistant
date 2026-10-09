@@ -13,8 +13,9 @@
  * listening.
  */
 import type { UIMessage } from 'ai';
-import { type Dispatch, type RefObject, type SetStateAction, useEffect } from 'react';
+import { type Dispatch, type RefObject, type SetStateAction, useEffect, useRef } from 'react';
 import { CARD_REFRESH_EVENT } from './card-refresh-events';
+import { uniqueMessageIds } from './message-reconciliation';
 import {
   type RecallSource,
   recallSourcesOf,
@@ -104,9 +105,9 @@ export function mergeChatLog(
   arriving: UIMessage[],
   options: { serverIds: Set<string>; streaming: boolean; retracted: Set<string> },
 ): UIMessage[] {
-  const merged = [...current];
+  const merged = uniqueMessageIds(current);
   const indexes = new Map(merged.map((message, index) => [message.id, index]));
-  let touched = false;
+  let touched = merged.length !== current.length;
   for (const message of arriving) {
     const index = indexes.get(message.id);
     if (index === undefined) {
@@ -278,6 +279,8 @@ export function useChatPolling({
   setActivity,
   setLiveRecall,
   setPollTrouble,
+  onTaskTerminal,
+  keepPollingTask,
 }: {
   conversationId: string;
   setMessages: Dispatch<SetStateAction<UIMessage[]>>;
@@ -294,11 +297,20 @@ export function useChatPolling({
   setActivity: Dispatch<SetStateAction<ChatActivityItem[]>>;
   setLiveRecall: Dispatch<SetStateAction<RecallSource[] | null>>;
   setPollTrouble: Dispatch<SetStateAction<PollTrouble>>;
+  onTaskTerminal?: (taskId: string, status: 'done' | 'failed' | 'cancelled') => void;
+  /** Tasks blocking an unsent form draft must remain observed through parked states. */
+  keepPollingTask?: (taskId: string) => boolean;
 }): void {
+  const onTaskTerminalRef = useRef(onTaskTerminal);
+  onTaskTerminalRef.current = onTaskTerminal;
+  const keepPollingTaskRef = useRef(keepPollingTask);
+  keepPollingTaskRef.current = keepPollingTask;
   // biome-ignore lint/correctness/useExhaustiveDependencies: the loop reads component-owned refs and stable setters by design — re-subscribing on every cursor move would restart the poll mid-conversation, so only a new conversation id does.
   useEffect(() => {
     let cancelled = false;
     let timer = 0;
+    let nextDelayMs: number | undefined;
+    const observation = new AbortController();
     let pollFailures = 0;
     const requestedCards = new Map<string, { taskId?: string; expires: number }>();
     // Kept locally too, so React is only poked when the state actually flips.
@@ -339,8 +351,12 @@ export function useChatPolling({
       );
     };
 
-    const settle = (note: string | null, opts?: { retryable?: boolean }) => {
-      if (cancelled) return;
+    const settle = (
+      expectedTaskId: string,
+      note: string | null,
+      opts?: { retryable?: boolean },
+    ) => {
+      if (cancelled || asyncTurnRef.current?.taskId !== expectedTaskId) return;
       setAsyncNote(note ? { text: note, retryable: opts?.retryable ?? false } : null);
       setAsyncTurn(null);
       setActivity([]);
@@ -399,8 +415,9 @@ export function useChatPolling({
         // hung request without cutting off a healthy one.
         const startedAt = Date.now();
         const res = await fetch(`/api/chat/status?${query.toString()}`, {
-          signal: AbortSignal.timeout(POLL_TIMEOUT_MS),
+          signal: AbortSignal.any([observation.signal, AbortSignal.timeout(POLL_TIMEOUT_MS)]),
         });
+        if (cancelled) return;
         elapsedMs = Date.now() - startedAt;
         // A dead session never recovers by polling — say so and stop asking.
         if (res.status === 401 || res.status === 403) {
@@ -420,7 +437,10 @@ export function useChatPolling({
             hasMore: boolean;
             activity?: ChatActivityItem[];
           };
-          if (turn) setActivity(data.activity ?? []);
+          if (cancelled) return;
+          const sameTurn =
+            !!turn && asyncTurnRef.current?.taskId === turn.taskId && turnRef.current === turnState;
+          if (sameTurn) setActivity(data.activity ?? []);
           // `refreshed` is deliberately kept out of the settle checks below: a
           // re-read of a card already on screen is not this turn producing an
           // answer. `superseded` is likewise a removal, never new output.
@@ -434,25 +454,37 @@ export function useChatPolling({
           const advanced = Boolean(data.nextCursor) && data.nextCursor !== cursorRef.current;
           if (data.nextCursor) cursorRef.current = data.nextCursor;
           if (data.hasMore && advanced) {
-            if (!cancelled) timer = window.setTimeout(tick, 0);
+            nextDelayMs = 0;
             return;
           }
-          if (turnState && data.taskStatus) {
+          if (sameTurn && turnState && data.taskStatus) {
             turnState.sawAssistant ||= data.messages.some(
               (message) => message.role === 'assistant',
             );
             turnState.sawDecision ||= data.messages.some(hasDecisionPart);
-            if (data.taskStatus === 'done' && turnState.sawAssistant) return settle(null);
+            if (
+              data.taskStatus === 'done' &&
+              (turnState.sawAssistant || keepPollingTaskRef.current?.(turnState.taskId))
+            ) {
+              onTaskTerminalRef.current?.(turnState.taskId, 'done');
+              return settle(turnState.taskId, null);
+            }
             if (PARKED_TASK_STATUSES.has(data.taskStatus) && turnState.sawAssistant) {
               // Stop as soon as the card the park is waiting on is here.
               // Without one, keep polling for a bounded grace: the status can
               // be observed in the moment between the park commit and the
               // card's insert, and settling there loses the card.
-              if (turnState.sawDecision || turnState.graceTicks <= 0) return settle(null);
-              turnState.graceTicks -= 1;
+              if (
+                !keepPollingTaskRef.current?.(turnState.taskId) &&
+                (turnState.sawDecision || turnState.graceTicks <= 0)
+              )
+                return settle(turnState.taskId, null);
+              if (!keepPollingTaskRef.current?.(turnState.taskId)) turnState.graceTicks -= 1;
             }
             if (data.taskStatus === 'failed' || data.taskStatus === 'cancelled') {
+              onTaskTerminalRef.current?.(turnState.taskId, data.taskStatus);
               return settle(
+                turnState.taskId,
                 `The task ${data.taskStatus === 'cancelled' ? 'was cancelled' : 'ended unsuccessfully'}.`,
                 { retryable: true },
               );
@@ -463,6 +495,7 @@ export function useChatPolling({
           if (pollFailures >= 3) setTrouble('stale');
         }
       } catch {
+        if (cancelled) return;
         // Transient poll failures retry on the next tick — but a thread that
         // has silently gone stale is indistinguishable from a quiet one, so a
         // streak of failures says so in the log.
@@ -472,8 +505,13 @@ export function useChatPolling({
       // Give up on *waiting* for a long turn, not on the thread: the presence
       // row stops claiming live progress while the poll keeps running, so the
       // answer still lands on its own whenever the executor finishes.
-      if (turnState && Date.now() - turnState.startedAt > TURN_TIMEOUT_MS) {
-        settle('Still working. The result will appear here when it finishes.');
+      if (
+        turnState &&
+        asyncTurnRef.current?.taskId === turnState.taskId &&
+        !keepPollingTaskRef.current?.(turnState.taskId) &&
+        Date.now() - turnState.startedAt > TURN_TIMEOUT_MS
+      ) {
+        settle(turnState.taskId, 'Still working. The result will appear here when it finishes.');
         return schedule(null, { elapsedMs, carriedNews });
       }
       schedule(asyncTurnRef.current, { elapsedMs, carriedNews });
@@ -490,14 +528,23 @@ export function useChatPolling({
         return;
       }
       pollInFlight = true;
+      nextDelayMs = undefined;
       try {
         await poll();
       } finally {
         pollInFlight = false;
-        if (pollQueued && !cancelled) {
-          pollQueued = false;
+        if (!cancelled && trouble !== 'expired') {
           window.clearTimeout(timer);
-          timer = window.setTimeout(tick, 0);
+          const delay = pollQueued
+            ? 0
+            : (nextDelayMs ??
+              nextPollDelayMs({
+                elapsedMs: 0,
+                carriedNews: false,
+                turnActive: Boolean(asyncTurnRef.current),
+              }));
+          pollQueued = false;
+          timer = window.setTimeout(tick, delay);
         }
       }
     };
@@ -507,13 +554,13 @@ export function useChatPolling({
       last: { elapsedMs: number; carriedNews: boolean } = { elapsedMs: 0, carriedNews: false },
     ) => {
       if (cancelled) return;
-      timer = window.setTimeout(tick, nextPollDelayMs({ ...last, turnActive: Boolean(turn) }));
+      nextDelayMs = nextPollDelayMs({ ...last, turnActive: Boolean(turn) });
     };
 
     // Coming back to the tab should feel current immediately, not one idle
     // interval later.
     const onVisible = () => {
-      if (document.visibilityState !== 'visible' || cancelled) return;
+      if (document.visibilityState !== 'visible' || cancelled || trouble === 'expired') return;
       window.clearTimeout(timer);
       void tick();
     };
@@ -533,6 +580,7 @@ export function useChatPolling({
     void tick();
     return () => {
       cancelled = true;
+      observation.abort();
       window.clearTimeout(timer);
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener(CARD_REFRESH_EVENT, onCardRefresh);

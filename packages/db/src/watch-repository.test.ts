@@ -1,8 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { eq, inArray } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, type Db } from './client.js';
-import { agents, conversations, suggestions, watches, watchFires } from './schema.js';
+import {
+  agents,
+  conversations,
+  suggestions,
+  watches,
+  watchFireEffects,
+  watchFires,
+} from './schema.js';
 import { createPostgresWatchRepository } from './watch-repository.js';
 
 const DATABASE_URL =
@@ -14,6 +21,83 @@ describe('PostgreSQL watch repository suggestions', () => {
   let db: Db;
   const ownerId = randomUUID();
   const foreignId = randomUUID();
+
+  it('lets a queued cancellation win before a blocked fire without resurrecting the watch', async () => {
+    const repository = createPostgresWatchRepository(db);
+    const now = new Date();
+    const watch = await repository.create({
+      agentId: ownerId,
+      kind: 'email',
+      tier: 'notify',
+      name: 'Lock race',
+      match: { expectedSenderEmails: ['sender@example.com'] },
+      maxFires: null,
+      expiresAt: new Date(now.getTime() + 86400000),
+    });
+    let release!: () => void;
+    let locked!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holder = db.transaction(async (tx) => {
+      await tx.select().from(watches).where(eq(watches.id, watch.id)).for('update');
+      locked();
+      await hold;
+    });
+    await ready;
+    const cancellation = repository.cancel(ownerId, watch.id, now);
+    try {
+      let queued = false;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const rows = await db.execute<{ waiting: boolean }>(
+          sql`select exists(select 1 from pg_stat_activity where datname=current_database() and wait_event='transactionid' and query like 'update "watches"%') as waiting`,
+        );
+        if (rows[0]?.waiting) {
+          queued = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(queued).toBe(true);
+      const firing = repository.recordFire({
+        agentId: ownerId,
+        watchId: watch.id,
+        triggerRef: 'cancel-race',
+        summary: 'Race',
+        excerpt: 'Race',
+        now,
+      });
+      let fireQueued = false;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const rows = await db.execute<{ count: number }>(
+          sql`select count(*)::int as count from pg_stat_activity where datname=current_database() and wait_event in ('transactionid', 'tuple') and query like '%"watches"%'`,
+        );
+        if ((rows[0]?.count ?? 0) >= 2) {
+          fireQueued = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(fireQueued).toBe(true);
+      release();
+      await holder;
+      expect(await cancellation).toEqual({ status: 'cancelled', cancelled: true });
+      expect(await firing).toMatchObject({ recorded: false, watch: { status: 'cancelled' } });
+      expect(await db.select().from(watchFires).where(eq(watchFires.watchId, watch.id))).toEqual(
+        [],
+      );
+      expect((await db.select().from(watches).where(eq(watches.id, watch.id)))[0]?.status).toBe(
+        'cancelled',
+      );
+    } finally {
+      release();
+      await holder;
+      await cancellation;
+    }
+  });
 
   beforeEach(async () => {
     db = createDb(DATABASE_URL);
@@ -35,6 +119,9 @@ describe('PostgreSQL watch repository suggestions', () => {
 
   afterEach(async () => {
     await db.delete(suggestions).where(eq(suggestions.agentId, ownerId));
+    await db
+      .delete(watchFireEffects)
+      .where(inArray(watchFireEffects.agentId, [ownerId, foreignId]));
     await db.delete(watchFires).where(eq(watchFires.agentId, ownerId));
     await db.delete(watches).where(eq(watches.agentId, ownerId));
     await db.delete(conversations).where(inArray(conversations.agentId, [ownerId, foreignId]));

@@ -1,6 +1,7 @@
 import {
   assertSupportedMigrationTables,
   checksumV3,
+  compositeMigrationId,
   deterministicMigrationCompare,
   MIGRATION_TABLES,
   type MigrationBundle,
@@ -173,7 +174,12 @@ export async function exportWorkspaceSnapshot(
             `select ${select} from ${quoteIdentifier(table)} x join conversations c on c.id = x.conversation_id where c.agent_id = $1 order by x.${quoteIdentifier(definition.id)}`,
             [options.agentId],
           );
-        } else if (table === 'tool_calls' || table === 'approvals' || table === 'response_checks') {
+        } else if (
+          table === 'tool_calls' ||
+          table === 'approvals' ||
+          table === 'response_checks' ||
+          table === 'execution_job_callback_receipts'
+        ) {
           rows = await connection.unsafe(
             `select ${select} from ${quoteIdentifier(table)} x join tasks t on t.id = x.task_id where t.agent_id = $1 order by x.${quoteIdentifier(definition.id)}`,
             [options.agentId],
@@ -215,12 +221,15 @@ export async function exportWorkspaceSnapshot(
                     serializeMigrationTimestamp(timestamp),
                   ];
                 if (
-                  key === 'embedding' &&
+                  (key === 'embedding' || key === 'prepared_vector') &&
                   Array.isArray(value) &&
                   value.every((item) => typeof item === 'number')
                 )
                   return [migrationColumnFieldName(table, key), serializeMigrationVector(value)];
-                if (key === 'embedding' && typeof value === 'string') {
+                if (
+                  (key === 'embedding' || key === 'prepared_vector') &&
+                  typeof value === 'string'
+                ) {
                   try {
                     const vector = JSON.parse(value) as unknown;
                     if (Array.isArray(vector) && vector.every((item) => typeof item === 'number'))
@@ -239,7 +248,10 @@ export async function exportWorkspaceSnapshot(
               }),
           );
           const singletonByAgent = table === 'owner_card' || table === 'ambient_snapshots';
-          const migratedId = singletonByAgent ? options.agentId : String(rawId);
+          const migratedId =
+            (singletonByAgent ? options.agentId : null) ??
+            compositeMigrationId(table, data) ??
+            String(rawId);
           if (table === 'owner_card') {
             data.agentId = options.agentId;
             data.postgresqlId = serializeMigrationValueV3(rawId);
@@ -266,7 +278,7 @@ export async function exportWorkspaceSnapshot(
         deterministicMigrationCompare(`${a.table}:${a.id}`, `${b.table}:${b.id}`),
       );
       const vectorRecords = records.filter((record) => {
-        const value = record.data.embedding;
+        const value = record.data.embedding ?? record.data.preparedVector;
         const tag =
           value && typeof value === 'object' && !Array.isArray(value)
             ? (value as { $assistantMigration?: unknown }).$assistantMigration
@@ -279,7 +291,9 @@ export async function exportWorkspaceSnapshot(
         );
       if (options.embeddingSpace) {
         for (const record of vectorRecords) {
-          const value = record.data.embedding as { $assistantMigration: ['vector', number[]] };
+          const value = (record.data.embedding ?? record.data.preparedVector) as {
+            $assistantMigration: ['vector', number[]];
+          };
           if (value.$assistantMigration[1].length !== options.embeddingSpace.dimensions)
             throw new Error(
               `Embedding provenance dimension mismatch: ${record.table}/${record.id}`,

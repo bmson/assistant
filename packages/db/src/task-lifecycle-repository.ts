@@ -5,10 +5,15 @@ import type {
   TaskRepository,
   TaskWake,
 } from '@assistant/persistence';
-import { newTaskRecord } from '@assistant/persistence';
+import {
+  missionTaskTerminalReport,
+  newTaskRecord,
+  normalizeTaskBudget,
+  redactTerminalArrivalTask,
+} from '@assistant/persistence';
 import { and, desc, eq, inArray, isNull, lt, lte, notInArray, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
-import { type TaskRow, tasks } from './schema.js';
+import { missionReports, type TaskRow, tasks } from './schema.js';
 import { createTask } from './task-creation-repository.js';
 import { activeLease, createPostgresTaskLeaseRepository } from './task-lease-repository.js';
 
@@ -176,19 +181,100 @@ export async function completeTask(
     typeof taskOrId === 'string'
       ? and(eq(tasks.id, taskOrId), notInArray(tasks.status, [...TERMINAL]))
       : activeLease(taskOrId);
-  const [updated] = await db
-    .update(tasks)
-    .set({
+  return db.transaction(async (tx) => {
+    const [updated] = await tx
+      .update(tasks)
+      .set({
+        status: outcome.status,
+        progress: outcome.progress ?? sql`${tasks.progress}`,
+        lockedUntil: null,
+        leaseToken: null,
+        runAfter: null,
+        attempt: 0,
+        updatedAt: sql`now()`,
+      })
+      .where(where)
+      .returning({
+        id: tasks.id,
+        agentId: tasks.agentId,
+        type: tasks.type,
+        parentTaskId: tasks.parentTaskId,
+        trigger: tasks.trigger,
+        externalEventId: tasks.externalEventId,
+      });
+    if (!updated) return false;
+
+    const arrivalRedaction = redactTerminalArrivalTask(
+      updated.trigger,
+      updated.agentId,
+      updated.externalEventId,
+    );
+    if (arrivalRedaction) {
+      await tx
+        .update(tasks)
+        .set(arrivalRedaction)
+        .where(and(eq(tasks.id, updated.id), eq(tasks.agentId, updated.agentId)));
+    }
+
+    if (outcome.status === 'done' && updated.type !== 'mission') return true;
+    if (
+      outcome.status !== 'done' &&
+      updated.type !== 'mission' &&
+      (updated.type !== 'adhoc' || !updated.parentTaskId)
+    )
+      return true;
+
+    const missionId = updated.type === 'mission' ? updated.id : updated.parentTaskId;
+    if (!missionId) return true;
+    const [mission] = await tx
+      .select({
+        id: tasks.id,
+        agentId: tasks.agentId,
+        goalId: tasks.goalId,
+        conversationId: tasks.conversationId,
+        type: tasks.type,
+        status: tasks.status,
+      })
+      .from(tasks)
+      .where(and(eq(tasks.id, missionId), eq(tasks.agentId, updated.agentId)))
+      .for('update');
+    if (mission?.type !== 'mission') return true;
+
+    if (updated.type !== 'mission' && outcome.status === 'done') return true;
+
+    if (
+      updated.type !== 'mission' &&
+      !TERMINAL.includes(mission.status as (typeof TERMINAL)[number])
+    ) {
+      await tx
+        .update(tasks)
+        .set({
+          status: 'needs_attention',
+          progress:
+            'A mission work session ended and needs review before the mission can continue.',
+          leaseToken: null,
+          lockedUntil: null,
+          runAfter: null,
+          attempt: 0,
+          attentionNotifiedAt: null,
+          updatedAt: sql`now()`,
+        })
+        .where(and(eq(tasks.id, mission.id), eq(tasks.agentId, mission.agentId)));
+    }
+
+    const now = new Date();
+    const report = missionTaskTerminalReport({
+      mission,
+      task: updated,
       status: outcome.status,
-      progress: outcome.progress ?? sql`${tasks.progress}`,
-      lockedUntil: null,
-      runAfter: null,
-      attempt: 0,
-      updatedAt: sql`now()`,
-    })
-    .where(where)
-    .returning({ id: tasks.id });
-  return Boolean(updated);
+      now,
+    });
+    await tx
+      .insert(missionReports)
+      .values(report)
+      .onConflictDoNothing({ target: missionReports.id });
+    return true;
+  });
 }
 
 export async function markTaskNeedsAttention(
@@ -245,25 +331,75 @@ export async function recordFailedAttempt(
   error: string,
 ): Promise<'retry' | 'dead_letter' | 'lost_lease'> {
   const message = error.slice(0, 500);
-  const [updated] = await db
-    .update(tasks)
-    .set({
-      attempt: sql`${tasks.attempt} + 1`,
-      status: sql`CASE WHEN ${tasks.attempt} + 1 >= ${MAX_ATTEMPTS} THEN 'needs_attention' ELSE 'sleeping' END`,
-      progress: sql`'attempt ' || (${tasks.attempt} + 1)::text || ' failed: ' || ${message}`,
-      runAfter: sql`CASE WHEN ${tasks.attempt} + 1 >= ${MAX_ATTEMPTS} THEN NULL ELSE now() + least(300, (5 * power(2, ${tasks.attempt}))::int) * interval '1 second' END`,
-      // Dead-lettering here often has no accompanying notify (a crashed worker).
-      // Nulling the stamp lets the re-notify sweep reach it; harmless when the
-      // task instead sleeps (the sweep never selects sleeping rows).
-      attentionNotifiedAt: null,
-      lockedUntil: null,
-      queueGeneration: sql`${tasks.queueGeneration} + 1`,
-      updatedAt: sql`now()`,
-    })
-    .where(activeLease(task))
-    .returning({ status: tasks.status, queueGeneration: tasks.queueGeneration });
-  if (!updated) return 'lost_lease';
-  return updated.status === 'needs_attention' ? 'dead_letter' : 'retry';
+  return db.transaction(async (tx) => {
+    const [updated] = await tx
+      .update(tasks)
+      .set({
+        attempt: sql`${tasks.attempt} + 1`,
+        status: sql`CASE WHEN ${tasks.attempt} + 1 >= ${MAX_ATTEMPTS} THEN 'needs_attention' ELSE 'sleeping' END`,
+        progress: sql`'attempt ' || (${tasks.attempt} + 1)::text || ' failed: ' || ${message}`,
+        runAfter: sql`CASE WHEN ${tasks.attempt} + 1 >= ${MAX_ATTEMPTS} THEN NULL ELSE now() + least(300, (5 * power(2, ${tasks.attempt}))::int) * interval '1 second' END`,
+        // Dead-lettering here often has no accompanying notify (a crashed worker).
+        // Nulling the stamp lets the re-notify sweep reach it; harmless when the
+        // task instead sleeps (the sweep never selects sleeping rows).
+        attentionNotifiedAt: null,
+        lockedUntil: null,
+        queueGeneration: sql`${tasks.queueGeneration} + 1`,
+        updatedAt: sql`now()`,
+      })
+      .where(activeLease(task))
+      .returning({
+        id: tasks.id,
+        agentId: tasks.agentId,
+        type: tasks.type,
+        parentTaskId: tasks.parentTaskId,
+        goalId: tasks.goalId,
+        conversationId: tasks.conversationId,
+        status: tasks.status,
+        attempt: tasks.attempt,
+      });
+    if (!updated) return 'lost_lease';
+    if (updated.status !== 'needs_attention') return 'retry';
+
+    const isMission = updated.type === 'mission';
+    const parent =
+      !isMission && updated.type === 'adhoc' && updated.parentTaskId
+        ? (await tx.select().from(tasks).where(eq(tasks.id, updated.parentTaskId)).for('update'))[0]
+        : undefined;
+    const mission = isMission
+      ? (await tx.select().from(tasks).where(eq(tasks.id, updated.id)).for('update'))[0]
+      : parent?.type === 'mission' && parent.agentId === updated.agentId
+        ? parent
+        : undefined;
+    if (!mission) return 'dead_letter';
+
+    if (!isMission && !TERMINAL.includes(mission.status as (typeof TERMINAL)[number])) {
+      await tx
+        .update(tasks)
+        .set({
+          status: 'needs_attention',
+          progress:
+            'A mission work session exhausted its retries and needs review before the mission can continue.',
+          lockedUntil: null,
+          runAfter: null,
+          attentionNotifiedAt: null,
+          updatedAt: sql`now()`,
+        })
+        .where(eq(tasks.id, mission.id));
+    }
+    const report = missionTaskTerminalReport({
+      mission,
+      task: { id: updated.id },
+      status: 'needs_attention',
+      attempt: updated.attempt,
+      now: new Date(),
+    });
+    await tx
+      .insert(missionReports)
+      .values(report)
+      .onConflictDoNothing({ target: missionReports.id });
+    return 'dead_letter';
+  });
 }
 
 export async function wakeTask(
@@ -271,13 +407,7 @@ export async function wakeTask(
   taskId: string,
   budgetIncrease?: { agentId: string; limit: number },
 ): Promise<TaskWake | null> {
-  if (
-    budgetIncrease &&
-    (!Number.isFinite(budgetIncrease.limit) ||
-      budgetIncrease.limit < 0.01 ||
-      budgetIncrease.limit > 10_000)
-  )
-    return null;
+  if (budgetIncrease && normalizeTaskBudget(budgetIncrease.limit, 0.01) === null) return null;
   const [woken] = await db
     .update(tasks)
     .set({

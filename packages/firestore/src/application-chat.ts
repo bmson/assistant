@@ -1,21 +1,39 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type {
   ApplicationChatApproval,
   ApplicationChatConversation,
   ApplicationChatHydrationState,
   ApplicationChatMessage,
   ApplicationChatPersistence,
+  Records,
   TaskLease,
 } from '@assistant/persistence';
 import {
+  assertChatAdmissionOperationId,
   boundedChatConversationLimit,
   boundedChatMessageLimit,
+  chatAdmissionCancellationPayload,
+  chatAdmissionCancellationTrigger,
+  chatAdmissionExternalEventId,
+  chatAdmissionPayload,
+  isChatAdmissionCancellationProjection,
   newTaskRecord,
+  normalizeTaskBudget,
+  recallSurfaceRefs,
+  withChatAdmissionPhase,
 } from '@assistant/persistence';
 import { type Query, type QueryDocumentSnapshot, Timestamp } from '@google-cloud/firestore';
+import { conversationDocument } from './conversation-document.js';
 import { FirestoreExecutionEvidenceRepository } from './execution-evidence.js';
+import { assertFirestoreInstallationOwner } from './installation-owner.js';
 import { createWakeIntent } from './outbox.js';
-import { decodeRecord, encodeRecord, type InstallationStore } from './store.js';
+import {
+  assertPrivacyErasureGenerationInTransaction,
+  assertPrivacyErasureInactiveInTransaction,
+  readPrivacyErasureFence,
+} from './privacy-erasure.js';
+import { deterministicUuid } from './stable-id.js';
+import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 const TERMINAL_TASK_STATUSES = ['done', 'failed', 'cancelled'];
 const MAX_ACTIVE_TASKS = 500;
@@ -23,6 +41,7 @@ const MAX_MODELS = 100;
 const MAX_LOOKUP_IDS = 200;
 const GOAL_BLOCKED_PREFIX = 'Waiting on the owner:';
 const DIRECT_CHAT_LEASE_MS = 10 * 60_000;
+const FIRST_APPEND_ID = '00000000-0000-0000-0000-000000000000';
 
 function conciseTitle(value: string | undefined): string | undefined {
   const title = value?.replace(/\s+/g, ' ').trim() ?? '';
@@ -35,27 +54,47 @@ function decodeConversation(snapshot: QueryDocumentSnapshot): ApplicationChatCon
 }
 
 function decodeMessage(snapshot: QueryDocumentSnapshot): ApplicationChatMessage {
-  const message = decodeRecord<ApplicationChatMessage>(snapshot.data());
-  const createdAt = snapshot.get('createdAt');
-  if (!(createdAt instanceof Timestamp)) return message;
-  const wholeSecond = new Date(Number(createdAt.seconds) * 1_000)
-    .toISOString()
-    .slice(0, 'YYYY-MM-DDTHH:mm:ss'.length);
+  return decodeMessageData(snapshot.data(), snapshot.get('createdAt'), snapshot.get('appendedAt'));
+}
+
+function decodeMessageData(
+  data: FirebaseFirestore.DocumentData,
+  createdAt: unknown,
+  appendedAt: unknown,
+): ApplicationChatMessage {
+  const message = decodeRecord<ApplicationChatMessage & { embeddingSpace?: unknown }>(data);
+  const appendSequence =
+    appendedAt instanceof Timestamp
+      ? (BigInt(appendedAt.seconds) * 1_000_000_000n + BigInt(appendedAt.nanoseconds))
+          .toString()
+          .padStart(20, '0')
+      : undefined;
+  const wholeSecond =
+    createdAt instanceof Timestamp
+      ? new Date(Number(createdAt.seconds) * 1_000)
+          .toISOString()
+          .slice(0, 'YYYY-MM-DDTHH:mm:ss'.length)
+      : undefined;
   return {
     ...message,
-    createdAtExact: `${wholeSecond}.${String(createdAt.nanoseconds).padStart(9, '0')}Z`,
+    embeddingSpaceKey:
+      typeof message.embeddingSpaceKey === 'string'
+        ? message.embeddingSpaceKey
+        : typeof message.embeddingSpace === 'string'
+          ? message.embeddingSpace
+          : null,
+    ...(wholeSecond && createdAt instanceof Timestamp
+      ? { createdAtExact: `${wholeSecond}.${String(createdAt.nanoseconds).padStart(9, '0')}Z` }
+      : {}),
+    ...(appendSequence ? { appendSequence } : {}),
   };
 }
 
-function cursorTimestamp(createdAt: Date, createdAtExact?: string): Date | Timestamp {
-  if (!createdAtExact) return createdAt;
-  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d{1,9})Z$/.exec(createdAtExact);
-  if (!match) return createdAt;
-  const [, wholeSecond, fraction] = match;
-  if (!wholeSecond || !fraction) return createdAt;
-  const seconds = Date.parse(`${wholeSecond}Z`) / 1_000;
-  if (!Number.isSafeInteger(seconds)) return createdAt;
-  return new Timestamp(seconds, Number(fraction.padEnd(9, '0')));
+function appendedTimestamp(sequence: string): Timestamp {
+  const value = BigInt(sequence);
+  const seconds = value / 1_000_000_000n;
+  const nanos = value % 1_000_000_000n;
+  return new Timestamp(Number(seconds), Number(nanos));
 }
 
 function chunks<T>(values: T[], size = 30): T[][] {
@@ -76,6 +115,67 @@ function isOwnedChat(data: FirebaseFirestore.DocumentData | undefined, agentId: 
   return Boolean(data && data.agentId === agentId && data.channel === 'chat');
 }
 
+async function assertRecalledMessagesCurrent(
+  tx: FirebaseFirestore.Transaction,
+  store: InstallationStore,
+  agentId: string,
+  refs: ReturnType<typeof recallSurfaceRefs>,
+) {
+  const ids = [...new Set(refs.flatMap((ref) => ref.sourceMessageIds ?? []))];
+  if (!ids.length) return;
+  const snapshots = await Promise.all(
+    chunks(ids, 30).map((group) => tx.getAll(...group.map((id) => store.doc('messages', id)))),
+  );
+  const messagesById = new Map<string, FirebaseFirestore.DocumentSnapshot>();
+  for (const snapshot of snapshots.flat()) {
+    const id = snapshot.get('id');
+    if (typeof id === 'string') messagesById.set(id, snapshot);
+  }
+  const conversationIds = [
+    ...new Set(
+      ids
+        .map((id) => messagesById.get(id)?.get('conversationId'))
+        .filter((id): id is string => typeof id === 'string'),
+    ),
+  ];
+  const conversations = await Promise.all(
+    chunks(conversationIds, 30).map((group) =>
+      tx.getAll(...group.map((id) => store.doc('conversations', id))),
+    ),
+  );
+  const ownedConversationIds = new Set(
+    conversations
+      .flat()
+      .filter((snapshot) => snapshot.exists && isOwnedChat(snapshot.data(), agentId))
+      .map((snapshot) => snapshot.get('id'))
+      .filter((id): id is string => typeof id === 'string'),
+  );
+  for (const ref of refs) {
+    const sourceIds = ref.sourceMessageIds;
+    if (!sourceIds?.length) continue;
+    const sourceRows = sourceIds.map((id) => messagesById.get(id));
+    if (
+      sourceRows.some(
+        (row) =>
+          !row?.exists ||
+          row.get('hiddenAt') != null ||
+          typeof row.get('conversationId') !== 'string' ||
+          !ownedConversationIds.has(row.get('conversationId')),
+      )
+    )
+      throw new Error('Recalled source changed before chat publication');
+    if (ref.representation === 'message_excerpts') {
+      const revision = createHash('sha256')
+        .update(
+          JSON.stringify(sourceRows.map((row, index) => [sourceIds[index], row?.get('text')])),
+        )
+        .digest('hex');
+      if (revision !== ref.sourceRevision)
+        throw new Error('Recalled source changed before chat publication');
+    }
+  }
+}
+
 /** Firestore adapter for the owner-facing application chat read/write model. */
 export class FirestoreApplicationChatPersistence implements ApplicationChatPersistence {
   readonly kind = 'application-chat-persistence' as const;
@@ -85,108 +185,132 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
     private readonly configuredAgentId?: string,
   ) {}
 
+  async privacyObservationGeneration(agentId: string): Promise<string | null> {
+    if (agentId !== this.configuredAgentId)
+      throw new Error('Privacy observation is outside the configured Firestore owner');
+    const fence = await readPrivacyErasureFence(this.store, agentId);
+    return fence ? `${fence.seconds}:${fence.nanoseconds}` : null;
+  }
+
   async resolveAgent() {
-    if (this.configuredAgentId) {
-      const snapshot = await this.store.doc('agents', this.configuredAgentId).get();
-      if (!snapshot.exists) throw new Error('configured Firestore agent is missing');
-      const agent = decodeRecord<Awaited<ReturnType<ApplicationChatPersistence['resolveAgent']>>>(
-        snapshot.data(),
-      );
-      if (agent.id !== this.configuredAgentId)
-        throw new Error('configured Firestore agent is missing');
-      return agent;
-    }
-    const snapshot = await this.store
-      .collection('agents')
-      .orderBy('createdAt', 'asc')
-      .orderBy('id', 'asc')
-      .limit(1)
-      .get();
-    const first = snapshot.docs[0];
-    if (!first) throw new Error('no agent row — run pnpm seed');
-    return decodeRecord<Awaited<ReturnType<ApplicationChatPersistence['resolveAgent']>>>(
-      first.data(),
+    const ownerId = await assertFirestoreInstallationOwner(this.store, this.configuredAgentId);
+    if (!ownerId) throw new Error('no agent row — run pnpm seed');
+    const snapshot = await this.store.doc('agents', ownerId).get();
+    if (!snapshot.exists) throw new Error('installation owner changed during lookup');
+    const agent = decodeRecord<Awaited<ReturnType<ApplicationChatPersistence['resolveAgent']>>>(
+      snapshot.data(),
     );
+    if (agent.id !== ownerId) throw new Error('installation owner identity mismatch');
+    return agent;
   }
 
   async getOrCreatePrimaryConversation(agentId: string) {
+    if (this.configuredAgentId && this.configuredAgentId !== agentId)
+      throw new Error('Primary conversation owner is outside this installation');
     return this.store.db.runTransaction(async (tx) => {
-      // All bootstrap callers contend on one owner-scoped document. A query for
-      // `isPrimary` alone does not prevent concurrent transactions from each
-      // creating a different conversation when the query is initially empty.
+      const owner = await tx.get(this.store.doc('agents', agentId));
+      if (!owner.exists || owner.get('id') !== agentId)
+        throw new Error('Primary conversation owner is missing');
+      await assertPrivacyErasureInactiveInTransaction(tx, this.store, agentId);
       const markerRef = this.store.doc('primaryConversations', agentId);
       const marker = await tx.get(markerRef);
+      const ownerPurpose = (document: FirebaseFirestore.DocumentSnapshot) => {
+        const metadata = document.get('metadata') as Record<string, unknown> | undefined;
+        return (
+          isOwnedChat(document.data(), agentId) &&
+          document.get('trust') === 'owner' &&
+          !metadata?.goalId &&
+          (metadata?.purpose === undefined || metadata.purpose === 'owner-chat')
+        );
+      };
+      const demote = new Map<string, FirebaseFirestore.DocumentReference>();
+      let marked: FirebaseFirestore.DocumentSnapshot | undefined;
       if (marker.exists) {
-        const conversationId = marker.get('conversationId');
-        if (
-          marker.get('agentId') !== agentId ||
-          typeof conversationId !== 'string' ||
-          !conversationId
-        )
+        const id = marker.get('conversationId');
+        if (marker.get('agentId') !== agentId || typeof id !== 'string' || !id)
           throw new Error('Primary conversation marker is malformed');
-        const current = await tx.get(this.store.doc('conversations', conversationId));
+        marked = await tx.get(this.store.doc('conversations', id));
         if (
-          !current.exists ||
-          !isOwnedChat(current.data(), agentId) ||
-          current.get('isPrimary') !== true
+          !marked.exists ||
+          !isOwnedChat(marked.data(), agentId) ||
+          marked.get('id') !== id ||
+          marked.get('isPrimary') !== true
         )
           throw new Error('Primary conversation marker does not match an owned chat');
-        const conversation = decodeRecord<ApplicationChatConversation>(current.data());
-        if (!conversation.archivedAt) return conversation;
-        const now = this.store.now();
-        tx.update(current.ref, { archivedAt: null, archived: false, updatedAt: now });
-        return { ...conversation, archivedAt: null, updatedAt: now };
+        if (!ownerPurpose(marked)) demote.set(marked.id, marked.ref);
       }
-
       const primarySnapshot = await tx.get(
         this.store
           .collection('conversations')
           .where('agentId', '==', agentId)
           .where('isPrimary', '==', true)
-          .limit(1),
+          .limit(3),
       );
-      const primary = primarySnapshot.docs[0];
-      if (primary) {
-        if (!isOwnedChat(primary.data(), agentId))
+      if (primarySnapshot.size > 2) throw new Error('Ambiguous primary conversation');
+      const valid = primarySnapshot.docs.filter((document) => {
+        if (
+          document.get('id') === undefined ||
+          this.store.doc('conversations', document.get('id')).id !== document.id
+        )
+          throw new Error('Primary conversation identity mismatch');
+        if (!isOwnedChat(document.data(), agentId))
           throw new Error('Primary conversation belongs to another agent');
-        const conversation = decodeConversation(primary);
-        tx.create(markerRef, {
+        if (ownerPurpose(document)) return true;
+        demote.set(document.id, document.ref);
+        return false;
+      });
+      if (valid.length > 1) throw new Error('Ambiguous primary conversation');
+      let selected: FirebaseFirestore.QueryDocumentSnapshot | undefined = valid[0];
+      if (!selected) {
+        // Bound the candidate read; a thread that has no suitable legacy chat
+        // gets a new stable primary rather than an unbounded bootstrap scan.
+        const candidates = await tx.get(
+          this.store
+            .collection('conversations')
+            .where('agentId', '==', agentId)
+            .where('channel', '==', 'chat')
+            .where('trust', '==', 'owner')
+            .where('archived', '==', false)
+            .orderBy('updatedAt', 'desc')
+            .orderBy('id', 'desc')
+            .limit(100),
+        );
+        selected = candidates.docs.find(ownerPurpose);
+      }
+      const now = this.store.now();
+      for (const ref of demote.values()) tx.update(ref, { isPrimary: false, updatedAt: now });
+      if (selected) {
+        if (
+          typeof selected.get('id') !== 'string' ||
+          this.store.doc('conversations', selected.get('id')).id !== selected.id
+        )
+          throw new Error('Primary conversation identity mismatch');
+        const conversation = decodeConversation(selected);
+        const alreadyCanonical =
+          marker.exists &&
+          marked?.id === selected.id &&
+          demote.size === 0 &&
+          selected.get('isPrimary') === true &&
+          selected.get('archived') === false &&
+          selected.get('archivedAt') === null &&
+          (conversation.metadata as { purpose?: unknown } | null)?.purpose === 'owner-chat';
+        if (alreadyCanonical) return conversation;
+        const metadata = { ...(conversation.metadata as object), purpose: 'owner-chat' };
+        tx.update(selected.ref, {
+          isPrimary: true,
+          archivedAt: null,
+          archived: false,
+          metadata,
+          updatedAt: now,
+        });
+        tx.set(markerRef, {
           agentId,
           conversationId: conversation.id,
-          createdAt: this.store.now(),
+          createdAt: marker.get('createdAt') ?? now,
         });
-        if (conversation.archivedAt) {
-          const now = this.store.now();
-          tx.update(primary.ref, { archivedAt: null, archived: false, updatedAt: now });
-          return { ...conversation, archivedAt: null, updatedAt: now };
-        }
-        return conversation;
+        return { ...conversation, isPrimary: true, archivedAt: null, metadata, updatedAt: now };
       }
-
-      const candidates = await tx.get(
-        this.store
-          .collection('conversations')
-          .where('agentId', '==', agentId)
-          .where('channel', '==', 'chat')
-          .where('archived', '==', false)
-          .orderBy('updatedAt', 'desc')
-          .orderBy('id', 'desc'),
-      );
-      const recent = candidates.docs.find(
-        (document) =>
-          isOwnedChat(document.data(), agentId) &&
-          !(document.get('metadata') as Record<string, unknown> | undefined)?.goalId,
-      );
-      if (recent) {
-        const conversation = decodeConversation(recent);
-        const now = this.store.now();
-        tx.update(recent.ref, { isPrimary: true, updatedAt: now });
-        tx.create(markerRef, { agentId, conversationId: conversation.id, createdAt: now });
-        return { ...conversation, isPrimary: true, updatedAt: now };
-      }
-
       const id = randomUUID();
-      const now = this.store.now();
       const created: ApplicationChatConversation = {
         id,
         agentId,
@@ -195,14 +319,15 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
         trust: 'owner',
         modelOverride: null,
         isPrimary: true,
-        metadata: {},
+        metadata: { purpose: 'owner-chat' },
         archivedAt: null,
         lastReadAt: null,
+        messageSequence: 0,
         createdAt: now,
         updatedAt: now,
       };
-      tx.create(this.store.doc('conversations', id), encodeRecord({ ...created, archived: false }));
-      tx.create(markerRef, { agentId, conversationId: id, createdAt: now });
+      tx.create(this.store.doc('conversations', id), conversationDocument(created));
+      tx.set(markerRef, { agentId, conversationId: id, createdAt: now });
       return created;
     });
   }
@@ -218,13 +343,14 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
       trust: 'owner',
       modelOverride: null,
       isPrimary: false,
-      metadata: {},
+      metadata: { purpose: 'owner-chat' },
       archivedAt: null,
       lastReadAt: null,
+      messageSequence: 0,
       createdAt: now,
       updatedAt: now,
     };
-    await this.store.doc('conversations', id).create(encodeRecord({ ...row, archived: false }));
+    await this.store.doc('conversations', id).create(conversationDocument(row));
     return row;
   }
 
@@ -442,11 +568,17 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
 
   async getTaskStatus(agentId: string, conversationId: string, taskId: string) {
     const snapshot = await this.store.doc('tasks', taskId).get();
-    return snapshot.exists &&
-      snapshot.get('agentId') === agentId &&
-      snapshot.get('conversationId') === conversationId
-      ? String(snapshot.get('status'))
-      : null;
+    if (!snapshot.exists) return null;
+    const task = decodeRecord<Record<string, unknown>>(snapshot.data());
+    if (
+      task.id !== taskId ||
+      documentKey(taskId) !== snapshot.id ||
+      task.agentId !== agentId ||
+      task.conversationId !== conversationId ||
+      isChatAdmissionCancellationProjection(task)
+    )
+      return null;
+    return typeof task.status === 'string' ? task.status : null;
   }
 
   async listTaskActivity(
@@ -497,14 +629,32 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
       .collection('messages')
       .where('conversationId', '==', conversationId)
       .where('hiddenAt', '==', null);
-    if (input.after) {
-      query = query
-        .orderBy('createdAt', 'asc')
-        .orderBy('id', 'asc')
-        .startAfter(
-          cursorTimestamp(input.after.createdAt, input.after.createdAtExact),
-          input.after.id,
+    let afterSequence = input.after?.appendSequence;
+    if (input.after && !afterSequence) {
+      // Older clients only sent the createdAt/id pair. Resolve that stable
+      // message identity to its commit-ordered position before paging so a
+      // late-created message cannot be skipped by the legacy timestamp.
+      const anchor = await this.store.doc('messages', input.after.id).get();
+      const appendedAt = anchor.get('appendedAt');
+      if (
+        anchor.exists &&
+        anchor.get('conversationId') === conversationId &&
+        anchor.get('hiddenAt') === null &&
+        appendedAt instanceof Timestamp
+      ) {
+        afterSequence = (
+          BigInt(appendedAt.seconds) * 1_000_000_000n +
+          BigInt(appendedAt.nanoseconds)
         )
+          .toString()
+          .padStart(20, '0');
+      }
+    }
+    if (afterSequence) {
+      query = query
+        .orderBy('appendedAt', 'asc')
+        .orderBy('id', 'asc')
+        .startAfter(appendedTimestamp(afterSequence), input.after?.id ?? '')
         .limit(limit + 1);
       const snapshot = await query.get();
       return {
@@ -512,12 +662,32 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
         hasMore: snapshot.size > limit,
       };
     }
-    const snapshot = await query
-      .orderBy('createdAt', 'desc')
-      .orderBy('id', 'desc')
-      .limit(limit)
-      .get();
-    return { messages: snapshot.docs.map(decodeMessage).reverse(), hasMore: false };
+    if (input.fromStart || input.after) {
+      query = query.orderBy('appendedAt', 'asc').orderBy('id', 'asc');
+      query = query.startAfter(new Timestamp(0, 0), FIRST_APPEND_ID).limit(limit + 1);
+      const snapshot = await query.get();
+      return {
+        messages: snapshot.docs.slice(0, limit).map(decodeMessage),
+        hasMore: snapshot.size > limit,
+      };
+    }
+    const [chronological, appendOrdered] = await Promise.all([
+      query.orderBy('createdAt', 'desc').orderBy('id', 'desc').limit(limit).get(),
+      query.orderBy('appendedAt', 'asc').orderBy('id', 'asc').limitToLast(limit).get(),
+    ]);
+    const chronologicalRows = chronological.docs.map(decodeMessage).reverse();
+    const appendedRows = appendOrdered.docs.map(decodeMessage);
+    const byId = new Map(appendedRows.map((message) => [message.id, message]));
+    for (const message of chronologicalRows) {
+      if (!byId.has(message.id) && byId.size < limit) byId.set(message.id, message);
+    }
+    return {
+      messages: [...byId.values()].sort(
+        (left, right) =>
+          left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id),
+      ),
+      hasMore: false,
+    };
   }
 
   async listMessagesByIds(agentId: string, conversationId: string, rawIds: string[]) {
@@ -581,6 +751,59 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
       const message = await tx.get(ref);
       if (!message.exists || message.get('conversationId') !== conversationId) return false;
       tx.update(ref, { hiddenAt: hidden ? this.store.now() : null });
+      return true;
+    });
+  }
+
+  async acknowledgeMessageDelivery(
+    agentId: string,
+    conversationId: string,
+    messageId: string,
+    clientId: string,
+  ): Promise<boolean> {
+    return this.store.db.runTransaction(async (tx) => {
+      const conversationRef = this.store.doc('conversations', conversationId);
+      const messageRef = this.store.doc('messages', messageId);
+      const conversation = await tx.get(conversationRef);
+      if (!conversation.exists || !isOwnedChat(conversation.data(), agentId)) return false;
+      const message = await tx.get(messageRef);
+      if (
+        !message.exists ||
+        message.get('conversationId') !== conversationId ||
+        message.get('role') !== 'assistant'
+      )
+        return false;
+      const deliveredBy = message.get('clientDeliveredBy');
+      if (typeof deliveredBy === 'string') return deliveredBy === clientId;
+      const taskId = message.get('taskId');
+      if (typeof taskId !== 'string') return false;
+      const taskSnapshot = await tx.get(this.store.doc('tasks', taskId));
+      if (!taskSnapshot.exists) return false;
+      const task = decodeRecord<Records['tasks']>(taskSnapshot.data());
+      const admission = chatAdmissionPayload(task);
+      if (
+        task.agentId !== agentId ||
+        task.conversationId !== conversationId ||
+        task.type !== 'chat_turn' ||
+        task.trust !== 'owner' ||
+        task.status !== 'done' ||
+        !admission
+      )
+        return false;
+      const request = await tx.get(this.store.doc('messages', admission.triggerMessageId));
+      if (
+        !request.exists ||
+        request.get('conversationId') !== conversationId ||
+        request.get('taskId') !== taskId ||
+        request.get('role') !== 'user' ||
+        request.get('origin') !== 'owner' ||
+        request.get('clientId') !== clientId
+      )
+        return false;
+      tx.update(messageRef, {
+        clientDeliveredAt: this.store.now(),
+        clientDeliveredBy: clientId,
+      });
       return true;
     });
   }
@@ -671,7 +894,12 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
       ? await this.store.db.getAll(...toolCallIds.map((id) => this.store.doc('toolCalls', id)))
       : [];
     const toolNameById = new Map(
-      toolCallDocs.filter((doc) => doc.exists).map((doc) => [doc.id, String(doc.get('toolName'))]),
+      toolCallDocs
+        .filter((doc) => doc.exists && ownedTaskIds.has(String(doc.get('taskId'))))
+        .map((doc) => [
+          String(doc.get('id')),
+          { taskId: String(doc.get('taskId')), toolName: String(doc.get('toolName')) },
+        ]),
     );
     const decodeApproval = (doc: FirebaseFirestore.DocumentSnapshot): ApplicationChatApproval => ({
       id: String(doc.get('id')),
@@ -679,7 +907,10 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
       summary: String(doc.get('summary')),
       status: String(doc.get('status')),
       payload: decodeRecord(doc.get('payload')),
-      toolName: toolNameById.get(String(doc.get('toolCallId'))),
+      toolName:
+        toolNameById.get(String(doc.get('toolCallId')))?.taskId === String(doc.get('taskId'))
+          ? toolNameById.get(String(doc.get('toolCallId')))?.toolName
+          : undefined,
       expiresAt: decodeRecord<Date>(doc.get('expiresAt')),
     });
     const directIdSet = new Set(approvalIds);
@@ -744,7 +975,7 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
     const dedupe = input.channelMessageId
       ? this.store.doc('messageChannelIds', input.channelMessageId)
       : null;
-    return this.store.db.runTransaction(async (tx) => {
+    const row = await this.store.db.runTransaction(async (tx) => {
       const parent = await tx.get(conversation);
       if (!parent.exists || !isOwnedChat(parent.data(), agentId)) throw new Error('chat not found');
       const existing = dedupe ? await tx.get(dedupe) : null;
@@ -761,8 +992,13 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
         createdAt: now,
         taskId: input.taskId ?? null,
         channelMessageId: input.channelMessageId ?? null,
+        clientId: null,
+        clientDeliveredAt: null,
+        clientDeliveredBy: null,
         embedding: null,
+        embeddingSpaceKey: null,
         hiddenAt: null,
+        appendSequence: '00000000000000000000',
       };
       if (Buffer.byteLength(JSON.stringify(row), 'utf8') > 900_000) {
         throw new Error('Message exceeds inline storage limit; store its payload in Cloud Storage');
@@ -771,6 +1007,334 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
       if (dedupe) tx.create(dedupe, { messageId: id, conversationId: input.conversationId });
       tx.update(conversation, { updatedAt: now });
       return row;
+    });
+    if (!row) return undefined;
+    const committed = await this.store.doc('messages', id).get();
+    if (!committed.exists) throw new Error('Committed chat message is missing');
+    return decodeMessageData(
+      committed.data() ?? {},
+      committed.get('createdAt'),
+      committed.get('appendedAt'),
+    );
+  }
+
+  async cancelChatTurn(input: Parameters<ApplicationChatPersistence['cancelChatTurn']>[0]) {
+    assertChatAdmissionOperationId(input.clientOperationId);
+    const externalEventId = chatAdmissionExternalEventId(input);
+    const eventRef = this.store.doc(
+      'taskEventKeys',
+      createHash('sha256').update(externalEventId).digest('hex'),
+    );
+    return this.store.db.runTransaction(async (tx) => {
+      const conversationRef = this.store.doc('conversations', input.conversationId);
+      const conversationSnapshot = await tx.get(conversationRef);
+      if (!conversationSnapshot.exists || !isOwnedChat(conversationSnapshot.data(), input.agentId))
+        throw new Error('chat not found');
+      const key = await tx.get(eventRef);
+      if (key.exists) {
+        const taskId = key.get('taskId');
+        if (typeof taskId !== 'string' || !taskId)
+          throw new Error('Chat admission index is malformed');
+        const taskRef = this.store.doc('tasks', taskId);
+        const taskSnapshot = await tx.get(taskRef);
+        if (!taskSnapshot.exists) throw new Error('Chat admission index points to a missing task');
+        const task = decodeRecord<Records['tasks']>(taskSnapshot.data());
+        if (task.id !== taskId || task.externalEventId !== externalEventId)
+          throw new Error('Chat admission index points to a mismatched task');
+        if (task.agentId !== input.agentId || task.conversationId !== input.conversationId)
+          throw new Error('Chat operation ID was already used for a different request');
+        const cancellation = chatAdmissionCancellationPayload(task);
+        if (cancellation) {
+          if (cancellation.clientOperationId !== input.clientOperationId)
+            throw new Error('Chat operation ID was already used for a different request');
+          return {
+            kind: 'cancelled_before_admission',
+            task,
+            status: 'cancelled',
+            transitioned: false,
+            effectStatus: 'not_started',
+          } as const;
+        }
+        const admission = chatAdmissionPayload(task);
+        if (!admission || admission.clientOperationId !== input.clientOperationId)
+          throw new Error('Chat operation ID was already used for a different request');
+        const messageSnapshot = await tx.get(
+          this.store.doc('messages', admission.triggerMessageId),
+        );
+        if (
+          !messageSnapshot.exists ||
+          messageSnapshot.get('conversationId') !== input.conversationId ||
+          messageSnapshot.get('taskId') !== taskId ||
+          messageSnapshot.get('role') !== 'user'
+        )
+          throw new Error('Chat admission is missing its owner message');
+        if (['done', 'failed', 'cancelled'].includes(task.status))
+          return {
+            kind: 'admitted_task',
+            task,
+            status: task.status,
+            transitioned: false,
+            effectStatus: 'unknown',
+          } as const;
+        const now = this.store.now();
+        tx.update(taskRef, {
+          status: 'cancelled',
+          lockedUntil: null,
+          leaseToken: null,
+          runAfter: null,
+          attempt: 0,
+          updatedAt: now,
+        });
+        return {
+          kind: 'admitted_task',
+          task: {
+            ...task,
+            status: 'cancelled',
+            lockedUntil: null,
+            leaseToken: null,
+            runAfter: null,
+            attempt: 0,
+            updatedAt: now,
+          },
+          status: 'cancelled',
+          transitioned: true,
+          effectStatus: 'unknown',
+        } as const;
+      }
+
+      const taskId = randomUUID();
+      const now = this.store.now();
+      const task = {
+        ...newTaskRecord(
+          {
+            agentId: input.agentId,
+            conversationId: input.conversationId,
+            type: 'chat_turn',
+            trust: 'owner',
+            trigger: chatAdmissionCancellationTrigger(input),
+            externalEventId,
+          },
+          taskId,
+          now,
+        ),
+        status: 'cancelled',
+      };
+      tx.create(this.store.doc('tasks', taskId), encodeRecord(task));
+      tx.create(eventRef, { taskId, createdAt: now });
+      return {
+        kind: 'cancelled_before_admission',
+        task,
+        status: 'cancelled',
+        transitioned: true,
+        effectStatus: 'not_started',
+      } as const;
+    });
+  }
+
+  async admitChatTurn(input: Parameters<ApplicationChatPersistence['admitChatTurn']>[0]) {
+    const taskId = randomUUID();
+    const messageId = randomUUID();
+    const leaseToken = randomUUID();
+    const externalEventId = chatAdmissionExternalEventId(input);
+    const eventRef = this.store.doc(
+      'taskEventKeys',
+      createHash('sha256').update(externalEventId).digest('hex'),
+    );
+    const result = await this.store.db.runTransaction(async (tx) => {
+      const conversationRef = this.store.doc('conversations', input.conversationId);
+      const conversationSnapshot = await tx.get(conversationRef);
+      if (!conversationSnapshot.exists || !isOwnedChat(conversationSnapshot.data(), input.agentId))
+        throw new Error('chat not found');
+
+      const key = await tx.get(eventRef);
+      if (key.exists) {
+        const existingId = key.get('taskId');
+        if (typeof existingId !== 'string') throw new Error('Chat admission index is malformed');
+        const taskSnapshot = await tx.get(this.store.doc('tasks', existingId));
+        if (!taskSnapshot.exists) throw new Error('Chat admission index points to a missing task');
+        const task = decodeRecord<Records['tasks']>(taskSnapshot.data());
+        if (task.id !== existingId || task.externalEventId !== externalEventId)
+          throw new Error('Chat admission index points to a mismatched task');
+        const cancellation = chatAdmissionCancellationPayload(task);
+        if (cancellation) {
+          if (
+            task.agentId !== input.agentId ||
+            task.conversationId !== input.conversationId ||
+            cancellation.clientOperationId !== input.clientOperationId
+          )
+            throw new Error('Chat operation ID was already used for a different request');
+          return {
+            kind: 'cancelled_before_admission',
+            created: false,
+            task,
+            status: 'cancelled',
+            effectStatus: 'not_started',
+          } as const;
+        }
+        const admission = chatAdmissionPayload(task);
+        if (
+          task.agentId !== input.agentId ||
+          task.conversationId !== input.conversationId ||
+          !admission ||
+          admission.clientOperationId !== input.clientOperationId ||
+          admission.requestHash !== input.requestHash
+        )
+          throw new Error('Chat operation ID was already used for a different request');
+        const messageSnapshot = await tx.get(
+          this.store.doc('messages', admission.triggerMessageId),
+        );
+        if (
+          !messageSnapshot.exists ||
+          messageSnapshot.get('conversationId') !== input.conversationId ||
+          messageSnapshot.get('role') !== 'user'
+        )
+          throw new Error('Chat admission is missing its owner message');
+        return {
+          kind: 'admitted',
+          created: false,
+          task,
+          message: decodeMessageData(
+            messageSnapshot.data() ?? {},
+            messageSnapshot.get('createdAt'),
+            messageSnapshot.get('appendedAt'),
+          ),
+        } as const;
+      }
+
+      const budget = await tx.get(this.store.doc('budgets', 'task_default'));
+      const now = this.store.now();
+      const trigger = {
+        source: 'chat',
+        agentId: input.agentId,
+        conversationId: input.conversationId,
+        trust: 'owner',
+        payload: {
+          text: input.text,
+          triggerMessageId: messageId,
+          requestAt: now.toISOString(),
+          intentRevision: 1,
+          clientOperationId: input.clientOperationId,
+          autonomous: input.autonomous,
+          force: input.force,
+          spoken: input.spoken,
+          chatAdmission: {
+            protocol: 'owner-chat-v1',
+            clientOperationId: input.clientOperationId,
+            requestHash: input.requestHash,
+            triggerMessageId: messageId,
+            phase: 'classifying',
+          },
+        },
+      };
+      const task = newTaskRecord(
+        {
+          agentId: input.agentId,
+          conversationId: input.conversationId,
+          type: 'chat_turn',
+          trust: 'owner',
+          title: input.text,
+          goalId: input.goalId,
+          trigger,
+          externalEventId,
+          budgetUsdLimit: budget.get('limitUsd') ?? '0.50',
+          autonomyGrant: input.autonomyGrant,
+        },
+        taskId,
+        now,
+      );
+      const lease: TaskLease = {
+        ...task,
+        status: 'running',
+        updatedAt: now,
+        lockedUntil: new Date(now.getTime() + DIRECT_CHAT_LEASE_MS),
+        leaseToken,
+      };
+      const message: ApplicationChatMessage = {
+        id: messageId,
+        conversationId: input.conversationId,
+        taskId,
+        role: 'user',
+        origin: 'owner',
+        clientId: input.clientId ?? null,
+        clientDeliveredAt: null,
+        clientDeliveredBy: null,
+        parts: [{ type: 'text', text: input.text }],
+        text: input.text,
+        channelMessageId: null,
+        embedding: null,
+        embeddingSpaceKey: null,
+        hiddenAt: null,
+        createdAt: now,
+        appendSequence: '00000000000000000000',
+      };
+      tx.create(this.store.doc('tasks', taskId), encodeRecord(lease));
+      tx.create(eventRef, { taskId, createdAt: now });
+      tx.create(this.store.doc('messages', messageId), encodeRecord(message));
+      tx.update(conversationRef, { updatedAt: now });
+      return { kind: 'admitted', created: true, task: lease, message, lease } as const;
+    });
+    if (!result.created || result.kind !== 'admitted') return result;
+    const messageSnapshot = await this.store.doc('messages', result.message.id).get();
+    if (!messageSnapshot.exists) throw new Error('Committed chat admission message is missing');
+    return {
+      ...result,
+      message: decodeMessageData(
+        messageSnapshot.data() ?? {},
+        messageSnapshot.get('createdAt'),
+        messageSnapshot.get('appendedAt'),
+      ),
+    };
+  }
+
+  async queueAdmittedChatTurn(
+    input: Parameters<ApplicationChatPersistence['queueAdmittedChatTurn']>[0],
+  ) {
+    return this.store.db.runTransaction(async (tx) => {
+      const ref = this.store.doc('tasks', input.task.id);
+      const snapshot = await tx.get(ref);
+      if (!snapshot.exists || snapshot.get('agentId') !== input.agentId) return null;
+      const task = decodeRecord<TaskLease>(snapshot.data());
+      if (task.status !== 'running' || task.leaseToken !== input.task.leaseToken) return null;
+      const admission = chatAdmissionPayload(task);
+      if (!admission || admission.phase === 'queued') return null;
+      const now = this.store.now();
+      const queueGeneration = task.queueGeneration + 1;
+      tx.update(
+        ref,
+        encodeRecord({
+          status: 'pending',
+          trigger: withChatAdmissionPhase(task.trigger, 'queued', input.triagedActionable),
+          lockedUntil: null,
+          leaseToken: null,
+          queueGeneration,
+          updatedAt: now,
+        }),
+      );
+      createWakeIntent(tx, this.store, {
+        taskId: task.id,
+        generation: queueGeneration,
+        availableAt: now,
+      });
+      return { id: task.id, queueGeneration };
+    });
+  }
+
+  async markChatTurnStreaming(
+    input: Parameters<ApplicationChatPersistence['markChatTurnStreaming']>[0],
+  ) {
+    return this.store.db.runTransaction(async (tx) => {
+      const ref = this.store.doc('tasks', input.task.id);
+      const snapshot = await tx.get(ref);
+      if (!snapshot.exists || snapshot.get('agentId') !== input.agentId) return false;
+      const task = decodeRecord<TaskLease>(snapshot.data());
+      if (task.status !== 'running' || task.leaseToken !== input.task.leaseToken) return false;
+      const admission = chatAdmissionPayload(task);
+      if (!admission || admission.phase === 'queued') return false;
+      tx.update(ref, {
+        trigger: withChatAdmissionPhase(task.trigger, 'streaming', false, input.triageOutcome),
+        updatedAt: this.store.now(),
+      });
+      return true;
     });
   }
 
@@ -819,6 +1383,7 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
     task: TaskLease;
     status: 'done' | 'failed';
     progress?: string;
+    privacyObservationGeneration?: string | null;
     messages: Parameters<ApplicationChatPersistence['appendOwned']>[1][];
   }) {
     return this.store.db.runTransaction(async (tx) => {
@@ -852,6 +1417,77 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
           throw new Error('Chat completion message does not match its task');
         }
       }
+      const persistedMessages = input.messages.map((message) => {
+        const id = randomUUID();
+        const row: ApplicationChatMessage = {
+          ...message,
+          id,
+          createdAt: now,
+          taskId: message.taskId ?? null,
+          channelMessageId: message.channelMessageId ?? null,
+          clientId: null,
+          clientDeliveredAt: null,
+          clientDeliveredBy: null,
+          embedding: null,
+          embeddingSpaceKey: null,
+          hiddenAt: null,
+          appendSequence: '00000000000000000000',
+        };
+        return {
+          row,
+          refs:
+            input.status === 'done' && message.role === 'assistant'
+              ? recallSurfaceRefs(message.parts)
+              : [],
+        };
+      });
+      const surfaced = persistedMessages.flatMap(({ row, refs }) =>
+        refs.map((source) => ({ source, messageId: row.id })),
+      );
+      if (input.status === 'done')
+        await assertRecalledMessagesCurrent(
+          tx,
+          this.store,
+          input.agentId,
+          surfaced.map(({ source }) => source),
+        );
+      if (input.privacyObservationGeneration !== undefined) {
+        await assertPrivacyErasureGenerationInTransaction(
+          tx,
+          this.store,
+          input.agentId,
+          input.privacyObservationGeneration,
+        );
+      } else if (surfaced.length > 0) {
+        if (!conversation || conversation.get('agentId') !== input.agentId)
+          throw new Error('Chat completion conversation is outside the owner scope');
+        await assertPrivacyErasureInactiveInTransaction(tx, this.store, input.agentId);
+      }
+      const uniqueSurfaced = [
+        ...new Map(surfaced.map((entry) => [entry.source.sourceKey, entry])).values(),
+      ];
+      const surfaceTargets = uniqueSurfaced.map(({ source, messageId }) => ({
+        source,
+        messageId,
+        doc: this.store.doc(
+          'recallSurfaces',
+          deterministicUuid('assistant:recall-surface', input.agentId, source.sourceKey),
+        ),
+      }));
+      const priorSurfaces = surfaceTargets.length
+        ? await tx.getAll(...surfaceTargets.map((target) => target.doc))
+        : [];
+      for (const [index, target] of surfaceTargets.entries()) {
+        const prior = priorSurfaces[index];
+        if (
+          prior?.exists &&
+          prior.get('agentId') === input.agentId &&
+          prior.get('sourceKey') === target.source.sourceKey &&
+          prior.get('sourceRevision') === target.source.sourceRevision &&
+          prior.get('suppressedAt') != null
+        )
+          throw new Error('Recalled source was hidden before chat publication');
+      }
       tx.update(
         taskRef,
         encodeRecord({
@@ -862,27 +1498,58 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
           updatedAt: now,
         }),
       );
-      for (const message of input.messages) {
-        const id = randomUUID();
-        const row: ApplicationChatMessage = {
-          ...message,
-          id,
-          createdAt: now,
-          taskId: message.taskId ?? null,
-          channelMessageId: message.channelMessageId ?? null,
-          embedding: null,
-          hiddenAt: null,
-        };
-        tx.create(this.store.doc('messages', id), encodeRecord(row));
+      for (const { row } of persistedMessages) {
+        tx.create(this.store.doc('messages', row.id), encodeRecord(row));
       }
+      surfaceTargets.forEach(({ source, messageId, doc }, index) => {
+        const prior = priorSurfaces[index];
+        if (prior?.exists) {
+          const current = decodeRecord<Records['recallSurfaces']>(prior.data());
+          if (current.agentId !== input.agentId || current.sourceKey !== source.sourceKey)
+            throw new Error('Recall surface ownership mismatch');
+          const revised = current.sourceRevision !== source.sourceRevision;
+          tx.update(
+            doc,
+            encodeRecord({
+              suppressedAt: revised ? null : current.suppressedAt,
+              sourceRevision: source.sourceRevision,
+              kind: source.kind,
+              lastSurfacedAt: now,
+              lastMessageId: messageId,
+              surfaceCount: current.surfaceCount + 1,
+              version: current.version + (revised ? 1 : 0),
+            }),
+          );
+          return;
+        }
+        const id = deterministicUuid('assistant:recall-surface', input.agentId, source.sourceKey);
+        tx.create(
+          doc,
+          encodeRecord({
+            id,
+            agentId: input.agentId,
+            sourceKey: source.sourceKey,
+            sourceRevision: source.sourceRevision,
+            kind: source.kind,
+            firstSurfacedAt: now,
+            lastSurfacedAt: now,
+            lastMessageId: messageId,
+            surfaceCount: 1,
+            suppressedAt: null,
+            version: 1,
+          }),
+        );
+      });
       if (conversationRef && input.messages.length) tx.update(conversationRef, { updatedAt: now });
       return true;
     });
   }
 
   async raiseTaskBudget(agentId: string, taskId: string, requested: number) {
-    if (!Number.isFinite(requested) || requested < 0.01 || requested > 10_000) {
-      throw new Error('task budget must be between $0.01 and $10,000');
+    if (normalizeTaskBudget(requested, 0.01) === null) {
+      throw new Error(
+        'task budget must be between $0.01 and $9,999.9999 with at most four decimal places',
+      );
     }
     await this.store.db.runTransaction(async (tx) => {
       const ref = this.store.doc('tasks', taskId);

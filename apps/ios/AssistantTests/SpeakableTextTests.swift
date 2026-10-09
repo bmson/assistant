@@ -163,6 +163,106 @@ final class SpeakableTextTests: XCTestCase {
         XCTAssertFalse(spoken.contains("hunter2"))
     }
 
+    func testGeneratedAccessibilityLabelCannotSpeakSensitiveFactValues() {
+        let message = ChatMessage(
+            id: "m5",
+            role: .assistant,
+            parts: [generatedCardPart(accessibilityLabel: "Your booking reference is hunter2 and your gate is 12.")],
+            metadata: nil
+        )
+        let spoken = SpeakableText.passages(for: message).joined(separator: " ")
+        XCTAssertFalse(spoken.localizedCaseInsensitiveContains("hunter2"))
+        XCTAssertTrue(spoken.contains("Your booking reference is"))
+
+        guard case let .generated(card)? = message.parts.compactMap(MessageResponseCard.init(part:)).first else {
+            return XCTFail("Expected generated card")
+        }
+        XCTAssertFalse(SpeakableText.safeAccessibilityLabel(for: card).localizedCaseInsensitiveContains("hunter2"))
+    }
+
+    func testAvailabilitySpeechRequiresExplicitCompletenessAndCheckedCalendar() {
+        func passages(complete: JSONValue?, calendars: [JSONValue]) -> [String] {
+            var card: [String: JSONValue] = [
+                "kind": .string("availability"),
+                "busy": .array([]),
+                "calendarsChecked": .array(calendars),
+            ]
+            if let complete { card["complete"] = complete }
+            let message = ChatMessage(
+                id: "availability", role: .assistant,
+                parts: [.init(type: "data-card", data: .object(card))], metadata: nil
+            )
+            return SpeakableText.passages(for: message)
+        }
+
+        XCTAssertEqual(
+            passages(complete: nil, calendars: [.string("Work")]),
+            ["No conflicts were found in the checked calendars. Availability is incomplete; unlisted time is unknown."]
+        )
+        XCTAssertEqual(passages(complete: .bool(true), calendars: []), ["Availability is unconfirmed."])
+        XCTAssertEqual(passages(complete: .bool(true), calendars: [.string("  ")]), ["Availability is unconfirmed."])
+        XCTAssertEqual(
+            passages(complete: .bool(false), calendars: [.string("Work"), .string("Family")]),
+            ["No conflicts were found in the checked calendars. Availability is incomplete; unlisted time is unknown."]
+        )
+        XCTAssertEqual(passages(complete: .bool(false), calendars: [.string("Work")]), [
+            "No conflicts were found in the checked calendars. Availability is incomplete; unlisted time is unknown.",
+        ])
+        XCTAssertEqual(passages(complete: .bool(true), calendars: [.string("Work")]), ["Nothing is booked."])
+    }
+
+    func testAvailabilitySpeechQualifiesMalformedAndPartialBusyEvidence() {
+        func passage(complete: JSONValue, busy: JSONValue, calendars: [JSONValue]) -> [String] {
+            let message = ChatMessage(
+                id: "availability", role: .assistant,
+                parts: [.init(type: "data-card", data: .object([
+                    "kind": .string("availability"),
+                    "busy": busy,
+                    "complete": complete,
+                    "calendarsChecked": .array(calendars),
+                ]))], metadata: nil
+            )
+            return SpeakableText.passages(for: message)
+        }
+        let valid = JSONValue.object([
+            "start": .string("2026-10-07T09:00:00Z"),
+            "end": .string("2026-10-07T10:00:00Z"),
+        ])
+        let malformed = JSONValue.object([
+            "start": .string("not-a-date"),
+            "end": .string("2026-10-07T10:00:00Z"),
+        ])
+        let reversed = JSONValue.object([
+            "start": .string("2026-10-07T11:00:00Z"),
+            "end": .string("2026-10-07T10:00:00Z"),
+        ])
+        let zeroDuration = JSONValue.object([
+            "start": .string("2026-10-07T10:00:00Z"),
+            "end": .string("2026-10-07T10:00:00Z"),
+        ])
+
+        XCTAssertEqual(
+            passage(complete: .bool(true), busy: .array([valid, malformed]), calendars: [.string("Work")]),
+            ["1 booked block. Availability is incomplete; unlisted time is unknown."]
+        )
+        XCTAssertEqual(
+            passage(complete: .bool(true), busy: .array([malformed]), calendars: [.string("Work")]),
+            ["No conflicts were found in the checked calendars. Availability is incomplete; unlisted time is unknown."]
+        )
+        XCTAssertEqual(
+            passage(complete: .bool(true), busy: .array([reversed, zeroDuration]), calendars: [.string("Work")]),
+            ["No conflicts were found in the checked calendars. Availability is incomplete; unlisted time is unknown."]
+        )
+        XCTAssertEqual(
+            passage(complete: .bool(true), busy: .string("unknown"), calendars: [.string("Work")]),
+            ["No conflicts were found in the checked calendars. Availability is incomplete; unlisted time is unknown."]
+        )
+        XCTAssertEqual(
+            passage(complete: .bool(true), busy: .array([]), calendars: []),
+            ["Availability is unconfirmed."]
+        )
+    }
+
     private func generatedCardPart(accessibilityLabel: String?) -> MessagePart {
         var spec: [String: JSONValue] = [
             "version": .number(1),

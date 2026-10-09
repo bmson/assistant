@@ -6,6 +6,7 @@ import {
   personSummaryFromStoredRow,
 } from '@assistant/application/people';
 import { getPersonProfile } from '@assistant/application/profile';
+import { loadConfig, parseFirestoreEmbeddingSpace } from '@assistant/config';
 import {
   assertPrivacyErasureFenceUnchanged,
   FirestoreKnowledgeWorkspaceReadRepository,
@@ -52,7 +53,14 @@ export async function getFirestorePersonDossier(
       opts.factLimit,
     ),
     getFirestorePersonTemporalDetails(store, agentId, contactId, opts.now),
-    getFirestorePersonGraph(store, agentId, contactId, GRAPH_EXTRACTION_VERSION, opts.now),
+    getFirestorePersonGraph(
+      store,
+      agentId,
+      contactId,
+      GRAPH_EXTRACTION_VERSION,
+      opts.now,
+      parseFirestoreEmbeddingSpace(loadConfig().FIRESTORE_EMBEDDING_SPACE),
+    ),
   ]);
   if (!profile || !temporal || !graph) throw new Error('Person detail changed during read');
   const entity = graph.entityId

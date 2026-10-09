@@ -32,7 +32,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       vi.stubEnv('FIRESTORE_AGENT_ID', agentId);
       vi.stubEnv(
         'FIRESTORE_EMBEDDING_SPACE',
-        '{"provider":"vertex","model":"fixture","dimensions":768,"revision":"1"}',
+        '{"provider":"vertex","model":"fixture","dimensions":1536,"revision":"1"}',
       );
       vi.stubEnv('LLM_PROVIDER', 'vertex');
       vi.stubEnv('ASSISTANT_MODULES', 'minimal');
@@ -96,6 +96,96 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect((await route.GET(new Request('http://localhost/api/mobile/v1/packs'))).status).toBe(
         401,
       );
+    });
+
+    it('authenticates before reading the POST body', async () => {
+      auth.allowed.mockResolvedValueOnce(false);
+      let read = false;
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            read = true;
+            controller.enqueue(new TextEncoder().encode('{"action":"item"}'));
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      const response = await route.POST(
+        new Request('http://localhost/api/mobile/v1/packs', {
+          method: 'POST',
+          body,
+          duplex: 'half',
+        } as RequestInit),
+      );
+      expect(response.status).toBe(401);
+      expect(read).toBe(false);
+    });
+
+    it.each([
+      ['declared short', { 'content-length': '1' }],
+      ['missing length', {}],
+    ])('rejects oversized %s streams before mutation', async (_label, headers) => {
+      auth.allowed.mockResolvedValue(true);
+      const bytes = new TextEncoder().encode('x'.repeat(32_001));
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      });
+      const response = await route.POST(
+        new Request('http://localhost/api/mobile/v1/packs', {
+          method: 'POST',
+          headers,
+          body,
+          duplex: 'half',
+        } as RequestInit),
+      );
+      expect(response.status).toBe(413);
+      expect(await response.json()).toEqual({ ok: false, error: 'Pack command is too large.' });
+      expect((await store.doc('situationPacks', packId).get()).get('version')).toBe(2);
+    });
+
+    it('rejects malformed UTF-8 as invalid JSON without changing the pack', async () => {
+      auth.allowed.mockResolvedValue(true);
+      const response = await route.POST(
+        new Request('http://localhost/api/mobile/v1/packs', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: new Uint8Array([0xc3, 0x28]),
+        }),
+      );
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe('Request body must be valid JSON.');
+      expect((await store.doc('situationPacks', packId).get()).get('version')).toBe(2);
+    });
+
+    it('bounds slow chunked request bodies with a deadline', async () => {
+      auth.allowed.mockResolvedValue(true);
+      const realSetTimeout = globalThis.setTimeout;
+      globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
+        realSetTimeout(handler, timeout === 10_000 ? 1 : timeout, ...args)) as typeof setTimeout;
+      try {
+        const body = new ReadableStream<Uint8Array>({
+          pull() {
+            return new Promise(() => {});
+          },
+        });
+        const pending = route.POST(
+          new Request('http://localhost/api/mobile/v1/packs', {
+            method: 'POST',
+            body,
+            duplex: 'half',
+          } as RequestInit),
+        );
+        const response = await pending;
+        expect(response.status).toBe(408);
+        expect((await response.json()).error).toBe('Request body took too long.');
+        expect((await store.doc('situationPacks', packId).get()).get('version')).toBe(2);
+      } finally {
+        globalThis.setTimeout = realSetTimeout;
+      }
     });
   },
 );

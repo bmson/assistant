@@ -2,7 +2,6 @@
 
 import {
   cleanKnowledgeProjectionOrphans,
-  correctKnowledgeGraphRelation,
   GRAPH_EXTRACTION_VERSION,
   getKnowledgeGraphNeighborhood,
   getKnowledgeGraphRelation,
@@ -18,7 +17,11 @@ import {
   reviewKnowledgeGraphRelation,
   searchKnowledgeGraphEntities,
 } from '@assistant/application';
-import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
+import {
+  loadConfig,
+  parseFirestoreEmbeddingSpace,
+  validateAgentPersistenceConfig,
+} from '@assistant/config';
 import {
   FirestoreKnowledgeGraphRelationMutationRepository,
   getFirestoreKnowledgeGraphRelation,
@@ -26,16 +29,15 @@ import {
 import { revalidatePath } from 'next/cache';
 import { requireOwner } from '@/auth';
 import {
-  correctFirestoreKnowledgeRelation,
   getFirestoreKnowledgeCuration,
   getFirestoreKnowledgeWorkspace,
 } from '@/lib/firestore-knowledge';
 import {
   addOwnerKnowledgeGraphFactForCurrentPersistence,
+  correctOwnerKnowledgeGraphFactForCurrentPersistence,
   getDb,
   getFirestoreInstallationStore,
   getOwnerMemoryCommands,
-  getRouter,
 } from '@/lib/server';
 
 /**
@@ -237,7 +239,11 @@ export async function correctKnowledgeRelation(
   formData: FormData,
 ): Promise<AddKnowledgeRelationState> {
   await requireOwner();
+  const disposition = formData.get('sourceDisposition') ?? 'graph_only';
+  if (disposition !== 'graph_only' && disposition !== 'whole_fact')
+    return { error: 'Choose how to correct the earlier source.', success: null };
   const input = {
+    sourceDisposition: disposition as 'graph_only' | 'whole_fact',
     subjectLabel: String(formData.get('subjectLabel') ?? ''),
     subjectKind: String(formData.get('subjectKind') ?? ''),
     subjectId: String(formData.get('subjectId') ?? '') || undefined,
@@ -248,15 +254,16 @@ export async function correctKnowledgeRelation(
     note: String(formData.get('note') ?? ''),
   };
   const result = await reportable(() =>
-    loadConfig().PERSISTENCE_DRIVER === 'firestore'
-      ? correctFirestoreKnowledgeRelation(relationId, input)
-      : correctKnowledgeGraphRelation(getDb(), getRouter(), relationId, input),
+    correctOwnerKnowledgeGraphFactForCurrentPersistence(relationId, input),
   );
   if (result.error) return { error: result.error, success: null };
   revalidateKnowledgeGraph();
   return {
     error: null,
-    success: 'Corrected connection saved; the earlier connection is now marked inaccurate.',
+    success:
+      'sourceDisposition' in result && result.sourceDisposition === 'whole_fact'
+        ? 'Corrected connection saved; the earlier standalone fact has left recall.'
+        : 'Corrected connection saved; the earlier connection is marked inaccurate. Its original source text remains available to memory recall.',
   };
 }
 
@@ -323,6 +330,8 @@ export async function loadConnectionSource(
       config.FIRESTORE_AGENT_ID,
       GRAPH_EXTRACTION_VERSION,
       relationId,
+      undefined,
+      parseFirestoreEmbeddingSpace(config.FIRESTORE_EMBEDDING_SPACE),
     );
     return relation
       ? {

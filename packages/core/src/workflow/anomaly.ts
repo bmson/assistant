@@ -5,6 +5,7 @@ import {
   approvalPolicies,
   conversations,
   type Db,
+  lockPostgresPrivacyObservationFence,
   messages,
   tasks,
   toolCalls,
@@ -362,11 +363,14 @@ export async function listOpenAnomalies(db: Db, agentId: string): Promise<Anomal
 }
 
 /** Dismiss an anomaly (false positive) — raises the effective baseline for frequency. */
-export async function dismissAnomaly(db: Db, anomalyId: string): Promise<void> {
-  await db
+export async function dismissAnomaly(db: Db, anomalyId: string, agentId: string): Promise<boolean> {
+  if (!agentId) return false;
+  const rows = await db
     .update(anomalies)
     .set({ status: 'dismissed', updatedAt: sql`now()` })
-    .where(eq(anomalies.id, anomalyId));
+    .where(and(eq(anomalies.id, anomalyId), eq(anomalies.agentId, agentId)))
+    .returning({ id: anomalies.id });
+  return rows.length > 0;
 }
 
 /**
@@ -376,18 +380,29 @@ export async function dismissAnomaly(db: Db, anomalyId: string): Promise<void> {
 export async function suspendAnomalyPolicy(
   db: Db,
   anomalyId: string,
+  agentId: string,
 ): Promise<{ suspended: boolean }> {
-  const [anomaly] = await db.select().from(anomalies).where(eq(anomalies.id, anomalyId));
-  if (!anomaly) return { suspended: false };
-  if (anomaly.policyId) {
-    await db
+  if (!agentId) return { suspended: false };
+  return db.transaction(async (tx) => {
+    await lockPostgresPrivacyObservationFence(tx as unknown as Db, agentId);
+    const [anomaly] = await tx
+      .select({ id: anomalies.id, policyId: anomalies.policyId })
+      .from(anomalies)
+      .where(and(eq(anomalies.id, anomalyId), eq(anomalies.agentId, agentId)));
+    if (!anomaly?.policyId) return { suspended: false };
+
+    const [policy] = await tx
       .update(approvalPolicies)
       .set({ enabled: false, updatedAt: sql`now()` })
-      .where(eq(approvalPolicies.id, anomaly.policyId));
-  }
-  await db
-    .update(anomalies)
-    .set({ status: 'suspended', updatedAt: sql`now()` })
-    .where(eq(anomalies.id, anomalyId));
-  return { suspended: Boolean(anomaly.policyId) };
+      .where(and(eq(approvalPolicies.id, anomaly.policyId), eq(approvalPolicies.agentId, agentId)))
+      .returning({ id: approvalPolicies.id });
+    if (!policy) return { suspended: false };
+
+    const [updated] = await tx
+      .update(anomalies)
+      .set({ status: 'suspended', updatedAt: sql`now()` })
+      .where(and(eq(anomalies.id, anomaly.id), eq(anomalies.agentId, agentId)))
+      .returning({ id: anomalies.id });
+    return { suspended: Boolean(updated) };
+  });
 }

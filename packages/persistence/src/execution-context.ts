@@ -1,7 +1,12 @@
 import type { Records } from './records.js';
 
+/** Shared bounded owner-history window; prompt byte fitting remains separate. */
+export const MAX_EXECUTION_SEED_MESSAGES = 100;
+
 export interface ExecutionMessageCursor {
   createdAt: Date;
+  /** Exact UTC timestamp; adapters retain micro/nanoseconds across checkpoints. */
+  exactCreatedAt?: string;
   id: string;
 }
 
@@ -18,6 +23,8 @@ export interface ExecutionContextRepository {
     agentId: string;
     conversationId: string;
     before: Date;
+    /** Inclusive durable triggering row; adapters compare at stored precision. */
+    throughMessageId?: string;
     limit?: number;
   }): Promise<Records['messages'][]>;
   getInboundMessage(input: {
@@ -34,9 +41,9 @@ export interface ExecutionContextRepository {
   getOwnerRepliesAfter(input: {
     agentId: string;
     conversationId: string;
-    after: { createdAt: Date; id?: string };
+    after: { createdAt: Date; exactCreatedAt?: string; id?: string };
     limit?: number;
-  }): Promise<Records['messages'][]>;
+  }): Promise<Array<Records['messages'] & { exactCreatedAt?: string }>>;
   noticeIds(
     agentId: string,
     rows: ReadonlyArray<{ id: string; role: string; taskId: string | null; parts: unknown }>,

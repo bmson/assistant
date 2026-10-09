@@ -115,6 +115,7 @@ struct RouteCardView: View {
     let route: RouteInfo
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.openURL) private var openURL
 
     var body: some View {
@@ -136,19 +137,34 @@ struct RouteCardView: View {
             .accessibilityLabel("Map of the route to \(route.destination.label)")
             .accessibilityAddTraits(.isButton)
 
-            HStack(alignment: .firstTextBaseline) {
-                Text(Self.duration(route.durationSeconds))
-                    .font(.title2.weight(.bold))
-                    .monospacedDigit()
-                    .foregroundStyle(AssistantTheme.ink(for: colorScheme))
-                Spacer(minLength: 8)
-                Text([Self.distance(route.distanceMeters), route.routeName.isEmpty ? "" : "via \(route.routeName)"]
-                    .filter { !$0.isEmpty }.joined(separator: " · "))
-                    .font(.subheadline)
-                    .monospacedDigit()
-                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+            let duration = Text(Self.duration(route.durationSeconds))
+                .font(.title2.weight(.bold))
+                .monospacedDigit()
+                .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+            let routeDetails = Text([Self.distance(route.distanceMeters), route.routeName.isEmpty ? "" : "via \(route.routeName)"]
+                .filter { !$0.isEmpty }.joined(separator: " · "))
+                .font(.subheadline)
+                .monospacedDigit()
+                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+            let stackedSummary = VStack(alignment: .leading, spacing: 8) {
+                duration.fixedSize(horizontal: false, vertical: true)
+                routeDetails.fixedSize(horizontal: false, vertical: true)
+            }
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    stackedSummary
+                } else {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .firstTextBaseline) {
+                            duration.fixedSize(horizontal: true, vertical: false)
+                            Spacer(minLength: 8)
+                            routeDetails
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                        stackedSummary
+                    }
+                }
             }
 
             VStack(alignment: .leading, spacing: 3) {
@@ -189,6 +205,7 @@ struct RouteCardView: View {
                         .font(.subheadline.weight(.semibold))
                         .padding(.horizontal, 14)
                         .padding(.vertical, 8)
+                        .frame(minHeight: 44)
                         .background(AssistantTheme.accent(for: colorScheme), in: Capsule())
                         .foregroundStyle(.white)
                 }

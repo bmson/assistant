@@ -4,6 +4,7 @@ import {
 } from '@assistant/application/workspace-skills';
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import { createInstallationStore, FirestoreSkillMutationRepository } from '@assistant/firestore';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { writeFirestoreMobileSkill } from '@/lib/mobile-skill-write';
 import { getApplication } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
@@ -59,7 +60,14 @@ export async function PATCH(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid skill id' }, { status: 400 });
-  const input = skillInput(await request.json().catch(() => null));
+  const mutationBody = await readMobileMutationBody(request, [
+    'name',
+    'steps',
+    'preconditions',
+    'gotchas',
+  ]);
+  if (!mutationBody.ok) return mutationBody.response;
+  const input = skillInput(mutationBody.value);
   if ('error' in input) return mobileJson({ error: input.error }, { status: 400 });
   if (loadConfig().PERSISTENCE_DRIVER === 'firestore') {
     try {
@@ -85,13 +93,17 @@ export async function POST(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid skill id' }, { status: 400 });
-  const body = (await request.json().catch(() => null)) as { deprecated?: unknown } | null;
+  const mutationBody = await readMobileMutationBody(request, ['deprecated']);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as { deprecated?: unknown } | null;
   if (typeof body?.deprecated !== 'boolean') {
     return mobileJson({ error: 'deprecated must be a boolean' }, { status: 400 });
   }
   if (loadConfig().PERSISTENCE_DRIVER === 'firestore')
     return firestoreMutation(id, body.deprecated);
-  await getApplication().setSkillDeprecated(id, body.deprecated);
+  if (!(await getApplication().setSkillDeprecated(id, body.deprecated))) {
+    return mobileJson({ error: 'Skill not found.' }, { status: 409 });
+  }
   return mobileJson({ ok: true });
 }
 
@@ -103,6 +115,8 @@ export async function DELETE(
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid skill id' }, { status: 400 });
   if (loadConfig().PERSISTENCE_DRIVER === 'firestore') return firestoreMutation(id);
-  await getApplication().deleteSkill(id);
+  if (!(await getApplication().deleteSkill(id))) {
+    return mobileJson({ error: 'Skill not found.' }, { status: 409 });
+  }
   return mobileJson({ ok: true });
 }

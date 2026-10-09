@@ -21,8 +21,7 @@ import {
   TriangleAlert,
 } from 'lucide-react';
 import { type ReactNode, useEffect, useState, useTransition } from 'react';
-import type { ChatCardPresentation } from '@/lib/chat-notices';
-import { type NoticeKind, offCourseReplacement } from '@/lib/chat-notices';
+import type { ChatCardPresentation, NoticeKind } from '@/lib/chat-notices';
 import { focusRing } from '@/lib/ui';
 import { DecisionCard, type DecisionTone } from './decision-card';
 import { MessageMarkdown } from './markdown';
@@ -30,169 +29,21 @@ import { MessageMarkdown } from './markdown';
 export interface RecallSource {
   date: string;
   label: string;
-  kind?: 'chat' | 'knowledge_graph';
+  kind?: 'chat' | 'knowledge_graph' | 'decision' | 'commitment';
   hops?: 1 | 2;
+  surfaceKey?: string;
+  sourceRevision?: string;
 }
 
-export function messageText(message: UIMessage): string {
-  return message.parts
-    .filter(
-      (part): part is Extract<UIMessage['parts'][number], { type: 'text' }> => part.type === 'text',
-    )
-    .map((part) => part.text)
-    .join('');
-}
-
-/** Persisted send time, carried on message.metadata by the server mappers. */
-export function messageDate(message: UIMessage): Date | null {
-  const meta = message.metadata as { createdAt?: unknown } | undefined;
-  if (meta && typeof meta.createdAt === 'string') {
-    const date = new Date(meta.createdAt);
-    if (!Number.isNaN(date.getTime())) return date;
-  }
-  return null;
-}
-
-/**
- * What the log has learned about sequence, carried across renders by the
- * component that owns it. Both halves only ever grow, so what they say about
- * a message never changes once it has been said.
- */
-export interface ChatLogOrder {
-  /** Where each id was first seen — the fallback order for undated messages. */
-  arrival: Map<string, number>;
-  /** Parsed send times, so an instant is derived from its ISO string once. */
-  sendTimes: Map<string, number>;
-}
-
-export function createChatLogOrder(): ChatLogOrder {
-  return { arrival: new Map(), sendTimes: new Map() };
-}
-
-/**
- * A message's send time as a number, parsed at most once per id.
- *
- * `messageDate` builds a Date from an ISO string, and the sort below asks for
- * one O(n log n) times per render — which during a stream is once per token.
- * On a long thread that was thousands of Date constructions a second, all of
- * them re-deriving an instant that cannot move: the server fixes a message's
- * send time when it persists it.
- *
- * Only real timestamps are remembered. A message the client made itself has no
- * send time *yet* — it gets one when its durable twin arrives under the same
- * id — so caching its absence would pin it after the log forever. Those cost a
- * property check per comparison and no Date at all.
- */
-function sendTime(message: UIMessage, order: ChatLogOrder): number {
-  const cached = order.sendTimes.get(message.id);
-  if (cached !== undefined) return cached;
-  const at = messageDate(message)?.getTime();
-  if (at === undefined) return Number.POSITIVE_INFINITY;
-  order.sendTimes.set(message.id, at);
-  return at;
-}
-
-/**
- * Chronological order for the rendered log, and the only place order is
- * decided. Everything else — the poll's merge, useChat's own appends — just
- * puts messages in the set; this puts them in sequence.
- *
- * Persisted messages sort by their send time and tie-break on id, exactly as
- * the server ordered them (listMessages: `created_at, id`). Anything the client
- * made itself has no send time yet and no server order to agree with, so it
- * sorts after everything durable, in the order it appeared here. That last part
- * is the fix for a real reversal: the optimistic user turn and the reply
- * streaming in response to it were both undated, so the tie-break ran on two
- * randomly generated ids and the answer could render above the question.
- *
- * `order` is mutated to record each id on first sight.
- */
-export function orderChatLog(messages: UIMessage[], order: ChatLogOrder): UIMessage[] {
-  const { arrival } = order;
-  for (const message of messages) {
-    if (!arrival.has(message.id)) arrival.set(message.id, arrival.size);
-  }
-  return [...messages].sort((a, b) => {
-    const left = sendTime(a, order);
-    const right = sendTime(b, order);
-    if (left !== right) return left - right;
-    if (Number.isFinite(left)) return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-    return (arrival.get(a.id) ?? 0) - (arrival.get(b.id) ?? 0);
-  });
-}
-
-/** A message the client made itself — the server has never sent us this id. */
-function isProvisional(message: UIMessage, serverIds: Set<string>): boolean {
-  return !serverIds.has(message.id);
-}
-
-/**
- * Retire the optimistic user turn once its persisted twin is in the log.
- *
- * The client sent the text, so matching on it is reliable, and one durable
- * message retires exactly one local copy — asking the same question twice still
- * shows twice. Safe to run mid-stream: it only ever removes a duplicate of
- * something already on screen.
- */
-export function retireProvisionalUserTurns(log: UIMessage[], serverIds: Set<string>): UIMessage[] {
-  const durable: string[] = [];
-  for (const message of log) {
-    if (message.role === 'user' && !isProvisional(message, serverIds)) {
-      durable.push(messageText(message).trim());
-    }
-  }
-  if (durable.length === 0) return log;
-  return log.filter((message) => {
-    if (message.role !== 'user' || !isProvisional(message, serverIds)) return true;
-    const at = durable.indexOf(messageText(message).trim());
-    if (at === -1) return true;
-    durable.splice(at, 1);
-    return false;
-  });
-}
-
-/**
- * The words a reply actually shows. Normally its text parts — but a streamed
- * draft the response contract replaced shows the replacement instead, carried
- * on its `data-off-course` part, which is also the text chat-turn.ts persisted.
- * Reading it here is what keeps the streamed copy and its durable twin
- * comparable when the contract intervenes.
- */
-function shownText(message: UIMessage): string {
-  return (offCourseReplacement(message.parts) ?? messageText(message)).trim();
-}
-
-/**
- * Retire a locally streamed reply once its persisted twin is in the log.
- *
- * This used to retire every local reply as soon as ANY durable assistant
- * message arrived, which meant a scheduled brief, a watch firing, or inbound
- * mail mirrored into chat would delete a reply the client was still holding —
- * a message visibly disappearing for no reason the reader could see. The text
- * a streamed reply shows and the text of its persisted twin are identical by
- * construction (chat-turn.ts persists exactly what it streamed, and streams
- * the contract's replacement when it corrects one), so matching on text names
- * the right one instead of the nearest one.
- *
- * Matching runs against the whole log rather than one poll page, so a twin that
- * landed while the stream was still live is still reconciled on a later tick.
- */
-export function retireProvisionalReplies(log: UIMessage[], serverIds: Set<string>): UIMessage[] {
-  const durable: string[] = [];
-  for (const message of log) {
-    if (message.role === 'assistant' && !isProvisional(message, serverIds)) {
-      durable.push(shownText(message));
-    }
-  }
-  if (durable.length === 0) return log;
-  return log.filter((message) => {
-    if (message.role !== 'assistant' || !isProvisional(message, serverIds)) return true;
-    const at = durable.indexOf(shownText(message));
-    if (at === -1) return true;
-    durable.splice(at, 1);
-    return false;
-  });
-}
+export type { ChatLogOrder } from './message-reconciliation';
+export {
+  createChatLogOrder,
+  messageDate,
+  messageText,
+  orderChatLog,
+  retireProvisionalReplies,
+  retireProvisionalUserTurns,
+} from './message-reconciliation';
 
 /*
  * Dates render in the agent's configured timezone, on the server and in the
@@ -557,6 +408,66 @@ function RecallFeedbackControl({
   );
 }
 
+function RecallSourceControl({ source }: { source: RecallSource }) {
+  const [pending, startTransition] = useTransition();
+  const [suppressed, setSuppressed] = useState<boolean | null>(null);
+  const [error, setError] = useState(false);
+  useEffect(() => {
+    if (!source.surfaceKey) return;
+    let active = true;
+    const sourceRevision = source.sourceRevision;
+    void fetch(
+      `/api/recall/sources/${source.surfaceKey}?sourceRevision=${encodeURIComponent(sourceRevision ?? '')}`,
+      { cache: 'no-store' },
+    )
+      .then(async (response) =>
+        response.ok ? ((await response.json()) as { suppressed?: boolean }) : null,
+      )
+      .then((value) => {
+        if (active && typeof value?.suppressed === 'boolean') setSuppressed(value.suppressed);
+      })
+      .catch(() => {
+        if (active) setError(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [source.surfaceKey, source.sourceRevision]);
+  if (!source.surfaceKey || !source.sourceRevision) return null;
+  const save = () => {
+    if (suppressed === null) return;
+    const next = !suppressed;
+    setError(false);
+    startTransition(async () => {
+      try {
+        const response = await fetch(`/api/recall/sources/${source.surfaceKey}`, {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ suppressed: next, expectedSourceRevision: source.sourceRevision }),
+        });
+        if (!response.ok) throw new Error('Recall control rejected');
+        setSuppressed(next);
+      } catch {
+        setError(true);
+      }
+    });
+  };
+  return (
+    <button
+      type="button"
+      className="ml-1 rounded underline decoration-current/40 underline-offset-2 hover:decoration-current disabled:opacity-50"
+      disabled={pending || suppressed === null}
+      onClick={save}
+      aria-label={
+        suppressed ? 'Allow this version in future recall' : 'Hide this version from future recall'
+      }
+      title={error ? 'Recall control could not be saved' : undefined}
+    >
+      {error ? 'Retry source control' : suppressed ? 'Allow this version' : 'Hide this version'}
+    </button>
+  );
+}
+
 /** The "recalled from earlier" affordance: provenance plus owner feedback. */
 export function RecallNote({
   sources,
@@ -591,6 +502,7 @@ export function RecallNote({
         >
           {index > 0 ? '· ' : ''}
           {friendlyRecallDate(source.date)} — {source.label}
+          {messageId ? <RecallSourceControl source={source} /> : null}
         </span>
       ))}
       {messageId && onFeedback ? (
@@ -612,7 +524,9 @@ export function decodeRecallHeader(value: string | null): RecallSource[] | null 
         typeof (s as RecallSource).label === 'string' &&
         ((s as RecallSource).kind === undefined ||
           (s as RecallSource).kind === 'chat' ||
-          (s as RecallSource).kind === 'knowledge_graph') &&
+          (s as RecallSource).kind === 'knowledge_graph' ||
+          (s as RecallSource).kind === 'decision' ||
+          (s as RecallSource).kind === 'commitment') &&
         ((s as RecallSource).hops === undefined ||
           (s as RecallSource).hops === 1 ||
           (s as RecallSource).hops === 2),

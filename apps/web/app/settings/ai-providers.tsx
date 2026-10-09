@@ -577,7 +577,11 @@ function ConnectForm({
         Provider
         <select
           value={kind}
-          onChange={(event) => setKind(event.target.value as Kind)}
+          onChange={(event) => {
+            setApiKey('');
+            setKind(event.target.value as Kind);
+          }}
+          disabled={pending || saving}
           className={selectClass}
         >
           {(Object.keys(KIND_LABEL) as Kind[]).map((value) => (
@@ -620,7 +624,11 @@ function ConnectForm({
               required
               type="url"
               value={baseUrl}
-              onChange={(event) => setBaseUrl(event.target.value)}
+              onChange={(event) => {
+                setApiKey('');
+                setBaseUrl(event.target.value);
+              }}
+              disabled={pending || saving}
               placeholder="https://api.groq.com/openai/v1"
               className={inputClass}
               autoCapitalize="none"

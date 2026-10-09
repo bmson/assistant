@@ -245,6 +245,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore watches', () =>
       ]);
       expect(results[0]?.suggestion.id).toBe(results[1]?.suggestion.id);
       expect(results[1]?.suggestion.id).toBe(results[2]?.suggestion.id);
+      expect(results[0]?.suggestion.id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      );
       expect(results[0]?.conversationId).not.toBe('foreign');
       const destination = await store.doc('conversations', results[0]?.conversationId ?? '').get();
       expect(destination.get('agentId')).toBe('agent-a');
@@ -255,6 +258,24 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore watches', () =>
       expect(
         (await store.collection('conversations').where('title', '==', 'Notifications').get()).size,
       ).toBe(1);
+      const prepared = await repository.getPreparedSuggestion({
+        agentId: 'agent-a',
+        watchId: watch.id,
+        triggerRef: 'gmail:race',
+      });
+      expect(prepared?.effect.kind).toBe('suggestion_message');
+      expect(prepared?.effect.status).toBe('pending');
+      await store.doc('watches', watch.id).delete();
+      await expect(
+        repository.getPreparedSuggestion({
+          agentId: 'agent-a',
+          watchId: watch.id,
+          triggerRef: 'gmail:race',
+        }),
+      ).resolves.toMatchObject({
+        suggestion: { status: 'pending' },
+        effect: { kind: 'suggestion_message', status: 'pending' },
+      });
     } finally {
       await disposeStore(store);
     }
@@ -366,6 +387,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore watches', () =>
       };
       const first = await repository.commitSuggestion(input);
       if (!first) throw new Error('missing first suggestion');
+      expect(first.suggestion.id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
       await store.doc('suggestions', first.suggestion.id).delete();
       const recovered = await repository.commitSuggestion(input);
       expect(recovered?.suggestion.id).toBe(first.suggestion.id);

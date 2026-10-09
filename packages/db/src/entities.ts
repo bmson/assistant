@@ -181,7 +181,23 @@ export async function resolveSubjectContact(
   const lower = name.toLowerCase();
   if (ASSISTANT_ALIASES.has(lower)) return null;
 
-  const [owner] = await db.select().from(contacts).where(eq(contacts.trust, 'owner')).limit(1);
+  const candidates = await db.select().from(contacts);
+  const exact = candidates.filter((contact) =>
+    [contact.name, ...contact.aliases].some(
+      (candidate) => candidate.trim().toLocaleLowerCase() === lower,
+    ),
+  );
+  if (lower !== 'owner') {
+    if (exact.length > 1) return null;
+    if (exact[0]) return { contactId: exact[0].id, created: false };
+    const prefixes = candidates.filter((contact) =>
+      [contact.name, ...contact.aliases].some((candidate) =>
+        namePrefixMatch(lower, candidate.toLocaleLowerCase()),
+      ),
+    );
+    if (prefixes.length > 1) return null;
+  }
+  const owner = candidates.find((contact) => contact.trust === 'owner');
   const ownerMatch = owner
     ? [owner.name, ...owner.aliases].find((candidate) =>
         namePrefixMatch(lower, candidate.toLocaleLowerCase()),
@@ -203,7 +219,6 @@ export async function resolveSubjectContact(
     return { contactId: owner.id, created: false };
   }
 
-  const candidates = await db.select().from(contacts);
   const match = candidates
     .filter((contact) => contact.trust !== 'owner')
     .map((contact) => ({

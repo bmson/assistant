@@ -2,16 +2,21 @@
 // leak postgres connection pools on every recompile.
 import path from 'node:path';
 import {
+  acknowledgeChatMessageDelivery,
   addAssistantSkill,
   addOwnerKnowledgeGraphFact,
   addOwnerKnowledgeGraphFactFromRepository,
   applyImprovementProposal,
   archiveChatConversation,
   archiveInactiveChats,
+  cancelChatTurn,
   changeChatModel,
   checkReadiness,
   checkReadinessWithProbe,
+  correctKnowledgeGraphRelation,
   correctOwnerCommitment,
+  correctOwnerKnowledgeGraphFactFromRepository,
+  createCardFormAdmissionService,
   createChatConversation,
   createMcpConnection,
   decideApproval,
@@ -32,12 +37,14 @@ import {
   getAssistantIdentity,
   getAssistantTimezone,
   getChatConversationView,
+  getCostsDashboard,
   getDocument,
   getDocumentsOverview,
   getImportOverview,
   getMcpConnection,
   getPrimaryConversationId,
   getProactiveHealth,
+  getProfileOverview,
   getSettingsOverview,
   getShellStatus,
   handleChatTurn,
@@ -49,6 +56,7 @@ import {
   listApprovalInbox,
   listAssistantSkills,
   listChatHistory,
+  listClosedCommitmentOverview,
   listCommitmentOverview,
   listGoalsDashboard,
   listImprovementProposals,
@@ -61,6 +69,7 @@ import {
   recordRecallFeedbackWithRepository,
   registerDeviceToken,
   registerDeviceTokenWithRepository,
+  reopenOwnerCommitment,
   resolveOwnerCommitment,
   restoreChatConversation,
   reviewImportedSource,
@@ -82,7 +91,9 @@ import {
 import { readAuditInvestigation } from '@assistant/application/audit-investigation';
 import type { CallsPorts } from '@assistant/application/calls';
 import type { GoalInput } from '@assistant/application/goals';
+import { GRAPH_EXTRACTION_VERSION } from '@assistant/application/knowledge-graph';
 import type { ModelProviderPorts } from '@assistant/application/model-providers';
+import { listPeopleDirectoryPage, personSummaryFromStoredRow } from '@assistant/application/people';
 import {
   createProfileMemoryCommands,
   organizeMemoryNow,
@@ -96,13 +107,19 @@ import {
   parseFirestoreEmbeddingSpace,
   repoRoot,
   validateAgentPersistenceConfig,
+  validateRestoreRehearsalConfig,
 } from '@assistant/config';
-import { encodeMessageCursor, getAgent } from '@assistant/core/chat';
+import {
+  encodeMessageCursor,
+  getAgent,
+  getOrCreatePrimaryConversation,
+} from '@assistant/core/chat';
 import {
   decryptStoredCredential,
   encryptMcpBearerToken,
   encryptStoredCredential,
 } from '@assistant/core/mcp-secrets';
+import { documentStats } from '@assistant/core/memory/document-catalog';
 import { createConnectedModelProviders, ModelRouter } from '@assistant/core/model-router';
 import {
   goalAutomationCadence,
@@ -110,18 +127,32 @@ import {
   nextRun,
 } from '@assistant/core/workflow/schedules';
 import {
+  anomalies,
+  assertPostgresRestoreRehearsalReadOnly,
   createDb,
+  createPostgresApplicationChatPersistence,
   createPostgresAuditInvestigationRepository,
   createPostgresCallSessionRepository,
+  createPostgresCardFormAdmissionRepository,
   createPostgresCardRefreshRepository,
+  createPostgresEmailSyncRepository,
   createPostgresGeneratedCardRepository,
   createPostgresModelCatalogRepository,
   createPostgresModelConnectionRepository,
+  createPostgresRecallSurfacingRepository,
   createPostgresSelfRepairRepository,
+  createPostgresTaskDiscoveryRepository,
   createPostgresToolExecutionRepository,
   type Db,
+  documents,
+  files,
+  improvementProposals,
+  skills,
+  withPostgresPrivacyObservationFence,
 } from '@assistant/db';
 import {
+  assertPrivacyErasureFenceUnchanged,
+  createFirestoreCardFormAdmissionRepository,
   createFirestoreExecutionPersistence,
   createFirestoreProfileMemoryCommandPersistence,
   createFirestoreSettingsPersistence,
@@ -132,30 +163,60 @@ import {
   FirestoreCallSessionRepository,
   FirestoreCommitmentMutationRepository,
   FirestoreDeviceTokenRepository,
+  FirestoreDocumentReadRepository,
+  FirestoreEmailSyncRepository,
   FirestoreGoalMutationRepository,
   FirestoreImportCommandRepository,
+  FirestoreImportOverviewRepository,
   FirestoreLocationPingRepository,
   FirestoreMcpConnectionMutationRepository,
   FirestoreModelCatalogRepository,
   FirestoreModelConnectionRepository,
   FirestoreOwnerKnowledgeGraphFactRepository,
   FirestoreRecallFeedbackRepository,
+  FirestoreRecallSurfacingRepository,
   FirestoreSelfRepairRepository,
   FirestoreShellStatusRepository,
   FirestoreSkillMutationRepository,
+  FirestoreTaskDiscoveryRepository,
   FirestoreToolExecutionRepository,
+  FirestoreWorkspaceAnomalyRepository,
   FirestoreWorkspaceFileLookup,
+  FirestoreWorkspaceImprovementRepository,
+  getFirestoreClosedCommitmentOverview,
+  getFirestoreMobilePeopleDirectoryPage,
+  readPrivacyErasureFence,
 } from '@assistant/firestore';
+import { FirestoreSkillLibraryRepository } from '@assistant/firestore/skill-library';
 import type { SelfRepairRepository } from '@assistant/persistence';
-import { embeddingModelId, validateEmbedding } from '@assistant/persistence';
+import {
+  embeddingSpaceIdentityKey,
+  POSTGRES_EMBEDDING_DIMENSIONS,
+  type RecallSurfacingRepository,
+  validateEmbedding,
+} from '@assistant/persistence';
+import type { CardFormSubmission } from '@assistant/persistence/card-form';
 import { inspectMcpConnection } from '@assistant/tools/mcp';
 import {
   GcsWorkspaceStore,
   LocalWorkspaceStore,
   type WorkspaceStore,
 } from '@assistant/tools/workspace';
+import { and, asc, desc, eq, gt, lt, or } from 'drizzle-orm';
 import { unstable_cache } from 'next/cache';
 import { cache } from 'react';
+import {
+  decodeMobileDocumentCursor,
+  encodeMobileDocumentCursor,
+  type MobileDocumentCursor,
+} from './mobile-document-pages.js';
+import { decodeMobilePeopleCursor, encodeMobilePeopleCursor } from './mobile-people-pages.js';
+import {
+  decodeMobileWorkspaceCursor,
+  encodeMobileWorkspaceCursor,
+  type MobileWorkspaceCursor,
+  type MobileWorkspacePageSection,
+} from './mobile-workspace-pages.js';
 
 const globalCache = globalThis as unknown as {
   __assistantDb?: Db;
@@ -342,20 +403,36 @@ export async function startFirestoreGoalWork(id: string) {
 }
 
 export function getDb(): Db {
-  if (loadConfig().PERSISTENCE_DRIVER === 'firestore') {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
     throw new Error('PostgreSQL-backed web surface is unavailable in Firestore mode');
   }
+  const restoreProblems = validateRestoreRehearsalConfig(config);
+  if (restoreProblems.length) throw new Error(restoreProblems.join('; '));
   if (!globalCache.__assistantDb) {
-    const config = loadConfig();
     globalCache.__assistantDb = createDb(config.DATABASE_URL, {
       max: config.DB_POOL_MAX,
       idleTimeoutSeconds: config.DB_IDLE_TIMEOUT_SECONDS,
       connectTimeoutSeconds: config.DB_CONNECT_TIMEOUT_SECONDS,
       statementTimeoutMs: config.DB_STATEMENT_TIMEOUT_MS,
       sourceWritesFenced: config.POSTGRES_SOURCE_WRITES_FENCED,
+      readOnly: config.RESTORE_REHEARSAL,
     });
   }
   return globalCache.__assistantDb;
+}
+
+export function getEmailObligationRepository() {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    const problems = validateAgentPersistenceConfig(config);
+    if (problems.length) throw new Error(problems.join('; '));
+    return new FirestoreEmailSyncRepository(
+      getFirestoreInstallationStore(),
+      config.FIRESTORE_AGENT_ID,
+    );
+  }
+  return createPostgresEmailSyncRepository(getDb());
 }
 
 export function getGeneratedCards() {
@@ -381,6 +458,8 @@ export function getRouter(): ModelRouter {
       config.OPENROUTER_API_KEY,
       config.LLM_AUDIT_CAPTURE,
       createConnectedModelProviders(config, () => connections.list()),
+      undefined,
+      POSTGRES_EMBEDDING_DIMENSIONS,
     );
   }
   return globalCache.__assistantRouter;
@@ -416,6 +495,27 @@ export const getAgentIdentity = cache(
   },
 );
 
+/** Owner-scoped recall hide/allow controls for web and mobile transports. */
+export async function getRecallSurfacingPorts(): Promise<{
+  agentId: string;
+  repository: RecallSurfacingRepository;
+}> {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    const problems = validateAgentPersistenceConfig(config);
+    if (problems.length) throw new Error(problems.join('; '));
+    return {
+      agentId: config.FIRESTORE_AGENT_ID,
+      repository: new FirestoreRecallSurfacingRepository(getFirestoreInstallationStore()),
+    };
+  }
+  const db = getDb();
+  return {
+    agentId: (await getAgent(db)).id,
+    repository: createPostgresRecallSurfacingRepository(db),
+  };
+}
+
 /** Same workspace identity the agent composition root uses. */
 export function getWorkspace(): WorkspaceStore {
   if (!globalCache.__assistantWorkspace) {
@@ -426,9 +526,32 @@ export function getWorkspace(): WorkspaceStore {
             config.WORKSPACE_BUCKET,
             `workspace/${config.ASSISTANT_WORKSPACE_ID}`,
           )
-        : new LocalWorkspaceStore(path.join(repoRoot, '.workspace'));
+        : new LocalWorkspaceStore(
+            config.RESTORE_REHEARSAL
+              ? config.RESTORE_REHEARSAL_ROOT
+              : path.join(repoRoot, '.workspace'),
+          );
   }
   return globalCache.__assistantWorkspace;
+}
+
+/** Owner-scoped import history read used by initial pages and web continuations. */
+export async function getCurrentImportOverview(input?: {
+  sourceCursor?: string | null;
+  filesCursor?: string | null;
+  limit?: number;
+}) {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER !== 'firestore') return getApplication().getImports(input);
+  const store = getFirestoreInstallationStore();
+  const fence = await readPrivacyErasureFence(store, config.FIRESTORE_AGENT_ID);
+  const overview = await getImportOverview(
+    new FirestoreImportOverviewRepository(store, config.FIRESTORE_AGENT_ID),
+    getWorkspace(),
+    input,
+  );
+  await assertPrivacyErasureFenceUnchanged(store, config.FIRESTORE_AGENT_ID, fence);
+  return overview;
 }
 
 /**
@@ -440,6 +563,10 @@ function createApplication(options: { profileMemory?: ProfileMemoryCommandPersis
   const db = getDb();
   const memoryCommands = profileMemoryCommands(options.profileMemory ?? db, {
     embed: (texts) => getRouter().embed(texts),
+    embedWithIdentity: async (texts) => {
+      const result = await getRouter().embedWithIdentity(texts);
+      return { embeddings: result.embeddings, embeddingSpaceKey: result.spaceKey };
+    },
   });
   const workspace = getWorkspace();
   const refreshMcpConnection = async (connectionId: string) => {
@@ -485,6 +612,8 @@ function createApplication(options: { profileMemory?: ProfileMemoryCommandPersis
     },
     deleteMcpConnection: (id: string) => deleteMcpConnection(db, id),
     getSettings: () => getSettingsOverview(db),
+    getProfileOverview: () => getProfileOverview(db),
+    getCostsDashboard: () => getCostsDashboard(db),
     getProactiveHealth: () => getProactiveHealth(db),
     updateSettings: (input: { timezone: string; locale: string; signature: string }) =>
       updateAssistantSettings(db, input),
@@ -498,14 +627,20 @@ function createApplication(options: { profileMemory?: ProfileMemoryCommandPersis
     setPolicyEnabled: (id: string, enabled: boolean) => setApprovalPolicyEnabled(db, id, enabled),
     deletePolicy: (id: string) => deleteApprovalPolicy(db, id),
     getDocuments: () => getDocumentsOverview(db),
-    getDocument: (id: string) => getDocument(db, id),
+    getWorkspacePage: (input: WorkspacePageRequest) => queryPostgresWorkspacePage(db, input),
+    getDocument: (id: string, options?: Parameters<typeof getDocument>[2]) =>
+      getDocument(db, id, options),
     deleteDocument: (id: string) => deleteDocument(db, workspace, id),
     uploadDocument: (input: { name: string; title?: string; mime?: string; bytes: Buffer }) =>
       uploadDocument(db, workspace, input),
     downloadArtifact: (path: string) => downloadArtifact(db, workspace, path),
     exportLongTermMemoryData: () => exportLongTermMemoryData(db),
     forgetLongTermMemory: () => forgetLongTermMemory(db, workspace),
-    getImports: () => getImportOverview(db, workspace),
+    getImports: (input?: {
+      sourceCursor?: string | null;
+      filesCursor?: string | null;
+      limit?: number;
+    }) => getImportOverview(db, workspace, input),
     startImport: (path: string, source: string) =>
       startWorkspaceImport(db, workspace, path, source),
     purgeImport: (source: string) => purgeImportedSource(db, source),
@@ -531,6 +666,9 @@ function createApplication(options: { profileMemory?: ProfileMemoryCommandPersis
       limit?: number;
     }) => listActivity(db, input),
     listCommitments: () => listCommitmentOverview(db),
+    listClosedCommitments: () => listClosedCommitmentOverview(db),
+    reopenCommitment: (id: string, expectedUpdatedAt: Date, operationId: string) =>
+      reopenOwnerCommitment(db, id, expectedUpdatedAt, operationId),
     resolveCommitment: (id: string, resolution: string) =>
       resolveOwnerCommitment(db, id, resolution),
     snoozeCommitment: (id: string, until: Date) => snoozeOwnerCommitment(db, id, until),
@@ -560,6 +698,8 @@ function createApplication(options: { profileMemory?: ProfileMemoryCommandPersis
       hideChatMessage(db, conversationId, messageId),
     unhideChatMessage: (conversationId: string, messageId: string) =>
       unhideChatMessage(db, conversationId, messageId),
+    acknowledgeMessageDelivery: (conversationId: string, messageId: string, clientId: string) =>
+      acknowledgeChatMessageDelivery(db, conversationId, messageId, clientId),
     archiveInactiveChats: () => archiveInactiveChats(db),
     listChatHistory: (archived: boolean) => listChatHistory(db, archived),
     getChatConversation: (conversationId: string, input: { taskId?: string; cursor?: string }) =>
@@ -575,7 +715,28 @@ function createApplication(options: { profileMemory?: ProfileMemoryCommandPersis
       /** The request's own signal, so a client that hangs up ends the hold. */
       signal?: AbortSignal;
     }) => waitForChatUpdates(db, input),
+    submitCardForm: async (submission: CardFormSubmission) => {
+      const agent = await getAgent(db);
+      const admission = createCardFormAdmissionService(
+        createPostgresCardFormAdmissionRepository(db),
+      );
+      const result = await admission.submit({ agentId: agent.id, submission });
+      if (!result.ok) return result;
+      const rows = await createPostgresApplicationChatPersistence(db).listMessagesByIds(
+        agent.id,
+        submission.conversationId,
+        [result.messageId],
+      );
+      const message = rows?.find((row) => row.id === result.messageId);
+      if (!message) throw new Error('Admitted form message could not be read back');
+      return {
+        ...result,
+        messageCursor: encodeMessageCursor({ createdAt: message.createdAt, id: message.id }),
+      };
+    },
     isValidChatCursor,
+    cancelChatTurn: (input: { conversationId: string; clientOperationId: string }) =>
+      cancelChatTurn(db, input),
     handleChatTurn: (request: Request) =>
       handleChatTurn(request, { config: loadConfig(), db, router: getRouter() }),
     checkReadiness: () => checkReadiness(db),
@@ -585,6 +746,589 @@ function createApplication(options: { profileMemory?: ProfileMemoryCommandPersis
 export function getApplication(): ReturnType<typeof createApplication> {
   globalCache.__assistantApplication ??= createApplication();
   return globalCache.__assistantApplication;
+}
+
+async function queryPostgresMobileDocumentPage(
+  db: Db,
+  input: { ownerId: string; limit: number; after?: MobileDocumentCursor },
+) {
+  const agent = await getAgent(db);
+  if (agent.id !== input.ownerId) throw new Error('Document read is outside the configured owner');
+  const afterDate = input.after ? new Date(input.after.createdAt) : undefined;
+  const rows = await db
+    .select({
+      id: documents.id,
+      title: documents.title,
+      mime: documents.mime,
+      source: documents.source,
+      trust: documents.trust,
+      status: documents.status,
+      extractor: documents.extractor,
+      extractionMetadata: documents.extractionMetadata,
+      chunkCount: documents.chunkCount,
+      charCount: documents.charCount,
+      bytes: files.bytes,
+      error: documents.error,
+      createdAt: documents.createdAt,
+    })
+    .from(documents)
+    .innerJoin(files, eq(files.id, documents.fileId))
+    .where(
+      and(
+        eq(documents.agentId, input.ownerId),
+        eq(files.agentId, input.ownerId),
+        input.after && afterDate
+          ? or(
+              lt(documents.createdAt, afterDate),
+              and(eq(documents.createdAt, afterDate), lt(documents.id, input.after.id)),
+            )
+          : undefined,
+      ),
+    )
+    .orderBy(desc(documents.createdAt), desc(documents.id))
+    .limit(input.limit + 1);
+  const primary = await getOrCreatePrimaryConversation(db, input.ownerId);
+  const stats = await documentStats(db, input.ownerId);
+  const selected = rows.slice(0, input.limit).map((row) => ({ ...row, bytes: row.bytes ?? 0 }));
+  const tail = selected.at(-1);
+  const hasMore = rows.length > input.limit;
+  return {
+    documents: selected,
+    stats,
+    primaryConversationId: primary.id,
+    hasMore,
+    nextCursor:
+      hasMore && tail
+        ? encodeMobileDocumentCursor({
+            version: 1,
+            ownerId: input.ownerId,
+            id: tail.id,
+            createdAt: tail.createdAt.toISOString(),
+          })
+        : null,
+  };
+}
+
+async function queryFirestoreMobileDocumentPage(
+  ownerId: string,
+  limit: number,
+  after?: MobileDocumentCursor,
+) {
+  const page = await new FirestoreDocumentReadRepository(
+    getFirestoreInstallationStore(),
+    ownerId,
+  ).listPage(ownerId, {
+    limit,
+    ...(after ? { after: { id: after.id, createdAt: new Date(after.createdAt) } } : {}),
+  });
+  return {
+    documents: page.documents,
+    stats: page.stats,
+    primaryConversationId: page.primaryConversationId,
+    hasMore: page.hasMore,
+    nextCursor: page.nextCursor
+      ? encodeMobileDocumentCursor({
+          version: 1,
+          ownerId,
+          id: page.nextCursor.id,
+          createdAt: page.nextCursor.createdAt.toISOString(),
+        })
+      : null,
+  };
+}
+
+/** Server composition for the bounded mobile document read, including its privacy fence. */
+export async function getMobileDocumentsPage(input: { limit: number; cursor: string | null }) {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    const problems = validateAgentPersistenceConfig(config);
+    if (problems.length) throw new Error(problems.join('; '));
+    const ownerId = config.FIRESTORE_AGENT_ID;
+    const after = input.cursor ? decodeMobileDocumentCursor(input.cursor, ownerId) : undefined;
+    const page = await queryFirestoreMobileDocumentPage(ownerId, input.limit, after);
+    return page;
+  }
+  const db = getDb();
+  const ownerId = (await getAgent(db)).id;
+  const after = input.cursor ? decodeMobileDocumentCursor(input.cursor, ownerId) : undefined;
+  const page = await withPostgresPrivacyObservationFence(db, ownerId, () =>
+    queryPostgresMobileDocumentPage(db, {
+      ownerId,
+      limit: input.limit,
+      ...(after ? { after } : {}),
+    }),
+  );
+  return page;
+}
+
+/** Server composition for the bounded mobile people read. */
+export async function getMobilePeoplePage(input: { limit: number; cursor: string | null }) {
+  const config = loadConfig();
+  const now = new Date();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    const problems = validateAgentPersistenceConfig(config);
+    if (problems.length) throw new Error(problems.join('; '));
+    const ownerId = config.FIRESTORE_AGENT_ID;
+    const after = input.cursor ? decodeMobilePeopleCursor(input.cursor, ownerId) : undefined;
+    const page = await getFirestoreMobilePeopleDirectoryPage(
+      getFirestoreInstallationStore(),
+      ownerId,
+      now,
+      GRAPH_EXTRACTION_VERSION,
+      { limit: input.limit, ...(after ? { after: { name: after.name, id: after.id } } : {}) },
+    );
+    return {
+      people: page.people.map((row) => personSummaryFromStoredRow(row, now)),
+      hasMore: page.hasMore,
+      nextCursor: page.nextCursor
+        ? encodeMobilePeopleCursor({ version: 1, ownerId, ...page.nextCursor })
+        : null,
+      generatedAt: now.toISOString(),
+    };
+  }
+  const db = getDb();
+  const ownerId = (await getAgent(db)).id;
+  const after = input.cursor ? decodeMobilePeopleCursor(input.cursor, ownerId) : undefined;
+  const page = await withPostgresPrivacyObservationFence(db, ownerId, () =>
+    listPeopleDirectoryPage(db, {
+      now,
+      limit: input.limit,
+      ...(after ? { after: { name: after.name, id: after.id } } : {}),
+    }),
+  );
+  return {
+    people: page.people,
+    hasMore: page.hasMore,
+    nextCursor: page.nextCursor
+      ? encodeMobilePeopleCursor({ version: 1, ownerId, ...page.nextCursor })
+      : null,
+    generatedAt: now.toISOString(),
+  };
+}
+
+type WorkspacePageRequest = {
+  section: MobileWorkspacePageSection;
+  ownerId: string;
+  after?: MobileWorkspaceCursor;
+  archived: boolean;
+  limit: number;
+};
+
+function workspaceConversationCursor(after: MobileWorkspaceCursor | undefined) {
+  return after?.updatedAt ? { id: after.afterId, updatedAt: new Date(after.updatedAt) } : undefined;
+}
+
+async function queryPostgresWorkspacePage(db: Db, input: WorkspacePageRequest) {
+  if (input.section === 'import-sources' || input.section === 'import-files') {
+    const overview = await getImportOverview(db, getWorkspace(), {
+      ...(input.section === 'import-sources' ? { sourceCursor: input.after?.afterId ?? null } : {}),
+      ...(input.section === 'import-files' ? { filesCursor: input.after?.afterId ?? null } : {}),
+      limit: input.limit,
+    });
+    const isSources = input.section === 'import-sources';
+    const availability = isSources ? overview.sourceAvailability : overview.filesAvailability;
+    if (availability.status !== 'available')
+      throw new Error(availability.message ?? 'Import section unavailable');
+    const next = isSources
+      ? overview.sourcePagination.nextCursor
+      : overview.filesPagination.nextCursor;
+    return {
+      consistency: isSources
+        ? overview.sourcePagination.consistency
+        : overview.filesPagination.consistency,
+      items: isSources
+        ? overview.sources.map((source) => ({
+            id: source.id,
+            source: source.source,
+            workspacePath: source.workspacePath,
+            kind: source.kind,
+            status: source.status,
+            itemsTotal: source.itemsTotal,
+            itemsProcessed: source.itemsProcessed,
+            memoriesSaved: source.memoriesSaved,
+            quarantinedNow: overview.quarantineBySource[source.source] ?? 0,
+            taskId: source.taskId,
+            error: source.error,
+            updatedAt: source.updatedAt.toISOString(),
+          }))
+        : overview.unstartedFiles,
+      hasMore: isSources ? overview.sourcePagination.hasMore : overview.filesPagination.hasMore,
+      nextCursor:
+        next !== null
+          ? encodeMobileWorkspaceCursor({
+              version: 1,
+              section: input.section,
+              ownerId: input.ownerId,
+              afterId: next,
+            })
+          : null,
+    };
+  }
+  if (input.section === 'chats') {
+    const chat = createPostgresApplicationChatPersistence(db);
+    const page = await chat.listConversations(input.ownerId, {
+      archived: input.archived,
+      limit: input.limit,
+      ...(workspaceConversationCursor(input.after)
+        ? { after: workspaceConversationCursor(input.after) }
+        : {}),
+    });
+    const active = new Set(await chat.listActiveConversationIds(input.ownerId));
+    const tail = page.nextCursor;
+    return {
+      items: page.conversations.map((conversation) => ({
+        id: conversation.id,
+        title: conversation.title,
+        isPrimary: conversation.isPrimary,
+        updatedAt: conversation.updatedAt,
+        active: active.has(conversation.id),
+      })),
+      hasMore: page.hasMore,
+      nextCursor: tail
+        ? encodeMobileWorkspaceCursor({
+            version: 1,
+            section: 'chats',
+            ownerId: input.ownerId,
+            archived: input.archived,
+            afterId: tail.id,
+            updatedAt: tail.updatedAt.toISOString(),
+          })
+        : null,
+    };
+  }
+  if (input.section === 'skills') {
+    const rows = await db
+      .select()
+      .from(skills)
+      .where(
+        and(
+          eq(skills.agentId, input.ownerId),
+          input.after ? gt(skills.id, input.after.afterId) : undefined,
+        ),
+      )
+      .orderBy(asc(skills.id))
+      .limit(input.limit + 1);
+    const items = rows
+      .slice(0, input.limit)
+      .map((row) => ({ ...row, updatedAt: row.updatedAt.toISOString() }));
+    const hasMore = rows.length > input.limit;
+    const tail = items.at(-1);
+    return {
+      items,
+      hasMore,
+      nextCursor:
+        hasMore && tail
+          ? encodeMobileWorkspaceCursor({
+              version: 1,
+              section: 'skills',
+              ownerId: input.ownerId,
+              afterId: tail.id,
+            })
+          : null,
+    };
+  }
+  if (input.section === 'anomalies') {
+    const rows = await db
+      .select()
+      .from(anomalies)
+      .where(
+        and(
+          eq(anomalies.agentId, input.ownerId),
+          eq(anomalies.status, 'open'),
+          input.after ? gt(anomalies.id, input.after.afterId) : undefined,
+        ),
+      )
+      .orderBy(asc(anomalies.id))
+      .limit(input.limit + 1);
+    const items = rows.slice(0, input.limit).map((row) => ({
+      id: row.id,
+      kind: row.kind,
+      toolName: row.toolName,
+      detail: row.detail,
+      observed: row.observed,
+      expected: row.expected,
+      citationCount: row.toolCallIds.length,
+      hasPolicy: row.policyId !== null,
+      createdAt: row.createdAt.toISOString(),
+    }));
+    const hasMore = rows.length > input.limit;
+    const tail = items.at(-1);
+    return {
+      items,
+      hasMore,
+      nextCursor:
+        hasMore && tail
+          ? encodeMobileWorkspaceCursor({
+              version: 1,
+              section: 'anomalies',
+              ownerId: input.ownerId,
+              afterId: tail.id,
+            })
+          : null,
+    };
+  }
+  const rows = await db
+    .select()
+    .from(improvementProposals)
+    .where(
+      and(
+        eq(improvementProposals.agentId, input.ownerId),
+        eq(improvementProposals.status, 'open'),
+        input.after ? gt(improvementProposals.id, input.after.afterId) : undefined,
+      ),
+    )
+    .orderBy(asc(improvementProposals.id))
+    .limit(input.limit + 1);
+  const items = rows.slice(0, input.limit).map((row) => ({
+    id: row.id,
+    kind: row.kind,
+    title: row.title,
+    rationale: row.rationale,
+    suggestion:
+      typeof (row.change as { suggestion?: unknown } | null)?.suggestion === 'string'
+        ? (row.change as { suggestion: string }).suggestion
+        : '',
+    evidenceCount: row.evidenceIds.length,
+    applyable: row.kind === 'model_role',
+    createdAt: row.createdAt.toISOString(),
+  }));
+  const hasMore = rows.length > input.limit;
+  const tail = items.at(-1);
+  return {
+    items,
+    hasMore,
+    nextCursor:
+      hasMore && tail
+        ? encodeMobileWorkspaceCursor({
+            version: 1,
+            section: 'improvements',
+            ownerId: input.ownerId,
+            afterId: tail.id,
+          })
+        : null,
+  };
+}
+
+async function queryFirestoreWorkspacePage(
+  store: ReturnType<typeof getFirestoreInstallationStore>,
+  input: WorkspacePageRequest,
+) {
+  if (input.section === 'import-sources' || input.section === 'import-files') {
+    const overview = await getImportOverview(
+      new FirestoreImportOverviewRepository(store, input.ownerId),
+      getWorkspace(),
+      {
+        ...(input.section === 'import-sources'
+          ? { sourceCursor: input.after?.afterId ?? null }
+          : {}),
+        ...(input.section === 'import-files' ? { filesCursor: input.after?.afterId ?? null } : {}),
+        limit: input.limit,
+      },
+    );
+    const isSources = input.section === 'import-sources';
+    const availability = isSources ? overview.sourceAvailability : overview.filesAvailability;
+    if (availability.status !== 'available')
+      throw new Error(availability.message ?? 'Import section unavailable');
+    const next = isSources
+      ? overview.sourcePagination.nextCursor
+      : overview.filesPagination.nextCursor;
+    return {
+      consistency: isSources
+        ? overview.sourcePagination.consistency
+        : overview.filesPagination.consistency,
+      items: isSources
+        ? overview.sources.map((source) => ({
+            id: source.id,
+            source: source.source,
+            workspacePath: source.workspacePath,
+            kind: source.kind,
+            status: source.status,
+            itemsTotal: source.itemsTotal,
+            itemsProcessed: source.itemsProcessed,
+            memoriesSaved: source.memoriesSaved,
+            quarantinedNow: overview.quarantineBySource[source.source] ?? 0,
+            taskId: source.taskId,
+            error: source.error,
+            updatedAt: source.updatedAt.toISOString(),
+          }))
+        : overview.unstartedFiles,
+      hasMore: isSources ? overview.sourcePagination.hasMore : overview.filesPagination.hasMore,
+      nextCursor:
+        next !== null
+          ? encodeMobileWorkspaceCursor({
+              version: 1,
+              section: input.section,
+              ownerId: input.ownerId,
+              afterId: next,
+            })
+          : null,
+    };
+  }
+  if (input.section === 'chats') {
+    const chat = new FirestoreApplicationChatPersistence(store);
+    const page = await chat.listConversations(input.ownerId, {
+      archived: input.archived,
+      limit: input.limit,
+      ...(workspaceConversationCursor(input.after)
+        ? { after: workspaceConversationCursor(input.after) }
+        : {}),
+    });
+    const active = new Set(await chat.listActiveConversationIds(input.ownerId));
+    const tail = page.nextCursor;
+    return {
+      items: page.conversations.map((conversation) => ({
+        id: conversation.id,
+        title: conversation.title,
+        isPrimary: conversation.isPrimary,
+        updatedAt: conversation.updatedAt,
+        active: active.has(conversation.id),
+      })),
+      hasMore: page.hasMore,
+      nextCursor: tail
+        ? encodeMobileWorkspaceCursor({
+            version: 1,
+            section: 'chats',
+            ownerId: input.ownerId,
+            archived: input.archived,
+            afterId: tail.id,
+            updatedAt: tail.updatedAt.toISOString(),
+          })
+        : null,
+    };
+  }
+  const pageInput = { afterId: input.after?.afterId, limit: input.limit };
+  if (input.section === 'skills') {
+    const page = await new FirestoreSkillLibraryRepository(store).listPage(
+      input.ownerId,
+      pageInput,
+    );
+    return {
+      items: page.items.map((row) => ({ ...row, updatedAt: row.updatedAt.toISOString() })),
+      hasMore: page.hasMore,
+      nextCursor: page.nextCursor
+        ? encodeMobileWorkspaceCursor({
+            version: 1,
+            section: 'skills',
+            ownerId: input.ownerId,
+            afterId: page.nextCursor,
+          })
+        : null,
+    };
+  }
+  if (input.section === 'anomalies') {
+    const page = await new FirestoreWorkspaceAnomalyRepository(store).listOpenPage(
+      input.ownerId,
+      pageInput,
+    );
+    return {
+      items: page.items.map((row) => ({
+        id: row.id,
+        kind: row.kind,
+        toolName: row.toolName,
+        detail: row.detail,
+        observed: row.observed,
+        expected: row.expected,
+        citationCount: row.toolCallIds.length,
+        hasPolicy: row.policyId !== null,
+        createdAt: row.createdAt.toISOString(),
+      })),
+      hasMore: page.hasMore,
+      nextCursor: page.nextCursor
+        ? encodeMobileWorkspaceCursor({
+            version: 1,
+            section: 'anomalies',
+            ownerId: input.ownerId,
+            afterId: page.nextCursor,
+          })
+        : null,
+    };
+  }
+  const page = await new FirestoreWorkspaceImprovementRepository(store).listOpenPage(
+    input.ownerId,
+    pageInput,
+  );
+  return {
+    items: page.items.map((row) => ({
+      id: row.id,
+      kind: row.kind,
+      title: row.title,
+      rationale: row.rationale,
+      suggestion: typeof row.change.suggestion === 'string' ? row.change.suggestion : '',
+      evidenceCount: row.evidenceIds.length,
+      applyable: row.kind === 'model_role',
+      createdAt: row.createdAt.toISOString(),
+    })),
+    hasMore: page.hasMore,
+    nextCursor: page.nextCursor
+      ? encodeMobileWorkspaceCursor({
+          version: 1,
+          section: 'improvements',
+          ownerId: input.ownerId,
+          afterId: page.nextCursor,
+        })
+      : null,
+  };
+}
+
+export async function getMobileWorkspaceSectionPage(input: {
+  section: MobileWorkspacePageSection;
+  archived: boolean;
+  limit: number;
+  cursor: string | null;
+}) {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    const problems = validateAgentPersistenceConfig(config);
+    if (problems.length) throw new Error(problems.join('; '));
+    const ownerId = config.FIRESTORE_AGENT_ID;
+    const after = input.cursor
+      ? decodeMobileWorkspaceCursor(input.cursor, {
+          section: input.section,
+          ownerId,
+          ...(input.section === 'chats' ? { archived: input.archived } : {}),
+        })
+      : undefined;
+    const store = getFirestoreInstallationStore();
+    const fence = await readPrivacyErasureFence(store, ownerId);
+    const page = await queryFirestoreWorkspacePage(store, {
+      ...input,
+      ownerId,
+      ...(after ? { after } : {}),
+    });
+    await assertPrivacyErasureFenceUnchanged(store, ownerId, fence);
+    return page;
+  }
+  const db = getDb();
+  const ownerId = (await getAgent(db)).id;
+  const after = input.cursor
+    ? decodeMobileWorkspaceCursor(input.cursor, {
+        section: input.section,
+        ownerId,
+        ...(input.section === 'chats' ? { archived: input.archived } : {}),
+      })
+    : undefined;
+  if (input.section === 'import-sources' || input.section === 'import-files') {
+    // getImportOverview owns one bounded owner/privacy-fenced transaction for
+    // both independently paged streams. Wrapping the same read here would open
+    // a second transaction that waits on its own owner-row lock.
+    return queryPostgresWorkspacePage(db, { ...input, ownerId, ...(after ? { after } : {}) });
+  }
+  return withPostgresPrivacyObservationFence(db, ownerId, () =>
+    queryPostgresWorkspacePage(db, { ...input, ownerId, ...(after ? { after } : {}) }),
+  );
+}
+
+export async function withPostgresMobileWorkspaceRead<T>(
+  read: (context: {
+    ownerId: string;
+    application: ReturnType<typeof createApplication>;
+  }) => Promise<T>,
+): Promise<T> {
+  const db = getDb();
+  const ownerId = (await getAgent(db)).id;
+  return withPostgresPrivacyObservationFence(db, ownerId, () =>
+    read({ ownerId, application: getApplication() }),
+  );
 }
 
 /** Portable chat operations exposed to web and mobile transports in Firestore mode. */
@@ -608,6 +1352,7 @@ function createFirestoreChatApplication() {
     config.OPENROUTER_API_KEY,
     config.LLM_AUDIT_CAPTURE,
     createConnectedModelProviders(config, () => modelConnections.list()),
+    embeddingSpace,
   );
   const ownerGraphFacts = new FirestoreOwnerKnowledgeGraphFactRepository(
     store,
@@ -615,8 +1360,8 @@ function createFirestoreChatApplication() {
     config.FIRESTORE_AGENT_ID,
   );
   const ownerGraphEmbedding = {
-    embed: (texts: string[]) =>
-      router.embed(texts, { expectedModelId: embeddingModelId(embeddingSpace) }),
+    embed: (texts: string[]) => router.embed(texts, { expectedSpace: embeddingSpace }),
+    embeddingSpace: async () => embeddingSpace,
   };
   const locationPings = new FirestoreLocationPingRepository(store);
   const imports: ImportCommandPersistence = {
@@ -630,11 +1375,15 @@ function createFirestoreChatApplication() {
     {
       embed: async (texts: string[]) => {
         const vectors = await router.embed(texts, {
-          expectedModelId: embeddingModelId(embeddingSpace),
+          expectedSpace: embeddingSpace,
         });
         for (const vector of vectors) validateEmbedding(embeddingSpace, vector);
         return vectors;
       },
+      embedWithIdentity: async (texts: string[]) => ({
+        embeddings: await router.embed(texts, { expectedSpace: embeddingSpace }),
+        embeddingSpaceKey: embeddingSpaceIdentityKey(embeddingSpace),
+      }),
     },
   );
   const commitments = new FirestoreCommitmentMutationRepository(store, config.FIRESTORE_AGENT_ID);
@@ -658,7 +1407,7 @@ function createFirestoreChatApplication() {
       .slice(0, 4000);
   const embedSkillText = async (text: string): Promise<number[]> => {
     const [vector] = await router.embed([text], {
-      expectedModelId: embeddingModelId(embeddingSpace),
+      expectedSpace: embeddingSpace,
     });
     const result = vector ?? [];
     validateEmbedding(embeddingSpace, result);
@@ -697,6 +1446,10 @@ function createFirestoreChatApplication() {
       }),
     ...memoryCommands,
     resolveCommitment: (id: string, resolution: string) => commitments.resolve(id, resolution),
+    listClosedCommitments: () =>
+      getFirestoreClosedCommitmentOverview(store, config.FIRESTORE_AGENT_ID),
+    reopenCommitment: (id: string, expectedUpdatedAt: Date, operationId: string) =>
+      commitments.reopen(id, expectedUpdatedAt, operationId),
     snoozeCommitment: (id: string, until: Date) => commitments.snooze(id, until),
     dismissCommitment: (id: string) => commitments.dismiss(id),
     correctCommitment: (
@@ -719,6 +1472,16 @@ function createFirestoreChatApplication() {
       objectId?: string;
       note: string;
     }) => addOwnerKnowledgeGraphFactFromRepository(ownerGraphFacts, ownerGraphEmbedding, input),
+    correctOwnerKnowledgeGraphFact: (
+      relationId: string,
+      input: Parameters<typeof correctOwnerKnowledgeGraphFactFromRepository>[3],
+    ) =>
+      correctOwnerKnowledgeGraphFactFromRepository(
+        ownerGraphFacts,
+        ownerGraphEmbedding,
+        relationId,
+        input,
+      ),
     embedSkillText,
     startImport: (path: string, source: string) =>
       startWorkspaceImport(imports, getWorkspace(), path, source),
@@ -796,14 +1559,39 @@ function createFirestoreChatApplication() {
       hideChatMessage(chat, conversationId, messageId),
     unhideChatMessage: (conversationId: string, messageId: string) =>
       unhideChatMessage(chat, conversationId, messageId),
+    acknowledgeMessageDelivery: (conversationId: string, messageId: string, clientId: string) =>
+      acknowledgeChatMessageDelivery(chat, conversationId, messageId, clientId),
     archiveInactiveChats: () => archiveInactiveChats(chat),
     listChatHistory: (archived: boolean) => listChatHistory(chat, archived),
     getChatConversation: (conversationId: string, input: { taskId?: string; cursor?: string }) =>
       getChatConversationView(chatReads, conversationId, input),
+    cancelChatTurn: (input: { conversationId: string; clientOperationId: string }) =>
+      cancelChatTurn(chat, input),
     handleChatTurn: (request: Request) =>
       handleChatTurn(request, { config, router, chat, persistence }),
     getChatUpdates: (input: Parameters<typeof waitForChatUpdates>[1]) =>
       waitForChatUpdates(chatReads, input),
+    submitCardForm: async (submission: CardFormSubmission) => {
+      const admission = createCardFormAdmissionService(
+        createFirestoreCardFormAdmissionRepository(store, config.FIRESTORE_AGENT_ID),
+      );
+      const result = await admission.submit({
+        agentId: config.FIRESTORE_AGENT_ID,
+        submission,
+      });
+      if (!result.ok) return result;
+      const rows = await chat.listMessagesByIds(
+        config.FIRESTORE_AGENT_ID,
+        submission.conversationId,
+        [result.messageId],
+      );
+      const message = rows?.find((row) => row.id === result.messageId);
+      if (!message) throw new Error('Admitted form message could not be read back');
+      return {
+        ...result,
+        messageCursor: encodeMessageCursor({ createdAt: message.createdAt, id: message.id }),
+      };
+    },
     isValidChatCursor,
     recordRecallFeedback: (messageId: string, verdict: 'helpful' | 'not_helpful') =>
       recordRecallFeedbackWithRepository(
@@ -851,6 +1639,16 @@ export function addOwnerKnowledgeGraphFactForCurrentPersistence(input: {
   return addOwnerKnowledgeGraphFact(getDb(), getRouter(), input);
 }
 
+/** Source-backed relationship correction on the selected driver's atomic write boundary. */
+export function correctOwnerKnowledgeGraphFactForCurrentPersistence(
+  relationId: string,
+  input: Parameters<typeof correctKnowledgeGraphRelation>[3],
+) {
+  if (loadConfig().PERSISTENCE_DRIVER === 'firestore')
+    return getFirestoreChatApplication().correctOwnerKnowledgeGraphFact(relationId, input);
+  return correctKnowledgeGraphRelation(getDb(), getRouter(), relationId, input);
+}
+
 /** The mobile workspace settings section, backed by the configured owner in either driver. */
 export function getWorkspaceSettings() {
   return loadConfig().PERSISTENCE_DRIVER === 'firestore'
@@ -891,7 +1689,15 @@ export function registerOwnerDeviceToken(body: unknown) {
 }
 
 /** Readiness for the configured driver; Firestore never opens a SQL connection. */
-export function checkWebReadiness() {
+export async function checkWebReadiness() {
+  const config = loadConfig();
+  if (config.RESTORE_REHEARSAL) {
+    try {
+      await assertPostgresRestoreRehearsalReadOnly(getDb());
+    } catch {
+      return { ready: false, database: 'unavailable' as const };
+    }
+  }
   return getChatApplication().checkReadiness();
 }
 
@@ -914,6 +1720,8 @@ export function getOwnerMemoryCommands() {
     rejectQuarantinedMemory: application.rejectQuarantinedMemory,
     createMemory: application.createMemory,
     resolveCommitment: application.resolveCommitment,
+    listClosedCommitments: application.listClosedCommitments,
+    reopenCommitment: application.reopenCommitment,
     snoozeCommitment: application.snoozeCommitment,
     dismissCommitment: application.dismissCommitment,
     correctCommitment: application.correctCommitment,
@@ -977,4 +1785,18 @@ export async function getSelfRepairService(): Promise<{
     };
   const db = getDb();
   return { repository: createPostgresSelfRepairRepository(db), agentId: (await getAgent(db)).id };
+}
+
+/** Composition boundary for owner-scoped historical task discovery. */
+export async function getTaskDiscoveryPorts() {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore')
+    return {
+      repository: new FirestoreTaskDiscoveryRepository(getFirestoreInstallationStore()),
+      agentId: config.FIRESTORE_AGENT_ID,
+    };
+  return {
+    repository: createPostgresTaskDiscoveryRepository(getDb()),
+    agentId: (await getAgent(getDb())).id,
+  };
 }

@@ -1,6 +1,7 @@
-import { and, eq, inArray, like, or, sql } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { eq, inArray, like, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
-import { conversations, modelRoles, models } from './schema.js';
+import { conversations, modelRoleRevisions, modelRoles, models } from './schema.js';
 
 // OpenRouter catalog checked 2026-09-08. Prices are USD/million tokens and
 // reservation estimates; provider-reported usage.cost remains authoritative.
@@ -139,32 +140,52 @@ export async function reconcileModelConfig(db: Db, resetRoles = false): Promise<
   await db.transaction(async (tx) => {
     for (const model of modelDefaults) {
       const values = { ...model, capabilities: { ...model.capabilities } };
-      await tx
-        .insert(models)
-        .values(values)
-        .onConflictDoUpdate({
-          target: models.id,
-          set: { ...values, ...(resetRoles ? { enabled: true } : {}), updatedAt: sql`now()` },
-        });
+      await tx.insert(models).values(values).onConflictDoNothing();
     }
     for (const role of modelRoleDefaults) {
       await tx.insert(modelRoles).values(role).onConflictDoNothing();
+      const [current] = await tx
+        .select()
+        .from(modelRoles)
+        .where(eq(modelRoles.role, role.role))
+        .for('update');
+      if (!current) continue;
+      const primaryRetired = isRetired(current.primaryModel);
+      const fallbackRetired = isRetired(current.fallbackModel);
+      const after = resetRoles
+        ? {
+            primaryModel: role.primaryModel,
+            fallbackModel: role.fallbackModel,
+            params: role.params,
+          }
+        : {
+            primaryModel: primaryRetired ? role.primaryModel : current.primaryModel,
+            fallbackModel: fallbackRetired ? role.fallbackModel : current.fallbackModel,
+            params: current.params,
+          };
+      if (
+        after.primaryModel === current.primaryModel &&
+        after.fallbackModel === current.fallbackModel &&
+        JSON.stringify(after.params) === JSON.stringify(current.params)
+      )
+        continue;
       await tx
         .update(modelRoles)
-        .set({ ...role, updatedAt: sql`now()` })
-        .where(
-          and(
-            eq(modelRoles.role, role.role),
-            resetRoles
-              ? undefined
-              : or(
-                  inArray(modelRoles.primaryModel, retired),
-                  inArray(modelRoles.fallbackModel, retired),
-                  like(modelRoles.primaryModel, 'anthropic/%'),
-                  like(modelRoles.fallbackModel, 'anthropic/%'),
-                ),
-          ),
-        );
+        .set({ ...after, updatedAt: sql`now()` })
+        .where(eq(modelRoles.role, role.role));
+      await tx.insert(modelRoleRevisions).values({
+        id: randomUUID(),
+        role: role.role,
+        beforeState: {
+          primaryModel: current.primaryModel,
+          fallbackModel: current.fallbackModel,
+          params: current.params,
+        },
+        afterState: after,
+        source: resetRoles ? 'explicit-reset' : 'retired-route-repair',
+        baselineKnown: true,
+        requiresOwnerReview: !resetRoles,
+      });
     }
     // Preserve historical model/cost records, but remove retired choices from
     // both clients and clear saved overrides that could select them again.
@@ -182,4 +203,8 @@ export async function reconcileModelConfig(db: Db, resetRoles = false): Promise<
         ),
       );
   });
+}
+
+function isRetired(modelId: string): boolean {
+  return retired.includes(modelId) || modelId.startsWith('anthropic/');
 }

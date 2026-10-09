@@ -19,6 +19,7 @@ describe('PostgreSQL approval inbox', () => {
   const taskIds: string[] = [];
   const toolCallIds: string[] = [];
   const approvalIds: string[] = [];
+  const ownerId = randomUUID();
 
   afterEach(async () => {
     if (!db) return;
@@ -30,6 +31,7 @@ describe('PostgreSQL approval inbox', () => {
     if (approvalIds.length) await db.delete(approvals).where(inArray(approvals.id, approvalIds));
     if (toolCallIds.length) await db.delete(toolCalls).where(inArray(toolCalls.id, toolCallIds));
     if (taskIds.length) await db.delete(tasks).where(inArray(tasks.id, taskIds));
+    await db.delete(agents).where(eq(agents.id, ownerId));
     await db.$client.end();
     db = undefined;
     taskIds.length = 0;
@@ -40,8 +42,12 @@ describe('PostgreSQL approval inbox', () => {
   it('returns owner pending evidence and bounded history without payloads', async () => {
     const database = createDb(testDatabaseUrl());
     db = database;
-    const [owner] = await database.select({ id: agents.id }).from(agents).limit(1);
-    if (!owner) throw new Error('Seed the test database');
+    await database.insert(agents).values({
+      id: ownerId,
+      name: `approval-inbox-${ownerId.slice(0, 8)}`,
+      email: `${ownerId}@approval-inbox.invalid`,
+      workspacePrefix: `approval-inbox/${ownerId}`,
+    });
 
     const seed = async (input: {
       agentId?: string;
@@ -57,7 +63,7 @@ describe('PostgreSQL approval inbox', () => {
       const approvalId = randomUUID();
       await database.insert(tasks).values({
         id: taskId,
-        agentId: input.agentId ?? owner.id,
+        agentId: input.agentId ?? ownerId,
         type: 'chat_turn',
         trust: 'owner',
         status: 'waiting_approval',
@@ -66,7 +72,7 @@ describe('PostgreSQL approval inbox', () => {
       if (toolTaskId !== taskId) {
         await database.insert(tasks).values({
           id: toolTaskId,
-          agentId: owner.id,
+          agentId: ownerId,
           type: 'chat_turn',
           trust: 'owner',
           status: 'waiting_approval',
@@ -151,9 +157,9 @@ describe('PostgreSQL approval inbox', () => {
     });
 
     await expect(
-      listApprovalInbox(database, owner.id, { now: NOW, recentLimit: 0 }),
+      listApprovalInbox(database, ownerId, { now: NOW, recentLimit: 0 }),
     ).rejects.toThrow('Invalid approval inbox limit');
-    const inbox = await listApprovalInbox(database, owner.id, { now: NOW, recentLimit: 6 });
+    const inbox = await listApprovalInbox(database, ownerId, { now: NOW, recentLimit: 6 });
     expect(inbox.pending.map(({ approval }) => approval.id)).toEqual([pendingId]);
     expect(inbox.resolved.map(({ approval }) => approval.id)).toEqual([
       boundaryId,
@@ -184,7 +190,7 @@ describe('PostgreSQL approval inbox', () => {
         expiresAt: new Date('2026-09-13T11:00:00.000Z'),
       });
     }
-    const capped = await listApprovalInbox(database, owner.id, { now: NOW });
+    const capped = await listApprovalInbox(database, ownerId, { now: NOW });
     expect(capped.pending).toHaveLength(50);
     expect(capped.pending[0]?.approval.id).toBe(pendingId);
   });

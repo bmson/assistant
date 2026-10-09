@@ -5,11 +5,12 @@
  */
 export function createRecallBlock(header: string, maxChars: number) {
   const budget = Number.isFinite(maxChars) ? Math.max(0, Math.floor(maxChars)) : 0;
+  const bytes = (value: string) => new TextEncoder().encode(value).byteLength;
   let text = '';
   return {
     add(entry: string): boolean {
       const next = text ? `${text}\n${entry}` : `${header}\n\n${entry}`;
-      if (!entry || next.length > budget) return false;
+      if (!entry || bytes(next) > budget) return false;
       text = next;
       return true;
     },
@@ -17,7 +18,7 @@ export function createRecallBlock(header: string, maxChars: number) {
       return text;
     },
     get available(): boolean {
-      return budget > header.length + 2;
+      return budget > bytes(header) + 2;
     },
   };
 }

@@ -134,8 +134,8 @@ describe.skipIf(!localEmulator)('Firestore web Skills actions with PostgreSQL of
     await expect(editSkillAction(foreignSkillId, input)).resolves.toMatchObject({
       error: 'Skill not found',
     });
-    expect(mocks.embed).toHaveBeenCalledOnce();
-    mocks.embed.mockClear();
+    // Ownership preflight now rejects a foreign skill before embedding it.
+    expect(mocks.embed).not.toHaveBeenCalled();
     await expect(deleteSkillAction(foreignSkillId)).rejects.toThrow('Skill not found');
     await expect(toggleSkillDeprecatedAction(foreignSkillId, true)).rejects.toThrow(
       'Skill not found',

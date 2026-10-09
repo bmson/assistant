@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  canonicalPredicate,
   extractionVocabularyLines,
   GRAPH_ENTITY_KINDS,
   PREDICATE_VOCABULARY,
@@ -34,10 +35,19 @@ describe('predicate vocabulary', () => {
       'grandmother_of',
       'grandfather_of',
       'spouse_of',
+      'former_spouse_of',
       'cousin_of',
     ]) {
       expect(predicateSpec(role), role).toBeDefined();
     }
+  });
+
+  it('keeps past employment and marriage distinct from current relationships', () => {
+    expect(canonicalPredicate('was_employed_by').id).toBe('worked_at');
+    expect(canonicalPredicate('was employed at').id).toBe('worked_at');
+    expect(canonicalPredicate('employed_by').id).toBe('works_at');
+    expect(canonicalPredicate('was_married_to').id).toBe('former_spouse_of');
+    expect(canonicalPredicate('married_to').id).toBe('spouse_of');
   });
 
   it('suggests by kind pair, in registry order', () => {

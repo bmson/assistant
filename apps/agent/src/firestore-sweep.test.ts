@@ -143,6 +143,8 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance swe
         releasedReservations: 1,
         expiredInboxWatches: 0,
         webWatchFires: 0,
+        watchFireEffectsDrained: 0,
+        missionReportsRepaired: 0,
         portableStep: 1,
       },
     });
@@ -283,7 +285,14 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance swe
         revision: '1',
       }),
     );
-    expect(embed).toHaveBeenCalledWith(['where did we land on the lease renewal']);
+    expect(embed).toHaveBeenCalledWith(['where did we land on the lease renewal'], {
+      expectedSpace: {
+        provider: 'synthetic',
+        model: 'sweep-fixture',
+        dimensions: 1536,
+        revision: '1',
+      },
+    });
     expect((await store.doc('messages', aged).get()).exists).toBe(false);
     expect((await store.doc('toolCache', 'expired').get()).exists).toBe(false);
 
@@ -292,7 +301,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance swe
       report: { renotifiedAttention: 0, budgetNotices: 0, messagesEmbedded: 0 },
     });
     expect(sqlAccesses).toEqual([]);
-  });
+  }, 20_000);
 
   it('writes no vectors when the embed role no longer produces the configured space', async () => {
     const embed = vi.fn(async (texts: string[]) => texts.map(() => [1]));

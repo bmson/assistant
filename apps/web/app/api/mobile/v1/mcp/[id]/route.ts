@@ -1,5 +1,6 @@
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import { FirestoreMcpConnectionMutationRepository } from '@assistant/firestore';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import {
   discoverFirestoreMcpConnection,
   getApplication,
@@ -18,7 +19,9 @@ export async function POST(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid MCP connection id' }, { status: 400 });
-  const body = (await request.json().catch(() => null)) as { action?: unknown } | null;
+  const mutationBody = await readMobileMutationBody(request, ['action']);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as { action?: unknown } | null;
   const config = loadConfig();
   if (config.PERSISTENCE_DRIVER === 'firestore') {
     if (body?.action !== 'refresh' && body?.action !== 'enable' && body?.action !== 'disable')

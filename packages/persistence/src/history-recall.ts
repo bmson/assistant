@@ -14,6 +14,7 @@ export interface HistoryMessage {
 export interface HistorySearch {
   agentId: string;
   embedding: number[];
+  embeddingSpaceKey: string;
   exclude: HistoryExclusion;
   limit: number;
 }

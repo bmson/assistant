@@ -66,7 +66,13 @@ describe.skipIf(!localEmulator)('Firestore mobile Knowledge graph with PostgreSQ
     category: 'knowledge',
     quarantined: false,
     expiresAt: null,
-    embedding: [0.1],
+    embedding: Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0)),
+    embeddingSpace: embeddingSpaceKey({
+      provider: 'vertex',
+      model: 'example-embedding',
+      dimensions: 1536,
+      revision: 'fixture-v1',
+    }),
     contentHash: `hash-${id}`,
     subjectContactId: null,
     createdAt: now,
@@ -299,6 +305,12 @@ describe.skipIf(!localEmulator)('Firestore mobile Knowledge graph with PostgreSQ
       content: 'Anna parent of Baldvin. Owner note: family',
       contentHash: `owner-fact-${randomUUID()}`,
       embedding: Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0)),
+      embeddingSpaceKey: embeddingSpaceKey({
+        provider: 'vertex',
+        model: 'example-embedding',
+        dimensions: 1536,
+        revision: 'fixture-v1',
+      }),
       predicate: 'parent_of',
       subjectContactId: null,
       subject: {
@@ -395,6 +407,12 @@ describe.skipIf(!localEmulator)('Firestore mobile Knowledge graph with PostgreSQ
       content: 'Anna parent of Baldvin. Owner note: family',
       contentHash: `owner-fact-${randomUUID()}`,
       embedding: Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0)),
+      embeddingSpaceKey: embeddingSpaceKey({
+        provider: 'vertex',
+        model: 'example-embedding',
+        dimensions: 1536,
+        revision: 'fixture-v1',
+      }),
       predicate: 'parent_of',
       subjectContactId: null,
       subject: {

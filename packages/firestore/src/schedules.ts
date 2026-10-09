@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   existingTaskResult,
+  GOAL_SUPERSEDED_PROGRESS,
+  GOAL_TASK_TERMINAL,
+  goalOccurrenceIsCurrent,
   newTaskRecord,
   occurrenceIsCurrent,
   type Records,
@@ -120,6 +123,10 @@ export class FirestoreScheduleRepository implements ScheduleRepository {
         enabled: input.enabled ?? true,
         cron: input.cron,
         taskTemplate: input.taskTemplate,
+        seedTemplateKey: null,
+        seedTemplateRevision: null,
+        seedDefinition: null,
+        seedReviewRequired: false,
         lastRunAt: null,
         nextRunAt: input.nextRunAt,
       };
@@ -271,6 +278,33 @@ export class FirestoreScheduleRepository implements ScheduleRepository {
       // This is the cancellation and complete-snapshot fence shared with the
       // reminder delivery/cancellation transactions.
       if (!occurrenceIsCurrent(current, input)) return null;
+      if (input.goalGuard) {
+        const goalSnapshot = await tx.get(this.store.doc('goals', input.goalGuard.goal.id));
+        const open = await tx.get(
+          this.store
+            .collection('tasks')
+            .where('agentId', '==', current.agentId)
+            .where('goalId', '==', input.goalGuard.goal.id)
+            .where('status', 'not-in', GOAL_TASK_TERMINAL)
+            .limit(501),
+        );
+        if (open.size > 500)
+          throw new Error('Too much open goal work to safely commit its next session');
+        const openTasks = open.docs.map((doc) => {
+          const task = decodeRecord<Records['tasks']>(doc.data());
+          if (
+            documentKey(task.id) !== doc.id ||
+            task.agentId !== current.agentId ||
+            task.goalId !== input.goalGuard?.goal.id
+          )
+            throw new Error('Goal task identity mismatch');
+          return { id: task.id, type: task.type, status: task.status, updatedAt: task.updatedAt };
+        });
+        const goal = goalSnapshot.exists
+          ? decodeRecord<Records['goals']>(goalSnapshot.data())
+          : null;
+        if (!goalOccurrenceIsCurrent(input, goal, openTasks)) return null;
+      } else if (!goalOccurrenceIsCurrent(input, null, [])) return null;
 
       let eventSnapshot = null;
       let existingTaskSnapshot = null;
@@ -314,6 +348,22 @@ export class FirestoreScheduleRepository implements ScheduleRepository {
           });
           taskResult = { task, created: true };
         }
+      }
+
+      if (taskResult?.created && input.goalGuard) {
+        for (const id of input.goalGuard.supersedeTaskIds)
+          tx.update(
+            this.store.doc('tasks', id),
+            encodeRecord({
+              status: 'cancelled',
+              progress: GOAL_SUPERSEDED_PROGRESS,
+              updatedAt: input.now,
+              lockedUntil: null,
+              leaseToken: null,
+              runAfter: null,
+              attempt: 0,
+            }),
+          );
       }
 
       const schedule: ScheduleRecord = {

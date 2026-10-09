@@ -1,17 +1,24 @@
 import {
-  correctKnowledgeGraphRelation,
   GRAPH_EXTRACTION_VERSION,
   getKnowledgeGraphRelation,
   presentKnowledgeGraphRelation,
   reviewKnowledgeGraphRelation,
 } from '@assistant/application';
-import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
+import {
+  loadConfig,
+  parseFirestoreEmbeddingSpace,
+  validateAgentPersistenceConfig,
+} from '@assistant/config';
 import {
   FirestoreKnowledgeGraphRelationMutationRepository,
   getFirestoreKnowledgeGraphRelation,
 } from '@assistant/firestore';
-import { correctFirestoreKnowledgeRelation } from '@/lib/firestore-knowledge';
-import { getDb, getFirestoreInstallationStore, getRouter } from '@/lib/server';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
+import {
+  correctOwnerKnowledgeGraphFactForCurrentPersistence,
+  getDb,
+  getFirestoreInstallationStore,
+} from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
 export const dynamic = 'force-dynamic';
@@ -47,6 +54,8 @@ export async function GET(
       config.FIRESTORE_AGENT_ID,
       GRAPH_EXTRACTION_VERSION,
       id,
+      undefined,
+      parseFirestoreEmbeddingSpace(config.FIRESTORE_EMBEDDING_SPACE),
     );
     return relation
       ? mobileJson({
@@ -86,7 +95,20 @@ export async function POST(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid relationship id' }, { status: 400 });
-  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+  const mutationBody = await readMobileMutationBody(request, [
+    'action',
+    'note',
+    'objectId',
+    'objectKind',
+    'objectLabel',
+    'predicate',
+    'sourceDisposition',
+    'subjectId',
+    'subjectKind',
+    'subjectLabel',
+  ]);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as Record<string, unknown> | null;
   if (body?.action === 'confirm' || body?.action === 'reject') {
     const reviewed = await reviewRelation(id, body.action === 'confirm' ? 'confirmed' : 'rejected');
     return reviewed
@@ -94,7 +116,14 @@ export async function POST(
       : mobileJson({ error: 'relationship not found' }, { status: 404 });
   }
   if (body?.action === 'correct') {
+    if (
+      body.sourceDisposition !== undefined &&
+      body.sourceDisposition !== 'graph_only' &&
+      body.sourceDisposition !== 'whole_fact'
+    )
+      return mobileJson({ error: 'invalid source disposition' }, { status: 400 });
     const input = {
+      sourceDisposition: (body.sourceDisposition ?? 'graph_only') as 'graph_only' | 'whole_fact',
       subjectLabel: typeof body.subjectLabel === 'string' ? body.subjectLabel : '',
       subjectKind: typeof body.subjectKind === 'string' ? body.subjectKind : '',
       subjectId: typeof body.subjectId === 'string' ? body.subjectId : undefined,
@@ -104,10 +133,7 @@ export async function POST(
       objectId: typeof body.objectId === 'string' ? body.objectId : undefined,
       note: typeof body.note === 'string' ? body.note : '',
     };
-    const result =
-      loadConfig().PERSISTENCE_DRIVER === 'firestore'
-        ? await correctFirestoreKnowledgeRelation(id, input)
-        : await correctKnowledgeGraphRelation(getDb(), getRouter(), id, input);
+    const result = await correctOwnerKnowledgeGraphFactForCurrentPersistence(id, input);
     return result.error ? mobileJson(result, { status: 400 }) : mobileJson(result, { status: 201 });
   }
   return mobileJson({ error: 'action must be confirm, reject, or correct' }, { status: 400 });

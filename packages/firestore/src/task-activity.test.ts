@@ -1,3 +1,8 @@
+import { randomUUID } from 'node:crypto';
+import {
+  chatAdmissionCancellationTrigger,
+  chatAdmissionExternalEventId,
+} from '@assistant/persistence';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { InstallationStore } from './store.js';
 import { FirestoreTaskActivityRepository } from './task-activity.js';
@@ -40,6 +45,30 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore Activity list',
     return id;
   }
 
+  async function seedCancellationMarker(n: number, updatedAt: Date) {
+    const id = `marker-${String(n).padStart(4, '0')}`;
+    const conversationId = 'marker-conversation';
+    const clientOperationId = randomUUID();
+    await store.doc('tasks', id).set({
+      id,
+      agentId,
+      conversationId,
+      externalEventId: chatAdmissionExternalEventId({ agentId, conversationId, clientOperationId }),
+      type: 'chat_turn',
+      status: 'cancelled',
+      title: null,
+      progress: '',
+      trust: 'owner',
+      spentUsd: '0.000000',
+      budgetUsdLimit: '0.5000',
+      updatedAt,
+      archivedAt: null,
+      autonomyGrant: null,
+      trigger: chatAdmissionCancellationTrigger({ agentId, conversationId, clientOperationId }),
+    });
+    return id;
+  }
+
   async function seedAgent() {
     store = emulatorStore();
     await store.doc('agents', agentId).set({ id: agentId, name: 'Owner' });
@@ -63,6 +92,20 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore Activity list',
       Array.from({ length: 50 }, (_, index) => `task-${String(250 - index).padStart(4, '0')}`),
     );
     expect(result.archivedCount).toBe(0);
+  });
+
+  it('skips cancellation markers across page boundaries before applying the list limit', async () => {
+    await seedAgent();
+    const ordinary = await seedTask(1, { updatedAt: new Date('2026-01-01T00:00:00Z') });
+    const markerTime = new Date('2026-02-01T00:00:00Z');
+    let newestMarker = '';
+    for (let n = 1; n <= 101; n += 1) newestMarker = await seedCancellationMarker(n, markerTime);
+    const result = await list({ limit: 1 });
+    expect(result.tasks.map((task) => task.id)).toEqual([ordinary]);
+    expect(result.tasks.some((task) => task.id === newestMarker)).toBe(false);
+    await expect(
+      new FirestoreTaskActivityRepository(store).getDetail(agentId, newestMarker, { pageSize: 1 }),
+    ).resolves.toBeNull();
   });
 
   it('skips archived and canary tasks, and counts the archived ones', async () => {

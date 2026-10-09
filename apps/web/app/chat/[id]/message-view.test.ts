@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createChatLogOrder,
   dayLabel,
+  messageText,
   orderChatLog,
   retireProvisionalReplies,
   retireProvisionalUserTurns,
@@ -22,8 +23,13 @@ function durable(id: string, role: 'user' | 'assistant', text: string, at?: stri
 }
 
 /** A message the client made itself: local id, no persisted timestamp. */
-function provisional(id: string, role: 'user' | 'assistant', text: string): UIMessage {
-  return { id, role, parts: [{ type: 'text', text }] } as UIMessage;
+function provisional(
+  id: string,
+  role: 'user' | 'assistant',
+  text: string,
+  durableMessageId?: string,
+): UIMessage {
+  return { id, role, metadata: { durableMessageId }, parts: [{ type: 'text', text }] } as UIMessage;
 }
 
 function order(messages: UIMessage[]): string[] {
@@ -47,6 +53,54 @@ describe('orderChatLog', () => {
         durable('a', 'assistant', 'first', '2026-08-18T10:00:00.000Z'),
       ]),
     ).toEqual(['a', 'local']);
+  });
+
+  it('keeps the complete persisted answer when a later identified stream snapshot is partial', () => {
+    const channelMessageId = 'chat-reply:task-1';
+    const streamed = {
+      ...provisional('sdk-stream-id', 'assistant', 'This local chat is working.'),
+      metadata: { channelMessageId },
+    } as UIMessage;
+    const persistedParts = [
+      { type: 'text', text: 'This local chat is working.' },
+      { type: 'data-card', data: { kind: 'generated-card', title: 'Verified answer' } },
+    ];
+    const persisted = {
+      ...durable(
+        'database-message-id',
+        'assistant',
+        'This local chat is working.',
+        '2026-10-08T12:00:00.000Z',
+      ),
+      parts: persistedParts,
+      metadata: {
+        channelMessageId,
+        createdAt: '2026-10-08T12:00:00.000Z',
+        source: 'response-contract',
+      },
+    } as UIMessage;
+    const laterStreamSnapshot = {
+      ...streamed,
+      parts: [{ type: 'text', text: 'Raw partial stream without the guarded answer.' }],
+    } as UIMessage;
+
+    const rows = orderChatLog([streamed, persisted, laterStreamSnapshot], createChatLogOrder());
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.id).toBe('database-message-id');
+    expect(rows[0]?.parts).toEqual(persistedParts);
+    expect(rows[0]?.metadata).toMatchObject({
+      channelMessageId,
+      createdAt: '2026-10-08T12:00:00.000Z',
+      source: 'response-contract',
+    });
+  });
+
+  it('does not merge identical assistant text without a shared channel identity', () => {
+    const body = 'This local chat is working.';
+    const first = provisional('stream-a', 'assistant', body);
+    const second = durable('stored-b', 'assistant', body, '2026-10-08T12:00:00.000Z');
+    expect(order([first, second])).toEqual(['stored-b', 'stream-a']);
   });
 
   it('breaks a timestamp tie on id so the order is stable across polls', () => {
@@ -94,6 +148,16 @@ describe('orderChatLog', () => {
     expect(orderChatLog([persisted, earlier], order).map((m) => m.id)).toEqual(['m1', 's1']);
   });
 
+  it('renders only the latest SDK snapshot when a stream identity occurs twice', () => {
+    const first = provisional('qgz-stream', 'assistant', 'The reply is starting.');
+    const latest = provisional('qgz-stream', 'assistant', 'This local chat is working.');
+    const log = orderChatLog([first, latest], createChatLogOrder());
+
+    expect(log).toHaveLength(1);
+    expect(log[0]?.id).toBe('qgz-stream');
+    expect(log[0] ? messageText(log[0]) : '').toBe('This local chat is working.');
+  });
+
   it('gives the same order whether or not the send times are already cached', () => {
     const order = createChatLogOrder();
     const log = [
@@ -106,11 +170,40 @@ describe('orderChatLog', () => {
   });
 });
 
+describe('explicit provisional identity', () => {
+  it('keeps repeated identical user requests and replies with no acknowledgement', () => {
+    for (const role of ['user', 'assistant'] as const) {
+      const log = [durable('old', role, 'Same words'), provisional('new', role, 'Same words')];
+      const retire = role === 'user' ? retireProvisionalUserTurns : retireProvisionalReplies;
+      expect(retire(log, new Set(['old']))).toEqual(log);
+      expect(retire(retire(log, new Set(['old'])), new Set(['old']))).toEqual(log);
+    }
+  });
+  it('uses the acknowledged reply identity even when the contract replaces the text', () => {
+    const local = {
+      ...provisional('stream', 'assistant', 'Old draft'),
+      metadata: { channelMessageId: 'chat-reply:task-B' },
+    };
+    const old = {
+      ...durable('A', 'assistant', 'Same'),
+      metadata: { channelMessageId: 'chat-reply:task-A' },
+    };
+    const current = {
+      ...durable('B', 'assistant', 'Corrected'),
+      metadata: { channelMessageId: 'chat-reply:task-B' },
+    };
+    expect(retireProvisionalReplies([old, local, current], new Set(['A', 'B']))).toEqual([
+      old,
+      current,
+    ]);
+  });
+});
+
 describe('retireProvisionalUserTurns', () => {
   it('retires the optimistic turn when its persisted twin is in the log', () => {
     const log = [
       durable('s1', 'assistant', 'earlier', '2026-08-18T09:00:00.000Z'),
-      provisional('local-user', 'user', 'book the flight'),
+      provisional('local-user', 'user', 'book the flight', 's2'),
       durable('s2', 'user', 'book the flight', '2026-08-18T10:00:00.000Z'),
     ];
     const kept = retireProvisionalUserTurns(log, new Set(['s1', 's2']));
@@ -120,7 +213,7 @@ describe('retireProvisionalUserTurns', () => {
   it('shows the same question twice when it was genuinely asked twice', () => {
     // One durable copy must retire exactly one local copy, not both.
     const log = [
-      provisional('local-1', 'user', 'status?'),
+      provisional('local-1', 'user', 'status?', 's2'),
       provisional('local-2', 'user', 'status?'),
       durable('s2', 'user', 'status?', '2026-08-18T10:00:00.000Z'),
     ];
@@ -132,7 +225,7 @@ describe('retireProvisionalUserTurns', () => {
 describe('retireProvisionalReplies', () => {
   it('retires the streamed reply once its persisted twin is in the log', () => {
     const log = [
-      provisional('streamed', 'assistant', 'Booked it.'),
+      provisional('streamed', 'assistant', 'Booked it.', 's2'),
       durable('s2', 'assistant', 'Booked it.', '2026-08-18T10:00:00.000Z'),
     ];
     const kept = retireProvisionalReplies(log, new Set(['s2']));
@@ -157,7 +250,7 @@ describe('retireProvisionalReplies', () => {
     // own page would leave the duplicate on screen forever.
     const log = [
       durable('s2', 'assistant', 'Booked it.', '2026-08-18T10:00:00.000Z'),
-      provisional('streamed', 'assistant', 'Booked it.'),
+      provisional('streamed', 'assistant', 'Booked it.', 's2'),
     ];
     expect(retireProvisionalReplies(log, new Set(['s2'])).map((m) => m.id)).toEqual(['s2']);
   });
@@ -174,6 +267,7 @@ describe('retireProvisionalReplies', () => {
     const streamed = {
       id: 'streamed',
       role: 'assistant',
+      metadata: { durableMessageId: 's2' },
       parts: [
         { type: 'text', text: 'I checked your calendar — nothing today.' },
         { type: 'data-off-course', data: { text: "That's everything I could actually see." } },

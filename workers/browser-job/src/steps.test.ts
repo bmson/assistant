@@ -99,3 +99,35 @@ describe('browser upload step', () => {
     expect(result.outputs[0]?.error).toContain('exceeds 8 MB');
   });
 });
+
+it('keeps same-named screenshots immutable across executions and content changes', async () => {
+  let bytes = Buffer.from('first image');
+  const objects = new Map<string, Buffer>();
+  const page = { screenshot: async () => bytes } as unknown as Page;
+  const workspace = {
+    put: async (key: string, value: Buffer) => {
+      objects.set(key, value);
+    },
+  } as unknown as BlobStore;
+  const first = await runSteps(page, [{ action: 'screenshot', name: 'same' }], {
+    taskId: 'task',
+    executionId: 'a'.repeat(64),
+    workspace,
+  });
+  bytes = Buffer.from('second image');
+  const second = await runSteps(page, [{ action: 'screenshot', name: 'same' }], {
+    taskId: 'task',
+    executionId: 'b'.repeat(64),
+    workspace,
+  });
+  expect(first.screenshots[0]).not.toBe(second.screenshots[0]);
+  expect(objects.get(first.screenshots[0] ?? '')?.toString()).toBe('first image');
+  expect(objects.get(second.screenshots[0] ?? '')?.toString()).toBe('second image');
+  const replay = await runSteps(page, [{ action: 'screenshot', name: 'same' }], {
+    taskId: 'task',
+    executionId: 'b'.repeat(64),
+    workspace,
+  });
+  expect(replay).toEqual(second);
+  expect(objects.size).toBe(2);
+});

@@ -5,7 +5,13 @@ import type {
   NotificationsConversationRepository,
 } from '@assistant/persistence';
 import { describe, expect, it } from 'vitest';
-import { cardFromEmail, mayBeCardWorthy, withoutSenderLinks } from './email-cards.js';
+import {
+  applyPreparedEmailCard,
+  cardFromEmail,
+  mayBeCardWorthy,
+  prepareEmailCard,
+  withoutSenderLinks,
+} from './email-cards.js';
 
 const hotel = {
   subject: 'Your reservation at Hotel Kabuki is confirmed',
@@ -241,5 +247,120 @@ describe('cardFromEmail', () => {
     });
     expect(card).toBeNull();
     expect(saved).toEqual([]);
+  });
+
+  it('keeps a structured-composition failure unknown for the durable worker', async () => {
+    const result = await prepareEmailCard(
+      {
+        router: {
+          async object() {
+            return { ok: false, errorCode: 'provider_timeout' };
+          },
+        } as unknown as ModelRouter,
+      },
+      {
+        ...event,
+        sourceId: 'gmail:m1',
+        messageId: 'm1',
+      } as never,
+    );
+
+    expect(result).toEqual({ kind: 'unknown', errorCode: 'email_card_effect_unknown' });
+  });
+});
+
+describe('durable email card effect fence', () => {
+  it('passes the exact observer claim and privacy generation into the card write', async () => {
+    const saved: GeneratedCardPersistInput[] = [];
+    const conversationFences: unknown[] = [];
+    const noticeFences: unknown[] = [];
+    const deps = {
+      router: {} as ModelRouter,
+      generatedCards: {
+        async get() {
+          return null;
+        },
+        async createOrRevise(input: GeneratedCardPersistInput) {
+          saved.push(input);
+          return {
+            card: {
+              id: input.id,
+              sourceFingerprint: input.sourceFingerprint,
+              updatedAt: new Date(),
+            },
+            revision: { id: input.revisionId },
+          };
+        },
+      } as unknown as GeneratedCardRepository,
+      notifications: {
+        kind: 'notifications-conversation-repository',
+        getOrCreate: async (_agentId: string, fence?: unknown) => {
+          conversationFences.push(fence);
+          return 'notifications-chat';
+        },
+      } as NotificationsConversationRepository,
+      notifyOwner: async (input: { emailObserverEffectFence?: unknown }) => {
+        noticeFences.push(input.emailObserverEffectFence);
+        return { legs: [{ channel: 'dashboard', status: 'pending' as const }] };
+      },
+    };
+    const source = {
+      agentId: 'owner-1',
+      messageId: 'message-1',
+      sourceId: 'gmail:provider-1',
+      from: 'reservations@example.test',
+      subject: hotel.subject,
+      body: hotel.body,
+      authenticated: true,
+      origin: 'owner',
+      contentTrust: 'owner',
+      ingestMode: 'direct',
+      sourceVerification: 'authenticated',
+      hasExternalOrUnknown: false,
+    } as const;
+    const claim = {
+      id: 'observer-work-1',
+      agentId: 'owner-1',
+      observerKey: 'google.email-card',
+      observerVersion: 1,
+      claimToken: 'lease-token',
+      claimGeneration: 3,
+      privacyGeneration: 'privacy-7',
+    } as import('@assistant/persistence').EmailObserverClaim;
+    const prepared = {
+      kind: 'generated-card',
+      id: '2c301781-3be3-41bc-b577-4e5fe9cd69d0',
+      revisionId: '6a35f8a2-bb66-40ec-94cc-59122814f0cd',
+      sourceFingerprint: 'a'.repeat(64),
+      grounding: 'evidence',
+      spec: {
+        version: 1,
+        title: 'Hotel Kabuki',
+        icon: 'hotel',
+        accent: 'mint',
+        accessibilityLabel: 'Hotel Kabuki reservation',
+        sourceLabel: 'Email',
+        facts: [
+          { id: 'date', label: 'Check-in', value: 'October 9', source: 'Email', sensitive: false },
+        ],
+        blocks: [{ type: 'facts', factIds: ['date'] }],
+        actions: [],
+        refreshable: false,
+      },
+    };
+
+    await applyPreparedEmailCard(deps, source, claim, prepared);
+
+    expect(saved).toHaveLength(1);
+    const expectedFence = {
+      id: claim.id,
+      agentId: claim.agentId,
+      claimToken: claim.claimToken,
+      claimGeneration: claim.claimGeneration,
+      expectedPrivacyGeneration: claim.privacyGeneration,
+    };
+    expect(saved[0]?.emailObserverEffectFence).toEqual(expectedFence);
+    expect(conversationFences).toEqual([expectedFence]);
+    expect(noticeFences).toEqual([expectedFence]);
   });
 });

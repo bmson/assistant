@@ -1,6 +1,6 @@
 import { conversations, createDb, type Db, messages, type TaskRow } from '@assistant/db';
 import type { ModelMessage } from 'ai';
-import { inArray } from 'drizzle-orm';
+import { inArray, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getAgent } from '../../chat.js';
 import type { TaskState } from '../../events.js';
@@ -63,6 +63,44 @@ describe('foldOwnerRepliesSincePark', () => {
     }
   });
 
+  it('persists precise microsecond watermarks across repeated resumes', async () => {
+    if (!dbUp) throw new Error('Database unavailable');
+    const conversationId = await makeConversation('chat');
+    const task = { conversationId, agentId };
+    const state = stateWith('2026-07-22T09:00:00.000Z');
+    const window: ModelMessage[] = [];
+    for (const [index, fraction] of ['123456', '123789'].entries()) {
+      await db.insert(messages).values({
+        conversationId,
+        role: 'user',
+        origin: 'owner',
+        text: `micro-${index}`,
+        parts: [],
+        createdAt: sql`(${`2026-07-22T10:00:00.${fraction}Z`})::timestamptz`,
+      });
+    }
+    await foldOwnerRepliesSincePark(db, task, state, window);
+    expect(window.map((m) => m.content)).toEqual([
+      '[The owner added this while the task was paused:]\nmicro-0',
+      '[The owner added this while the task was paused:]\nmicro-1',
+    ]);
+    expect(state.seenConversationAt).toBe('2026-07-22T10:00:00.123789000Z');
+    const resumed = JSON.parse(JSON.stringify(state)) as TaskState;
+    for (let i = 0; i < 3; i++) await foldOwnerRepliesSincePark(db, task, resumed, window);
+    expect(window).toHaveLength(2);
+    await db.insert(messages).values({
+      conversationId,
+      role: 'user',
+      origin: 'owner',
+      text: 'third',
+      parts: [],
+      createdAt: sql`('2026-07-22T10:00:00.123790Z')::timestamptz`,
+    });
+    await foldOwnerRepliesSincePark(db, task, resumed, window);
+    expect(window).toHaveLength(3);
+    expect(resumed.seenConversationAt).toBe('2026-07-22T10:00:00.123790000Z');
+  });
+
   it('baselines the watermark on the first run without folding', async () => {
     if (!dbUp) return;
     const conversationId = await makeConversation('chat');
@@ -71,7 +109,7 @@ describe('foldOwnerRepliesSincePark', () => {
     const window: ModelMessage[] = [];
     await foldOwnerRepliesSincePark(db, { agentId, conversationId } as TaskRow, state, window);
     expect(window).toHaveLength(0); // nothing folded — seed already holds it
-    expect(state.seenConversationAt).toBe(new Date('2026-07-22T10:00:00Z').toISOString());
+    expect(state.seenConversationAt).toBe('2026-07-22T10:00:00.000000000Z');
     expect(state.seenConversationId).toBeTruthy();
   });
 
@@ -79,13 +117,13 @@ describe('foldOwnerRepliesSincePark', () => {
     if (!dbUp) return;
     const conversationId = await makeConversation('chat');
     await addOwnerMessage(conversationId, 'actually make it Bob', new Date('2026-07-22T11:00:00Z'));
-    const state = stateWith(new Date('2026-07-22T10:00:00Z').toISOString());
+    const state = stateWith('2026-07-22T10:00:00.000000000Z');
     const window: ModelMessage[] = [];
     await foldOwnerRepliesSincePark(db, { agentId, conversationId } as TaskRow, state, window);
     expect(window).toHaveLength(1);
     expect(String(window[0]?.content)).toContain('actually make it Bob');
     expect(String(window[0]?.content)).toContain('while the task was paused');
-    expect(state.seenConversationAt).toBe(new Date('2026-07-22T11:00:00Z').toISOString());
+    expect(state.seenConversationAt).toBe('2026-07-22T11:00:00.000000000Z');
     expect(state.seenConversationId).toBeTruthy();
 
     // Idempotent: a second fold with the advanced watermark appends nothing.
@@ -110,7 +148,7 @@ describe('foldOwnerRepliesSincePark', () => {
     expect(window.map((message) => String(message.content))).toEqual([
       expect.stringContaining('same-time correction'),
     ]);
-    expect(state.seenConversationAt).toBe(at.toISOString());
+    expect(state.seenConversationAt).toBe(at.toISOString().replace(/(\.\d{3})Z$/, '$1000000Z'));
     expect(state.seenConversationId).toBe(secondId);
     const repeated: ModelMessage[] = [];
     await foldOwnerRepliesSincePark(db, { agentId, conversationId } as TaskRow, state, repeated);
@@ -121,11 +159,11 @@ describe('foldOwnerRepliesSincePark', () => {
     if (!dbUp) return;
     const conversationId = await makeConversation('email');
     await addOwnerMessage(conversationId, 'a quoted forward', new Date('2026-07-22T11:00:00Z'));
-    const state = stateWith(new Date('2026-07-22T10:00:00Z').toISOString());
+    const state = stateWith('2026-07-22T10:00:00.000000000Z');
     const window: ModelMessage[] = [];
     await foldOwnerRepliesSincePark(db, { agentId, conversationId } as TaskRow, state, window);
     expect(window).toHaveLength(0);
     // The watermark is left untouched for a non-chat channel.
-    expect(state.seenConversationAt).toBe(new Date('2026-07-22T10:00:00Z').toISOString());
+    expect(state.seenConversationAt).toBe('2026-07-22T10:00:00.000000000Z');
   });
 });

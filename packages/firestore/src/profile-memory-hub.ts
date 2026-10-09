@@ -4,6 +4,7 @@ import type {
   Records,
 } from '@assistant/persistence';
 import { FieldPath, type Query, type QueryDocumentSnapshot } from '@google-cloud/firestore';
+import { decodeMemoryRecord } from './memory-record.js';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
@@ -49,8 +50,9 @@ async function visitProfileCollection(
 function ownedProfileRow<T extends { id: string; agentId: string }>(
   doc: QueryDocumentSnapshot,
   agentId: string,
+  decode: (value: unknown) => T = (value) => decodeRecord<T>(value),
 ): T {
-  const row = decodeRecord<T>(doc.data());
+  const row = decode(doc.data());
   if (!row.id || documentKey(row.id) !== doc.id || row.agentId !== agentId)
     throw new Error('Malformed or foreign Memory hub record');
   return row;
@@ -100,7 +102,9 @@ export async function loadProfileHubSource(
     if (!row.id || documentKey(row.id) !== doc.id) throw new Error('Malformed Memory hub contact');
     return row;
   });
-  const memories = memoryDocs.map((doc) => ownedProfileRow<Records['memories']>(doc, agentId));
+  const memories = memoryDocs.map((doc) =>
+    ownedProfileRow<Records['memories']>(doc, agentId, decodeMemoryRecord),
+  );
   const feedback = feedbackDocs.map((doc) =>
     ownedProfileRow<Records['recallFeedback']>(doc, agentId),
   );
@@ -235,7 +239,7 @@ export class FirestoreProfileMemoryHubRepository implements ProfileMemoryHubRepo
     await visitProfileCollection(
       this.store.collection('memories').where('agentId', '==', agentId) as Query,
       (doc) => {
-        const memory = ownedProfileRow<Records['memories']>(doc, agentId);
+        const memory = ownedProfileRow<Records['memories']>(doc, agentId, decodeMemoryRecord);
         if (memory.category !== 'knowledge' || (memory.expiresAt && memory.expiresAt <= now))
           return;
         if (memory.quarantined) {

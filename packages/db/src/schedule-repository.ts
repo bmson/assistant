@@ -6,6 +6,9 @@ import type {
   TaskCreateResult,
 } from '@assistant/persistence';
 import {
+  GOAL_SUPERSEDED_PROGRESS,
+  GOAL_TASK_TERMINAL,
+  goalOccurrenceIsCurrent,
   occurrenceIsCurrent,
   scheduleBatch,
   scheduleCanRun,
@@ -13,9 +16,9 @@ import {
   scheduleTime,
   validateScheduleCreate,
 } from '@assistant/persistence';
-import { and, asc, eq, isNull, lte, sql } from 'drizzle-orm';
+import { and, asc, eq, isNull, lte, notInArray, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
-import { schedules } from './schema.js';
+import { goals, schedules, tasks } from './schema.js';
 import { createTask } from './task-creation-repository.js';
 
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -34,6 +37,23 @@ async function lockSchedule(tx: Tx, scheduleId: string): Promise<void> {
 async function lockedSchedule(tx: Tx, scheduleId: string): Promise<ScheduleRecord | null> {
   const [row] = await tx.select().from(schedules).where(eq(schedules.id, scheduleId)).for('update');
   return row ?? null;
+}
+
+async function commitSerializable<T>(db: Db, commit: (tx: Tx) => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await db.transaction(commit, { isolationLevel: 'serializable' });
+    } catch (error) {
+      let cause: unknown = error;
+      let conflict = false;
+      for (let depth = 0; depth < 5 && cause && typeof cause === 'object'; depth += 1) {
+        const record = cause as { code?: string; cause?: unknown };
+        if (record.code === '40001' || record.code === '40P01') conflict = true;
+        cause = record.cause;
+      }
+      if (!conflict || attempt >= 3) throw error;
+    }
+  }
 }
 
 export function createPostgresScheduleRepository(db: Db): ScheduleRepository {
@@ -182,10 +202,35 @@ export function createPostgresScheduleRepository(db: Db): ScheduleRepository {
     async commitOccurrence(input: ScheduleOccurrence) {
       scheduleTime(input.now);
       if (input.nextRunAt !== null) scheduleTime(input.nextRunAt);
-      return db.transaction(async (tx) => {
+      return commitSerializable(db, async (tx) => {
         await lockSchedule(tx, input.expected.id);
         const current = await lockedSchedule(tx, input.expected.id);
         if (!current || !occurrenceIsCurrent(current, input)) return null;
+        if (input.goalGuard) {
+          const [goal] = await tx
+            .select()
+            .from(goals)
+            .where(and(eq(goals.id, input.goalGuard.goal.id), eq(goals.agentId, current.agentId)))
+            .for('update');
+          const openTasks = await tx
+            .select({
+              id: tasks.id,
+              type: tasks.type,
+              status: tasks.status,
+              updatedAt: tasks.updatedAt,
+            })
+            .from(tasks)
+            .where(
+              and(
+                eq(tasks.agentId, current.agentId),
+                eq(tasks.goalId, input.goalGuard.goal.id),
+                notInArray(tasks.status, GOAL_TASK_TERMINAL),
+              ),
+            )
+            .orderBy(asc(tasks.id))
+            .for('update');
+          if (!goalOccurrenceIsCurrent(input, goal ?? null, openTasks)) return null;
+        } else if (!goalOccurrenceIsCurrent(input, null, [])) return null;
 
         let task: TaskCreateResult | null = null;
         // createTask is intentionally reused here for its defaults and
@@ -199,6 +244,22 @@ export function createPostgresScheduleRepository(db: Db): ScheduleRepository {
           } | null;
           if (trigger?.source !== 'schedule' || trigger.payload?.scheduleId !== current.id)
             throw new Error('Task event belongs to another schedule');
+        }
+
+        if (task?.created && input.goalGuard) {
+          for (const id of input.goalGuard.supersedeTaskIds)
+            await tx
+              .update(tasks)
+              .set({
+                status: 'cancelled',
+                progress: GOAL_SUPERSEDED_PROGRESS,
+                updatedAt: input.now,
+                lockedUntil: null,
+                leaseToken: null,
+                runAfter: null,
+                attempt: 0,
+              })
+              .where(and(eq(tasks.id, id), eq(tasks.agentId, current.agentId)));
         }
 
         const [updated] = await tx

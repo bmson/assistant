@@ -3,13 +3,19 @@ import { runMemoryConsolidation } from '@assistant/core/memory/consolidation';
 import type { ModelRouter } from '@assistant/core/model-router';
 import type { Db } from '@assistant/db';
 import { createFirestoreExecutionPersistence } from '@assistant/firestore';
-import type { Records } from '@assistant/persistence';
+import { embeddingSpaceIdentityKey, type Records } from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { encodeRecord, type InstallationStore } from '../../../packages/firestore/src/store.js';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
 
 const agentId = 'consolidation-worker-owner';
 const contactId = 'consolidation-worker-person';
+const SPACE = {
+  provider: 'test',
+  model: 'test-embedding',
+  dimensions: 1536,
+  revision: 'test-v1',
+} as const;
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
   'Firestore memory consolidation worker',
@@ -48,6 +54,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         agentId,
         expiresAt: null,
         embedding: [1, ...new Array(1535).fill(0)],
+        embeddingSpaceKey: embeddingSpaceIdentityKey(SPACE),
         sourceTaskId: null,
         kind: 'fact',
         confidence: '0.80',
@@ -69,9 +76,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         lastAccessedAt: null,
         lastConsolidatedAt: null,
       };
-      await store
-        .doc('memories', id)
-        .set(encodeRecord({ ...row, retrievalRevision: `revision-${id}` }));
+      await store.doc('memories', id).set(
+        encodeRecord({
+          ...row,
+          embeddingSpace: embeddingSpaceIdentityKey(SPACE),
+          retrievalRevision: `revision-${id}`,
+        }),
+      );
       await store.doc('memoryContentHashes', contentHash).set({ memoryId: id });
       return row;
     }
@@ -84,6 +95,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       });
       const db = new Proxy({}, { get: () => sqlCalls }) as Db;
       const router = {
+        async embeddingSpace() {
+          return SPACE;
+        },
+        async embeddingSpaceKey() {
+          return embeddingSpaceIdentityKey(SPACE);
+        },
         async object() {
           return {
             ok: true,
@@ -103,12 +120,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           return [new Array(1536).fill(0).map((_, index) => (index === 0 ? 1 : 0))];
         },
       } as unknown as ModelRouter;
-      const persistence = createFirestoreExecutionPersistence(store, agentId, {
-        provider: 'test',
-        model: 'test-embedding',
-        dimensions: 1536,
-        revision: 'test-v1',
-      });
+      const persistence = createFirestoreExecutionPersistence(store, agentId, SPACE);
 
       const result = await runMemoryConsolidation(
         { db, router, persistence },

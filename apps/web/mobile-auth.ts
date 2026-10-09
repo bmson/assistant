@@ -25,7 +25,7 @@ export async function isMobileAuthed(request: Request): Promise<boolean> {
       if (
         process.env.K_SERVICE &&
         config.GCP_PROJECT &&
-        secureTokenMatches(await getMobileAccessToken(true), token)
+        secureTokenMatches(await getMobileAccessToken('mismatch'), token)
       )
         return true;
     } catch {
@@ -38,6 +38,17 @@ export async function isMobileAuthed(request: Request): Promise<boolean> {
   if (config.OWNER_AUTH_MODE === 'passkey' && token.startsWith('asd1_')) {
     const { verifyOwnerDeviceToken } = await import('./lib/owner-auth/runtime');
     if (await verifyOwnerDeviceToken(token)) return true;
+  }
+  // Cookie authentication on a write requires the configured exact origin.
+  // SameSite does not separate a hostile sibling host from this application.
+  // Originless native writes were already accepted above by their bearer key.
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method.toUpperCase())) {
+    try {
+      const expectedOrigin = new URL(config.AUTH_URL || config.PUBLIC_URL).origin;
+      if (request.headers.get('origin') !== expectedOrigin) return false;
+    } catch {
+      return false;
+    }
   }
   return Boolean(await isAuthed());
 }

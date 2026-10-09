@@ -57,6 +57,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore repair ledger',
     );
     expect(await repository.update(claim, 'failed', {}, now)).toBeNull();
     await repository.update(next!, 'failed', {}, now);
+    expect(
+      (await repository.list(agentId)).find((record) => record.id === claim.id)?.data.outcome,
+    ).toMatchObject({ status: 'failed', stage: 'coding_dispatch' });
     expect(await repository.claim(agentId, now, 1)).toBeNull();
   });
   it('claims a new report before an older retried report', async () => {
@@ -66,6 +69,56 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore repair ledger',
     if (!blocked) throw new Error('Fixture update failed');
     await repository.update(blocked, 'reported', {}, new Date(Date.now() + 1000));
     expect((await repository.claim(agentId, new Date(Date.now() + 2000), 2))?.id).toBe(newer.id);
+  });
+  it('resumes an eligible retry after repository recreation and reports durable usage conservatively', async () => {
+    const issue = await repository.report(agentId, { ...input, fingerprint: 'retry' });
+    const eligibleAt = new Date(Date.now() + 60_000);
+    const queued = await repository.update(
+      issue,
+      'reported',
+      { nextEligibleAt: eligibleAt.toISOString(), preDispatchRetryCount: 1 },
+      new Date(),
+    );
+    if (!queued) throw new Error('Missing queued retry');
+    const afterRestart = new FirestoreSelfRepairRepository(store, agentId);
+    expect(await afterRestart.claim(agentId, new Date(), 2)).toBeNull();
+    const taskId = randomUUID();
+    await store.doc('tasks', taskId).set({ id: taskId, agentId });
+    const claimed = await new FirestoreSelfRepairRepository(store, agentId).claim(
+      agentId,
+      eligibleAt,
+      2,
+      taskId,
+    );
+    if (!claimed) throw new Error('Retry claim was not restored');
+    expect(claimed).toMatchObject({
+      id: issue.id,
+      status: 'investigating',
+      data: { investigationTaskIds: [taskId], investigationStartedAt: eligibleAt.toISOString() },
+    });
+    await store.doc('modelCalls', randomUUID()).set({
+      id: randomUUID(),
+      agentId,
+      taskId,
+      createdAt: eligibleAt,
+      costUsd: '0.012345',
+    });
+    await store.doc('costReservations', randomUUID()).set({
+      agentId,
+      taskId,
+      status: 'unknown',
+    });
+    const accounting = await afterRestart.modelAccounting(
+      agentId,
+      claimed.data.investigationTaskIds ?? [],
+      eligibleAt,
+    );
+    expect(accounting).toEqual({
+      observedModelCalls: 1,
+      knownCostUsd: '0.012345',
+      unresolvedReservations: 1,
+      complete: false,
+    });
   });
   it('consumes a manual allowance once while preserving concurrent active-work exclusion', async () => {
     const issue = await repository.report(agentId, input);

@@ -40,9 +40,18 @@ try {
       .getByRole('link', { name: 'Audit trail' })
       .click();
     await page.getByRole('heading', { name: 'Audit trail', exact: true }).waitFor();
-    await page.getByLabel('Search recent records').fill('smoke-no-matching-record');
+    await page.getByLabel('Search recorded work').fill('smoke-no-matching-record');
     await page.getByRole('button', { name: 'Filter', exact: true }).click();
-    await page.getByText('No records match these filters.', { exact: false }).waitFor();
+    await page.waitForURL(
+      (url) =>
+        url.pathname === '/audit' && url.searchParams.get('q') === 'smoke-no-matching-record',
+    );
+    await page
+      .getByText(
+        'No matches in this scanned page. Continue to older records if available, or change the filters.',
+        { exact: true },
+      )
+      .waitFor();
     const overflowing = await page.evaluate(
       () => document.documentElement.scrollWidth > window.innerWidth,
     );

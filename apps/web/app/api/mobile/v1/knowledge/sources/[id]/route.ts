@@ -1,6 +1,7 @@
 import { getKnowledgeSourceImpact } from '@assistant/application';
 import { loadConfig } from '@assistant/config';
 import { getFirestoreKnowledgeWorkspace } from '@/lib/firestore-knowledge';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getDb, getOwnerMemoryCommands } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -39,7 +40,9 @@ export async function PATCH(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const id = sourceId((await params).id);
   if (!id) return notFound();
-  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+  const mutationBody = await readMobileMutationBody(request, ['content']);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as Record<string, unknown> | null;
   const result = await getOwnerMemoryCommands().correctMemory(
     id,
     typeof body?.content === 'string' ? body.content : '',

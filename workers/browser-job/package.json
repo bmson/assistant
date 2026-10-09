@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@assistant/persistence": "workspace:*",
     "playwright": "^1.63.0"
   },
   "devDependencies": {

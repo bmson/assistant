@@ -60,6 +60,9 @@ function fixture(metadataOverrides: Record<string, unknown> = {}, body = bytes) 
     derivedMetadata: 0,
     writes: 1,
     collections: {},
+    writeBatches: 0,
+    maxBatchBytes: 0,
+    maxBatchWrites: 0,
   }));
   return { fetcher, requests, storeFactory, terminate, importer };
 }

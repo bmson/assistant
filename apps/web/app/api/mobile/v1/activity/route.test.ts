@@ -1,11 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { listActivityWithRepository } from '@assistant/application/tasks';
 import { resetConfigForTest } from '@assistant/config';
-import {
-  createInstallationStore,
-  FirestoreTaskActivityCommandRepository,
-  FirestoreTaskActivityRepository,
-} from '@assistant/firestore';
+import { createInstallationStore, FirestoreTaskActivityRepository } from '@assistant/firestore';
 import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -217,7 +213,8 @@ describe.skipIf(!localEmulator)('Firestore mobile Activity GET with PostgreSQL o
     const post = await route.POST(
       new Request('http://localhost/api/mobile/v1/activity', { method: 'POST' }),
     );
-    expect(post.status).toBe(503);
+    expect(post.status).toBe(400);
+    expect(await post.json()).toEqual({ error: 'Request body must be JSON.' });
   });
 
   it('blocks archive-old while privacy erasure is active', async () => {
@@ -237,7 +234,7 @@ describe.skipIf(!localEmulator)('Firestore mobile Activity GET with PostgreSQL o
     }
   });
 
-  it('fails before writes when the terminal archive set exceeds the atomic-write cap', async () => {
+  it('returns bounded durable continuation for more than 400 terminal tasks', async () => {
     const batch = store.db.batch();
     const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
     for (let index = 0; index < 401; index += 1) {
@@ -246,11 +243,53 @@ describe.skipIf(!localEmulator)('Firestore mobile Activity GET with PostgreSQL o
     }
     await batch.commit();
 
-    await expect(
-      new FirestoreTaskActivityCommandRepository(store).archiveOld(agentId),
-    ).rejects.toThrow('Archive-old activity exceeds the bounded write limit');
-    expect((await store.doc('tasks', 'bulk-000').get()).get('archivedAt')).toBeNull();
-    expect((await store.doc('tasks', 'bulk-400').get()).get('archivedAt')).toBeNull();
+    const firstResponse = await route.POST(
+      new Request('http://localhost/api/mobile/v1/activity', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'archive-old' }),
+      }),
+    );
+    const first = (await firstResponse.json()) as {
+      operationId: string;
+      archivedTotal: number;
+      complete: boolean;
+    };
+    expect(firstResponse.status).toBe(200);
+    expect(first).toMatchObject({ archivedTotal: 250, complete: false });
+    expect(first.operationId).toMatch(/^[0-9a-f-]{36}$/i);
+    const remainingAfterFirst = await store
+      .collection('tasks')
+      .where('agentId', '==', agentId)
+      .where('archivedAt', '==', null)
+      .where('status', '==', 'done')
+      .get();
+    expect(
+      remainingAfterFirst.docs.filter((document) => String(document.get('id')).startsWith('bulk-')),
+    ).toHaveLength(151);
+
+    const nextResponse = await route.POST(
+      new Request('http://localhost/api/mobile/v1/activity', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'archive-old', operationId: first.operationId }),
+      }),
+    );
+    await expect(nextResponse.json()).resolves.toMatchObject({
+      archivedTotal: 401,
+      complete: true,
+    });
+    const remainingAfterSecond = await store
+      .collection('tasks')
+      .where('agentId', '==', agentId)
+      .where('archivedAt', '==', null)
+      .where('status', '==', 'done')
+      .get();
+    expect(
+      remainingAfterSecond.docs.filter((document) =>
+        String(document.get('id')).startsWith('bulk-'),
+      ),
+    ).toHaveLength(0);
   });
 
   it('fails closed during erasure and when the configured agent is missing', async () => {

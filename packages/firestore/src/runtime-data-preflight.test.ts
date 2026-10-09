@@ -99,7 +99,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore runtime data pr
     ).toEqual({ ready: true, issues: [] });
   });
 
-  it('fails closed on incompatible embedding provenance', async () => {
+  it('rejects invalid embedding provenance without inferring a model mismatch', async () => {
     await seed();
     expect(
       (
@@ -108,10 +108,19 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore runtime data pr
           embeddingSpace: { ...input.embeddingSpace, provider: 'openai', dimensions: 0 },
         })
       ).issues,
-    ).toEqual([
-      { code: 'embedding_space_invalid', subject: 'embedding-space' },
-      { code: 'embedding_mismatch', subject: 'embed' },
-    ]);
+    ).toEqual([{ code: 'embedding_space_invalid', subject: 'embedding-space' }]);
+  });
+
+  it('fails closed when valid embedding provenance disagrees with the configured embed role', async () => {
+    await seed();
+    expect(
+      (
+        await checkFirestoreRuntimeData(store, {
+          ...input,
+          embeddingSpace: { ...input.embeddingSpace, model: 'gemini-embedding-002', revision: '2' },
+        })
+      ).issues,
+    ).toEqual([{ code: 'embedding_mismatch', subject: 'embed' }]);
   });
 
   it('rejects a foreign model, changed embedding role, and disabled catalog entry', async () => {

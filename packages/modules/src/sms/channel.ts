@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Config } from '@assistant/config';
 import {
   BudgetReservationError,
@@ -10,9 +11,28 @@ import {
   resolveApproval,
 } from '@assistant/core';
 import { truncateAtBoundary } from '@assistant/core/owner-text';
-import type { ExecutionPersistence, Records, SmsChannelRepository } from '@assistant/persistence';
+import {
+  drainNotificationOutbox,
+  type ExecutionPersistence,
+  estimateSmsSegments,
+  type FinalChannelDeliveryResult,
+  finalChannelDelivery,
+  type NotificationDeliveryResult,
+  type NotificationLegResult,
+  type NotificationOutboxLeg,
+  type NotificationOutboxSendResult,
+  notificationDeliveryKey,
+  notificationLeg,
+  notificationLegEntry,
+  type Records,
+  type SmsChannelRepository,
+  type SmsDeliveryAccounting,
+  type SmsUsageReconciliationOutcome,
+  sendNotificationOutboxLeg,
+  smsUsageReconciliationState,
+} from '@assistant/persistence';
 import { isAmbiguousTwilioDeliveryError, parseApprovalReply } from '@assistant/tools';
-import type { TwilioClient } from '@assistant/tools/modules/sms';
+import { submitSms, type TwilioClient } from '@assistant/tools/modules/sms';
 import type { ToolRegistry } from '@assistant/tools/registry';
 
 /**
@@ -25,11 +45,67 @@ export interface SmsChannelDeps {
   registry: ToolRegistry;
   twilio: TwilioClient;
   /** Metering, approvals, messages, and tasks, plus the channel's own state. */
-  persistence: Pick<ExecutionPersistence, 'costs' | 'approvals' | 'messages' | 'tasks'> & {
+  persistence: Pick<
+    ExecutionPersistence,
+    'costs' | 'approvals' | 'messages' | 'tasks' | 'notificationOutbox'
+  > & {
     smsChannel: SmsChannelRepository;
   };
   /** The owner an inbound SMS belongs to. */
   owner: () => Promise<{ id: string }>;
+}
+
+const SMS_USAGE_RECONCILIATION_BATCH = 20;
+const SMS_USAGE_RECONCILIATION_MAX_ATTEMPTS = 24;
+const SMS_USAGE_RECONCILIATION_MAX_AGE_MS = 14 * 24 * 60 * 60_000;
+
+/** Retry delayed Twilio Message usage reads without ever resubmitting a message. */
+export async function reconcilePendingSmsUsage(
+  deps: SmsChannelDeps,
+  now = new Date(),
+): Promise<number> {
+  if (!deps.twilio.configured() || !deps.twilio.getMessageUsage) return 0;
+  const claims = await deps.persistence.smsChannel.claimSmsUsageReconciliation(
+    now,
+    SMS_USAGE_RECONCILIATION_BATCH,
+  );
+  let settled = 0;
+  for (const claim of claims) {
+    let outcome: SmsUsageReconciliationOutcome;
+    try {
+      const usage = await deps.twilio.getMessageUsage(claim.providerMessageId);
+      if (usage.billedSegments !== undefined && usage.priceUsd !== undefined) {
+        outcome = {
+          kind: 'complete',
+          billedSegments: usage.billedSegments,
+          priceUsd: usage.priceUsd,
+        };
+      } else {
+        outcome = smsUsageRetry(claim, now, 'Twilio usage fields are not final yet');
+      }
+    } catch (error) {
+      outcome = smsUsageRetry(claim, now, error instanceof Error ? error.message : String(error));
+    }
+    try {
+      if (await deps.persistence.smsChannel.settleSmsUsageReconciliation(claim, outcome)) settled++;
+    } catch (error) {
+      // The claim lease expires and the same known SID is safe to query again.
+      console.error('SMS usage reconciliation persistence failed', error);
+    }
+  }
+  return settled;
+}
+
+function smsUsageRetry(
+  claim: import('@assistant/persistence').SmsUsageReconciliationClaim,
+  now: Date,
+  error: string,
+): SmsUsageReconciliationOutcome {
+  const expired = now.getTime() - claim.createdAt.getTime() >= SMS_USAGE_RECONCILIATION_MAX_AGE_MS;
+  if (claim.attempts >= SMS_USAGE_RECONCILIATION_MAX_ATTEMPTS || expired)
+    return { kind: 'exhausted', error };
+  const delayMs = Math.min(6 * 60 * 60_000, 60_000 * 2 ** Math.min(8, claim.attempts - 1));
+  return { kind: 'retry', nextAttemptAt: new Date(now.getTime() + delayMs), error };
 }
 
 export interface InboundSms {
@@ -71,7 +147,12 @@ async function sendMeteredSms(
     description: string;
     critical?: boolean;
   },
-): Promise<{ deliveryStatus: 'accepted' | 'unknown'; sid?: string }> {
+): Promise<{
+  deliveryStatus: 'accepted' | 'unknown';
+  sid?: string;
+  smsAccounting: SmsDeliveryAccounting;
+}> {
+  const estimate = estimateSmsSegments(input.text);
   if (!(await underSmsChannelLimit(deps))) {
     // Callers already treat delivery errors as retryable-later without
     // re-running the model, so failing here is safe and visible.
@@ -81,51 +162,73 @@ async function sendMeteredSms(
   const rate = await getRate(costs, 'twilio_sms');
   const reservation = await reserveCost(costs, {
     source: 'twilio_sms',
-    estimatedUsd: rate.unitPriceUsd,
+    estimatedUsd: estimate.estimatedSegments * rate.unitPriceUsd,
     taskId: input.taskId,
-    description: input.description,
+    description: `${input.description} (${estimate.estimatedSegments} estimated segment(s))`,
     critical: input.critical,
   });
   if (!reservation.ok) {
     throw new BudgetReservationError(reservation.reason, reservation.resumeAt);
   }
-  const reconcileAttempt = () =>
-    reconcileReservation(costs, reservation.reservationId, {
-      usd: rate.unitPriceUsd,
-      quantity: 1,
-      unit: rate.unit,
-      unitPriceUsd: rate.unitPriceUsd,
+  const reconcileAttempt = (receipt?: SmsDeliveryAccounting, providerPriceUsd?: number) => {
+    const quantity = receipt?.billedSegments ?? estimate.estimatedSegments;
+    const usd = providerPriceUsd ?? quantity * rate.unitPriceUsd;
+    return reconcileReservation(costs, reservation.reservationId, {
+      evidence: {
+        basis: providerPriceUsd !== undefined ? 'provider_reported' : 'preflight_estimate',
+        provider: 'twilio',
+        ...(receipt?.providerMessageId ? { requestId: receipt.providerMessageId } : {}),
+        sms: receipt ?? estimate,
+        ...(receipt?.providerMessageId
+          ? { smsUsageReconciliation: smsUsageReconciliationState(receipt) }
+          : {}),
+      },
+      usd,
+      quantity,
+      unit: 'segment',
+      unitPriceUsd: quantity > 0 ? usd / quantity : rate.unitPriceUsd,
       description: input.description,
     });
+  };
   let result: { sid: string };
+  let sent: Awaited<ReturnType<typeof submitSms>>;
   try {
-    result = await deps.twilio.send(input.to, input.text);
+    sent = await submitSms(deps.twilio, input.to, input.text);
+    result = { sid: sent.sid };
   } catch (error) {
     if (isAmbiguousTwilioDeliveryError(error)) {
       // The provider may already have accepted and billed this message. Count
       // the attempt, then treat it as delivered so the durable final-response
       // retry loop cannot send a duplicate merely because the response was lost.
-      await reconcileAttempt().catch((reconcileError) =>
+      const ambiguousAccounting: SmsDeliveryAccounting = estimate;
+      await reconcileAttempt(ambiguousAccounting).catch((reconcileError) =>
         console.error('ambiguous SMS cost reconciliation failed', reconcileError),
       );
       console.error('SMS delivery outcome is unknown; automatic retry suppressed', error);
-      return { deliveryStatus: 'unknown' };
+      return { deliveryStatus: 'unknown', smsAccounting: ambiguousAccounting };
     }
     await releaseReservation(costs, reservation.reservationId).catch(() => {});
     throw error;
   }
 
+  const smsAccounting = sent.accounting;
   // The provider side effect already happened. Never throw from metering and
   // cause a duplicate SMS; keep the hold conservative if reconciliation fails.
-  await reconcileAttempt().catch((error) => console.error('SMS cost reconciliation failed', error));
-  return { deliveryStatus: 'accepted', sid: result.sid };
+  await reconcileAttempt(smsAccounting, sent.providerUsage?.priceUsd).catch((error) =>
+    console.error('SMS cost reconciliation failed', error),
+  );
+  return { deliveryStatus: 'accepted', sid: result.sid, smsAccounting };
 }
 
 /** One short, metered owner-only SMS for the deployed integration canary. */
 export async function sendCanarySms(
   deps: SmsChannelDeps,
   marker: string,
-): Promise<{ deliveryStatus: 'accepted' | 'unknown'; sid?: string }> {
+): Promise<{
+  deliveryStatus: 'accepted' | 'unknown';
+  sid?: string;
+  smsAccounting: SmsDeliveryAccounting;
+}> {
   if (!deps.twilio.configured() || !deps.config.OWNER_PHONE) {
     throw new Error('Twilio or OWNER_PHONE is not configured');
   }
@@ -220,20 +323,48 @@ export async function handleInboundSms(deps: SmsChannelDeps, sms: InboundSms): P
 /** Executor hook: deliver a finished sms_turn's final text back to the peer. */
 export async function deliverSmsFinal(
   deps: SmsChannelDeps,
-  task: Pick<Records['tasks'], 'id' | 'conversationId' | 'trust'>,
+  task: Pick<Records['tasks'], 'id' | 'conversationId' | 'trust' | 'type'>,
   text: string,
-): Promise<void> {
-  if (task.trust !== 'owner' || !task.conversationId || !deps.twilio.configured()) return;
+  attemptId = `sms-final:${task.id}`,
+): Promise<FinalChannelDeliveryResult> {
+  if (task.trust !== 'owner')
+    return finalChannelDelivery('sms', 'not_applicable', attemptId, 'non-owner-task');
+  const requiredByType = task.type === 'sms_turn';
+  if (!task.conversationId) {
+    return requiredByType
+      ? finalChannelDelivery('sms', 'rejected', attemptId, 'missing-conversation')
+      : finalChannelDelivery('sms', 'not_applicable', attemptId, 'no-conversation');
+  }
   const destination = await deps.persistence.smsChannel.finalDestination(task.conversationId);
-  if (destination?.channel !== 'sms' || destination.trust !== 'owner') return;
-  if (!destination.externalId || destination.externalId !== deps.config.OWNER_PHONE) return;
-  await sendMeteredSms(deps, {
-    to: destination.externalId,
-    text: truncateAtBoundary(text, 1500),
-    taskId: task.id,
-    description: 'owner SMS task reply',
-    critical: true,
-  });
+  if (!requiredByType && destination?.channel !== 'sms')
+    return finalChannelDelivery('sms', 'not_applicable', attemptId, 'not-sms-conversation');
+  if (destination?.channel !== 'sms')
+    return finalChannelDelivery('sms', 'rejected', attemptId, 'sms-conversation-unavailable');
+  if (!deps.twilio.configured() || !deps.config.OWNER_PHONE)
+    return finalChannelDelivery('sms', 'rejected', attemptId, 'provider-not-configured');
+  if (destination.trust !== 'owner')
+    return finalChannelDelivery('sms', 'rejected', attemptId, 'conversation-not-owner');
+  if (!destination.externalId || destination.externalId !== deps.config.OWNER_PHONE)
+    return finalChannelDelivery('sms', 'rejected', attemptId, 'owner-phone-binding-changed');
+  try {
+    const result = await sendMeteredSms(deps, {
+      to: destination.externalId,
+      text: truncateAtBoundary(text, 1500),
+      taskId: task.id,
+      description: 'owner SMS task reply',
+      critical: true,
+    });
+    return finalChannelDelivery(
+      'sms',
+      result.deliveryStatus === 'accepted' ? 'accepted' : 'unknown',
+      attemptId,
+      result.deliveryStatus === 'unknown' ? 'provider-outcome-unknown' : undefined,
+      result.smsAccounting,
+    );
+  } catch (error) {
+    console.error('SMS final delivery was rejected before acceptance', error);
+    return finalChannelDelivery('sms', 'rejected', attemptId, 'provider-or-budget-rejected');
+  }
 }
 
 /**
@@ -245,29 +376,150 @@ export async function deliverSmsFinal(
  */
 export async function notifyOwnerBySms(
   deps: SmsChannelDeps,
-  input: { taskId?: string; text: string },
-): Promise<void> {
+  input: {
+    taskId?: string;
+    text: string;
+    deliveryKey?: string;
+    applicationConfirmationNoticeFence?: import('@assistant/persistence').ApplicationConfirmationNoticeFence;
+  },
+): Promise<NotificationDeliveryResult> {
   // Optional chaining: some internal/test call paths build a partial deps
   // without a Twilio client or config. A missing notifier is a silent no-op,
   // never an error — owner pings are best-effort.
-  if (!deps.twilio?.configured() || !deps.config?.OWNER_PHONE) return;
+  if (!deps.twilio?.configured() || !deps.config?.OWNER_PHONE)
+    return notificationLeg('sms', 'skipped', 'not-configured');
   // critical: these pings fire exactly when something needs the owner (failure,
   // stall, escalation) — a budget cap must degrade them last, like final replies.
-  await sendMeteredSms(deps, {
-    to: deps.config.OWNER_PHONE,
-    text: truncateAtBoundary(input.text, 480),
-    taskId: input.taskId,
-    description: 'owner async update',
-    critical: true,
+  const owner = await deps.owner();
+  const text = truncateAtBoundary(input.text, 480);
+  const recipientHash = smsRecipientKey(deps.config.OWNER_PHONE);
+  return {
+    legs: [
+      await sendNotificationOutboxLeg(
+        deps.persistence.notificationOutbox,
+        {
+          agentId: owner.id,
+          deliveryKey:
+            input.deliveryKey ??
+            notificationDeliveryKey('sms-owner-notice', input.taskId ?? owner.id, text),
+          legKey: `sms:${recipientHash}`,
+          adapter: 'sms',
+          destination: { recipientHash },
+          payload: {
+            text,
+            ...(input.taskId ? { taskId: input.taskId } : {}),
+            description: 'owner async update',
+            critical: true,
+          },
+          ...(input.applicationConfirmationNoticeFence
+            ? { applicationConfirmationNoticeFence: input.applicationConfirmationNoticeFence }
+            : {}),
+          now: new Date(),
+        },
+        (leg) => sendSmsOutboxLeg(deps, leg),
+      ),
+    ],
+  };
+}
+
+function smsRecipientKey(phone: string): string {
+  return createHash('sha256').update(phone).digest('hex');
+}
+
+function retryDelay(attempts: number): number {
+  return Math.min(60 * 60_000, 15_000 * 2 ** Math.max(0, attempts - 1));
+}
+
+async function sendSmsOutboxLeg(
+  deps: SmsChannelDeps,
+  leg: NotificationOutboxLeg,
+): Promise<NotificationOutboxSendResult> {
+  const destination = leg.destination as { recipientHash?: unknown } | null;
+  const payload = leg.payload as {
+    text?: unknown;
+    taskId?: unknown;
+    description?: unknown;
+    critical?: unknown;
+  } | null;
+  if (
+    !payload ||
+    typeof payload.text !== 'string' ||
+    !destination ||
+    destination.recipientHash !== smsRecipientKey(deps.config.OWNER_PHONE ?? '')
+  )
+    return { status: 'skipped', reason: 'owner-sms-destination-changed-or-erased' };
+  if (!deps.twilio?.configured() || !deps.config.OWNER_PHONE)
+    return { status: 'skipped', reason: 'sms-provider-unavailable' };
+  try {
+    const result = await sendMeteredSms(deps, {
+      to: deps.config.OWNER_PHONE,
+      text: payload.text,
+      ...(typeof payload.taskId === 'string' ? { taskId: payload.taskId } : {}),
+      description: typeof payload.description === 'string' ? payload.description : 'owner notice',
+      critical: payload.critical === true,
+    });
+    return result.deliveryStatus === 'accepted'
+      ? {
+          status: 'delivered',
+          providerMessageId: result.sid,
+          smsAccounting: result.smsAccounting,
+        }
+      : {
+          status: 'unknown',
+          reason: 'provider-outcome-unknown',
+          smsAccounting: result.smsAccounting,
+        };
+  } catch (error) {
+    const retryAt =
+      error instanceof BudgetReservationError
+        ? error.resumeAt
+        : new Date(Date.now() + retryDelay(leg.attempts));
+    return {
+      status: 'failed',
+      retryable: true,
+      retryAt,
+      reason:
+        error instanceof BudgetReservationError
+          ? 'budget-reservation-deferred'
+          : error instanceof SmsChannelRateLimitError
+            ? 'channel-rate-limit'
+            : 'definitive-send-rejection',
+    };
+  }
+}
+
+export async function drainSmsNotificationOutbox(
+  deps: SmsChannelDeps,
+  now = new Date(),
+): Promise<number> {
+  if (!deps.twilio?.configured() || !deps.config.OWNER_PHONE) return 0;
+  const owner = await deps.owner();
+  return drainNotificationOutbox(deps.persistence.notificationOutbox, {
+    agentId: owner.id,
+    adapter: 'sms',
+    now,
+    limit: 100,
+    send: (leg) => sendSmsOutboxLeg(deps, leg),
   });
 }
 
 /** Executor hook: SMS the owner when approvals park a task. */
 export async function notifyApprovalsBySms(
   deps: SmsChannelDeps,
-  approvals: Array<{ taskId: string; shortCode: string; summary: string; toolName?: string }>,
-): Promise<void> {
-  if (!deps.twilio.configured() || !deps.config.OWNER_PHONE) return;
+  approvals: Array<{
+    taskId: string;
+    shortCode: string;
+    summary: string;
+    toolName?: string;
+    deliveryKey?: string;
+  }>,
+): Promise<NotificationDeliveryResult> {
+  if (approvals.length === 0) return notificationLeg('sms', 'skipped', 'empty-batch');
+  if (!deps.twilio.configured() || !deps.config.OWNER_PHONE)
+    return notificationLeg('sms', 'skipped', 'not-configured');
+  const owner = await deps.owner();
+  const recipientHash = smsRecipientKey(deps.config.OWNER_PHONE);
+  const legs: NotificationLegResult[] = [];
   for (const approval of approvals) {
     // One-tap SMS resolution is offered only for low-consequence tools (see
     // ToolRegistry.smsApprovable); anything that sends, spends, egresses, or
@@ -285,12 +537,35 @@ export async function notifyApprovalsBySms(
     // added only when the summary does not already carry one.
     const summary = truncateAtBoundary(approval.summary, 120);
     const stop = /[.!?…]$/u.test(summary) ? '' : '.';
-    await sendMeteredSms(deps, {
-      to: deps.config.OWNER_PHONE,
-      text: `Approval ${approval.shortCode} — ${summary}${stop} ${action}`,
-      taskId: approval.taskId,
-      description: `approval notification ${approval.shortCode}`,
-      critical: true,
-    });
+    try {
+      const text = `Approval ${approval.shortCode} — ${summary}${stop} ${action}`;
+      legs.push(
+        await sendNotificationOutboxLeg(
+          deps.persistence.notificationOutbox,
+          {
+            agentId: owner.id,
+            deliveryKey:
+              approval.deliveryKey ??
+              notificationDeliveryKey('sms-approval', approval.taskId, approval.shortCode),
+            legKey: `sms:${recipientHash}`,
+            adapter: 'sms',
+            destination: { recipientHash },
+            payload: {
+              text,
+              taskId: approval.taskId,
+              description: `approval notification ${approval.shortCode}`,
+              critical: true,
+            },
+            now: new Date(),
+          },
+          (leg) => sendSmsOutboxLeg(deps, leg),
+        ),
+      );
+    } catch {
+      // Preserve the outcome of earlier approvals and keep sending independent
+      // approvals even if one budget/provider operation fails.
+      legs.push(notificationLegEntry('sms', 'failed', 'provider-or-budget-failure'));
+    }
   }
+  return { legs };
 }

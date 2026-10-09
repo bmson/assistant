@@ -17,6 +17,8 @@ const issue: RepairIssue = {
     prUrl: 'javascript:alert(1)',
     runUrl: 'https://other.example/run',
     history: [],
+    mergeSha: 'a'.repeat(40),
+    monitoringAt: new Date().toISOString(),
   },
 };
 it('only confirms deployed fixes and rejects stale/foreign issue decisions', async () => {
@@ -185,4 +187,36 @@ it('allows a cleaned-up hosted retry with a fresh branch and no previous deploym
     }),
     expect.any(Date),
   );
+});
+
+it('projects stage-aware copy without raw provider errors and refuses legacy unproven deployment', async () => {
+  const unknown = {
+    ...issue,
+    status: 'monitoring' as const,
+    data: { ...issue.data, mergeSha: undefined, monitoringAt: undefined },
+  };
+  const repository = { list: async () => [unknown] } as unknown as SelfRepairRepository;
+  await expect(decideRepairIssue(repository, 'owner', 'issue', 'resolve')).rejects.toThrow(
+    'after the fix is deployed',
+  );
+  const failed = {
+    ...issue,
+    status: 'failed' as const,
+    data: {
+      ...issue.data,
+      lastError: 'raw provider 429 SECRET',
+      history: [
+        { status: 'testing' as const, at: new Date().toISOString(), detail: '' },
+        {
+          status: 'failed' as const,
+          at: new Date().toISOString(),
+          detail: 'raw provider 429 SECRET',
+        },
+      ],
+    },
+  };
+  const projected = projectRepairIssue(failed);
+  expect(projected.outcome.stage).toBe('validation');
+  expect(projected.lastError).toContain('Review the recorded check results');
+  expect(JSON.stringify(projected)).not.toContain('SECRET');
 });

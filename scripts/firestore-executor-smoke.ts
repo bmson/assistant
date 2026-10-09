@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { type ExecutorDeps, executeTask, TaskStateSchema } from '@assistant/core';
 import type { Db } from '@assistant/db';
 import { createFirestoreExecutionPersistence, type InstallationStore } from '@assistant/firestore';
+import { finalChannelDelivery } from '@assistant/persistence';
 
 /** Synthetic context queries plus real executor finalization; no SQL or model network access. */
 export async function firestoreExecutorSmoke(store: InstallationStore) {
@@ -99,8 +100,9 @@ export async function firestoreExecutorSmoke(store: InstallationStore) {
     router: unavailable as ExecutorDeps['router'],
     dispatcher: unavailable as ExecutorDeps['dispatcher'],
     persistence,
-    deliverFinal: async () => {
+    deliverFinal: async (_task, _text, attemptId) => {
       delivered++;
+      return finalChannelDelivery('dashboard', 'accepted', attemptId);
     },
   };
   assert.equal((await executeTask(deps, task.id)).outcome, 'done');

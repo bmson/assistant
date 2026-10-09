@@ -1,6 +1,7 @@
 import { collapseWhitespace, ownerDate, ownerTime, truncateAtBoundary } from '../owner-text.js';
 import type { EventSalience } from '../proactive/calendar-salience.js';
 import type { BriefingCalendarEvent, CalendarConflict } from './briefing.js';
+import { calendarRelationshipNote } from './calendar-relationship.js';
 
 /**
  * The daily briefing as sections rather than prose.
@@ -36,7 +37,13 @@ export interface BriefingListItem {
 }
 
 export type BriefingSection =
-  | { type: 'agenda'; title: string; complete: boolean; items: BriefingAgendaItem[] }
+  | {
+      type: 'agenda';
+      title: string;
+      complete: boolean;
+      omittedCount?: number;
+      items: BriefingAgendaItem[];
+    }
   | {
       type: 'weather';
       title: string;
@@ -105,9 +112,16 @@ function localDayOrder(event: BriefingCalendarEvent, timeZone: string): string {
 }
 
 function eventDay(event: BriefingCalendarEvent, timeZone: string, now: Date): string {
-  // An all-day event is a calendar date; noon UTC keeps it on its own day.
-  const value = event.allDay ? `${event.start.slice(0, 10)}T12:00:00Z` : event.start;
-  return ownerDate(value, timeZone, now);
+  if (!event.allDay) return ownerDate(event.start, timeZone, now);
+  // Compare civil dates in UTC after resolving the owner's current civil day.
+  // Noon UTC itself crosses into tomorrow at UTC+12/+13/+14.
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
+  return ownerDate(`${event.start.slice(0, 10)}T12:00:00Z`, 'UTC', new Date(`${today}T12:00:00Z`));
 }
 
 export function agendaSection(input: {
@@ -125,33 +139,57 @@ export function agendaSection(input: {
   const notes = new Map(
     input.salient.map((scored) => [eventKey(scored.event), tidy(scored.reasons.join('; '))]),
   );
+  const conflictNotes = new Map(
+    input.conflicts.flatMap((conflict) =>
+      [...conflict.a, ...conflict.b].map(
+        (event) =>
+          [
+            eventKey(event),
+            calendarRelationshipNote(
+              conflict.relationship ?? 'unresolved',
+              conflict.attendance ?? 'unresolved',
+            ),
+          ] as const,
+      ),
+    ),
+  );
+  const important = (event: BriefingCalendarEvent) =>
+    conflicting.has(eventKey(event)) || notes.has(eventKey(event));
+  const selected = [...input.events]
+    .sort((a, b) => Number(important(b)) - Number(important(a)))
+    .slice(0, MAX_AGENDA)
+    .sort(
+      (a, b) =>
+        localDayOrder(a, input.timeZone).localeCompare(localDayOrder(b, input.timeZone)) ||
+        input.events.indexOf(a) - input.events.indexOf(b),
+    );
+  const omittedCount = input.events.length - selected.length;
   return {
     type: 'agenda',
-    title: 'Schedule',
+    title:
+      omittedCount > 0
+        ? `Schedule (${selected.length} of ${input.events.length} events)`
+        : 'Schedule',
     complete: input.complete,
-    items: [...input.events]
-      .sort((a, b) =>
-        localDayOrder(a, input.timeZone).localeCompare(localDayOrder(b, input.timeZone)),
-      )
-      .slice(0, MAX_AGENDA)
-      .map((event) => {
-        const key = eventKey(event);
-        const location = tidy(event.location);
-        const note = notes.get(key);
-        const flag = conflicting.has(key) ? 'conflict' : note ? 'salient' : undefined;
-        return {
-          day: eventDay(event, input.timeZone, input.now),
-          time: eventTime(event, input.timeZone),
-          title: tidy(event.summary) || 'Untitled event',
-          ...(location ? { location } : {}),
-          ...(flag ? { flag } : {}),
-          ...(flag === 'conflict'
-            ? { note: 'Overlaps another event' }
-            : note
-              ? { note: truncateAtBoundary(note, DETAIL_LIMIT) }
-              : {}),
-        };
-      }),
+    ...(omittedCount > 0 ? { omittedCount } : {}),
+    items: selected.map((event) => {
+      const key = eventKey(event);
+      const location = tidy(event.location);
+      const note = notes.get(key);
+      const flag = conflicting.has(key) ? 'conflict' : note ? 'salient' : undefined;
+      return {
+        day: eventDay(event, input.timeZone, input.now),
+        time: eventTime(event, input.timeZone),
+        title: tidy(event.summary) || 'Untitled event',
+        ...(location ? { location } : {}),
+        ...(flag ? { flag } : {}),
+        ...(flag === 'conflict'
+          ? { note: conflictNotes.get(key) ?? 'Overlaps another event; attendance is unverified.' }
+          : note
+            ? { note: truncateAtBoundary(note, DETAIL_LIMIT) }
+            : {}),
+      };
+    }),
   };
 }
 
@@ -233,6 +271,10 @@ export function briefingMarkdown(lead: string, sections: BriefingSection[]): str
       }
       if (!section.complete)
         blocks.push('Some calendars could not be read, so this may be incomplete.');
+      if (section.omittedCount)
+        blocks.push(
+          `${section.omittedCount} other retrieved events are omitted from this briefing preview.`,
+        );
       continue;
     }
     const rows = section.items.map(

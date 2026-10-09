@@ -1,4 +1,8 @@
-import type { ModelRoutingRepository } from '@assistant/persistence';
+import {
+  type ModelRoutingRepository,
+  microsToUsd,
+  storedLedgerUsdToMicros,
+} from '@assistant/persistence';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { createPostgresCostRepository } from './cost-repository.js';
@@ -39,7 +43,11 @@ export function createPostgresModelRoutingRepository(db: Db): ModelRoutingReposi
       return row ?? null;
     },
     async recordCall(input) {
-      const [row] = await db.insert(modelCalls).values(input).returning({ id: modelCalls.id });
+      const costUsd = microsToUsd(storedLedgerUsdToMicros(input.costUsd)).toFixed(6);
+      const [row] = await db
+        .insert(modelCalls)
+        .values({ runtimeRevision: null, runtimeReleaseSha: null, ...input, costUsd })
+        .returning({ id: modelCalls.id });
       if (!row) throw new Error('Model call telemetry was not persisted');
       return row.id;
     },

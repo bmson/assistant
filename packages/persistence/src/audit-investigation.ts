@@ -59,7 +59,7 @@ export const AUDIT_FIELDS = {
     'resolutionPayload',
   ],
   messages: ['id', 'createdAt', 'role', 'text', 'origin', 'conversationId'],
-  contextMessages: ['id', 'createdAt', 'role', 'text', 'origin', 'conversationId'],
+  contextMessages: ['taskId', 'id', 'createdAt', 'role', 'text', 'origin', 'conversationId'],
   responseChecks: [
     'id',
     'createdAt',

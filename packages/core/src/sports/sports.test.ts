@@ -150,10 +150,12 @@ describe('lookupScores', () => {
   });
 
   it("falls back to one team's last result and next game", async () => {
-    const { impl, requested } = fakeFetch(routes);
+    const { impl, requested } = fakeFetch({
+      ...routes,
+      'baseball/mlb/scoreboard?dates=20260922': { events: [] },
+    });
     const result = await lookupScores({
       team: 'SF Giants',
-      date: '2026-09-30',
       timeZone,
       now: new Date('2026-09-22T19:00:00Z'),
       fetchImpl: impl,
@@ -181,4 +183,63 @@ describe('lookupScores', () => {
     const result = await lookupScores({ team: 'Reykjavik Vikings', timeZone, fetchImpl: impl });
     expect(result).toMatchObject({ unsupported: true, games: [] });
   });
+});
+
+it('does not substitute current season fixtures for an explicit historical date', async () => {
+  const { impl, requested } = fakeFetch({
+    'baseball/mlb/teams': fixture('mlb-teams'),
+    'baseball/mlb/teams/': fixture('sf-schedule'),
+  });
+  const result = await lookupScores({
+    team: 'SF Giants',
+    league: 'mlb',
+    date: '2020-02-29',
+    timeZone,
+    fetchImpl: impl,
+  });
+  expect(result.games).toEqual([]);
+  expect(result.date).toBe('2020-02-29');
+  expect(result.evidenceNote).toContain('not substituted');
+  expect(requested.some((url) => url.endsWith('/schedule'))).toBe(false);
+});
+it('does not claim unsupported or no-game results after unavailable source reads', async () => {
+  const failing = async () => new Response('{}', { status: 503 });
+  const unknown = await lookupScores({
+    team: 'Giants',
+    league: 'mlb',
+    timeZone,
+    fetchImpl: failing,
+  });
+  expect(unknown.unsupported).toBe(false);
+  expect(unknown.coverage).toMatchObject({ complete: false, unavailableRosters: ['mlb'] });
+  clearSportsCache();
+  const { impl } = fakeFetch({ 'baseball/mlb/teams': fixture('mlb-teams') });
+  const partial = await lookupScores({
+    team: 'SF Giants',
+    league: 'mlb',
+    timeZone,
+    fetchImpl: async (url) => (url.includes('/scoreboard') ? failing() : impl(url)),
+  });
+  expect(partial.games).toEqual([]);
+  expect(partial.coverage).toMatchObject({ complete: false, unavailableScoreboards: ['mlb'] });
+  expect(partial.evidenceNote).toContain('unavailable');
+});
+it.each([
+  'https://evil-espncdn.com/pixel.png',
+  'https://espncdn.com.evil.test/pixel.png',
+  'https://owner@a.espncdn.com/pixel.png',
+])('rejects lookalike image host %s', (logo) => {
+  const event = structuredClone(fixture('mlb-scoreboard').events[0]);
+  for (const competitor of event.competitions[0].competitors) {
+    competitor.team.logo = logo;
+    competitor.team.logos = [];
+  }
+  const game = normalizeEvent(event, mlb, timeZone);
+  expect(game?.home.logo).toBeUndefined();
+  expect(game?.away.logo).toBeUndefined();
+});
+it('rejects impossible requested civil dates', async () => {
+  await expect(lookupScores({ league: 'mlb', date: '2026-02-30', timeZone })).rejects.toThrow(
+    'valid civil date',
+  );
 });

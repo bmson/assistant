@@ -71,6 +71,17 @@ body:has(.chat-viewport) > main {
   min-height: 0;
   flex-direction: column;
   padding-block: 0;
+  width: 100%;
+}
+
+/* The route transition wrapper must share the remaining conversation height.
+   Otherwise its content grows beyond the viewport and the fixed composer
+   covers replies instead of leaving a scrollable transcript above it. */
+body:has(.chat-viewport) > main > .route-surface {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
 }
 
 /* Text and rules sitting DIRECTLY on the stage read in the stage's own ink,

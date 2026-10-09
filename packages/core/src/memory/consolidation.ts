@@ -1,14 +1,23 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   agents,
+  assertPostgresPrivacyObservationFence,
   createPostgresOwnerCardCompilationRepository,
   type Db,
+  importSources,
   isTombstoned,
+  knowledgeGraphSources,
+  lockPostgresPrivacyObservationFence,
   memories,
+  memoryImportLineage,
+  occasionImportLineage,
   ownerCard,
 } from '@assistant/db';
 import {
   type ConsolidationMerge,
+  canRewriteConsolidationFacts,
+  earliestConsolidationSource,
+  embeddingSpaceIdentityKey,
   isOwnerCardCompilationRepository,
   isOwnerContextRepository,
   type MemoryConsolidationRepository,
@@ -16,7 +25,7 @@ import {
   type OwnerCardCompilationRepository,
   type OwnerContextRepository,
 } from '@assistant/persistence';
-import { and, eq, gt, inArray, isNull, notInArray, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, inArray, isNull, notInArray, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { BudgetReservationError, nextDailyReset, nextMonthlyReset } from '../cost.js';
 import { isUnparseableObjectError, type ModelRouter } from '../model-router/router.js';
@@ -105,10 +114,29 @@ export interface FactLite {
   createdAt: Date;
   validFrom: Date | null;
   validUntil: Date | null;
+  importSources?: string[];
+  importSourceProvenance?: Array<{
+    source: string;
+    sourceUnitProvenance: import('@assistant/persistence').ImportUnitProvenance[];
+  }>;
 }
 
 const MAX_WINDOWS_PER_RUN = 12;
 const MAX_FACTS_PER_ENTITY = 60;
+
+function mergeImportUnitProvenance(
+  existing: import('@assistant/persistence').ImportUnitProvenance[],
+  incoming: import('@assistant/persistence').ImportUnitProvenance[],
+): import('@assistant/persistence').ImportUnitProvenance[] {
+  const byIdentity = new Map<string, import('@assistant/persistence').ImportUnitProvenance>();
+  for (const unit of [...existing, ...incoming]) {
+    const key = `${unit.sourceOffset}\0${unit.unitOffset}\0${unit.unitTextHash}`;
+    byIdentity.set(key, unit);
+  }
+  return [...byIdentity.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, unit]) => unit);
+}
 
 /**
  * The fields precedence actually turns on. Stated as its own type so the
@@ -131,6 +159,45 @@ export function pickWinner<T extends FactPrecedence>(group: T[]): T {
   )[0] as T;
 }
 
+/** Every retirement ends at a surviving fact; overlapping groups cannot erase a cycle. */
+export function flattenFactRetirements(
+  proposed: Map<string, string>,
+  facts: FactPrecedence[],
+): Map<string, string> {
+  const edges = new Map(proposed);
+  const byId = new Map(facts.map((fact) => [fact.id, fact]));
+  for (const start of [...edges.keys()]) {
+    const path: string[] = [];
+    const positions = new Map<string, number>();
+    let node = start;
+    while (edges.has(node)) {
+      const prior = positions.get(node);
+      if (prior !== undefined) {
+        const cycle = path
+          .slice(prior)
+          .sort()
+          .map((id) => byId.get(id));
+        if (cycle.some((fact) => !fact)) throw new Error('Retirement references an unknown fact');
+        const winner = pickWinner(cycle as FactPrecedence[]);
+        edges.delete(winner.id);
+        node = winner.id;
+        break;
+      }
+      positions.set(node, path.length);
+      path.push(node);
+      const next = edges.get(node);
+      if (!next || !byId.has(node) || !byId.has(next))
+        throw new Error('Retirement references an unknown fact');
+      node = next;
+    }
+    for (const id of path) {
+      if (id === node) edges.delete(id);
+      else edges.set(id, node);
+    }
+  }
+  return edges;
+}
+
 function parseIsoDate(value: string): Date | null {
   if (!value) return null;
   const d = new Date(value.length === 4 ? `${value}-01-01` : value);
@@ -144,6 +211,8 @@ async function runFirestoreMemoryConsolidation(
   opts: { taskId?: string; agentId?: string },
   heartbeat?: () => Promise<void>,
 ): Promise<ConsolidationResult> {
+  const embeddingSpace = await router.embeddingSpace();
+  const embeddingSpaceKey = embeddingSpaceIdentityKey(embeddingSpace);
   const agentId = opts.agentId;
   if (!agentId) throw new Error('Firestore memory consolidation requires an agent ID');
   const result: ConsolidationResult = {
@@ -168,7 +237,7 @@ async function runFirestoreMemoryConsolidation(
     const listing = facts
       .map(
         (fact) =>
-          `id=${fact.id} | ${fact.createdAt.toISOString().slice(0, 10)} | conf=${fact.confidence} | domain=${fact.domain ?? '?'}${fact.ownerConfirmed || fact.pinned ? ' | [curated]' : ''} | ${fact.content}`,
+          `id=${fact.id} | ${fact.createdAt.toISOString().slice(0, 10)} | validFrom=${fact.validFrom?.toISOString() ?? 'unknown/open'} | validUntil=${fact.validUntil?.toISOString() ?? 'unknown/open'} | conf=${fact.confidence} | domain=${fact.domain ?? '?'}${fact.ownerConfirmed || fact.pinned ? ' | [curated]' : ''} | ${fact.content}`,
       )
       .join('\n');
     const outcome = await router
@@ -183,6 +252,7 @@ async function runFirestoreMemoryConsolidation(
           'Do NOT invent contradictions — different facts about the same topic are fine unless they cannot both be true.',
           'Merging: only group fragmented facts about the SAME topic or attribute; invent nothing,',
           'and leave facts marked [curated] alone.',
+          'Temporal validity and uncertainty are invariants. Retain historical, future, dated or uncertain claims separately; do not turn them into current timeless wording.',
           'Only report recurring occasions with a specific month and day explicitly stated in a fact.',
         ].join('\n'),
         prompt: listing,
@@ -204,20 +274,26 @@ async function runFirestoreMemoryConsolidation(
       );
     } else {
       await heartbeat?.();
-      const retirements = new Map<string, string>();
+      let retirements = new Map<string, string>();
       const chooseLoserRetirements = (groups: string[][]) => {
         for (const group of groups) {
           const members = group.map((id) => byId.get(id)).filter((fact) => fact !== undefined);
-          if (members.length < 2) continue;
+          if (!canRewriteConsolidationFacts(members)) continue;
           const winner = pickWinner(members);
           for (const member of members) {
-            if (member.id !== winner.id && (!member.ownerConfirmed || winner.ownerConfirmed))
+            if (
+              member.id !== winner.id &&
+              !member.pinned &&
+              (!member.ownerConfirmed || winner.ownerConfirmed)
+            )
               retirements.set(member.id, winner.id);
           }
         }
       };
       chooseLoserRetirements(outcome.object.duplicateGroups);
       chooseLoserRetirements(outcome.object.contradictionGroups);
+      retirements = flattenFactRetirements(retirements, facts);
+      const survivors = new Set(retirements.values());
       const replacement = new Map(retirements);
       const mostCommon = (values: Array<string | null>) => {
         const counts = new Map<string, number>();
@@ -232,16 +308,21 @@ async function runFirestoreMemoryConsolidation(
             (fact): fact is NonNullable<typeof fact> =>
               fact !== undefined && !fact.ownerConfirmed && !fact.pinned,
           );
-        if (members.length < 2 || members.some((member) => replacement.has(member.id))) continue;
+        if (
+          !canRewriteConsolidationFacts(members) ||
+          members.some((member) => replacement.has(member.id) || survivors.has(member.id))
+        )
+          continue;
         const content = merge.unified.trim();
         const contentHash = createHash('sha256').update(content).digest('hex');
-        const [embedding] = await router.embed([content]);
+        const [embedding] = await router.embed([content], { expectedSpace: embeddingSpace });
         if (!embedding) continue;
         merges.push({
           id: randomUUID(),
           content,
           contentHash,
           embedding,
+          embeddingSpaceKey,
           kind: mostCommon(members.map((member) => member.kind)) ?? 'fact',
           confidence: Math.min(...members.map((member) => Number(member.confidence))).toFixed(2),
           importance: Math.max(...members.map((member) => member.importance)),
@@ -255,8 +336,20 @@ async function runFirestoreMemoryConsolidation(
       const fixes = outcome.object.domainFixes.filter((fix) => byId.has(fix.id));
       const timeline = outcome.object.timeline.flatMap((item) => {
         if (!byId.has(item.id)) return [];
-        const validFrom = parseIsoDate(item.validFrom);
-        const validUntil = parseIsoDate(item.validUntil);
+        const original = byId.get(item.id);
+        const proposedFrom = parseIsoDate(item.validFrom);
+        const proposedUntil = parseIsoDate(item.validUntil);
+        const validFrom =
+          original?.validFrom && proposedFrom && proposedFrom < original.validFrom
+            ? original.validFrom
+            : proposedFrom;
+        const validUntil =
+          original?.validUntil && proposedUntil && proposedUntil > original.validUntil
+            ? original.validUntil
+            : proposedUntil;
+        const effectiveFrom = validFrom ?? original?.validFrom;
+        const effectiveUntil = validUntil ?? original?.validUntil;
+        if (effectiveFrom && effectiveUntil && effectiveFrom > effectiveUntil) return [];
         return validFrom || validUntil
           ? [
               {
@@ -312,6 +405,49 @@ export interface ConsolidationResult {
   cardCompiled: boolean;
 }
 
+/** Lock all contributing source rows in a stable order before derived writes. */
+async function withConsolidationSourceFence<T>(
+  db: Db,
+  input: {
+    agentId: string;
+    sources: readonly string[];
+    observedPrivacyFence: string | null;
+  },
+  write: (tx: Db) => Promise<T>,
+): Promise<T> {
+  return db.transaction(async (transaction) => {
+    const tx = transaction as unknown as Db;
+    await lockPostgresPrivacyObservationFence(tx, input.agentId);
+    await assertPostgresPrivacyObservationFence(tx, input.agentId, input.observedPrivacyFence);
+    const sources = [...new Set(input.sources)].sort();
+    if (sources.length) {
+      const rows = await transaction
+        .select({
+          source: importSources.source,
+          agentId: importSources.agentId,
+          status: importSources.status,
+        })
+        .from(importSources)
+        .where(
+          and(eq(importSources.agentId, input.agentId), inArray(importSources.source, sources)),
+        )
+        .orderBy(asc(importSources.source))
+        .for('share');
+      if (
+        rows.length !== sources.length ||
+        rows.some(
+          (row, index) =>
+            row.agentId !== input.agentId ||
+            row.source !== sources[index] ||
+            row.status === 'purged',
+        )
+      )
+        throw new Error('An imported source changed while consolidation was in flight');
+    }
+    return write(tx);
+  });
+}
+
 export async function runMemoryConsolidation(
   deps: {
     db: Db;
@@ -335,6 +471,25 @@ export async function runMemoryConsolidation(
     );
   }
   const { db, router } = deps;
+  const embeddingSpace = await router.embeddingSpace();
+  const embeddingSpaceKey = embeddingSpaceIdentityKey(embeddingSpace);
+  // Capture the owner's privacy generation before reading facts or invoking the
+  // model. Every later publication compares this token while holding the
+  // owner lock, so a suspended review cannot republish pre-erasure content.
+  const observedPrivacyFences = await db.transaction(async (transaction) => {
+    const owners = opts.agentId
+      ? await transaction.select({ id: agents.id }).from(agents).where(eq(agents.id, opts.agentId))
+      : await transaction.select({ id: agents.id }).from(agents).orderBy(asc(agents.id));
+    const observed = new Map<string, string | null>();
+    for (const owner of owners)
+      observed.set(
+        owner.id,
+        await lockPostgresPrivacyObservationFence(transaction as unknown as Db, owner.id),
+      );
+    if (opts.agentId && !observed.has(opts.agentId))
+      throw new Error('Consolidation owner is unavailable');
+    return observed;
+  });
   return withSpan('memory.consolidate', {}, async () => {
     const result: ConsolidationResult = {
       entities: 0,
@@ -441,13 +596,45 @@ export async function runMemoryConsolidation(
         .orderBy(sql`${memories.lastConsolidatedAt} asc nulls first`, memories.createdAt)
         .limit(MAX_FACTS_PER_ENTITY);
       if (facts.length < 2) continue;
+      const lineageRows = await db
+        .select({
+          memoryId: memoryImportLineage.memoryId,
+          source: memoryImportLineage.source,
+          sourceUnitProvenance: memoryImportLineage.sourceUnitProvenance,
+        })
+        .from(memoryImportLineage)
+        .where(
+          inArray(
+            memoryImportLineage.memoryId,
+            facts.map((fact) => fact.id),
+          ),
+        );
+      const sourcesByMemory = new Map<string, string[]>();
+      const provenanceByMemory = new Map<
+        string,
+        Map<string, import('@assistant/persistence').ImportUnitProvenance[]>
+      >();
+      for (const row of lineageRows) {
+        const sources = sourcesByMemory.get(row.memoryId) ?? [];
+        sources.push(row.source);
+        sourcesByMemory.set(row.memoryId, sources);
+        const sourcesForMemory = provenanceByMemory.get(row.memoryId) ?? new Map();
+        sourcesForMemory.set(row.source, row.sourceUnitProvenance);
+        provenanceByMemory.set(row.memoryId, sourcesForMemory);
+      }
+      for (const fact of facts) {
+        fact.importSources = sourcesByMemory.get(fact.id) ?? [];
+        fact.importSourceProvenance = [...(provenanceByMemory.get(fact.id) ?? new Map())].map(
+          ([source, sourceUnitProvenance]) => ({ source, sourceUnitProvenance }),
+        );
+      }
       result.entities += 1;
 
       const byId = new Map(facts.map((f) => [f.id, f]));
       const listing = facts
         .map(
           (f) =>
-            `id=${f.id} | ${f.createdAt.toISOString().slice(0, 10)} | conf=${f.confidence} | domain=${f.domain ?? '?'}${f.ownerConfirmed || f.pinned ? ' | [curated]' : ''} | ${f.content}`,
+            `id=${f.id} | ${f.createdAt.toISOString().slice(0, 10)} | validFrom=${f.validFrom?.toISOString() ?? 'unknown/open'} | validUntil=${f.validUntil?.toISOString() ?? 'unknown/open'} | conf=${f.confidence} | domain=${f.domain ?? '?'}${f.ownerConfirmed || f.pinned ? ' | [curated]' : ''} | ${f.content}`,
         )
         .join('\n');
 
@@ -468,6 +655,7 @@ export async function runMemoryConsolidation(
             'sentence loses nothing ("drinks coffee black" + "prefers espresso after lunch" →',
             '"Drinks coffee black; espresso after lunch"). Keep every specific, invent nothing,',
             'and leave facts marked [curated] alone.',
+            'Temporal validity and uncertainty are invariants. Retain historical, future, dated or uncertain claims separately; do not turn them into current timeless wording.',
             'Occasions: if a fact states a recurring date for THIS person (a birthday,',
             'anniversary, or other dated event with a specific month and day), surface it in',
             'the occasions array so it can be reminded at lead time. Include the year only if',
@@ -497,17 +685,36 @@ export async function runMemoryConsolidation(
 
       const expireLosers = async (group: string[], kind: 'duplicate' | 'contradiction') => {
         const members = group.map((id) => byId.get(id)).filter((f): f is FactLite => Boolean(f));
-        if (members.length < 2) return;
+        if (!canRewriteConsolidationFacts(members)) return;
         const winner = pickWinner(members);
-        for (const loser of members) {
-          if (loser.id === winner.id) continue;
-          // never silently expire an owner-confirmed fact in favor of an unconfirmed one
-          if (loser.ownerConfirmed && !winner.ownerConfirmed) continue;
-          await db
-            .update(memories)
-            .set({ expiresAt: sql`now()`, supersededById: winner.id })
-            .where(eq(memories.id, loser.id));
-          byId.delete(loser.id);
+        const ownerId = members[0]?.agentId;
+        if (!ownerId || members.some((fact) => fact.agentId !== ownerId))
+          throw new Error('Consolidation facts cross owner boundaries');
+        const expired = await withConsolidationSourceFence(
+          db,
+          {
+            agentId: ownerId,
+            sources: members.flatMap((fact) => fact.importSources ?? []),
+            observedPrivacyFence: observedPrivacyFences.get(ownerId) ?? null,
+          },
+          async (tx) => {
+            const ids: string[] = [];
+            for (const loser of members) {
+              if (loser.id === winner.id || loser.pinned) continue;
+              // never silently expire an owner-confirmed fact in favor of an unconfirmed one
+              if (loser.ownerConfirmed && !winner.ownerConfirmed) continue;
+              const [updated] = await tx
+                .update(memories)
+                .set({ expiresAt: sql`now()`, supersededById: winner.id })
+                .where(and(eq(memories.id, loser.id), eq(memories.agentId, ownerId)))
+                .returning({ id: memories.id });
+              if (updated) ids.push(updated.id);
+            }
+            return ids;
+          },
+        );
+        for (const id of expired) {
+          byId.delete(id);
           if (kind === 'duplicate') result.duplicatesExpired += 1;
           else result.contradictionsResolved += 1;
         }
@@ -529,38 +736,86 @@ export async function runMemoryConsolidation(
           .filter((f): f is FactLite => Boolean(f))
           // owner-curated wording is sacrosanct — never fold it into a rewrite
           .filter((f) => !f.ownerConfirmed && !f.pinned);
-        if (members.length < 2) continue;
+        if (!canRewriteConsolidationFacts(members)) continue;
         const unified = merge.unified.trim();
         const contentHash = createHash('sha256').update(unified).digest('hex');
         if (await isTombstoned(db, contentHash)) continue;
-        const [embedding] = await router.embed([unified]);
+        const [embedding] = await router.embed([unified], { expectedSpace: embeddingSpace });
         await deps.heartbeat?.();
-        const [row] = await db
-          .insert(memories)
-          .values({
-            agentId: (members[0] as FactLite).agentId,
-            category: 'knowledge',
-            kind: mostCommon(members.map((m) => m.kind)) ?? 'fact',
-            content: unified,
-            contentHash,
-            embedding,
-            importance: Math.max(...members.map((m) => m.importance)),
-            // a unified claim is only as reliable as its shakiest member
-            confidence: Math.min(...members.map((m) => Number(m.confidence))).toFixed(2),
-            originTrust: 'assistant',
-            subjectContactId: entity.subjectContactId,
-            domain: mostCommon(members.map((m) => m.domain)),
-            sourceTaskId: opts.taskId,
-            lastConsolidatedAt: sql`now()`,
-          })
-          .onConflictDoNothing({ target: memories.contentHash })
-          .returning();
+        const ownerId = members[0]?.agentId;
+        if (!ownerId || members.some((fact) => fact.agentId !== ownerId))
+          throw new Error('Consolidation merge crosses owner boundaries');
+        const row = await withConsolidationSourceFence(
+          db,
+          {
+            agentId: ownerId,
+            sources: members.flatMap((member) => member.importSources ?? []),
+            observedPrivacyFence: observedPrivacyFences.get(ownerId) ?? null,
+          },
+          async (tx) => {
+            const [inserted] = await tx
+              .insert(memories)
+              .values({
+                agentId: ownerId,
+                category: 'knowledge',
+                kind: mostCommon(members.map((m) => m.kind)) ?? 'fact',
+                content: unified,
+                contentHash,
+                embedding,
+                embeddingSpaceKey,
+                importance: Math.max(...members.map((m) => m.importance)),
+                // a unified claim is only as reliable as its shakiest member
+                confidence: Math.min(...members.map((m) => Number(m.confidence))).toFixed(2),
+                originTrust: 'assistant',
+                subjectContactId: entity.subjectContactId,
+                domain: mostCommon(members.map((m) => m.domain)),
+                sourceTaskId: opts.taskId,
+                lastConsolidatedAt: sql`now()`,
+                createdAt: earliestConsolidationSource(members),
+              })
+              .onConflictDoNothing({ target: memories.contentHash })
+              .returning();
+            if (!inserted) return null;
+            const derivedSources = [
+              ...new Set(members.flatMap((member) => member.importSources ?? [])),
+            ];
+            if (derivedSources.length) {
+              const sourceUnits = new Map<
+                string,
+                import('@assistant/persistence').ImportUnitProvenance[]
+              >();
+              for (const member of members)
+                for (const provenance of member.importSourceProvenance ?? []) {
+                  const prior = sourceUnits.get(provenance.source) ?? [];
+                  sourceUnits.set(provenance.source, [
+                    ...prior,
+                    ...provenance.sourceUnitProvenance,
+                  ]);
+                }
+              await tx
+                .insert(memoryImportLineage)
+                .values(
+                  derivedSources.map((source) => ({
+                    source,
+                    memoryId: inserted.id,
+                    sourceUnitProvenance: mergeImportUnitProvenance(
+                      [],
+                      sourceUnits.get(source) ?? [],
+                    ),
+                  })),
+                )
+                .onConflictDoNothing();
+            }
+            for (const member of members)
+              await tx
+                .update(memories)
+                .set({ expiresAt: sql`now()`, supersededById: inserted.id })
+                .where(and(eq(memories.id, member.id), eq(memories.agentId, ownerId)));
+            return inserted;
+          },
+        );
         if (!row) continue; // unified wording already stored
         for (const member of members) {
-          await db
-            .update(memories)
-            .set({ expiresAt: sql`now()`, supersededById: row.id })
-            .where(eq(memories.id, member.id));
           byId.delete(member.id);
           result.factsUnified += 1;
         }
@@ -569,23 +824,63 @@ export async function runMemoryConsolidation(
       for (const fix of outcome.object.domainFixes) {
         const fact = byId.get(fix.id);
         if (!fact || fact.domain === fix.domain) continue;
-        await db.update(memories).set({ domain: fix.domain }).where(eq(memories.id, fix.id));
-        result.domainsAssigned += 1;
+        const [updated] = await withConsolidationSourceFence(
+          db,
+          {
+            agentId: fact.agentId,
+            sources: fact.importSources ?? [],
+            observedPrivacyFence: observedPrivacyFences.get(fact.agentId) ?? null,
+          },
+          (tx) =>
+            tx
+              .update(memories)
+              .set({ domain: fix.domain })
+              .where(and(eq(memories.id, fix.id), eq(memories.agentId, fact.agentId)))
+              .returning({ id: memories.id }),
+        );
+        if (updated) result.domainsAssigned += 1;
       }
 
       for (const t of outcome.object.timeline) {
         const fact = byId.get(t.id);
         if (!fact) continue;
-        const validFrom = parseIsoDate(t.validFrom);
-        const validUntil = parseIsoDate(t.validUntil);
+        const proposedFrom = parseIsoDate(t.validFrom);
+        const proposedUntil = parseIsoDate(t.validUntil);
+        const validFrom =
+          fact.validFrom && proposedFrom && proposedFrom < fact.validFrom
+            ? fact.validFrom
+            : proposedFrom;
+        const validUntil =
+          fact.validUntil && proposedUntil && proposedUntil > fact.validUntil
+            ? fact.validUntil
+            : proposedUntil;
+        const effectiveFrom = validFrom ?? fact.validFrom;
+        const effectiveUntil = validUntil ?? fact.validUntil;
+        if (effectiveFrom && effectiveUntil && effectiveFrom > effectiveUntil) continue;
         if (!validFrom && !validUntil) continue;
-        await db
-          .update(memories)
-          .set({
-            ...(validFrom ? { validFrom } : {}),
-            ...(validUntil ? { validUntil } : {}),
-          })
-          .where(eq(memories.id, t.id));
+        await withConsolidationSourceFence(
+          db,
+          {
+            agentId: fact.agentId,
+            sources: fact.importSources ?? [],
+            observedPrivacyFence: observedPrivacyFences.get(fact.agentId) ?? null,
+          },
+          async (tx) => {
+            const [updated] = await tx
+              .update(memories)
+              .set({
+                ...(validFrom ? { validFrom } : {}),
+                ...(validUntil ? { validUntil } : {}),
+              })
+              .where(and(eq(memories.id, t.id), eq(memories.agentId, fact.agentId)))
+              .returning({ id: memories.id });
+            if (updated)
+              await tx
+                .update(knowledgeGraphSources)
+                .set({ extractionVersion: 0 })
+                .where(eq(knowledgeGraphSources.memoryId, t.id));
+          },
+        );
       }
 
       // Backfill occasions from dates already stated in this person's facts, so
@@ -594,21 +889,44 @@ export async function runMemoryConsolidation(
       // from already-vetted active facts → not quarantined; saveOccasion is an
       // idempotent upsert, so re-running never duplicates. A bad date is skipped
       // rather than failing the whole pass.
+      const occasionContactId = entity.subjectContactId;
+      if (!occasionContactId) continue;
       for (const occ of outcome.object.occasions ?? []) {
         try {
-          const saved = await saveOccasion(db, {
-            agentId: (facts[0] as FactLite).agentId,
-            contactId: entity.subjectContactId,
-            kind: occ.kind,
-            label: occ.label,
-            month: occ.month,
-            day: occ.day,
-            year: occ.year,
-            notes: occ.notes,
-            originTrust: 'assistant',
-            quarantined: false,
-            source: 'consolidation',
-          });
+          const occasionOwnerId = facts[0]?.agentId;
+          if (!occasionOwnerId) throw new Error('Consolidation occasion has no owner');
+          const derivedSources = [...new Set(facts.flatMap((fact) => fact.importSources ?? []))];
+          const saved = await withConsolidationSourceFence(
+            db,
+            {
+              agentId: occasionOwnerId,
+              sources: derivedSources,
+              observedPrivacyFence: observedPrivacyFences.get(occasionOwnerId) ?? null,
+            },
+            async (tx) => {
+              const result = await saveOccasion(tx, {
+                agentId: occasionOwnerId,
+                contactId: occasionContactId,
+                kind: occ.kind,
+                label: occ.label,
+                month: occ.month,
+                day: occ.day,
+                year: occ.year,
+                notes: occ.notes,
+                originTrust: 'assistant',
+                quarantined: false,
+                source: 'consolidation',
+              });
+              if (derivedSources.length)
+                await tx
+                  .insert(occasionImportLineage)
+                  .values(
+                    derivedSources.map((source) => ({ source, occasionId: result.occasion.id })),
+                  )
+                  .onConflictDoNothing();
+              return result;
+            },
+          );
           if (saved.saved) result.occasionsSaved += 1;
         } catch (err) {
           console.error('memory consolidation: skipping unsavable occasion', err);
@@ -664,7 +982,7 @@ export function renderOwnerCard(input: OwnerCardCompilationInput, now: Date): st
           (fact) =>
             !fact.pinned &&
             fact.importance >= CARD_AUTO_MIN_IMPORTANCE &&
-            isCurrentAt(fact.validUntil, now),
+            isCurrentAt(fact.validUntil, now, fact.validFrom),
         )
         .slice(0, CARD_AUTO_FACTS_PER_DOMAIN),
     ];

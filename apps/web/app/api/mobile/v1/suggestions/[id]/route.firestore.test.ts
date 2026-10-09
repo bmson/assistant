@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { resetConfigForTest } from '@assistant/config';
-import { createInstallationStore } from '@assistant/firestore';
+import {
+  createInstallationStore,
+  FirestoreWatchRepository,
+  suggestionIdFor,
+} from '@assistant/firestore';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 const auth = vi.hoisted(() => ({ allowed: vi.fn(), sqlCalls: vi.fn() }));
@@ -94,14 +98,77 @@ describe.skipIf(!localEmulator)(
         { params: Promise.resolve({ id }) },
       );
 
+    it.each(['accepted', 'dismissed', 'snoozed'])(
+      'answers an actual watch proposal with %s and deduplicates acceptance',
+      async (decision) => {
+        const watches = new FirestoreWatchRepository(store);
+        const now = new Date();
+        const watch = await watches.create({
+          agentId,
+          conversationId,
+          kind: 'email',
+          tier: 'suggest',
+          name: 'Owner update',
+          match: { expectedSenderEmails: ['owner@example.com'] },
+          maxFires: 5,
+          expiresAt: new Date(now.getTime() + 86400000),
+        });
+        const triggerRef = `test-${decision}`;
+        await watches.recordFire({
+          watchId: watch.id,
+          agentId,
+          triggerRef,
+          summary: 'Update',
+          excerpt: 'Please review',
+          now,
+        });
+        const committed = await watches.commitSuggestion({
+          watchId: watch.id,
+          agentId,
+          triggerRef,
+          summary: 'Review?',
+          proposedAction: 'Review the update.',
+          now,
+        });
+        expect(committed?.suggestion.id).toBe(
+          suggestionIdFor(agentId, `watch:${watch.id}:${triggerRef}`),
+        );
+        if (!committed) throw new Error('No committed watch proposal');
+        const before = (await store.collection('tasks').get()).size;
+        expect((await post(committed.suggestion.id, decision)).status).toBe(200);
+        if (decision === 'accepted') {
+          expect((await post(committed.suggestion.id, decision)).status).toBe(200);
+          expect((await store.collection('tasks').get()).size).toBe(before + 1);
+        }
+      },
+    );
+
+    it('retains the exact legacy watch identity without creating a duplicate proposal', async () => {
+      const legacyId = `watch-suggestion:${'a'.repeat(64)}`;
+      await store.doc('suggestions', legacyId).set({
+        id: legacyId,
+        agentId,
+        conversationId,
+        origin: 'watch',
+        proposedAction: 'Review the old update.',
+        status: 'pending',
+        expiresAt: new Date(Date.now() + 86400000),
+        acceptedTaskId: null,
+      });
+      expect((await post(legacyId, 'accepted')).status).toBe(200);
+      expect((await post(legacyId, 'accepted')).status).toBe(200);
+      expect((await post('watch-suggestion:invalid', 'dismissed')).status).toBe(400);
+    });
+
     it('accepts once and refuses a foreign suggestion without opening SQL', async () => {
       const foreign = await post(foreignId, 'accepted');
       expect(foreign.status).toBe(409);
+      const before = (await store.collection('tasks').get()).size;
       const first = await post(suggestionId, 'accepted');
       const second = await post(suggestionId, 'accepted');
       expect(first.status).toBe(200);
       expect(await second.json()).toEqual(await first.json());
-      expect((await store.collection('tasks').get()).size).toBe(1);
+      expect((await store.collection('tasks').get()).size).toBe(before + 1);
       expect(auth.sqlCalls).not.toHaveBeenCalled();
     });
   },

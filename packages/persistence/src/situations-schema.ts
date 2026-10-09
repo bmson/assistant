@@ -52,6 +52,148 @@ export interface SituationPackView {
   affectedIds: string[];
 }
 
+/** A confirmed situation choice with the exact pack revision it came from. */
+export interface SituationDecisionContext {
+  decisionId: string;
+  option: string;
+  outcome: 'chosen' | 'rejected';
+  reason: string;
+  scope: 'situation' | 'preference';
+  packId: string;
+  packTitle: string;
+  packVersion: number;
+  packUpdatedAt: string;
+  relevance: number;
+}
+
+const CONTEXT_STOP_WORDS = new Set([
+  'about',
+  'after',
+  'again',
+  'also',
+  'because',
+  'before',
+  'could',
+  'from',
+  'have',
+  'into',
+  'just',
+  'like',
+  'more',
+  'most',
+  'that',
+  'them',
+  'then',
+  'there',
+  'these',
+  'they',
+  'this',
+  'what',
+  'when',
+  'where',
+  'which',
+  'while',
+  'with',
+  'would',
+  'your',
+]);
+
+function contextTerms(value: string): string[] {
+  return (value.toLocaleLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []).filter(
+    (term) => !CONTEXT_STOP_WORDS.has(term),
+  );
+}
+
+/**
+ * Select owner-confirmed decisions relevant to a bounded discussion frame.
+ * Each pack is an independent source: contradictory choices in different
+ * packs stay visible as separate evidence instead of a last-write-wins map.
+ */
+export function selectSituationDecisionContext(
+  packs: ReadonlyArray<
+    Pick<SituationPackView, 'id' | 'title' | 'version' | 'archived' | 'updatedAt'> & {
+      data: unknown;
+    }
+  >,
+  query: string,
+  limit = 12,
+): SituationDecisionContext[] {
+  const terms = [...new Set(contextTerms(query).reverse())].slice(0, 128);
+  if (terms.length === 0) return [];
+
+  const candidates: Array<SituationDecisionContext & { optionKey: string }> = [];
+  for (const pack of packs) {
+    if (pack.archived) continue;
+    const parsed = PackDataSchema.safeParse(pack.data);
+    if (!parsed.success) continue;
+    const packContext = [
+      pack.title,
+      ...parsed.data.items.flatMap((item) => [item.title, item.details]),
+    ]
+      .join(' ')
+      .toLocaleLowerCase();
+    const packTerms = new Set(contextTerms(packContext));
+    for (const decision of parsed.data.decisions) {
+      if (!decision.confirmed) continue;
+      const decisionTerms = new Set(contextTerms(`${decision.option} ${decision.reason}`));
+      const decisionScore = terms.reduce(
+        (score, term) => score + Number(decisionTerms.has(term)),
+        0,
+      );
+      const contextScore = terms.reduce((score, term) => score + Number(packTerms.has(term)), 0);
+      // A situation-only choice must be connected to the pack or its decision
+      // wording. A lasting preference needs a direct match to its own claim.
+      if (
+        decisionScore === 0 ||
+        (decision.scope === 'situation' && contextScore === 0 && decisionScore < 2)
+      )
+        continue;
+      candidates.push({
+        decisionId: decision.id,
+        option: decision.option,
+        outcome: decision.outcome,
+        reason: decision.reason,
+        scope: decision.scope,
+        packId: pack.id,
+        packTitle: pack.title,
+        packVersion: pack.version,
+        packUpdatedAt: pack.updatedAt,
+        relevance: decisionScore * 2 + contextScore,
+        optionKey: decision.option.trim().toLocaleLowerCase(),
+      });
+    }
+  }
+
+  candidates.sort(
+    (a, b) =>
+      b.relevance - a.relevance ||
+      b.packUpdatedAt.localeCompare(a.packUpdatedAt) ||
+      a.packId.localeCompare(b.packId) ||
+      a.decisionId.localeCompare(b.decisionId),
+  );
+  const max = Math.max(1, Math.min(limit, 24));
+  const selected = candidates.slice(0, max);
+  const selectedIds = new Set(
+    selected.map((candidate) => `${candidate.packId}:${candidate.decisionId}`),
+  );
+  // If a selected option has credible opposing evidence in another pack,
+  // retain the best opposing record even when it falls just below the limit.
+  for (const candidate of selected) {
+    const opposing = candidates.find(
+      (other) =>
+        other.optionKey === candidate.optionKey &&
+        other.outcome !== candidate.outcome &&
+        other.packId !== candidate.packId &&
+        !selectedIds.has(`${other.packId}:${other.decisionId}`),
+    );
+    if (opposing) {
+      selected.push(opposing);
+      selectedIds.add(`${opposing.packId}:${opposing.decisionId}`);
+    }
+  }
+  return selected.map(({ optionKey: _optionKey, ...candidate }) => candidate);
+}
+
 /** No orphan edges or cycles: propagation must always have an explainable path. */
 export function validatePack(data: PackData): void {
   PackDataSchema.parse(data);

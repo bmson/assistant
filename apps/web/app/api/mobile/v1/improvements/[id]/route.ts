@@ -1,3 +1,4 @@
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { proposalCodeFixReceipt, requestOwnerProposalCodeFix } from '@/lib/proposal-code-fix';
 import { decideOwnerImprovement } from '@/lib/workspace-reviews';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
@@ -13,7 +14,9 @@ export async function POST(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid proposal id' }, { status: 400 });
-  const body = (await request.json().catch(() => null)) as { action?: unknown } | null;
+  const mutationBody = await readMobileMutationBody(request, ['action']);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as { action?: unknown } | null;
   try {
     if (body?.action === 'request_fix') {
       const issue = await requestOwnerProposalCodeFix(id);

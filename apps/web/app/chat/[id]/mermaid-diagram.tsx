@@ -5,6 +5,33 @@ import { useEffect, useId, useState } from 'react';
 
 const MAX_SOURCE_CHARS = 20_000;
 
+function withViewBoxDimensions(svgSource: string): string {
+  const parsed = new DOMParser().parseFromString(svgSource, 'image/svg+xml');
+  const svg = parsed.documentElement;
+  const viewBox = svg
+    .getAttribute('viewBox')
+    ?.trim()
+    .split(/[\s,]+/)
+    .map(Number);
+  const width = viewBox?.[2];
+  const height = viewBox?.[3];
+  if (
+    svg.localName !== 'svg' ||
+    viewBox?.length !== 4 ||
+    !viewBox.every(Number.isFinite) ||
+    !width ||
+    !height ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    return svgSource;
+  }
+  // These numeric values come only from the sanitized SVG's finite viewBox.
+  svg.setAttribute('width', `${width}px`);
+  svg.setAttribute('height', `${height}px`);
+  return new XMLSerializer().serializeToString(svg);
+}
+
 export function MermaidDiagram({ source }: { source: string }) {
   const reactId = useId();
   const [svgUrl, setSvgUrl] = useState('');
@@ -47,7 +74,9 @@ export function MermaidDiagram({ source }: { source: string }) {
         const safeSvg = DOMPurify.sanitize(rendered.svg, {
           USE_PROFILES: { svg: true, svgFilters: true },
         });
-        objectUrl = URL.createObjectURL(new Blob([safeSvg], { type: 'image/svg+xml' }));
+        // Preserve Mermaid's natural text size; the parent contains wide diagrams.
+        const sizedSvg = withViewBoxDimensions(safeSvg);
+        objectUrl = URL.createObjectURL(new Blob([sizedSvg], { type: 'image/svg+xml' }));
         setSvgUrl(objectUrl);
         setError('');
       })
@@ -62,15 +91,25 @@ export function MermaidDiagram({ source }: { source: string }) {
 
   return (
     <figure className="my-3 overflow-hidden rounded-xl border border-edge bg-raised first:mt-0 last:mb-0">
-      <figcaption className="border-b border-edge/60 bg-sunken/40 px-4 py-2 text-[11px] font-semibold tracking-[0.14em] text-accent uppercase">
+      <figcaption className="border-b border-edge/60 bg-sunken/40 px-4 py-2 text-xs leading-5 font-medium text-accent">
         Diagram
       </figcaption>
       {svgUrl ? (
-        <div className="overflow-x-auto p-4">
+        <section
+          aria-label="Mermaid diagram, horizontally scrollable"
+          // biome-ignore lint/a11y/noNoninteractiveTabindex: The scroll region must be keyboard reachable.
+          tabIndex={0}
+          onKeyDown={(event) => {
+            if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+            event.preventDefault();
+            event.currentTarget.scrollBy({ left: event.key === 'ArrowRight' ? 40 : -40 });
+          }}
+          className="overflow-x-auto p-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >
           {/* A sanitized in-memory SVG is not an optimizable network image. */}
           {/* biome-ignore lint/performance/noImgElement: blob URLs cannot use next/image. */}
-          <img src={svgUrl} className="mx-auto h-auto max-w-full" alt="Rendered Mermaid diagram" />
-        </div>
+          <img src={svgUrl} className="mx-auto h-auto max-w-none" alt="Rendered Mermaid diagram" />
+        </section>
       ) : error ? (
         <p className="px-4 py-3 text-sm text-muted" role="status">
           {error}

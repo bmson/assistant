@@ -1,9 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { toolOperationKey } from '../operation-identity.js';
 import type { ToolRegistry } from '../registry.js';
 import type { AssistantTool, ToolFlags } from '../types.js';
 import { contentDigest, type GoogleClient } from './client.js';
 import { renderSlideBody } from './docs-markdown.js';
+import {
+  checkpointGoogleEffect,
+  type GoogleEffectReceipt,
+  PartialGoogleArtifactError,
+} from './effect-progress.js';
 
 const CODE_FONT = 'Courier New';
 const LINK_COLOR = { red: 0.06, green: 0.45, blue: 0.8 };
@@ -56,7 +62,7 @@ function objectPrefix(): string {
 /** Build plain, readable slides without relying on a locale-specific template placeholder. */
 export function buildSlideRequests(
   slides: z.infer<typeof slideList>,
-  options: { deleteSlideId?: string } = {},
+  options: { deleteSlideId?: string; insertionIndex?: number } = {},
 ): Array<Record<string, unknown>> {
   const requests: Array<Record<string, unknown>> = [];
   if (options.deleteSlideId) requests.push({ deleteObject: { objectId: options.deleteSlideId } });
@@ -70,7 +76,9 @@ export function buildSlideRequests(
       {
         createSlide: {
           objectId: slideId,
-          insertionIndex: index,
+          ...(options.insertionIndex === undefined
+            ? {}
+            : { insertionIndex: options.insertionIndex + index }),
           slideLayoutReference: { predefinedLayout: 'BLANK' },
         },
       },
@@ -194,30 +202,46 @@ export function registerSlidesTools(registry: ToolRegistry, deps: SlidesToolDeps
       acceptsUntrustedInput: true,
       idempotencyKey: (args, ctx) => {
         const a = args as z.infer<typeof createSchema>;
-        return `slides-create-${ctx.taskId}-${a.title}`;
+        return toolOperationKey('slides-create', ctx, `slides-create-${ctx.taskId}-${a.title}`);
       },
-      execute: async (args) => {
+      execute: async (args, ctx) => {
         const created = await deps.client.api<Presentation>(SLIDES, {
           method: 'POST',
           body: JSON.stringify({ title: args.title }),
         });
         const id = created.presentationId;
         if (!id) throw new Error('Slides API did not return a presentationId');
-        const requests = buildSlideRequests(args.slides, {
-          deleteSlideId: created.slides?.[0]?.objectId,
-        });
-        await deps.client.api(`${SLIDES}/${encodeURIComponent(id)}:batchUpdate`, {
-          method: 'POST',
-          body: JSON.stringify({ requests }),
-        });
-        await shareWithOwner(deps.client, id, deps.ownerEmail);
-        return {
-          presentationId: id,
-          title: created.title ?? args.title,
-          url: presentationUrl(id),
-          slideCount: args.slides.length,
-          sharedWith: deps.ownerEmail,
+        const progress: GoogleEffectReceipt = {
+          provider: 'google',
+          kind: 'slides',
+          objectId: id,
+          stage: 'created',
         };
+        try {
+          await checkpointGoogleEffect(ctx, progress);
+          const requests = buildSlideRequests(args.slides, {
+            deleteSlideId: created.slides?.[0]?.objectId,
+            insertionIndex: 0,
+          });
+          await deps.client.api(`${SLIDES}/${encodeURIComponent(id)}:batchUpdate`, {
+            method: 'POST',
+            body: JSON.stringify({ requests }),
+          });
+          progress.stage = 'filled';
+          await checkpointGoogleEffect(ctx, progress);
+          await shareWithOwner(deps.client, id, deps.ownerEmail);
+          progress.stage = 'shared';
+          await checkpointGoogleEffect(ctx, progress);
+          return {
+            presentationId: id,
+            title: created.title ?? args.title,
+            url: presentationUrl(id),
+            slideCount: args.slides.length,
+            sharedWith: deps.ownerEmail,
+          };
+        } catch (error) {
+          throw new PartialGoogleArtifactError({ ...progress }, error);
+        }
       },
     },
     { privateWrite: true },
@@ -231,8 +255,12 @@ export function registerSlidesTools(registry: ToolRegistry, deps: SlidesToolDeps
       description:
         'Append one or more slides (title + Markdown body) to a Google Slides presentation the assistant can access.',
       inputSchema: appendSchema,
-      risk: 'autonomous',
+      risk: 'approval',
       acceptsUntrustedInput: true,
+      approvalSummary: (input) => {
+        const args = input as z.infer<typeof appendSchema>;
+        return `Append ${args.slides.length} slides to ${presentationUrl(args.presentationId)} (visible to its current readers):\n\n${args.slides.map((slide) => `${slide.title}\n${slide.body}`).join('\n\n')}`;
+      },
       // Append is non-idempotent: a crash-retry must not duplicate the slides.
       idempotencyKey: (args, ctx) => {
         const a = args as z.infer<typeof appendSchema>;
@@ -250,7 +278,7 @@ export function registerSlidesTools(registry: ToolRegistry, deps: SlidesToolDeps
         };
       },
     },
-    { privateWrite: true },
+    { privateWrite: true, outwardFacing: true, networkEgress: true, blanketAllowIneligible: true },
   );
 
   return registry;

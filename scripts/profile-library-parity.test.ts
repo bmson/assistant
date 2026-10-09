@@ -31,6 +31,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('profile library PG/Firest
   const foreignSubject = randomUUID();
   const preciseEarly = randomUUID();
   const preciseLate = randomUUID();
+  const preciseSpaceKey = 'a'.repeat(64);
   const quarantineId = randomUUID();
   const expiredId = randomUUID();
   const foreignMemoryId = randomUUID();
@@ -118,6 +119,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('profile library PG/Firest
         subjectContactId: subjectB,
         content: 'Precise late',
         contentHash: 'late',
+        embeddingSpaceKey: preciseSpaceKey,
         embedding: Array.from({ length: 1536 }, () => 0.25),
         pinned: true,
         ownerConfirmed: true,
@@ -226,7 +228,11 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('profile library PG/Firest
           : row.id === preciseLate
             ? new Timestamp(Math.floor(at.getTime() / 1000), 123_789_000)
             : row.createdAt;
-      batch.set(store.doc('memories', row.id), { ...row, createdAt: precise });
+      const firestoreRow =
+        row.id === preciseLate
+          ? { ...row, embeddingSpaceKey: null, embeddingSpace: preciseSpaceKey }
+          : row;
+      batch.set(store.doc('memories', row.id), { ...firestoreRow, createdAt: precise });
     }
     batch.set(store.doc('knowledgeGraphSources', preciseLate), {
       memoryId: preciseLate,

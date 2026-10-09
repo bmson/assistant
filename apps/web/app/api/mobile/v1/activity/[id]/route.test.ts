@@ -148,18 +148,36 @@ describe.skipIf(!localEmulator)(
     });
 
     it('archives a terminal owner task and restores it atomically', async () => {
-      expect((await post(doneId, 'archive')).status).toBe(200);
+      const archive = await post(doneId, 'archive');
+      expect(archive.status).toBe(200);
+      expect(await archive.json()).toMatchObject({
+        outcome: 'archived',
+        transitioned: true,
+        current: { id: doneId, status: 'done', archivedAt: expect.any(String) },
+      });
       const archived = await store.doc('tasks', doneId).get();
       const archivedAt = archived.get('archivedAt').toDate();
       expect(archivedAt).toBeInstanceOf(Date);
       expect(archived.get('updatedAt').toDate().getTime()).toBe(archivedAt.getTime());
 
-      expect((await post(doneId, 'archive')).status).toBe(200);
+      const repeatedArchive = await post(doneId, 'archive');
+      expect(repeatedArchive.status).toBe(200);
+      expect(await repeatedArchive.json()).toMatchObject({
+        outcome: 'already_archived',
+        transitioned: false,
+        current: { id: doneId, status: 'done', archivedAt: expect.any(String) },
+      });
       expect((await store.doc('tasks', doneId).get()).get('archivedAt').toDate()).toEqual(
         archivedAt,
       );
 
-      expect((await post(doneId, 'restore')).status).toBe(200);
+      const restore = await post(doneId, 'restore');
+      expect(restore.status).toBe(200);
+      expect(await restore.json()).toMatchObject({
+        outcome: 'restored',
+        transitioned: true,
+        current: { id: doneId, status: 'done', archivedAt: null },
+      });
       const restored = await store.doc('tasks', doneId).get();
       expect(restored.get('archivedAt')).toBeNull();
       expect(restored.get('updatedAt').toDate().getTime()).toBeGreaterThanOrEqual(
@@ -169,8 +187,12 @@ describe.skipIf(!localEmulator)(
 
     it('refuses non-terminal, foreign, missing, and malformed tasks without writing', async () => {
       expect((await post(runningId, 'archive')).status).toBe(409);
-      expect((await post(foreignId, 'archive')).status).toBe(409);
-      expect((await post(randomUUID(), 'archive')).status).toBe(409);
+      const foreign = await post(foreignId, 'archive');
+      expect(foreign.status).toBe(404);
+      expect(await foreign.json()).toMatchObject({ outcome: 'not_found', current: null });
+      const missing = await post(randomUUID(), 'archive');
+      expect(missing.status).toBe(404);
+      expect(await missing.json()).toMatchObject({ outcome: 'not_found', current: null });
       expect((await store.doc('tasks', runningId).get()).get('archivedAt')).toBeNull();
       expect((await store.doc('tasks', foreignId).get()).get('archivedAt')).toBeNull();
       await store.doc('tasks', doneId).update({ archivedAt: 'malformed' });
@@ -189,21 +211,44 @@ describe.skipIf(!localEmulator)(
     });
 
     it('revokes only owner autonomy grants and preserves an existing revocation', async () => {
-      expect((await post(autonomyId, 'revoke-autonomy')).status).toBe(200);
+      const revokedResponse = await post(autonomyId, 'revoke-autonomy');
+      expect(revokedResponse.status).toBe(200);
+      expect(await revokedResponse.json()).toMatchObject({
+        outcome: 'autonomy_revoked',
+        transitioned: true,
+        current: { id: autonomyId, autonomyRevoked: true },
+      });
       const revoked = await store.doc('tasks', autonomyId).get();
       const revokedAt = revoked.get('autonomyGrant').revokedAt;
       expect(typeof revokedAt).toBe('string');
       expect(revoked.get('updatedAt').toDate()).toBeInstanceOf(Date);
-      expect((await post(autonomyId, 'revoke-autonomy')).status).toBe(200);
+      const repeated = await post(autonomyId, 'revoke-autonomy');
+      expect(repeated.status).toBe(200);
+      expect(await repeated.json()).toMatchObject({
+        outcome: 'already_applied',
+        transitioned: false,
+        current: { id: autonomyId, autonomyRevoked: true },
+      });
       expect((await store.doc('tasks', autonomyId).get()).get('autonomyGrant').revokedAt).toBe(
         revokedAt,
       );
-      expect((await post(foreignId, 'revoke-autonomy')).status).toBe(200);
+      expect((await post(foreignId, 'revoke-autonomy')).status).toBe(404);
       expect((await store.doc('tasks', foreignId).get()).get('autonomyGrant')).toBeUndefined();
     });
 
     it('raises a stalled task budget with its runnable transition and queue intent atomically', async () => {
-      expect((await post(attentionId, 'raise-budget', { budgetUsdLimit: 1 })).status).toBe(200);
+      const raised = await post(attentionId, 'raise-budget', { budgetUsdLimit: 1 });
+      expect(raised.status).toBe(200);
+      expect(await raised.json()).toMatchObject({
+        outcome: 'budget_raised',
+        transitioned: true,
+        current: {
+          id: attentionId,
+          status: 'pending',
+          queueGeneration: 5,
+          budgetUsdLimit: '1.0000',
+        },
+      });
       const task = await store.doc('tasks', attentionId).get();
       expect(task.get('status')).toBe('pending');
       expect(task.get('budgetUsdLimit')).toBe('1.0000');
@@ -223,8 +268,13 @@ describe.skipIf(!localEmulator)(
         post(retryId, 'retry'),
         post(retryId, 'retry'),
       ]);
-      expect(first.status).toBe(200);
-      expect(duplicate.status).toBe(200);
+      const results = await Promise.all([first.json(), duplicate.json()]);
+      expect([first.status, duplicate.status].sort()).toEqual([200, 409]);
+      expect(results.map((row) => row.outcome).sort()).toEqual(['no_longer_retriable', 'retried']);
+      expect(results.filter((row) => row.transitioned)).toHaveLength(1);
+      expect(results.find((row) => row.transitioned)).toMatchObject({
+        current: { id: retryId, status: 'pending', queueGeneration: 3 },
+      });
       const task = await store.doc('tasks', retryId).get();
       expect(task.get('status')).toBe('pending');
       expect(task.get('queueGeneration')).toBe(3);
@@ -240,15 +290,39 @@ describe.skipIf(!localEmulator)(
     });
 
     it('cancels an active owner task and fences its worker lease idempotently', async () => {
-      expect((await post(cancelId, 'cancel')).status).toBe(200);
+      const cancel = await post(cancelId, 'cancel');
+      expect(cancel.status).toBe(200);
+      expect(await cancel.json()).toMatchObject({
+        outcome: 'cancelled',
+        transitioned: true,
+        current: { id: cancelId, status: 'cancelled', queueGeneration: 0 },
+        effectStatus: 'unknown',
+      });
       const cancelled = await store.doc('tasks', cancelId).get();
       expect(cancelled.get('status')).toBe('cancelled');
       expect(cancelled.get('leaseToken')).toBeNull();
       expect(cancelled.get('lockedUntil')).toBeNull();
       expect(cancelled.get('runAfter')).toBeNull();
-      expect((await post(cancelId, 'cancel')).status).toBe(200);
+      const repeated = await post(cancelId, 'cancel');
+      expect(repeated.status).toBe(200);
+      expect(await repeated.json()).toMatchObject({
+        outcome: 'already_cancelled',
+        transitioned: false,
+        current: { id: cancelId, status: 'cancelled' },
+        effectStatus: 'unknown',
+      });
       expect((await store.doc('tasks', cancelId).get()).get('status')).toBe('cancelled');
-      expect((await post(foreignId, 'cancel')).status).toBe(409);
+      const foreign = await post(foreignId, 'cancel');
+      expect(foreign.status).toBe(404);
+      expect(await foreign.json()).toMatchObject({ outcome: 'not_found', current: null });
+      const terminal = await post(doneId, 'cancel');
+      expect(terminal.status).toBe(200);
+      expect(await terminal.json()).toMatchObject({
+        outcome: 'already_terminal',
+        transitioned: false,
+        current: { id: doneId, status: 'done' },
+        effectStatus: 'not_applicable',
+      });
     });
 
     it('validates budget input and fences both owner controls during privacy erasure', async () => {

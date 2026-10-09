@@ -33,6 +33,7 @@ export interface ProfileMemoryManagementRepository {
     content: string;
     contentHash: string;
     embedding: number[];
+    embeddingSpaceKey?: string;
   }): Promise<MemoryMutation>;
   forget(memoryId: string, reason: MemoryForgetReason): Promise<MemoryMutation>;
   setProminence(memoryId: string, level: MemoryProminence): Promise<MemoryMutation>;
@@ -41,6 +42,7 @@ export interface ProfileMemoryManagementRepository {
     content: string;
     contentHash: string;
     embedding: number[];
+    embeddingSpaceKey?: string;
     importance: number;
     pinned: boolean;
     subjectContactId: string;

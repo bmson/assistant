@@ -9,7 +9,8 @@ import {
   proactiveMoments,
   suggestions,
 } from '@assistant/db';
-import { eq, like } from 'drizzle-orm';
+import { type EmailThreadHeadReader, notificationLeg } from '@assistant/persistence';
+import { desc, eq, like } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { getAgent } from '../chat.js';
 import type { BriefingCalendarEvent } from '../workflow/briefing.js';
@@ -133,6 +134,30 @@ describe('eventLeadMoments', () => {
     });
   });
 
+  it('does not turn an unverified calendar flight time into a travel lead', () => {
+    const wrongCalendarFlight = salient(
+      {
+        summary: 'SFO → BER flight (United)',
+        start: '2026-03-04T09:10:00Z',
+        end: '2026-03-04T10:00:00Z',
+        location: 'Keflavik Airport',
+      },
+      ['it is at Keflavik Airport', 'it falls outside your usual hours'],
+    );
+    expect(eventLeadMoments([wrongCalendarFlight], NOW)).toEqual([]);
+
+    const ordinaryMeeting = salient(
+      {
+        summary: 'Consultant appointment',
+        start: '2026-03-04T09:10:00Z',
+        end: '2026-03-04T10:00:00Z',
+        location: 'Skolavorduholt 1',
+      },
+      ['it is at Skolavorduholt 1'],
+    );
+    expect(eventLeadMoments([ordinaryMeeting], NOW)).toHaveLength(1);
+  });
+
   it('ignores all-day entries and anything already started', () => {
     expect(eventLeadMoments([salient({ allDay: true })], NOW)).toHaveLength(0);
     expect(eventLeadMoments([salient({ start: '2026-03-04T08:50:00Z' })], NOW)).toHaveLength(0);
@@ -154,20 +179,28 @@ describe('mailMoment', () => {
     importance: 5,
   };
 
-  it('does not claim actionable automated mail needs a reply', () => {
+  it('qualifies a classifier result as review, not a verified open obligation', () => {
     const moment = mailMoment(mail);
     expect(moment.card).toMatchObject({
-      urgencyLabel: 'Still open',
+      urgencyLabel: 'Review email',
       title: mail.subject,
       details: [{ label: 'From', value: mail.fromName }],
     });
-    expect(moment.card.summary).toBeUndefined();
-    expect(moment.text).toBe('Still open: “We noticed a new login” from Account security');
-    expect(moment.suggestion?.summary).toBe('Check what “We noticed a new login” needs from you?');
+    expect(moment.card.summary).toBe(
+      'The current source has not been reviewed as an outstanding obligation. Check the latest message before acting.',
+    );
+    expect(moment.text).toBe('Worth checking: “We noticed a new login” from Account security');
+    expect(moment.suggestion?.summary).toBe(
+      'Check whether “We noticed a new login” still needs attention?',
+    );
     expect(moment.suggestion?.proposedAction).toContain('gmail:security-1');
+    expect(moment.suggestion?.proposedAction).toContain(
+      'Do not treat the original actionable score as proof',
+    );
     expect(moment.suggestion?.proposedAction).toContain(
       'Do not send messages, create reminders or calendar events',
     );
+    expect(moment.suggestion?.proposedAction).toContain('If nothing is needed, say so.');
   });
 
   it('offers a reply draft when a person is waiting on the owner', () => {
@@ -177,8 +210,13 @@ describe('mailMoment', () => {
       subject: 'Re: Interview availability',
       category: 'personal',
     });
-    expect(moment.suggestion?.summary).toBe('Draft a reply to Sam Recruiter?');
-    expect(moment.suggestion?.proposedAction).toContain('prepare a reply draft');
+    expect(moment.suggestion?.summary).toBe(
+      'Check whether a reply is still needed to Sam Recruiter?',
+    );
+    expect(moment.suggestion?.proposedAction).toContain(
+      'Check the current thread for a later owner reply',
+    );
+    expect(moment.suggestion?.proposedAction).toContain('prepare a draft');
     expect(moment.suggestion?.proposedAction).toContain('Do not send messages');
     expect(moment.suggestion?.proposedAction).toMatch(/If a reply is no longer needed, say so\.$/);
   });
@@ -239,11 +277,30 @@ describe('runPulse', () => {
     await db.delete(conversations).where(eq(conversations.id, conversationId));
   });
 
+  const emailThreadReader: EmailThreadHeadReader = async ({ threadId }) => {
+    const [latest] = await db
+      .select()
+      .from(emailIngest)
+      .where(eq(emailIngest.providerThreadId, threadId))
+      .orderBy(desc(emailIngest.providerReceivedAt))
+      .limit(1);
+    return latest?.providerMessageId && latest.providerReceivedAt
+      ? {
+          threadId,
+          latestMessageId: latest.providerMessageId,
+          latestReceivedAt: latest.providerReceivedAt,
+        }
+      : null;
+  };
+
   async function addActionableMail(id: string) {
     await db.insert(emailIngest).values({
       agentId,
       conversationId,
       channelMessageId: `gmail:${MARKER}-${id}`,
+      providerMessageId: `${MARKER}-${id}`,
+      providerThreadId: `${MARKER}-thread-${id}`,
+      providerReceivedAt: new Date(NOW.getTime() - 4 * 3600_000),
       fromEmail: 'clinic@hospital.example',
       subject: `${MARKER} your appointment needs confirming`,
       contentTrust: 'unknown',
@@ -259,9 +316,85 @@ describe('runPulse', () => {
 
   it('stays quiet when nothing is live', async (ctx) => {
     if (!dbUp) return ctx.skip();
-    const result = await runPulse({ db }, { now: NOW });
+    const result = await runPulse({ db, emailThreadReader }, { now: NOW });
     expect(result.delivered).toBeNull();
     expect(result.heldBy).toBe('no-candidates');
+  });
+
+  it('holds old mail when the provider has a later reply or no current reader', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    await addActionableMail('mail-stale-provider');
+    expect((await runPulse({ db }, { now: NOW })).delivered).toBeNull();
+    const result = await runPulse(
+      {
+        db,
+        emailThreadReader: async ({ threadId }) => ({
+          threadId,
+          latestMessageId: 'a-new-owner-reply',
+          latestReceivedAt: NOW,
+        }),
+      },
+      { now: NOW },
+    );
+    expect(result.delivered).toBeNull();
+    expect(
+      await db.select().from(proactiveMoments).where(eq(proactiveMoments.agentId, agentId)),
+    ).toHaveLength(0);
+  });
+
+  it('rechecks an owner resolution committed while refreshing the thread', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    await addActionableMail('mail-resolved-during-read');
+    const result = await runPulse(
+      {
+        db,
+        emailThreadReader: async (input) => {
+          const head = await emailThreadReader(input);
+          await db
+            .update(emailIngest)
+            .set({ obligationStatus: 'resolved', obligationVersion: 1 })
+            .where(eq(emailIngest.providerThreadId, input.threadId));
+          return head;
+        },
+      },
+      { now: NOW },
+    );
+    expect(result.delivered).toBeNull();
+    expect(result.heldBy).toBe('stale-source');
+    expect(
+      await db.select().from(proactiveMoments).where(eq(proactiveMoments.agentId, agentId)),
+    ).toHaveLength(0);
+  });
+
+  it('rechecks a newly ingested source after the successful provider read', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    await addActionableMail('mail-new-source-during-read');
+    const result = await runPulse(
+      {
+        db,
+        emailThreadReader: async (input) => {
+          const head = await emailThreadReader(input);
+          await db.insert(emailIngest).values({
+            agentId,
+            channelMessageId: `gmail:${MARKER}-newer`,
+            providerThreadId: input.threadId,
+            providerMessageId: 'newer',
+            providerReceivedAt: NOW,
+            fromEmail: 'owner@example.test',
+            subject: 'Replied',
+            contentTrust: 'owner',
+            authenticated: true,
+            category: 'other',
+            importance: 1,
+            actionable: false,
+          });
+          return head;
+        },
+      },
+      { now: NOW },
+    );
+    expect(result.delivered).toBeNull();
+    expect(result.heldBy).toBe('stale-source');
   });
 
   it('surfaces actionable mail with a suggestion and pings once', async (ctx) => {
@@ -271,9 +404,11 @@ describe('runPulse', () => {
     const result = await runPulse(
       {
         db,
+        emailThreadReader,
         notifyOwner: async ({ text, urgency }) => {
           expect(urgency).toBe('ambient');
           pings.push(text);
+          return notificationLeg('push', 'delivered');
         },
       },
       { now: NOW },
@@ -295,7 +430,7 @@ describe('runPulse', () => {
           data: expect.objectContaining({
             kind: 'proactive-alert',
             category: 'email',
-            urgencyLabel: 'Still open',
+            urgencyLabel: 'Review email',
           }),
         }),
       ]),
@@ -305,24 +440,37 @@ describe('runPulse', () => {
   it('never says the same moment twice, and respects the minimum gap', async (ctx) => {
     if (!dbUp) return ctx.skip();
     await addActionableMail('mail-2');
-    const first = await runPulse({ db }, { now: NOW });
+    const first = await runPulse({ db, emailThreadReader }, { now: NOW });
     expect(first.delivered).toBe('mail-action');
 
     // Immediately after: the hourly gap holds it, whatever it found.
-    const second = await runPulse({ db }, { now: new Date(NOW.getTime() + 60_000) });
+    const second = await runPulse(
+      { db, emailThreadReader },
+      { now: new Date(NOW.getTime() + 60_000) },
+    );
     expect(second.delivered).toBeNull();
     expect(second.heldBy).toBe('min-gap');
 
     // Past the gap, the same moment is already spent — the fence, not the pacing.
-    const third = await runPulse({ db }, { now: new Date(NOW.getTime() + 2 * 3600_000) });
+    const third = await runPulse(
+      { db, emailThreadReader },
+      { now: new Date(NOW.getTime() + 2 * 3600_000) },
+    );
     expect(third.delivered).toBeNull();
-    expect(third.heldBy).toBe('already-said');
+    // Storage filters admitted occurrences before the candidate limit.
+    expect(third.heldBy).toBe('no-candidates');
+    expect(third.candidates).toBe(0);
+    const ledger = await db
+      .select()
+      .from(proactiveMoments)
+      .where(eq(proactiveMoments.agentId, agentId));
+    expect(ledger).toHaveLength(1);
   });
 
   it('holds everything once the daily ceiling is reached', async (ctx) => {
     if (!dbUp) return ctx.skip();
     await addActionableMail('mail-3');
-    const result = await runPulse({ db }, { now: NOW, dailyCap: 0 });
+    const result = await runPulse({ db, emailThreadReader }, { now: NOW, dailyCap: 0 });
     expect(result.delivered).toBeNull();
     expect(result.heldBy).toBe('daily-cap');
   });
@@ -340,12 +488,15 @@ describe('runPulse', () => {
       });
     try {
       await addActionableMail('cap-1');
-      const first = await runPulse({ db }, { now: NOW });
+      const first = await runPulse({ db, emailThreadReader }, { now: NOW });
       expect(first.delivered).toBe('mail-action');
 
       await addActionableMail('cap-2');
       // Past the hourly gap, so only the owner's ceiling can be holding it.
-      const second = await runPulse({ db }, { now: new Date(NOW.getTime() + 2 * 3600_000) });
+      const second = await runPulse(
+        { db, emailThreadReader },
+        { now: new Date(NOW.getTime() + 2 * 3600_000) },
+      );
       expect(second.heldBy).toBe('daily-cap');
     } finally {
       await db.delete(notificationPrefs).where(eq(notificationPrefs.agentId, agentId));
@@ -358,6 +509,7 @@ describe('runPulse', () => {
     const result = await runPulse(
       {
         db,
+        emailThreadReader,
         notifyOwner: async () => {
           throw new Error('APNs down');
         },
@@ -374,6 +526,7 @@ describe('runPulse', () => {
     const result = await runPulse(
       {
         db,
+        emailThreadReader,
         calendarReader: async () => {
           throw new Error('grant expired');
         },
@@ -413,9 +566,14 @@ describe('runPulse', () => {
       if (!dbUp) return ctx.skip();
       await seedSnapshot();
       await addActionableMail('cal-1');
-      // The event that was previously snapshotted is simply gone from this read.
+      // The provider explicitly confirms cancellation in the point read.
       const result = await runPulse(
-        { db, calendarReader: async () => ({ events: [], complete: true }) },
+        {
+          db,
+          emailThreadReader,
+          calendarReader: async () => ({ events: [], complete: true }),
+          calendarEventReader: async () => calEvent({ status: 'cancelled' }),
+        },
         { now: NOW },
       );
       expect(result.delivered).toBe('calendar-cancelled');
@@ -433,7 +591,11 @@ describe('runPulse', () => {
       await seedSnapshot();
       const moved = calEvent({ start: '2026-03-04T14:00:00Z', end: '2026-03-04T14:30:00Z' });
       const result = await runPulse(
-        { db, calendarReader: async () => ({ events: [moved], complete: true }) },
+        {
+          db,
+          emailThreadReader,
+          calendarReader: async () => ({ events: [moved], complete: true }),
+        },
         { now: NOW },
       );
       expect(result.delivered).toBe('calendar-moved');
@@ -453,7 +615,11 @@ describe('runPulse', () => {
       });
       const declined = calEvent({ attendees: ['guest@example.com (declined)'] });
       const result = await runPulse(
-        { db, calendarReader: async () => ({ events: [declined], complete: true }) },
+        {
+          db,
+          emailThreadReader,
+          calendarReader: async () => ({ events: [declined], complete: true }),
+        },
         { now: NOW },
       );
       expect(result.delivered).toBe('calendar-declined');
@@ -463,7 +629,11 @@ describe('runPulse', () => {
       if (!dbUp) return ctx.skip();
       // No seeded row: this agent has never had a calendar read before.
       const result = await runPulse(
-        { db, calendarReader: async () => ({ events: [calEvent()], complete: true }) },
+        {
+          db,
+          emailThreadReader,
+          calendarReader: async () => ({ events: [calEvent()], complete: true }),
+        },
         { now: NOW },
       );
       expect(result.delivered).toBeNull();
@@ -477,6 +647,7 @@ describe('runPulse', () => {
       const result = await runPulse(
         {
           db,
+          emailThreadReader,
           calendarReader: async () => {
             throw new Error('grant expired');
           },

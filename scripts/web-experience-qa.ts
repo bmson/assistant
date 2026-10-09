@@ -28,7 +28,8 @@ const { build } = tsxRequire('esbuild') as {
     },
   ): Promise<void>;
 };
-const postcss = webRequire('postcss');
+const tailwindRequire = createRequire(webRequire.resolve('@tailwindcss/postcss'));
+const postcss = tailwindRequire('postcss');
 const tailwind = webRequire('@tailwindcss/postcss');
 await mkdir(output, { recursive: true });
 const fixtures = spawnSync(
@@ -178,6 +179,18 @@ if (!address || typeof address === 'string') throw new Error('No synthetic serve
 const base = `http://127.0.0.1:${address.port}`;
 const browser = await chromium.launch({ headless: true, channel: 'chrome' });
 const measurements: unknown[] = [];
+const blockedRequests: string[] = [];
+async function guardPreviewRequests(page: import('playwright').Page) {
+  await page.route('**/*', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.origin !== base) {
+      blockedRequests.push(`${url.protocol}//${url.host}${url.pathname}`);
+      await route.abort('blockedbyclient');
+      return;
+    }
+    await route.continue();
+  });
+}
 let mutations = 0;
 async function checkCredentialReceipts() {
   const checks: string[] = [];
@@ -188,6 +201,7 @@ async function checkCredentialReceipts() {
       reducedMotion: 'reduce',
     });
     const page = await context.newPage();
+    await guardPreviewRequests(page);
     const failures: string[] = [];
     page.on('pageerror', (error) => failures.push(error.message));
     page.on('console', (message) => {
@@ -504,6 +518,7 @@ try {
         reducedMotion: 'reduce',
       });
       const page = await context.newPage();
+      await guardPreviewRequests(page);
       const failures: string[] = [];
       page.on('pageerror', (error) => failures.push(error.message));
       page.on('console', (message) => {
@@ -618,6 +633,7 @@ try {
     viewport: { width: 390, height: 844 },
     reducedMotion: 'reduce',
   });
+  await guardPreviewRequests(page);
   await page.route('**/api/owner/**', (route) =>
     route.fulfill({
       json: route.request().url().includes('/passkeys') ? { passkeys: [] } : { devices: [] },
@@ -927,6 +943,10 @@ try {
     });
   }
   await checkCredentialReceipts();
+  if (blockedRequests.length)
+    throw new Error(
+      `Unexpected external preview requests were blocked: ${blockedRequests.join(', ')}`,
+    );
   await writeFile(
     path.join(output, 'measurements.json'),
     `${JSON.stringify(

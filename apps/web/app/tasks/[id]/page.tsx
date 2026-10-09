@@ -77,10 +77,10 @@ export default async function TaskDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ before?: string }>;
+  searchParams: Promise<{ before?: string; cursor?: string }>;
 }) {
   await requireOwner();
-  const [{ id }, { before }] = await Promise.all([params, searchParams]);
+  const [{ id }, { before, cursor: timelineCursor }] = await Promise.all([params, searchParams]);
   if (!UUID_RE.test(id)) notFound();
 
   const now = new Date();
@@ -88,6 +88,7 @@ export default async function TaskDetailPage({
   // the oldest entry already shown. A malformed cursor just starts over.
   const cursor = before ? new Date(before) : undefined;
   const detail = await getTaskActivityDetail(id, {
+    ...(timelineCursor ? { cursor: timelineCursor } : {}),
     ...(cursor && !Number.isNaN(cursor.getTime()) ? { before: cursor } : {}),
   });
   if (!detail) notFound();
@@ -101,6 +102,7 @@ export default async function TaskDetailPage({
     files: taskFiles,
     actions,
     hasMoreTimeline,
+    nextTimelineCursor,
     activeGrant,
     stuckWaiting,
   } = detail;
@@ -193,7 +195,6 @@ export default async function TaskDetailPage({
       }),
     ),
   ].sort((a, b) => a.at.getTime() - b.at.getTime());
-  const oldestShown = timeline[0]?.at;
   const completedActions = actions.filter((action) => action.completed);
   const incompleteActions = actions.filter((action) => !action.completed);
   const taskBudget = Number(task.budgetUsdLimit);
@@ -428,17 +429,17 @@ export default async function TaskDetailPage({
         {/* The record is paged from the newest end, so a long mission's page
             weight is a function of the page size and not of how long it ran.
             Older entries are a link away rather than always in the payload. */}
-        {hasMoreTimeline && oldestShown ? (
+        {hasMoreTimeline && nextTimelineCursor ? (
           <p className="mt-4 text-sm">
             <Link
-              href={`/tasks/${task.id}?before=${encodeURIComponent(oldestShown.toISOString())}`}
+              href={`/tasks/${task.id}?cursor=${encodeURIComponent(nextTimelineCursor)}`}
               className="font-medium underline underline-offset-2 hover:no-underline"
             >
               Show older activity
             </Link>
           </p>
         ) : null}
-        {before ? (
+        {before || timelineCursor ? (
           <p className="mt-4 text-sm">
             <Link
               href={`/tasks/${task.id}`}

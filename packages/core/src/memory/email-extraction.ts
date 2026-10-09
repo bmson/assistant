@@ -4,11 +4,13 @@ import {
   emailIngest,
   isTombstoned,
   memories,
+  memoryTombstones,
   messages,
   resolveSubjectContact,
 } from '@assistant/db';
 import type { EmailExtractionRepository } from '@assistant/persistence';
-import { asc, eq, isNull, sql } from 'drizzle-orm';
+import { embeddingSpaceIdentityKey } from '@assistant/persistence';
+import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { BudgetReservationError, nextDailyReset, nextMonthlyReset } from '../cost.js';
 import { isUnparseableObjectError, type ModelRouter } from '../model-router/router.js';
@@ -85,6 +87,27 @@ const EmailExtractionSchema = z.object({
   facts: z.array(ExtractedFactSchema).max(10),
   occasions: z.array(ExtractedOccasionSchema).max(5).default([]),
 });
+const EMAIL_EXTRACTION_VERSION = 'email-extraction-v2';
+const PreparedEmailExtractionSchema = z.object({
+  sourceHash: z.string().regex(/^[a-f0-9]{64}$/),
+  extractionVersion: z.literal(EMAIL_EXTRACTION_VERSION),
+  embeddingSpaceKey: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .nullable(),
+  facts: EmailExtractionSchema.shape.facts,
+  occasions: EmailExtractionSchema.shape.occasions,
+  embeddingsByHash: z.record(
+    z.string().regex(/^[a-f0-9]{64}$/),
+    z.array(z.number().finite()).min(1).max(4096),
+  ),
+});
+type PreparedEmailExtraction = z.infer<typeof PreparedEmailExtractionSchema>;
+
+function parsedPreparedEmailExtraction(value: unknown): PreparedEmailExtraction | null {
+  const result = PreparedEmailExtractionSchema.safeParse(value);
+  return result.success ? result.data : null;
+}
 
 function extractionSystem(): string {
   return [
@@ -124,11 +147,18 @@ function postgresEmailExtraction(db: Db): EmailExtractionRepository {
           subject: emailIngest.subject,
           category: emailIngest.category,
           importance: emailIngest.importance,
+          preparedExtraction: emailIngest.preparedExtraction,
         })
         .from(emailIngest)
-        .where(isNull(emailIngest.extractedAt))
+        .where(and(isNull(emailIngest.extractedAt), eq(emailIngest.pipelineStage, 'complete')))
         .orderBy(asc(emailIngest.createdAt))
-        .limit(limit),
+        .limit(limit)
+        .then((rows) =>
+          rows.map((row) => ({
+            ...row,
+            preparedExtraction: row.preparedExtraction ?? null,
+          })),
+        ),
     async messageText(channelMessageId) {
       const [message] = await db
         .select({ text: messages.text })
@@ -137,13 +167,69 @@ function postgresEmailExtraction(db: Db): EmailExtractionRepository {
         .limit(1);
       return message?.text ?? null;
     },
+    async savePrepared(id, agentId, payload) {
+      const [saved] = await db
+        .update(emailIngest)
+        .set({ preparedExtraction: payload, updatedAt: new Date() })
+        .where(
+          and(
+            eq(emailIngest.id, id),
+            eq(emailIngest.agentId, agentId),
+            isNull(emailIngest.extractedAt),
+          ),
+        )
+        .returning({ id: emailIngest.id });
+      if (!saved)
+        throw new Error('Email extraction source changed before prepared output was saved');
+    },
+    async screenFactHashes(_agentId, hashes) {
+      if (!hashes.length) return {};
+      const [existing, tombstones] = await Promise.all([
+        db
+          .select({
+            contentHash: memories.contentHash,
+            embeddingSpaceKey: memories.embeddingSpaceKey,
+          })
+          .from(memories)
+          .where(inArray(memories.contentHash, hashes)),
+        db
+          .select({ contentHash: memoryTombstones.contentHash })
+          .from(memoryTombstones)
+          .where(inArray(memoryTombstones.contentHash, hashes)),
+      ]);
+      const existingByHash = new Map(
+        existing.map((row) => [row.contentHash, row.embeddingSpaceKey]),
+      );
+      const tombstonedHashes = new Set(tombstones.map((row) => row.contentHash));
+      return Object.fromEntries(
+        hashes.map((hash) => [
+          hash,
+          tombstonedHashes.has(hash)
+            ? { state: 'tombstoned' as const }
+            : existingByHash.has(hash)
+              ? {
+                  state: 'duplicate' as const,
+                  embeddingSpaceKey: existingByHash.get(hash) ?? null,
+                }
+              : { state: 'new' as const },
+        ]),
+      );
+    },
+    async refreshFactEmbedding(agentId, contentHash, embedding, embeddingSpaceKey) {
+      const [updated] = await db
+        .update(memories)
+        .set({ embedding, embeddingSpaceKey })
+        .where(and(eq(memories.agentId, agentId), eq(memories.contentHash, contentHash)))
+        .returning({ id: memories.id });
+      return Boolean(updated);
+    },
     async stamp(id, now) {
       await db
         .update(emailIngest)
-        .set({ extractedAt: now, updatedAt: now })
+        .set({ extractedAt: now, preparedExtraction: null, updatedAt: now })
         .where(eq(emailIngest.id, id));
     },
-    async saveFact({ agentId, taskId, fact, quarantined }) {
+    async saveFact({ agentId, taskId, embeddingSpaceKey, fact, quarantined }) {
       if (await isTombstoned(db, fact.contentHash)) return 'tombstoned';
       const resolved = await resolveSubjectContact(db, {
         subject: fact.subject,
@@ -158,6 +244,7 @@ function postgresEmailExtraction(db: Db): EmailExtractionRepository {
           content: fact.content,
           contentHash: fact.contentHash,
           embedding: fact.embedding,
+          embeddingSpaceKey,
           importance: fact.importance,
           confidence: fact.confidence,
           originTrust: 'unknown',
@@ -195,7 +282,7 @@ function postgresEmailExtraction(db: Db): EmailExtractionRepository {
       const [row] = await db
         .select({ n: sql<number>`count(*)` })
         .from(emailIngest)
-        .where(isNull(emailIngest.extractedAt));
+        .where(and(isNull(emailIngest.extractedAt), eq(emailIngest.pipelineStage, 'complete')));
       return Number(row?.n ?? 0);
     },
   };
@@ -258,49 +345,131 @@ export async function runEmailIngestExtraction(
         continue;
       }
 
-      extractions += 1;
-      const outcome = await router
-        .object<z.infer<typeof EmailExtractionSchema>>('extract', {
-          taskId: opts.taskId,
-          schema: EmailExtractionSchema,
-          system: extractionSystem(),
-          prompt: `Email from ${row.fromEmail} (subject: ${row.subject}):\n${body}`,
-        })
-        .catch((err) => {
-          // One unstructurable message must not dead-letter the whole run.
-          if (!isUnparseableObjectError(err)) throw err;
-          console.error(`email extraction: skipping ${row.channelMessageId}`, err);
-          return null;
-        });
-      if (outcome === null) {
-        await stamp();
-        continue;
+      const sourceHash = createHash('sha256')
+        .update(
+          JSON.stringify([
+            EMAIL_EXTRACTION_VERSION,
+            row.agentId,
+            row.channelMessageId,
+            row.fromEmail,
+            row.subject,
+            row.category,
+            body,
+          ]),
+        )
+        .digest('hex');
+      let prepared = parsedPreparedEmailExtraction(row.preparedExtraction);
+      if (
+        !prepared ||
+        prepared.sourceHash !== sourceHash ||
+        prepared.extractionVersion !== EMAIL_EXTRACTION_VERSION
+      ) {
+        extractions += 1;
+        const outcome = await router
+          .object<z.infer<typeof EmailExtractionSchema>>('extract', {
+            taskId: opts.taskId,
+            schema: EmailExtractionSchema,
+            system: extractionSystem(),
+            prompt: `Email from ${row.fromEmail} (subject: ${row.subject}):\n${body}`,
+          })
+          .catch((err) => {
+            if (!isUnparseableObjectError(err)) throw err;
+            console.error(`email extraction: skipping ${row.channelMessageId}`, err);
+            return null;
+          });
+        if (outcome === null) {
+          await stamp();
+          continue;
+        }
+        if (!outcome.ok) {
+          throw new BudgetReservationError(
+            outcome.decision.reason,
+            outcome.decision.reason.includes('monthly') ? nextMonthlyReset() : nextDailyReset(),
+          );
+        }
+        prepared = {
+          sourceHash,
+          extractionVersion: EMAIL_EXTRACTION_VERSION,
+          embeddingSpaceKey: null,
+          facts: outcome.object.facts,
+          occasions: outcome.object.occasions,
+          embeddingsByHash: {},
+        };
+        // Persist the paid structured result before embeddings or memory writes.
+        await store.savePrepared(row.id, row.agentId, prepared);
       }
-      if (!outcome.ok) {
-        // Budget stops park the task; the un-stamped rows are picked up on the
-        // next run, so nothing is lost by returning here.
-        throw new BudgetReservationError(
-          outcome.decision.reason,
-          outcome.decision.reason.includes('monthly') ? nextMonthlyReset() : nextDailyReset(),
-        );
-      }
+      if (!prepared) throw new Error('Prepared email extraction was not available');
+      const preparedState = prepared;
       await deps.heartbeat?.();
 
-      const facts = outcome.object.facts;
+      const facts = prepared.facts;
       result.extracted += facts.length;
-      const embeddings = facts.length
+      const factByHash = new Map<string, (typeof facts)[number]>();
+      for (const fact of facts) {
+        const hash = createHash('sha256').update(fact.content).digest('hex');
+        if (factByHash.has(hash)) {
+          result.duplicates += 1;
+          continue;
+        }
+        factByHash.set(hash, fact);
+      }
+      const screened = await store.screenFactHashes(row.agentId, [...factByHash.keys()]);
+      const embeddingSpace = await router.embeddingSpace();
+      const embeddingSpaceKey = embeddingSpaceIdentityKey(embeddingSpace);
+      const storedSpaceKey = store.storageEmbeddingSpaceKey ?? embeddingSpaceKey;
+      if (storedSpaceKey !== embeddingSpaceKey)
+        throw new Error(
+          'Email memory storage space differs from the active router space; review before retry',
+        );
+      if (
+        preparedState.embeddingSpaceKey !== embeddingSpaceKey &&
+        Object.keys(preparedState.embeddingsByHash).length > 0
+      )
+        throw new Error(
+          'Prepared email embeddings belong to a different space; review before retry',
+        );
+      // A missing key means the old cached vectors are unknown, not current.
+      // Recompute them before any durable write can associate them with this space.
+      const embedHashes = [...factByHash.keys()].filter((hash) => {
+        const screenedFact = screened[hash] ?? { state: 'new' as const };
+        if (screenedFact.state === 'tombstoned') result.tombstoned += 1;
+        else if (screenedFact.state === 'duplicate') result.duplicates += 1;
+        const cached = preparedState.embeddingsByHash[hash];
+        if (screenedFact.state === 'tombstoned') return false;
+        if (screenedFact.state === 'duplicate')
+          return screenedFact.embeddingSpaceKey !== storedSpaceKey;
+        return preparedState.embeddingSpaceKey !== embeddingSpaceKey || !cached;
+      });
+      const embeddings = embedHashes.length
         ? await router.embed(
-            facts.map((f) => f.content),
-            { taskId: opts.taskId },
+            embedHashes.map((hash) => factByHash.get(hash)?.content ?? ''),
+            { taskId: opts.taskId, expectedSpace: embeddingSpace },
           )
         : [];
-
-      for (let i = 0; i < facts.length; i++) {
-        const fact = facts[i];
+      const embeddingsByHash =
+        preparedState.embeddingSpaceKey === embeddingSpaceKey
+          ? { ...preparedState.embeddingsByHash }
+          : {};
+      for (let i = 0; i < embedHashes.length; i += 1) {
+        const hash = embedHashes[i];
         const embedding = embeddings[i];
-        if (!fact || !embedding) continue;
+        if (hash && embedding) embeddingsByHash[hash] = embedding;
+      }
+      prepared = { ...prepared, embeddingSpaceKey, embeddingsByHash };
+      await store.savePrepared(row.id, row.agentId, prepared);
 
-        const contentHash = createHash('sha256').update(fact.content).digest('hex');
+      for (const [hash, fact] of factByHash) {
+        const state = screened[hash] ?? { state: 'new' as const };
+        if (state.state === 'tombstoned') continue;
+        const embedding = prepared.embeddingsByHash[hash];
+        if (!embedding) continue;
+        if (state.state === 'duplicate') {
+          if (state.embeddingSpaceKey !== storedSpaceKey)
+            await store.refreshFactEmbedding(row.agentId, hash, embedding, storedSpaceKey);
+          continue;
+        }
+
+        const contentHash = hash;
         const quarantined = ingestFactQuarantined({
           category: row.category,
           subject: fact.subject,
@@ -309,6 +478,7 @@ export async function runEmailIngestExtraction(
         const saved = await store.saveFact({
           agentId: row.agentId,
           ...(opts.taskId ? { taskId: opts.taskId } : {}),
+          embeddingSpaceKey: storedSpaceKey,
           fact: {
             category: fact.category,
             kind: fact.kind,
@@ -339,7 +509,7 @@ export async function runEmailIngestExtraction(
 
       // An occasion is a claim about a named person's life — unfalsifiable and
       // long-lived — so it always waits for review, whatever the message was.
-      for (const occ of outcome.object.occasions ?? []) {
+      for (const occ of prepared.occasions ?? []) {
         try {
           const saved = await store.saveOccasion({
             agentId: row.agentId,

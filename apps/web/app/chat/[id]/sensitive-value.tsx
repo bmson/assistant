@@ -10,6 +10,7 @@
  * sits. Bullets in a proportional face reflowed the whole row on reveal, which
  * is what made the card look like it was rebuilding itself.
  */
+import { useId } from 'react';
 import { focusRing } from '@/lib/ui';
 
 /**
@@ -38,16 +39,25 @@ export function SensitiveValue({
   className?: string;
 }) {
   const action = actionLabel(revealed, label);
+  const valueId = useId();
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      aria-pressed={revealed}
-      aria-label={action}
-      title={action}
-      className={`-mx-1 rounded px-1 text-left font-mono break-all motion-safe:transition-colors hover:bg-sunken/70 ${focusRing} ${className}`}
-    >
-      {revealed ? value : '*'.repeat(value.length)}
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-pressed={revealed}
+        aria-label={action}
+        aria-describedby={revealed ? valueId : undefined}
+        title={action}
+        className={`-mx-1 rounded px-1 text-left font-mono break-all motion-safe:transition-colors hover:bg-sunken/70 ${focusRing} ${className}`}
+      >
+        <span aria-hidden="true">{revealed ? value : '*'.repeat(value.length)}</span>
+      </button>
+      {revealed ? (
+        <span id={valueId} className="sr-only" role="status">
+          {value}
+        </span>
+      ) : null}
+    </>
   );
 }

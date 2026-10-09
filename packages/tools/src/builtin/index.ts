@@ -17,17 +17,24 @@ import {
   tasks,
   toolCalls,
 } from '@assistant/db';
-import type { MemoryToolRepository, TaskRepository } from '@assistant/persistence';
-import { and, desc, eq, gt, gte, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
+import {
+  type ConversationSearchRepository,
+  embeddingSpaceIdentityKey,
+  type MemoryToolRepository,
+  type TaskRepository,
+} from '@assistant/persistence';
+import { and, eq, gt, gte, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { register } from '../register.js';
 import type { ToolRegistry } from '../registry.js';
 import type { WorkspaceStore } from '../workspace-store.js';
+import { registerPortableConversationSearchTool } from './conversation-search.js';
 import {
   registerPortableWebFetchTool,
   registerPortableWorkspaceTools,
 } from './portable-web-workspace.js';
+import { pageStoredToolResult } from './read-result.js';
 import { registerSituationTools } from './situations.js';
 import { registerSportsTools } from './sports.js';
 import { registerPortableTaskTools } from './task-schedule.js';
@@ -52,6 +59,11 @@ export * from './web-fetch.js';
 export interface BuiltinDeps {
   /** Embedding closure (injected by the app — avoids a core↔tools cycle). */
   embed: (texts: string[]) => Promise<number[][]>;
+  /** Embedding plus the exact immutable storage identity that produced it. */
+  embedWithIdentity?: (texts: string[]) => Promise<{
+    embeddings: number[][];
+    embeddingSpaceKey: string;
+  }>;
   /** Workspace file store: local FS in dev, GCS in prod. */
   workspace: WorkspaceStore;
   /**
@@ -84,10 +96,11 @@ export interface BuiltinDeps {
   tasks?: TaskRepository;
   /** Durable memory port used by memory.save and memory.recall. */
   memory?: MemoryToolRepository;
+  /** Owner-scoped conversation search port; absent profiles do not expose search. */
+  conversations?: ConversationSearchRepository;
 }
 
-// Repository-backed record tools for portable compositions. The SQL built-ins
-// in registerBuiltinTools keep their own registrations.
+// Repository-backed record tools for portable compositions.
 export { registerPortableContactLookupTool } from './contacts.js';
 export { registerPortableConversationSearchTool } from './conversation-search.js';
 export { registerPortableGraphSnapshotTool } from './graph-snapshot.js';
@@ -98,7 +111,7 @@ export { registerSituationTools } from './situations.js';
 /** Memory tools use persistence ports and can be installed without the SQL-only built-ins. */
 export function registerPortableMemoryTools(
   registry: ToolRegistry,
-  deps: Pick<BuiltinDeps, 'embed' | 'memory' | 'supersede'>,
+  deps: Pick<BuiltinDeps, 'embed' | 'embedWithIdentity' | 'memory' | 'supersede'>,
 ): ToolRegistry {
   // ── memory ─────────────────────────────────────────────────────────────────
   register(
@@ -130,10 +143,33 @@ export function registerPortableMemoryTools(
         `Remember${args.subject ? ` (about ${args.subject})` : ''}: “${args.content.slice(0, 200)}”`,
       execute: async (args, ctx) => {
         if (!deps.memory) throw new Error('memory tool repository unavailable');
+        const observedPrivacyGeneration = await deps.memory.observationGeneration(ctx.agentId);
         const contentHash = createHash('sha256').update(args.content).digest('hex');
-        const [embedding] = await deps.embed([args.content]);
-        if (!embedding) throw new Error('embedding unavailable');
+        const screened = await deps.memory.screenContentHash(ctx.agentId, contentHash);
         const quarantined = ctx.trust !== 'owner' && ctx.trust !== 'assistant';
+        if (screened !== 'new')
+          return {
+            saved: false,
+            duplicate: screened === 'duplicate',
+            ...(screened === 'tombstoned'
+              ? {
+                  tombstoned: true,
+                  note: 'the owner explicitly forgot this fact — do not re-save it',
+                }
+              : {}),
+            quarantined,
+          };
+        const embedded = deps.embedWithIdentity
+          ? await deps.embedWithIdentity([args.content])
+          : null;
+        const [embedding] = embedded?.embeddings ?? (await deps.embed([args.content]));
+        if (!embedding) throw new Error('embedding unavailable');
+        const exactSpaceKey =
+          embedded?.embeddingSpaceKey ??
+          (deps.memory.embeddingSpace
+            ? embeddingSpaceIdentityKey(deps.memory.embeddingSpace)
+            : undefined);
+        if (!exactSpaceKey) throw new Error('embedding space identity unavailable');
         const expiresAt =
           args.category === 'experience'
             ? new Date(ctx.now().getTime() + 90 * 24 * 3600 * 1000)
@@ -142,7 +178,9 @@ export function registerPortableMemoryTools(
           agentId: ctx.agentId,
           content: args.content,
           contentHash,
+          observedPrivacyGeneration,
           embedding,
+          embeddingSpaceKey: exactSpaceKey,
           category: args.category,
           kind: args.kind,
           importance: args.importance,
@@ -204,15 +242,23 @@ export function registerPortableMemoryTools(
       acceptsUntrustedInput: true,
       execute: async (args, ctx) => {
         if (!deps.memory) throw new Error('memory tool repository unavailable');
-        const [embedding] = await deps.embed([args.query]);
+        const embedded = deps.embedWithIdentity ? await deps.embedWithIdentity([args.query]) : null;
+        const [embedding] = embedded?.embeddings ?? (await deps.embed([args.query]));
         if (!embedding) throw new Error('embedding unavailable');
         const now = ctx.now();
+        const embeddingSpaceKey =
+          embedded?.embeddingSpaceKey ??
+          (deps.memory.embeddingSpace
+            ? embeddingSpaceIdentityKey(deps.memory.embeddingSpace)
+            : undefined);
+        if (!embeddingSpaceKey) throw new Error('embedding space identity unavailable');
         const result = await deps.memory.recall({
           agentId: ctx.agentId,
           embedding,
           query: args.query,
           limit: args.limit,
           now,
+          embeddingSpaceKey,
         });
         return {
           memories: result.memories.map((r) => ({
@@ -241,6 +287,14 @@ export function registerBuiltinTools(registry: ToolRegistry, deps: BuiltinDeps):
   registerSituationTools(registry);
   registerSportsTools(registry, deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {});
   registerPortableMemoryTools(registry, deps);
+  if (deps.conversations) {
+    if (!deps.embedWithIdentity)
+      throw new Error('Conversation search requires an identity-bearing embedding provider');
+    registerPortableConversationSearchTool(registry, {
+      embed: deps.embedWithIdentity,
+      conversations: deps.conversations,
+    });
+  }
   registerPortableTaskTools(registry, deps);
 
   register(
@@ -332,20 +386,26 @@ export function registerBuiltinTools(registry: ToolRegistry, deps: BuiltinDeps):
         // Scoped to the calling task: other tasks' results may hold content
         // this task's trust tier was never meant to see.
         const [row] = await ctx.db
-          .select({ result: toolCalls.result, taskId: toolCalls.taskId })
+          .select({
+            result: toolCalls.result,
+            taskId: toolCalls.taskId,
+            toolName: toolCalls.toolName,
+            args: toolCalls.args,
+            status: toolCalls.status,
+          })
           .from(toolCalls)
           .where(eq(toolCalls.id, args.toolCallId));
         if (!row || row.taskId !== ctx.taskId) {
           return { error: 'no such tool call in this task' };
         }
-        const json = JSON.stringify(row.result ?? null);
-        const chunk = json.slice(args.offset, args.offset + 30_000);
-        return {
-          totalChars: json.length,
+        return pageStoredToolResult({
+          call: row,
+          toolCallId: args.toolCallId,
           offset: args.offset,
-          chunk,
-          hasMore: args.offset + chunk.length < json.length,
-        };
+          agentId: ctx.agentId,
+          ...(ctx.conversationId ? { currentConversationId: ctx.conversationId } : {}),
+          ...(deps.conversations ? { conversations: deps.conversations } : {}),
+        });
       },
     },
     // The stored result may embed third-party content (a fetched page, a mail
@@ -494,48 +554,9 @@ export function registerBuiltinTools(registry: ToolRegistry, deps: BuiltinDeps):
   // ── workspace files ────────────────────────────────────────────────────────
   registerPortableWorkspaceTools(registry, deps.workspace);
 
-  // ── conversation search ────────────────────────────────────────────────────
-  register(
-    registry,
-    {
-      name: 'conversations.search',
-      description: 'Search past conversations semantically ("where did we discuss X").',
-      inputSchema: z.object({
-        query: z.string().min(2).max(500),
-        limit: z.number().int().min(1).max(20).default(5),
-      }),
-      risk: 'autonomous',
-      acceptsUntrustedInput: true,
-      execute: async (args, ctx) => {
-        const [embedding] = await deps.embed([args.query]);
-        const withEmbedding = await ctx.db
-          .select({
-            conversationId: messages.conversationId,
-            text: messages.text,
-            createdAt: messages.createdAt,
-            similarity: sql<number>`1 - (${messages.embedding} <=> ${JSON.stringify(embedding)}::vector)`,
-          })
-          .from(messages)
-          .where(sql`${messages.embedding} IS NOT NULL`)
-          .orderBy(sql`${messages.embedding} <=> ${JSON.stringify(embedding)}::vector`)
-          .limit(args.limit);
-        if (withEmbedding.length > 0) return { matches: withEmbedding, mode: 'semantic' };
-
-        const fallback = await ctx.db
-          .select({
-            conversationId: messages.conversationId,
-            text: messages.text,
-            createdAt: messages.createdAt,
-          })
-          .from(messages)
-          .where(sql`${messages.text} ILIKE ${`%${args.query}%`}`)
-          .orderBy(desc(messages.createdAt))
-          .limit(args.limit);
-        return { matches: fallback, mode: 'text' };
-      },
-    },
-    { confidentialRead: true, returnsUntrustedContent: true },
-  );
+  // Conversation search is registered by the persistence composition through
+  // the shared repository port; the tool package must not bypass owner/privacy
+  // filters with ad hoc SQL.
 
   // ── owner notification ─────────────────────────────────────────────────────
   register(

@@ -115,6 +115,8 @@ export async function requestSavedCardRefresh(
   agentId: string,
   cardId: string,
   conversationId?: string,
+  operationId?: string,
+  expectedRevisionId?: string,
 ): Promise<CardRefreshResult> {
   const repository =
     'kind' in persistence && persistence.kind === 'card-refresh-repository'
@@ -124,6 +126,8 @@ export async function requestSavedCardRefresh(
     agentId,
     cardId,
     conversationId,
+    operationId,
+    expectedRevisionId,
     formatInstruction(value) {
       const provenance = cardRuntimeProvenance(value);
       const spec = GenerativeCardSpecV1Schema.safeParse(value);

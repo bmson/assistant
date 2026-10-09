@@ -1,4 +1,5 @@
 import type { TaskRow } from '@assistant/db';
+import type { NotificationDeliveryResult } from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import {
   isBackgroundTask,
@@ -68,9 +69,13 @@ describe("background work stays out of the owner's chat and phone", () => {
     trust: 'owner',
   } as TaskRow;
 
-  function deps() {
+  function deps(
+    ownerResult: NotificationDeliveryResult = {
+      legs: [{ channel: 'push', status: 'delivered' }],
+    },
+  ) {
     const append = vi.fn(async (input: unknown) => ({ id: 'm1', ...(input as object) }));
-    const notifyOwner = vi.fn(async () => {});
+    const notifyOwner = vi.fn(async () => ownerResult);
     const getOrCreate = vi.fn(async () => 'notifications-1');
     return {
       append,
@@ -95,7 +100,11 @@ describe("background work stays out of the owner's chat and phone", () => {
   it('logs a stalled scheduled job in Notifications and does not mirror or ping', async () => {
     const { deps: d, append, notifyOwner, getOrCreate } = deps();
     const result = await notifyOwnerAndConversation(d, background, 'It did not finish.');
-    expect(result).toEqual({ conversationNotified: true, ownerNotified: false });
+    expect(result).toEqual({
+      conversationNotified: true,
+      ownerNotified: false,
+      legs: [{ channel: 'notifications-conversation', status: 'delivered' }],
+    });
     expect(getOrCreate).toHaveBeenCalledWith('agent-1');
     expect(append).toHaveBeenCalledWith(
       expect.objectContaining({ conversationId: 'notifications-1', taskId: 'bg-task' }),
@@ -106,7 +115,14 @@ describe("background work stays out of the owner's chat and phone", () => {
   it('still tells the owner about work they asked for, in their own conversation', async () => {
     const { deps: d, append, notifyOwner } = deps();
     const result = await notifyOwnerAndConversation(d, asked, "I couldn't finish that.");
-    expect(result).toEqual({ conversationNotified: true, ownerNotified: true });
+    expect(result).toEqual({
+      conversationNotified: true,
+      ownerNotified: true,
+      legs: [
+        { channel: 'task-conversation', status: 'delivered' },
+        { channel: 'push', status: 'delivered' },
+      ],
+    });
     expect(append).toHaveBeenCalledWith(expect.objectContaining({ conversationId: 'chat-1' }));
     expect(notifyOwner).toHaveBeenCalledTimes(1);
   });
@@ -118,5 +134,28 @@ describe("background work stays out of the owner's chat and phone", () => {
     const parts = JSON.stringify((call?.[0] as { parts?: unknown } | undefined)?.parts);
     expect(parts).toContain('"notice":"provider-failed"');
     expect(parts).not.toContain('"notice":"needs-attention"');
+  });
+
+  it('reports total delivery failure without claiming an owner-visible notice', async () => {
+    const {
+      deps: d,
+      append,
+      notifyOwner,
+    } = deps({
+      legs: [
+        { channel: 'sms', status: 'failed' },
+        { channel: 'push', status: 'skipped' },
+      ],
+    });
+    append.mockRejectedValue(new Error('conversation store unavailable'));
+    const result = await notifyOwnerAndConversation(d, asked, "I couldn't finish that.");
+    expect(result.conversationNotified).toBe(false);
+    expect(result.ownerNotified).toBe(false);
+    expect(result.legs.map(({ channel, status }) => [channel, status])).toEqual([
+      ['task-conversation', 'failed'],
+      ['sms', 'failed'],
+      ['push', 'skipped'],
+    ]);
+    expect(notifyOwner).toHaveBeenCalledOnce();
   });
 });

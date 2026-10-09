@@ -1,9 +1,74 @@
 import { loadConfig } from '@assistant/config';
 import { type NextRequest, NextResponse } from 'next/server';
 
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
+}
+
+function hasLocalChatPreview(request: NextRequest, authUrl: string, enabled: boolean): boolean {
+  if (
+    process.env.NODE_ENV !== 'development' ||
+    !enabled ||
+    !isLoopbackHostname(request.nextUrl.hostname)
+  )
+    return false;
+  try {
+    const configuredUrl = new URL(authUrl);
+    return (
+      ['http:', 'https:'].includes(configuredUrl.protocol) &&
+      configuredUrl.username === '' &&
+      configuredUrl.password === '' &&
+      isLoopbackHostname(configuredUrl.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Firestore preview exposes migrated read surfaces and the supported owner mutations. */
 export function proxy(request: NextRequest) {
   const path = request.nextUrl.pathname;
+  const runtimeConfig = loadConfig();
+  if (runtimeConfig.ASSISTANT_RELEASE_WRITES_PAUSED) {
+    const probe = ['/api/health', '/api/ready', '/api/release-probe'].includes(path);
+    if (probe && ['GET', 'HEAD'].includes(request.method)) return NextResponse.next();
+    return Response.json(
+      { error: 'Assistant is being updated. Please try again shortly.', code: 'updating' },
+      { status: 503, headers: { 'retry-after': '5', 'cache-control': 'no-store' } },
+    );
+  }
+  const chatPage =
+    path === '/chat' ||
+    path === '/chat/all' ||
+    /^\/chat\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(path);
+  const localChatPage =
+    hasLocalChatPreview(request, runtimeConfig.AUTH_URL, runtimeConfig.WEB_APP_PREVIEW_ENABLED) &&
+    chatPage &&
+    ['GET', 'HEAD', 'POST'].includes(request.method);
+  if (runtimeConfig.RESTORE_REHEARSAL) {
+    const readOnlyRequest = request.method === 'GET' || request.method === 'HEAD';
+    const staticAsset =
+      path.startsWith('/_next/static/') ||
+      [
+        '/icon.svg',
+        '/apple-icon.png',
+        '/favicon.ico',
+        '/manifest.webmanifest',
+        '/icons/assistant-192.png',
+        '/icons/assistant-512.png',
+        '/icons/assistant-mark.svg',
+        '/icons/assistant-source.svg',
+      ].includes(path);
+    if (readOnlyRequest && (path === '/api/health' || path === '/api/ready' || staticAsset))
+      return NextResponse.next();
+    return Response.json(
+      {
+        error: 'Only health, readiness, and static assets are available during restore rehearsal.',
+      },
+      { status: 503 },
+    );
+  }
   // Browser access is an owner administration console. Native APIs retain
   // their existing persistence and authentication boundaries below.
   const adminPage = ['/settings', '/security', '/signin', '/setup'].includes(path);
@@ -27,7 +92,7 @@ export function proxy(request: NextRequest) {
   // persistence mode, including the isolated shipping-image smoke check.
   if (asset && ['GET', 'HEAD'].includes(request.method)) return NextResponse.next();
   if (!path.startsWith('/api/') && !path.startsWith('/_next/') && !asset) {
-    if (path === '/' || (!adminPage && !auditPage)) {
+    if (path === '/' || (!adminPage && !auditPage && !localChatPage)) {
       if (request.method === 'GET' || request.method === 'HEAD') {
         return NextResponse.redirect(new URL('/settings', request.url));
       }
@@ -40,10 +105,6 @@ export function proxy(request: NextRequest) {
     }
   }
   if (loadConfig().PERSISTENCE_DRIVER !== 'firestore') return NextResponse.next();
-  const chatPage =
-    path === '/chat' ||
-    path === '/chat/all' ||
-    /^\/chat\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(path);
   const chatIdPath =
     /^\/api\/mobile\/v1\/chats\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const activityIdPath =
@@ -81,6 +142,7 @@ export function proxy(request: NextRequest) {
     // Owner artifact download, gated on the owner's files record.
     (path === '/api/files' && request.method === 'GET') ||
     (path === '/api/ready' && request.method === 'GET') ||
+    (path === '/api/release-probe' && request.method === 'GET') ||
     // Persistence-free owner reads: live scores (agent timezone only) and route maps.
     ((path === '/api/live/scoreboard' ||
       path === '/api/mobile/v1/live/scoreboard' ||
@@ -145,10 +207,13 @@ export function proxy(request: NextRequest) {
     (path === '/tasks' && ['GET', 'POST'].includes(request.method)) ||
     (/^\/tasks\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(path) &&
       ['GET', 'POST'].includes(request.method)) ||
-    (chatPage && (request.method === 'GET' || request.method === 'POST')) ||
+    (chatPage && ['GET', 'HEAD', 'POST'].includes(request.method)) ||
     (['/icon.svg', '/apple-icon.png', '/favicon.ico', '/manifest.webmanifest'].includes(path) &&
       request.method === 'GET') ||
     ((path === '/api/chat' || path === '/api/mobile/v1/chat') && request.method === 'POST') ||
+    (path === '/api/chat/cancel' && request.method === 'POST') ||
+    (path === '/api/mobile/v1/chat/cancel' && request.method === 'POST') ||
+    (path === '/api/mobile/v1/chat/forms' && request.method === 'POST') ||
     ((path === '/api/chat/status' || path === '/api/mobile/v1/chat/status') &&
       request.method === 'GET') ||
     (path === '/api/shell/status' && request.method === 'GET') ||
@@ -224,6 +289,7 @@ export function proxy(request: NextRequest) {
       ['GET', 'POST', 'DELETE'].includes(request.method)) ||
     (path === '/api/mobile/v1/people' && request.method === 'GET') ||
     (path === '/api/mobile/v1/memory/commitments' && ['GET', 'POST'].includes(request.method)) ||
+    (path === '/api/mobile/v1/email-obligations' && ['GET', 'POST'].includes(request.method)) ||
     (path === '/api/mobile/v1/settings' && request.method === 'PATCH') ||
     (/^\/api\/mobile\/v1\/settings\/reminders\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
       path,

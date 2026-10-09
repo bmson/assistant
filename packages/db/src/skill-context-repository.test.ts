@@ -7,6 +7,7 @@ import { createPostgresSkillContextRepository } from './skill-context-repository
 
 const DATABASE_URL =
   process.env.DATABASE_URL ?? 'postgres://assistant:assistant@localhost:55432/assistant_test';
+const SPACE_KEY = 'a'.repeat(64);
 
 function vector(x: number, y = 0): number[] {
   return [x, y, ...new Array(1534).fill(0)];
@@ -49,6 +50,7 @@ describe('PostgreSQL learned-skill context', () => {
         name: 'first equal match',
         steps: 'first',
         embedding: vector(1),
+        embeddingSpaceKey: SPACE_KEY,
       },
       {
         id: skillIds[1],
@@ -56,6 +58,7 @@ describe('PostgreSQL learned-skill context', () => {
         name: 'second equal match',
         steps: 'second',
         embedding: vector(1),
+        embeddingSpaceKey: SPACE_KEY,
       },
       {
         id: skillIds[2],
@@ -63,6 +66,7 @@ describe('PostgreSQL learned-skill context', () => {
         name: 'below threshold',
         steps: 'low',
         embedding: vector(0.7, Math.sqrt(1 - 0.7 ** 2)),
+        embeddingSpaceKey: SPACE_KEY,
       },
       {
         id: skillIds[3],
@@ -70,6 +74,7 @@ describe('PostgreSQL learned-skill context', () => {
         name: 'already deprecated',
         steps: 'old',
         embedding: vector(1),
+        embeddingSpaceKey: SPACE_KEY,
         deprecated: true,
       },
       {
@@ -78,6 +83,7 @@ describe('PostgreSQL learned-skill context', () => {
         name: 'foreign exact match',
         steps: 'private',
         embedding: vector(1),
+        embeddingSpaceKey: SPACE_KEY,
       },
     ]);
   });
@@ -92,6 +98,7 @@ describe('PostgreSQL learned-skill context', () => {
     const matches = await repository.recall({
       agentId: ownerId,
       embedding: vector(1),
+      embeddingSpaceKey: SPACE_KEY,
       limit: 1,
     });
     expect(matches).toHaveLength(1);
@@ -101,10 +108,19 @@ describe('PostgreSQL learned-skill context', () => {
     });
     expect(matches[0]?.skill).not.toHaveProperty('embedding');
 
-    const all = await repository.recall({ agentId: ownerId, embedding: vector(1), limit: 10 });
+    const all = await repository.recall({
+      agentId: ownerId,
+      embedding: vector(1),
+      embeddingSpaceKey: SPACE_KEY,
+      limit: 10,
+    });
     expect(all.map((match) => match.skill.id)).toEqual([skillIds[0], skillIds[1]]);
     await expect(
-      repository.recall({ agentId: ownerId, embedding: vector(1).slice(1) }),
+      repository.recall({
+        agentId: ownerId,
+        embedding: vector(1).slice(1),
+        embeddingSpaceKey: SPACE_KEY,
+      }),
     ).rejects.toThrow('embedding');
   });
 
@@ -143,7 +159,11 @@ describe('PostgreSQL learned-skill context', () => {
     expect(successful).toMatchObject({ successCount: 7, deprecated: false });
     expect(successful?.lastVerifiedAt).toBeInstanceOf(Date);
 
-    const recalled = await repository.recall({ agentId: ownerId, embedding: vector(1) });
+    const recalled = await repository.recall({
+      agentId: ownerId,
+      embedding: vector(1),
+      embeddingSpaceKey: SPACE_KEY,
+    });
     expect(recalled.map((match) => match.skill.id)).not.toContain(skillIds[0]);
   });
 });

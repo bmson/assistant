@@ -96,12 +96,12 @@ describe.skipIf(!localEmulator)('Firestore web task actions with PostgreSQL offl
 
     const running = await task({ status: 'running' });
     await expect(raiseTaskBudgetAndRetry(running, form)).rejects.toThrow(
-      'only stalled tasks can be retried',
+      'Task can no longer be resumed with a higher budget.',
     );
     const invalid = new FormData();
     invalid.set('budgetUsdLimit', 'not a number');
     await expect(raiseTaskBudgetAndRetry(await task(), invalid)).rejects.toThrow(
-      'task budget must be between $0.01 and $10,000',
+      'task budget must be between $0.01 and $9,999.9999 with at most four decimal places',
     );
   });
 
@@ -115,6 +115,45 @@ describe.skipIf(!localEmulator)('Firestore web task actions with PostgreSQL offl
     });
   });
 
+  it.each(['5junk', '5e0', '5.00000', '', '0', '0.009', '9999.99995', '10000', 'Infinity'])(
+    'rejects the complete malformed task cap %s before changing work',
+    async (raw) => {
+      const id = await task();
+      const before = await read(id);
+      const form = new FormData();
+      form.set('budgetUsdLimit', raw);
+      await expect(raiseTaskBudgetAndRetry(id, form)).rejects.toThrow(
+        'task budget must be between $0.01 and $9,999.9999 with at most four decimal places',
+      );
+      expect(await read(id)).toEqual(before);
+      expect((await store.collection('outbox').where('taskId', '==', id).get()).empty).toBe(true);
+    },
+  );
+
+  it('accepts the exact maximum task cap without rounding beyond storage precision', async () => {
+    const id = await task();
+    const form = new FormData();
+    form.set('budgetUsdLimit', '9999.9999');
+    await raiseTaskBudgetAndRetry(id, form);
+    expect(await read(id)).toMatchObject({
+      status: 'pending',
+      budgetUsdLimit: '9999.9999',
+      queueGeneration: 4,
+    });
+  });
+
+  it('rejects a file supplied as a task cap before changing work', async () => {
+    const id = await task();
+    const before = await read(id);
+    const form = new FormData();
+    form.set('budgetUsdLimit', new File(['5'], 'amount.txt'));
+    await expect(raiseTaskBudgetAndRetry(id, form)).rejects.toThrow(
+      'task budget must be between $0.01 and $9,999.9999 with at most four decimal places',
+    );
+    expect(await read(id)).toEqual(before);
+    expect((await store.collection('outbox').where('taskId', '==', id).get()).empty).toBe(true);
+  });
+
   it('revokes an autonomy grant and ignores tasks owned by another agent', async () => {
     const id = await task({ status: 'running', autonomyGrant: { grantedAt: 'earlier' } });
     await revokeAutonomyGrant(id);
@@ -124,7 +163,7 @@ describe.skipIf(!localEmulator)('Firestore web task actions with PostgreSQL offl
     });
 
     const foreign = await task({ agentId: randomUUID(), autonomyGrant: { grantedAt: 'x' } });
-    await revokeAutonomyGrant(foreign);
+    await expect(revokeAutonomyGrant(foreign)).rejects.toThrow('activity item not found');
     await expect(cancelTask(foreign)).rejects.toThrow('activity item not found');
     expect(await read(foreign)).toMatchObject({
       status: 'needs_attention',

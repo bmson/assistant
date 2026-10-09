@@ -1,5 +1,6 @@
 import type { ProfileContact, Records } from '@assistant/persistence';
 import { FieldPath, type Query } from '@google-cloud/firestore';
+import { decodeMemoryRecord } from './memory-record.js';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import { FirestoreProfilePeopleReadRepository } from './profile-people-read.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
@@ -31,33 +32,40 @@ const MEMORY_DIRECTORY_FIELDS = [
   'contentHash',
 ];
 
-async function byAgent<T extends { id: string; agentId: string }>(
+async function byAgentValues<T extends { id: string; agentId: string }>(
   store: InstallationStore,
   collection: string,
   agentId: string,
+  field: string,
+  values: string[],
   fields?: string[],
 ): Promise<T[]> {
   const rows: T[] = [];
-  let cursor: FirebaseFirestore.QueryDocumentSnapshot | undefined;
-  for (;;) {
-    let query: Query = store
-      .collection(collection)
-      .where('agentId', '==', agentId)
-      .orderBy(FieldPath.documentId());
-    if (fields) query = query.select(...fields);
-    query = query.limit(PAGE_SIZE);
-    if (cursor) query = query.startAfter(cursor);
-    const page = await query.get();
-    for (const doc of page.docs) {
-      const row = decodeRecord<T>(doc.data());
-      if (row.agentId !== agentId || !row.id || documentKey(row.id) !== doc.id)
-        throw new Error(`People directory has a malformed ${collection} record`);
-      rows.push(row);
+  for (let offset = 0; offset < values.length; offset += 30) {
+    const selectedValues = values.slice(offset, offset + 30);
+    let cursor: FirebaseFirestore.QueryDocumentSnapshot | undefined;
+    for (;;) {
+      let query: Query = store
+        .collection(collection)
+        .where('agentId', '==', agentId)
+        .where(field, 'in', selectedValues)
+        .orderBy(FieldPath.documentId());
+      if (fields) query = query.select(...fields);
+      query = query.limit(PAGE_SIZE);
+      if (cursor) query = query.startAfter(cursor);
+      const page = await query.get();
+      for (const doc of page.docs) {
+        const row = decodeRecord<T>(doc.data());
+        if (row.agentId !== agentId || !row.id || documentKey(row.id) !== doc.id)
+          throw new Error(`People directory has a malformed ${collection} record`);
+        rows.push(row);
+      }
+      if (rows.length > MAX_ROWS) throw new Error('People directory scan exceeds its limit');
+      if (page.size < PAGE_SIZE) break;
+      cursor = page.docs.at(-1);
     }
-    if (rows.length > MAX_ROWS) throw new Error('People directory scan exceeds its limit');
-    if (page.size < PAGE_SIZE) return rows;
-    cursor = page.docs.at(-1);
   }
+  return rows;
 }
 
 export interface FirestorePersonDirectoryRow {
@@ -194,22 +202,73 @@ export async function getFirestoreMobilePeopleDirectory(
   configuredAgentId: string,
   now: Date,
   extractionVersion: number,
+  contactsOverride?: ProfileContact[],
 ): Promise<FirestorePersonDirectoryRow[]> {
   const fence = await readPrivacyErasureFence(store, configuredAgentId);
-  const contacts = (await getFirestorePeopleDirectory(store, configuredAgentId)).slice(0, 500);
+  const contacts =
+    contactsOverride ?? (await getFirestorePeopleDirectory(store, configuredAgentId)).slice(0, 500);
+  if (contacts.length === 0) {
+    await assertConfiguredOwner(store, configuredAgentId);
+    await assertPrivacyErasureFenceUnchanged(store, configuredAgentId, fence);
+    return [];
+  }
   const contactIds = new Set(contacts.map((contact) => contact.id));
-  const [memories, occasions, entities, relations] = await Promise.all([
+  const [memories, occasions, personEntities] = await Promise.all([
     // The full embedding vector is only needed for a small set of location
     // relation sources. Avoid transferring it with every directory fact.
-    byAgent<MemoryDirectoryRow>(store, 'memories', configuredAgentId, MEMORY_DIRECTORY_FIELDS),
-    byAgent<Records['occasions']>(store, 'occasions', configuredAgentId),
-    byAgent<Records['knowledgeGraphEntities']>(store, 'knowledgeGraphEntities', configuredAgentId),
-    byAgent<Records['knowledgeGraphRelations']>(
+    byAgentValues<MemoryDirectoryRow>(
       store,
-      'knowledgeGraphRelations',
+      'memories',
       configuredAgentId,
+      'subjectContactId',
+      [...contactIds],
+      MEMORY_DIRECTORY_FIELDS,
+    ),
+    byAgentValues<Records['occasions']>(store, 'occasions', configuredAgentId, 'contactId', [
+      ...contactIds,
+    ]),
+    byAgentValues<Records['knowledgeGraphEntities']>(
+      store,
+      'knowledgeGraphEntities',
+      configuredAgentId,
+      'contactId',
+      [...contactIds],
     ),
   ]);
+  const relations = await byAgentValues<Records['knowledgeGraphRelations']>(
+    store,
+    'knowledgeGraphRelations',
+    configuredAgentId,
+    'subjectEntityId',
+    personEntities.map((entity) => entity.id),
+  );
+  const entityIds = new Set(personEntities.map((entity) => entity.id));
+  const relatedObjectIds = [
+    ...new Set(
+      relations.map((relation) => relation.objectEntityId).filter((id) => !entityIds.has(id)),
+    ),
+  ];
+  const relatedEntities: Records['knowledgeGraphEntities'][] = [];
+  for (let offset = 0; offset < relatedObjectIds.length; offset += 200) {
+    const ids = relatedObjectIds.slice(offset, offset + 200);
+    const snapshots = await store.db.getAll(
+      ...ids.map((id) => store.doc('knowledgeGraphEntities', id)),
+    );
+    for (const snapshot of snapshots) {
+      if (!snapshot.exists) continue;
+      const entity = decodeRecord<Records['knowledgeGraphEntities']>(snapshot.data());
+      if (
+        entity.agentId !== configuredAgentId ||
+        !entity.id ||
+        documentKey(entity.id) !== snapshot.id
+      )
+        throw new Error('People directory has a malformed knowledge graph entity');
+      relatedEntities.push(entity);
+    }
+  }
+  if (relatedEntities.length + personEntities.length > MAX_ROWS)
+    throw new Error('People directory scan exceeds its limit');
+  const entities = [...personEntities, ...relatedEntities];
   validateProjectionRows(memories, occasions, entities, relations);
   const active = (memory: MemoryDirectoryRow) =>
     memory.quarantined === false &&
@@ -281,7 +340,7 @@ export async function getFirestoreMobilePeopleDirectory(
     }
     for (const doc of memoryDocs) {
       if (!doc.exists) continue;
-      const memory = decodeRecord<Records['memories']>(doc.data());
+      const memory = decodeMemoryRecord(doc.data());
       if (
         memory.id !== sourceIdByDocument.get(doc.id) ||
         memory.agentId !== configuredAgentId ||
@@ -325,4 +384,61 @@ export async function getFirestoreMobilePeopleDirectory(
     lastContactAt: lastContacts.get(contact.id) ?? null,
     location: locations.get(contact.id) ?? null,
   }));
+}
+
+/** Reads and enriches one owner directory page without scanning all contacts. */
+export async function getFirestoreMobilePeopleDirectoryPage(
+  store: InstallationStore,
+  configuredAgentId: string,
+  now: Date,
+  extractionVersion: number,
+  input: { limit: number; after?: { name: string; id: string } },
+) {
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100)
+    throw new Error('People page size must be between 1 and 100');
+  if (
+    input.after &&
+    (typeof input.after.name !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.after.id))
+  )
+    throw new Error('Invalid people continuation');
+  await assertConfiguredOwner(store, configuredAgentId);
+  const fence = await readPrivacyErasureFence(store, configuredAgentId);
+  let query = store
+    .collection('contacts')
+    .orderBy('name', 'asc')
+    .orderBy(FieldPath.documentId(), 'asc');
+  if (input.after) query = query.startAfter(input.after.name, documentKey(input.after.id));
+  const rawPageLimit = input.limit + 2;
+  const snapshot = await query.limit(rawPageLimit).get();
+  const rows = snapshot.docs.map((doc) => {
+    const contact = decodeRecord<ProfileContact>(doc.data());
+    if (
+      !contact.id ||
+      documentKey(contact.id) !== doc.id ||
+      typeof contact.name !== 'string' ||
+      typeof contact.relationship !== 'string' ||
+      typeof contact.trust !== 'string'
+    )
+      throw new Error('People directory contains a malformed contact');
+    return contact;
+  });
+  const eligible = rows.filter((contact) => contact.trust !== 'owner');
+  const selected = eligible.slice(0, input.limit);
+  const hasMore = eligible.length > input.limit || snapshot.size === rawPageLimit;
+  const items = await getFirestoreMobilePeopleDirectory(
+    store,
+    configuredAgentId,
+    now,
+    extractionVersion,
+    selected,
+  );
+  await assertConfiguredOwner(store, configuredAgentId);
+  await assertPrivacyErasureFenceUnchanged(store, configuredAgentId, fence);
+  const tail = selected.length === input.limit ? selected.at(-1) : rows.at(-1);
+  return {
+    people: items,
+    hasMore,
+    nextCursor: hasMore && tail ? { name: tail.name, id: tail.id } : null,
+  };
 }

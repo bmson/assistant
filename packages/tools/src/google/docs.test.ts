@@ -107,6 +107,47 @@ describe('documentText', () => {
     });
     expect(text).toBe('Hello world');
   });
+
+  it('retains table rows and cells as readable evidence', () => {
+    expect(
+      documentText({
+        body: {
+          content: [
+            {
+              table: {
+                tableRows: [
+                  {
+                    tableCells: [
+                      {
+                        content: [{ paragraph: { elements: [{ textRun: { content: 'Name' } }] } }],
+                      },
+                      {
+                        content: [
+                          { paragraph: { elements: [{ textRun: { content: 'Status' } }] } },
+                        ],
+                      },
+                    ],
+                  },
+                  {
+                    tableCells: [
+                      {
+                        content: [
+                          { paragraph: { elements: [{ textRun: { content: 'Reykjavik' } }] } },
+                        ],
+                      },
+                      {
+                        content: [{ paragraph: { elements: [{ textRun: { content: 'Ready' } }] } }],
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      }),
+    ).toBe('Name | Status\nReykjavik | Ready');
+  });
 });
 
 describe('registerDocsTools', () => {
@@ -284,5 +325,59 @@ describe('registerDocsTools', () => {
     const tool = toolsWith(vi.fn()).get('docs.get')?.tool;
     const parsed = tool?.inputSchema.safeParse({ documentId: '../../etc/passwd' });
     expect(parsed?.success).toBe(false);
+  });
+
+  it('continues bounded document reads without losing tables or splitting Unicode', async () => {
+    const document = {
+      documentId: 'document_123456',
+      revisionId: 'rev-7',
+      title: 'Plan',
+      body: {
+        content: [
+          { paragraph: { elements: [{ textRun: { content: `${'a'.repeat(98)}😀` } }] } },
+          {
+            table: {
+              tableRows: [
+                {
+                  tableCells: [
+                    {
+                      content: [
+                        { paragraph: { elements: [{ textRun: { content: 'DECISIVE CELL' } }] } },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    };
+    const api = vi.fn().mockResolvedValue(document);
+    const get = toolsWith(api).get('docs.get')?.tool;
+    const firstPage = (await get?.execute(
+      { documentId: 'document_123456', maxChars: 100 },
+      {} as never,
+    )) as {
+      text: string;
+      complete: boolean;
+      receipt: {
+        continuation: { input: { startOffset: number } } | null;
+        source: { revision: string };
+      };
+    };
+    expect(firstPage.complete).toBe(false);
+    expect(firstPage.text).not.toMatch(/[\uD800-\uDBFF]$/);
+    expect(firstPage.receipt.source.revision).toBe('rev-7');
+    const next = firstPage.receipt.continuation;
+    expect(next).toBeTruthy();
+    const secondPage = (await get?.execute(
+      { documentId: 'document_123456', maxChars: 100, startOffset: next?.input.startOffset },
+      {} as never,
+    )) as { text: string; complete: boolean; receipt: { complete: boolean } };
+    expect(secondPage.text).toContain('DECISIVE CELL');
+    expect(secondPage.complete).toBe(true);
+    expect(secondPage.receipt.complete).toBe(true);
+    expect(api.mock.calls[0]?.[0]).toContain('includeTabsContent=true');
   });
 });

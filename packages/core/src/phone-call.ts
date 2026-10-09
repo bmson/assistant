@@ -1,4 +1,4 @@
-import type { ExecutionJobRepository } from '@assistant/persistence';
+import type { CallCostLedger, ExecutionJobRepository } from '@assistant/persistence';
 import { z } from 'zod';
 import { type JobCallbackOutcome, recordJobCallback } from './workflow/job-callback.js';
 
@@ -190,6 +190,7 @@ export interface CallResult {
   durationSeconds: number | null;
   transcript: Array<{ role: string; text: string }>;
   costUsd: number | null;
+  costBreakdown?: CallCostLedger;
 }
 
 /** Wake the task parked on a call with the call's result (one-shot token). */
@@ -200,6 +201,7 @@ export function recordCallResult(
   return recordJobCallback(jobs, 'call', {
     taskId: input.taskId,
     token: input.token,
+    idempotencyKey: `call-result:${input.result.callId}`,
     result: input.result as unknown as Record<string, unknown>,
     files: [],
   });

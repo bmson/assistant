@@ -5,11 +5,13 @@ import {
   type Records,
   SUPERSEDE_SIMILARITY_FLOOR,
   type SupersedeFact,
+  snapshotEmbeddingSpace,
   validateEmbedding,
 } from '@assistant/persistence';
 import type { DocumentSnapshot, QueryDocumentSnapshot } from '@google-cloud/firestore';
 import { embeddingSpaceKey } from './memory.js';
-import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
+import { decodeMemoryRecord } from './memory-record.js';
+import { documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 const VECTOR_CANDIDATE_LIMIT = MAX_SUPERSEDE_CANDIDATES * 4;
 
@@ -41,11 +43,14 @@ function fact(row: Memory): SupersedeFact {
 /** Firestore storage half of bounded, write-time memory supersession. */
 export class FirestoreMemorySupersedeRepository implements MemorySupersedeRepository {
   readonly kind = 'memory-supersede-repository' as const;
+  readonly space: EmbeddingSpace;
 
   constructor(
     readonly store: InstallationStore,
-    readonly space: EmbeddingSpace,
-  ) {}
+    space: EmbeddingSpace,
+  ) {
+    this.space = snapshotEmbeddingSpace(space);
+  }
 
   async writtenFact(input: { agentId: string; id: string }) {
     if (!input.agentId || !input.id) return null;
@@ -54,7 +59,7 @@ export class FirestoreMemorySupersedeRepository implements MemorySupersedeReposi
       async (tx) => {
         const snapshot = await tx.get(ref);
         if (!snapshot.exists) return null;
-        const row = decodeRecord<Memory>(snapshot.data());
+        const row = decodeMemoryRecord(snapshot.data());
         const tombstone = await tx.get(this.store.doc('memoryTombstones', row.contentHash));
         const now = this.store.now();
         if (
@@ -120,7 +125,7 @@ export class FirestoreMemorySupersedeRepository implements MemorySupersedeReposi
           const tombstone = records[index * 2 + 1];
           if (!source || !snapshot || !sameSnapshot(source, snapshot) || tombstone?.exists)
             continue;
-          const row = decodeRecord<Memory>(snapshot.data());
+          const row = decodeMemoryRecord(snapshot.data());
           const similarity = 1 - Number(source.get('vectorDistance'));
           if (
             row.id === input.newFactId ||
@@ -153,7 +158,7 @@ export class FirestoreMemorySupersedeRepository implements MemorySupersedeReposi
       const replacementRef = this.store.doc('memories', input.replacementId);
       const replacementSnapshot = await tx.get(replacementRef);
       if (!replacementSnapshot.exists) return [];
-      const replacement = decodeRecord<Memory>(replacementSnapshot.data());
+      const replacement = decodeMemoryRecord(replacementSnapshot.data());
       const replacementTombstone = await tx.get(
         this.store.doc('memoryTombstones', replacement.contentHash),
       );
@@ -184,7 +189,7 @@ export class FirestoreMemorySupersedeRepository implements MemorySupersedeReposi
       for (let index = 0; index < targetSnapshots.length; index++) {
         const snapshot = targetSnapshots[index];
         if (!snapshot?.exists || tombstones[index]?.exists) continue;
-        const row = decodeRecord<Memory>(snapshot.data());
+        const row = decodeMemoryRecord(snapshot.data());
         if (
           row.id !== ids[index] ||
           documentKey(row.id) !== snapshot.id ||

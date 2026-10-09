@@ -125,6 +125,54 @@ export function createReadOnlyDeps(config: CutoverConfig): CutoverDeps {
   };
 }
 
+/**
+ * Read-only dependencies for the final retirement proof. This is broader than
+ * inventory collection because it also probes current health and the Neon
+ * fence, but it exposes no mutating gcloud, Neon, SQL, command, or storage
+ * operations. Secret bytes and identity tokens stay in process memory.
+ */
+export function createRetirementProofDeps(config: CutoverConfig): CutoverDeps {
+  const inventoryOnly = createReadOnlyDeps(config);
+  const live = realDeps(config);
+  const refuse = (): never => {
+    throw new Error('Retirement proof dependencies refuse mutating operations');
+  };
+  const allowedGcloudRun = (args: string[]) =>
+    (args.length === 2 && args[0] === 'auth' && args[1] === 'print-identity-token') ||
+    (args.length === 5 &&
+      args[0] === 'secrets' &&
+      args[1] === 'versions' &&
+      args[2] === 'access' &&
+      args[3] === 'latest' &&
+      args[4] === `--secret=${config.sourceDatabaseSecret}`);
+  return {
+    ...inventoryOnly,
+    gcloud: {
+      json: inventoryOnly.gcloud.json,
+      run: async (args, options) => {
+        if (!allowedGcloudRun(args)) refuse();
+        return live.gcloud.run(args, options);
+      },
+    },
+    neon: {
+      getEndpoint: (...args) => live.neon.getEndpoint(...args),
+      listOperations: (...args) => live.neon.listOperations(...args),
+      setEndpointDisabled: async () => refuse(),
+      getOperation: async () => refuse(),
+      createBranch: async () => refuse(),
+      getBranch: async () => refuse(),
+      deleteBranch: async () => refuse(),
+    },
+    probe: {
+      tryConnect: (...args) => live.probe.tryConnect(...args),
+      readOnlyProof: async () => refuse(),
+      sessionInventory: async () => refuse(),
+      primaryWriteState: async () => refuse(),
+    },
+    http: live.http,
+  };
+}
+
 const USAGE = `Usage:
   pnpm cutover status   --config cutover.json --evidence-dir DIR
   pnpm cutover run STEP --config cutover.json --evidence-dir DIR [--confirm STEP]

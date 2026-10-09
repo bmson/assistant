@@ -21,7 +21,7 @@ const labels: Record<string, string> = {
   testing: 'Testing',
   pr_open: 'PR ready to review',
   merged: 'Awaiting deployment',
-  monitoring: 'Deployed · confirm fix',
+  monitoring: 'Behavior verification',
   resolved: 'Resolved',
   blocked: 'Needs your attention',
   failed: 'Fix attempt failed',
@@ -39,6 +39,8 @@ export interface RepairView {
   sourceTaskId: string | null;
   prUrl: string | null;
   runUrl: string | null;
+  outcome?: { message: string; nextStep: string };
+  deploymentConfirmed?: boolean;
   history: { status: string; at: string; detail: string }[];
 }
 export function RepairPanel({
@@ -181,7 +183,13 @@ export function RepairPanel({
           <h3 className="font-semibold">{issue.title}</h3>
           <p className="text-sm text-muted">{issue.diagnosis || issue.summary}</p>
           {issue.waitingReason && <p className="text-sm text-muted">{issue.waitingReason}</p>}
-          {issue.lastError && <p className="text-sm">{issue.lastError}</p>}
+          {issue.outcome ? (
+            <p className="text-sm">
+              {issue.outcome.message} {issue.outcome.nextStep}
+            </p>
+          ) : issue.lastError ? (
+            <p className="text-sm">{issue.lastError}</p>
+          ) : null}
           <div className="flex flex-wrap items-center gap-3 text-sm">
             {issue.prUrl && (
               <a
@@ -219,7 +227,7 @@ export function RepairPanel({
                   Run now
                 </ActionButton>
               )}
-            {issue.status === 'monitoring' && (
+            {issue.status === 'monitoring' && issue.deploymentConfirmed === true && (
               <ActionButton
                 disabled={pending}
                 onClick={() => run(() => repairDecisionAction(issue.id, 'resolve'))}

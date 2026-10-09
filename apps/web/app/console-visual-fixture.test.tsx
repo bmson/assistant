@@ -29,7 +29,10 @@ vi.mock('@/auth', () => ({
     return fixture.mode;
   },
   requireOwner: async () => ({}),
-  isAuthed: async () => !['/signin', '/setup'].includes(fixture.path),
+  isAuthed: async () =>
+    ['/signin', '/setup'].includes(fixture.path)
+      ? null
+      : { user: { name: 'Synthetic owner', email: 'owner@example.test' } },
 }));
 vi.mock('next/navigation', () => ({ usePathname: () => fixture.path }));
 vi.mock('next/headers', () => ({
@@ -44,12 +47,15 @@ vi.mock('@assistant/config', () => ({
 }));
 vi.mock('@/lib/mobile-access-token', () => ({
   getMobileAccessToken: async () => 'synthetic-token',
+  hasMobileTokenRotationCapability: () => fixture.canRotate,
 }));
 vi.mock('@/app/settings/actions', () => ({
   rotateMobileToken: async () => ({ error: 'Synthetic preview only.' }),
 }));
 vi.mock('@/lib/task-activity', () => ({
-  listTaskActivity: async () => ({
+  discoverTaskActivity: async () => ({
+    complete: true,
+    nextCursor: null,
     items: [
       {
         id: '00000000-0000-4000-8000-000000000001',

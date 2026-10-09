@@ -9,7 +9,7 @@ import {
 const audience = 'https://agent.example.test';
 const serviceAccount = 'assistant-invoker@example.iam.gserviceaccount.com';
 
-async function signedToken(overrides: Record<string, unknown> = {}) {
+async function signedToken(overrides: Record<string, unknown> = {}, tokenAudience = audience) {
   const { privateKey, publicKey } = await generateKeyPair('RS256');
   const token = await new SignJWT({
     email: serviceAccount,
@@ -18,7 +18,7 @@ async function signedToken(overrides: Record<string, unknown> = {}) {
   })
     .setProtectedHeader({ alg: 'RS256', kid: 'test-key' })
     .setIssuer('https://accounts.google.com')
-    .setAudience(audience)
+    .setAudience(tokenAudience)
     .setSubject('123456789')
     .setIssuedAt()
     .setExpirationTime('5m')
@@ -43,6 +43,45 @@ describe('Google OIDC authorization', () => {
         jwks: async () => publicKey,
       }),
     ).toBe(true);
+  });
+
+  it('keeps private callbacks route-bound even when IAM accepts both custom audiences', async () => {
+    const executeAudience = oidcAudienceForPath(audience, '/internal/tasks/execute');
+    const sweepAudience = oidcAudienceForPath(audience, '/internal/sweep');
+    const { token, publicKey } = await signedToken({}, executeAudience);
+    const config = {
+      INTERNAL_AUTH_MODE: 'oidc',
+      INTERNAL_API_SECRET: '',
+      INTERNAL_OIDC_AUDIENCE: executeAudience,
+      INTERNAL_OIDC_SERVICE_ACCOUNT: serviceAccount,
+      QUEUE_DRIVER: 'cloudtasks',
+    } as const;
+    const jwks = async () => publicKey;
+    expect(await verifyInternalAuthorization(`Bearer ${token}`, config, jwks)).toBe(true);
+    for (const wrongAudience of [sweepAudience, audience, `${audience}/internal/other`]) {
+      expect(
+        await verifyInternalAuthorization(
+          `Bearer ${token}`,
+          { ...config, INTERNAL_OIDC_AUDIENCE: wrongAudience },
+          jwks,
+        ),
+      ).toBe(false);
+    }
+    expect(
+      await verifyInternalAuthorization(
+        `Bearer ${token}`,
+        { ...config, INTERNAL_OIDC_SERVICE_ACCOUNT: 'other@example.iam.gserviceaccount.com' },
+        jwks,
+      ),
+    ).toBe(false);
+    // Platform-transformed or unsigned payloads never become application proof.
+    expect(
+      await verifyInternalAuthorization(
+        `Bearer ${token.split('.').slice(0, 2).join('.')}.`,
+        config,
+        jwks,
+      ),
+    ).toBe(false);
   });
 
   it('rejects a token for a different service account or audience', async () => {

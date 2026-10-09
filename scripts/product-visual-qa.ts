@@ -6,7 +6,15 @@ import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
+import { chromium, type Page, type PageScreenshotOptions } from 'playwright';
+import {
+  requireCurrentVisualCoverage,
+  type VisualCaptureReceipt,
+  type VisualEvidenceMode,
+  visualCaptureFreshness,
+  visualCaptureReceipt,
+  visualHash,
+} from './visual-capture-provenance.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const before = process.argv.includes('--before');
@@ -46,9 +54,44 @@ const { build } = tsxRequire('esbuild') as {
     },
   ): Promise<void>;
 };
-const postcss = webRequire('postcss');
+const tailwindRequire = createRequire(webRequire.resolve('@tailwindcss/postcss'));
+const postcss = tailwindRequire('postcss');
 const tailwind = webRequire('@tailwindcss/postcss');
 await mkdir(output, { recursive: true });
+async function componentInputHash(): Promise<string> {
+  const componentDirectories = before
+    ? ['.workspace/ui-review-2026-10-03/baseline']
+    : [
+        'apps/web/app',
+        'apps/web/lib',
+        'apps/web/public',
+        ...(await readdir(path.join(root, 'packages'))).map((name) => `packages/${name}/src`),
+      ];
+  const componentFiles = (
+    await Promise.all(
+      componentDirectories.map(async (directory) =>
+        (
+          await readdir(path.join(root, directory), { recursive: true }).catch(() => [])
+        )
+          .filter((name) => /\.(?:ts|tsx|css|svg|png|woff2?|ttf)$/.test(name))
+          .map((name) => `${directory}/${name}`),
+      ),
+    )
+  )
+    .flat()
+    .sort();
+  return visualHash(
+    JSON.stringify(
+      await Promise.all(
+        componentFiles.map(async (file) => [
+          file,
+          visualHash(await readFile(path.join(root, file))),
+        ]),
+      ),
+    ),
+  );
+}
+const componentSha256 = await componentInputHash();
 const fixture = process.argv.includes('--reuse-html')
   ? null
   : spawnSync('pnpm', ['exec', 'vitest', 'run', 'apps/web/app/product-visual-fixture.test.tsx'], {
@@ -202,6 +245,102 @@ const pages = allPages.filter(
     (!process.argv.includes('--forms-only') ||
       ['skills', 'improvements', 'writing-voice'].includes(entry.name)),
 );
+if ((await componentInputHash()) !== componentSha256)
+  throw new Error('Source changed during fixture generation; repeat the capture');
+const buildSha256 = visualHash(
+  JSON.stringify({
+    script: visualHash(await readFile(fileURLToPath(import.meta.url))),
+    captureContract: visualHash(
+      await readFile(path.join(root, 'scripts/visual-capture-provenance.ts')),
+    ),
+    lock: visualHash(await readFile(path.join(root, 'pnpm-lock.yaml'))),
+    client: before ? null : visualHash(await readFile(path.join(output, 'client.js'))),
+  }),
+);
+const stylesheetSha256 = visualHash(
+  JSON.stringify({
+    globals: visualHash(css.css),
+    conversation: conversationHash,
+    client: hydrateChat
+      ? visualHash(await readFile(path.join(output, 'client.css')).catch(() => ''))
+      : null,
+  }),
+);
+const fixtureInputs = {
+  before,
+  hydrateChat,
+  chatStates,
+  componentSha256,
+  html: Object.fromEntries(
+    await Promise.all(
+      allPages.map(async (entry) => [
+        entry.name,
+        visualHash(await readFile(path.join(output, `${entry.name}.html`))),
+      ]),
+    ),
+  ),
+};
+if (process.argv.includes('--reuse-html')) {
+  const prior = await readFile(path.join(output, 'fixture-source-receipt.json'), 'utf8').catch(
+    () => null,
+  );
+  if (!prior || JSON.stringify(JSON.parse(prior)) !== JSON.stringify(fixtureInputs))
+    throw new Error('Cached HTML lacks matching source provenance; repeat without --reuse-html');
+} else {
+  await writeFile(
+    path.join(output, 'fixture-source-receipt.json'),
+    `${JSON.stringify(fixtureInputs)}\n`,
+  );
+}
+function evidenceMode(entry: PageFixture): VisualEvidenceMode {
+  return before
+    ? 'static-frozen-baseline'
+    : hydrateChat || ['skills', 'improvements', 'writing-voice'].includes(entry.name)
+      ? 'hydrated-synthetic'
+      : 'static-source';
+}
+const captureReceipts = new Map<string, VisualCaptureReceipt>();
+async function provenanceScreenshot(page: Page, options: PageScreenshotOptions): Promise<Buffer> {
+  const fixture = allPages.find(
+    (entry) => new URL(page.url()).pathname === `/fixture/${entry.name}`,
+  );
+  if (!fixture || !options.path)
+    throw new Error('Screenshot has no declared fixture or output path');
+  const pixels = await page.screenshot(options);
+  const screenshot = path.basename(options.path);
+  const provenance = visualCaptureReceipt(
+    evidenceMode(fixture),
+    await captureInputs(fixture),
+    pixels,
+  );
+  await writeFile(
+    path.join(output, 'capture-receipts', `${provenance.id}.json`),
+    `${JSON.stringify({ screenshot, fixture: fixture.name, provenance }, null, 2)}\n`,
+    { flag: 'wx' },
+  );
+  captureReceipts.set(screenshot, provenance);
+  return pixels;
+}
+async function renderedFixtureHtml(entry: PageFixture): Promise<string> {
+  return (await readFile(path.join(output, `${entry.name}.html`), 'utf8'))
+    .replace(
+      '</head>',
+      `<link rel="stylesheet" href="/style.css">${!before && isConversationFixture(entry) ? '<link rel="stylesheet" href="/conversation.css">' : ''}${hydrateChat ? '<link rel="stylesheet" href="/client.css">' : ''}</head>`,
+    )
+    .replace(
+      '</body>',
+      `${before ? '' : '<script type="module" src="/client.js"></script>'}</body>`,
+    );
+}
+async function captureInputs(entry: PageFixture, currentComponentHash = componentSha256) {
+  return {
+    htmlSha256: visualHash(await renderedFixtureHtml(entry)),
+    componentSha256: currentComponentHash,
+    stylesheetSha256,
+    buildSha256,
+  };
+}
+await mkdir(path.join(output, 'capture-receipts'), { recursive: true });
 const server = createServer(async (request, response) => {
   try {
     const pathname = new URL(request.url ?? '/', 'http://localhost').pathname;
@@ -232,16 +371,7 @@ const server = createServer(async (request, response) => {
     }
     const entry = allPages.find((entry) => pathname === `/fixture/${entry.name}`);
     if (entry) {
-      const hasConversationStyles = !before && isConversationFixture(entry);
-      const html = (await readFile(path.join(output, `${entry.name}.html`), 'utf8'))
-        .replace(
-          '</head>',
-          `<link rel="stylesheet" href="/style.css">${hasConversationStyles ? '<link rel="stylesheet" href="/conversation.css">' : ''}${hydrateChat ? '<link rel="stylesheet" href="/client.css">' : ''}</head>`,
-        )
-        .replace(
-          '</body>',
-          `${before ? '' : '<script type="module" src="/client.js"></script>'}</body>`,
-        );
+      const html = await renderedFixtureHtml(entry);
       response.setHeader('Content-Type', 'text/html; charset=utf-8');
       response.end(html);
       return;
@@ -576,12 +706,15 @@ try {
             `Conversation surface or composer clearance failed on ${entry.name}: ${JSON.stringify(conversationPresentation)}`,
           );
         const name = `${entry.name}-${viewport.width}-${scheme}.png`;
-        const capture = await page.screenshot({
+        const capture = await provenanceScreenshot(page, {
           path: path.join(output, name),
           fullPage: true,
           animations: 'disabled',
         });
+        const provenance = captureReceipts.get(name);
         const measurement = {
+          provenance,
+
           ...entry,
           screenshot: name,
           width: viewport.width,
@@ -645,124 +778,130 @@ try {
         page.off('pageerror', onError);
       }
       if (!before && !hydrateChat && viewport.width === 390) {
-        await page.goto(`${origin}/fixture/skills`, { waitUntil: 'networkidle' });
-        await page.getByRole('button', { name: 'Add skill', exact: true }).click();
-        if (
-          !(await page
-            .getByLabel('Skill name', { exact: true })
-            .evaluate((element) => element === document.activeElement))
-        )
-          throw new Error('New skill form did not receive focus');
-        await page.getByLabel('Skill name', { exact: true }).fill('Plan a calmer week');
-        await page
-          .getByLabel('Steps', { exact: true })
-          .fill('Check commitments, then leave room for rest.');
-        await page.evaluate(() => {
-          (window as Window & { __qaFailure?: boolean }).__qaFailure = true;
-        });
-        await page.getByRole('button', { name: 'Save skill', exact: true }).click();
-        await page.getByRole('alert').waitFor();
-        if (
-          (await page.getByLabel('Skill name', { exact: true }).inputValue()) !==
-          'Plan a calmer week'
-        )
-          throw new Error('Failed skill save lost the draft');
-        if (
-          (await page.locator('textarea[name="steps"]').inputValue()) !==
-          'Check commitments, then leave room for rest.'
-        )
-          throw new Error('Failed skill save lost the procedure');
-        await page.screenshot({
-          path: path.join(output, `skills-form-error-390-${scheme}.png`),
-          fullPage: true,
-        });
-        await page.evaluate(() => {
-          (window as Window & { __qaFailure?: boolean }).__qaFailure = false;
-        });
-        await page.getByRole('button', { name: 'Save skill', exact: true }).click();
-        await page.getByRole('button', { name: 'Add skill', exact: true }).waitFor();
-        interactions.push({
-          scheme,
-          check:
-            'Skill form has visible accessible labels; failed save retains draft and announces error; successful retry closes form.',
-        });
-        await page.goto(`${origin}/fixture/improvements`, { waitUntil: 'networkidle' });
-        await page.getByRole('button', { name: 'Report an issue', exact: true }).click();
-        if (
-          (await page
-            .getByRole('button', { name: 'Report an issue', exact: true })
-            .getAttribute('aria-expanded')) !== 'true'
-        )
-          throw new Error('Report disclosure did not expose expanded state');
-        const title = page.getByLabel('Issue title', { exact: true });
-        if (!(await title.evaluate((element) => element === document.activeElement)))
-          throw new Error('Report form did not receive focus');
-        await title.fill('Keep useful results visible');
-        await page
-          .getByLabel('What went wrong', { exact: true })
-          .fill('A second lookup failed and hid the first useful result.');
-        await page.evaluate(() => {
-          (window as Window & { __qaFailure?: boolean }).__qaFailure = true;
-        });
-        await page.getByRole('button', { name: 'Save report', exact: true }).click();
-        await page.getByRole('alert').waitFor();
-        if ((await title.inputValue()) !== 'Keep useful results visible')
-          throw new Error('Failed issue report lost the draft');
-        if (
-          (await page.locator('textarea[name="summary"]').inputValue()) !==
-          'A second lookup failed and hid the first useful result.'
-        )
-          throw new Error('Failed issue report lost its description');
-        await page.screenshot({
-          path: path.join(output, `repair-form-error-390-${scheme}.png`),
-          fullPage: true,
-        });
-        await page.getByRole('button', { name: 'Cancel', exact: true }).click();
-        if (
-          (await page
-            .getByRole('button', { name: 'Report an issue', exact: true })
-            .getAttribute('aria-expanded')) !== 'false'
-        )
-          throw new Error('Closed report retained expanded state');
-        if (
-          !(await page
-            .getByRole('button', { name: 'Report an issue', exact: true })
-            .evaluate((element) => element === document.activeElement))
-        )
-          throw new Error('Closing report did not restore focus');
-        interactions.push({
-          scheme,
-          check:
-            'Report disclosure exposes expanded state, moves focus to title, retains failed draft, and returns focus on cancel.',
-        });
-        await page.goto(`${origin}/fixture/writing-voice`, { waitUntil: 'networkidle' });
-        await page
-          .getByLabel(/^The voice in one or two sentences/)
-          .fill('Warm and clear. Lead with the decision.');
-        await page.evaluate(() => {
-          (window as Window & { __qaFailure?: boolean }).__qaFailure = true;
-        });
-        await page.getByRole('button', { name: 'Save voice', exact: true }).click();
-        await page.getByRole('alert').waitFor();
-        if (
-          (await page.getByLabel(/^The voice in one or two sentences/).inputValue()) !==
-          'Warm and clear. Lead with the decision.'
-        )
-          throw new Error('Failed writing voice save lost the draft');
-        await page.screenshot({
-          path: path.join(output, `voice-form-error-390-${scheme}.png`),
-          fullPage: true,
-        });
-        await page.evaluate(() => {
-          (window as Window & { __qaFailure?: boolean }).__qaFailure = false;
-        });
-        await page.getByRole('button', { name: 'Save voice', exact: true }).click();
-        await page.getByRole('status').filter({ hasText: 'Saved' }).waitFor();
-        interactions.push({
-          scheme,
-          check:
-            'Writing voice save failure announces an error and successful retry announces Saved.',
-        });
+        if (!selectedPages || selectedPages.includes('skills')) {
+          await page.goto(`${origin}/fixture/skills`, { waitUntil: 'networkidle' });
+          await page.getByRole('button', { name: 'Add skill', exact: true }).click();
+          if (
+            !(await page
+              .getByLabel('Skill name', { exact: true })
+              .evaluate((element) => element === document.activeElement))
+          )
+            throw new Error('New skill form did not receive focus');
+          await page.getByLabel('Skill name', { exact: true }).fill('Plan a calmer week');
+          await page
+            .getByLabel('Steps', { exact: true })
+            .fill('Check commitments, then leave room for rest.');
+          await page.evaluate(() => {
+            (window as Window & { __qaFailure?: boolean }).__qaFailure = true;
+          });
+          await page.getByRole('button', { name: 'Save skill', exact: true }).click();
+          await page.getByRole('alert').waitFor();
+          if (
+            (await page.getByLabel('Skill name', { exact: true }).inputValue()) !==
+            'Plan a calmer week'
+          )
+            throw new Error('Failed skill save lost the draft');
+          if (
+            (await page.locator('textarea[name="steps"]').inputValue()) !==
+            'Check commitments, then leave room for rest.'
+          )
+            throw new Error('Failed skill save lost the procedure');
+          await provenanceScreenshot(page, {
+            path: path.join(output, `skills-form-error-390-${scheme}.png`),
+            fullPage: true,
+          });
+          await page.evaluate(() => {
+            (window as Window & { __qaFailure?: boolean }).__qaFailure = false;
+          });
+          await page.getByRole('button', { name: 'Save skill', exact: true }).click();
+          await page.getByRole('button', { name: 'Add skill', exact: true }).waitFor();
+          interactions.push({
+            scheme,
+            check:
+              'Skill form has visible accessible labels; failed save retains draft and announces error; successful retry closes form.',
+          });
+        }
+        if (!selectedPages || selectedPages.includes('improvements')) {
+          await page.goto(`${origin}/fixture/improvements`, { waitUntil: 'networkidle' });
+          await page.getByRole('button', { name: 'Report an issue', exact: true }).click();
+          if (
+            (await page
+              .getByRole('button', { name: 'Report an issue', exact: true })
+              .getAttribute('aria-expanded')) !== 'true'
+          )
+            throw new Error('Report disclosure did not expose expanded state');
+          const title = page.getByLabel('Issue title', { exact: true });
+          if (!(await title.evaluate((element) => element === document.activeElement)))
+            throw new Error('Report form did not receive focus');
+          await title.fill('Keep useful results visible');
+          await page
+            .getByLabel('What went wrong', { exact: true })
+            .fill('A second lookup failed and hid the first useful result.');
+          await page.evaluate(() => {
+            (window as Window & { __qaFailure?: boolean }).__qaFailure = true;
+          });
+          await page.getByRole('button', { name: 'Save report', exact: true }).click();
+          await page.getByRole('alert').waitFor();
+          if ((await title.inputValue()) !== 'Keep useful results visible')
+            throw new Error('Failed issue report lost the draft');
+          if (
+            (await page.locator('textarea[name="summary"]').inputValue()) !==
+            'A second lookup failed and hid the first useful result.'
+          )
+            throw new Error('Failed issue report lost its description');
+          await provenanceScreenshot(page, {
+            path: path.join(output, `repair-form-error-390-${scheme}.png`),
+            fullPage: true,
+          });
+          await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+          if (
+            (await page
+              .getByRole('button', { name: 'Report an issue', exact: true })
+              .getAttribute('aria-expanded')) !== 'false'
+          )
+            throw new Error('Closed report retained expanded state');
+          if (
+            !(await page
+              .getByRole('button', { name: 'Report an issue', exact: true })
+              .evaluate((element) => element === document.activeElement))
+          )
+            throw new Error('Closing report did not restore focus');
+          interactions.push({
+            scheme,
+            check:
+              'Report disclosure exposes expanded state, moves focus to title, retains failed draft, and returns focus on cancel.',
+          });
+        }
+        if (!selectedPages || selectedPages.includes('writing-voice')) {
+          await page.goto(`${origin}/fixture/writing-voice`, { waitUntil: 'networkidle' });
+          await page
+            .getByLabel(/^The voice in one or two sentences/)
+            .fill('Warm and clear. Lead with the decision.');
+          await page.evaluate(() => {
+            (window as Window & { __qaFailure?: boolean }).__qaFailure = true;
+          });
+          await page.getByRole('button', { name: 'Save voice', exact: true }).click();
+          await page.getByRole('alert').waitFor();
+          if (
+            (await page.getByLabel(/^The voice in one or two sentences/).inputValue()) !==
+            'Warm and clear. Lead with the decision.'
+          )
+            throw new Error('Failed writing voice save lost the draft');
+          await provenanceScreenshot(page, {
+            path: path.join(output, `voice-form-error-390-${scheme}.png`),
+            fullPage: true,
+          });
+          await page.evaluate(() => {
+            (window as Window & { __qaFailure?: boolean }).__qaFailure = false;
+          });
+          await page.getByRole('button', { name: 'Save voice', exact: true }).click();
+          await page.getByRole('status').filter({ hasText: 'Saved' }).waitFor();
+          interactions.push({
+            scheme,
+            check:
+              'Writing voice save failure announces an error and successful retry announces Saved.',
+          });
+        }
       }
       await context.close();
     }
@@ -783,7 +922,14 @@ try {
     throw new Error('Hydrated chat attempted an unexpected account or external request');
   let combined = measurements;
   if (selectedPages && !hydrateChat) {
-    const previous = JSON.parse(await readFile(path.join(output, 'measurements.json'), 'utf8')) as {
+    const previous = JSON.parse(
+      await readFile(path.join(output, 'measurements.json'), 'utf8').catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === 'ENOENT') return '{"measurements":[]}';
+          throw error;
+        },
+      ),
+    ) as {
       measurements: Array<Record<string, unknown>>;
     };
     const refreshed = new Set(measurements.map((entry) => entry.screenshot));
@@ -792,6 +938,71 @@ try {
       ...measurements,
     ];
   }
+  const latestComponentHash = await componentInputHash();
+  combined = await Promise.all(
+    combined.map(async (entry) => {
+      const fixture = allPages.find((page) => page.name === entry.name);
+      const freshness = fixture
+        ? visualCaptureFreshness(
+            entry.provenance as VisualCaptureReceipt | undefined,
+            await captureInputs(fixture, latestComponentHash),
+            evidenceMode(fixture),
+          )
+        : 'unknown';
+      const pixelsMatch =
+        entry.provenance &&
+        visualHash(await readFile(path.join(output, String(entry.screenshot))).catch(() => '')) ===
+          (entry.provenance as VisualCaptureReceipt).screenshotSha256;
+      return { ...entry, freshness: pixelsMatch ? freshness : 'unknown' };
+    }),
+  );
+  const expectedScreenshots = allPages.flatMap((entry) =>
+    (hydrateChat ? [390] : [1280, 390]).flatMap((width) =>
+      ['light', 'dark'].map((scheme) => `${entry.name}-${width}-${scheme}.png`),
+    ),
+  );
+  const currentScreenshots = new Set(
+    combined.filter((entry) => entry.freshness === 'current').map((entry) => entry.screenshot),
+  );
+  const missingCurrentScreenshots = expectedScreenshots.filter(
+    (name) => !currentScreenshots.has(name),
+  );
+  const retainedReceipts = new Map<
+    string,
+    { screenshot: string; fixture: string; provenance: VisualCaptureReceipt }
+  >();
+  for (const file of await readdir(path.join(output, 'capture-receipts'))) {
+    if (!file.endsWith('.json')) continue;
+    const receipt = JSON.parse(
+      await readFile(path.join(output, 'capture-receipts', file), 'utf8'),
+    ) as { screenshot: string; fixture: string; provenance: VisualCaptureReceipt };
+    const previous = retainedReceipts.get(receipt.screenshot);
+    if (!previous || previous.provenance.capturedAt < receipt.provenance.capturedAt)
+      retainedReceipts.set(receipt.screenshot, receipt);
+  }
+  const captureInventory = await Promise.all(
+    pngs.map(async (screenshot) => {
+      const retained = retainedReceipts.get(screenshot);
+      const fixture = allPages.find((entry) => entry.name === retained?.fixture);
+      const pixelsMatch =
+        retained &&
+        visualHash(await readFile(path.join(output, screenshot))) ===
+          retained.provenance.screenshotSha256;
+      const freshness =
+        fixture && pixelsMatch
+          ? visualCaptureFreshness(
+              retained?.provenance,
+              await captureInputs(fixture, latestComponentHash),
+              evidenceMode(fixture),
+            )
+          : 'unknown';
+      return { screenshot, freshness, provenance: retained?.provenance ?? null };
+    }),
+  );
+  const currentCoverage =
+    missingCurrentScreenshots.length === 0 &&
+    combined.every((entry) => entry.freshness === 'current') &&
+    captureInventory.every((entry) => entry.freshness === 'current');
   const sourceFiles = hydrateChat
     ? [
         'apps/web/app/chat/[id]/chat-client.tsx',
@@ -889,6 +1100,12 @@ try {
           conversationCss === null ? 0 : Buffer.byteLength(conversationCss),
         blockedRequests,
         syntheticApiRequests,
+        currentCoverage,
+        captureInventory,
+        missingCurrentScreenshots,
+        staleOrUnknownScreenshots: combined
+          .filter((entry) => entry.freshness !== 'current')
+          .map((entry) => entry.screenshot),
         measurements: combined,
         interactions,
         recapturedPages: selectedPages ?? null,
@@ -897,6 +1114,38 @@ try {
       2,
     )}\n`,
   );
+  // The main artifact manifest must carry the same per-capture qualification;
+  // regenerating its HTML/CSS does not make retained pixels current.
+  const artifactManifestPath = path.join(output, 'manifest.json');
+  const artifactManifest = JSON.parse(await readFile(artifactManifestPath, 'utf8')) as Record<
+    string,
+    unknown
+  >;
+  await writeFile(
+    artifactManifestPath,
+    `${JSON.stringify(
+      {
+        ...artifactManifest,
+        currentCoverage,
+        captureInventory,
+        missingCurrentScreenshots,
+        provenancePolicy:
+          'Only each immutable capture receipt identifies its tested inputs. Current source metadata is not a receipt for retained images.',
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  if (process.argv.includes('--require-current'))
+    requireCurrentVisualCoverage(
+      [
+        ...captureInventory,
+        ...missingCurrentScreenshots.map((screenshot) => ({ screenshot, freshness: 'unknown' })),
+      ].map((entry) => ({
+        screenshot: String(entry.screenshot),
+        freshness: String(entry.freshness),
+      })),
+    );
   process.stdout.write(
     `${pages.length} synthetic source states; ${pngs.length} full-page screenshots; ${blockedRequests} account/external requests blocked.\n`,
   );

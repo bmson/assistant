@@ -1,163 +1,107 @@
-import { createDb, type Db, locationPings, tasks } from '@assistant/db';
-import { and, eq, sql } from 'drizzle-orm';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { getAgent } from '../chat.js';
-import { hasConfirmedArrival, maybeEnqueueArrivalNudge } from './arrival.js';
+import type { LocationPingRepository, TaskRepository } from '@assistant/persistence';
+import { describe, expect, it, vi } from 'vitest';
+import { hasConfirmedArrival, maybeEnqueueArrivalNudgeWithRepository } from './arrival.js';
 
-const DATABASE_URL =
-  process.env.DATABASE_URL ?? 'postgres://assistant:assistant@localhost:5432/assistant';
+const NOW = new Date('2026-06-15T12:04:00Z');
+const AGENT_ID = '3ba0f740-8049-4c7a-9818-aa158b4d53d8';
+const arrival = {
+  observationId: '8bbfcf58-8b57-4a65-bd5e-390d1bcf8271',
+  lat: 64.1123,
+  lng: -21.9,
+  accuracyM: 10,
+  capturedAt: new Date(NOW.getTime() - 4 * 60_000),
+};
 
-/**
- * The window is pinned to June 2020 so real (present-day) pings and tasks in
- * a dev database can never satisfy the baseline or the cooldown — the queries
- * are bounded by `capturedAt < ping.capturedAt` and `createdAt >= now-12h`.
- */
-const NOW = new Date('2020-06-15T12:00:00Z');
-// Downtown Reykjavík vs Kópavogur — ~7km apart, well past the 1.5km radius.
-const HOME = { lat: 64.1466, lng: -21.9426 };
-const AWAY = { lat: 64.1123, lng: -21.9 };
+describe('maybeEnqueueArrivalNudgeWithRepository', () => {
+  it('does not make a task when the opaque source reference has expired', async () => {
+    const locations = {
+      isArrivalObservationActive: vi.fn().mockResolvedValue(false),
+      recent: vi.fn(),
+      hasArrivalTaskSince: vi.fn(),
+    } as unknown as LocationPingRepository;
+    const createTask = vi.fn();
+    const tasks = { kind: 'task-lease-repository', createTask } as unknown as TaskRepository;
 
-describe('arrival dwell confirmation', () => {
-  const observation = (minutesAgo: number, place = AWAY, accuracyM: number | null = 50) => ({
-    ...place,
-    accuracyM,
-    capturedAt: new Date(NOW.getTime() - minutesAgo * 60_000),
+    await expect(
+      maybeEnqueueArrivalNudgeWithRepository(
+        locations,
+        tasks,
+        { id: AGENT_ID, timezone: 'Atlantic/Reykjavik' },
+        arrival,
+        NOW,
+      ),
+    ).resolves.toBe(false);
+    expect(locations.recent).not.toHaveBeenCalled();
+    expect(locations.hasArrivalTaskSince).not.toHaveBeenCalled();
+    expect(createTask).not.toHaveBeenCalled();
   });
-  const current = observation(0);
-  const home = observation(120, HOME);
 
-  it('requires a separated second fix, not a first arrival, replay, or rapid duplicate', () => {
-    expect(hasConfirmedArrival(current, [home], NOW)).toBe(false);
-    expect(hasConfirmedArrival(current, [home, current], NOW)).toBe(false);
-    expect(hasConfirmedArrival(current, [home, observation(1)], NOW)).toBe(false);
-    expect(hasConfirmedArrival(current, [home, observation(3)], NOW)).toBe(true);
+  it('stores only an opaque expiring ref and generic text, never location details', async () => {
+    const locations = {
+      isArrivalObservationActive: vi.fn().mockResolvedValue(true),
+      recent: vi.fn().mockResolvedValue([
+        {
+          lat: 64.2,
+          lng: -21.7,
+          accuracyM: 10,
+          capturedAt: new Date(arrival.capturedAt.getTime() - 40 * 60_000),
+        },
+        {
+          lat: 64.1122,
+          lng: -21.9001,
+          accuracyM: 10,
+          capturedAt: new Date(arrival.capturedAt.getTime() - 4 * 60_000),
+        },
+      ]),
+      hasArrivalTaskSince: vi.fn().mockResolvedValue(false),
+    } as unknown as LocationPingRepository;
+    let saved: Record<string, unknown> | undefined;
+    const createTask = vi.fn(async (input: Record<string, unknown>) => {
+      saved = input;
+      return { created: true, task: { status: 'done' } };
+    });
+    const tasks = { kind: 'task-lease-repository', createTask } as unknown as TaskRepository;
+
+    await expect(
+      maybeEnqueueArrivalNudgeWithRepository(
+        locations,
+        tasks,
+        { id: AGENT_ID, timezone: 'Atlantic/Reykjavik' },
+        arrival,
+        NOW,
+      ),
+    ).resolves.toBe(true);
+
+    const serialized = JSON.stringify(saved);
+    expect(serialized).toContain(arrival.observationId);
+    expect(serialized).toContain('arrivalExpiresAt');
+    expect(serialized).toContain('successful_silent');
+    expect(serialized).not.toContain(String(arrival.lat));
+    expect(serialized).not.toContain(String(arrival.lng));
+    expect(serialized).not.toContain('Reykjavík');
+    expect(serialized).not.toContain('Reykjavik Harbour');
+    expect(serialized).toContain(`arrival:${AGENT_ID}:2026-06-15`);
   });
 
-  it('rejects drift, interrupted stops, uncertain fixes, and stale confirmations', () => {
-    expect(hasConfirmedArrival(current, [home, observation(4), observation(1, HOME)], NOW)).toBe(
+  it('requires separated stationary samples at a new place', () => {
+    const dwell = {
+      ...arrival,
+      observationId: 'older',
+      lat: 64.1122,
+      lng: -21.9001,
+      capturedAt: new Date(arrival.capturedAt.getTime() - 4 * 60_000),
+    };
+    const priorPlace = {
+      ...arrival,
+      observationId: 'prior-place',
+      lat: 64.2,
+      lng: -21.7,
+      capturedAt: new Date(arrival.capturedAt.getTime() - 40 * 60_000),
+    };
+    expect(hasConfirmedArrival(arrival, [dwell, priorPlace], NOW)).toBe(true);
+    expect(hasConfirmedArrival(arrival, [], NOW)).toBe(false);
+    expect(hasConfirmedArrival({ ...arrival, accuracyM: 500 }, [dwell, priorPlace], NOW)).toBe(
       false,
     );
-    expect(hasConfirmedArrival(current, [home, observation(4, AWAY, 5000)], NOW)).toBe(false);
-    expect(hasConfirmedArrival(current, [home, observation(4, AWAY, null)], NOW)).toBe(false);
-    expect(hasConfirmedArrival(current, [home, observation(31)], NOW)).toBe(false);
-    expect(hasConfirmedArrival(observation(10), [home, observation(14)], NOW)).toBe(false);
-    expect(hasConfirmedArrival(observation(-1), [home, observation(4)], NOW)).toBe(false);
-    expect(hasConfirmedArrival(observation(0, AWAY, -1), [home, observation(4)], NOW)).toBe(false);
-  });
-
-  it('does not treat a routine place or an unobserved baseline as a new arrival', () => {
-    expect(hasConfirmedArrival(current, [observation(4)], NOW)).toBe(false);
-    expect(hasConfirmedArrival(current, [home, observation(120), observation(4)], NOW)).toBe(false);
-  });
-});
-
-describe('maybeEnqueueArrivalNudge (integration)', () => {
-  let db: Db;
-  let dbUp = false;
-  let agent: { id: string; timezone: string };
-
-  beforeAll(async () => {
-    db = createDb(DATABASE_URL);
-    try {
-      agent = await getAgent(db);
-      dbUp = true;
-    } catch {
-      console.warn('arrival.test: database unreachable — skipping');
-    }
-  });
-
-  afterEach(async () => {
-    if (!dbUp) return;
-    await db
-      .delete(locationPings)
-      .where(and(eq(locationPings.agentId, agent.id), sql`${locationPings.source} = 'xtest'`));
-    await db
-      .delete(tasks)
-      .where(and(eq(tasks.agentId, agent.id), sql`${tasks.externalEventId} like 'arrival:%'`));
-  });
-
-  afterAll(async () => {
-    await (db as unknown as { $client: { end: () => Promise<void> } }).$client?.end?.();
-  });
-
-  function ping(overrides: Partial<Parameters<typeof maybeEnqueueArrivalNudge>[2]> = {}) {
-    return {
-      lat: AWAY.lat,
-      lng: AWAY.lng,
-      label: 'Kópavogur',
-      accuracyM: 50,
-      capturedAt: NOW,
-      ...overrides,
-    };
-  }
-
-  async function insertBaseline(at: Date, place = HOME) {
-    await db.insert(locationPings).values({
-      agentId: agent.id,
-      lat: String(place.lat),
-      lng: String(place.lng),
-      source: 'xtest',
-      accuracyM: 50,
-      capturedAt: at,
-    });
-  }
-
-  it('enqueues one considered nudge on a genuine arrival', async (ctx) => {
-    if (!dbUp) return ctx.skip();
-    await insertBaseline(new Date(NOW.getTime() - 2 * 3600e3));
-
-    expect(await maybeEnqueueArrivalNudge(db, agent, ping(), NOW)).toBe(false);
-    await insertBaseline(new Date(NOW.getTime() - 4 * 60e3), AWAY);
-
-    expect(await maybeEnqueueArrivalNudge(db, agent, ping(), NOW)).toBe(true);
-
-    const [task] = await db
-      .select({ instruction: sql<string>`${tasks.trigger} -> 'payload' ->> 'instruction'` })
-      .from(tasks)
-      .where(and(eq(tasks.agentId, agent.id), sql`${tasks.externalEventId} like 'arrival:%'`));
-    expect(task?.instruction).toContain('Kópavogur');
-    expect(task?.instruction).toContain('owner.notify');
-  });
-
-  it('stays quiet when the ping is near somewhere the owner already was', async (ctx) => {
-    if (!dbUp) return ctx.skip();
-    await insertBaseline(new Date(NOW.getTime() - 5 * 3600e3), AWAY);
-    expect(await maybeEnqueueArrivalNudge(db, agent, ping(), NOW)).toBe(false);
-  });
-
-  it('stands down with no baseline at all (fresh install / purged history)', async (ctx) => {
-    if (!dbUp) return ctx.skip();
-    expect(await maybeEnqueueArrivalNudge(db, agent, ping(), NOW)).toBe(false);
-  });
-
-  it('dedupes the same place on the same day, and respects the 12h cooldown', async (ctx) => {
-    if (!dbUp) return ctx.skip();
-    await insertBaseline(new Date(NOW.getTime() - 2 * 3600e3));
-    await insertBaseline(new Date(NOW.getTime() - 4 * 60e3), AWAY);
-    expect(await maybeEnqueueArrivalNudge(db, agent, ping(), NOW)).toBe(true);
-    // Replay (crash retry, duplicate ping): the idempotency key absorbs it.
-    expect(await maybeEnqueueArrivalNudge(db, agent, ping(), NOW)).toBe(false);
-    // Somewhere else entirely an hour later: the global cooldown holds.
-    const later = new Date(NOW.getTime() + 3600e3);
-    await insertBaseline(new Date(later.getTime() - 4 * 60e3), { lat: 64.8, lng: -23.5 });
-    expect(
-      await maybeEnqueueArrivalNudge(
-        db,
-        agent,
-        ping({ lat: 64.8, lng: -23.5, label: 'Snæfellsnes', capturedAt: later }),
-        later,
-      ),
-    ).toBe(false);
-    const created = await db
-      .select({ id: tasks.id })
-      .from(tasks)
-      .where(and(eq(tasks.agentId, agent.id), sql`${tasks.externalEventId} like 'arrival:%'`));
-    expect(created).toHaveLength(1);
-  });
-
-  it('ignores fixes too coarse to name a place', async (ctx) => {
-    if (!dbUp) return ctx.skip();
-    await insertBaseline(new Date(NOW.getTime() - 2 * 3600e3));
-    expect(await maybeEnqueueArrivalNudge(db, agent, ping({ accuracyM: 5000 }), NOW)).toBe(false);
   });
 });

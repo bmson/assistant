@@ -7,10 +7,13 @@ import type {
 } from '@assistant/core/realtime-voice';
 import {
   ACTIVE_CALL_STATUSES,
+  acceptCallTranscriptBatch,
   type CallCheckin,
   type CallSession,
   type CallSessionRepository,
   type CallTranscriptLine,
+  type CallVoiceRouteSnapshot,
+  notificationLeg,
 } from '@assistant/persistence';
 import type { VoiceDialer } from '@assistant/tools/calls';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -33,11 +36,20 @@ vi.mock('@assistant/core', async (importOriginal) => ({
 }));
 
 const { handleMediaStream } = await import('./bridge.js');
+const { deliverCallFinish } = await import('./finish.js');
 type MediaSocket = import('./bridge.js').MediaSocket;
 const { startCall, mediaStreamUrl } = await import('./dial.js');
 const { handleCallStatus } = await import('./status.js');
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
+
+function requiredRevision(
+  value: CallCheckin | undefined | null,
+): CallCheckin & { revision: number } {
+  if (!value || typeof value.revision !== 'number')
+    throw new Error('Test check-in revision missing');
+  return value as CallCheckin & { revision: number };
+}
 
 function memoryCalls(): CallSessionRepository & { rows: Map<string, CallSession> } {
   const rows = new Map<string, CallSession>();
@@ -61,6 +73,7 @@ function memoryCalls(): CallSessionRepository & { rows: Map<string, CallSession>
         endedAt: null,
         durationSeconds: null,
         transcript: [],
+        transcriptState: { nextSequence: 1, pending: [], acknowledged: [] },
         notes: [],
         checkins: [],
         hangupRequested: false,
@@ -68,9 +81,36 @@ function memoryCalls(): CallSessionRepository & { rows: Map<string, CallSession>
         summary: null,
         costUsd: null,
         error: null,
+        finishDelivery: null,
+        lineRate: input.lineRate ?? null,
+        capacityReleasedAt: null,
       };
       rows.set(row.id, row);
       return row;
+    },
+    async admit(input, options) {
+      const existing = rows.get(input.id);
+      if (existing) return { kind: 'existing', call: existing };
+      if ([...rows.values()].some((row) => row.agentId === input.agentId && active(row)))
+        return { kind: 'active_limit' };
+      const since = new Date(options.now.getTime() - 24 * 60 * 60_000);
+      if (
+        [...rows.values()].filter(
+          (row) =>
+            row.agentId === input.agentId && row.createdAt >= since && !row.capacityReleasedAt,
+        ).length >= options.dailyLimit
+      )
+        return { kind: 'daily_limit' };
+      const call = await this.create(input);
+      call.createdAt = options.now;
+      return { kind: 'admitted', call };
+    },
+    async releaseAdmission(id, now) {
+      const row = rows.get(id);
+      if (row?.status !== 'failed' || row.twilioCallSid || !row.endedAt || row.capacityReleasedAt)
+        return false;
+      patch(id, { capacityReleasedAt: now });
+      return true;
     },
     get: async (id) => rows.get(id) ?? null,
     getByCallSid: async (sid) =>
@@ -92,20 +132,144 @@ function memoryCalls(): CallSessionRepository & { rows: Map<string, CallSession>
       patch(id, change);
       return rows.get(id) ?? null;
     },
+    async listPendingFinishDelivery(agentId, _limit, now = new Date()) {
+      return [...rows.values()].filter((row) => {
+        const delivery = row.finishDelivery as {
+          costs: { done: boolean };
+          resultDelivered: boolean;
+          nextAttemptAt: Date;
+        } | null;
+        return (
+          row.agentId === agentId &&
+          delivery !== null &&
+          (!delivery.costs.done || !delivery.resultDelivered) &&
+          delivery.nextAttemptAt <= now
+        );
+      });
+    },
+    async deferFinishDelivery(id) {
+      const row = rows.get(id);
+      const delivery = row?.finishDelivery as {
+        attempts: number;
+        nextAttemptAt: Date;
+        costs: { done: boolean };
+        resultDelivered: boolean;
+      } | null;
+      if (!row || !delivery || (delivery.costs.done && delivery.resultDelivered)) return false;
+      const attempts = delivery.attempts + 1;
+      const delayMs = Math.min(15 * 60_000, 1_000 * 2 ** Math.min(attempts, 10));
+      patch(id, {
+        finishDelivery: { ...delivery, attempts, nextAttemptAt: new Date(Date.now() + delayMs) },
+      });
+      return true;
+    },
+    async markFinishDelivery(id, leg) {
+      const row = rows.get(id);
+      const delivery = row?.finishDelivery as {
+        costs: { done: boolean };
+        resultDelivered: boolean;
+      } | null;
+      if (!row || !delivery) return false;
+      patch(id, {
+        finishDelivery:
+          leg === 'costs'
+            ? { ...delivery, costs: { ...delivery.costs, done: true } }
+            : { ...delivery, resultDelivered: true },
+      });
+      return true;
+    },
+    async updateFinishCostLedger(id, ledger, resultCostUsd) {
+      const row = rows.get(id);
+      const delivery = row?.finishDelivery as {
+        costs: { done: boolean; ledger?: unknown };
+        result: Record<string, unknown>;
+      } | null;
+      if (!row || !delivery || delivery.costs.done) return false;
+      patch(id, {
+        costUsd: resultCostUsd === null ? null : resultCostUsd.toFixed(6),
+        finishDelivery: {
+          ...delivery,
+          costs: { ...delivery.costs, ledger },
+          result: { ...delivery.result, costUsd: resultCostUsd, costBreakdown: ledger },
+        },
+      });
+      return true;
+    },
     appendTranscript: async (id, lines) =>
       patch(id, {
         transcript: [...((rows.get(id)?.transcript as CallTranscriptLine[]) ?? []), ...lines],
       }),
+    async appendTranscriptBatch(id, batch) {
+      const row = rows.get(id);
+      if (!row) return { accepted: false, reason: 'invalid', nextSequence: 1 };
+      const result = acceptCallTranscriptBatch(
+        (row.transcript as CallTranscriptLine[]) ?? [],
+        row.transcriptState,
+        batch,
+      );
+      if (result.result.accepted && !result.result.duplicate)
+        patch(id, { transcript: result.transcript, transcriptState: result.state });
+      return result.result;
+    },
     appendNote: async (id, note) =>
       patch(id, { notes: [...((rows.get(id)?.notes as string[]) ?? []), note] }),
-    addCheckin: async (id, checkin) =>
-      patch(id, { checkins: [...((rows.get(id)?.checkins as CallCheckin[]) ?? []), checkin] }),
-    async answerCheckin(_agent, id, checkinId, answer, via) {
+    async addCheckin(id, checkin) {
+      const row = rows.get(id);
+      if (!row || !active(row)) return null;
       const checkins = (rows.get(id)?.checkins as CallCheckin[]) ?? [];
-      if (!checkins.some((c) => c.id === checkinId && c.answer === null)) return false;
+      const revision =
+        checkins.reduce((max, current) => Math.max(max, current.revision ?? 0), 0) + 1;
+      const created = { ...checkin, revision, deliveryStatus: 'pending' as const };
+      patch(id, {
+        checkins: [
+          ...checkins.map((c) =>
+            c.answer === null && ['pending', 'delivered'].includes(c.deliveryStatus ?? 'pending')
+              ? { ...c, deliveryStatus: 'superseded' as const }
+              : c,
+          ),
+          created,
+        ],
+      });
+      return created;
+    },
+    async markCheckinDelivery(id, checkinId, revision, delivered) {
+      const checkins = (rows.get(id)?.checkins as CallCheckin[]) ?? [];
+      const target = checkins.find((c) => c.id === checkinId && c.revision === revision);
+      if (target?.deliveryStatus !== 'pending') return false;
+      const ok = delivered && Date.parse(target.expiresAt ?? '') > Date.now();
       patch(id, {
         checkins: checkins.map((c) =>
-          c.id === checkinId ? { ...c, answer, via, answeredAt: new Date().toISOString() } : c,
+          c.id === checkinId ? { ...c, deliveryStatus: ok ? 'delivered' : 'failed' } : c,
+        ),
+      });
+      return ok;
+    },
+    async answerCheckin(_agent, id, checkinId, revision, answer, via) {
+      const checkins = (rows.get(id)?.checkins as CallCheckin[]) ?? [];
+      const target = checkins.find((c) => c.id === checkinId);
+      const latest = [...checkins]
+        .reverse()
+        .find((c) => c.answer === null && c.deliveryStatus === 'delivered');
+      if (
+        !target ||
+        target.revision !== revision ||
+        target.deliveryStatus !== 'delivered' ||
+        target.answer !== null ||
+        latest?.id !== target.id ||
+        Date.parse(target.expiresAt ?? '') <= Date.now()
+      )
+        return false;
+      patch(id, {
+        checkins: checkins.map((c) =>
+          c.id === checkinId
+            ? {
+                ...c,
+                answer,
+                via,
+                answeredAt: new Date().toISOString(),
+                deliveryStatus: 'answered',
+              }
+            : c,
         ),
       });
       return true;
@@ -155,6 +319,19 @@ const rates = {
   textOutputPerMTok: 24,
 };
 
+const voiceRoute: CallVoiceRouteSnapshot = {
+  version: 1,
+  modelId: 'openai:gpt-realtime-2.1',
+  connectionId: 'openai',
+  connectionKind: 'openai',
+  connectionUpdatedAt: null,
+  provider: 'openai',
+  providerModel: 'gpt-realtime-2.1',
+  endpoint: { kind: 'openai-realtime', url: 'wss://api.openai.com/v1/realtime' },
+  voice: null,
+  rates,
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   core.reserveCost.mockResolvedValue({ ok: true, reservationId: 'res-1' });
@@ -174,6 +351,7 @@ function dialDeps(calls: CallSessionRepository, dialer: VoiceDialer) {
     ownerId: async () => 'agent-1',
     voiceModel: async () => ({
       id: 'openai:gpt-realtime-2.1',
+      route: voiceRoute,
       resolved: {
         provider: {} as never,
         model: 'gpt-realtime-2.1',
@@ -217,6 +395,7 @@ describe('placing a call', () => {
       maxMinutes: 8,
       callbackToken: 'wake-token',
       reservationId: 'res-1',
+      voiceRoute,
       twilioCallSid: `CA${'a'.repeat(32)}`,
     });
     const placed = dialer.placeCall.mock.calls[0]?.[0] as {
@@ -339,8 +518,17 @@ function fakeSession() {
       inputAudioTokens: 1_000,
       inputTextTokens: 2_000,
       cachedInputTokens: 0,
+      cachedAudioInputTokens: 0,
+      cachedTextInputTokens: 0,
+      cachedUnclassifiedInputTokens: 0,
       outputAudioTokens: 500,
       outputTextTokens: 100,
+      reasoningOutputTokens: 0,
+      reasoningUsageReported: false,
+      transcriptionInputAudioTokens: 0,
+      transcriptionOutputTextTokens: 0,
+      transcriptionUsageReported: false,
+      transcriptionInputAudioMilliseconds: 0,
     }),
     close: vi.fn(async () => {}),
   } satisfies RealtimeSession;
@@ -376,7 +564,7 @@ function fakeVoice(connectGate?: Promise<void>) {
 }
 
 async function connectedBridge(
-  options: { connectGate?: Promise<void>; openingWaitMs?: number } = {},
+  options: { connectGate?: Promise<void>; openingWaitMs?: number; pollMs?: number } = {},
 ) {
   const calls = memoryCalls();
   const dialer = fakeDialer();
@@ -385,7 +573,9 @@ async function connectedBridge(
   const token = /name="token" value="([0-9a-f]+)"/.exec(twiml)?.[1] ?? '';
   const voice = fakeVoice(options.connectGate);
   const socket = fakeSocket();
-  const notifyOwner = vi.fn(async (_input: { text: string; taskId?: string }) => {});
+  const notifyOwner = vi.fn(async (_input: { text: string; taskId?: string }) =>
+    notificationLeg('dashboard', 'delivered'),
+  );
   handleMediaStream(socket as unknown as MediaSocket, {
     calls,
     costs: {} as never,
@@ -397,7 +587,7 @@ async function connectedBridge(
     ownerName: 'Baldvin',
     assistantName: 'Aria',
     timezone: 'America/Los_Angeles',
-    pollMs: 20,
+    pollMs: options.pollMs ?? 20,
     checkinWaitMs: 2_000,
     openingWaitMs: options.openingWaitMs ?? 5_000,
   });
@@ -407,6 +597,68 @@ async function connectedBridge(
 const CALL_ID = '11111111-1111-4111-8111-111111111111';
 
 describe('live call bridge', () => {
+  it('replays a terminal call outbox after a metering outage without dialing again', async () => {
+    const { calls, dialer, voice, socket, token } = await connectedBridge();
+    vi.mocked(dialer.getCall).mockResolvedValue({
+      status: 'completed',
+      durationSeconds: 95,
+      priceUsd: 0.028,
+      answeredBy: 'human',
+    });
+    core.getRate.mockClear();
+    socket.emit('message', {
+      event: 'start',
+      start: { streamSid: 'MZ1', customParameters: { callId: CALL_ID, token } },
+    });
+    await vi.waitFor(() => expect(voice.config()).toBeDefined());
+    let finishMeteringAttempt = () => {};
+    const meteringAttempted = new Promise<void>((resolve) => {
+      finishMeteringAttempt = resolve;
+    });
+    core.reconcileReservation.mockImplementationOnce(async () => {
+      finishMeteringAttempt();
+      throw new Error('metering temporarily unavailable');
+    });
+    voice.events().toolCall({
+      id: 'end-once',
+      name: 'end_call',
+      args: { outcome: 'achieved', summary: 'Call completed.' },
+    });
+    await vi.waitFor(() => expect(dialer.hangup).toHaveBeenCalled());
+    socket.emit('message', { event: 'stop' });
+
+    await vi.waitFor(() => expect(calls.rows.get(CALL_ID)?.status).toBe('completed'));
+    await meteringAttempted;
+    expect(core.recordCallResult).not.toHaveBeenCalled();
+    const pending = calls.rows.get(CALL_ID);
+    expect(pending?.finishDelivery).toMatchObject({
+      resultDelivered: false,
+      result: { summary: 'Call completed.', costUsd: null },
+      costs: { done: false, ledger: { components: { carrier: { usd: 0.028 } } } },
+    });
+
+    await deliverCallFinish(
+      { calls, costs: {} as never, jobs: {} as never },
+      pending as CallSession,
+    );
+    await deliverCallFinish(
+      { calls, costs: {} as never, jobs: {} as never },
+      calls.rows.get(CALL_ID) as CallSession,
+    );
+    expect(core.reconcileReservation).toHaveBeenCalledTimes(2);
+    expect(core.getRate).not.toHaveBeenCalled();
+    expect(core.recordCostEvent).not.toHaveBeenCalled();
+    expect(core.reconcileReservation.mock.calls[1]?.[2]).toMatchObject({
+      evidence: { voiceCallLedger: { components: { carrier: { usd: 0.028 } } } },
+    });
+    expect(core.recordCallResult).toHaveBeenCalledTimes(1);
+    expect(dialer.placeCall).toHaveBeenCalledTimes(1);
+    expect(calls.rows.get(CALL_ID)?.finishDelivery).toMatchObject({
+      costs: { done: true },
+      resultDelivered: true,
+    });
+  });
+
   it('refuses a stream whose token does not redeem', async () => {
     const { socket } = await connectedBridge();
     socket.emit('message', {
@@ -527,6 +779,54 @@ describe('live call bridge', () => {
     await vi.waitFor(() => expect(core.recordCallResult).toHaveBeenCalled());
   });
 
+  it('keeps failed transcript batches buffered and retries the same sequence safely', async () => {
+    const { calls, voice, socket, token } = await connectedBridge({ pollMs: 10 });
+    const append = calls.appendTranscriptBatch.bind(calls);
+    const write = vi
+      .spyOn(calls, 'appendTranscriptBatch')
+      .mockRejectedValueOnce(new Error('temporary database failure'))
+      .mockImplementation(append);
+    socket.emit('message', {
+      event: 'start',
+      start: { streamSid: 'MZ1', customParameters: { callId: CALL_ID, token } },
+    });
+    await vi.waitFor(() => expect(voice.config()).toBeDefined());
+    voice.events().transcript('caller', 'Please keep the full transcript.');
+    await vi.waitFor(() => expect(write).toHaveBeenCalledTimes(2));
+    expect(write.mock.calls[0]?.[1]).toEqual(write.mock.calls[1]?.[1]);
+    expect(calls.rows.get(CALL_ID)?.transcript).toMatchObject([
+      { text: 'Please keep the full transcript.', sequence: 1 },
+    ]);
+    socket.emit('close');
+    await vi.waitFor(() => expect(core.recordCallResult).toHaveBeenCalled());
+    expect(calls.rows.get(CALL_ID)?.transcript).toHaveLength(1);
+  });
+
+  it('writes an explicit gap receipt at shutdown when the transcript payload cannot be saved', async () => {
+    const { calls, voice, socket, token } = await connectedBridge({ pollMs: 1_000 });
+    const append = calls.appendTranscriptBatch.bind(calls);
+    let attempts = 0;
+    vi.spyOn(calls, 'appendTranscriptBatch').mockImplementation(async (id, batch) => {
+      attempts += 1;
+      if (attempts <= 3) throw new Error('transient transcript outage');
+      return append(id, batch);
+    });
+    socket.emit('message', {
+      event: 'start',
+      start: { streamSid: 'MZ1', customParameters: { callId: CALL_ID, token } },
+    });
+    await vi.waitFor(() => expect(voice.config()).toBeDefined());
+    voice.events().transcript('caller', 'Payload that cannot be saved.');
+    socket.emit('close');
+    await vi.waitFor(() => expect(core.recordCallResult).toHaveBeenCalled());
+    expect(calls.rows.get(CALL_ID)?.transcript).toMatchObject([
+      { role: 'system', text: expect.stringContaining('Transcript gap: 1 line(s)') },
+    ]);
+    expect(calls.rows.get(CALL_ID)?.transcript).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ text: 'Payload that cannot be saved.' })]),
+    );
+  });
+
   it('does not interrupt a caller with the quiet-line introduction', async () => {
     const { voice, socket, token } = await connectedBridge({ openingWaitMs: 50 });
     socket.emit('message', {
@@ -572,9 +872,10 @@ describe('live call bridge', () => {
     await vi.waitFor(() => expect(get).toHaveBeenCalledWith(CALL_ID));
     expect(dialer.hangup).not.toHaveBeenCalled();
 
-    // Model speech goes out as 20 ms frames; the caller talking over it clears the line.
+    // One 20 ms frame waits for a playback mark before the next is sent.
     voice.events().audio(new Uint8Array(320));
-    expect(socket.sent.filter((m) => m.event === 'media')).toHaveLength(2);
+    expect(socket.sent.filter((m) => m.event === 'media')).toHaveLength(1);
+    expect(socket.sent.filter((m) => m.event === 'mark')).toHaveLength(1);
     voice.events().speechStarted();
     expect(socket.sent.at(-1)).toEqual({ event: 'clear', streamSid: 'MZ1' });
     expect(voice.session.interrupt).toHaveBeenCalled();
@@ -586,8 +887,13 @@ describe('live call bridge', () => {
     expect(notifyOwner.mock.calls[0]?.[0]).toMatchObject({
       text: expect.stringContaining(`https://bot.example/calls/${CALL_ID}`),
     });
-    const checkin = ((calls.rows.get(CALL_ID)?.checkins ?? []) as CallCheckin[])[0] as CallCheckin;
-    expect(await calls.answerCheckin('agent-1', CALL_ID, checkin.id, 'Yes', 'web')).toBe(true);
+    const checkin = requiredRevision(
+      ((calls.rows.get(CALL_ID)?.checkins ?? []) as CallCheckin[])[0],
+    );
+    expect(checkin.deliveryStatus).toBe('delivered');
+    expect(
+      await calls.answerCheckin('agent-1', CALL_ID, checkin.id, checkin.revision, 'Yes', 'web'),
+    ).toBe(true);
     await vi.waitFor(() =>
       expect(voice.session.sendToolResult).toHaveBeenCalledWith(
         expect.objectContaining({ id: 'c2' }),
@@ -628,19 +934,19 @@ describe('live call bridge', () => {
       role: 'them',
       text: 'We have 7:45, is that OK?',
     });
-    // Line: 2 started minutes; model: priced from its reported usage.
-    expect(core.reconcileReservation).toHaveBeenCalledWith(
-      {},
-      'res-1',
-      expect.objectContaining({ usd: 2 * 0.014, quantity: 2 }),
-    );
-    expect(core.recordCostEvent).toHaveBeenCalledWith(
-      {},
-      expect.objectContaining({
-        source: 'model',
-        usd: (1_000 * 32 + 2_000 * 4 + 500 * 64 + 100 * 24) / 1e6,
-      }),
-    );
+    expect(core.recordCostEvent).not.toHaveBeenCalled();
+    const finished = calls.rows.get(CALL_ID)?.finishDelivery as {
+      costs: {
+        ledger: {
+          components: {
+            modelAudioInput: { quantity?: number };
+            modelTextInput: { quantity?: number };
+          };
+        };
+      };
+    };
+    expect(finished.costs.ledger.components.modelAudioInput.quantity).toBe(1_000);
+    expect(finished.costs.ledger.components.modelTextInput.quantity).toBe(2_000);
     expect(calls.rows.get(CALL_ID)?.status).toBe('completed');
     expect(voice.session.close).toHaveBeenCalled();
   });
@@ -701,6 +1007,17 @@ describe('live call bridge', () => {
     expect(socket.sent.at(-1)).toEqual({ event: 'clear', streamSid: 'MZ1' });
     const unplayed = voice.session.interrupt.mock.calls[0]?.[0] as number;
     expect(unplayed).toBeGreaterThan(1_500);
+    expect(unplayed).toBe(2_000);
+
+    const clearedMark = socket.sent.findLast((message) => message.event === 'mark')?.mark as
+      | { name?: string }
+      | undefined;
+    expect(clearedMark?.name).toBeDefined();
+    socket.emit('message', {
+      event: 'mark',
+      streamSid: 'MZ1',
+      mark: { name: clearedMark?.name },
+    });
 
     // Nothing playing: a new caller turn interrupts nothing.
     voice.session.interrupt.mockClear();
@@ -708,6 +1025,60 @@ describe('live call bridge', () => {
     voice.events().speechStarted();
     expect(voice.session.interrupt).not.toHaveBeenCalled();
     expect(socket.sent).toHaveLength(sentBefore);
+    socket.emit('close');
+    await vi.waitFor(() => expect(core.recordCallResult).toHaveBeenCalled());
+  });
+
+  it('treats a playback mark as transport completion, not comprehension', async () => {
+    const { voice, socket } = await startedBridge();
+    voice.events().audio(new Uint8Array(160));
+    const mark = socket.sent.findLast((message) => message.event === 'mark')?.mark as
+      | { name?: string }
+      | undefined;
+    expect(mark?.name).toBeDefined();
+    socket.emit('message', { event: 'mark', streamSid: 'MZ1', mark: { name: mark?.name } });
+    voice.events().speechStarted();
+    expect(voice.session.interrupt).not.toHaveBeenCalled();
+    expect(socket.sent.some((message) => message.event === 'clear')).toBe(false);
+    socket.emit('close');
+    await vi.waitFor(() => expect(core.recordCallResult).toHaveBeenCalled());
+  });
+
+  it('clears only the frame still outstanding after earlier playback marks', async () => {
+    const { voice, socket } = await startedBridge();
+    voice.events().audio(new Uint8Array(320));
+    const firstMark = socket.sent.findLast((message) => message.event === 'mark')?.mark as
+      | { name?: string }
+      | undefined;
+    socket.emit('message', {
+      event: 'mark',
+      streamSid: 'MZ1',
+      mark: { name: firstMark?.name },
+    });
+    expect(socket.sent.filter((message) => message.event === 'media')).toHaveLength(2);
+    const secondMark = socket.sent.findLast((message) => message.event === 'mark')?.mark as
+      | { name?: string }
+      | undefined;
+    voice.events().speechStarted();
+    expect(voice.session.interrupt).toHaveBeenCalledWith(20);
+    socket.emit('message', {
+      event: 'mark',
+      streamSid: 'MZ1',
+      mark: { name: secondMark?.name },
+    });
+    expect(socket.sent.filter((message) => message.event === 'media')).toHaveLength(2);
+    socket.emit('close');
+    await vi.waitFor(() => expect(core.recordCallResult).toHaveBeenCalled());
+  });
+
+  it('bounds generated audio waiting for Twilio and ends on overflow', async () => {
+    const { dialer, voice, socket } = await startedBridge();
+    voice.events().audio(new Uint8Array(80_008));
+    expect(voice.session.interrupt).toHaveBeenCalledWith(10_001);
+    expect(socket.sent.filter((message) => message.event === 'media')).toHaveLength(0);
+    await vi.waitFor(() => expect(dialer.hangup).toHaveBeenCalled());
+    voice.events().audio(new Uint8Array(160));
+    expect(socket.sent.filter((message) => message.event === 'media')).toHaveLength(0);
     socket.emit('close');
     await vi.waitFor(() => expect(core.recordCallResult).toHaveBeenCalled());
   });
@@ -750,11 +1121,32 @@ describe('live call bridge', () => {
   });
 
   it('reconnects a dropped voice model with the conversation so far', async () => {
-    const { dialer, voice, socket } = await startedBridge();
-    voice.events().transcript('assistant', 'Hi, I would like to book a table for two tonight.');
-    voice.events().transcript('caller', 'We have 7:45, is that OK?');
-    voice.events().closed();
+    const { calls, dialer, voice, socket } = await startedBridge();
+    const oldEvents = voice.events();
+    oldEvents.audio(new Uint8Array(160));
+    const oldMark = socket.sent.findLast((message) => message.event === 'mark')?.mark as
+      | { name?: string }
+      | undefined;
+    oldEvents.transcript('assistant', 'Hi, I would like to book a table for two tonight.');
+    oldEvents.transcript('caller', 'We have 7:45, is that OK?');
+    oldEvents.closed();
     await vi.waitFor(() => expect(voice.configs).toHaveLength(2));
+    oldEvents.audio(new Uint8Array(160)); // stale output from the replaced generation is ignored
+    voice.events().audio(new Uint8Array(320));
+    expect(socket.sent.filter((message) => message.event === 'media')).toHaveLength(1);
+    socket.emit('message', { event: 'mark', streamSid: 'MZ1', mark: { name: oldMark?.name } });
+    expect(socket.sent.filter((message) => message.event === 'media')).toHaveLength(2);
+    const currentMark = socket.sent.findLast((message) => message.event === 'mark')?.mark as
+      | { name?: string }
+      | undefined;
+    socket.emit('message', { event: 'mark', streamSid: 'MZ1', mark: { name: oldMark?.name } });
+    expect(socket.sent.filter((message) => message.event === 'media')).toHaveLength(2);
+    socket.emit('message', {
+      event: 'mark',
+      streamSid: 'MZ1',
+      mark: { name: currentMark?.name },
+    });
+    expect(socket.sent.filter((message) => message.event === 'media')).toHaveLength(3);
     const resumed = voice.configs[1]?.instructions ?? '';
     expect(resumed).toContain('GOAL: Book a table for two at 7:30pm tonight.');
     expect(resumed).toContain('THE CALL IS ALREADY IN PROGRESS');
@@ -771,14 +1163,11 @@ describe('live call bridge', () => {
 
     socket.emit('close');
     await vi.waitFor(() => expect(core.recordCallResult).toHaveBeenCalled());
-    // Both sessions' audio is billed.
-    expect(core.recordCostEvent).toHaveBeenCalledWith(
-      {},
-      expect.objectContaining({
-        source: 'model',
-        usd: (2 * (1_000 * 32 + 2_000 * 4 + 500 * 64 + 100 * 24)) / 1e6,
-      }),
-    );
+    // Both sessions' provider usage is retained in the component ledger.
+    const finished = calls.rows.get(CALL_ID)?.finishDelivery as {
+      costs: { ledger: { components: { modelAudioInput: { quantity?: number } } } };
+    };
+    expect(finished.costs.ledger.components.modelAudioInput.quantity).toBe(2_000);
   });
 
   it('ends the call when the voice model keeps dropping', async () => {

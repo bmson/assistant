@@ -8,7 +8,14 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 const auth = vi.hoisted(() => ({ owner: vi.fn() }));
 vi.mock('@/auth', () => ({ requireOwner: auth.owner }));
 
-const workspace = { list: vi.fn(async () => [{ name: 'ready.txt', dir: false }]) };
+const workspace = {
+  listPage: vi.fn(async () => ({
+    items: [{ name: 'ready.txt', dir: false }],
+    hasMore: false,
+    nextCursor: null,
+    consistency: 'process-snapshot' as const,
+  })),
+};
 vi.mock('@/lib/server', () => ({
   getApplication: () => {
     throw new Error('PostgreSQL application must not be created');
@@ -85,7 +92,7 @@ describe.skipIf(!localEmulator)('Firestore owner import page with PostgreSQL off
     const html = renderToStaticMarkup(await page.default());
     expect(html).toContain('Old notes');
     expect(html).toContain('ready.txt');
-    expect(workspace.list).toHaveBeenCalledWith('import');
+    expect(workspace.listPage).toHaveBeenCalledWith('import', { cursor: null, limit: 50 });
     expect(html).toContain('1 need review');
     expect(html).toContain('action="/api/import/upload"');
     expect(html).toContain('Approve all');

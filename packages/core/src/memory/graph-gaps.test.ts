@@ -74,6 +74,10 @@ async function addEntity(
       agentId,
       subjectEntityId: id,
       predicate,
+      // This fixture describes an explicitly asserted, usable source fact.
+      // The schema defaults omitted assertion qualifiers to `unverified`,
+      // which the production recall and curiosity guards correctly exclude.
+      assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
       objectEntityId: objectId,
       sourceMemoryId: memoryId,
       sourceFingerprint: `${MARKER}-${label}-${predicate}-${index}`,

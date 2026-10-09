@@ -33,8 +33,18 @@ export interface RealtimeUsage {
   inputAudioTokens: number;
   inputTextTokens: number;
   cachedInputTokens: number;
+  cachedAudioInputTokens: number;
+  cachedTextInputTokens: number;
+  cachedUnclassifiedInputTokens: number;
   outputAudioTokens: number;
   outputTextTokens: number;
+  reasoningOutputTokens: number;
+  reasoningUsageReported: boolean;
+  transcriptionInputAudioTokens: number;
+  transcriptionOutputTextTokens: number;
+  transcriptionUsageReported: boolean;
+  /** Bridge-measured input audio duration sent to a per-minute transcriber. */
+  transcriptionInputAudioMilliseconds: number;
 }
 
 export function emptyRealtimeUsage(): RealtimeUsage {
@@ -42,8 +52,17 @@ export function emptyRealtimeUsage(): RealtimeUsage {
     inputAudioTokens: 0,
     inputTextTokens: 0,
     cachedInputTokens: 0,
+    cachedAudioInputTokens: 0,
+    cachedTextInputTokens: 0,
+    cachedUnclassifiedInputTokens: 0,
     outputAudioTokens: 0,
     outputTextTokens: 0,
+    reasoningOutputTokens: 0,
+    reasoningUsageReported: false,
+    transcriptionInputAudioTokens: 0,
+    transcriptionOutputTextTokens: 0,
+    transcriptionUsageReported: false,
+    transcriptionInputAudioMilliseconds: 0,
   };
 }
 
@@ -58,6 +77,15 @@ export interface RealtimeSessionEvents {
   error(error: Error): void;
   /** The provider closed the session. */
   closed(): void;
+}
+
+/**
+ * Provider-side result of an interruption request. A provider cancellation
+ * signal does not identify which generated samples reached the listener.
+ */
+export interface RealtimeInterruptionResult {
+  providerState: 'cancelled' | 'requested' | 'unknown';
+  spokenOffset: 'estimated' | 'unknown';
 }
 
 /**
@@ -80,11 +108,11 @@ export interface RealtimeSession {
   /** Ask the model to speak now, optionally steering this one turn. */
   respond(instructions?: string): void;
   /**
-   * The caller interrupted. `unplayedMs` is how much already-sent speech had
-   * not reached the line yet, so the model's memory of what it said matches
-   * what the caller heard.
+   * The caller interrupted. `unplayedMs` is transport-derived buffered audio.
+   * The provider may not support a precise model-history truncation; callers
+   * must inspect the result and must not treat it as proof of comprehension.
    */
-  interrupt(unplayedMs: number): void;
+  interrupt(unplayedMs: number): RealtimeInterruptionResult;
   usage(): RealtimeUsage;
   close(): Promise<void>;
 }

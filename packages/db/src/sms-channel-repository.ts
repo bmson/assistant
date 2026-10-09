@@ -9,6 +9,7 @@ import {
   rateLimits,
   toolCalls,
 } from './schema.js';
+import { claimPostgresSmsUsage, settlePostgresSmsUsage } from './sms-usage-reconciliation.js';
 
 /** The SMS channel's PostgreSQL state, with the same queries the channel has always run. */
 export function createPostgresSmsChannelRepository(db: Db): SmsChannelRepository {
@@ -35,21 +36,38 @@ export function createPostgresSmsChannelRepository(db: Db): SmsChannelRepository
       return true;
     },
     async conversationForPeer(agentId, peer, trust) {
-      const [binding] = await db
-        .select()
-        .from(channelBindings)
-        .where(and(eq(channelBindings.channel, 'sms'), eq(channelBindings.externalId, peer)));
-      if (binding) return binding.conversationId;
-      const [conversation] = await db
-        .insert(conversations)
-        .values({ agentId, channel: 'sms', trust, title: `SMS ${peer}` })
-        .returning();
-      if (!conversation) throw new Error('failed to create sms conversation');
-      await db
-        .insert(channelBindings)
-        .values({ conversationId: conversation.id, channel: 'sms', externalId: peer })
-        .onConflictDoNothing();
-      return conversation.id;
+      if (!peer) throw new Error('SMS peer is required');
+      return db.transaction(async (tx) => {
+        // The binding's uniqueness is global to channel/peer, so its lock
+        // must use the same identity even when a foreign owner asks for it.
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${JSON.stringify(['sms', peer])}, 0))`,
+        );
+        const [binding] = await tx
+          .select()
+          .from(channelBindings)
+          .where(and(eq(channelBindings.channel, 'sms'), eq(channelBindings.externalId, peer)));
+        if (binding) {
+          const [conversation] = await tx
+            .select()
+            .from(conversations)
+            .where(eq(conversations.id, binding.conversationId));
+          if (!conversation || conversation.agentId !== agentId || conversation.channel !== 'sms')
+            throw new Error('SMS binding is missing or outside the owner scope');
+          return conversation.id;
+        }
+        const [conversation] = await tx
+          .insert(conversations)
+          .values({ agentId, channel: 'sms', trust, title: `SMS ${peer}` })
+          .returning();
+        if (!conversation) throw new Error('failed to create sms conversation');
+        await tx.insert(channelBindings).values({
+          conversationId: conversation.id,
+          channel: 'sms',
+          externalId: peer,
+        });
+        return conversation.id;
+      });
     },
     async finalDestination(conversationId) {
       const [conversation] = await db
@@ -81,5 +99,7 @@ export function createPostgresSmsChannelRepository(db: Db): SmsChannelRepository
         .limit(1);
       return pending?.toolName ?? null;
     },
+    claimSmsUsageReconciliation: (now, limit) => claimPostgresSmsUsage(db, now, limit),
+    settleSmsUsageReconciliation: (claim, outcome) => settlePostgresSmsUsage(db, claim, outcome),
   };
 }

@@ -60,6 +60,21 @@ describe('requestedArtifactIntent', () => {
     expect(artifactToolUnavailable(intent)).toContain('not available to this task');
   });
 
+  it.each([
+    'Do not open, just explain what a Google Doc URL looks like: URL',
+    'Don’t read this document: URL',
+    'Translate "open URL" into French',
+    'Here is a hypothetical example: URL',
+    '`URL`',
+    'Compare URL with https://docs.google.com/document/d/OtherDocument123/edit',
+  ])('does not force a read for quoted, prohibited, or ambiguous input: %s', (text) => {
+    expect(
+      requestedDocumentReadIntent(
+        text.replaceAll('URL', 'https://docs.google.com/document/d/DocumentId123/edit'),
+      ),
+    ).toBeUndefined();
+  });
+
   it('surfaces the durable Google error and never calls a failed creation complete', () => {
     const intent = requestedArtifactIntent('Create a document');
     expect(intent).toBeDefined();

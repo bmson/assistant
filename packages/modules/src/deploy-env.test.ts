@@ -24,6 +24,10 @@ import { assistantModuleMetas } from './registry.js';
  */
 describe('deploy.sh delivers every module setting', () => {
   const deploy = readFileSync(path.join(repoRoot, 'infra/gcp/deploy.sh'), 'utf8');
+  const observerEnv = readFileSync(
+    path.join(repoRoot, 'infra/gcp/email-observer-worker-env.sh'),
+    'utf8',
+  );
 
   /**
    * Keys whose value the script actually READS from the operator's env file.
@@ -36,8 +40,9 @@ describe('deploy.sh delivers every module setting', () => {
    * it is empty. A setting nothing reads from `.env` cannot be configured,
    * whatever the file says about it.
    */
+  const sourcedText = `${deploy}\n${observerEnv}`;
   const sourced = new Set(
-    [...deploy.matchAll(/\b(?:envval|mail_env_add)\s+([A-Z][A-Z0-9_]*)/g)].map(
+    [...sourcedText.matchAll(/\b(?:envval|mail_env_add)\s+([A-Z][A-Z0-9_]*)/g)].map(
       (match) => match[1] as string,
     ),
   );
@@ -117,5 +122,13 @@ describe('deploy.sh delivers every module setting', () => {
     expect(agentEnv).toContain('${MAIL_ENV}');
     // biome-ignore lint/suspicious/noTemplateCurlyInString: matching a literal shell interpolation
     expect(webEnv).toContain('${WEB_MAIL_ENV}');
+  });
+
+  it('forwards the default-off observer gate to the agent only', () => {
+    expect(observerEnv).toContain('envval EMAIL_OBSERVER_WORKER_ENABLED');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: matching a literal shell interpolation
+    expect(agentEnv).toContain('${EMAIL_OBSERVER_WORKER_ENV}');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: matching a literal shell interpolation
+    expect(webEnv).not.toContain('${EMAIL_OBSERVER_WORKER_ENV}');
   });
 });

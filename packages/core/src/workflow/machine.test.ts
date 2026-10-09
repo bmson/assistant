@@ -153,6 +153,21 @@ describe('task state machine (integration)', () => {
     expect(row?.status).toBe('done');
   });
 
+  it('preserves retry and reclaim budgets for metadata-only checkpoints', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const { task } = await track(enqueueTask(db, { event: event(), type: 'adhoc' }));
+    await db.update(tasks).set({ attempt: 7, reclaimCount: 4 }).where(eq(tasks.id, task.id));
+    const lease = await claimTask(db, task.id);
+    if (!lease) throw new Error('Missing test lease');
+    const state = taskState(lease);
+    state.plannerState = { planningRecall: { status: 'skipped' } };
+    expect(await checkpointTask(db, lease, state, { preserveFailureCounters: true })).toBe(true);
+    const [stored] = await db.select().from(tasks).where(eq(tasks.id, task.id));
+    expect(stored).toMatchObject({ attempt: 7, reclaimCount: 4 });
+    expect(stored?.state).toEqual(state);
+    expect(await recordFailedAttempt(db, lease, 'first work step failed')).toBe('dead_letter');
+  });
+
   it('clears a delivered needs-attention final before retrying saved work', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const { task } = await track(enqueueTask(db, { event: event(), type: 'adhoc' }));

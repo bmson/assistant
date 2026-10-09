@@ -1,16 +1,24 @@
 import { createHash } from 'node:crypto';
 import {
+  CardFormSubmissionSchema,
+  cardFormAdmissionActiveEventId,
+  cardFormAdmissionExternalEventId,
+  cardFormTaskAdmission,
   checksumForMigrationVersion,
   deserializeMigrationValue,
   deterministicMigrationCompare,
+  embeddingSpaceIdentityKey,
+  findCardForm,
   type MigrationBundle,
   type MigrationRecord,
   type MigrationTarget,
   PreciseMigrationTimestamp,
+  snapshotEmbeddingSpace,
   tableDefinition,
   validateMigrationBundle,
 } from '@assistant/persistence';
 import { FieldValue, Timestamp } from '@google-cloud/firestore';
+import { assertFirestoreInstallationOwner } from './installation-owner.js';
 import { decodeRecord, encodeRecord, type InstallationStore } from './store.js';
 
 export type WorkspaceImportMode = 'preview' | 'write' | 'verify';
@@ -20,9 +28,23 @@ export type WorkspaceImportResult = {
   derivedMetadata: number;
   writes: number;
   collections: Record<string, number>;
+  /** Number of deterministic destination transactions, excluding marker creation. */
+  writeBatches: number;
+  /** Largest estimated commit request, including the progress-marker update. */
+  maxBatchBytes: number;
+  /** Largest transaction write count, including the progress-marker update. */
+  maxBatchWrites: number;
   resumed?: boolean;
   verified?: boolean;
+  /** Offline preview checks the bundle, not destination ownership or readiness. */
+  destinationOwnerChecked?: boolean;
 };
+
+const MAX_DOCUMENT_ESTIMATED_BYTES = 900_000;
+// Firestore accepts at most 500 writes and a 10 MiB request. Leave room for the
+// marker update, transaction envelope, path encoding, and protobuf framing.
+const MAX_IMPORT_TRANSACTION_WRITES = 450;
+const MAX_IMPORT_TRANSACTION_BYTES = 8 * 1024 * 1024;
 
 export type WorkspaceActivationEvidence = {
   /** Operator-recorded identifier for the external PostgreSQL write fence. */
@@ -89,6 +111,118 @@ function markerFormatVersionMatches(
   return markerFormatVersion === undefined && bundleFormatVersion <= 2;
 }
 
+type MigrationWrite = { collection: string; id: string; data: FirebaseFirestore.DocumentData };
+type MigrationWriteBatch = {
+  start: number;
+  writes: MigrationWrite[];
+  estimatedBytes: number;
+};
+
+function varintBytes(value: number): number {
+  let bytes = 1;
+  for (let remaining = Math.max(0, Math.floor(value)); remaining >= 128; remaining >>>= 7) bytes++;
+  return bytes;
+}
+
+/**
+ * Conservative protobuf estimate for a Firestore field value. This is a
+ * packing estimate, not a claim about the SDK's private serializer: it counts
+ * field names, wire tags/lengths, UTF-8 payloads, and vector doubles, then the
+ * caller adds per-document path and request overhead plus a safety margin.
+ */
+function estimateValueBytes(value: unknown): number {
+  if (value === null || typeof value === 'boolean') return 16;
+  if (typeof value === 'number') return 24;
+  if (typeof value === 'string') {
+    const length = Buffer.byteLength(value, 'utf8');
+    return 8 + varintBytes(length) + length;
+  }
+  if (typeof value === 'bigint') {
+    const length = Buffer.byteLength(value.toString(), 'utf8');
+    return 16 + length;
+  }
+  if (value instanceof Date || value instanceof Timestamp) return 32;
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+    const length = value.byteLength;
+    return 8 + varintBytes(length) + length;
+  }
+  if (Array.isArray(value))
+    return 8 + value.reduce((bytes, item) => bytes + estimateValueBytes(item), 0);
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    // Admin SDK VectorValue stores its coordinates in `_values`; encode every
+    // coordinate as a tagged IEEE-754 double, even when JSON would elide it.
+    if (value.constructor?.name === 'VectorValue' && Array.isArray(record._values))
+      return 32 + record._values.length * 12;
+    // GeoPoint is a pair of doubles in the Firestore value protocol.
+    if ('_latitude' in record && '_longitude' in record) return 40;
+    return (
+      12 +
+      Object.entries(record).reduce((bytes, [key, item]) => {
+        const keyBytes = Buffer.byteLength(key, 'utf8');
+        return bytes + 8 + varintBytes(keyBytes) + keyBytes + estimateValueBytes(item);
+      }, 0)
+    );
+  }
+  // Unexpected values are rejected by shape validation; keep this conservative
+  // branch so the estimate never silently undercounts a future codec type.
+  return 1024;
+}
+
+function estimateWriteBytes(
+  write: Pick<MigrationWrite, 'collection' | 'id' | 'data'>,
+  target: MigrationTarget,
+): number {
+  const path = `projects/${target.projectId}/databases/${target.databaseId}/documents/${write.collection}/${write.id}`;
+  const pathBytes = Buffer.byteLength(path, 'utf8');
+  const payloadBytes = estimateValueBytes(write.data);
+  return Math.ceil(payloadBytes * 1.25) + pathBytes * 2 + 2048;
+}
+
+function packMigrationWrites(
+  writes: MigrationWrite[],
+  target: MigrationTarget,
+  startIndex = 0,
+): MigrationWriteBatch[] {
+  if (!Number.isSafeInteger(startIndex) || startIndex < 0 || startIndex > writes.length)
+    throw new Error('Invalid migration progress marker');
+  const batches: MigrationWriteBatch[] = [];
+  let index = startIndex;
+  while (index < writes.length) {
+    const start = index;
+    const chunk: MigrationWrite[] = [];
+    let bytes = 4096; // Commit envelope and progress-marker update.
+    while (index < writes.length && chunk.length + 1 < MAX_IMPORT_TRANSACTION_WRITES) {
+      const write = writes[index];
+      if (!write) break;
+      const size = estimateWriteBytes(write, target);
+      if (size > MAX_DOCUMENT_ESTIMATED_BYTES)
+        throw new Error(
+          `Migration document exceeds safe Firestore inline size: ${write.collection}/${write.id} (${size} estimated bytes)`,
+        );
+      if (chunk.length > 0 && bytes + size > MAX_IMPORT_TRANSACTION_BYTES) break;
+      if (bytes + size > MAX_IMPORT_TRANSACTION_BYTES)
+        throw new Error(`Migration transaction cannot safely fit ${write.collection}/${write.id}`);
+      chunk.push(write);
+      bytes += size;
+      index++;
+    }
+    if (chunk.length === 0) throw new Error('Migration write packing made no progress');
+    batches.push({ start, writes: chunk, estimatedBytes: bytes });
+  }
+  return batches;
+}
+
+function batchStatistics(batches: MigrationWriteBatch[]) {
+  return {
+    writeBatches: batches.length,
+    maxBatchBytes: Math.max(0, ...batches.map((batch) => batch.estimatedBytes)),
+    maxBatchWrites: batches.length
+      ? Math.max(...batches.map((batch) => batch.writes.length + 1))
+      : 0,
+  };
+}
+
 async function verifyDestination(
   store: InstallationStore,
   writes: Array<{ collection: string; id: string; data: FirebaseFirestore.DocumentData }>,
@@ -148,12 +282,27 @@ function scheduleNameKey(agentId: string, name: string): string {
     .digest('hex');
 }
 
+function captureBundleEmbeddingSpace(bundle: MigrationBundle): MigrationBundle {
+  const source = bundle.manifest.source;
+  const embeddingSpace = source.embeddingSpace
+    ? snapshotEmbeddingSpace(source.embeddingSpace)
+    : undefined;
+  return {
+    ...bundle,
+    manifest: {
+      ...bundle.manifest,
+      source: {
+        ...source,
+        ...(embeddingSpace ? { embeddingSpace } : {}),
+      },
+    },
+  };
+}
+
 function embeddingSpaceKey(
   space: NonNullable<MigrationBundle['manifest']['source']['embeddingSpace']>,
 ) {
-  return createHash('sha256')
-    .update(JSON.stringify([space.provider, space.model, space.dimensions, space.revision]))
-    .digest('hex');
+  return embeddingSpaceIdentityKey(space);
 }
 
 function materialize(
@@ -174,7 +323,16 @@ function materialize(
     if (!Array.isArray(values) || values.length !== space.dimensions)
       throw new Error(`Vector dimensions do not match provenance for ${record.table}/${record.id}`);
     data.embedding = FieldValue.vector(values as number[]);
-    data.embeddingSpace = embeddingSpaceKey(space);
+    if (record.table === 'memories') {
+      // A migration manifest describes the source vector shape, not proof that
+      // a legacy row was produced by this exact model revision. Preserve only
+      // the row's explicit identity; old/unknown memories stay ineligible for
+      // target-space retrieval until a completed refresh writes a new vector.
+      data.embeddingSpace =
+        typeof data.embeddingSpaceKey === 'string' ? data.embeddingSpaceKey : null;
+    } else {
+      data.embeddingSpace = embeddingSpaceKey(space);
+    }
     if (record.table === 'memories' || record.table === 'skills')
       data.retrievalRevision = record.checksum;
   }
@@ -190,8 +348,34 @@ function materialize(
       )
       .digest('hex');
   }
+  if (record.table === 'documents' && data.extractionMetadata === undefined)
+    data.extractionMetadata = null;
   if (record.table === 'conversations') data.archived = Boolean(data.archivedAt);
-  if (record.table === 'messages' && data.hiddenAt === undefined) data.hiddenAt = null;
+  if (record.table === 'messages') {
+    if (data.hiddenAt === undefined) data.hiddenAt = null;
+    // Older bundles predate client delivery receipts. Preserve the content
+    // while explicitly importing those legacy messages as unacknowledged.
+    if (data.clientId === undefined) data.clientId = null;
+    if (data.clientDeliveredAt === undefined) data.clientDeliveredAt = null;
+    if (data.clientDeliveredBy === undefined) data.clientDeliveredBy = null;
+  }
+  if (record.table === 'model_calls') {
+    if (data.runtimeRevision === undefined) data.runtimeRevision = null;
+    if (data.runtimeReleaseSha === undefined) data.runtimeReleaseSha = null;
+  }
+  if (record.table === 'memory_embedding_refreshes') {
+    const { agentId, memoryId, targetSpaceKey, sourceHash } = data;
+    if (
+      typeof agentId !== 'string' ||
+      typeof memoryId !== 'string' ||
+      typeof targetSpaceKey !== 'string' ||
+      typeof sourceHash !== 'string'
+    )
+      throw new Error(`Refresh receipt is missing its identity: ${record.id}`);
+    data.identityKey = createHash('sha256')
+      .update([agentId, memoryId, targetSpaceKey, sourceHash].join('\0'))
+      .digest('hex');
+  }
   return data;
 }
 
@@ -281,8 +465,164 @@ function assertFirestoreShape(
       assertFirestoreShape(item, destination, depth + 1, false);
 }
 
+function cardFormActiveGuardRecord(
+  taskId: string,
+  task: Record<string, unknown>,
+  bundle: MigrationBundle,
+  sourceRows: Map<string, Record<string, unknown>>,
+): { collection: string; id: string; data: Record<string, unknown> } | null {
+  const trigger = task.trigger;
+  const payload =
+    trigger && typeof trigger === 'object' && !Array.isArray(trigger)
+      ? (trigger as Record<string, unknown>).payload
+      : null;
+  const hasAdmission =
+    payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? Object.hasOwn(payload, 'cardFormAdmission')
+      : false;
+  if (!hasAdmission) return null;
+
+  const admission = cardFormTaskAdmission({ trigger } as Parameters<
+    typeof cardFormTaskAdmission
+  >[0]);
+  if (!admission) throw new Error(`Malformed card form admission task: ${taskId}`);
+  const payloadRow = payload as Record<string, unknown>;
+  const agentId = bundle.manifest.source.agentId;
+  const receiptInput = {
+    protocol: 'card-form-v1',
+    conversationId: admission.conversationId,
+    cardId: admission.cardId,
+    expectedRevisionId: admission.expectedRevisionId,
+    formId: admission.formId,
+    operationId: admission.operationId,
+    values: {},
+    ownerMessageText: payloadRow.text,
+  };
+  const receiptShape = CardFormSubmissionSchema.safeParse(receiptInput);
+  const taskIdShape = CardFormSubmissionSchema.safeParse({ ...receiptInput, operationId: taskId });
+  const ownerIdShape = CardFormSubmissionSchema.safeParse({ ...receiptInput, cardId: agentId });
+  const messageIdShape = CardFormSubmissionSchema.safeParse({
+    ...receiptInput,
+    operationId: admission.messageId,
+  });
+  if (
+    !receiptShape.success ||
+    !taskIdShape.success ||
+    !ownerIdShape.success ||
+    !messageIdShape.success ||
+    receiptShape.data.conversationId !== admission.conversationId ||
+    receiptShape.data.cardId !== admission.cardId ||
+    receiptShape.data.expectedRevisionId !== admission.expectedRevisionId ||
+    receiptShape.data.operationId !== admission.operationId ||
+    receiptShape.data.ownerMessageText !== payloadRow.text ||
+    taskIdShape.data.operationId !== taskId ||
+    ownerIdShape.data.cardId !== agentId ||
+    messageIdShape.data.operationId !== admission.messageId ||
+    typeof task.status !== 'string'
+  )
+    throw new Error(`Card form task receipt identity is malformed: ${taskId}`);
+  if (
+    task.id !== taskId ||
+    task.agentId !== agentId ||
+    task.type !== 'chat_turn' ||
+    task.trust !== 'owner' ||
+    task.conversationId !== admission.conversationId ||
+    task.externalEventId !==
+      cardFormAdmissionExternalEventId({
+        agentId,
+        operationId: admission.operationId,
+      }) ||
+    !trigger ||
+    typeof trigger !== 'object' ||
+    Array.isArray(trigger) ||
+    (trigger as Record<string, unknown>).source !== 'chat' ||
+    (trigger as Record<string, unknown>).agentId !== agentId ||
+    (trigger as Record<string, unknown>).conversationId !== admission.conversationId ||
+    (trigger as Record<string, unknown>).trust !== 'owner' ||
+    typeof payloadRow.text !== 'string' ||
+    !payloadRow.text.trim() ||
+    payloadRow.clientOperationId !== admission.operationId ||
+    payloadRow.triggerMessageId !== admission.messageId ||
+    !payloadRow.chatAdmission ||
+    typeof payloadRow.chatAdmission !== 'object' ||
+    Array.isArray(payloadRow.chatAdmission) ||
+    (payloadRow.chatAdmission as Record<string, unknown>).protocol !== 'owner-chat-v1' ||
+    (payloadRow.chatAdmission as Record<string, unknown>).clientOperationId !==
+      admission.operationId ||
+    (payloadRow.chatAdmission as Record<string, unknown>).requestHash !== admission.payloadDigest ||
+    (payloadRow.chatAdmission as Record<string, unknown>).triggerMessageId !== admission.messageId
+  )
+    throw new Error(`Card form task owner or operation binding mismatch: ${taskId}`);
+
+  const conversation = sourceRows.get(`conversations:${admission.conversationId}`);
+  const card = sourceRows.get(`generated_cards:${admission.cardId}`);
+  const revision = sourceRows.get(`generated_card_revisions:${admission.expectedRevisionId}`);
+  const message = sourceRows.get(`messages:${admission.messageId}`);
+  if (
+    !conversation ||
+    conversation.id !== admission.conversationId ||
+    conversation.agentId !== agentId ||
+    conversation.channel !== 'chat' ||
+    conversation.trust !== 'owner' ||
+    !card ||
+    card.id !== admission.cardId ||
+    card.agentId !== agentId ||
+    card.conversationId !== admission.conversationId ||
+    !revision ||
+    revision.id !== admission.expectedRevisionId ||
+    revision.cardId !== admission.cardId ||
+    !findCardForm(revision.spec, admission.formId) ||
+    !message ||
+    message.id !== admission.messageId ||
+    message.taskId !== taskId ||
+    message.conversationId !== admission.conversationId ||
+    message.role !== 'user' ||
+    message.origin !== 'owner' ||
+    message.text !== payloadRow.text
+  )
+    throw new Error(`Card form task record binding mismatch: ${taskId}`);
+
+  if (['done', 'failed', 'cancelled'].includes(task.status)) return null;
+  const externalEventId = cardFormAdmissionActiveEventId({
+    agentId,
+    cardId: admission.cardId,
+    formId: admission.formId,
+  });
+  return {
+    collection: 'taskEventKeys',
+    id: createHash('sha256').update(externalEventId).digest('hex'),
+    data: {
+      taskId,
+      agentId,
+      cardId: admission.cardId,
+      formId: admission.formId,
+      operationId: admission.operationId,
+      updatedAt: task.updatedAt ?? task.createdAt ?? null,
+    },
+  };
+}
+
 function derivedRecords(bundle: MigrationBundle, target: MigrationTarget) {
   const rows: Array<{ collection: string; id: string; data: Record<string, unknown> }> = [];
+  const sourceRows = new Map(
+    bundle.records
+      .filter((record) =>
+        [
+          'agents',
+          'conversations',
+          'generated_cards',
+          'generated_card_revisions',
+          'messages',
+        ].includes(record.table),
+      )
+      .map(
+        (record) =>
+          [
+            `${record.table}:${record.id}`,
+            materialize(record, bundle.manifest.source.embeddingSpace),
+          ] as const,
+      ),
+  );
   const approvals = bundle.records
     .filter((record) => record.table === 'approvals')
     .map((record) => materialize(record, bundle.manifest.source.embeddingSpace));
@@ -339,6 +679,8 @@ function derivedRecords(bundle: MigrationBundle, target: MigrationTarget) {
         id: createHash('sha256').update(data.externalEventId).digest('hex'),
         data: { taskId: record.id, createdAt: data.createdAt },
       });
+    const activeGuard = cardFormActiveGuardRecord(record.id, data, bundle, sourceRows);
+    if (activeGuard) rows.push(activeGuard);
   }
   for (const record of bundle.records.filter((candidate) => candidate.table === 'tool_calls')) {
     const data = materialize(record, bundle.manifest.source.embeddingSpace);
@@ -478,6 +820,7 @@ export async function importWorkspaceBundle(
     failAfterBatches?: number;
   },
 ): Promise<WorkspaceImportResult> {
+  bundle = captureBundleEmbeddingSpace(bundle);
   validateMigrationBundle(bundle, options);
   const recordCompare =
     bundle.manifest.formatVersion >= 3
@@ -498,7 +841,7 @@ export async function importWorkspaceBundle(
   const dataDerived = derived.filter(
     (record) => !(record.collection === 'coordination' && record.id === 'migration'),
   );
-  const writes = [
+  const writes: MigrationWrite[] = [
     ...records.map((record) => ({
       collection: record.collection,
       id: record.id,
@@ -521,17 +864,9 @@ export async function importWorkspaceBundle(
     if (writeKeys.has(key)) throw new Error(`Migration produces duplicate destination: ${key}`);
     writeKeys.add(key);
     assertFirestoreShape(write.data, `${write.collection}/${write.id}`);
-    const estimatedBytes = Buffer.byteLength(
-      JSON.stringify(write.data, (_key, value) =>
-        typeof value === 'bigint' ? { $bigint: value.toString() } : value,
-      ),
-      'utf8',
-    );
-    if (estimatedBytes > 900_000)
-      throw new Error(
-        `Migration document exceeds safe Firestore inline size: ${write.collection}/${write.id} (${estimatedBytes} bytes)`,
-      );
   }
+  const previewBatches = packMigrationWrites(writes, options.target);
+  const previewStats = batchStatistics(previewBatches);
   const expectedChecksums = new Map(
     writes.map((write) => [
       `${write.collection}:${write.id}`,
@@ -555,6 +890,8 @@ export async function importWorkspaceBundle(
       derivedMetadata: derived.length,
       writes: writes.length + 1,
       collections,
+      destinationOwnerChecked: false,
+      ...previewStats,
     };
   if (store.installationId !== options.target.installationId)
     throw new Error('Firestore installation identity does not match migration target');
@@ -562,6 +899,7 @@ export async function importWorkspaceBundle(
     throw new Error('Firestore project identity does not match migration target');
   if (store.databaseId !== options.target.databaseId)
     throw new Error('Firestore database identity does not match migration target');
+  await assertFirestoreInstallationOwner(store, options.sourceAgentId, true);
   const marker = store.doc('coordination', 'migration');
   const markerSnapshot = await marker.get();
   const markerData = markerSnapshot.exists ? markerSnapshot.data() : undefined;
@@ -573,7 +911,9 @@ export async function importWorkspaceBundle(
       derivedMetadata: derived.length,
       writes: writes.length + 1,
       collections,
+      ...previewStats,
       verified: true,
+      destinationOwnerChecked: true,
     };
   }
   const markerIdentity = {
@@ -651,9 +991,10 @@ export async function importWorkspaceBundle(
         throw new Error('Destination contains an unexpected migration record');
     }
   }
+  const writeBatches = packMigrationWrites(writes, options.target, completed);
   let batchCount = 0;
-  for (let index = completed; index < writes.length; index += 450) {
-    const chunk = writes.slice(index, Math.min(index + 450, writes.length));
+  for (const batch of writeBatches) {
+    const { start: index, writes: chunk } = batch;
     await store.db.runTransaction(async (tx) => {
       const current = await tx.get(marker);
       if (
@@ -685,8 +1026,10 @@ export async function importWorkspaceBundle(
     derivedMetadata: derived.length,
     writes: writes.length + 1,
     collections,
+    ...batchStatistics(writeBatches),
     resumed,
     verified: true,
+    destinationOwnerChecked: true,
   };
 }
 
@@ -706,6 +1049,7 @@ export async function activateWorkspaceBundle(
     snapshotBytes: Uint8Array;
   },
 ): Promise<WorkspaceActivationResult> {
+  bundle = captureBundleEmbeddingSpace(bundle);
   validateMigrationBundle(bundle, { sourceAgentId: input.sourceAgentId, target: input.target });
   if (
     bundle.manifest.formatVersion !== 3 ||
@@ -719,6 +1063,7 @@ export async function activateWorkspaceBundle(
     throw new Error('Firestore project identity does not match migration target');
   if (store.databaseId !== input.target.databaseId)
     throw new Error('Firestore database identity does not match migration target');
+  await assertFirestoreInstallationOwner(store, input.sourceAgentId);
 
   const { evidence } = input;
   const drainedAt = new Date(evidence.sourceWritesDrainedAt);

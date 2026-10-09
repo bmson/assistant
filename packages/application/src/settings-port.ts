@@ -21,7 +21,7 @@ export interface SettingsOverview {
   reminders: Array<{
     id: string;
     text: string;
-    kind: 'once' | 'recurring';
+    kind: 'once' | 'recurring' | 'event_completion';
     status: 'scheduled' | 'delivering';
     nextRunAt: Date | null;
   }>;

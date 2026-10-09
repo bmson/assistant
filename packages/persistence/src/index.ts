@@ -1,35 +1,67 @@
 export * from './active-jobs.js';
 export * from './anomaly-scan.js';
 export * from './application-chat.js';
+export * from './application-confirmation-ambiguous.js';
+export * from './application-confirmation-notice.js';
 export * from './application-confirmations.js';
+export * from './approval-authority.js';
 export * from './approval-policies.js';
 export * from './approvals.js';
+export * from './arrival-observation.js';
 export * from './assistant-health.js';
 export * from './audit-investigation.js';
 export * from './briefing.js';
 export * from './budget-caps.js';
 export * from './builtin-tools.js';
+export { type CalendarOccurrenceIdentity, sameCalendarOccurrence } from './calendar-occurrence.js';
 export * from './call-sessions.js';
+export * from './card-form.js';
+export * from './card-form-admission.js';
 export * from './card-refresh.js';
+export * from './chat-admission.js';
 export * from './code-jobs.js';
 export * from './commitment-maintenance.js';
+export * from './consolidation-temporal.js';
 export * from './contact-names.js';
 export * from './contracts.js';
 export * from './conversation-segmentation.js';
 export * from './cost-evidence.js';
 export * from './cost-policy.js';
+export {
+  curiosityDeliveryKey,
+  curiosityMessageId,
+  curiosityNudgeChannel,
+  curiosityNudgePingId,
+  notificationOutboxLegId,
+  pushDeviceKey,
+} from './curiosity-identity.js';
 export * from './device-tokens.js';
 export * from './dispatch.js';
 export * from './document-catalog.js';
 export * from './document-deletion.js';
+export * from './document-extraction-metadata.js';
+export {
+  baseMime,
+  type DocumentExtractor,
+  type DocumentSource,
+  type DocumentTrust,
+  extractorFor,
+} from './document-types.js';
 export * from './dream.js';
+export * from './email-attachment-custody.js';
+export * from './email-booking.js';
 export * from './email-extraction.js';
+export * from './email-observer-identity.js';
+export * from './email-observer-validation.js';
 export * from './email-sync.js';
 export * from './embedding.js';
+export * from './exact-timestamp.js';
 export * from './execution.js';
 export * from './execution-context.js';
 export * from './execution-evidence.js';
 export * from './execution-jobs.js';
+export * from './external-effect.js';
+export * from './final-channel-delivery.js';
 export * from './generated-cards.js';
 export * from './goals.js';
 export * from './graph-curiosity.js';
@@ -38,12 +70,14 @@ export * from './graph-recall.js';
 export * from './history-recall.js';
 export * from './import-jobs.js';
 export * from './import-overview.js';
+export * from './knowledge-assertions.js';
 export * from './knowledge-graph-curation.js';
 export * from './knowledge-graph-sync.js';
 export * from './knowledge-workspace.js';
 export * from './location-pings.js';
 export * from './maintenance.js';
 export * from './memory-consolidation.js';
+export * from './memory-embedding-refresh.js';
 export * from './memory-extraction.js';
 export * from './memory-supersede.js';
 export * from './memory-tools.js';
@@ -51,6 +85,8 @@ export * from './migration.js';
 export * from './missions.js';
 export * from './model-routing.js';
 export * from './money.js';
+export * from './notification-delivery.js';
+export * from './notification-outbox.js';
 export * from './notifications.js';
 export * from './nudge-policy.js';
 export * from './owner-card-compilation.js';
@@ -69,26 +105,35 @@ export * from './profile-people-read.js';
 export * from './pulse.js';
 export * from './recall-feedback.js';
 export * from './recall-metrics.js';
+export * from './recall-surfacing.js';
 export * from './records.js';
 export * from './reminders.js';
 export { repairPathBlocked } from './repair-guard.js';
+export * from './repair-outcome.js';
 export * from './schedules.js';
+export * from './security-incidents.js';
 export * from './self-improvement.js';
 export * from './self-maintenance.js';
 export * from './self-repair.js';
 export * from './settings.js';
 export * from './shell-presence.js';
 export * from './shell-status.js';
+export type { SituationDecisionContext } from './situations-schema.js';
 export * from './skill-context.js';
 export * from './skill-library.js';
 export * from './skill-mutations.js';
 export * from './skill-reflection.js';
 export * from './sms-channel.js';
+export * from './sms-segments.js';
 export * from './suggestions.js';
 export * from './task-activity.js';
 export * from './task-activity-commands.js';
+export { normalizeTaskBudget, storedTaskBudgetToMicros } from './task-budget.js';
 export * from './task-creation.js';
+export * from './task-discovery.js';
 export * from './task-lifecycle.js';
+export * from './task-timeline.js';
+export * from './tool-call-receipts.js';
 export * from './voice-context.js';
 export * from './voice-profile.js';
 export * from './voice-purge.js';

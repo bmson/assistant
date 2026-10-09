@@ -18,7 +18,15 @@ import { useEffect } from 'react';
  */
 const MAX_INTERVAL_MS = 120_000;
 
-export function AutoRefresh({ intervalMs = 12_000 }: { intervalMs?: number }) {
+export function AutoRefresh({
+  intervalMs = 12_000,
+  maxIntervalMs = MAX_INTERVAL_MS,
+  refreshWhileEditing = false,
+}: {
+  intervalMs?: number;
+  maxIntervalMs?: number;
+  refreshWhileEditing?: boolean;
+}) {
   const router = useRouter();
   useEffect(() => {
     let timer = 0;
@@ -32,13 +40,17 @@ export function AutoRefresh({ intervalMs = 12_000 }: { intervalMs?: number }) {
       // Don't refresh while the owner is filling in or submitting a form.
       const busy =
         document.visibilityState !== 'visible' ||
-        document.querySelector('form [aria-busy="true"]') !== null ||
-        document.activeElement?.tagName === 'INPUT' ||
-        document.activeElement?.tagName === 'TEXTAREA';
+        (!refreshWhileEditing &&
+          (document.querySelector('form [aria-busy="true"]') !== null ||
+            document.activeElement?.tagName === 'INPUT' ||
+            document.activeElement?.tagName === 'TEXTAREA'));
       if (!busy) {
         const current = document.querySelector('main')?.textContent ?? '';
         // Measured before the refresh, so it reflects what the LAST one did.
-        wait = current === previous ? Math.min(wait * 2, MAX_INTERVAL_MS) : intervalMs;
+        wait =
+          current === previous
+            ? Math.min(wait * 2, Math.max(intervalMs, maxIntervalMs))
+            : intervalMs;
         previous = current;
         router.refresh();
       }
@@ -52,13 +64,13 @@ export function AutoRefresh({ intervalMs = 12_000 }: { intervalMs?: number }) {
       if (document.visibilityState !== 'visible') return;
       wait = intervalMs;
       window.clearTimeout(timer);
-      timer = window.setTimeout(tick, wait);
+      timer = window.setTimeout(tick, 0);
     };
     document.addEventListener('visibilitychange', onVisible);
     return () => {
       window.clearTimeout(timer);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [router, intervalMs]);
+  }, [router, intervalMs, maxIntervalMs, refreshWhileEditing]);
   return null;
 }

@@ -1,11 +1,13 @@
 import { decideSuggestion, snoozeSuggestionUntil } from '@assistant/application/suggestions';
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import { FirestoreSuggestionDecisionRepository } from '@assistant/firestore';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getDb, getFirestoreInstallationStore } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
 export const dynamic = 'force-dynamic';
 
+const LEGACY_WATCH_ID_RE = /^watch-suggestion:[0-9a-f]{64}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
@@ -21,10 +23,17 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ): Promise<Response> {
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
+  const mutationBody = await readMobileMutationBody(request, ['decision']);
+  if (!mutationBody.ok) return mutationBody.response;
   const { id } = await params;
-  if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid suggestion id' }, { status: 400 });
+  const config = loadConfig();
+  if (
+    !UUID_RE.test(id) &&
+    !(config.PERSISTENCE_DRIVER === 'firestore' && LEGACY_WATCH_ID_RE.test(id))
+  )
+    return mobileJson({ error: 'invalid suggestion id' }, { status: 400 });
 
-  const body = (await request.json().catch(() => null)) as { decision?: unknown } | null;
+  const body = mutationBody.value as { decision?: unknown } | null;
   const decision = body?.decision;
   if (decision !== 'accepted' && decision !== 'dismissed' && decision !== 'snoozed') {
     return mobileJson(
@@ -33,7 +42,6 @@ export async function POST(
     );
   }
 
-  const config = loadConfig();
   if (config.PERSISTENCE_DRIVER === 'firestore') {
     const problems = validateAgentPersistenceConfig(config);
     if (problems.length) return mobileJson({ error: problems.join('; ') }, { status: 503 });

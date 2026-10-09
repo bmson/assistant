@@ -12,7 +12,12 @@ export type BrowserCallbackOutcome = JobCallbackOutcome;
  */
 export async function recordBrowserJobResult(
   store: Db | ExecutionJobRepository,
-  input: { taskId: string; token: string; result: Record<string, unknown> },
+  input: {
+    taskId: string;
+    token: string;
+    result: Record<string, unknown>;
+    idempotencyKey?: string;
+  },
 ): Promise<BrowserCallbackOutcome> {
   // Inventory the job's Workspace artifacts (screenshots + trace) in `files`.
   const screenshots = Array.isArray(input.result.screenshots)

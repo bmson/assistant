@@ -4,7 +4,14 @@ import {
   type Db,
   type TaskRow,
 } from '@assistant/db';
-import type { MessageRepository } from '@assistant/persistence';
+import {
+  hasEffectiveNotificationDelivery,
+  type MessageRepository,
+  type NotificationDeliveryResult,
+  notificationDeliveryKey,
+  notificationLeg,
+  notificationLegEntry,
+} from '@assistant/persistence';
 import { persistMessage } from '../../chat.js';
 import { compactChatMessageParts } from '../../chat-card.js';
 import { markAttentionNotified } from '../machine.js';
@@ -39,18 +46,19 @@ export async function notifyOwnerOfDeliveredAnswer(
   if (!deps.notifyOwner) return false;
   const body = text.trim();
   if (!body) return false;
-  return deps
+  const result = await deps
     .notifyOwner({
+      deliveryKey: notificationDeliveryKey('task-answer', task.id),
       taskId: task.id,
       conversationId: task.conversationId,
       text: body,
       urgency: 'ambient',
     })
-    .then(() => true)
     .catch((err) => {
       console.error('answer-ready notification failed', err);
-      return false;
+      return undefined;
     });
+  return hasEffectiveNotificationDelivery(result);
 }
 
 /**
@@ -189,16 +197,27 @@ export async function notifyOwnerAndConversation(
   text: string,
   extraParts: unknown[] = [],
   kind: NoticeKind = 'needs-attention',
-): Promise<{ conversationNotified: boolean; ownerNotified: boolean }> {
+): Promise<{
+  conversationNotified: boolean;
+  ownerNotified: boolean;
+  legs: NotificationDeliveryResult['legs'];
+}> {
   // Work the assistant started on its own — a scheduled brief, a nightly job —
   // has no thread of its own and nobody waiting on it. When it stalls, that is
   // a line in the Notifications log and a row in Activity, not a message in the
   // owner's conversation and not a buzz on their phone. They did not ask for it,
   // so its trouble is not theirs to be interrupted by.
   if (isBackgroundTask(task)) {
+    const conversationNotified = await postBackgroundNotice(deps, task, text, extraParts, kind);
     return {
-      conversationNotified: await postBackgroundNotice(deps, task, text, extraParts, kind),
+      conversationNotified,
       ownerNotified: false,
+      legs: [
+        notificationLegEntry(
+          'notifications-conversation',
+          conversationNotified ? 'delivered' : 'failed',
+        ),
+      ],
     };
   }
   // Every caller of this is an event the owner has to resolve — a permanent
@@ -210,17 +229,33 @@ export async function notifyOwnerAndConversation(
     text,
     noticeParts(kind, extraParts),
   );
-  let ownerNotified = false;
+  let ownerDelivery: NotificationDeliveryResult = notificationLeg(
+    'owner',
+    'skipped',
+    'no-notifier',
+  );
   if (deps.notifyOwner) {
-    ownerNotified = await deps
-      .notifyOwner({ taskId: task.id, conversationId: task.conversationId, text })
-      .then(() => true)
+    const result = await deps
+      .notifyOwner({
+        deliveryKey: notificationDeliveryKey('task-attention', task.id, kind),
+        taskId: task.id,
+        conversationId: task.conversationId,
+        text,
+      })
       .catch((err) => {
         console.error('owner notification failed', err);
-        return false;
+        return notificationLeg('owner', 'failed', 'notifier-threw');
       });
+    ownerDelivery = result ?? notificationLeg('owner', 'skipped', 'legacy-no-result');
   }
-  return { conversationNotified, ownerNotified };
+  return {
+    conversationNotified,
+    ownerNotified: hasEffectiveNotificationDelivery(ownerDelivery),
+    legs: [
+      notificationLegEntry('task-conversation', conversationNotified ? 'delivered' : 'failed'),
+      ...ownerDelivery.legs,
+    ],
+  };
 }
 
 /**

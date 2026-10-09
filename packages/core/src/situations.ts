@@ -8,6 +8,7 @@ import {
   situationPreviews,
 } from '@assistant/db';
 import { and, desc, eq, gt, isNull, or } from 'drizzle-orm';
+import { isSensitiveCardFact, publicCardText } from './card-privacy.js';
 import { GenerativeCardSpecV1Schema } from './generative-card.js';
 import {
   affectedItems,
@@ -17,7 +18,9 @@ import {
   type PackItem,
   PackItemSchema,
   type PackSnapshot,
+  type SituationDecisionContext,
   type SituationPackView,
+  selectSituationDecisionContext,
   validatePack,
 } from './situations-schema.js';
 
@@ -56,14 +59,19 @@ async function snapshot(
         ),
       );
     const parsed = GenerativeCardSpecV1Schema.safeParse(revision?.spec);
+    const privateValues = parsed.success
+      ? parsed.data.facts.filter(isSensitiveCardFact).map((fact) => fact.value)
+      : [];
     return {
       revision: card.currentRevisionId,
       state: card.expiresAt && card.expiresAt <= new Date() ? 'expired' : card.status,
-      title: parsed.success ? parsed.data.title : 'Saved card',
+      title: parsed.success
+        ? (publicCardText(parsed.data.title, privateValues) ?? 'Saved card')
+        : 'Saved card',
       // Secret/booking-code values must never leak through a planning snapshot.
       details: parsed.success
         ? parsed.data.facts
-            .filter((fact) => !fact.sensitive)
+            .filter((fact) => !isSensitiveCardFact(fact))
             .map((fact) => `${fact.label ?? fact.id}: ${fact.value}`)
             .join('\n')
             .slice(0, 4000)
@@ -478,4 +486,31 @@ export async function recallSituationDecisions(
     if (!latest.has(key)) latest.set(key, decision);
   }
   return [...latest.values()].slice(0, 12);
+}
+
+/** Owner-scoped, read-only context projection used before ordinary chat planning. */
+export async function recallSituationDecisionContext(
+  db: Db,
+  agentId: string,
+  discussionFrame: string,
+  limit = 12,
+): Promise<SituationDecisionContext[]> {
+  const rows = await db
+    .select({
+      id: situationPacks.id,
+      title: situationPacks.title,
+      version: situationPacks.version,
+      archived: situationPacks.archived,
+      updatedAt: situationPacks.updatedAt,
+      data: situationPacks.data,
+    })
+    .from(situationPacks)
+    .where(and(eq(situationPacks.agentId, agentId), eq(situationPacks.archived, false)))
+    .orderBy(desc(situationPacks.updatedAt))
+    .limit(50);
+  return selectSituationDecisionContext(
+    rows.map((row) => ({ ...row, updatedAt: row.updatedAt.toISOString() })),
+    discussionFrame,
+    limit,
+  );
 }

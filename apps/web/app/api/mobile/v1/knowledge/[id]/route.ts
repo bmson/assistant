@@ -6,9 +6,14 @@ import {
   renameKnowledgeGraphEntity,
   retypeKnowledgeGraphEntity,
 } from '@assistant/application';
-import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
+import {
+  loadConfig,
+  parseFirestoreEmbeddingSpace,
+  validateAgentPersistenceConfig,
+} from '@assistant/config';
 import { getFirestoreKnowledgeGraphOverview } from '@assistant/firestore';
 import { getFirestoreKnowledgeCuration } from '@/lib/firestore-knowledge';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getDb, getFirestoreInstallationStore } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -34,6 +39,7 @@ export async function GET(
       { entityId: id },
       undefined,
       config.GRAPH_SYNC_BATCH_LIMIT,
+      parseFirestoreEmbeddingSpace(config.FIRESTORE_EMBEDDING_SPACE),
     );
     return graph.selected
       ? mobileJson({
@@ -62,9 +68,16 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> },
 ): Promise<Response> {
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
+  const mutationBody = await readMobileMutationBody(request, [
+    'action',
+    'kind',
+    'label',
+    'targetId',
+  ]);
+  if (!mutationBody.ok) return mutationBody.response;
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid knowledge item id' }, { status: 400 });
-  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+  const body = mutationBody.value as Record<string, unknown> | null;
   const action = body?.action;
   const curation =
     loadConfig().PERSISTENCE_DRIVER === 'firestore' ? getFirestoreKnowledgeCuration() : null;

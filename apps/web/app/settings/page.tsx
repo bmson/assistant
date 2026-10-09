@@ -4,7 +4,7 @@ import { headers } from 'next/headers';
 import Link from 'next/link';
 import { SecurityClient } from '@/app/security/security-client';
 import { authMode, requireOwner } from '@/auth';
-import { getMobileAccessToken } from '@/lib/mobile-access-token';
+import { getMobileAccessToken, hasMobileTokenRotationCapability } from '@/lib/mobile-access-token';
 import { btn, Card, PageHeader, PageShell, SectionHeading } from '@/lib/ui';
 import { MobileTokenPanel } from './mobile-token';
 
@@ -49,7 +49,7 @@ export default async function SettingsPage() {
             <MobileTokenPanel
               maskedToken={token ? `${token.slice(0, 6)}…${token.slice(-4)}` : null}
               serverUrl={serverUrl}
-              canRotate={existsSync(envFile) || Boolean(config.GCP_PROJECT)}
+              canRotate={existsSync(envFile) || hasMobileTokenRotationCapability(config)}
             />
           </Card>
         </section>

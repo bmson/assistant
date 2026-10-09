@@ -6,6 +6,7 @@ import {
   type CostEvidence,
   type CostEvidenceTotal,
   costBasis,
+  normalizeBudgetCaps,
 } from '@assistant/persistence';
 import { desc, eq, gte, sql, sum } from 'drizzle-orm';
 
@@ -134,32 +135,30 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
   };
 }
 
-/** Update only valid positive caps; blank or invalid fields leave a scope unchanged. */
-function validBudgetCaps(values: Partial<Record<'task_default' | 'daily' | 'monthly', string>>) {
-  const caps: Partial<Record<'task_default' | 'daily' | 'monthly', string>> = {};
-  for (const scope of ['task_default', 'daily', 'monthly'] as const) {
-    const value = Number.parseFloat(values[scope]?.trim() ?? '');
-    if (Number.isFinite(value) && value > 0 && value <= 10_000) caps[scope] = value.toFixed(2);
-  }
-  return caps;
-}
+export { type BudgetCaps, normalizeBudgetCaps } from '@assistant/persistence';
 
 export function updateBudgetCapsWithRepository(
   repository: BudgetCapsRepository,
   agentId: string,
   values: Partial<Record<'task_default' | 'daily' | 'monthly', string>>,
 ): Promise<void> {
-  return repository.update(agentId, validBudgetCaps(values));
+  const normalized = normalizeBudgetCaps(values);
+  if (normalized.error) throw new Error(normalized.error);
+  return repository.update(agentId, normalized.caps ?? {});
 }
 
 export async function updateBudgetCaps(
   db: Db,
   values: Partial<Record<'task_default' | 'daily' | 'monthly', string>>,
 ): Promise<void> {
-  for (const [scope, limitUsd] of Object.entries(validBudgetCaps(values))) {
-    await db
-      .update(budgets)
-      .set({ limitUsd, updatedAt: sql`now()` })
-      .where(eq(budgets.scope, scope));
-  }
+  const normalized = normalizeBudgetCaps(values);
+  if (normalized.error) throw new Error(normalized.error);
+  await db.transaction(async (tx) => {
+    for (const [scope, limitUsd] of Object.entries(normalized.caps ?? {})) {
+      await tx
+        .update(budgets)
+        .set({ limitUsd, updatedAt: sql`now()` })
+        .where(eq(budgets.scope, scope));
+    }
+  });
 }

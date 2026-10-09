@@ -421,7 +421,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         nextAction: 'check rates',
         externalEventId: `mission:source:${source.id}`,
       });
-      expect((await messagesIn(origin)).at(-1)?.text).toContain('Started a mission for this');
+      expect((await messagesIn(origin)).at(-1)?.text).toContain('Started a mission (id ');
 
       // First wake: no reflection is due, so a bounded session child spawns.
       expect(await executeTask(deps, mission.id)).toEqual({
@@ -435,6 +435,15 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect(sessions.size).toBe(1);
       const session = sessions.docs[0]?.data() as Task;
       expect(session).toMatchObject({ type: 'adhoc', status: 'pending', budgetUsdLimit: '0.2500' });
+      expect(session.goalId).toBe(goalId);
+      expect(session.parentTaskId).toBe(mission.id);
+      const sessionPayload = (
+        session.trigger as { payload?: { instruction?: string; missionId?: string } }
+      ).payload;
+      expect(sessionPayload?.missionId).toBe(mission.id);
+      expect(sessionPayload?.instruction).toContain(`mission ${mission.id}`);
+      expect(sessionPayload?.instruction).toContain(`goal ${goalId}`);
+      expect(sessionPayload?.instruction).toContain('Watch mortgage rates');
       expect((await readTask(mission.id)).status).toBe('sleeping');
 
       // A wake while that session is still in flight never spawns a second one.

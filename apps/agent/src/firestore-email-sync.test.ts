@@ -2,11 +2,17 @@ import { randomUUID } from 'node:crypto';
 import type { Config } from '@assistant/config';
 import { createFirestoreExecutionPersistence } from '@assistant/firestore';
 import type { EmailSyncDeps } from '@assistant/modules';
-import type { ExecutionPersistence } from '@assistant/persistence';
+import type {
+  EmailSyncLease,
+  EmailSyncRepository,
+  ExecutionPersistence,
+} from '@assistant/persistence';
 import type { GoogleClient } from '@assistant/tools/modules/google';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InstallationStore } from '../../../packages/firestore/src/store.js';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
+import { drainEmailObservers } from '../../../packages/modules/src/email-observers.js';
+import { googleDurableEmailObservers } from '../../../packages/modules/src/google/durable-email-observers.js';
 import { syncMailboxWithDistributedLock } from '../../../packages/modules/src/google/email-sync.js';
 
 const SPACE = { provider: 'synthetic', model: 'mail-fixture', dimensions: 1536, revision: '1' };
@@ -110,18 +116,25 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
     }
 
     function deps(overrides: Partial<Config> = {}): EmailSyncDeps {
+      const googleClient = gmail();
+      const config = {
+        ASSISTANT_MODULES: ['google'],
+        GMAIL_SYNC_ENABLED: 'true',
+        EMAIL_OBSERVER_WORKER_ENABLED: true,
+        EMAIL_INGEST_MODE: 'direct',
+        EMAIL_INGEST_IMPORTANCE_THRESHOLD: 3,
+        EMAIL_INGEST_NOTIFY_THRESHOLD: 5,
+        EMAIL_INGEST_MAX_TRIAGE_PER_DAY: 40,
+        EMAIL_OBSERVER_MAX_PAID_PER_DAY: 20,
+        PROACTIVE_CARDS_ENABLED: false,
+        GENERATIVE_CARDS_ENABLED: false,
+        ...overrides,
+      } as Config;
       return {
-        config: {
-          ASSISTANT_MODULES: ['google'],
-          EMAIL_INGEST_MODE: 'direct',
-          EMAIL_INGEST_IMPORTANCE_THRESHOLD: 3,
-          EMAIL_INGEST_NOTIFY_THRESHOLD: 5,
-          EMAIL_INGEST_MAX_TRIAGE_PER_DAY: 40,
-          PROACTIVE_CARDS_ENABLED: false,
-          ...overrides,
-        } as Config,
+        config,
         persistence,
         router: {
+          embeddingSpace: async () => SPACE,
           object: async (_role: string, input: { prompt: string }) => {
             scored.push(input.prompt.slice(0, 40));
             return {
@@ -138,10 +151,37 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           embed: async (texts: string[]) => texts.map(() => vector()),
         } as unknown as EmailSyncDeps['router'],
         workspace: {} as EmailSyncDeps['workspace'],
-        googleClient: gmail(),
+        googleClient,
         notifyOwner: async () => {},
         observeInboundEmail: async () => {},
+        durableEmailObservers: googleDurableEmailObservers(googleClient),
       };
+    }
+
+    async function drainObservers(emailDeps: EmailSyncDeps) {
+      const result = await drainEmailObservers(
+        {
+          ...emailDeps,
+          registry: {} as never,
+          dispatcher: {} as never,
+          ownerNotifier: {
+            notifyOwner: async () => ({ legs: [] }),
+            notifyApprovals: async () => {},
+          },
+          emailObservers: [],
+          durableEmailObservers: emailDeps.durableEmailObservers ?? [],
+        } as never,
+        agentId,
+        {
+          limit: 20,
+          shouldContinue: () =>
+            emailDeps.config.EMAIL_OBSERVER_WORKER_ENABLED === true &&
+            emailDeps.config.GMAIL_SYNC_ENABLED === 'true',
+        },
+      );
+      expect(result.unknown).toBe(0);
+      expect(result.failed).toBe(0);
+      return result;
     }
 
     function arrive(message: Omit<FakeMessage, 'threadId'> & { threadId?: string }) {
@@ -154,8 +194,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       return (await persistence.emailSync?.syncState(BOT))?.lastHistoryId;
     }
 
-    it('baselines, then triages known mail once per message and advances the cursor', async () => {
-      expect(await syncMailboxWithDistributedLock(deps())).toEqual({ processed: 0 });
+    it('baselines, triages known mail once after durable admission, and advances the cursor', async () => {
+      const baselineDeps = deps();
+      expect(await syncMailboxWithDistributedLock(baselineDeps)).toEqual({
+        processed: 0,
+        morePending: false,
+      });
       expect(await lastHistoryId()).toBe(100n);
 
       arrive({
@@ -172,11 +216,24 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         body: 'Urgent',
         authenticated: false,
       });
-      expect(await syncMailboxWithDistributedLock(deps())).toEqual({ processed: 1 });
+      const mailDeps = deps();
+      expect(await syncMailboxWithDistributedLock(mailDeps)).toEqual({
+        processed: 1,
+        morePending: false,
+      });
 
-      const [triage] = (await store.collection('tasks').where('type', '==', 'email_triage').get())
-        .docs;
-      expect([triage?.get('externalEventId'), triage?.get('trust')]).toEqual(['gmail:m1', 'known']);
+      const observerRows = await store
+        .collection('emailObserverWork')
+        .where('sourceKey', '==', 'gmail:m1')
+        .get();
+      expect(observerRows.empty).toBe(false);
+      expect(observerRows.docs.map((row) => row.get('observerKey'))).toContain(
+        'google.direct-email-routing',
+      );
+      expect(observerRows.docs.every((row) => row.get('status') === 'pending')).toBe(true);
+      expect((await store.collection('tasks').where('type', '==', 'email_triage').get()).size).toBe(
+        0,
+      );
       const binding = await store
         .collection('channelBindings')
         .where('externalId', '==', 'thread-lunch')
@@ -192,11 +249,25 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       ).toEqual([['gmail:m1', 4]]);
       expect(await lastHistoryId()).toBe(BigInt(historyId));
 
-      // Gmail replays m1: nothing is scored, persisted, or triaged twice.
+      // Admission commits the source and cursor before applying effects. The
+      // installed bounded handler drain restores the prior mailbox behavior.
+      expect(await drainObservers(mailDeps)).toMatchObject({ completed: 1 });
+      const [triage] = (await store.collection('tasks').where('type', '==', 'email_triage').get())
+        .docs;
+      expect([triage?.get('externalEventId'), triage?.get('trust')]).toEqual(['gmail:m1', 'known']);
+
+      // Gmail replays m1: nothing is scored, persisted, or admitted twice.
       arrive({ ...(messages.get('m1') as FakeMessage) });
       scored.length = 0;
-      expect(await syncMailboxWithDistributedLock(deps())).toEqual({ processed: 0 });
+      expect(await syncMailboxWithDistributedLock(deps())).toEqual({
+        processed: 0,
+        morePending: false,
+      });
       expect(scored).toEqual([]);
+      expect(
+        (await store.collection('emailObserverWork').where('sourceKey', '==', 'gmail:m1').get())
+          .size,
+      ).toBe(observerRows.size);
       expect((await store.collection('tasks').where('type', '==', 'email_triage').get()).size).toBe(
         1,
       );
@@ -205,7 +276,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       ).toBe(1);
     });
 
-    it('learns the owner voice from their own mail and triages it at owner trust', async () => {
+    it('learns owner voice and triages the mail after durable admission', async () => {
       await syncMailboxWithDistributedLock(deps());
       arrive({
         id: 'm-owner',
@@ -215,9 +286,24 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       });
       await syncMailboxWithDistributedLock(deps());
       const samples = await store.collection('writingSamples').get();
-      expect(samples.docs.map((doc) => [doc.get('register'), doc.get('context')])).toEqual([
-        ['email_casual', 'auto:inbound-email'],
-      ]);
+      expect(samples.empty).toBe(true);
+      const observerRows = await store
+        .collection('emailObserverWork')
+        .where('sourceKey', '==', 'gmail:m-owner')
+        .get();
+      expect(observerRows.docs.map((row) => row.get('observerKey'))).toContain(
+        'google.owner-voice-sample',
+      );
+      expect(observerRows.docs.every((row) => row.get('status') === 'pending')).toBe(true);
+      expect((await store.collection('tasks').where('type', '==', 'email_triage').get()).size).toBe(
+        0,
+      );
+      const mailDeps = deps();
+      expect(await drainObservers(mailDeps)).toMatchObject({ completed: 2 });
+      const samplesAfterDrain = await store.collection('writingSamples').get();
+      expect(
+        samplesAfterDrain.docs.map((doc) => [doc.get('register'), doc.get('context')]),
+      ).toEqual([['email_casual', 'auto:inbound-email']]);
       const [triage] = (await store.collection('tasks').where('type', '==', 'email_triage').get())
         .docs;
       expect(triage?.get('trust')).toBe('owner');
@@ -238,6 +324,116 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect(await persistence.emailSync?.triagedSince(new Date(Date.now() - 3_600_000))).toBe(1);
     });
 
+    it('recovers Firestore forwarded stages after source and task commits without another score', async () => {
+      const forwarded = deps({ EMAIL_INGEST_MODE: 'forwarded' } as Partial<Config>);
+      await syncMailboxWithDistributedLock(forwarded);
+      arrive({
+        id: 'f-recover',
+        from: FRIEND,
+        subject: 'Pass for Friday',
+        body: 'A ticket/pass is attached for Friday.',
+      });
+      let interruptAfterSource = true;
+      const emailSync = persistence.emailSync;
+      if (!emailSync) throw new Error('missing Firestore email sync repository');
+      let interruptAfterBegin = true;
+      let interruptAfterPreparedScore = true;
+      let interruptBeforeReceipt = true;
+      persistence = {
+        ...persistence,
+        emailSync: new Proxy(emailSync, {
+          get(target, property, receiver) {
+            if (property === 'commitEmailAdmission') {
+              return async (...args: Parameters<EmailSyncRepository['commitEmailAdmission']>) => {
+                const result = await emailSync.commitEmailAdmission(...args);
+                if (interruptAfterSource) {
+                  interruptAfterSource = false;
+                  throw new Error('simulated crash after Firestore source commit');
+                }
+                return result;
+              };
+            }
+            if (property === 'beginForwardedIngest') {
+              return async (...args: Parameters<EmailSyncRepository['beginForwardedIngest']>) => {
+                const result = await emailSync.beginForwardedIngest(...args);
+                if (interruptAfterBegin) {
+                  interruptAfterBegin = false;
+                  throw new Error('simulated crash after Firestore ingest stage creation');
+                }
+                return result;
+              };
+            }
+            if (property === 'prepareIngestScore') {
+              return async (...args: Parameters<EmailSyncRepository['prepareIngestScore']>) => {
+                await emailSync.prepareIngestScore(...args);
+                if (interruptAfterPreparedScore) {
+                  interruptAfterPreparedScore = false;
+                  throw new Error('simulated crash after Firestore score checkpoint');
+                }
+              };
+            }
+            if (property === 'completeForwardedIngest') {
+              return async (
+                ...args: Parameters<EmailSyncRepository['completeForwardedIngest']>
+              ) => {
+                if (interruptBeforeReceipt) {
+                  interruptBeforeReceipt = false;
+                  throw new Error('simulated crash after Firestore task commit');
+                }
+                return emailSync.completeForwardedIngest(...args);
+              };
+            }
+            return Reflect.get(target, property, receiver);
+          },
+        }),
+      };
+
+      await expect(
+        syncMailboxWithDistributedLock(deps({ EMAIL_INGEST_MODE: 'forwarded' } as Partial<Config>)),
+      ).rejects.toThrow('simulated crash after Firestore ingest stage creation');
+      expect(scored).toHaveLength(0);
+      await expect(
+        syncMailboxWithDistributedLock(deps({ EMAIL_INGEST_MODE: 'forwarded' } as Partial<Config>)),
+      ).rejects.toThrow('simulated crash after Firestore score checkpoint');
+      expect(scored).toHaveLength(1);
+      await expect(
+        syncMailboxWithDistributedLock(deps({ EMAIL_INGEST_MODE: 'forwarded' } as Partial<Config>)),
+      ).rejects.toThrow('simulated crash after Firestore source commit');
+      await expect(
+        syncMailboxWithDistributedLock(deps({ EMAIL_INGEST_MODE: 'forwarded' } as Partial<Config>)),
+      ).rejects.toThrow('simulated crash after Firestore task commit');
+      expect(scored).toHaveLength(1);
+      await expect(
+        syncMailboxWithDistributedLock(deps({ EMAIL_INGEST_MODE: 'forwarded' } as Partial<Config>)),
+      ).resolves.toMatchObject({ processed: 1 });
+      expect(scored).toHaveLength(1);
+
+      const ingest = await store
+        .collection('emailIngest')
+        .where('channelMessageId', '==', 'gmail:f-recover')
+        .get();
+      expect(ingest.size).toBe(1);
+      expect(ingest.docs[0]?.data()).toMatchObject({
+        pipelineStage: 'complete',
+        scoreStatus: 'prepared',
+        messagePersisted: true,
+        cardCandidate: false,
+        triaged: true,
+      });
+      expect(
+        (
+          await store
+            .collection('messages')
+            .where('channelMessageId', '==', 'gmail:f-recover')
+            .get()
+        ).size,
+      ).toBe(1);
+      expect(
+        (await store.collection('tasks').where('externalEventId', '==', 'gmail:f-recover').get())
+          .size,
+      ).toBe(1);
+    });
+
     it('lets one instance hold the mailbox lock at a time', async () => {
       const sync = persistence.emailSync;
       if (!sync) throw new Error('missing email sync repository');
@@ -253,6 +449,47 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       release();
       expect(await first).toEqual({ value: 'first' });
       expect(await sync.withLock(async () => 'third')).toEqual({ value: 'third' });
+    });
+
+    it('fences a stale worker after lease expiry and takeover', async () => {
+      const sync = persistence.emailSync;
+      if (!sync) throw new Error('missing email sync repository');
+      let staleLease: EmailSyncLease | undefined;
+      let releaseStale!: () => void;
+      let staleStarted!: () => void;
+      const staleReady = new Promise<void>((resolve) => (staleStarted = resolve));
+      const finishStale = new Promise<void>((resolve) => (releaseStale = resolve));
+      const stale = sync.withLock(async (lease) => {
+        staleLease = lease;
+        staleStarted();
+        await finishStale;
+      });
+      await staleReady;
+      await store.doc('coordination', 'gmail-sync-lock').update({ expiresAt: new Date(0) });
+
+      let currentLease: EmailSyncLease | undefined;
+      let releaseCurrent!: () => void;
+      let currentStarted!: () => void;
+      const currentReady = new Promise<void>((resolve) => (currentStarted = resolve));
+      const finishCurrent = new Promise<void>((resolve) => (releaseCurrent = resolve));
+      const current = sync.withLock(async (lease) => {
+        currentLease = lease;
+        await sync.saveCursor(BOT, { owner: 'current-worker' }, lease);
+        currentStarted();
+        await finishCurrent;
+      });
+      await currentReady;
+      if (!staleLease) throw new Error('stale worker did not capture its lease');
+      expect(currentLease?.generation).toBeGreaterThan(staleLease?.generation ?? 0);
+      await expect(sync.saveCursor(BOT, { owner: 'stale-worker' }, staleLease)).rejects.toThrow(
+        'Gmail sync lease is no longer current',
+      );
+      expect(await sync.syncState(BOT)).toMatchObject({ cursor: { owner: 'current-worker' } });
+
+      releaseStale();
+      await stale;
+      releaseCurrent();
+      await current;
     });
   },
 );

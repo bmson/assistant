@@ -4,11 +4,13 @@ const mocks = vi.hoisted(() => ({
   auth: vi.fn(),
   hide: vi.fn(),
   unhide: vi.fn(),
+  delivered: vi.fn(),
 }));
 vi.mock('@/lib/server', () => ({
   getChatApplication: () => ({
     hideChatMessage: mocks.hide,
     unhideChatMessage: mocks.unhide,
+    acknowledgeMessageDelivery: mocks.delivered,
   }),
 }));
 vi.mock('@/mobile-auth', () => ({
@@ -22,11 +24,14 @@ import { POST } from './route';
 const CHAT_ID = '11111111-1111-1111-1111-111111111111';
 const MESSAGE_ID = '22222222-2222-2222-2222-222222222222';
 
-const post = (id: string, messageId: string, body: unknown) =>
+const post = (id: string, messageId: string, body: unknown, authorization?: string) =>
   POST(
     new Request(`https://example.com/api/mobile/v1/chats/${id}/messages/${messageId}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        ...(authorization ? { authorization } : {}),
+      },
       body: JSON.stringify(body),
     }),
     { params: Promise.resolve({ id, messageId }) },
@@ -63,7 +68,7 @@ describe('native chat message visibility', () => {
     const response = await post(CHAT_ID, MESSAGE_ID, {});
     expect(response.status).toBe(400);
     expect(((await response.json()) as { error: string }).error).toBe(
-      'action must be hide or unhide',
+      'action must be hide, unhide, or delivered',
     );
   });
 
@@ -71,7 +76,7 @@ describe('native chat message visibility', () => {
     const response = await post(CHAT_ID, MESSAGE_ID, { action: 'delete' });
     expect(response.status).toBe(400);
     expect(((await response.json()) as { error: string }).error).toBe(
-      'action must be hide or unhide',
+      'action must be hide, unhide, or delivered',
     );
   });
 
@@ -105,5 +110,47 @@ describe('native chat message visibility', () => {
     const response = await post(CHAT_ID, MESSAGE_ID, { action: 'hide' });
     expect(response.status).toBe(409);
     expect(((await response.json()) as { error: string }).error).toBe('chat not found');
+  });
+
+  it('requires an authenticated bearer device and a bounded client ID for delivery receipts', async () => {
+    const noBearer = await post(CHAT_ID, MESSAGE_ID, {
+      action: 'delivered',
+      clientId: '33333333-3333-4333-8333-333333333333',
+    });
+    expect(noBearer.status).toBe(401);
+    expect(mocks.delivered).not.toHaveBeenCalled();
+
+    const malformed = await post(
+      CHAT_ID,
+      MESSAGE_ID,
+      { action: 'delivered', clientId: 'not-a-uuid' },
+      'Bearer synthetic-device-token',
+    );
+    expect(malformed.status).toBe(400);
+    expect(mocks.delivered).not.toHaveBeenCalled();
+
+    const extra = await post(
+      CHAT_ID,
+      MESSAGE_ID,
+      {
+        action: 'delivered',
+        clientId: '33333333-3333-4333-8333-333333333333',
+        taskId: 'forged',
+      },
+      'Bearer synthetic-device-token',
+    );
+    expect(extra.status).toBe(400);
+    expect(mocks.delivered).not.toHaveBeenCalled();
+  });
+
+  it('records the matching client delivery acknowledgement and keeps not-ready replies retryable', async () => {
+    const clientId = '33333333-3333-4333-8333-333333333333';
+    mocks.delivered.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const request = () =>
+      post(CHAT_ID, MESSAGE_ID, { action: 'delivered', clientId }, 'Bearer synthetic-device-token');
+    expect((await request()).status).toBe(409);
+    expect(await (await request()).json()).toEqual({ ok: true });
+    expect(mocks.delivered).toHaveBeenNthCalledWith(1, CHAT_ID, MESSAGE_ID, clientId);
+    expect(mocks.delivered).toHaveBeenNthCalledWith(2, CHAT_ID, MESSAGE_ID, clientId);
   });
 });

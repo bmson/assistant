@@ -66,9 +66,22 @@ describe('PostgreSQL generated-card repository', () => {
       });
       expect(revised.card.id).toBe(results[0].card.id);
       expect(revised.revision.version).toBe(2);
-      expect((await repository.list(agent.id)).map((row) => row.revision.id)).toEqual([
-        revised.revision.id,
-      ]);
+      await expect(
+        repository.createOrRevise({
+          ...first,
+          id: randomUUID(),
+          revisionId: randomUUID(),
+          spec: spec('stale refresh result'),
+          targetCardId: revised.card.id,
+          targetRevisionId: results[0].revision.id,
+          touch: true,
+        }),
+      ).rejects.toThrow('refresh revision is stale');
+      expect(
+        (await repository.list(agent.id, new Date(), [revised.card.id])).map(
+          (row) => row.revision.id,
+        ),
+      ).toEqual([revised.revision.id]);
       const refreshed = await repository.createOrRevise({
         ...first,
         revisionId: randomUUID(),
@@ -86,7 +99,7 @@ describe('PostgreSQL generated-card repository', () => {
       expect(await repository.get(randomUUID(), revised.card.id)).toBeNull();
       expect(await repository.dismiss(randomUUID(), revised.card.id)).toBe(false);
       expect(await repository.dismiss(agent.id, revised.card.id)).toBe(true);
-      expect(await repository.list(agent.id)).toEqual([]);
+      expect(await repository.list(agent.id, new Date(), [revised.card.id])).toEqual([]);
 
       await expect(
         repository.createOrRevise({

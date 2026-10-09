@@ -88,7 +88,9 @@ describe.skipIf(!localEmulator)('Firestore mobile settings PATCH with PostgreSQL
     const { PATCH } = await import('./route.js');
     const { getDb } = await import('@/lib/server');
     expect(() => getDb()).toThrow('PostgreSQL-backed web surface is unavailable');
-    expect(await (await PATCH(request([]))).json()).toEqual({ error: 'invalid settings body' });
+    expect(await (await PATCH(request([]))).json()).toEqual({
+      error: 'Request body must be an object.',
+    });
     const invalidTimezone = await PATCH(request({ timezone: 'Not/AZone', locale: 'en-US' }));
     expect(invalidTimezone.status).toBe(400);
     expect(await invalidTimezone.json()).toEqual({ error: 'Unknown timezone "Not/AZone".' });

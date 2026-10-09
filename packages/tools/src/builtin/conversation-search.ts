@@ -7,7 +7,10 @@ import type { ToolRegistry } from '../registry.js';
 export function registerPortableConversationSearchTool(
   registry: ToolRegistry,
   deps: {
-    embed: (texts: string[]) => Promise<number[][]>;
+    embed: (texts: string[]) => Promise<{
+      embeddings: number[][];
+      embeddingSpaceKey: string;
+    }>;
     conversations: ConversationSearchRepository;
   },
 ): ToolRegistry {
@@ -23,18 +26,26 @@ export function registerPortableConversationSearchTool(
       risk: 'autonomous',
       acceptsUntrustedInput: true,
       execute: async (args, ctx) => {
-        const [embedding] = await deps.embed([args.query]);
+        const result = await deps.embed([args.query]);
+        if (result.embeddings.length !== 1)
+          throw new Error('conversation search requires exactly one query embedding');
+        const [embedding] = result.embeddings;
         if (!embedding) throw new Error('embedding unavailable');
+        if (!/^[a-f0-9]{64}$/.test(result.embeddingSpaceKey))
+          throw new Error('embedding space identity unavailable');
         const semantic = await deps.conversations.semantic({
           agentId: ctx.agentId,
           embedding,
+          embeddingSpaceKey: result.embeddingSpaceKey,
           limit: args.limit,
+          ...(ctx.conversationId ? { currentConversationId: ctx.conversationId } : {}),
         });
         if (semantic.length > 0) return { matches: semantic, mode: 'semantic' };
         const text = await deps.conversations.text({
           agentId: ctx.agentId,
           query: args.query,
           limit: args.limit,
+          ...(ctx.conversationId ? { currentConversationId: ctx.conversationId } : {}),
         });
         return { matches: text, mode: 'text' };
       },

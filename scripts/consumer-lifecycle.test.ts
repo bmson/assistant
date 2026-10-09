@@ -30,7 +30,22 @@ async function initializedState(): Promise<{ dir: string; state: string }> {
     },
     modules: [],
     modelProvider: 'google',
-    resources: [],
+    resources: [
+      {
+        kind: 'runtime-config',
+        name: `sha256:${'f'.repeat(64)}`,
+        scope: 'installation',
+        owner: 'terraform',
+        installationId: 'pilot',
+      },
+      {
+        kind: 'cloud-run-service',
+        name: 'pilot-web',
+        scope: 'installation',
+        owner: 'terraform',
+        installationId: 'pilot',
+      },
+    ],
     createdAt: '2026-09-24T12:00:00.000Z',
   });
   let persisted: InstallationManifest | null = null;
@@ -83,7 +98,7 @@ describe('consumer:update', () => {
       applied: false,
       from: oldSha,
       to: newSha,
-      stage: 'bootstrapped',
+      stage: 'provisioned',
     });
     expect(preview.calls.some((call) => call.startsWith('gcloud'))).toBe(false);
     expect(JSON.parse(await readFile(state, 'utf8')).stage.current).toBe('initialized');
@@ -104,12 +119,16 @@ describe('consumer:update', () => {
       commitSha: newSha,
       archiveDigest: await sha256File(archive),
     });
-    expect(saved.stage.current).toBe('bootstrapped');
+    expect(saved.stage.current).toBe('provisioned');
+    expect(
+      saved.resources.filter((resource: { owner: string }) => resource.owner === 'terraform'),
+    ).toHaveLength(2);
     expect(JSON.parse(await readFile(result.manifestPath, 'utf8')).identity.release.commitSha).toBe(
       newSha,
     );
-    expect(result.next).toHaveLength(3);
-    expect(result.next[2]).toContain('--verify --apply');
+    expect(result.next).toHaveLength(2);
+    expect(result.next[0]).toContain('--build-images --runtime-config RUNTIME_CONFIG --apply');
+    expect(result.next[1]).toContain('--verify --apply');
   });
 });
 

@@ -28,6 +28,7 @@ export function AgentForm({
         <label className="flex min-w-0 flex-col gap-1.5">
           <span className={labelClass}>Timezone</span>
           <input
+            disabled={pending}
             type="text"
             value={timezone}
             onChange={(e) => {
@@ -41,6 +42,7 @@ export function AgentForm({
         <label className="flex min-w-0 flex-col gap-1.5">
           <span className={labelClass}>Locale</span>
           <input
+            disabled={pending}
             type="text"
             value={locale}
             onChange={(e) => {
@@ -57,6 +59,7 @@ export function AgentForm({
         {/* textareaClass, not inputClass — the latter pins h-9 and squashed
             this to a single line regardless of rows. */}
         <textarea
+          disabled={pending}
           value={signature}
           onChange={(e) => {
             setSignature(e.target.value);
@@ -73,9 +76,15 @@ export function AgentForm({
           disabled={pending}
           onClick={() =>
             startTransition(async () => {
-              const result = await updateAgentSettings({ timezone, locale, signature });
-              if (result.error) setError(result.error);
-              else setSaved(true);
+              setError(null);
+              setSaved(false);
+              try {
+                const result = await updateAgentSettings({ timezone, locale, signature });
+                if (result.error) setError(result.error);
+                else setSaved(true);
+              } catch {
+                setError('The settings could not be saved. Your entries are kept here.');
+              }
             })
           }
           className={btn.primary}

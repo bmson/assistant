@@ -5,6 +5,7 @@ import {
   FirestoreToolExecutionRepository,
   type InstallationStore,
 } from '@assistant/firestore';
+import { approvalPolicyFingerprint } from '@assistant/persistence';
 
 /** Synthetic smoke for the portable dispatcher and model-routing seams. */
 export async function firestoreRuntimeSmoke(store: InstallationStore) {
@@ -14,6 +15,7 @@ export async function firestoreRuntimeSmoke(store: InstallationStore) {
   const callId = randomUUID();
   const approvalId = randomUUID();
   const now = new Date('2026-09-12T12:00:00Z');
+  await store.doc('agents', agentId).set({ id: agentId });
   await store.doc('conversations', conversationId).set({
     id: conversationId,
     agentId,
@@ -43,6 +45,7 @@ export async function firestoreRuntimeSmoke(store: InstallationStore) {
     agentId,
     type: 'chat_turn',
     status: 'waiting_approval',
+    trust: 'owner',
     budgetUsdLimit: '1',
     spentUsd: '0',
     conversationId,
@@ -80,6 +83,8 @@ export async function firestoreRuntimeSmoke(store: InstallationStore) {
     decision: {},
     expectedApprovalId: approvalId,
     expectedResolutionPayload: {},
+    expectedPolicyFingerprint: approvalPolicyFingerprint([]),
+    expectedTaskTrust: 'owner',
   });
   assert.ok(claimed);
   assert.equal(
@@ -116,7 +121,7 @@ export async function firestoreRuntimeSmoke(store: InstallationStore) {
     capabilities: {},
     updatedAt: now,
   });
-  assert.deepEqual(await models.taskBudget(taskId), { limit: '1', spent: '0' });
+  assert.deepEqual(await models.taskBudget(taskId), { limit: '1.0000', spent: '0.000000' });
   assert.equal(await models.conversationOverride(taskId), 'synthetic-model');
   assert.equal((await models.role('chat'))?.primaryModel, 'synthetic-model');
   assert.equal((await models.model('synthetic-model'))?.id, 'synthetic-model');
@@ -127,6 +132,8 @@ export async function firestoreRuntimeSmoke(store: InstallationStore) {
     inputTokens: 1,
     outputTokens: 1,
     costUsd: '0.000002',
+    runtimeRevision: null,
+    runtimeReleaseSha: null,
   });
   await models.recordAudit({
     taskId,

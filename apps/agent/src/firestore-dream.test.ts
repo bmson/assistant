@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { type ExecutorDeps, executeTask } from '@assistant/core';
 import type { Db } from '@assistant/db';
 import { createFirestoreExecutionPersistence } from '@assistant/firestore';
-import type { ExecutionPersistence } from '@assistant/persistence';
+import { type ExecutionPersistence, embeddingSpaceIdentityKey } from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   decodeRecord,
@@ -54,6 +54,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         );
       persistence = createFirestoreExecutionPersistence(store, agentId, SPACE);
       const router = {
+        async embeddingSpace() {
+          return SPACE;
+        },
+        async embeddingSpaceKey() {
+          return embeddingSpaceIdentityKey(SPACE);
+        },
         async object(_role: string, input: { prompt: string }) {
           prompts.push(input.prompt);
           return { ok: true, modelId: 'fixture', degraded: false, object: dream };

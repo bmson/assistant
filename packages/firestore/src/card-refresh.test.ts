@@ -23,6 +23,7 @@ describe.skipIf(!enabled)('Firestore saved-card refresh', () => {
     const cardId = randomUUID();
     const revisionId = randomUUID();
     const conversationId = randomUUID();
+    const operationId = randomUUID();
     try {
       await Promise.all([
         store.doc('conversations', conversationId).set({
@@ -51,6 +52,8 @@ describe.skipIf(!enabled)('Firestore saved-card refresh', () => {
           agentId,
           cardId,
           conversationId,
+          operationId,
+          expectedRevisionId: revisionId,
           formatInstruction: () => ({ title: 'Refresh card', instruction: 'Read only.' }),
         });
       const results = await Promise.all(Array.from({ length: 8 }, request));
@@ -60,6 +63,321 @@ describe.skipIf(!enabled)('Firestore saved-card refresh', () => {
       expect(results.filter((result) => result.ok && result.created)).toHaveLength(1);
       expect((await store.collection('tasks').get()).size).toBe(1);
       expect((await store.collection('outbox').get()).size).toBe(1);
+      const firstTaskId = results.find((result) => result.ok)?.taskId;
+      if (!firstTaskId) throw new Error('refresh task was not created');
+      expect((await store.doc('tasks', firstTaskId).get()).get('trigger')).toMatchObject({
+        payload: { refreshCardId: cardId, refreshCardRevisionId: revisionId },
+      });
+      await store.doc('tasks', firstTaskId).update({ status: 'done' });
+      const replay = await request();
+      expect(replay).toMatchObject({ ok: true, taskId: firstTaskId, created: false });
+      expect((await store.collection('tasks').get()).size).toBe(1);
+    } finally {
+      await disposeStore(store);
+    }
+  });
+
+  it('durably aliases a distinct same-revision operation to the active task', async () => {
+    const store = emulatorStore();
+    const agentId = randomUUID();
+    const cardId = randomUUID();
+    const revisionId = randomUUID();
+    const conversationId = randomUUID();
+    const firstOperationId = randomUUID();
+    const retryOperationId = randomUUID();
+    try {
+      await Promise.all([
+        store.doc('conversations', conversationId).set({
+          id: conversationId,
+          agentId,
+          channel: 'chat',
+          trust: 'owner',
+          isPrimary: true,
+        }),
+        store.doc('generatedCardRevisions', revisionId).set({
+          id: revisionId,
+          cardId,
+          spec: { version: 1 },
+        }),
+        store.doc('generatedCards', cardId).set({
+          id: cardId,
+          agentId,
+          conversationId,
+          currentRevisionId: revisionId,
+          status: 'active',
+          dismissedAt: null,
+        }),
+      ]);
+      const repository = new FirestoreCardRefreshRepository(store);
+      const request = (operationId: string) =>
+        repository.request({
+          agentId,
+          cardId,
+          conversationId,
+          operationId,
+          expectedRevisionId: revisionId,
+          formatInstruction: () => ({ title: 'Refresh card', instruction: 'Read only.' }),
+        });
+
+      const first = await request(firstOperationId);
+      if (!first.ok) throw new Error('initial refresh was not created');
+      expect(first).toMatchObject({ ok: true, created: true, dispatch: 'outbox' });
+
+      const alias = await request(retryOperationId);
+      expect(alias).toMatchObject({
+        ok: true,
+        taskId: first.taskId,
+        created: false,
+        dispatch: 'outbox',
+      });
+      const operationKey = createHash('sha256')
+        .update(`saved-card-refresh:${agentId}:${cardId}:${retryOperationId}`)
+        .digest('hex');
+      expect((await store.doc('taskEventKeys', operationKey).get()).data()).toMatchObject({
+        taskId: first.taskId,
+      });
+      expect((await store.collection('tasks').where('agentId', '==', agentId).get()).size).toBe(1);
+      expect(
+        (await store.collection('outbox').where('taskId', '==', first.taskId).get()).size,
+      ).toBe(1);
+      expect(
+        (await store.collection('conversations').where('agentId', '==', agentId).get()).size,
+      ).toBe(1);
+
+      await store.doc('tasks', first.taskId).update({ status: 'done' });
+      const replayAfterCompletion = await request(retryOperationId);
+      expect(replayAfterCompletion).toMatchObject({
+        ok: true,
+        taskId: first.taskId,
+        created: false,
+        dispatch: 'outbox',
+      });
+      expect((await store.collection('tasks').where('agentId', '==', agentId).get()).size).toBe(1);
+      expect(
+        (await store.collection('outbox').where('taskId', '==', first.taskId).get()).size,
+      ).toBe(1);
+      expect(
+        (await store.collection('conversations').where('agentId', '==', agentId).get()).size,
+      ).toBe(1);
+    } finally {
+      await disposeStore(store);
+    }
+  });
+
+  it('rejects a stale revision before replaying an operation or reusing an active task', async () => {
+    const store = emulatorStore();
+    const agentId = randomUUID();
+    const cardId = randomUUID();
+    const viewedRevisionId = randomUUID();
+    const currentRevisionId = randomUUID();
+    const conversationId = randomUUID();
+    const operationId = randomUUID();
+    try {
+      await Promise.all([
+        store.doc('conversations', conversationId).set({
+          id: conversationId,
+          agentId,
+          channel: 'chat',
+          isPrimary: true,
+        }),
+        store.doc('generatedCardRevisions', viewedRevisionId).set({
+          id: viewedRevisionId,
+          cardId,
+          spec: { version: 1 },
+        }),
+        store.doc('generatedCardRevisions', currentRevisionId).set({
+          id: currentRevisionId,
+          cardId,
+          spec: { version: 1 },
+        }),
+        store.doc('generatedCards', cardId).set({
+          id: cardId,
+          agentId,
+          conversationId,
+          currentRevisionId: viewedRevisionId,
+          status: 'active',
+          dismissedAt: null,
+        }),
+      ]);
+      const repository = new FirestoreCardRefreshRepository(store);
+      const request = (requestedOperationId: string) =>
+        repository.request({
+          agentId,
+          cardId,
+          conversationId,
+          operationId: requestedOperationId,
+          expectedRevisionId: viewedRevisionId,
+          formatInstruction: () => ({ title: 'Refresh card', instruction: 'Read only.' }),
+        });
+      const first = await request(operationId);
+      if (!first.ok) throw new Error('initial refresh was not created');
+      expect(first.created).toBe(true);
+      await store.doc('generatedCards', cardId).update({ currentRevisionId });
+
+      const replay = await request(operationId);
+      const secondOperation = await request(randomUUID());
+      for (const result of [replay, secondOperation])
+        expect(result).toEqual({
+          ok: false,
+          status: 409,
+          error: 'This card changed. Reload it before starting another refresh.',
+        });
+      expect((await store.collection('tasks').where('agentId', '==', agentId).get()).size).toBe(1);
+      expect(
+        (await store.collection('outbox').where('taskId', '==', first.taskId).get()).size,
+      ).toBe(1);
+    } finally {
+      await disposeStore(store);
+    }
+  });
+
+  it('rejects replaying one operation ID against a newer card revision', async () => {
+    const store = emulatorStore();
+    const agentId = randomUUID();
+    const cardId = randomUUID();
+    const viewedRevisionId = randomUUID();
+    const currentRevisionId = randomUUID();
+    const conversationId = randomUUID();
+    const operationId = randomUUID();
+    try {
+      await Promise.all([
+        store.doc('conversations', conversationId).set({
+          id: conversationId,
+          agentId,
+          channel: 'chat',
+          trust: 'owner',
+          isPrimary: true,
+        }),
+        store.doc('generatedCardRevisions', viewedRevisionId).set({
+          id: viewedRevisionId,
+          cardId,
+          spec: { version: 1 },
+        }),
+        store.doc('generatedCardRevisions', currentRevisionId).set({
+          id: currentRevisionId,
+          cardId,
+          spec: { version: 1 },
+        }),
+        store.doc('generatedCards', cardId).set({
+          id: cardId,
+          agentId,
+          conversationId,
+          currentRevisionId: viewedRevisionId,
+          status: 'active',
+          dismissedAt: null,
+        }),
+      ]);
+      const repository = new FirestoreCardRefreshRepository(store);
+      const request = (revisionId: string) =>
+        repository.request({
+          agentId,
+          cardId,
+          conversationId,
+          operationId,
+          expectedRevisionId: revisionId,
+          formatInstruction: () => ({ title: 'Refresh card', instruction: 'Read only.' }),
+        });
+      const first = await request(viewedRevisionId);
+      if (!first.ok) throw new Error('initial refresh was not created');
+      expect(first.created).toBe(true);
+
+      await store.doc('generatedCards', cardId).update({ currentRevisionId });
+      const replay = await request(currentRevisionId);
+      expect(replay).toEqual({
+        ok: false,
+        status: 409,
+        error: 'This card changed. Reload it before starting another refresh.',
+      });
+      expect((await store.collection('tasks').where('agentId', '==', agentId).get()).size).toBe(1);
+      expect(
+        (await store.collection('outbox').where('taskId', '==', first.taskId).get()).size,
+      ).toBe(1);
+    } finally {
+      await disposeStore(store);
+    }
+  });
+
+  it('rejects an active refresh task tied to an older card revision', async () => {
+    const store = emulatorStore();
+    const agentId = randomUUID();
+    const cardId = randomUUID();
+    const viewedRevisionId = randomUUID();
+    const currentRevisionId = randomUUID();
+    const conversationId = randomUUID();
+    try {
+      await Promise.all([
+        store.doc('conversations', conversationId).set({
+          id: conversationId,
+          agentId,
+          channel: 'chat',
+          trust: 'owner',
+          isPrimary: true,
+        }),
+        store.doc('generatedCardRevisions', viewedRevisionId).set({
+          id: viewedRevisionId,
+          cardId,
+          spec: { version: 1 },
+        }),
+        store.doc('generatedCardRevisions', currentRevisionId).set({
+          id: currentRevisionId,
+          cardId,
+          spec: { version: 2 },
+        }),
+        store.doc('generatedCards', cardId).set({
+          id: cardId,
+          agentId,
+          conversationId,
+          currentRevisionId: viewedRevisionId,
+          status: 'active',
+          dismissedAt: null,
+        }),
+      ]);
+      const repository = new FirestoreCardRefreshRepository(store);
+      const first = await repository.request({
+        agentId,
+        cardId,
+        conversationId,
+        operationId: randomUUID(),
+        expectedRevisionId: viewedRevisionId,
+        formatInstruction: () => ({ title: 'Refresh card', instruction: 'Read only.' }),
+      });
+      if (!first.ok) throw new Error('initial refresh was not created');
+      expect(first.created).toBe(true);
+
+      await store.doc('generatedCards', cardId).update({ currentRevisionId });
+      const result = await repository.request({
+        agentId,
+        cardId,
+        conversationId,
+        operationId: randomUUID(),
+        expectedRevisionId: currentRevisionId,
+        formatInstruction: () => ({ title: 'Refresh card', instruction: 'Read only.' }),
+      });
+      expect(result).toEqual({
+        ok: false,
+        status: 409,
+        error: 'This card changed. Reload it before starting another refresh.',
+      });
+
+      await store.doc('cardRefreshKeys', cardId).delete();
+      const queryReuse = await repository.request({
+        agentId,
+        cardId,
+        conversationId,
+        operationId: randomUUID(),
+        expectedRevisionId: currentRevisionId,
+        formatInstruction: () => ({ title: 'Refresh card', instruction: 'Read only.' }),
+      });
+      expect(queryReuse).toEqual({
+        ok: false,
+        status: 409,
+        error: 'This card changed. Reload it before starting another refresh.',
+      });
+      expect((await store.collection('tasks').where('agentId', '==', agentId).get()).size).toBe(1);
+      expect(
+        (await store.collection('outbox').where('taskId', '==', first.taskId).get()).size,
+      ).toBe(1);
+      expect((await store.collection('taskEventKeys').get()).size).toBe(1);
     } finally {
       await disposeStore(store);
     }

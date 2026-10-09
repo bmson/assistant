@@ -8,6 +8,7 @@ import {
   messages,
   tasks,
   watches,
+  watchFireEffects,
   watchFires,
 } from '@assistant/db';
 import { and, eq, inArray, like } from 'drizzle-orm';
@@ -141,6 +142,77 @@ describe('inbox watchers (notify tier)', () => {
     await matchEmailWatches(deps, email({ messageId: `${RUN}-replay` }));
     await matchEmailWatches(deps, email({ messageId: `${RUN}-replay` }));
     expect(await fireCountFor(watch.id)).toMatchObject({ fireCount: 1, fires: 1 });
+  });
+
+  it('replays a failed dashboard leg independently after the watch reached maxFires', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const { watch, conversationId } = await createEmailWatch('outbox-retry', { maxFires: 1 });
+    const trigger = `${RUN}-outbox-retry`;
+    await matchEmailWatches(deps, email({ messageId: trigger }));
+    const [fire] = await db.select().from(watchFires).where(eq(watchFires.watchId, watch.id));
+    if (!fire) throw new Error('fire fixture missing');
+    const [noticeEffect] = await db
+      .select()
+      .from(watchFireEffects)
+      .where(
+        and(eq(watchFireEffects.fireId, fire.id), eq(watchFireEffects.kind, 'dashboard_notice')),
+      );
+    if (!noticeEffect) throw new Error('notice effect fixture missing');
+    await db
+      .update(watchFireEffects)
+      .set({ status: 'failed' })
+      .where(eq(watchFireEffects.id, noticeEffect.id));
+
+    // The owning watch is exhausted, but the event outbox remains retryable.
+    await matchEmailWatches(deps, email({ messageId: trigger }));
+    const [replayed] = await db
+      .select()
+      .from(watchFireEffects)
+      .where(eq(watchFireEffects.id, noticeEffect.id));
+    const noticeRows = await db
+      .select()
+      .from(messages)
+      .where(
+        and(
+          eq(messages.conversationId, conversationId),
+          eq(messages.channelMessageId, `watch-fire:${watch.id}:${trigger}`),
+        ),
+      );
+    expect(replayed?.status, JSON.stringify(replayed?.result)).toBe('delivered');
+    expect(noticeRows).toHaveLength(1);
+    expect(await fireCountFor(watch.id)).toMatchObject({ status: 'fired', fireCount: 1, fires: 1 });
+  });
+
+  it('marks an expired owner-notification claim unknown instead of resending it', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const { watch } = await createEmailWatch('outbox-unknown');
+    await matchEmailWatches(deps, email({ messageId: `${RUN}-outbox-unknown` }));
+    const [fire] = await db.select().from(watchFires).where(eq(watchFires.watchId, watch.id));
+    if (!fire) throw new Error('fire fixture missing');
+    const [ownerEffect] = await db
+      .select()
+      .from(watchFireEffects)
+      .where(
+        and(eq(watchFireEffects.fireId, fire.id), eq(watchFireEffects.kind, 'owner_notification')),
+      );
+    if (!ownerEffect) throw new Error('notification effect fixture missing');
+    const claimedAt = new Date(NOW.getTime() + 1000);
+    await db
+      .update(watchFireEffects)
+      .set({ status: 'sending', claimedAt, leaseUntil: new Date(claimedAt.getTime() + 1000) })
+      .where(eq(watchFireEffects.id, ownerEffect.id));
+    await deps.watches.recoverExpiredFireEffectClaims(
+      agentId,
+      new Date(claimedAt.getTime() + 2000),
+    );
+    const [recovered] = await db
+      .select()
+      .from(watchFireEffects)
+      .where(eq(watchFireEffects.id, ownerEffect.id));
+    expect(recovered?.status).toBe('unknown');
+    expect(await deps.watches.pendingFireEffects(agentId)).not.toContainEqual(
+      expect.objectContaining({ id: ownerEffect.id }),
+    );
   });
 
   it('ignores unauthenticated mail and senders the owner never named', async (ctx) => {

@@ -2,14 +2,14 @@ import type { TaskRow } from '@assistant/db';
 import { createPostgresExecutionPersistence } from '@assistant/db';
 import type { ExecutionContextRepository } from '@assistant/persistence';
 import type { ModelMessage } from 'ai';
-import { HISTORICAL_CARD_CONTEXT } from '../conversation-context.js';
 import { BudgetReservationError } from '../cost.js';
 import { isForwardedIngest } from '../email-provenance.js';
-import type { TaskState } from '../events.js';
+import type { TaskState, Trust } from '../events.js';
 import { withSpan } from '../otel.js';
 import { classifyFailure, failureNotice, ownerTaskLabel } from '../owner-text.js';
 import { requestedArtifactIntent } from './artifact-intent.js';
 import { isKnownSenderReplyTask } from './executor/context-helpers.js';
+import { refreshResumedConversationSearch } from './executor/conversation-search-refresh.js';
 import { finalizePendingResponse, stageFinalResponse } from './executor/finalize.js';
 import { unreadSharedDocumentIntent } from './executor/intent.js';
 import {
@@ -28,7 +28,7 @@ import {
   runMissionPhase,
   runPlanPhase,
 } from './executor/phases.js';
-import { foldOwnerRepliesSincePark, seedContext } from './executor/seed.js';
+import { foldOwnerRepliesSincePark, seedContextWithEvidence } from './executor/seed.js';
 import { runStepLoop } from './executor/step-loop.js';
 import { createToolContext } from './executor/tool-context.js';
 import {
@@ -49,6 +49,7 @@ import {
   type TaskLease,
   taskState,
 } from './machine.js';
+import { latestOwnerIntent, ownerAuthoredWindow } from './owner-intent.js';
 import { buildRequestChecklist } from './request-checklist.js';
 import { isSaveStatusQuestion, previousSaveStatus } from './saved-work.js';
 
@@ -227,6 +228,46 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
   const persistence = deps.persistence ?? createPostgresExecutionPersistence(db);
   const lease = task;
   const state = taskState(task);
+
+  const trigger = task.trigger as {
+    source?: unknown;
+    externalEventId?: unknown;
+    payload?: Record<string, unknown>;
+  } | null;
+  if (trigger?.payload?.kind === 'arrival') {
+    const observationId = trigger.payload.arrivalObservationId;
+    const validTask =
+      task.trust === 'assistant' &&
+      task.type === 'adhoc' &&
+      !task.conversationId &&
+      !task.parentTaskId &&
+      trigger.source === 'internal' &&
+      typeof trigger.externalEventId === 'string' &&
+      new RegExp(`^arrival:${task.agentId}:\\d{4}-\\d{2}-\\d{2}$`).test(trigger.externalEventId);
+    const active =
+      validTask &&
+      typeof observationId === 'string' &&
+      Boolean(deps.isArrivalObservationActive) &&
+      (await deps.isArrivalObservationActive?.(task.agentId, observationId));
+    if (!active) {
+      const cancelled = await completeTask(persistence.tasks, lease, {
+        status: 'cancelled',
+        progress: 'arrival observation expired or invalid; no location details used',
+      });
+      if (!cancelled) return LOST_LEASE;
+      return { outcome: 'cancelled', detail: 'arrival observation expired or invalid' };
+    }
+    if (state.pendingFinal) return finalizePendingResponse(deps, lease, state.pendingFinal, state);
+    const safeText = 'You’ve arrived. Would you like a hand with anything?';
+    const window = [{ role: 'user' as const, content: 'Owner-approved generic arrival nudge.' }];
+    return stageFinalResponse(deps, lease, state, window, {
+      text: safeText,
+      progress: 'Sent the owner-approved generic arrival nudge.',
+      terminalStatus: 'done',
+      outcome: 'done',
+      contractBlocked: false,
+    });
+  }
   if (state.pendingFinal) return finalizePendingResponse(deps, lease, state.pendingFinal, state);
 
   if (shouldTaintContext(task)) {
@@ -235,6 +276,11 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
 
   const agent = await persistence.executionContext.getAgent(task.agentId);
   if (!agent) throw new Error('Task agent does not exist');
+  if (!state.requestTimeZone) {
+    state.requestTimeZone = agent.timezone;
+    if (!(await checkpointTask(persistence.tasks, lease, state, { preserveFailureCounters: true })))
+      return LOST_LEASE;
+  }
   const abort = new AbortController();
 
   // Code jobs (nightly extraction/consolidation, imports) run a registered
@@ -247,7 +293,13 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
 
   let window = state.contextWindow as unknown as ModelMessage[];
   if (window.length === 0) {
-    window = await seedContext(persistence.executionContext, task);
+    const seeded = await seedContextWithEvidence(persistence.executionContext, task);
+    window = seeded.messages;
+    if (seeded.historicalEvidenceTainted) state.untrustedContext = true;
+    if (seeded.clarificationContinuation) {
+      state.clarificationContinuation = seeded.clarificationContinuation;
+      if (seeded.clarificationContinuation.tainted) state.untrustedContext = true;
+    }
     // Publish the seeded window into state BEFORE building the tool context, so
     // harvestKnownAddresses (which scans state.contextWindow) sees the thread's
     // real recipients on the FIRST run — not just on resume. Without this, the
@@ -257,37 +309,37 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
     // gating by run number.
     state.contextWindow = window as unknown as TaskState['contextWindow'];
   }
-  // Historical card facts may originate in email or the web. Labelling them
-  // is not enough: restore the same taint boundary as a fresh external read.
-  if (
-    window.some(
-      (message) =>
-        typeof message.content === 'string' && message.content.includes(HISTORICAL_CARD_CONTEXT),
-    )
-  ) {
-    state.untrustedContext = true;
-  }
   // A direct document/sheet/slides request skips the generic planner, then forces
   // the matching creation tool. The D9 known-sender reply child is exempt: its
   // instruction embeds the sender's own draft, whose free text could otherwise
   // trip the artifact/doc-URL heuristics and force docs.create over gmail.send.
   const isKnownReply = isKnownSenderReplyTask(task);
+  const ownerIntent = latestOwnerIntent(window, {
+    trust: task.trust as Trust,
+    trigger: task.trigger,
+    clarificationContinuation: state.clarificationContinuation,
+  });
+  const ownerWindow = ownerAuthoredWindow(window, ownerIntent);
   const artifactIntent =
     state.step === 0 && !isKnownReply
-      ? requestedArtifactIntent(latestUserText(window) ?? '')
+      ? requestedArtifactIntent(ownerIntent.ownerAuthoredText)
       : undefined;
   const documentReadIntent =
     state.step === 0 && !artifactIntent && !isKnownReply
-      ? await unreadSharedDocumentIntent(persistence.executionEvidence, task, window)
+      ? await unreadSharedDocumentIntent(persistence.executionEvidence, task, ownerWindow)
       : undefined;
   const browserStageSnapshots = new Map<
     string,
-    { contextWindow: TaskState['contextWindow']; pendingJob: TaskState['pendingJob'] }
+    {
+      contextWindow: TaskState['contextWindow'];
+      pendingJob: TaskState['pendingJob'];
+      pendingToolBatch: TaskState['pendingToolBatch'];
+    }
   >();
 
-  // rc holds the shared, mutable run state. ctx's browser-staging closures read
-  // the LIVE window / stage-remainder through rc, so it is built after rc and the
-  // step loop reassigns rc.window (compaction) without stale captures.
+  // rc holds the shared, mutable run state. The browser-staging closure reads
+  // the LIVE window through rc, so it is built after rc and the step loop can
+  // reassign rc.window (compaction) without stale captures.
   const rc: RunContext = {
     deps,
     db,
@@ -298,7 +350,6 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
     state,
     ctx: undefined as unknown as ToolContextLike,
     window,
-    browserStageRemainder: [],
     artifactIntent,
     documentReadIntent,
   };
@@ -307,9 +358,10 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
     executionJobs: persistence.executionJobs,
     task,
     state,
+    requestTimeZone: state.requestTimeZone,
+    persistence,
     signal: abort.signal,
     getWindow: () => rc.window,
-    getBrowserStageRemainder: () => rc.browserStageRemainder,
     browserStageSnapshots,
   });
 
@@ -335,6 +387,39 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
   // so a resumed task acts on the latest owner intent, not a stale checkpoint.
   // (First run just baselines the watermark; chat channel only.)
   await foldOwnerRepliesSincePark(persistence.executionContext, task, state, rc.window);
+  // Rebuild persisted conversations.search evidence before a resumed planner or
+  // model can consume a pre-park private result. This is a local bounded text
+  // refresh; it never replays embedding or arbitrary tools.
+  const refreshedSearch = await refreshResumedConversationSearch(rc.window, {
+    agentId: task.agentId,
+    ...(task.conversationId ? { currentConversationId: task.conversationId } : {}),
+    repository: persistence.conversationSearch,
+  });
+  if (refreshedSearch.changed) {
+    state.plannerState.conversationSearchObservationGeneration =
+      refreshedSearch.observationGeneration;
+    state.contextWindow = compact(rc.window) as unknown as TaskState['contextWindow'];
+    if (!(await checkpointTask(persistence.tasks, lease, state, { preserveFailureCounters: true })))
+      return LOST_LEASE;
+  }
+  // The fold can append a newer owner-authored instruction. Refresh the typed
+  // intent and forced step-zero routes from that window before any planning or
+  // dispatch; otherwise the dispatcher could keep using the pre-resume scope.
+  const resumedOwnerIntent = latestOwnerIntent(rc.window, {
+    trust: task.trust as Trust,
+    trigger: task.trigger,
+    clarificationContinuation: state.clarificationContinuation,
+  });
+  rc.ctx.ownerIntent = resumedOwnerIntent;
+  const resumedOwnerWindow = ownerAuthoredWindow(rc.window, resumedOwnerIntent);
+  rc.artifactIntent =
+    state.step === 0 && !isKnownReply
+      ? requestedArtifactIntent(resumedOwnerIntent.ownerAuthoredText)
+      : undefined;
+  rc.documentReadIntent =
+    state.step === 0 && !rc.artifactIntent && !isKnownReply
+      ? await unreadSharedDocumentIntent(persistence.executionEvidence, task, resumedOwnerWindow)
+      : undefined;
   const payload = (task.trigger as { payload?: { text?: unknown } } | null)?.payload;
   // Never promote an older conversation message into fresh authorization.
   const originalRequest = typeof payload?.text === 'string' ? payload.text : '';
@@ -347,7 +432,10 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
   ) {
     state.requestChecklist = buildRequestChecklist(originalRequest);
   }
-  if (state.requestChecklist && !(await checkpointTask(persistence.tasks, lease, state)))
+  if (
+    state.requestChecklist &&
+    !(await checkpointTask(persistence.tasks, lease, state, { preserveFailureCounters: true }))
+  )
     return LOST_LEASE;
 
   // Save-status questions are read-only receipt checks, not new work for a
@@ -387,7 +475,10 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
       planResult.plan?.requestedOutcomes,
     );
   }
-  if (state.requestChecklist && !(await checkpointTask(persistence.tasks, lease, state)))
+  if (
+    state.requestChecklist &&
+    !(await checkpointTask(persistence.tasks, lease, state, { preserveFailureCounters: true }))
+  )
     return LOST_LEASE;
   return runStepLoop(rc, planResult.plan);
 }

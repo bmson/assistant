@@ -18,6 +18,9 @@ export interface ProfileMemoryCommandPersistence {
 
 export interface ProfileMemoryEmbeddingPort {
   embed(texts: string[]): Promise<number[][]>;
+  embedWithIdentity?(
+    texts: string[],
+  ): Promise<{ embeddings: number[][]; embeddingSpaceKey: string }>;
 }
 
 export interface CreateProfileMemoryInput {
@@ -80,7 +83,8 @@ export function createProfileMemoryCommands(
       if (!existing) return { error: 'Fact not found.' };
       // Model calls complete before the transaction; its hash precondition
       // prevents a slow embedding request from overwriting a newer owner edit.
-      const [embedding] = await router.embed([trimmed]);
+      const embedded = router.embedWithIdentity ? await router.embedWithIdentity([trimmed]) : null;
+      const [embedding] = embedded?.embeddings ?? (await router.embed([trimmed]));
       if (!embedding) throw new Error('Embedding provider returned no vector');
       const result = await memories.correct({
         memoryId,
@@ -88,6 +92,7 @@ export function createProfileMemoryCommands(
         content: trimmed,
         contentHash: createHash('sha256').update(trimmed).digest('hex'),
         embedding,
+        ...(embedded ? { embeddingSpaceKey: embedded.embeddingSpaceKey } : {}),
       });
       if (result.status !== 'updated') return { error: mutationError(result) };
       await finish(result, 'sync');
@@ -106,12 +111,14 @@ export function createProfileMemoryCommands(
       const content = input.content.trim();
       if (content.length < 3) return { error: 'Write a little more.' };
       if (!UUID_RE.test(input.subjectContactId)) return { error: 'Invalid subject.' };
-      const [embedding] = await router.embed([content]);
+      const embedded = router.embedWithIdentity ? await router.embedWithIdentity([content]) : null;
+      const [embedding] = embedded?.embeddings ?? (await router.embed([content]));
       if (!embedding) throw new Error('Embedding provider returned no vector');
       const result = await memories.create({
         content,
         contentHash: createHash('sha256').update(content).digest('hex'),
         embedding,
+        ...(embedded ? { embeddingSpaceKey: embedded.embeddingSpaceKey } : {}),
         importance: Math.min(Math.max(Math.trunc(Number(input.importance)) || 3, 1), 5),
         pinned: input.pinned,
         subjectContactId: input.subjectContactId,

@@ -1,9 +1,8 @@
-import { enqueueTask, InboundEventSchema } from '@assistant/core';
 import type { WatchRow } from '@assistant/db';
 import type { TaskRepository } from '@assistant/persistence';
 import { emailWatchMatches } from '@assistant/tools';
 import type { InboundEmailEvent } from '../platform.js';
-import { recordWatchFire, type WatchFireDeps } from './fire.js';
+import { drainWatchFireEffects, recordWatchFire, type WatchFireDeps } from './fire.js';
 
 /** What watch matching consumes: the database and the owner-notifier port. */
 export type WatchesDeps = WatchFireDeps & { tasks: TaskRepository };
@@ -16,6 +15,11 @@ export type EmailWatchInput = InboundEmailEvent;
 
 export interface EmailWatchResult {
   fired: string[];
+  deliveries: Array<{
+    watchId: string;
+    recorded: boolean;
+    legs: Array<{ kind: string; status: string }>;
+  }>;
 }
 
 /**
@@ -41,12 +45,16 @@ export async function matchEmailWatches(
   input: EmailWatchInput,
 ): Promise<EmailWatchResult> {
   const fired: string[] = [];
+  const deliveries: EmailWatchResult['deliveries'] = [];
   // A spoofed sender must never trigger a false heads-up; require authentication
   // exactly as the application-confirmation path does.
-  if (!input.authenticated) return { fired };
+  if (!input.authenticated) return { fired, deliveries };
   const now = input.now ?? new Date();
   const from = input.from.trim().toLowerCase();
-  if (!from || !input.messageId) return { fired };
+  if (!from || !input.messageId) return { fired, deliveries };
+  // A replayed source event also repairs prior effects even if the watch has
+  // since exhausted maxFires and is no longer a matching candidate.
+  await drainWatchFireEffects(deps, input.agentId, undefined, now);
 
   // Lazily expire lapsed watches so a match is never evaluated against a stale
   // window (the sweep reaper is the durable path; this covers the hot path).
@@ -58,7 +66,7 @@ export async function matchEmailWatches(
     if (!emailWatchMatches(watch.match, input)) continue;
     // The unique (watch_id, trigger_ref) index is the idempotency fence: a
     // message that already fired this watch returns false without re-notifying.
-    const didFire = await recordWatchFire(
+    const delivery = await recordWatchFire(
       deps,
       watch,
       {
@@ -71,29 +79,11 @@ export async function matchEmailWatches(
       },
       now,
     );
-    if (!didFire) continue;
+    deliveries.push({ watchId: watch.id, recorded: delivery.recorded, legs: delivery.legs });
+    if (!delivery.recorded) continue;
     fired.push(watch.id);
-
-    // Suggest tier: hand the fire to the compose job (a code job — no tools,
-    // so the untrusted excerpt can inform a proposal but never act). The
-    // externalEventId makes redelivery and sweep replays enqueue nothing twice.
-    if (watch.tier === 'suggest') {
-      const event = InboundEventSchema.parse({
-        source: 'internal',
-        externalEventId: `watch-suggest:${watch.id}:${input.messageId}`,
-        agentId: input.agentId,
-        trust: 'assistant',
-        payload: { job: 'watch.suggest', watchId: watch.id, triggerRef },
-      });
-      await enqueueTask(deps.tasks, {
-        event,
-        type: 'adhoc',
-        budgetUsdLimit: '0.06',
-        maxSteps: 2,
-      }).catch((err) => console.error('watch suggest enqueue failed', err));
-    }
   }
-  return { fired };
+  return { fired, deliveries };
 }
 
 /**

@@ -83,6 +83,9 @@ export function createPostgresExecutionEvidenceRepository(db: Db): ExecutionEvid
             eq(tasks.agentId, agentId),
             eq(tasks.conversationId, conversationId),
             eq(toolCalls.toolName, toolName),
+            eq(toolCalls.status, 'succeeded'),
+            sql`coalesce(${toolCalls.result}->>'ok', 'true') <> 'false'`,
+            sql`coalesce(${toolCalls.result}->>'deliveryStatus', '') <> 'unknown'`,
             sql`${toolCalls.args}->>'documentId' = ${documentId}`,
           ),
         )

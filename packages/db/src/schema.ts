@@ -1,9 +1,18 @@
+import type {
+  DirectEmailRecoveryReason,
+  DirectEmailRouting,
+  DocumentExtractionMetadata,
+  EmailContentProvenanceSnapshot,
+  ImportArchiveDiagnostics,
+  ImportUnitProvenance,
+} from '@assistant/persistence';
 import { sql } from 'drizzle-orm';
 import {
   type AnyPgColumn,
   bigint,
   boolean,
   check,
+  foreignKey,
   index,
   integer,
   interval,
@@ -194,6 +203,8 @@ export const conversations = pgTable(
      * long-running-chat design). At most one per agent, enforced below.
      */
     isPrimary: boolean('is_primary').notNull().default(false),
+    /** Monotonic commit-ordered sequence assigned to messages in this thread. */
+    messageSequence: bigint('message_sequence', { mode: 'number' }).notNull().default(0),
     metadata: jsonb('metadata').notNull().default({}),
     archivedAt: timestamp('archived_at', { withTimezone: true }),
     /**
@@ -247,17 +258,30 @@ export const messages = pgTable(
     origin: text('origin').notNull(),
     /** Gmail message id / Twilio MessageSid — idempotency for inbound events. */
     channelMessageId: text('channel_message_id'),
+    /** Stable native client identity for owner-request/delivery readiness proof. */
+    clientId: uuid('client_id'),
+    /** Set by an authenticated native client only after this durable reply is visible. */
+    clientDeliveredAt: timestamp('client_delivered_at', { withTimezone: true }),
+    clientDeliveredBy: uuid('client_delivered_by'),
     /** Populated async for semantic search over conversations. */
     embedding: vector('embedding', { dimensions: 1536 }),
+    /** Null for legacy vectors whose provider/model revision is unknown. */
+    embeddingSpaceKey: text('embedding_space_key'),
     /** Owner-hidden from the chat log. The row stays; reads skip it. */
     hiddenAt: timestamp('hidden_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Commit-ordered cursor assigned by the conversation append trigger. */
+    appendSequence: text('append_sequence').notNull().default('00000000000000000000'),
   },
   (t) => [
     check('messages_role_check', sql`${t.role} IN ('user','assistant','system','tool')`),
     check(
       'messages_origin_check',
       sql`${t.origin} IN ('owner','known_contact','unknown','web','assistant','system')`,
+    ),
+    check(
+      'messages_client_delivery_check',
+      sql`(${t.clientDeliveredAt} IS NULL) = (${t.clientDeliveredBy} IS NULL)`,
     ),
     uniqueIndex('messages_channel_message_id_idx')
       .on(t.channelMessageId)
@@ -266,6 +290,7 @@ export const messages = pgTable(
     index('messages_conversation_visible_idx')
       .on(t.conversationId, t.createdAt)
       .where(sql`${t.hiddenAt} IS NULL`),
+    index('messages_conversation_append_idx').on(t.conversationId, t.appendSequence),
     index('messages_created_idx').on(t.createdAt),
     index('messages_task_created_idx')
       .on(t.taskId, t.createdAt)
@@ -276,6 +301,7 @@ export const messages = pgTable(
         sql`${t.embedding} IS NULL AND ${t.role} IN ('user','assistant') AND length(${t.text}) > 20`,
       ),
     index('messages_embedding_idx').using('hnsw', t.embedding.op('vector_cosine_ops')),
+    index('messages_embedding_space_idx').on(t.conversationId, t.embeddingSpaceKey),
   ],
 );
 
@@ -348,6 +374,11 @@ export const commitments = pgTable(
     sourceTaskId: uuid('source_task_id').references((): AnyPgColumn => tasks.id, {
       onDelete: 'set null',
     }),
+    /** Stable evidence identity; retained across status changes to fence replay. */
+    sourceOccurrenceKey: text('source_occurrence_key'),
+    /** Owner-authored reopen creates a new occurrence while preserving the closed source row. */
+    reopenedFromId: uuid('reopened_from_id'),
+    reopenOperationId: uuid('reopen_operation_id'),
     kind: text('kind').notNull(),
     title: text('title').notNull(),
     details: text('details').notNull().default(''),
@@ -371,9 +402,15 @@ export const commitments = pgTable(
       sql`${t.status} IN ('open','resolved','snoozed','dismissed','stale')`,
     ),
     check('commitments_confidence_check', sql`${t.confidence} >= 0 AND ${t.confidence} <= 1`),
-    uniqueIndex('commitments_agent_hash_idx')
-      .on(t.agentId, t.contentHash)
-      .where(sql`${t.status} IN ('open','snoozed')`),
+    uniqueIndex('commitments_agent_source_occurrence_idx')
+      .on(t.agentId, t.sourceOccurrenceKey)
+      .where(sql`${t.sourceOccurrenceKey} IS NOT NULL`),
+    uniqueIndex('commitments_agent_reopen_operation_idx')
+      .on(t.agentId, t.reopenOperationId)
+      .where(sql`${t.reopenOperationId} IS NOT NULL`),
+    uniqueIndex('commitments_agent_reopened_from_idx')
+      .on(t.agentId, t.reopenedFromId)
+      .where(sql`${t.reopenedFromId} IS NOT NULL`),
     index('commitments_agent_status_idx').on(t.agentId, t.status, t.updatedAt),
     index('commitments_conversation_idx').on(t.conversationId, t.status, t.createdAt),
   ],
@@ -407,6 +444,7 @@ export const conversationSegments = pgTable(
     /** Rolling topic summary — the recall retrieval unit. */
     summary: text('summary').notNull().default(''),
     embedding: vector('embedding', { dimensions: 1536 }),
+    embeddingSpaceKey: text('embedding_space_key'),
     messageCount: integer('message_count').notNull().default(0),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
     endedAt: timestamp('ended_at', { withTimezone: true }).notNull(),
@@ -414,6 +452,7 @@ export const conversationSegments = pgTable(
   },
   (t) => [
     index('conversation_segments_embedding_idx').using('hnsw', t.embedding.op('vector_cosine_ops')),
+    index('conversation_segments_embedding_space_idx').on(t.agentId, t.embeddingSpaceKey),
     index('conversation_segments_conversation_idx').on(t.conversationId, t.endedAt),
     index('conversation_segments_agent_idx').on(t.agentId, t.endedAt),
     // Idempotent re-runs: a given start message anchors at most one segment.
@@ -528,6 +567,53 @@ export const tasks = pgTable(
   ],
 );
 
+/** Durable reports for mission transitions. Chat append keys are the stable event ids. */
+export const missionReports = pgTable(
+  'mission_reports',
+  {
+    id: text('id').primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    missionId: uuid('mission_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    goalId: uuid('goal_id').references(() => goals.id),
+    conversationId: uuid('conversation_id').references(() => conversations.id),
+    outcome: text('outcome').notNull(),
+    text: text('text').notNull(),
+    chatStatus: text('chat_status').notNull().default('pending'),
+    ownerStatus: text('owner_status').notNull().default('pending'),
+    mirrorStatus: text('mirror_status').notNull().default('pending'),
+    claimToken: uuid('claim_token'),
+    lockedUntil: timestamp('locked_until', { withTimezone: true }),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    attempts: integer('attempts').notNull().default(0),
+    chatDeliveredAt: timestamp('chat_delivered_at', { withTimezone: true }),
+    ownerDeliveredAt: timestamp('owner_delivered_at', { withTimezone: true }),
+    mirrorDeliveredAt: timestamp('mirror_delivered_at', { withTimezone: true }),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      'mission_reports_chat_status_check',
+      sql`${t.chatStatus} IN ('pending','delivered','skipped','failed')`,
+    ),
+    check(
+      'mission_reports_owner_status_check',
+      sql`${t.ownerStatus} IN ('pending','delivered','skipped','failed','unknown')`,
+    ),
+    check(
+      'mission_reports_mirror_status_check',
+      sql`${t.mirrorStatus} IN ('pending','delivered','skipped','failed')`,
+    ),
+    index('mission_reports_pending_idx').on(t.nextAttemptAt, t.createdAt),
+    index('mission_reports_mission_idx').on(t.agentId, t.missionId, t.createdAt),
+  ],
+);
+
 export const toolCalls = pgTable(
   'tool_calls',
   {
@@ -567,6 +653,75 @@ export const toolCalls = pgTable(
   ],
 );
 
+/** Minimal non-replayable effect receipt retained after private call payload expiry. */
+export const toolCallReceipts = pgTable(
+  'tool_call_receipts',
+  {
+    /** Reuses the original call UUID for direct retry/reconciliation lookup. */
+    id: uuid('id').primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    /** Intentionally not an FK: receipt outlives pruned task history. */
+    taskId: uuid('task_id').notNull(),
+    toolCallId: uuid('tool_call_id').notNull().unique(),
+    modelToolCallIdHash: text('model_tool_call_id_hash'),
+    idempotencyKeyHash: text('idempotency_key_hash'),
+    toolName: text('tool_name').notNull(),
+    effectOutcome: text('effect_outcome').notNull(),
+    recordedAt: timestamp('recorded_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    check(
+      'tool_call_receipts_outcome_check',
+      sql`${t.effectOutcome} IN ('completed','failed','unknown','not_executed')`,
+    ),
+    check(
+      'tool_call_receipts_model_hash_check',
+      sql`${t.modelToolCallIdHash} IS NULL OR ${t.modelToolCallIdHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      'tool_call_receipts_idempotency_hash_check',
+      sql`${t.idempotencyKeyHash} IS NULL OR ${t.idempotencyKeyHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    index('tool_call_receipts_agent_task_idx').on(t.agentId, t.taskId),
+    uniqueIndex('tool_call_receipts_model_lookup_idx')
+      .on(t.modelToolCallIdHash)
+      .where(sql`${t.modelToolCallIdHash} IS NOT NULL`),
+    uniqueIndex('tool_call_receipts_global_idempotency_idx')
+      .on(t.idempotencyKeyHash)
+      .where(sql`${t.idempotencyKeyHash} IS NOT NULL`),
+  ],
+);
+
+/** Digest-only serialization keys shared by active-call start and receipt compaction. */
+export const toolCallReceiptKeys = pgTable(
+  'tool_call_receipt_keys',
+  {
+    id: text('id').primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    /** Intentionally not an FK: key locks receipt identity beyond task pruning. */
+    taskId: uuid('task_id').notNull(),
+    receiptId: uuid('receipt_id').notNull(),
+    kind: text('kind').notNull(),
+    digest: text('digest').notNull(),
+  },
+  (t) => [
+    check('tool_call_receipt_keys_kind_check', sql`${t.kind} IN ('model_tool_call','idempotency')`),
+    check('tool_call_receipt_keys_id_check', sql`${t.id} ~ '^[a-f0-9]{64}$'`),
+    check('tool_call_receipt_keys_digest_check', sql`${t.digest} ~ '^[a-f0-9]{64}$'`),
+    uniqueIndex('tool_call_receipt_keys_global_idempotency_idx')
+      .on(t.digest)
+      .where(sql`${t.kind} = 'idempotency'`),
+    uniqueIndex('tool_call_receipt_keys_model_scope_idx')
+      .on(t.agentId, t.taskId, t.digest)
+      .where(sql`${t.kind} = 'model_tool_call'`),
+    index('tool_call_receipt_keys_receipt_idx').on(t.receiptId),
+  ],
+);
+
 /** One outbound phone call the assistant placed for the owner (calls module). */
 export const callSessions = pgTable(
   'call_sessions',
@@ -586,6 +741,9 @@ export const callSessions = pgTable(
     contactName: text('contact_name'),
     brief: jsonb('brief').notNull(),
     voiceModel: text('voice_model').notNull(),
+    /** Credential-free immutable route selected before reservation and dialing. */
+    voiceRoute: jsonb('voice_route'),
+    lineRate: jsonb('line_rate'),
     maxMinutes: integer('max_minutes').notNull(),
     twilioCallSid: text('twilio_call_sid'),
     streamTokenHash: text('stream_token_hash'),
@@ -596,6 +754,9 @@ export const callSessions = pgTable(
     endedAt: timestamp('ended_at', { withTimezone: true }),
     durationSeconds: integer('duration_seconds'),
     transcript: jsonb('transcript').notNull().default([]),
+    transcriptState: jsonb('transcript_state')
+      .notNull()
+      .default({ nextSequence: 1, pending: [], acknowledged: [] }),
     notes: jsonb('notes').notNull().default([]),
     checkins: jsonb('checkins').notNull().default([]),
     hangupRequested: boolean('hangup_requested').notNull().default(false),
@@ -603,6 +764,8 @@ export const callSessions = pgTable(
     summary: text('summary'),
     costUsd: numeric('cost_usd', { precision: 12, scale: 6 }),
     error: text('error'),
+    finishDelivery: jsonb('finish_delivery'),
+    capacityReleasedAt: timestamp('capacity_released_at', { withTimezone: true }),
     ...timestamps,
   },
   (t) => [
@@ -613,6 +776,22 @@ export const callSessions = pgTable(
       sql`${t.status} IN ('dialing','ringing','in_progress','completed','no_answer','busy','failed','canceled')`,
     ),
   ],
+);
+
+/** Idempotent callback receipts for terminal external jobs such as phone calls. */
+export const executionJobCallbackReceipts = pgTable(
+  'execution_job_callback_receipts',
+  {
+    idempotencyKey: text('idempotency_key').primaryKey(),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    tokenHash: text('token_hash').notNull(),
+    payloadDigest: text('payload_digest').notNull(),
+    queueGeneration: integer('queue_generation').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('execution_job_callback_receipts_task_idx').on(t.taskId)],
 );
 
 export const approvals = pgTable(
@@ -691,10 +870,15 @@ export const applicationConfirmations = pgTable(
     confirmationMessageId: text('confirmation_message_id'),
     confirmationFrom: text('confirmation_from'),
     confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
+    producerPrivacyGeneration: text('producer_privacy_generation'),
     lastError: text('last_error'),
     ...timestamps,
   },
   (t) => [
+    check(
+      'application_confirmations_producer_privacy_generation_check',
+      sql`${t.producerPrivacyGeneration} IS NULL OR length(${t.producerPrivacyGeneration}) <= 128`,
+    ),
     check(
       'application_confirmations_status_check',
       sql`${t.status} IN ('awaiting_confirmation','confirmation_received','updated','partially_updated','update_unknown','update_failed','cancelled','expired')`,
@@ -840,6 +1024,7 @@ export const skills = pgTable(
     /** Pitfalls learned the hard way. */
     gotchas: text('gotchas').notNull().default(''),
     embedding: vector('embedding', { dimensions: 1536 }),
+    embeddingSpaceKey: text('embedding_space_key'),
     /** The task that taught it (plain id, no FK — a skill outlives its source task). */
     sourceTaskId: uuid('source_task_id'),
     originTrust: text('origin_trust').notNull().default('assistant'),
@@ -855,9 +1040,22 @@ export const skills = pgTable(
     check('skills_origin_trust_check', sql`${t.originTrust} IN ('owner','assistant')`),
     uniqueIndex('skills_name_idx').on(t.agentId, t.name),
     index('skills_embedding_idx').using('hnsw', t.embedding.op('vector_cosine_ops')),
+    index('skills_embedding_space_idx').on(t.agentId, t.embeddingSpaceKey),
     index('skills_active_idx').on(t.agentId, t.deprecated),
   ],
 );
+
+/**
+ * Monotonic owner-library generation used to fence slow, model-authored skill
+ * reflections against every manual create/edit/rename/deprecate/delete.
+ */
+export const skillLibraryRevisions = pgTable('skill_library_revisions', {
+  agentId: uuid('agent_id')
+    .primaryKey()
+    .references(() => agents.id, { onDelete: 'cascade' }),
+  revision: bigint('revision', { mode: 'number' }).notNull().default(0),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
 /**
  * Self-improvement proposals (Phase 12): a nightly eval mines failures, retries,
@@ -909,6 +1107,8 @@ export const memories = pgTable(
     content: text('content').notNull(),
     contentHash: text('content_hash').notNull().unique(),
     embedding: vector('embedding', { dimensions: 1536 }),
+    /** Provider/model/width revision for the stored vector; null means legacy/unknown. */
+    embeddingSpaceKey: text('embedding_space_key'),
     importance: smallint('importance').notNull().default(3),
     /** Extracted memories are often uncertain. 0..1 */
     confidence: numeric('confidence', { precision: 3, scale: 2 }).notNull().default('0.7'),
@@ -956,6 +1156,56 @@ export const memories = pgTable(
     index('memories_agent_category_idx').on(t.agentId, t.category, t.createdAt),
     index('memories_subject_idx').on(t.subjectContactId),
     index('memories_source_idx').on(t.source),
+    uniqueIndex('memories_agent_id_id_unique_idx').on(t.agentId, t.id),
+  ],
+);
+
+/**
+ * A refresh receipt is one paid embedding attempt for one exact source revision
+ * and target space. Prepared vectors survive process restarts; ambiguous
+ * dispatches remain reviewable and are never called again automatically.
+ */
+export const memoryEmbeddingRefreshes = pgTable(
+  'memory_embedding_refreshes',
+  {
+    id: text('id').primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    memoryId: uuid('memory_id').notNull(),
+    sourceHash: text('source_hash').notNull(),
+    targetSpaceKey: text('target_space_key').notNull(),
+    targetDimensions: integer('target_dimensions').notNull(),
+    observedSpaceKey: text('observed_space_key'),
+    status: text('status').notNull(),
+    preparedVector: vector('prepared_vector', { dimensions: 1536 }),
+    privacyGeneration: text('privacy_generation'),
+    claimToken: text('claim_token'),
+    leaseUntil: timestamp('lease_until', { withTimezone: true }),
+    unknownReason: text('unknown_reason'),
+    ...timestamps,
+  },
+  (t) => [
+    check(
+      'memory_embedding_refresh_status_check',
+      sql`${t.status} IN ('dispatching','prepared','unknown','retry_authorized','completed','stale','abandoned')`,
+    ),
+    check(
+      'memory_embedding_refresh_dimensions_check',
+      sql`${t.targetDimensions} BETWEEN 1 AND 1536`,
+    ),
+    index('memory_embedding_refresh_identity_idx').on(
+      t.agentId,
+      t.memoryId,
+      t.targetSpaceKey,
+      t.sourceHash,
+      t.updatedAt,
+    ),
+    index('memory_embedding_refresh_owner_status_idx').on(t.agentId, t.status, t.updatedAt),
+    foreignKey({
+      columns: [t.agentId, t.memoryId],
+      foreignColumns: [memories.agentId, memories.id],
+    }).onDelete('cascade'),
   ],
 );
 
@@ -1109,9 +1359,27 @@ export const knowledgeGraphRelations = pgTable(
       .notNull()
       .references(() => knowledgeGraphEntities.id, { onDelete: 'cascade' }),
     predicate: text('predicate').notNull(),
+    assertion: jsonb('assertion')
+      .$type<{
+        tense: 'present' | 'past' | 'future' | 'unspecified';
+        polarity: 'positive' | 'negative';
+        modality:
+          | 'asserted'
+          | 'possible'
+          | 'conditional'
+          | 'reported'
+          | 'hypothetical'
+          | 'unverified';
+      }>()
+      .notNull()
+      .default(sql`'{"tense":"unspecified","polarity":"positive","modality":"unverified"}'::jsonb`),
     objectEntityId: uuid('object_entity_id')
       .notNull()
       .references(() => knowledgeGraphEntities.id, { onDelete: 'cascade' }),
+    /** Canonical semantic claim shared by this source edge and other evidence rows. */
+    assertionId: uuid('assertion_id').references(() => knowledgeGraphAssertions.id, {
+      onDelete: 'set null',
+    }),
     sourceMemoryId: uuid('source_memory_id')
       .notNull()
       .references(() => memories.id, { onDelete: 'cascade' }),
@@ -1133,6 +1401,10 @@ export const knowledgeGraphRelations = pgTable(
     /** Owner curation; rejected edges are excluded from graph recall. */
     reviewStatus: text('review_status').notNull().default('unreviewed'),
     reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+    /** Durable idempotency receipt for an owner correction. */
+    correctedByRelationId: uuid('corrected_by_relation_id'),
+    correctionSourceContentHash: text('correction_source_content_hash'),
+    correctionDisposition: text('correction_disposition'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -1141,8 +1413,16 @@ export const knowledgeGraphRelations = pgTable(
       sql`length(${t.predicate}) BETWEEN 1 AND 80`,
     ),
     check(
+      'knowledge_graph_relations_assertion_check',
+      sql`${t.assertion}->>'tense' IN ('present','past','future','unspecified') AND ${t.assertion}->>'polarity' IN ('positive','negative') AND ${t.assertion}->>'modality' IN ('asserted','possible','conditional','reported','hypothetical','unverified')`,
+    ),
+    check(
       'knowledge_graph_relations_review_status_check',
       sql`${t.reviewStatus} IN ('unreviewed','confirmed','rejected')`,
+    ),
+    check(
+      'knowledge_graph_relations_correction_disposition_check',
+      sql`${t.correctionDisposition} IS NULL OR ${t.correctionDisposition} IN ('graph_only','whole_fact')`,
     ),
     uniqueIndex('knowledge_graph_relations_source_fingerprint_idx').on(
       t.sourceMemoryId,
@@ -1151,6 +1431,117 @@ export const knowledgeGraphRelations = pgTable(
     index('knowledge_graph_relations_subject_idx').on(t.agentId, t.subjectEntityId),
     index('knowledge_graph_relations_object_idx').on(t.agentId, t.objectEntityId),
     index('knowledge_graph_relations_review_idx').on(t.agentId, t.reviewStatus),
+  ],
+);
+
+/** One semantic assertion, independent of the source edges that support it. */
+export const knowledgeGraphAssertions = pgTable(
+  'knowledge_graph_assertions',
+  {
+    id: uuid('id').primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    semanticKey: text('semantic_key').notNull(),
+    subjectEntityId: uuid('subject_entity_id')
+      .notNull()
+      .references(() => knowledgeGraphEntities.id, { onDelete: 'cascade' }),
+    predicate: text('predicate').notNull(),
+    objectEntityId: uuid('object_entity_id')
+      .notNull()
+      .references(() => knowledgeGraphEntities.id, { onDelete: 'cascade' }),
+    assertion: jsonb('assertion')
+      .$type<{
+        tense: 'present' | 'past' | 'future' | 'unspecified';
+        polarity: 'positive' | 'negative';
+        modality:
+          | 'asserted'
+          | 'possible'
+          | 'conditional'
+          | 'reported'
+          | 'hypothetical'
+          | 'unverified';
+      }>()
+      .notNull(),
+    qualifiers: jsonb('qualifiers')
+      .$type<Record<string, string | number | boolean | null>>()
+      .notNull()
+      .default({}),
+    validFrom: text('valid_from'),
+    validUntil: text('valid_until'),
+    semanticRevision: integer('semantic_revision').notNull().default(1),
+    evidenceRevision: integer('evidence_revision').notNull().default(0),
+    lifecycle: text('lifecycle').notNull().default('current'),
+    reviewStatus: text('review_status').notNull().default('unreviewed'),
+    reviewedRevision: integer('reviewed_revision'),
+    reviewedPayloadHash: text('reviewed_payload_hash'),
+    ownerAuthored: boolean('owner_authored').notNull().default(false),
+    supersededById: uuid('superseded_by_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('knowledge_graph_assertions_owner_key_idx').on(t.agentId, t.semanticKey),
+    index('knowledge_graph_assertions_subject_idx').on(t.agentId, t.subjectEntityId, t.predicate),
+    index('knowledge_graph_assertions_object_idx').on(t.agentId, t.objectEntityId, t.predicate),
+    check(
+      'knowledge_graph_assertions_lifecycle_check',
+      sql`${t.lifecycle} IN ('current','superseded','retracted')`,
+    ),
+    check(
+      'knowledge_graph_assertions_review_check',
+      sql`${t.reviewStatus} IN ('unreviewed','confirmed','rejected')`,
+    ),
+    check(
+      'knowledge_graph_assertions_revision_check',
+      sql`${t.semanticRevision} >= 1 AND ${t.evidenceRevision} >= 0`,
+    ),
+  ],
+);
+
+/** Source spans and provenance are independent records; copies can corroborate one claim. */
+export const knowledgeGraphAssertionEvidence = pgTable(
+  'knowledge_graph_assertion_evidence',
+  {
+    id: uuid('id').primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    assertionId: uuid('assertion_id')
+      .notNull()
+      .references(() => knowledgeGraphAssertions.id, { onDelete: 'cascade' }),
+    sourceMemoryId: uuid('source_memory_id')
+      .notNull()
+      .references(() => memories.id, { onDelete: 'cascade' }),
+    sourceFingerprint: text('source_fingerprint').notNull(),
+    sourceContentHash: text('source_content_hash').notNull(),
+    evidenceQuote: text('evidence_quote').notNull(),
+    sourceAuthor: text('source_author').notNull().default('unknown'),
+    sourceTrust: text('source_trust').notNull().default('unknown'),
+    independent: boolean('independent').notNull().default(false),
+    spanStart: integer('span_start'),
+    spanEnd: integer('span_end'),
+    extractionVersion: integer('extraction_version').notNull(),
+    evidenceRevision: integer('evidence_revision').notNull().default(1),
+    observedAt: timestamp('observed_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('knowledge_graph_assertion_evidence_source_idx').on(
+      t.agentId,
+      t.assertionId,
+      t.sourceMemoryId,
+      t.sourceFingerprint,
+    ),
+    index('knowledge_graph_assertion_evidence_lookup_idx').on(t.agentId, t.sourceMemoryId),
+    check(
+      'knowledge_graph_assertion_evidence_author_check',
+      sql`${t.sourceAuthor} IN ('owner','other','unknown')`,
+    ),
+    check(
+      'knowledge_graph_assertion_evidence_span_check',
+      sql`${t.spanStart} IS NULL OR (${t.spanStart} >= 0 AND ${t.spanEnd} >= ${t.spanStart})`,
+    ),
   ],
 );
 
@@ -1227,6 +1618,7 @@ export const importSources = pgTable(
     itemsProcessed: integer('items_processed').notNull().default(0),
     memoriesSaved: integer('memories_saved').notNull().default(0),
     memoriesQuarantined: integer('memories_quarantined').notNull().default(0),
+    parseDiagnostics: jsonb('parse_diagnostics').$type<ImportArchiveDiagnostics | null>(),
     error: text('error'),
     ...timestamps,
   },
@@ -1236,6 +1628,48 @@ export const importSources = pgTable(
       'import_sources_status_check',
       sql`${t.status} IN ('pending','running','done','failed','purged')`,
     ),
+    index('import_sources_agent_source_idx').on(t.agentId, t.source),
+    index('import_sources_agent_workspace_path_idx').on(t.agentId, t.workspacePath),
+  ],
+);
+
+/** Direct and transitive import provenance for memories, including rewritten facts. */
+export const memoryImportLineage = pgTable(
+  'memory_import_lineage',
+  {
+    source: text('source')
+      .notNull()
+      .references(() => importSources.source, { onDelete: 'cascade' }),
+    memoryId: uuid('memory_id')
+      .notNull()
+      .references(() => memories.id, { onDelete: 'cascade' }),
+    sourceUnitProvenance: jsonb('source_unit_provenance')
+      .$type<ImportUnitProvenance[]>()
+      .notNull()
+      .default([]),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('memory_import_lineage_source_memory_idx').on(t.source, t.memoryId),
+    index('memory_import_lineage_memory_idx').on(t.memoryId),
+  ],
+);
+
+/** Import sources that contributed claims to an occasion, direct or derived. */
+export const occasionImportLineage = pgTable(
+  'occasion_import_lineage',
+  {
+    source: text('source')
+      .notNull()
+      .references(() => importSources.source, { onDelete: 'cascade' }),
+    occasionId: uuid('occasion_id')
+      .notNull()
+      .references(() => occasions.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('occasion_import_lineage_source_occasion_idx').on(t.source, t.occasionId),
+    index('occasion_import_lineage_occasion_idx').on(t.occasionId),
   ],
 );
 
@@ -1313,6 +1747,22 @@ export const modelRoles = pgTable(
   ],
 );
 
+/** Before/after snapshots make routing changes reviewable and conditionally reversible. */
+export const modelRoleRevisions = pgTable(
+  'model_role_revisions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    role: text('role').notNull(),
+    beforeState: jsonb('before_state'),
+    afterState: jsonb('after_state'),
+    source: text('source').notNull(),
+    baselineKnown: boolean('baseline_known').notNull(),
+    requiresOwnerReview: boolean('requires_owner_review').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('model_role_revisions_role_created_idx').on(t.role, t.createdAt)],
+);
+
 /** Usage metering — one row per model call; budget guard sums cost_usd. */
 export const modelCalls = pgTable(
   'model_calls',
@@ -1328,6 +1778,9 @@ export const modelCalls = pgTable(
     latencyMs: integer('latency_ms'),
     finishReason: text('finish_reason'),
     openrouterGenerationId: text('openrouter_generation_id'),
+    /** Cloud Run runtime identity; null locally or when release identity is not configured. */
+    runtimeRevision: text('runtime_revision'),
+    runtimeReleaseSha: text('runtime_release_sha'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -1416,6 +1869,7 @@ export const costEvents = pgTable(
     description: text('description').notNull().default(''),
     /** Set when this event reconciles a pre-flight reservation. */
     reservationId: uuid('reservation_id').references((): AnyPgColumn => costReservations.id),
+    idempotencyKey: text('idempotency_key'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -1429,6 +1883,9 @@ export const costEvents = pgTable(
     uniqueIndex('cost_events_reservation_idx')
       .on(t.reservationId)
       .where(sql`${t.reservationId} IS NOT NULL`),
+    uniqueIndex('cost_events_idempotency_key_idx')
+      .on(t.idempotencyKey)
+      .where(sql`${t.idempotencyKey} IS NOT NULL`),
   ],
 );
 
@@ -1447,12 +1904,18 @@ export const costReservations = pgTable(
     estimatedUsd: numeric('estimated_usd', { precision: 10, scale: 6 }).notNull(),
     status: text('status').notNull().default('held'),
     actualUsd: numeric('actual_usd', { precision: 10, scale: 6 }),
+    attemptStartedAt: timestamp('attempt_started_at', { withTimezone: true }),
+    attemptMetadata: jsonb('attempt_metadata'),
+    unknownReason: text('unknown_reason'),
     description: text('description').notNull().default(''),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     reconciledAt: timestamp('reconciled_at', { withTimezone: true }),
   },
   (t) => [
-    check('cost_reservations_status_check', sql`${t.status} IN ('held','reconciled','released')`),
+    check(
+      'cost_reservations_status_check',
+      sql`${t.status} IN ('held','dispatching','unknown','reconciled','released')`,
+    ),
     index('cost_reservations_status_idx').on(t.status, t.createdAt),
     index('cost_reservations_task_idx').on(t.taskId, t.status),
   ],
@@ -1522,6 +1985,7 @@ export const writingSamples = pgTable(
     text: text('text').notNull(),
     context: text('context').notNull().default(''),
     embedding: vector('embedding', { dimensions: 1536 }),
+    embeddingSpaceKey: text('embedding_space_key'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -1530,6 +1994,7 @@ export const writingSamples = pgTable(
       sql`${t.register} IN ('email_professional','email_casual','sms','chat')`,
     ),
     index('writing_samples_embedding_idx').using('hnsw', t.embedding.op('vector_cosine_ops')),
+    index('writing_samples_embedding_space_idx').on(t.embeddingSpaceKey),
   ],
 );
 
@@ -1555,6 +2020,10 @@ export const gmailSyncState = pgTable('gmail_sync_state', {
   /** Durable bounded-drain cursor for Gmail history/inbox reconciliation pages. */
   cursor: jsonb('cursor').notNull().default({}),
   watchExpiration: timestamp('watch_expiration', { withTimezone: true }),
+  /** Fencing token for a Gmail drain; advanced under the session advisory lock. */
+  leaseHolder: text('lease_holder'),
+  leaseGeneration: integer('lease_generation').notNull().default(0),
+  leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true }),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -1592,6 +2061,31 @@ export const emailIngest = pgTable(
     contentTrust: text('content_trust').notNull().default('unknown'),
     /** Receiver-authenticated (aligned SPF/DKIM/DMARC). Forwarding often breaks SPF. */
     authenticated: boolean('authenticated').notNull().default(false),
+    /** Direct versus owner-forwarded policy; source authenticity remains a separate axis. */
+    ingestMode: text('ingest_mode').notNull().default('direct'),
+    /** MIME-aware provenance summary used by voice admission; contains no quoted text. */
+    hasExternalOrUnknown: boolean('has_external_or_unknown').notNull().default(true),
+    /** Immutable expected observer registry, including [] when no observers were enabled. */
+    observerRegistrySnapshot: jsonb('observer_registry_snapshot').$type<Array<{
+      key: string;
+      version: number;
+      workClass: string;
+    }> | null>(),
+    observerRegistryHash: text('observer_registry_hash'),
+    /** Immutable canonical body pointer chosen with the first atomic admission. */
+    admittedSourceKind: text('admitted_source_kind'),
+    admittedSourceId: text('admitted_source_id'),
+    directRouting: text('direct_routing').$type<DirectEmailRouting | null>(),
+    directRecoveryReason: text('direct_recovery_reason').$type<DirectEmailRecoveryReason | null>(),
+    emailContentProvenance: jsonb(
+      'email_content_provenance',
+    ).$type<EmailContentProvenanceSnapshot | null>(),
+    /** Paid automated-sender classification checkpoint; ambiguous outcomes are terminal. */
+    classificationStatus: text('classification_status').notNull().default('not_required'),
+    classificationClaimToken: text('classification_claim_token'),
+    preparedClassification: jsonb('prepared_classification').$type<{ automated: boolean } | null>(),
+    /** Distinguishes paid provider uncertainty from a prepared deterministic fallback. */
+    scoreOutcome: text('score_outcome').notNull().default('model_prepared'),
     category: text('category').notNull().default('other'),
     importance: smallint('importance').notNull().default(1),
     actionable: boolean('actionable').notNull().default(false),
@@ -1599,21 +2093,402 @@ export const emailIngest = pgTable(
     reason: text('reason').notNull().default(''),
     /** Dates the scorer found: [{ iso, what }] — the raw material for occasions. */
     dates: jsonb('dates').notNull().default([]),
+    /** Stable source identity for staged forwarded-ingest recovery. */
+    mailbox: text('mailbox').notNull().default(''),
+    providerMessageId: text('provider_message_id'),
+    /** RFC Message-ID header, retained as provider/source provenance. */
+    sourceMessageId: text('source_message_id'),
+    /** Provider thread and timestamp let the owner review only the current source. */
+    providerThreadId: text('provider_thread_id'),
+    providerReceivedAt: timestamp('provider_received_at', { withTimezone: true }),
+    /** Source-quoted security event details; null when attribution is uncertain. */
+    securityEvidence: jsonb('security_evidence').$type<{
+      providerIncidentRef?: string;
+      eventType?: string;
+      affectedAccount?: string;
+      eventAt?: string;
+      device?: string;
+      location?: string;
+      recoveryCopyOf?: string;
+      evidenceQuote?: string;
+    } | null>(),
+    securityIncidentId: uuid('security_incident_id'),
+    /** Classifier output starts unknown; only an explicit owner decision changes it. */
+    obligationStatus: text('obligation_status').notNull().default('unknown'),
+    obligationVersion: integer('obligation_version').notNull().default(0),
+    obligationDecision: text('obligation_decision'),
+    obligationDecisionAt: timestamp('obligation_decision_at', { withTimezone: true }),
+    obligationSnoozedUntil: timestamp('obligation_snoozed_until', { withTimezone: true }),
+    /** Durable pipeline checkpoint; old/direct rows default to complete. */
+    pipelineStage: text('pipeline_stage').notNull().default('complete'),
+    /** A scoring claim without a prepared verdict is never blindly retried. */
+    scoreStatus: text('score_status').notNull().default('prepared'),
+    scoreClaimToken: text('score_claim_token'),
+    cardCandidate: boolean('card_candidate').notNull().default(false),
+    nextStep: text('next_step'),
+    messagePersisted: boolean('message_persisted').notNull().default(true),
+    triageTaskId: uuid('triage_task_id'),
     /** A triage task was enqueued (i.e. the score cleared the threshold). */
     triaged: boolean('triaged').notNull().default(false),
     /** Set once memory extraction has walked this row. */
     extractedAt: timestamp('extracted_at', { withTimezone: true }),
+    /** Paid structured output retained until all dependent memory writes succeed. */
+    preparedExtraction: jsonb('prepared_extraction'),
     ...timestamps,
   },
   (t) => [
     uniqueIndex('email_ingest_message_idx').on(t.channelMessageId),
+    uniqueIndex('email_ingest_owner_source_idx').on(t.agentId, t.mailbox, t.providerMessageId),
     index('email_ingest_agent_created_idx').on(t.agentId, t.createdAt),
+    index('email_ingest_thread_current_idx').on(
+      t.agentId,
+      t.providerThreadId,
+      t.providerReceivedAt,
+    ),
+    index('email_ingest_security_incident_idx').on(t.agentId, t.securityIncidentId),
+    index('email_ingest_source_message_idx').on(t.agentId, t.sourceMessageId),
     // The extraction job's scan: un-extracted rows, oldest first.
     index('email_ingest_extract_idx').on(t.extractedAt, t.createdAt),
     check('email_ingest_importance_check', sql`${t.importance} BETWEEN 1 AND 5`),
     check(
       'email_ingest_content_trust_check',
       sql`${t.contentTrust} IN ('owner','known','unknown')`,
+    ),
+    check('email_ingest_mode_check', sql`${t.ingestMode} IN ('direct','forwarded')`),
+    check(
+      'email_ingest_classification_status_check',
+      sql`${t.classificationStatus} IN ('pending','in_progress','prepared','unknown','not_required')`,
+    ),
+    check(
+      'email_ingest_score_outcome_check',
+      sql`${t.scoreOutcome} IN ('model_prepared','deterministic_no_model','fallback_committed_unknown','provider_outcome_unknown','budget_blocked')`,
+    ),
+    check(
+      'email_ingest_direct_routing_check',
+      sql`${t.directRouting} IS NULL OR ${t.directRouting} IN ('application_confirmation','email_triage','needs_attention')`,
+    ),
+    check(
+      'email_ingest_direct_recovery_reason_check',
+      sql`${t.directRecoveryReason} IS NULL OR ${t.directRecoveryReason} IN ('provider_message_missing','provider_access_denied','provider_temporarily_unavailable','checkpoint_inconsistent')`,
+    ),
+    check(
+      'email_ingest_admitted_source_kind_check',
+      sql`${t.admittedSourceKind} IS NULL OR ${t.admittedSourceKind} IN ('message','automated_source')`,
+    ),
+    check(
+      'email_ingest_admitted_source_pair_check',
+      sql`(${t.admittedSourceKind} IS NULL) = (${t.admittedSourceId} IS NULL)`,
+    ),
+  ],
+);
+
+/** A canonical email body used only when retained automated direct mail has no transcript row. */
+export const emailObserverSources = pgTable(
+  'email_observer_sources',
+  {
+    id: uuid('id').primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    sourceKey: text('source_key').notNull(),
+    channelMessageId: text('channel_message_id').notNull(),
+    body: text('body').notNull(),
+    privacyGeneration: text('privacy_generation'),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('email_observer_source_owner_key_idx').on(t.agentId, t.sourceKey),
+    uniqueIndex('email_observer_source_channel_message_idx').on(t.channelMessageId),
+    check('email_observer_source_body_length_check', sql`length(${t.body}) <= 20000`),
+  ],
+);
+
+/** Durable per-owner, per-source, versioned observer state. No source body is copied here. */
+export const emailObserverWork = pgTable(
+  'email_observer_work',
+  {
+    id: uuid('id').primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    sourceKey: text('source_key').notNull(),
+    channelMessageId: text('channel_message_id').notNull(),
+    sourceKind: text('source_kind').notNull(),
+    observerKey: text('observer_key').notNull(),
+    observerVersion: integer('observer_version').notNull(),
+    workClass: text('work_class').notNull(),
+    status: text('status').notNull().default('pending'),
+    attemptCount: integer('attempt_count').notNull().default(0),
+    claimToken: text('claim_token'),
+    claimGeneration: integer('claim_generation').notNull().default(0),
+    leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true }),
+    privacyGeneration: text('privacy_generation'),
+    budgetKey: text('budget_key'),
+    budgetWindowStart: timestamp('budget_window_start', { withTimezone: true }),
+    budgetReserved: boolean('budget_reserved').notNull().default(false),
+    preparedResult: jsonb('prepared_result'),
+    deliveryKey: text('delivery_key'),
+    lastErrorCode: text('last_error_code'),
+    claimedAt: timestamp('claimed_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('email_observer_work_owner_source_key_idx').on(
+      t.agentId,
+      t.sourceKey,
+      t.observerKey,
+      t.observerVersion,
+    ),
+    index('email_observer_work_due_idx').on(t.agentId, t.status, t.leaseExpiresAt, t.createdAt),
+    index('email_observer_work_source_idx').on(t.agentId, t.sourceKey),
+    check(
+      'email_observer_work_status_check',
+      sql`${t.status} IN ('pending','claimed','prepared','complete','no_op','retryable_failed','unknown','skipped_erased','skipped_budget')`,
+    ),
+    check(
+      'email_observer_work_class_check',
+      sql`${t.workClass} IN ('idempotent_db','paid_ambiguous','external_provider')`,
+    ),
+    check(
+      'email_observer_work_source_kind_check',
+      sql`${t.sourceKind} IN ('message','automated_source')`,
+    ),
+    check('email_observer_work_attempts_check', sql`${t.attemptCount} >= 0`),
+    check('email_observer_work_generation_check', sql`${t.claimGeneration} >= 0`),
+    check(
+      'email_observer_work_result_size_check',
+      sql`octet_length(${t.preparedResult}::text) <= 100000`,
+    ),
+  ],
+);
+
+/**
+ * Durable, opaque-object custody for email attachment publication. Erased rows
+ * remain as minimal tombstones so a late conditional marker request can still
+ * be discovered and removed without guessing which object generation is ours.
+ */
+export const emailAttachmentCustodies = pgTable(
+  'email_attachment_custodies',
+  {
+    id: uuid('id').primaryKey(),
+    // Restrict owner deletion while any opaque object-custody tombstone remains.
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id),
+    observerWorkId: uuid('observer_work_id'),
+    claimToken: text('claim_token'),
+    claimGeneration: integer('claim_generation').notNull(),
+    privacyGeneration: text('privacy_generation'),
+    channelMessageId: text('channel_message_id'),
+    providerMessageId: text('provider_message_id'),
+    providerAttachmentId: text('provider_attachment_id'),
+    manifestDigest: text('manifest_digest'),
+    attachmentOrdinal: integer('attachment_ordinal').notNull(),
+    workspacePath: text('workspace_path').notNull(),
+    filename: text('filename'),
+    mime: text('mime'),
+    advertisedBytes: integer('advertised_bytes').notNull(),
+    actualBytes: integer('actual_bytes'),
+    sha256: text('sha256'),
+    markerGeneration: text('marker_generation'),
+    objectGeneration: text('object_generation'),
+    status: text('status').notNull().default('marker_pending'),
+    fileId: uuid('file_id'),
+    documentId: uuid('document_id'),
+    duplicateDocumentId: uuid('duplicate_document_id'),
+    leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('email_attachment_custody_source_idx').on(
+      t.agentId,
+      t.observerWorkId,
+      t.providerAttachmentId,
+    ),
+    uniqueIndex('email_attachment_custody_path_idx').on(t.workspacePath),
+    index('email_attachment_custody_cleanup_idx').on(t.agentId, t.status, t.updatedAt),
+    check('email_attachment_custody_generation_check', sql`${t.claimGeneration} >= 0`),
+    check('email_attachment_custody_ordinal_check', sql`${t.attachmentOrdinal} BETWEEN 0 AND 7`),
+    check(
+      'email_attachment_custody_advertised_bytes_check',
+      sql`${t.advertisedBytes} BETWEEN 0 AND 26214400`,
+    ),
+    check(
+      'email_attachment_custody_actual_bytes_check',
+      sql`${t.actualBytes} IS NULL OR ${t.actualBytes} BETWEEN 1 AND 26214400`,
+    ),
+    check(
+      'email_attachment_custody_manifest_check',
+      sql`${t.status} = 'erased' OR ${t.manifestDigest} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      'email_attachment_custody_sha_check',
+      sql`${t.sha256} IS NULL OR ${t.sha256} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      'email_attachment_custody_status_check',
+      sql`${t.status} IN ('marker_pending','marker_ready','content_authorized','object_written','catalogued','cleanup_pending','duplicate_cleaned','erased')`,
+    ),
+    check(
+      'email_attachment_custody_path_check',
+      sql`${t.workspacePath} ~ '^email-attachments/custody/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'`,
+    ),
+    check(
+      'email_attachment_custody_private_fields_check',
+      sql`${t.status} <> 'erased' OR (${t.observerWorkId} IS NULL AND ${t.claimToken} IS NULL AND ${t.privacyGeneration} IS NULL AND ${t.channelMessageId} IS NULL AND ${t.providerMessageId} IS NULL AND ${t.providerAttachmentId} IS NULL AND ${t.manifestDigest} IS NULL AND ${t.filename} IS NULL AND ${t.mime} IS NULL AND ${t.advertisedBytes} = 0 AND ${t.actualBytes} IS NULL AND ${t.sha256} IS NULL AND ${t.fileId} IS NULL AND ${t.documentId} IS NULL AND ${t.duplicateDocumentId} IS NULL)`,
+    ),
+  ],
+);
+
+/** Atomic paid-observer claim budget, independent of deep-triage admission. */
+export const emailObserverBudgets = pgTable(
+  'email_observer_budgets',
+  {
+    id: uuid('id').primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    observerKey: text('observer_key').notNull(),
+    utcWindowStart: timestamp('utc_window_start', { withTimezone: true }).notNull(),
+    utcWindowEnd: timestamp('utc_window_end', { withTimezone: true }).notNull(),
+    reservedCount: integer('reserved_count').notNull().default(0),
+    limit: integer('limit').notNull(),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('email_observer_budget_owner_window_idx').on(
+      t.agentId,
+      t.observerKey,
+      t.utcWindowStart,
+    ),
+    check('email_observer_budget_count_check', sql`${t.reservedCount} >= 0`),
+    check('email_observer_budget_limit_check', sql`${t.limit} BETWEEN 0 AND 1000`),
+  ],
+);
+
+/**
+ * A bounded, owner-scoped identity for one high-confidence security event.
+ * Source messages stay in email_ingest; the separate source table below links
+ * every constituent message without duplicating its private body.
+ */
+export const securityIncidents = pgTable(
+  'security_incidents',
+  {
+    id: uuid('id').primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    incidentKey: text('incident_key').notNull(),
+    confidence: text('confidence').notNull(),
+    revision: integer('revision').notNull().default(0),
+    disposition: text('disposition').notNull().default('unreviewed'),
+    decisionRevision: integer('decision_revision'),
+    decisionReason: text('decision_reason'),
+    materialChangeReason: text('material_change_reason'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('security_incidents_owner_key_idx').on(t.agentId, t.incidentKey),
+    check(
+      'security_incidents_confidence_check',
+      sql`${t.confidence} IN ('provider-reference','recovery-reference','source-message','separate-source')`,
+    ),
+    check(
+      'security_incidents_disposition_check',
+      sql`${t.disposition} IN ('unreviewed','expected','dismissed')`,
+    ),
+    check('security_incidents_revision_check', sql`${t.revision} >= 0`),
+  ],
+);
+
+/** Each source observation is retained and linked to its incident. */
+export const securityIncidentSources = pgTable(
+  'security_incident_sources',
+  {
+    id: uuid('id').primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    incidentId: uuid('incident_id')
+      .notNull()
+      .references(() => securityIncidents.id, { onDelete: 'cascade' }),
+    channelMessageId: text('channel_message_id').notNull(),
+    sourceMessageId: text('source_message_id'),
+    mailboxHash: text('mailbox_hash').notNull(),
+    evidenceFingerprint: text('evidence_fingerprint').notNull(),
+    observedAt: timestamp('observed_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('security_incident_sources_owner_message_idx').on(t.agentId, t.channelMessageId),
+    index('security_incident_sources_incident_idx').on(t.agentId, t.incidentId, t.observedAt),
+    index('security_incident_sources_evidence_idx').on(
+      t.agentId,
+      t.incidentId,
+      t.evidenceFingerprint,
+    ),
+  ],
+);
+
+/** One cross-surface attention claim per incident revision. */
+export const securityIncidentAttention = pgTable(
+  'security_incident_attention',
+  {
+    id: uuid('id').primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    incidentId: uuid('incident_id')
+      .notNull()
+      .references(() => securityIncidents.id, { onDelete: 'cascade' }),
+    revision: integer('revision').notNull(),
+    producer: text('producer').notNull(),
+    deliveryStatus: text('delivery_status').notNull().default('claimed'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('security_incident_attention_revision_idx').on(t.agentId, t.incidentId, t.revision),
+    check(
+      'security_incident_attention_producer_check',
+      sql`${t.producer} IN ('arrival','pulse','briefing')`,
+    ),
+    check(
+      'security_incident_attention_delivery_check',
+      sql`${t.deliveryStatus} IN ('claimed','accepted','unknown')`,
+    ),
+  ],
+);
+
+/**
+ * Latest verified lifecycle snapshot for an explicitly identified booking.
+ * The booking key is a one-way digest of a reference printed in source mail;
+ * raw dates/evidence stay with the source ingest row and can be erased there.
+ */
+export const emailBookingOccurrences = pgTable(
+  'email_booking_occurrences',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id),
+    bookingKey: text('booking_key').notNull(),
+    lifecycle: text('lifecycle').notNull(),
+    dates: jsonb('dates').notNull().default([]),
+    sourceChannelMessageId: text('source_channel_message_id').notNull(),
+    sourceReceivedAt: timestamp('source_received_at', { withTimezone: true }).notNull(),
+    sourceAuthenticated: boolean('source_authenticated').notNull().default(false),
+    version: integer('version').notNull().default(1),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('email_booking_occurrences_owner_key_idx').on(t.agentId, t.bookingKey),
+    index('email_booking_occurrences_source_idx').on(t.agentId, t.sourceChannelMessageId),
+    check(
+      'email_booking_occurrences_lifecycle_check',
+      sql`${t.lifecycle} IN ('confirmed','cancelled','rescheduled','tentative')`,
     ),
   ],
 );
@@ -1648,6 +2523,13 @@ export const suggestions = pgTable(
     proposedAction: text('proposed_action').notNull(),
     /** What produced it: 'briefing' today, a `suggest`-tier watch later. */
     origin: text('origin').notNull().default('briefing'),
+    /** Booking lineage for mail-derived proposals; null for all other suggestions. */
+    bookingKey: text('booking_key'),
+    bookingVersion: integer('booking_version'),
+    bookingCancellation: jsonb('booking_cancellation').$type<{
+      calendarEventId: string;
+      bookingIdentity: string;
+    } | null>(),
     /**
      * What it was noticed from (e.g. `gmail:<id>:calendar`). Unique per agent,
      * so re-running the producer re-proposes nothing the owner already saw —
@@ -1664,9 +2546,10 @@ export const suggestions = pgTable(
   (t) => [
     uniqueIndex('suggestions_source_idx').on(t.agentId, t.sourceRef),
     index('suggestions_status_idx').on(t.agentId, t.status, t.expiresAt),
+    index('suggestions_booking_status_idx').on(t.agentId, t.bookingKey, t.status),
     check(
       'suggestions_status_check',
-      sql`${t.status} IN ('pending','accepted','dismissed','snoozed','expired')`,
+      sql`${t.status} IN ('pending','accepted','dismissed','snoozed','expired','superseded')`,
     ),
   ],
 );
@@ -1682,6 +2565,11 @@ export const schedules = pgTable(
     cron: text('cron').notNull(),
     /** Template for the task the tick creates: { type, trigger, budgetUsdLimit, ... } */
     taskTemplate: jsonb('task_template').notNull().default({}),
+    /** Seed identity/version is separate from the editable display name. */
+    seedTemplateKey: text('seed_template_key'),
+    seedTemplateRevision: integer('seed_template_revision'),
+    seedDefinition: jsonb('seed_definition'),
+    seedReviewRequired: boolean('seed_review_required').notNull().default(false),
     enabled: boolean('enabled').notNull().default(true),
     lastRunAt: timestamp('last_run_at', { withTimezone: true }),
     nextRunAt: timestamp('next_run_at', { withTimezone: true }),
@@ -1779,6 +2667,41 @@ export const watchFires = pgTable(
   (t) => [uniqueIndex('watch_fires_watch_trigger_idx').on(t.watchId, t.triggerRef)],
 );
 
+/** Independently replayable side effects committed atomically with a watch fire. */
+export const watchFireEffects = pgTable(
+  'watch_fire_effects',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id),
+    watchId: uuid('watch_id').notNull(),
+    fireId: uuid('fire_id').notNull(),
+    kind: text('kind').notNull(),
+    status: text('status').notNull().default('pending'),
+    idempotencyKey: text('idempotency_key').notNull(),
+    payload: jsonb('payload').notNull().default({}),
+    attempts: integer('attempts').notNull().default(0),
+    claimedAt: timestamp('claimed_at', { withTimezone: true }),
+    leaseUntil: timestamp('lease_until', { withTimezone: true }),
+    result: jsonb('result'),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('watch_fire_effects_fire_kind_idx').on(t.fireId, t.kind),
+    uniqueIndex('watch_fire_effects_agent_idem_idx').on(t.agentId, t.idempotencyKey),
+    index('watch_fire_effects_pending_idx').on(t.agentId, t.status, t.createdAt),
+    check(
+      'watch_fire_effects_kind_check',
+      sql`${t.kind} IN ('dashboard_notice','owner_notification','suggestion_enqueue','suggestion_message')`,
+    ),
+    check(
+      'watch_fire_effects_status_check',
+      sql`${t.status} IN ('pending','sending','delivered','failed','unknown','skipped')`,
+    ),
+  ],
+);
+
 // ── Proactive delivery policy ────────────────────────────────────────────────
 
 /**
@@ -1831,6 +2754,66 @@ export const proactivePings = pgTable(
   (t) => [
     check('proactive_pings_urgency_check', sql`${t.urgency} IN ('ambient','interrupt')`),
     index('proactive_pings_agent_created_idx').on(t.agentId, t.createdAt),
+  ],
+);
+
+/**
+ * One durable row per concrete destination leg. A claim that expires while
+ * sending is reconciled to `unknown`, never resent automatically: the
+ * provider may have accepted it before the worker died.
+ */
+export const notificationOutbox = pgTable(
+  'notification_outbox',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    deliveryKey: text('delivery_key').notNull(),
+    legKey: text('leg_key').notNull(),
+    adapter: text('adapter').notNull(),
+    status: text('status').notNull().default('pending'),
+    /** Owner-bound target reference; provider secrets are forbidden. */
+    destination: jsonb('destination'),
+    /** Frozen owner-facing body and non-secret delivery options. */
+    payload: jsonb('payload'),
+    attempts: integer('attempts').notNull().default(0),
+    /** True only after a definitive rejection proves no delivery was accepted. */
+    retryable: boolean('retryable').notNull().default(false),
+    availableAt: timestamp('available_at', { withTimezone: true }).notNull().defaultNow(),
+    leaseToken: uuid('lease_token'),
+    leaseUntil: timestamp('lease_until', { withTimezone: true }),
+    providerMessageId: text('provider_message_id'),
+    result: jsonb('result'),
+    /** Non-secret producer association used to enforce privacy after observer completion. */
+    producerWorkId: text('producer_work_id'),
+    producerTaskId: uuid('producer_task_id'),
+    producerApplicationId: uuid('producer_application_id'),
+    producerConfirmationMessageId: text('producer_confirmation_message_id'),
+    producerPrivacyGeneration: text('producer_privacy_generation'),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('notification_outbox_agent_delivery_leg_idx').on(
+      t.agentId,
+      t.deliveryKey,
+      t.legKey,
+    ),
+    index('notification_outbox_due_idx').on(t.agentId, t.status, t.availableAt),
+    index('notification_outbox_producer_work_idx').on(t.agentId, t.producerWorkId),
+    index('notification_outbox_producer_task_idx')
+      .on(t.agentId, t.producerTaskId)
+      .where(sql`${t.producerTaskId} IS NOT NULL`),
+    check(
+      'notification_outbox_status_check',
+      sql`${t.status} IN ('pending','sending','delivered','skipped','failed','unknown')`,
+    ),
+    check('notification_outbox_attempts_nonnegative', sql`${t.attempts} >= 0`),
+    check(
+      'notification_outbox_retryable_failed_only',
+      sql`not ${t.retryable} or ${t.status} = 'failed'`,
+    ),
   ],
 );
 
@@ -1956,6 +2939,11 @@ export const files = pgTable(
     mime: text('mime').notNull().default('application/octet-stream'),
     bytes: bigint('bytes', { mode: 'number' }).notNull().default(0),
     sha256: text('sha256'),
+    objectGeneration: text('object_generation'),
+    emailAttachmentCustodyId: uuid('email_attachment_custody_id').references(
+      () => emailAttachmentCustodies.id,
+      { onDelete: 'restrict' },
+    ),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('files_agent_idx').on(t.agentId, t.createdAt)],
@@ -2018,6 +3006,7 @@ export const documents = pgTable(
      */
     processorAttempts: integer('processor_attempts').notNull().default(0),
     processedTextPath: text('processed_text_path'),
+    extractionMetadata: jsonb('extraction_metadata').$type<DocumentExtractionMetadata>(),
     ...timestamps,
   },
   (t) => [
@@ -2050,11 +3039,13 @@ export const documentChunks = pgTable(
     text: text('text').notNull(),
     charCount: integer('char_count').notNull().default(0),
     embedding: vector('embedding', { dimensions: 1536 }),
+    embeddingSpaceKey: text('embedding_space_key'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('document_chunks_doc_idx').on(t.documentId, t.chunkIndex),
     index('document_chunks_embedding_idx').using('hnsw', t.embedding.op('vector_cosine_ops')),
+    index('document_chunks_embedding_space_idx').on(t.agentId, t.embeddingSpaceKey),
     index('document_chunks_agent_idx').on(t.agentId),
   ],
 );
@@ -2085,6 +3076,11 @@ export const locationPings = pgTable(
     /** IANA id of the device's clock when the ping was captured (travel awareness). */
     timeZone: text('time_zone'),
     capturedAt: timestamp('captured_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * Short-lived arrival-only capability. Null for legacy/non-consented pings;
+     * callers may resolve the row for arrival admission only before this time.
+     */
+    arrivalExpiresAt: timestamp('arrival_expires_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('location_pings_agent_idx').on(t.agentId, t.capturedAt)],
@@ -2297,7 +3293,10 @@ export const recallMetrics = pgTable(
   },
   (t) => [
     check('recall_metrics_path_check', sql`${t.path} IN ('chat','executor')`),
-    check('recall_metrics_tier_check', sql`${t.historyTier} IN ('segment','message','none')`),
+    check(
+      'recall_metrics_tier_check',
+      sql`${t.historyTier} IN ('segment','message','blended','none')`,
+    ),
     index('recall_metrics_agent_created_idx').on(t.agentId, t.createdAt),
     index('recall_metrics_task_idx').on(t.taskId),
   ],
@@ -2329,9 +3328,40 @@ export const recallFeedback = pgTable(
   ],
 );
 
+/**
+ * Owner controls and minimal surfacing history for recalled source identities.
+ * The key is a digest of source IDs; no query, source text, or display label is stored.
+ */
+export const recallSurfaces = pgTable(
+  'recall_surfaces',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    sourceKey: text('source_key').notNull(),
+    sourceRevision: text('source_revision'),
+    kind: text('kind').notNull(),
+    firstSurfacedAt: timestamp('first_surfaced_at', { withTimezone: true }).notNull().defaultNow(),
+    lastSurfacedAt: timestamp('last_surfaced_at', { withTimezone: true }).notNull().defaultNow(),
+    lastMessageId: uuid('last_message_id'),
+    surfaceCount: integer('surface_count').notNull().default(1),
+    suppressedAt: timestamp('suppressed_at', { withTimezone: true }),
+    version: integer('version').notNull().default(1),
+  },
+  (t) => [
+    uniqueIndex('recall_surfaces_owner_source_idx').on(t.agentId, t.sourceKey),
+    index('recall_surfaces_owner_recent_idx').on(t.agentId, t.lastSurfacedAt),
+    check('recall_surfaces_key_check', sql`${t.sourceKey} ~ '^[a-f0-9]{64}$'`),
+    check('recall_surfaces_count_check', sql`${t.surfaceCount} > 0`),
+    check('recall_surfaces_version_check', sql`${t.version} > 0`),
+  ],
+);
+
 export type ResponseCheckRow = typeof responseChecks.$inferSelect;
 export type RecallMetricRow = typeof recallMetrics.$inferSelect;
 export type RecallFeedbackRow = typeof recallFeedback.$inferSelect;
+export type RecallSurfaceRow = typeof recallSurfaces.$inferSelect;
 
 export type CostEventRow = typeof costEvents.$inferSelect;
 export type CostReservationRow = typeof costReservations.$inferSelect;
@@ -2354,10 +3384,13 @@ export type ModelRoleRow = typeof modelRoles.$inferSelect;
 export type BudgetRow = typeof budgets.$inferSelect;
 export type ScheduleRow = typeof schedules.$inferSelect;
 export type EmailIngestRow = typeof emailIngest.$inferSelect;
+export type EmailAttachmentCustodyRow = typeof emailAttachmentCustodies.$inferSelect;
 export type SuggestionRow = typeof suggestions.$inferSelect;
 export type ProactiveMomentRow = typeof proactiveMoments.$inferSelect;
+export type NotificationOutboxRow = typeof notificationOutbox.$inferSelect;
 export type WatchRow = typeof watches.$inferSelect;
 export type WatchFireRow = typeof watchFires.$inferSelect;
+export type WatchFireEffectRow = typeof watchFireEffects.$inferSelect;
 export type CanaryRunRow = typeof canaryRuns.$inferSelect;
 
 /** Issue-to-PR lifecycle; no production write capability is granted by this ledger. */

@@ -125,6 +125,7 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
     private var previousSize = CGSize.zero
     private var edgeLabels: [GraphLink: String] = [:]
     private var edgeDirections: [GraphLink: String] = [:]
+    private var edgeAccessibleClaims: [GraphLink: [RelationshipGraphEdge]] = [:]
     private var lastCommand = -1
     private var needsInitialFit = true
     /// Until the owner moves the map, it keeps itself framed as the controls
@@ -290,14 +291,31 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
         if dark != self.dark { labelImages.removeAll() }
         self.dark = dark
         self.reduceMotion = reduceMotion
-        edgeLabels = [:]; edgeDirections = [:]
+        edgeLabels = [:]; edgeDirections = [:]; edgeAccessibleClaims = [:]
         let claims = Dictionary(grouping: snapshot.edges.filter { $0.reviewStatus != "rejected" },
                                 by: { GraphLink($0.subjectId, $0.objectId) })
         for (link, edges) in claims {
             let statements = Set(edges.map { "\($0.subjectId)|\($0.predicate)|\($0.objectId)|\($0.validFrom ?? "")|\($0.validUntil ?? "")" })
             if statements.count == 1, let edge = edges.first {
-                edgeLabels[link] = edge.presentation.label; edgeDirections[link] = edge.objectId
+                if let focus = selectedID, focus == edge.subjectId || focus == edge.objectId {
+                    edgeLabels[link] = edge.label(focusedAt: focus)
+                } else {
+                    edgeLabels[link] = edge.presentation.label
+                }
+                edgeDirections[link] = edge.objectId
             } else { edgeLabels[link] = "\(statements.count) relationships" }
+
+            // Keep assertion identity and its endpoint views until the focused
+            // node's accessibility value is built. A link can carry several
+            // facts with different wording, provenance, and review state.
+            var seenAssertions = Set<String>()
+            edgeAccessibleClaims[link] = edges
+                .filter { edge in
+                    let endpoint = edge.endpointViews?.first
+                    let identity = endpoint.map { "\($0.assertionId):\($0.semanticRevision)" } ?? edge.id
+                    return seenAssertions.insert(identity).inserted
+                }
+                .sorted { $0.id < $1.id }
         }
         unreviewed = Set(snapshot.edges.filter { $0.reviewStatus != "confirmed" }.map { GraphLink($0.subjectId, $0.objectId) })
         if changed {
@@ -1424,15 +1442,63 @@ final class RelationshipGraphCanvasView: UIView, UIGestureRecognizerDelegate {
     /// Bounded, because an announcement that recites forty edges is its own
     /// kind of unusable.
     private func connectionSummary(for id: String, names: [String: String], linksByID: [String: [GraphLink]]) -> String {
-        let touching = linksByID[id] ?? []
-        let described = touching.prefix(6).compactMap { link -> String? in
-            guard let otherID = link.other(than: id), let other = names[otherID] else { return nil }
-            let relation = edgeLabels[link] ?? "connected"
-            let status = unreviewed.contains(link) ? "needs review" : "confirmed"
-            return "\(relation) \(other), \(status)"
+        let touching = (linksByID[id] ?? []).sorted { lhs, rhs in
+            (lhs.other(than: id) ?? "") < (rhs.other(than: id) ?? "")
+        }
+        var described: [String] = []
+        var omitted = 0
+        for link in touching {
+            let claims = edgeAccessibleClaims[link] ?? []
+            if described.count >= 6 {
+                omitted += claims.count
+                continue
+            }
+            guard let otherID = link.other(than: id), let other = names[otherID] else { continue }
+            for (claimIndex, edge) in claims.enumerated() {
+                if described.count >= 6 {
+                    omitted += claims.count - claimIndex
+                    break
+                }
+                let endpoint = edge.endpointViews?.first {
+                    $0.focusEntityId == id && $0.relatedEntityId == otherID
+                }
+                let candidate = edge.accessibilityText(focusedAt: id)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let fallback = edge.presentation.accessibleLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+                let statement = candidate.isEmpty
+                    ? (fallback.isEmpty ? "\(edgeLabels[link] ?? "connected") with \(other)" : fallback)
+                    : candidate
+                let provenance: String
+                if let count = endpoint?.evidenceCount, count >= 0 {
+                    provenance = "\(count) evidence \(count == 1 ? "item" : "items")"
+                } else if !edge.sourceContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    provenance = "source detail available"
+                } else {
+                    provenance = "source detail unavailable"
+                }
+                let status: String
+                switch edge.reviewStatus {
+                case "confirmed": status = "confirmed"
+                case "unreviewed": status = "needs review"
+                default: status = "review status unavailable"
+                }
+                let fact = "\(statement), \(provenance), \(status)"
+                if described.count < 6 {
+                    described.append(fact)
+                } else {
+                    omitted += 1
+                }
+            }
         }
         guard !described.isEmpty else { return "No recorded connections" }
-        let more = touching.count > described.count ? ", and \(touching.count - described.count) more" : ""
+        let more: String
+        if omitted == 1 {
+            more = ", and 1 more relationship fact"
+        } else if omitted > 1 {
+            more = ", and \(omitted) more relationship facts"
+        } else {
+            more = ""
+        }
         return described.joined(separator: "; ") + more
     }
 

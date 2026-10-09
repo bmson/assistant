@@ -257,27 +257,90 @@ describe.skipIf(!localEmulator)('Firestore mobile People directory with PostgreS
     expect(JSON.stringify(body)).not.toContain('Owner');
   });
 
+  it('pages the Firestore directory without repeating contacts or returning the owner', async () => {
+    const { GET } = await import('./route.js');
+    const firstResponse = await GET(new Request(`${url}?limit=1`));
+    expect(firstResponse.status).toBe(200);
+    const first = await firstResponse.json();
+    expect(first.people.map((person: { id: string }) => person.id)).toEqual([personId]);
+    expect(first.pagination).toMatchObject({
+      consistency: 'live-keyset',
+      pageSize: 1,
+      hasMore: true,
+      complete: false,
+    });
+    const secondResponse = await GET(
+      new Request(`${url}?limit=1&cursor=${encodeURIComponent(first.pagination.nextCursor)}`),
+    );
+    expect(secondResponse.status).toBe(200);
+    const second = await secondResponse.json();
+    expect(second.people.map((person: { id: string }) => person.id)).toEqual([emptyPersonId]);
+    expect(second.pagination).toMatchObject({ hasMore: false, complete: true, nextCursor: null });
+  });
+
+  it('uses the encoded document identity to continue through equal-name contacts', async () => {
+    const { GET } = await import('./route.js');
+    // These encoded keys distinguish byte ordering from language collation.
+    const tiedIds = [
+      '00000007-0000-4000-8000-000000000001',
+      '00000001-0000-4000-8000-000000000001',
+      '00000003-0000-4000-8000-000000000001',
+    ];
+    await Promise.all(
+      tiedIds.map((id) =>
+        store.doc('contacts', id).set({
+          id,
+          name: 'Tied Example',
+          relationship: 'friend',
+          trust: 'confirmed',
+        }),
+      ),
+    );
+    const collected: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const query = new URLSearchParams({ limit: '1' });
+      if (cursor) query.set('cursor', cursor);
+      const response = await GET(new Request(`${url}?${query}`));
+      expect(response.status).toBe(200);
+      const page = await response.json();
+      collected.push(...page.people.map((person: { id: string }) => person.id));
+      cursor = page.pagination.nextCursor;
+    } while (cursor);
+    expect(collected).toHaveLength(5);
+    expect(new Set(collected).size).toBe(5);
+    expect(collected.slice(-3)).toEqual([
+      '00000001-0000-4000-8000-000000000001',
+      '00000003-0000-4000-8000-000000000001',
+      '00000007-0000-4000-8000-000000000001',
+    ]);
+  });
+
   it('authenticates first and fails closed for erasure or ambiguous owner', async () => {
     const { GET } = await import('./route.js');
     auth.mobile.mockResolvedValueOnce(false);
     expect((await GET(new Request(url))).status).toBe(401);
     await store.doc('privacyErasureJobs', agentId).set({ agentId, status: 'active' });
     try {
-      await expect(GET(new Request(url))).rejects.toThrow('Privacy erasure is in progress');
+      const response = await GET(new Request(url));
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        error: 'People are unavailable. Retry before viewing them.',
+      });
     } finally {
       await store.doc('privacyErasureJobs', agentId).delete();
     }
     vi.stubEnv('FIRESTORE_AGENT_ID', foreignAgentId);
     resetConfigForTest();
     try {
-      await expect(GET(new Request(url))).rejects.toThrow('exactly one configured agent');
+      expect((await GET(new Request(url))).status).toBe(503);
     } finally {
       vi.stubEnv('FIRESTORE_AGENT_ID', agentId);
       resetConfigForTest();
     }
     await store.doc('agents', foreignAgentId).set({ id: foreignAgentId });
     try {
-      await expect(GET(new Request(url))).rejects.toThrow('exactly one configured agent');
+      expect((await GET(new Request(url))).status).toBe(503);
     } finally {
       await store.doc('agents', foreignAgentId).delete();
     }
@@ -354,7 +417,11 @@ describe.skipIf(!localEmulator)('Firestore mobile People directory with PostgreS
       const ref = store.doc(collection, id);
       await ref.update({ [field]: bad });
       try {
-        await expect(GET(new Request(url))).rejects.toThrow(/malformed/);
+        const response = await GET(new Request(url));
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({
+          error: 'People are unavailable. Retry before viewing them.',
+        });
       } finally {
         await ref.update({ [field]: original });
       }

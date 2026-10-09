@@ -134,6 +134,32 @@ export interface PolicyMatch {
   effect: 'allow' | 'deny';
 }
 
+export function matchPolicyRows(
+  rows: readonly ApprovalPolicyRow[],
+  input: {
+    agentId: string;
+    toolName: string;
+    args: Record<string, unknown>;
+    ctx: ToolContext;
+  },
+): PolicyMatch | null {
+  const evaluate = (row: ApprovalPolicyRow): boolean => {
+    if (!row.enabled || row.agentId !== input.agentId || row.toolName !== input.toolName)
+      return false;
+    const template = policyTemplates[row.templateKey];
+    if (!template) return false; // unknown template = never matches (fails closed)
+    return template((row.match ?? {}) as Record<string, unknown>, input.args, input.ctx);
+  };
+
+  for (const row of rows.filter((r) => r.effect === 'deny')) {
+    if (evaluate(row)) return { policy: row, effect: 'deny' };
+  }
+  for (const row of rows.filter((r) => r.effect === 'allow')) {
+    if (evaluate(row)) return { policy: row, effect: 'allow' };
+  }
+  return null;
+}
+
 /** First matching enabled policy wins; deny templates are checked before allows. */
 export async function matchPolicies(
   store: ApprovalPolicyStore,
@@ -148,18 +174,5 @@ export async function matchPolicies(
     toolName: input.toolName,
     enabledOnly: true,
   });
-
-  const evaluate = (row: ApprovalPolicyRow): boolean => {
-    const template = policyTemplates[row.templateKey];
-    if (!template) return false; // unknown template = never matches (fails closed)
-    return template((row.match ?? {}) as Record<string, unknown>, input.args, input.ctx);
-  };
-
-  for (const row of rows.filter((r) => r.effect === 'deny')) {
-    if (evaluate(row)) return { policy: row, effect: 'deny' };
-  }
-  for (const row of rows.filter((r) => r.effect === 'allow')) {
-    if (evaluate(row)) return { policy: row, effect: 'allow' };
-  }
-  return null;
+  return matchPolicyRows(rows, input);
 }

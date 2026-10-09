@@ -71,6 +71,17 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore model catalog',
   beforeEach(async () => {
     store = emulatorStore();
     catalog = new FirestoreModelCatalogRepository(store);
+    await store.doc('models', 'minimax/minimax-m2.7').set({
+      id: 'minimax/minimax-m2.7',
+      label: 'Original',
+      capabilities: { tools: true },
+      promptCostPerMTok: '1.0000',
+      completionCostPerMTok: '2.0000',
+      latencyClass: 'medium',
+      enabled: true,
+      createdAt: new Date(0),
+      updatedAt: new Date(0),
+    });
     await store.doc('modelRoles', 'reason').set({
       role: 'reason',
       primaryModel: 'minimax/minimax-m2.7',
@@ -114,9 +125,32 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore model catalog',
     expect(await catalog.listRoles()).toEqual([
       expect.objectContaining({ role: 'reason', primaryModel: 'openai:gpt-5.1', params: {} }),
     ]);
-    expect((await catalog.listModels()).map((row) => row.id)).toEqual([
-      'openai:gpt-5.1',
-      'openai:unpriced',
+    expect((await catalog.listModels()).map((row) => row.id)).toEqual(
+      expect.arrayContaining(['minimax/minimax-m2.7', 'openai:gpt-5.1', 'openai:unpriced']),
+    );
+    const revisions = await catalog.listRoleRevisions();
+    expect(revisions).toHaveLength(1);
+    expect(revisions[0]).toMatchObject({
+      beforeState: {
+        primaryModel: 'minimax/minimax-m2.7',
+        fallbackModel: 'minimax/minimax-m2.7',
+      },
+      afterState: {
+        primaryModel: 'openai:gpt-5.1',
+        fallbackModel: 'openai:gpt-5.1',
+      },
+      baselineKnown: true,
+    });
+    const revisionId = revisions[0]?.id;
+    if (!revisionId) throw new Error('Expected routing revision');
+    expect(await catalog.rollbackRoleRevision(revisionId)).toBe(true);
+    expect(await catalog.rollbackRoleRevision(revisionId)).toBe(false);
+    expect(await catalog.listRoles()).toEqual([
+      expect.objectContaining({
+        role: 'reason',
+        primaryModel: 'minimax/minimax-m2.7',
+        fallbackModel: 'minimax/minimax-m2.7',
+      }),
     ]);
   });
 });

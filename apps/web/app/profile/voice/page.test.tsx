@@ -97,6 +97,8 @@ describe.skipIf(!localEmulator)('Firestore writing voice page with PostgreSQL of
     expect(html).toContain('href="/profile"');
     expect(html).toContain('Save voice');
     expect(html).toContain('action="/api/import/upload"');
+    expect(html).toContain('Only your configured email address is used from archives');
+    expect(html).toContain('plain text is treated as writing you confirm is yours');
     // The purge runs through FirestoreVoiceSamplePurgeRepository.
     expect(html).toContain('Clear learned &amp; uploaded samples');
   });

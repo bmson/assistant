@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import {
   EXECUTION_JOB_CALLBACK_STATES,
   type ExecutionJobCallbackDecision,
@@ -51,6 +51,21 @@ export type JobCallbackOutcome =
   | ExecutionJobCallbackOutcome
   | { ok: false; status: 400; error: string };
 
+/**
+ * Bind a callback receipt to one launch without persisting its bearer token.
+ * A later launch gets a different random token and therefore a different key.
+ */
+export function jobCallbackIdempotencyKey(
+  kind: 'browser' | 'code' | 'call',
+  taskId: string,
+  token: string,
+): string {
+  const tokenHash = hashCallbackToken(token);
+  return createHash('sha256')
+    .update(`assistant:execution-job-callback:v1\0${kind}\0${taskId}\0${tokenHash}`)
+    .digest('hex');
+}
+
 /** Verify a one-shot job callback, record its result, and wake the task. */
 export async function recordJobCallback(
   jobs: ExecutionJobRepository,
@@ -64,10 +79,27 @@ export async function recordJobCallback(
   // free DB/log amplification vector. Reject it structurally first.
   if (!UUID_RE.test(input.taskId)) return { ok: false, status: 400, error: 'bad request' };
   const tokenHash = hashCallbackToken(input.token);
+  // Phone-call completion has a separate call-session identity/outbox. Keep
+  // that established key while browser/code callbacks always use the
+  // task+launch-token identity required for one-shot job replay.
+  const expectedIdempotencyKey =
+    kind === 'call' && input.idempotencyKey
+      ? input.idempotencyKey
+      : jobCallbackIdempotencyKey(kind, input.taskId, input.token);
+  if (kind !== 'call' && input.idempotencyKey && input.idempotencyKey !== expectedIdempotencyKey)
+    return { ok: false, status: 400, error: 'bad callback identity' };
+  const idempotency = {
+    idempotencyKey: expectedIdempotencyKey,
+    tokenHash,
+    payloadDigest: createHash('sha256')
+      .update(JSON.stringify([input.result, input.files]))
+      .digest('hex'),
+  };
   const outcome = await jobs.recordCallback(
-    { taskId: input.taskId, result: input.result, files: input.files },
+    { taskId: input.taskId, result: input.result, files: input.files, ...idempotency },
     (task) => decide(task, tokenHash, kind),
   );
-  if (outcome.ok) getQueueNotifier().notify(outcome.taskId, outcome.queueGeneration);
+  if (outcome.ok && !outcome.replayed)
+    getQueueNotifier().notify(outcome.taskId, outcome.queueGeneration);
   return outcome;
 }

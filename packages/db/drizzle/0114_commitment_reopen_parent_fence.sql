@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "commitments_agent_reopened_from_idx" ON "commitments" USING btree ("agent_id","reopened_from_id") WHERE "commitments"."reopened_from_id" IS NOT NULL;

@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import {
+  agents,
   anomalies,
   approvalPolicies,
   conversations,
@@ -27,6 +29,8 @@ describe('approval anomaly detection', () => {
   let dbUp = false;
   let agentId: string;
   let taskId: string;
+  const createdForeignAgentIds: string[] = [];
+  const createdAnomalyIds: string[] = [];
   const createdPolicyIds: string[] = [];
   const insertedToolCallIds: string[] = [];
 
@@ -90,10 +94,14 @@ describe('approval anomaly detection', () => {
 
   afterAll(async () => {
     if (dbUp) {
+      if (createdAnomalyIds.length)
+        await db.delete(anomalies).where(inArray(anomalies.id, createdAnomalyIds));
       if (createdPolicyIds.length) {
         await db.delete(anomalies).where(inArray(anomalies.policyId, createdPolicyIds));
         await db.delete(approvalPolicies).where(inArray(approvalPolicies.id, createdPolicyIds));
       }
+      if (createdForeignAgentIds.length)
+        await db.delete(agents).where(inArray(agents.id, createdForeignAgentIds));
       if (insertedToolCallIds.length) {
         await db.delete(toolCalls).where(inArray(toolCalls.id, insertedToolCallIds));
       }
@@ -157,7 +165,20 @@ describe('approval anomaly detection', () => {
     expect(second.flagged).toBe(0);
 
     // suspend the policy behind it → policy disabled, anomaly marked suspended.
-    const result = await suspendAnomalyPolicy(db, anomaly?.id ?? '');
+    const foreignMarker = `xtest-anomaly-foreign-${randomUUID()}`;
+    const [foreignAgent] = await db
+      .insert(agents)
+      .values({
+        name: foreignMarker,
+        email: `${foreignMarker}@example.com`,
+        workspacePrefix: foreignMarker,
+      })
+      .returning({ id: agents.id });
+    if (!foreignAgent) throw new Error('foreign fixture agent was not created');
+    createdForeignAgentIds.push(foreignAgent.id);
+    const foreignAttempt = await suspendAnomalyPolicy(db, anomaly?.id ?? '', foreignAgent.id);
+    expect(foreignAttempt.suspended).toBe(false);
+    const result = await suspendAnomalyPolicy(db, anomaly?.id ?? '', agentId);
     expect(result.suspended).toBe(true);
     const [policy] = await db
       .select({ enabled: approvalPolicies.enabled })
@@ -191,11 +212,75 @@ describe('approval anomaly detection', () => {
     expect(mine[0]?.observed).toBe(7);
 
     // dismiss → re-scan same window → deduped, no new open anomaly for this policy.
-    await dismissAnomaly(db, mine[0]?.id ?? '');
+    const foreignAttempt = await dismissAnomaly(
+      db,
+      mine[0]?.id ?? '',
+      '00000000-0000-4000-8000-000000000001',
+    );
+    expect(foreignAttempt).toBe(false);
+    expect((await listOpenAnomalies(db, agentId)).some((a) => a.id === mine[0]?.id)).toBe(true);
+    await dismissAnomaly(db, mine[0]?.id ?? '', agentId);
     await runAnomalyScan({ db }, { now });
     const afterDismiss = (await listOpenAnomalies(db, agentId)).filter(
       (a) => a.policyId === policyId,
     );
     expect(afterDismiss).toHaveLength(0);
+  });
+
+  it('does not suspend a foreign approval policy linked from a stale anomaly row', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const marker = `xtest-anomaly-owner-${randomUUID()}`;
+    const [foreignAgent] = await db
+      .insert(agents)
+      .values({
+        name: marker,
+        email: `${marker}@example.com`,
+        workspacePrefix: marker,
+      })
+      .returning({ id: agents.id });
+    if (!foreignAgent) throw new Error('foreign fixture agent was not created');
+    createdForeignAgentIds.push(foreignAgent.id);
+    const [foreignPolicy] = await db
+      .insert(approvalPolicies)
+      .values({
+        agentId: foreignAgent.id,
+        toolName: 'gmail.send',
+        templateKey: 'gmail.send.to_recipient',
+        match: { recipient: `${marker}@example.com` },
+        effect: 'allow',
+        createdVia: 'approval_dialog',
+      })
+      .returning({ id: approvalPolicies.id });
+    if (!foreignPolicy) throw new Error('foreign fixture policy was not created');
+    createdPolicyIds.push(foreignPolicy.id);
+    const [staleAnomaly] = await db
+      .insert(anomalies)
+      .values({
+        agentId,
+        kind: 'burst',
+        policyId: foreignPolicy.id,
+        toolName: 'gmail.send',
+        observed: 5,
+        expected: 2,
+        windowLabel: marker,
+        subjectKey: foreignPolicy.id,
+      })
+      .returning({ id: anomalies.id });
+    if (!staleAnomaly) throw new Error('stale fixture anomaly was not created');
+    createdAnomalyIds.push(staleAnomaly.id);
+
+    expect(await suspendAnomalyPolicy(db, staleAnomaly.id, agentId)).toEqual({ suspended: false });
+    const [[policy], [anomaly]] = await Promise.all([
+      db
+        .select({ enabled: approvalPolicies.enabled })
+        .from(approvalPolicies)
+        .where(eq(approvalPolicies.id, foreignPolicy.id)),
+      db
+        .select({ status: anomalies.status })
+        .from(anomalies)
+        .where(eq(anomalies.id, staleAnomaly.id)),
+    ]);
+    expect(policy?.enabled).toBe(true);
+    expect(anomaly?.status).toBe('open');
   });
 });

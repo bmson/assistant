@@ -17,6 +17,9 @@ export interface VoiceModelCapabilities {
   audioInputPerMTok: number;
   /** USD per million audio output tokens (the assistant's speech). */
   audioOutputPerMTok: number;
+  /** Present only when the provider's cached-input rate is known for this model. */
+  cachedAudioInputPerMTok?: number;
+  cachedTextInputPerMTok?: number;
   /** Provider voice name, e.g. "marin" or "Aoede". */
   voice?: string;
 }
@@ -42,6 +45,11 @@ export interface ResolvedVoiceModel {
     audioOutputPerMTok: number;
     textInputPerMTok: number;
     textOutputPerMTok: number;
+    cachedAudioInputPerMTok?: number;
+    cachedTextInputPerMTok?: number;
+    transcriptionUsdPerMinute?: number;
+    transcriptionModel?: string;
+    rateCheckedAt?: string;
   };
 }
 
@@ -58,6 +66,8 @@ export function resolveVoiceModel(input: {
   connections: readonly Records['modelConnections'][];
   config: Pick<Config, 'VERTEX_PROJECT' | 'VERTEX_LOCATION'>;
   decrypt?: (sealed: string) => string;
+  /** Preserve an in-flight call's saved provider selection. */
+  transcriptionModel?: string;
 }): ResolvedVoiceModel {
   const row = input.model;
   const caps = voiceCapabilities(row);
@@ -66,6 +76,7 @@ export function resolveVoiceModel(input: {
       'No voice model is set up. Choose one in Settings → AI providers.',
     );
   const decrypt = input.decrypt ?? decryptStoredCredential;
+  const transcriptionModel = input.transcriptionModel ?? 'gpt-live-transcribe';
   const connectionId = connectionIdForModel(row.id);
   const connection = input.connections.find((candidate) => candidate.id === connectionId);
   if (connection && !connection.enabled)
@@ -75,6 +86,21 @@ export function resolveVoiceModel(input: {
     audioOutputPerMTok: caps.audioOutputPerMTok,
     textInputPerMTok: Number(row.promptCostPerMTok ?? 0),
     textOutputPerMTok: Number(row.completionCostPerMTok ?? 0),
+    ...(typeof caps.cachedAudioInputPerMTok === 'number'
+      ? { cachedAudioInputPerMTok: caps.cachedAudioInputPerMTok }
+      : {}),
+    ...(typeof caps.cachedTextInputPerMTok === 'number'
+      ? { cachedTextInputPerMTok: caps.cachedTextInputPerMTok }
+      : {}),
+    ...(row.id.startsWith('openai:') && transcriptionModel === 'gpt-live-transcribe'
+      ? {
+          transcriptionUsdPerMinute: 0.017,
+          transcriptionModel,
+          rateCheckedAt: '2026-10-07',
+        }
+      : row.id.startsWith('openai:')
+        ? { transcriptionModel }
+        : {}),
   };
   if (row.id.startsWith('openai:')) {
     const key = connection?.apiKeyEncrypted ? decrypt(connection.apiKeyEncrypted) : '';
@@ -83,7 +109,7 @@ export function resolveVoiceModel(input: {
         'Connect OpenAI with an API key in Settings → AI providers to use this voice model.',
       );
     return {
-      provider: createOpenAIRealtimeProvider({ apiKey: key }),
+      provider: createOpenAIRealtimeProvider({ apiKey: key, transcriptionModel }),
       model: row.id.slice('openai:'.length),
       voice: caps.voice,
       rates,
@@ -110,13 +136,16 @@ export function resolveVoiceModel(input: {
 
 /** Actual model spend for a finished call. */
 export function realtimeCostUsd(usage: RealtimeUsage, rates: ResolvedVoiceModel['rates']): number {
-  return (
-    (usage.inputAudioTokens * rates.audioInputPerMTok +
-      usage.inputTextTokens * rates.textInputPerMTok +
-      usage.outputAudioTokens * rates.audioOutputPerMTok +
-      usage.outputTextTokens * rates.textOutputPerMTok) /
-    1_000_000
-  );
+  const modelTokens =
+    Math.max(0, usage.inputAudioTokens - usage.cachedAudioInputTokens) * rates.audioInputPerMTok +
+    Math.max(0, usage.inputTextTokens - usage.cachedTextInputTokens) * rates.textInputPerMTok +
+    usage.cachedAudioInputTokens * (rates.cachedAudioInputPerMTok ?? rates.audioInputPerMTok) +
+    usage.cachedTextInputTokens * (rates.cachedTextInputPerMTok ?? rates.textInputPerMTok) +
+    usage.outputAudioTokens * rates.audioOutputPerMTok +
+    usage.outputTextTokens * rates.textOutputPerMTok;
+  const transcription =
+    (usage.transcriptionInputAudioMilliseconds * (rates.transcriptionUsdPerMinute ?? 0)) / 60_000;
+  return (modelTokens + transcription) / 1_000_000;
 }
 
 /**

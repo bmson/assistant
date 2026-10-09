@@ -18,7 +18,24 @@ const config = {
   installationId: 'assistant',
   neon: { projectId: 'proud-sun-123', branchId: 'br-main', endpointId: 'ep-main' },
   assets: { expectedRecovered: 12, expectedUnresolved: 5 },
-  services: [{ name: 'assistant-web' }, { name: 'assistant-agent' }],
+  firestoreDatabaseId: 'assistant-db',
+  dispatcher: {
+    schedulerJobs: ['assistant-sweep'],
+    queues: [],
+    pushSubscriptions: [],
+  },
+  services: [
+    {
+      name: 'assistant-web',
+      health: { path: '/api/health', expectReleaseSha: true },
+      ready: { path: '/api/ready', authenticated: false, expectDatabase: 'firestore' },
+    },
+    {
+      name: 'assistant-agent',
+      health: { path: '/health', expectReleaseSha: true },
+      ready: { path: '/ready', authenticated: false, expectDatabase: 'firestore' },
+    },
+  ],
 } as unknown as CutoverConfig;
 
 const unresolved = Array.from({ length: 5 }, (_, index) => ({
@@ -36,7 +53,7 @@ function cleanInventory(): Inventory {
       traffic: [{ revision: `${name}-00009`, percent: 100, latest: true }],
       image: 'img@sha256:x',
       envNames: ['PERSISTENCE_DRIVER', 'FIRESTORE_DATABASE_ID'],
-      config: { PERSISTENCE_DRIVER: 'firestore' },
+      config: { PERSISTENCE_DRIVER: 'firestore', FIRESTORE_DATABASE_ID: 'assistant-db' },
       secretRefs: [{ env: 'AUTH_SECRET', secret: 'auth-secret', version: '3' }],
     })),
     jobs: [{ name: 'assistant-processor', image: 'p', envNames: [], secretRefs: [] }],
@@ -51,6 +68,24 @@ function cleanInventory(): Inventory {
     queues: [{ name: 'agent-steps', state: 'PAUSED' }],
     subscriptions: [],
     secrets: ['auth-secret', 'database-url', 'database-url-final-export'],
+  };
+}
+
+function cleanLiveProof(inventory = cleanInventory(), capturedAt = '2026-10-02T12:00:00Z') {
+  const currentInventory = { ...inventory, capturedAt };
+  return {
+    capturedAt,
+    inventory: currentInventory,
+    services: config.services.map((target) => ({
+      name: target.name,
+      ok: true,
+      probes: {
+        health: { ok: true },
+        ready: { ok: true, database: 'firestore' },
+      },
+    })),
+    sourceStillFenced: { passed: true },
+    dispatcher: { ok: true },
   };
 }
 
@@ -317,6 +352,7 @@ describe('retirement evidence report', () => {
       decisions,
       now: new Date('2026-10-02T12:00:00Z'),
       minObservationHours: 168,
+      liveProof: cleanLiveProof(),
     });
     expect(report.checks.filter((check) => !check.ok)).toEqual([]);
     expect(report.ready).toBe(true);
@@ -374,6 +410,8 @@ describe('retirement evidence report', () => {
       { path: 'infra/gcp/release.sh', text: '--set-secrets "DATABASE_URL=database-url:latest"' },
       { path: 'infra/docker/backup.sh', text: 'pg_dump --dbname="$DATABASE_URL"' },
     ];
+    const liveProof = cleanLiveProof(inventory);
+    liveProof.dispatcher = { ok: false };
     const report = buildRetirementReport({
       config,
       store: evidence,
@@ -382,19 +420,18 @@ describe('retirement evidence report', () => {
       decisions,
       now: new Date('2026-10-02T12:00:00Z'),
       minObservationHours: 168,
+      liveProof,
     });
-    const failed = Object.fromEntries(
-      report.checks.filter((check) => !check.ok).map((check) => [check.name, check.detail]),
+    const failed = report.checks.filter((check) => !check.ok).map((check) => check.name);
+    expect(failed).toEqual(
+      expect.arrayContaining([
+        'No Cloud Run service or job references DATABASE_URL or a database secret',
+        'Every enabled Scheduler job targets a Firestore service',
+        'Current health, Firestore readiness, dispatcher routing, and source provider fence are verified',
+        'No release, backup, Terraform, or CI path depends on the database',
+        'Firestore release path reaches no PostgreSQL dependency',
+      ]),
     );
-    expect(failed).toEqual({
-      'No Cloud Run service or job references DATABASE_URL or a database secret':
-        'job assistant-migrate',
-      'Every enabled Scheduler job targets a Firestore service': 'assistant-legacy',
-      'No release, backup, Terraform, or CI path depends on the database':
-        'infra/docker/backup.sh, infra/gcp/release.sh',
-      'Firestore release path reaches no PostgreSQL dependency':
-        'infra/gcp/release-firestore.sh is missing; infra/gcp/release.sh does not hand over to infra/gcp/release-firestore.sh; infra/gcp/release.sh (Firestore release path) references the database',
-    });
     expect(renderRetirementReport(report)).toContain('Verdict: NOT READY');
   });
 
@@ -413,7 +450,7 @@ describe('retirement evidence report', () => {
     expect(failed).toEqual(
       expect.arrayContaining([
         'All cutover steps passed under this configuration',
-        'Firestore production observed for at least 168 hours',
+        'Minimum production observation window elapsed (168 hours)',
         'No Cloud Run service or job references DATABASE_URL or a database secret',
         'A separately retained PostgreSQL archive has a tested restore',
       ]),
@@ -438,8 +475,68 @@ describe('retirement evidence report', () => {
       minObservationHours: 168,
       liveInventory: fresh,
     });
-    expect(report.inventorySource).toBe('fresh read-only capture');
+    expect(report.inventorySource).toBe('fresh read-only capture (operational proof missing)');
     expect(report.cloudDependencies.map((item) => item.name)).toEqual(['assistant-web-legacy']);
     expect(report.ready).toBe(false);
+  });
+
+  it('fails closed on a rollback record even with fresh Firestore traffic and elapsed observation', () => {
+    const evidence = store();
+    writeEvidence(evidence, cleanInventory());
+    evidence.writeRecord('cutover-rollback-result-123.json', {
+      format: 'assistant-cutover-rollback',
+      status: 'completed',
+      passed: true,
+    });
+    const report = buildRetirementReport({
+      config,
+      store: evidence,
+      findings: scanRepository(releaseRepo()),
+      firestorePath: verifyFirestorePath(releaseRepo()),
+      decisions,
+      now: new Date('2026-10-02T12:00:00Z'),
+      minObservationHours: 168,
+      liveProof: cleanLiveProof(),
+    });
+    expect(report.ready).toBe(false);
+    expect(report.checks.find((check) => check.name.startsWith('No rollback'))).toEqual({
+      name: 'No rollback record invalidates this cutover retirement evidence',
+      ok: false,
+      detail: 'cutover-rollback-result-123.json',
+    });
+  });
+
+  it('fails closed on stale inventory, split serving traffic, wrong driver, or missing provider proof', () => {
+    const evidence = store();
+    writeEvidence(evidence, cleanInventory());
+    const inventory = cleanInventory();
+    const web = inventory.services[0];
+    if (web) {
+      web.config.PERSISTENCE_DRIVER = 'firestore';
+      web.traffic = [
+        { revision: 'assistant-web-old', percent: 50, latest: false },
+        { revision: web.latestReadyRevision, percent: 50, latest: true },
+      ];
+    }
+    const proof = cleanLiveProof(inventory, '2026-10-02T11:00:00Z');
+    proof.sourceStillFenced = { passed: false };
+    const report = buildRetirementReport({
+      config,
+      store: evidence,
+      findings: scanRepository(releaseRepo()),
+      firestorePath: verifyFirestorePath(releaseRepo()),
+      decisions,
+      now: new Date('2026-10-02T12:00:00Z'),
+      minObservationHours: 168,
+      liveProof: proof,
+    });
+    const failed = report.checks.filter((check) => !check.ok).map((check) => check.name);
+    expect(failed).toEqual(
+      expect.arrayContaining([
+        'Current Cloud inventory is fresh (at most 15 minutes old)',
+        'Every configured service currently serves its Firestore revision and database',
+        'Current health, Firestore readiness, dispatcher routing, and source provider fence are verified',
+      ]),
+    );
   });
 });

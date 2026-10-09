@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { loadConfig, resetConfigForTest } from '@assistant/config';
 import { TRIAGED_ACTIONABLE } from '@assistant/core/events';
 import type { ModelRouter } from '@assistant/core/model-router';
@@ -13,6 +14,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const stubs = vi.hoisted(() => ({
   enqueueTask: vi.fn(),
+  admission: vi.fn(),
+  queueAdmission: vi.fn(),
   getAmbientBlock: vi.fn(async () => undefined),
   getOwnerCard: vi.fn(async () => undefined),
 }));
@@ -31,7 +34,7 @@ vi.mock('@assistant/core/memory/consolidation', async (importOriginal) => ({
   getOwnerCard: stubs.getOwnerCard,
 }));
 
-const { handleChatTurn } = await import('./chat-turn.js');
+const { handleChatTurn, resumeAdmittedChatTask } = await import('./chat-turn.js');
 
 const AGENT = '00000000-0000-4000-8000-00000000000a';
 const CONVERSATION = '00000000-0000-4000-8000-00000000000c';
@@ -39,13 +42,17 @@ const CONVERSATION = '00000000-0000-4000-8000-00000000000c';
 type Completion = {
   status: 'done' | 'failed';
   progress?: string;
-  messages: Array<{ text: string; parts: unknown[] }>;
+  messages: Array<{ text: string; parts: unknown[]; channelMessageId?: string }>;
 };
 
 type StoreScript = {
   history?: Array<Record<string, unknown>>;
+  laterMessages?: Array<Record<string, unknown>>;
   evidence?: ActionEvidence[];
   unavailableConversation?: boolean;
+  cancellationWon?: boolean;
+  archivedConversation?: boolean;
+  emptyConversationTitle?: boolean;
 };
 
 function chatStore(script: StoreScript = {}) {
@@ -58,6 +65,14 @@ function chatStore(script: StoreScript = {}) {
   }));
   const completions: Completion[] = [];
   let taskCount = 0;
+  const admittedByOperation = new Map<
+    string,
+    {
+      task: Record<string, unknown>;
+      message: Record<string, unknown>;
+      lease: Record<string, unknown>;
+    }
+  >();
   const chat = {
     kind: 'application-chat-persistence',
     resolveAgent: async () => ({
@@ -72,33 +87,77 @@ function chatStore(script: StoreScript = {}) {
         : {
             id: CONVERSATION,
             agentId: AGENT,
-            title: 'Existing chat',
-            archivedAt: null,
+            title: script.emptyConversationTitle ? '' : 'Existing chat',
+            archivedAt: script.archivedConversation ? new Date('2026-09-01T00:00:00Z') : null,
             metadata: {},
             modelOverride: null,
           },
-    appendOwned: async (_agentId: string, input: Record<string, unknown>) => {
+    admitChatTurn: async (input: Record<string, unknown>) => {
+      stubs.admission(input);
+      if (script.cancellationWon)
+        return {
+          kind: 'cancelled_before_admission',
+          created: false,
+          task: { id: '00000000-0000-4000-8000-000000000099', status: 'cancelled' },
+          status: 'cancelled',
+          effectStatus: 'not_started',
+        };
+      const operationId = String(input.clientOperationId);
+      const existing = admittedByOperation.get(operationId);
+      if (existing)
+        return { kind: 'admitted', created: false, task: existing.task, message: existing.message };
       const row = {
         id: `00000000-0000-4000-8000-${String(messages.length + 1).padStart(12, '0')}`,
-        taskId: null,
+        taskId: `task-${++taskCount}`,
         createdAt: new Date(Date.UTC(2026, 8, 23, 12, 0, messages.length)),
-        ...input,
+        conversationId: CONVERSATION,
+        role: 'user',
+        origin: 'owner',
+        parts: [{ type: 'text', text: input.text }],
+        text: input.text,
       };
       messages.push(row);
-      return row;
+      const taskId = row.taskId;
+      const task = {
+        id: taskId,
+        conversationId: CONVERSATION,
+        agentId: AGENT,
+        status: 'running',
+        trigger: {
+          source: 'chat',
+          payload: { text: input.text, chatAdmission: { phase: 'classifying' } },
+        },
+      };
+      const lease = {
+        ...task,
+        leaseToken: `lease-${taskId}`,
+        lockedUntil: new Date(Date.now() + 60_000),
+      };
+      const admitted = { task, message: row, lease };
+      admittedByOperation.set(operationId, admitted);
+      return { kind: 'admitted', created: true, ...admitted };
     },
-    listMessages: async () => ({ messages: [...messages], hasMore: false }),
-    getTaskKinds: async () => new Map(),
-    createDirectChatTask: async (input: { conversationId: string }) => ({
-      id: `task-${++taskCount}`,
-      conversationId: input.conversationId,
+    privacyObservationGeneration: async () => null,
+    listMessages: async () => ({
+      messages: [...messages, ...(script.laterMessages ?? [])],
+      hasMore: false,
     }),
+    listMessagesByIds: async (_agentId: string, _conversationId: string, ids: string[]) =>
+      messages.filter((message) => ids.includes(String(message.id))),
+    getTaskKinds: async () => new Map(),
+    queueAdmittedChatTurn: async (input: { task: { id: string }; triagedActionable: boolean }) => {
+      stubs.queueAdmission(input);
+      return { id: input.task.id, queueGeneration: 1 };
+    },
+    markChatTurnStreaming: async () => true,
     completeDirectChatTask: async (input: Completion) => {
       completions.push(input);
       return true;
     },
     listConversationEvidence: async () => script.evidence ?? [],
     createConversation: vi.fn(),
+    restoreConversation: vi.fn(async () => true),
+    setConversationTitleIfEmpty: vi.fn(async () => true),
     raiseTaskBudget: vi.fn(async () => {}),
   };
   return {
@@ -107,6 +166,8 @@ function chatStore(script: StoreScript = {}) {
     messages,
     raiseTaskBudget: chat.raiseTaskBudget,
     createConversation: chat.createConversation,
+    restoreConversation: chat.restoreConversation,
+    setConversationTitleIfEmpty: chat.setConversationTitleIfEmpty,
   };
 }
 
@@ -119,6 +180,7 @@ type RouterScript = {
 };
 
 function scriptedRouter(script: RouterScript) {
+  const route = vi.fn(async () => ({ ok: true as const, modelId: 'test/model' }));
   const object = vi.fn(async () => {
     if (script.triage instanceof Error) throw script.triage;
     if (script.triageUnavailable) return { ok: false, decision: { mode: 'park', reason: 'cap' } };
@@ -155,7 +217,7 @@ function scriptedRouter(script: RouterScript) {
       };
     },
   );
-  return { router: { object, stream } as unknown as ModelRouter, object, stream };
+  return { router: { route, object, stream } as unknown as ModelRouter, route, object, stream };
 }
 
 function send(text: string, extra: Record<string, unknown> = {}) {
@@ -180,6 +242,8 @@ function config() {
 
 beforeEach(() => {
   stubs.enqueueTask.mockReset();
+  stubs.admission.mockReset();
+  stubs.queueAdmission.mockReset();
   stubs.getAmbientBlock.mockReset().mockResolvedValue(undefined);
   stubs.getOwnerCard.mockReset().mockResolvedValue(undefined);
   stubs.enqueueTask.mockResolvedValue({ task: { id: 'queued-task' } });
@@ -204,13 +268,99 @@ async function turn(
 }
 
 function queuedPayload() {
-  const [[, input]] = stubs.enqueueTask.mock.calls as unknown as [
-    [unknown, { event: { payload: Record<string, unknown> } }],
+  const [[input]] = stubs.queueAdmission.mock.calls as unknown as [
+    [{ triagedActionable: boolean }],
   ];
-  return input.event.payload;
+  return input.triagedActionable ? { [TRIAGED_ACTIONABLE]: true } : {};
 }
 
 describe('chat needs-action triage', () => {
+  it('recovers a stale direct reply using the persisted conversational triage outcome', async () => {
+    const operationId = '00000000-0000-4000-8000-0000000000d3';
+    const messageId = '00000000-0000-4000-8000-0000000000d4';
+    const taskId = '00000000-0000-4000-8000-0000000000d5';
+    const text = 'Say hello.';
+    const requestHash = createHash('sha256')
+      .update(JSON.stringify([text, false, false, false]))
+      .digest('hex');
+    const store = chatStore({
+      history: [{ id: messageId, taskId, role: 'user', text }],
+    });
+    const router = scriptedRouter({ draft: 'Hello again.' });
+    const task = {
+      id: taskId,
+      agentId: AGENT,
+      conversationId: CONVERSATION,
+      type: 'chat_turn',
+      trust: 'owner',
+      status: 'running',
+      lockedUntil: new Date(Date.now() + 60_000),
+      leaseToken: 'reclaimed-lease',
+      trigger: {
+        source: 'chat',
+        agentId: AGENT,
+        conversationId: CONVERSATION,
+        trust: 'owner',
+        payload: {
+          text,
+          triggerMessageId: messageId,
+          clientOperationId: operationId,
+          autonomous: false,
+          force: false,
+          spoken: false,
+          chatAdmission: {
+            protocol: 'owner-chat-v1',
+            clientOperationId: operationId,
+            requestHash,
+            triggerMessageId: messageId,
+            phase: 'streaming',
+            triageOutcome: 'conversational',
+          },
+        },
+      },
+    } as never;
+
+    await expect(
+      resumeAdmittedChatTask(task, {
+        config: config(),
+        router: router.router,
+        chat: store.chat,
+        persistence: { tasks: {}, ownerContext: {} } as never,
+      }),
+    ).resolves.toBe(200);
+    expect(router.object).not.toHaveBeenCalled();
+    expect(router.stream).toHaveBeenCalledOnce();
+    expect(store.messages.filter((message) => message.role === 'user')).toHaveLength(1);
+  });
+
+  it('replays the same client operation receipt without classifying or streaming again', async () => {
+    const operationId = '00000000-0000-4000-8000-0000000000d2';
+    const store = chatStore();
+    const firstRouter = scriptedRouter({ triage: { needsAction: false }, draft: 'Hello.' });
+    await handleChatTurn(send('Say hello.', { clientOperationId: operationId }), {
+      config: config(),
+      router: firstRouter.router,
+      chat: store.chat,
+      persistence: { tasks: {}, ownerContext: {} } as never,
+    });
+    const secondRouter = scriptedRouter({
+      triage: { needsAction: false },
+      draft: 'Different reply.',
+    });
+    const replay = await handleChatTurn(send('Say hello.', { clientOperationId: operationId }), {
+      config: config(),
+      router: secondRouter.router,
+      chat: store.chat,
+      persistence: { tasks: {}, ownerContext: {} } as never,
+    });
+
+    expect(replay.headers.get('x-async-task')).toBe('task-1');
+    expect(firstRouter.stream).toHaveBeenCalledOnce();
+    expect(secondRouter.object).not.toHaveBeenCalled();
+    expect(secondRouter.stream).not.toHaveBeenCalled();
+    expect(store.messages.filter((message) => message.role === 'user')).toHaveLength(1);
+  });
+
   it.each([
     'Remind me in ten minutes to take the laundry out.',
     'Cancel the sunglasses reminder.',
@@ -223,7 +373,7 @@ describe('chat needs-action triage', () => {
     'Check the weather in Tokyo tomorrow.',
   ])('never sends an explicit action to the tool-less reply: %s', async (text) => {
     const result = await turn(text, { triage: { needsAction: false }, draft: 'Done.' });
-    expect(result.response.headers.get('x-async-task')).toBe('queued-task');
+    expect(result.response.headers.get('x-async-task')).toBe('task-1');
     expect(result.stream).not.toHaveBeenCalled();
     expect(queuedPayload()[TRIAGED_ACTIONABLE]).toBe(true);
   });
@@ -239,9 +389,12 @@ describe('chat needs-action triage', () => {
           history: [{ role: 'assistant', text: 'Would you like me to send that email?' }],
         },
       );
-      expect(result.response.headers.get('x-async-task')).toBe('queued-task');
+      expect(result.response.headers.get('x-async-task')).toBe('task-1');
       expect(result.object).not.toHaveBeenCalled();
-      expect(stubs.enqueueTask.mock.calls[0]?.[1]?.autonomyGrant).toBeUndefined();
+      expect(
+        (stubs.admission.mock.calls[0]?.[0] as { autonomyGrant?: unknown } | undefined)
+          ?.autonomyGrant,
+      ).toBeUndefined();
     },
   );
 
@@ -268,26 +421,32 @@ describe('chat needs-action triage', () => {
 
   it('defaults to the executor when triage is budget-blocked', async () => {
     const result = await turn('Help with the thing from earlier.', { triageUnavailable: true });
-    expect(result.response.headers.get('x-async-task')).toBe('queued-task');
+    expect(result.response.headers.get('x-async-task')).toBe('task-1');
     expect(queuedPayload()[TRIAGED_ACTIONABLE]).toBeUndefined();
     expect(result.stream).not.toHaveBeenCalled();
   });
 
   it('forces a retry into the executor while keeping approval policy', async () => {
     await turn('Please try again.', {}, { force: true });
-    expect(stubs.enqueueTask.mock.calls[0]?.[1]?.autonomyGrant).toBeUndefined();
+    expect(
+      (stubs.admission.mock.calls[0]?.[0] as { autonomyGrant?: unknown } | undefined)
+        ?.autonomyGrant,
+    ).toBeUndefined();
     expect(queuedPayload()[TRIAGED_ACTIONABLE]).toBe(true);
   });
 
   it('uses the explicit composer autonomy grant for an autonomous turn', async () => {
     await turn('Please try again.', {}, { autonomous: true });
-    expect(stubs.enqueueTask.mock.calls[0]?.[1]?.autonomyGrant).toMatchObject({
-      grantedVia: 'composer',
-    });
+    expect(
+      (stubs.admission.mock.calls[0]?.[0] as { autonomyGrant?: unknown } | undefined)
+        ?.autonomyGrant,
+    ).toMatchObject({ grantedVia: 'composer' });
   });
 
   it('reports an unavailable queue while preserving the owner message', async () => {
-    stubs.enqueueTask.mockRejectedValue(new Error('queue unavailable'));
+    stubs.queueAdmission.mockImplementation(() => {
+      throw new Error('queue unavailable');
+    });
     const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const result = await turn('Remind me tomorrow to call Anna.', {});
@@ -306,7 +465,7 @@ describe('chat needs-action triage', () => {
       "What's the Giants score and the drive time to Oracle Park?",
       {},
     );
-    expect(response.headers.get('x-async-task')).toBe('queued-task');
+    expect(response.headers.get('x-async-task')).toBe('task-1');
     expect(object).not.toHaveBeenCalled();
     expect(stream).not.toHaveBeenCalled();
     expect(queuedPayload()[TRIAGED_ACTIONABLE]).toBe(true);
@@ -317,7 +476,7 @@ describe('chat needs-action triage', () => {
       triage: { needsAction: true },
     });
     expect(object).toHaveBeenCalledOnce();
-    expect(response.headers.get('x-async-task')).toBe('queued-task');
+    expect(response.headers.get('x-async-task')).toBe('task-1');
     expect(stream).not.toHaveBeenCalled();
     expect(queuedPayload()[TRIAGED_ACTIONABLE]).toBe(true);
   });
@@ -328,7 +487,7 @@ describe('chat needs-action triage', () => {
       triage: new Error('classifier timed out'),
     });
     quiet.mockRestore();
-    expect(response.headers.get('x-async-task')).toBe('queued-task');
+    expect(response.headers.get('x-async-task')).toBe('task-1');
     expect(stream).not.toHaveBeenCalled();
     expect(queuedPayload()[TRIAGED_ACTIONABLE]).toBeUndefined();
   });
@@ -341,9 +500,144 @@ describe('chat needs-action triage', () => {
     const [, request] = object.mock.calls[0] as unknown as [string, { prompt: string }];
     expect(request.prompt).toMatch(/LATEST USER MESSAGE \(classify this\):\ntell me a joke/);
   });
+
+  it('does not include a later concurrently admitted turn in this turn context', async () => {
+    const { object } = await turn(
+      'tell me a joke',
+      {
+        triage: { needsAction: false },
+        draft: 'A joke.',
+      },
+      {},
+      {
+        laterMessages: [
+          {
+            id: '00000000-0000-4000-8000-999999999999',
+            taskId: 'later-task',
+            conversationId: CONVERSATION,
+            role: 'user',
+            origin: 'owner',
+            createdAt: new Date(Date.UTC(2026, 8, 23, 12, 1)),
+            parts: [{ type: 'text', text: 'later turn secret context' }],
+            text: 'later turn secret context',
+          },
+        ],
+      },
+    );
+    const [, request] = object.mock.calls[0] as unknown as [string, { prompt: string }];
+    expect(request.prompt).not.toContain('later turn secret context');
+  });
 });
 
 describe('tool-less conversational reply', () => {
+  it('uses the shared owner-scoped decision projection without tools', async () => {
+    const store = chatStore();
+    const scripted = scriptedRouter({
+      triage: { needsAction: false },
+      draft: 'You previously rejected the daily check-in because it interrupted focus.',
+    });
+    Object.assign(scripted.router, {
+      embeddingSpace: async () => ({
+        provider: 'synthetic',
+        model: 'chat-turn-test',
+        dimensions: 2,
+        revision: '1',
+      }),
+      embed: vi.fn(async () => [[1, 0]]),
+    });
+    const retrieve = vi.fn(async () => [
+      {
+        decisionId: 'daily-check-in',
+        option: 'Daily check-in',
+        outcome: 'rejected' as const,
+        reason: 'It interrupted focus during launch.',
+        scope: 'situation' as const,
+        packId: '00000000-0000-4000-8000-0000000000a1',
+        packTitle: 'Launch plan',
+        packVersion: 3,
+        packUpdatedAt: '2026-10-01T00:00:00.000Z',
+        relevance: 5,
+      },
+    ]);
+    const response = await handleChatTurn(
+      send('Do you think a daily check-in makes sense for launch?'),
+      {
+        config: loadConfig({
+          OPENROUTER_API_KEY: 'test-key',
+          QUEUE_DRIVER: 'local',
+          CHAT_RECALL_ENABLED: 'true',
+          GRAPH_RAG_ENABLED: 'false',
+        }),
+        router: scripted.router,
+        chat: store.chat,
+        persistence: {
+          tasks: {},
+          ownerContext: {},
+          history: {
+            kind: 'history-recall-repository',
+            segments: async () => [],
+            messages: async () => [],
+            neighborhood: async () => [],
+          },
+          recallMetrics: { kind: 'recall-metrics-repository', record: vi.fn(async () => {}) },
+          situationDecisionContext: {
+            kind: 'situation-decision-context-repository',
+            retrieve,
+          },
+        } as never,
+      },
+    );
+
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(retrieve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: AGENT,
+        discussionFrame: expect.stringContaining(
+          'Do you think a daily check-in makes sense for launch?',
+        ),
+      }),
+    );
+    const request = scripted.stream.mock.calls[0]?.[1] as unknown as { system: string };
+    expect(request?.system).toContain('Launch plan');
+    expect(request?.system).toContain('version 3');
+    expect(request?.system).toContain('never action permission');
+  });
+
+  it('honors a current no-history instruction before memory and ambient reads', async () => {
+    const store = chatStore();
+    const scripted = scriptedRouter({
+      triage: { needsAction: false },
+      draft: 'Using only this note.',
+    });
+    const embed = vi.fn();
+    Object.assign(scripted.router, { embed });
+    const retrieve = vi.fn();
+    const response = await handleChatTurn(
+      send("Don't use old messages or memory; answer from this note."),
+      {
+        config: loadConfig({
+          OPENROUTER_API_KEY: 'test-key',
+          QUEUE_DRIVER: 'local',
+          CHAT_RECALL_ENABLED: 'true',
+          GRAPH_RAG_ENABLED: 'false',
+        }),
+        router: scripted.router,
+        chat: store.chat,
+        persistence: {
+          tasks: {},
+          ownerContext: {},
+          situationDecisionContext: { retrieve },
+        } as never,
+      },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(embed).not.toHaveBeenCalled();
+    expect(retrieve).not.toHaveBeenCalled();
+    expect(stubs.getAmbientBlock).not.toHaveBeenCalled();
+    expect(stubs.getOwnerCard).not.toHaveBeenCalled();
+  });
   it.each(['getAmbientBlock', 'getOwnerCard'] as const)(
     'answers without stalling when optional %s context is unavailable',
     async (context) => {
@@ -376,7 +670,12 @@ describe('tool-less conversational reply', () => {
     const result = await turn(request, { draft });
     expect(result.completions[0]?.messages[0]?.text).toBe(draft);
     expect(result.completions[0]?.status).toBe('done');
-    expect(await result.response.text()).not.toContain('data-off-course');
+    const wire = await result.response.text();
+    expect(wire).not.toContain('data-off-course');
+    expect(result.response.headers.get('x-owner-message-id')).toBeTruthy();
+    const replyIdentity = result.completions[0]?.messages[0]?.channelMessageId;
+    expect(replyIdentity).toMatch(/^chat-reply:/);
+    expect(wire).toContain(replyIdentity);
     expect(stubs.enqueueTask).not.toHaveBeenCalled();
   });
 
@@ -491,6 +790,39 @@ describe('tool-less conversational reply', () => {
     expect(await response.json()).toMatchObject({ code: 'budget_exhausted' });
     expect(completions[0]?.status).toBe('failed');
     expect(completions[0]?.messages[0]?.text).toMatch(/spending cap/);
+  });
+});
+
+describe('chat needs-action triage', () => {
+  it('keeps cancellation-first sends out of archived history and title changes', async () => {
+    const store = chatStore({
+      cancellationWon: true,
+      archivedConversation: true,
+      emptyConversationTitle: true,
+    });
+    const scripted = scriptedRouter({ draft: 'This must never be requested.' });
+    const response = await handleChatTurn(send('private prompt'), {
+      config: config(),
+      router: scripted.router,
+      chat: store.chat,
+      persistence: { tasks: {}, ownerContext: {} } as never,
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      outcome: 'cancelled_before_admission',
+      code: 'chat_turn_cancelled_before_admission',
+      effectStatus: 'not_started',
+      conversationId: CONVERSATION,
+      clientOperationId: expect.any(String),
+      taskId: null,
+    });
+    expect(store.messages).toEqual([]);
+    expect(store.restoreConversation).not.toHaveBeenCalled();
+    expect(store.setConversationTitleIfEmpty).not.toHaveBeenCalled();
+    expect(scripted.object).not.toHaveBeenCalled();
+    expect(scripted.stream).not.toHaveBeenCalled();
+    expect(stubs.queueAdmission).not.toHaveBeenCalled();
   });
 });
 

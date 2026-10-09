@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { loadConfig, resetConfigForTest } from '@assistant/config';
-import { FirestoreDeviceTokenRepository } from '@assistant/firestore';
+import {
+  FirestoreDeviceTokenRepository,
+  FirestoreNotificationOutboxRepository,
+} from '@assistant/firestore';
+import { notificationDeliveryKey } from '@assistant/persistence';
 import type { ApnsClient } from '@assistant/tools/modules/push';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InstallationStore } from '../../../packages/firestore/src/store.js';
@@ -17,10 +21,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore push notifier',
   const agentId = randomUUID();
   let store: InstallationStore;
   let devices: FirestoreDeviceTokenRepository;
+  let notificationOutbox: FirestoreNotificationOutboxRepository;
 
   beforeEach(async () => {
     store = emulatorStore();
     devices = new FirestoreDeviceTokenRepository(store);
+    notificationOutbox = new FirestoreNotificationOutboxRepository(store, agentId);
     await store.doc('agents', agentId).set({ id: agentId, name: 'Ada', timezone: 'UTC' });
   });
 
@@ -71,7 +77,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore push notifier',
         },
       ),
     } as unknown as ApnsClient;
-    const deps = { apns, devices, owner: async () => ({ id: agentId, name: 'Ada' }) };
+    const deps = {
+      apns,
+      devices,
+      notificationOutbox,
+      owner: async () => ({ id: agentId, name: 'Ada' }),
+    };
 
     await notifyOwnerByPush(deps, { text: 'The **flight** moved to 9:40.' });
     expect(sent.map((alert) => [alert.token, alert.title, alert.body])).toEqual([
@@ -122,5 +133,49 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore push notifier',
       [false, 'quiet-hours'],
       [true, null],
     ]);
+  });
+
+  it('persists a dashboard leg and replays it without duplicating its chat message', async () => {
+    vi.stubEnv('METADATA_SERVER_DETECTION', 'none');
+    const { agentServices, composeFirestoreAgent } = await import('./deps.js');
+    const deps = composeFirestoreAgent(
+      loadConfig({
+        PERSISTENCE_DRIVER: 'firestore',
+        ASSISTANT_MODULES: '',
+        ASSISTANT_WORKSPACE_ID: store.installationId,
+        FIRESTORE_AGENT_ID: agentId,
+        FIRESTORE_EMBEDDING_SPACE:
+          '{"provider":"openai","model":"text-embedding-3-small","dimensions":1536,"revision":"1"}',
+        GCP_PROJECT: 'demo-assistant-test',
+        QUEUE_DRIVER: 'local',
+        OPENROUTER_API_KEY: 'test-key',
+      }),
+    );
+    const notices = agentServices(deps).ownerNotifier;
+    const input = {
+      deliveryKey: 'test:dashboard-stable-identity',
+      text: 'The report is ready.',
+    };
+    const first = await notices.notifyOwner(input);
+    const replay = await notices.notifyOwner(input);
+    expect(
+      first?.legs.some((leg) => leg.channel === 'dashboard' && leg.status === 'delivered'),
+    ).toBe(true);
+    expect(
+      replay?.legs.some((leg) => leg.channel === 'dashboard' && leg.status === 'delivered'),
+    ).toBe(true);
+    expect(
+      (await store.collection('messages').get()).docs.filter(
+        (doc) => doc.get('text') === 'The report is ready.',
+      ),
+    ).toHaveLength(1);
+    const outbox = (await store.collection('notificationOutbox').get()).docs.filter(
+      (doc) =>
+        doc.get('agentId') === agentId &&
+        doc.get('deliveryKey') === notificationDeliveryKey('outbox', agentId, input.deliveryKey),
+    );
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]?.get('status')).toBe('delivered');
+    expect(outbox[0]?.get('providerMessageId')).toMatch(/^notification:[a-f0-9]{64}$/);
   });
 });

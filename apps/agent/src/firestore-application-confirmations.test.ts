@@ -4,21 +4,37 @@ import { createFirestoreExecutionPersistence } from '@assistant/firestore';
 import {
   applicationConfirmationTaskHandlers,
   applicationPersistence,
+  type EmailSyncDeps,
   executeApplicationConfirmationTask,
   processApplicationConfirmation,
+  processMessage,
 } from '@assistant/modules';
 import type { ExecutionPersistence } from '@assistant/persistence';
 import type { ToolContext } from '@assistant/tools';
-import { type GoogleClient, registerApplicationTools, ToolRegistry } from '@assistant/tools';
+import {
+  type GoogleClient,
+  parseApplicationActionState,
+  registerApplicationTools,
+  ToolRegistry,
+} from '@assistant/tools';
 import { ToolDispatcher } from '@assistant/tools/dispatcher';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InstallationStore } from '../../../packages/firestore/src/store.js';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
+import { drainEmailObservers } from '../../../packages/modules/src/email-observers.js';
 import { reapExpiredApplicationWatches } from '../../../packages/modules/src/google/application-confirmations.js';
+import { googleDurableEmailObservers } from '../../../packages/modules/src/google/durable-email-observers.js';
 
 const SPACE = { provider: 'synthetic', model: 'apps-fixture', dimensions: 1536, revision: '1' };
 const SENDER = 'careers@acme.test';
 const HOUR = 3_600_000;
+const directAdmissionObserverIdentities = googleDurableEmailObservers({
+  api: vi.fn(),
+  configured: () => true,
+} as unknown as GoogleClient)
+  .map(({ identity }) => `${identity.key}@${identity.version}:${identity.workClass}`)
+  .filter((identity) => !identity.startsWith('google.application-confirmation@'))
+  .sort();
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
   'Firestore application confirmations',
@@ -60,7 +76,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         persistence.approvals,
         persistence.approvalPolicies,
       );
-      await store.doc('agents', agentId).set({ id: agentId, name: 'Ada', timezone: 'UTC' });
+      await store.doc('agents', agentId).set({
+        id: agentId,
+        name: 'Ada',
+        email: 'owner@example.test',
+        timezone: 'UTC',
+      });
       await store.doc('coordination', 'budget-policy').set({
         dailyLimitMicros: 1_000_000,
         monthlyLimitMicros: 10_000_000,
@@ -139,6 +160,129 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         authenticated: true,
       });
 
+    async function admitAndDrainEmail(messageId: string, body: string, from = SENDER) {
+      const priorRecord = await persistence.applications?.byConfirmationMessage(
+        agentId,
+        `gmail:${messageId}`,
+      );
+      const client = {
+        configured: () => true,
+        api: vi.fn(async (url: string) => {
+          if (!url.includes(`/messages/${messageId}?`))
+            throw new Error(`unexpected ingress Google API call: ${url}`);
+          return {
+            id: messageId,
+            threadId: `thread-${messageId}`,
+            labelIds: ['INBOX'],
+            snippet: body.slice(0, 40),
+            payload: {
+              mimeType: 'text/plain',
+              headers: [
+                { name: 'From', value: from },
+                { name: 'Subject', value: 'Application received' },
+                { name: 'Message-ID', value: `<${messageId}@mail.test>` },
+                {
+                  name: 'Authentication-Results',
+                  value: `mx.google.com; dmarc=pass header.from=${from.split('@')[1]}`,
+                },
+              ],
+              body: { data: Buffer.from(body).toString('base64url') },
+            },
+          };
+        }),
+      } as unknown as GoogleClient;
+      const config = {
+        ASSISTANT_MODULES: ['google'],
+        GMAIL_SYNC_ENABLED: 'true',
+        EMAIL_OBSERVER_WORKER_ENABLED: true,
+        EMAIL_INGEST_MODE: 'direct',
+        EMAIL_INGEST_IMPORTANCE_THRESHOLD: 3,
+        EMAIL_INGEST_NOTIFY_THRESHOLD: 5,
+        EMAIL_INGEST_MAX_TRIAGE_PER_DAY: 20,
+        EMAIL_OBSERVER_MAX_PAID_PER_DAY: 20,
+        GENERATIVE_CARDS_ENABLED: false,
+      };
+      const router = {
+        embeddingSpace: async () => SPACE,
+        object: async () => ({
+          ok: true,
+          object: {
+            category: 'transactional',
+            importance: 3,
+            actionable: false,
+            reason: 'Synthetic application confirmation.',
+            dates: [],
+            cardCandidate: false,
+          },
+        }),
+        embed: async (texts: string[]) => texts.map(() => new Array(1536).fill(0)),
+      };
+      const durableEmailObservers = googleDurableEmailObservers(client);
+      const emailDeps = {
+        config,
+        db,
+        dispatcher,
+        persistence,
+        router,
+        registry,
+        workspace: {},
+        googleClient: client,
+        notifyOwner: async (input: { text: string }) => {
+          notices.push(input.text);
+        },
+        observeInboundEmail: async () => {},
+        durableEmailObservers,
+      } as unknown as EmailSyncDeps;
+      expect(
+        await processMessage(
+          emailDeps,
+          agentId,
+          'bot@assistant.test',
+          new Map([[from.toLowerCase(), 'known']]),
+          messageId,
+        ),
+      ).toBe('skipped');
+      const drain = await drainEmailObservers(
+        {
+          ...emailDeps,
+          ownerNotifier: {
+            notifyOwner: async (input: { text: string }) => {
+              notices.push(input.text);
+              return { legs: [] };
+            },
+            notifyApprovals: async () => {},
+          },
+          emailObservers: [],
+        } as never,
+        agentId,
+        {
+          limit: 20,
+          shouldContinue: () =>
+            config.EMAIL_OBSERVER_WORKER_ENABLED === true && config.GMAIL_SYNC_ENABLED === 'true',
+        },
+      );
+      expect(drain.unknown).toBe(0);
+      expect(drain.failed).toBe(0);
+      const record = await persistence.applications?.byConfirmationMessage(
+        agentId,
+        `gmail:${messageId}`,
+      );
+      if (priorRecord && record)
+        return { kind: 'replay' as const, applicationId: record.id, status: record.status };
+      if (record)
+        return record.status === 'confirmation_received'
+          ? { kind: 'in_progress' as const, applicationId: record.id }
+          : { kind: 'replay' as const, applicationId: record.id, status: record.status };
+      const [ambiguous] = (
+        await store
+          .collection('tasks')
+          .where('externalEventId', '==', `application-confirmation:gmail:${messageId}:ambiguous`)
+          .get()
+      ).docs;
+      if (ambiguous) return { kind: 'ambiguous' as const };
+      return { kind: 'ignored' as const };
+    }
+
     it('creates one active watch per token, in a new follow-up chat', async () => {
       const created = await watch('REQ-100200');
       expect(created.status).toBe('awaiting_confirmation');
@@ -168,8 +312,39 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         kind: 'ignored',
       });
 
-      const claimed = await email('m-1', 'Your reference is REQ-100­200.');
+      const claimed = await admitAndDrainEmail('m-1', 'Your reference is REQ-100­200.');
       expect(claimed).toEqual({ kind: 'in_progress', applicationId: created.applicationId });
+      const observerWork = await store
+        .collection('emailObserverWork')
+        .where('sourceKey', '==', 'gmail:m-1')
+        .get();
+      expect(
+        observerWork.docs
+          .map(
+            (row) =>
+              `${row.get('observerKey')}@${row.get('observerVersion')}:${row.get('workClass')}`,
+          )
+          .sort(),
+      ).toEqual(directAdmissionObserverIdentities);
+      expect(
+        observerWork.docs.some(
+          (row) => row.get('observerKey') === 'google.application-confirmation',
+        ),
+      ).toBe(false);
+      expect(
+        observerWork.docs.some(
+          (row) =>
+            row.get('observerKey') === 'google.direct-email-routing' &&
+            row.get('status') === 'complete',
+        ),
+      ).toBe(true);
+      // Generative cards are explicitly disabled in this fixture. Their paid
+      // observer remains due and is intentionally not claimed by the drain.
+      expect(
+        observerWork.docs
+          .find((row) => row.get('observerKey') === 'google.email-card')
+          ?.get('status'),
+      ).toBe('pending');
       const [task] = (
         await store
           .collection('tasks')
@@ -187,10 +362,35 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         applicationId: created.applicationId,
       });
       const record = await persistence.applications?.get(created.applicationId);
-      expect([record?.status, record?.actionState]).toEqual([
-        'updated',
-        { sheet: { status: 'succeeded' }, document: { status: 'succeeded' } },
-      ]);
+      expect(record?.status).toBe('updated');
+      const actionState = parseApplicationActionState(record?.actionState);
+      const sheetAction = actionState.sheet;
+      const documentAction = actionState.document;
+      expect(sheetAction?.status).toBe('succeeded');
+      expect(documentAction?.status).toBe('succeeded');
+      const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const sheetReceipt = sheetAction?.effectReceipt;
+      const documentReceipt = documentAction?.effectReceipt;
+      expect(sheetReceipt).toEqual({
+        argsDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        claimToken: expect.stringMatching(uuid),
+        idempotencyKey: `application-confirmation-apply-${created.applicationId}`,
+        producerPrivacyGeneration: null,
+        taskId: task.get('id'),
+        toolCallId: expect.stringMatching(uuid),
+        toolName: 'applications.apply_confirmation',
+      });
+      expect(documentReceipt).toEqual({
+        argsDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        claimToken: expect.stringMatching(uuid),
+        idempotencyKey: `application-confirmation-doc-${created.applicationId}`,
+        producerPrivacyGeneration: null,
+        taskId: task.get('id'),
+        toolCallId: expect.stringMatching(uuid),
+        toolName: 'applications.append_confirmation_doc',
+      });
+      expect(sheetReceipt?.claimToken).not.toBe(documentReceipt?.claimToken);
+      expect(sheetReceipt?.toolCallId).not.toBe(documentReceipt?.toolCallId);
       expect(api.mock.calls.map(([url]) => String(url).split('?')[0])).toEqual([
         expect.stringContaining('sheets.googleapis.com/v4/spreadsheets/sheet-1234567890/values/'),
         'https://docs.googleapis.com/v1/documents/doc-1234567890',
@@ -201,7 +401,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       ]);
 
       // A replayed email and a replayed task change nothing.
-      expect(await email('m-1', 'Your reference is REQ-100200.')).toMatchObject({ kind: 'replay' });
+      expect(await admitAndDrainEmail('m-1', 'Your reference is REQ-100200.')).toMatchObject({
+        kind: 'replay',
+      });
       expect(await executeApplicationConfirmationTask(deps(), task.get('id'))).toMatchObject({
         outcome: 'done',
       });
@@ -211,9 +413,36 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
     it('changes nothing when one email matches two watches', async () => {
       await watch('REQ-111111');
       await watch('REQ-222222');
-      expect(await email('m-2', 'Refs REQ-111111 and REQ-222222')).toMatchObject({
+      expect(await admitAndDrainEmail('m-2', 'Refs REQ-111111 and REQ-222222')).toMatchObject({
         kind: 'ambiguous',
       });
+      const observerWork = await store
+        .collection('emailObserverWork')
+        .where('sourceKey', '==', 'gmail:m-2')
+        .get();
+      expect(
+        observerWork.docs
+          .map(
+            (row) =>
+              `${row.get('observerKey')}@${row.get('observerVersion')}:${row.get('workClass')}`,
+          )
+          .sort(),
+      ).toEqual(directAdmissionObserverIdentities);
+      expect(
+        observerWork.docs.some(
+          (row) => row.get('observerKey') === 'google.application-confirmation',
+        ),
+      ).toBe(false);
+      expect(
+        observerWork.docs
+          .find((row) => row.get('observerKey') === 'google.direct-email-routing')
+          ?.get('status'),
+      ).toBe('complete');
+      expect(
+        observerWork.docs
+          .find((row) => row.get('observerKey') === 'google.email-card')
+          ?.get('status'),
+      ).toBe('pending');
       const [task] = (
         await store
           .collection('tasks')

@@ -104,14 +104,18 @@ function removeRtfGroups(s: string, heads: string[]): string {
 }
 
 export function normalize(text: string): string {
-  return text
+  const normalized = text
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/ *\n */g, '\n')
     .replace(/\n{3,}/g, '\n\n')
-    .trim()
-    .slice(0, MAX_TEXT_CHARS);
+    .trim();
+  if (normalized.length > MAX_TEXT_CHARS)
+    throw new Error(
+      'Extracted document exceeds the complete-text limit; no truncated text was published',
+    );
+  return normalized;
 }
 
 // ── Format routing ───────────────────────────────────────────────────────────

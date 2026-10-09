@@ -8,6 +8,7 @@
     "./browser": "./src/browser/index.ts",
     "./calls": "./src/calls/index.ts",
     "./builtin": "./src/builtin/index.ts",
+    "./web-fetch": "./src/builtin/web-fetch.ts",
     "./code": "./src/code/index.ts",
     "./dispatcher": "./src/dispatcher.ts",
     "./documents": "./src/documents.ts",

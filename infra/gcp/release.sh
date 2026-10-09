@@ -22,6 +22,7 @@ PROJECT="${GCP_PROJECT:?Set GCP_PROJECT to the Google Cloud project id}"
 REGION="${GCP_REGION:-us-west1}"
 
 DRIVER="$(resolve_release_persistence)" || exit $?
+export RELEASE_PERSISTENCE_DRIVER="$DRIVER"
 echo "Release path: ${DRIVER} (live services, RELEASE_PERSISTENCE_DRIVER=${RELEASE_PERSISTENCE_DRIVER:-auto})"
 case "$DRIVER" in
   firestore) exec bash "${RELEASE_ROOT}/release-firestore.sh" ;;

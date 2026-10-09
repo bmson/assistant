@@ -110,72 +110,65 @@ export class FirestoreExecutionEvidenceRepository implements ExecutionEvidenceRe
     const excluded = await ownedTask(this.store, agentId, excludeTaskId);
     if (excluded.conversationId !== conversationId)
       throw new Error('Execution evidence task is outside the conversation scope');
-    // The conversation's prior tasks, newest first. Only the fields that
-    // choose the window are read: a long-lived thread has thousands of tasks,
-    // and their full documents are large.
-    const priorTasks: Array<{ id: string; createdAt: number }> = [];
+    // Task start time cannot choose recent receipts: an old long-running task
+    // can finish after a newly started one. Read only owned task identities.
+    const priorTasks: string[] = [];
     let taskCursor: FirebaseFirestore.QueryDocumentSnapshot | undefined;
     for (;;) {
       let taskQuery = this.store
         .collection('tasks')
         .where('conversationId', '==', conversationId)
         .orderBy(FieldPath.documentId())
-        .select('id', 'agentId', 'createdAt')
+        .select('id', 'agentId')
         .limit(300);
       if (taskCursor) taskQuery = taskQuery.startAfter(taskCursor);
       const taskSnapshot = await taskQuery.get();
       for (const taskDoc of taskSnapshot.docs) {
-        const task = read<Pick<Records['tasks'], 'id' | 'agentId' | 'createdAt'>>({
+        const task = read<Pick<Records['tasks'], 'id' | 'agentId'>>({
           exists: taskDoc.exists,
           data: () => taskDoc.data(),
         });
         if (!task || documentKey(task.id) !== taskDoc.id)
           throw new Error('Execution evidence contains a corrupt task identity');
         if (task.agentId !== agentId || task.id === excludeTaskId) continue;
-        priorTasks.push({
-          id: task.id,
-          createdAt: task.createdAt instanceof Date ? task.createdAt.getTime() : 0,
-        });
+        priorTasks.push(task.id);
       }
       if (taskSnapshot.size < 300) break;
       taskCursor = taskSnapshot.docs.at(-1);
     }
-    priorTasks.sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
-
-    // The most recent `max` tool calls are the evidence a reply can lean on.
-    // A thread that has outgrown the window keeps working on its newest
-    // history instead of failing every later turn.
+    // Query bounded groups of owned task IDs using the provisioned timestamp/id
+    // index, then retain the global top K. Each group's top K contains every
+    // possible global top-K receipt, so batching preserves exact recency while
+    // avoiding one remote round trip per historical task. Memory stays at 2K.
     const toolRows: Records['toolCalls'][] = [];
-    for (const task of priorTasks) {
-      if (toolRows.length >= max) break;
+    const newestFirst = (a: Records['toolCalls'], b: Records['toolCalls']) =>
+      b.createdAt.getTime() - a.createdAt.getTime() || b.id.localeCompare(a.id);
+    for (let offset = 0; offset < priorTasks.length; offset += 30) {
+      const taskIds = priorTasks.slice(offset, offset + 30);
       const snapshot = await this.store
         .collection('toolCalls')
-        .where('taskId', '==', task.id)
+        .where('taskId', 'in', taskIds)
+        .orderBy('createdAt', 'desc')
+        .orderBy('id', 'desc')
         .limit(max)
         .get();
       const taskRows = snapshot.docs.map((doc) => {
         const row = read<Records['toolCalls']>({ exists: doc.exists, data: () => doc.data() });
-        if (!row || documentKey(row.id) !== doc.id)
+        if (
+          !row ||
+          documentKey(row.id) !== doc.id ||
+          !taskIds.includes(row.taskId) ||
+          !(row.createdAt instanceof Date) ||
+          !Number.isFinite(row.createdAt.getTime())
+        )
           throw new Error('Execution evidence contains a corrupt tool-call identity');
         return row;
       });
-      // The task at the window's edge contributes its latest steps.
-      taskRows.sort(
-        (a, b) =>
-          b.createdAt.getTime() - a.createdAt.getTime() ||
-          b.step - a.step ||
-          b.id.localeCompare(a.id),
-      );
-      toolRows.push(...taskRows.slice(0, max - toolRows.length));
+      toolRows.push(...taskRows);
+      toolRows.sort(newestFirst);
+      toolRows.splice(max);
     }
-    return toolRows
-      .sort(
-        (a, b) =>
-          a.createdAt.getTime() - b.createdAt.getTime() ||
-          a.step - b.step ||
-          a.id.localeCompare(b.id),
-      )
-      .map(evidence);
+    return toolRows.sort((a, b) => newestFirst(b, a)).map(evidence);
   }
 
   async hasConversationToolCall({
@@ -217,6 +210,12 @@ export class FirestoreExecutionEvidenceRepository implements ExecutionEvidenceRe
         });
         if (!call || documentKey(call.id) !== callDoc.id)
           throw new Error('Execution evidence contains a corrupt tool-call identity');
+        if (
+          call.status !== 'succeeded' ||
+          (call.result as { ok?: boolean; deliveryStatus?: string } | null)?.ok === false ||
+          (call.result as { deliveryStatus?: string } | null)?.deliveryStatus === 'unknown'
+        )
+          continue;
         const taskDoc = await this.store.doc('tasks', call.taskId).get();
         const task = read<Records['tasks']>(taskDoc, call.taskId);
         if (task?.agentId === agentId && task.conversationId === conversationId) return true;

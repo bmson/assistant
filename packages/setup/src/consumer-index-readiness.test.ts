@@ -37,13 +37,15 @@ function liveIndexes(databaseId = identity.databaseId) {
   const databasePrefix = `projects/${identity.projectId}/databases/${databaseId}/collectionGroups/`;
   return spec.indexes.map((index, number) => {
     const fields = [...index.fields];
-    const documentName = {
-      fieldPath: '__name__',
-      order: index.fields.at(-1)?.order === 'DESCENDING' ? 'DESCENDING' : 'ASCENDING',
-    };
     const vectorPosition = fields.findIndex((field) => field.vectorConfig !== undefined);
-    if (vectorPosition === fields.length - 1) fields.splice(vectorPosition, 0, documentName);
-    else fields.push(documentName);
+    if (!fields.some((field) => field.fieldPath === '__name__')) {
+      const documentName = {
+        fieldPath: '__name__',
+        order: index.fields.at(-1)?.order === 'DESCENDING' ? 'DESCENDING' : 'ASCENDING',
+      };
+      if (vectorPosition === fields.length - 1) fields.splice(vectorPosition, 0, documentName);
+      else fields.push(documentName);
+    }
     return {
       name: `${databasePrefix}${index.collectionGroup}/indexes/${number + 1}`,
       queryScope: index.queryScope,
@@ -79,6 +81,30 @@ function fakeLists(indexes: unknown, fields: unknown, calls: string[]): CommandR
 }
 
 describe('consumer Firestore index readiness', () => {
+  it('rejects redundant single-field composites before any cloud command', async () => {
+    const calls: string[] = [];
+    const runner = fakeLists([], [], calls);
+    const invalid = Buffer.from(
+      JSON.stringify({
+        indexes: [
+          {
+            collectionGroup: 'contacts',
+            queryScope: 'COLLECTION',
+            fields: [
+              { fieldPath: 'name', order: 'ASCENDING' },
+              { fieldPath: '__name__', order: 'ASCENDING' },
+            ],
+          },
+        ],
+        fieldOverrides: [],
+      }),
+    );
+    await expect(provisionTargetFirestoreIndexes(runner, identity, invalid)).rejects.toThrow(
+      'duplicates an automatic single-field index',
+    );
+    expect(calls).toEqual([]);
+  });
+
   it('provisions only missing manifest resources for the explicit named database', async () => {
     const commands: string[][] = [];
     const runner: CommandRunner = {
@@ -162,6 +188,47 @@ describe('consumer Firestore index readiness', () => {
         { fieldPath: 'category', order: 'ASCENDING' },
       ],
     });
+  });
+
+  it('preserves explicit document-name directions for stable keyset indexes', async () => {
+    const documentIndex = spec.indexes.find(
+      (index) =>
+        index.collectionGroup === 'documents' &&
+        index.fields.some((field) => field.fieldPath === '__name__'),
+    );
+    const ascendingIndex = spec.indexes.find(
+      (index) =>
+        index.collectionGroup === 'privacyErasureAssets' &&
+        index.fields.some((field) => field.fieldPath === '__name__'),
+    );
+    expect(documentIndex?.fields.at(-1)).toEqual({ fieldPath: '__name__', order: 'DESCENDING' });
+    expect(ascendingIndex?.fields.at(-1)).toEqual({ fieldPath: '__name__', order: 'ASCENDING' });
+    await expect(
+      verifyConsumerIndexReadiness(
+        fakeLists(liveIndexes(), liveOverrides(), []),
+        identity,
+        specBytes,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects an explicit document-name direction that cannot be reproduced by the preceding field', async () => {
+    const changed = JSON.parse(specBytes.toString('utf8')) as typeof spec;
+    const documentIndex = changed.indexes.find(
+      (index) =>
+        index.collectionGroup === 'documents' &&
+        index.fields.some((field) => field.fieldPath === '__name__'),
+    );
+    const nameField = documentIndex?.fields.find((field) => field.fieldPath === '__name__');
+    if (!nameField) throw new Error('expected explicit document-name index field');
+    nameField.order = 'ASCENDING';
+    await expect(
+      verifyConsumerIndexReadiness(
+        fakeLists(liveIndexes(), liveOverrides(), []),
+        identity,
+        Buffer.from(JSON.stringify(changed)),
+      ),
+    ).rejects.toThrow('document-name order must match');
   });
 
   it('accepts exactly the trusted READY indexes and active field exemptions', async () => {

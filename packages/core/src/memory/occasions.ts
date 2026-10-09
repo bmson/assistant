@@ -1,4 +1,12 @@
-import { contacts, type Db, type OccasionRow, occasions } from '@assistant/db';
+import {
+  assertPostgresPrivacyObservationFence,
+  contacts,
+  type Db,
+  lockPostgresPrivacyObservationFence,
+  type OccasionRow,
+  occasions,
+} from '@assistant/db';
+import { occasionTrustRank } from '@assistant/persistence/occasion-trust';
 import { and, asc, eq, sql } from 'drizzle-orm';
 
 /**
@@ -247,6 +255,23 @@ export interface SaveOccasionInput {
 export async function saveOccasion(
   db: Db,
   input: SaveOccasionInput,
+  privacyObservation?: { generation: string | null },
+): Promise<{ saved: boolean; occasion: OccasionRow }> {
+  return db.transaction(async (tx) => {
+    await lockPostgresPrivacyObservationFence(tx as unknown as Db, input.agentId);
+    if (privacyObservation)
+      await assertPostgresPrivacyObservationFence(
+        tx as unknown as Db,
+        input.agentId,
+        privacyObservation.generation,
+      );
+    return saveOccasionInTransaction(tx as unknown as Db, input);
+  });
+}
+
+async function saveOccasionInTransaction(
+  db: Db,
+  input: SaveOccasionInput,
 ): Promise<{ saved: boolean; occasion: OccasionRow }> {
   if (!isOccasionKind(input.kind)) throw new Error(`invalid occasion kind: ${input.kind}`);
   if (!validMonthDay(input.month, input.day)) {
@@ -280,8 +305,7 @@ export async function saveOccasion(
         occasions.day,
       ],
       set: {
-        // Fill a previously-unknown year; append genuinely new notes; never
-        // downgrade trust or re-quarantine an already-reviewed occasion.
+        // Only same-or-higher trust observations may add accepted fields.
         year: sql`coalesce(${occasions.year}, excluded.year)`,
         notes: sql`case
           when ${occasions.notes} = '' then excluded.notes
@@ -289,9 +313,28 @@ export async function saveOccasion(
           else ${occasions.notes} || '; ' || excluded.notes end`,
         updatedAt: sql`now()`,
       },
+      setWhere: sql`(case ${occasions.originTrust} when 'owner' then 3 when 'assistant' then 2 when 'known' then 1 else 0 end) <= ${occasionTrustRank(input.originTrust ?? 'owner')}
+        and not (${input.quarantined ?? false} and not ${occasions.quarantined})
+        and not (${occasions.ownerConfirmed} and ${input.originTrust ?? 'owner'} <> 'owner')`,
     })
     .returning();
-  if (!row) throw new Error('occasion upsert failed');
+  if (!row) {
+    const [unchanged] = await db
+      .select()
+      .from(occasions)
+      .where(
+        and(
+          eq(occasions.agentId, input.agentId),
+          eq(occasions.contactId, input.contactId),
+          eq(occasions.kind, input.kind),
+          eq(occasions.month, input.month),
+          eq(occasions.day, input.day),
+        ),
+      )
+      .limit(1);
+    if (!unchanged) throw new Error('occasion upsert failed');
+    return { saved: false, occasion: unchanged };
+  }
   // `saved` is true when this created a new row (createdAt == updatedAt on insert).
   return { saved: row.createdAt.getTime() === row.updatedAt.getTime(), occasion: row };
 }

@@ -89,6 +89,7 @@ export class FirestoreTaskLeaseRepository implements TaskLeaseRepository {
   }
 
   async checkpoint(lease: TaskLease, state: unknown, extra: TaskCheckpoint = {}): Promise<boolean> {
+    const { preserveFailureCounters, ...fields } = extra;
     return this.store.db.runTransaction(async (tx) => {
       const ref = this.store.doc('tasks', lease.id);
       const snap = await tx.get(ref);
@@ -97,7 +98,12 @@ export class FirestoreTaskLeaseRepository implements TaskLeaseRepository {
       if (!leaseMatches(decodeRecord<TaskLease>(snap.data()), lease, now)) return false;
       tx.update(
         ref,
-        encodeRecord({ state, ...extra, attempt: 0, reclaimCount: 0, updatedAt: now }),
+        encodeRecord({
+          state,
+          ...fields,
+          ...(preserveFailureCounters ? {} : { attempt: 0, reclaimCount: 0 }),
+          updatedAt: now,
+        }),
       );
       return true;
     });

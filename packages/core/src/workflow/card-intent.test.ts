@@ -26,6 +26,9 @@ describe('requestedCardIntent', () => {
     "don't make a card for this",
     'show me my cards',
     'the credit card expires next month',
+    'save my credit card and debit card numbers',
+    'save my gift card and library card',
+    'Translate: “make a card”',
     'make a doc summarizing the booking',
     'what is on my calendar today',
   ])('does not treat %s as a card request', (text) => {

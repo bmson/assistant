@@ -17,12 +17,36 @@ import {
   createInstallationStore,
   FirestoreTaskActivityCommandRepository,
 } from '@assistant/firestore';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getDb } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
 export const dynamic = 'force-dynamic';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function activityOutcomeResponse(
+  action: string,
+  result: Awaited<ReturnType<typeof archiveActivity>>,
+): Response {
+  const status =
+    result.outcome === 'not_found' ? 404 : result.outcome === 'no_longer_retriable' ? 409 : 200;
+  return mobileJson(
+    {
+      ok: status === 200,
+      ...result,
+      ...(action === 'cancel'
+        ? {
+            effectStatus:
+              result.outcome === 'cancelled' || result.outcome === 'already_cancelled'
+                ? 'unknown'
+                : 'not_applicable',
+          }
+        : {}),
+    },
+    { status },
+  );
+}
 
 /** Apply owner-scoped task activity commands through the configured persistence driver. */
 export async function POST(
@@ -32,7 +56,9 @@ export async function POST(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid activity id' }, { status: 400 });
-  const body = (await request.json().catch(() => null)) as {
+  const mutationBody = await readMobileMutationBody(request, ['action', 'budgetUsdLimit']);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as {
     action?: unknown;
     budgetUsdLimit?: unknown;
   } | null;
@@ -60,39 +86,45 @@ export async function POST(
       });
       try {
         const repository = new FirestoreTaskActivityCommandRepository(store);
+        let result: Awaited<ReturnType<typeof archiveActivity>>;
         if (body.action === 'archive')
-          await archiveActivityWithRepository(repository, config.FIRESTORE_AGENT_ID, id);
+          result = await archiveActivityWithRepository(repository, config.FIRESTORE_AGENT_ID, id);
         else if (body.action === 'restore')
-          await restoreActivityWithRepository(repository, config.FIRESTORE_AGENT_ID, id);
+          result = await restoreActivityWithRepository(repository, config.FIRESTORE_AGENT_ID, id);
         else if (body.action === 'retry')
-          await retryActivityWithRepository(repository, config.FIRESTORE_AGENT_ID, id);
+          result = await retryActivityWithRepository(repository, config.FIRESTORE_AGENT_ID, id);
         else if (body.action === 'cancel')
-          await cancelActivityWithRepository(repository, config.FIRESTORE_AGENT_ID, id);
+          result = await cancelActivityWithRepository(repository, config.FIRESTORE_AGENT_ID, id);
         else if (body.action === 'revoke-autonomy')
-          await revokeTaskAutonomyWithRepository(repository, config.FIRESTORE_AGENT_ID, id);
+          result = await revokeTaskAutonomyWithRepository(
+            repository,
+            config.FIRESTORE_AGENT_ID,
+            id,
+          );
         else
-          await raiseTaskBudgetWithRepository(
+          result = await raiseTaskBudgetWithRepository(
             repository,
             config.FIRESTORE_AGENT_ID,
             id,
             body.budgetUsdLimit as number,
           );
-        return mobileJson({ ok: true });
+        return activityOutcomeResponse(body.action, result);
       } finally {
         await store.db.terminate();
       }
     }
-    if (body?.action === 'archive') await archiveActivity(getDb(), id);
-    else if (body?.action === 'restore') await restoreActivity(getDb(), id);
-    else if (body?.action === 'retry') await retryActivity(getDb(), id);
-    else if (body?.action === 'cancel') await cancelActivity(getDb(), id);
-    else if (body?.action === 'revoke-autonomy') await revokeTaskAutonomy(getDb(), id);
+    let result: Awaited<ReturnType<typeof archiveActivity>>;
+    if (body?.action === 'archive') result = await archiveActivity(getDb(), id);
+    else if (body?.action === 'restore') result = await restoreActivity(getDb(), id);
+    else if (body?.action === 'retry') result = await retryActivity(getDb(), id);
+    else if (body?.action === 'cancel') result = await cancelActivity(getDb(), id);
+    else if (body?.action === 'revoke-autonomy') result = await revokeTaskAutonomy(getDb(), id);
     else if (body?.action === 'raise-budget') {
-      const budget = Number(body.budgetUsdLimit);
-      if (!Number.isFinite(budget)) {
+      const budget = body.budgetUsdLimit;
+      if (typeof budget !== 'number' || !Number.isFinite(budget)) {
         return mobileJson({ error: 'budgetUsdLimit must be a number' }, { status: 400 });
       }
-      await raiseTaskBudget(getDb(), id, budget);
+      result = await raiseTaskBudget(getDb(), id, budget);
     } else {
       return mobileJson(
         {
@@ -101,7 +133,7 @@ export async function POST(
         { status: 400 },
       );
     }
-    return mobileJson({ ok: true });
+    return activityOutcomeResponse(body?.action ?? '', result);
   } catch (error) {
     return mobileJson(
       { error: error instanceof Error ? error.message : 'Activity could not be updated.' },

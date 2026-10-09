@@ -1,6 +1,7 @@
 import { type ExecutorDeps, executeTask, TaskStateSchema } from '@assistant/core';
 import type { Db } from '@assistant/db';
 import { createFirestoreExecutionPersistence } from '@assistant/firestore';
+import { finalChannelDelivery } from '@assistant/persistence';
 import { taskFixture } from '@assistant/persistence/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InstallationStore } from '../../../packages/firestore/src/store.js';
@@ -68,7 +69,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
 
     it('resumes a durable final response and completes without PostgreSQL or another model call', async () => {
       const task = await pendingFinalTask();
-      const deliver = vi.fn(async () => {});
+      const deliver = vi.fn(async (_task, _text, attemptId) =>
+        finalChannelDelivery('dashboard', 'accepted', attemptId),
+      );
       deps.deliverFinal = deliver;
       expect(await executeTask(deps, task.id)).toEqual({ outcome: 'done', detail: 'Completed' });
       expect(deliver).toHaveBeenCalledOnce();
@@ -127,7 +130,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect((await store.doc('tasks', current.id).get()).get('status')).toBe('done');
     });
 
-    it('does not force a shared document read after a matching Firestore tool call', async () => {
+    it('reads a renewed request after a prior failed Firestore document call', async () => {
       const url = 'Please read https://docs.google.com/document/d/doc-1234567890/edit';
       const previous = taskFixture({
         id: 'prior-doc-turn',
@@ -187,7 +190,11 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         step,
         embed: vi.fn().mockResolvedValue([new Array(1536).fill(0)]),
       } as unknown as ExecutorDeps['router'];
-      const dispatch = vi.fn();
+      const dispatch = vi.fn().mockResolvedValue({
+        kind: 'executed',
+        toolCallId: 'current-doc-read',
+        result: { title: 'Current version', content: 'Updated owner document' },
+      });
       deps.dispatcher = {
         toolDefs: () => [],
         resultIsUntrusted: () => false,
@@ -198,18 +205,28 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       const result = await executeTask(deps, current.id);
       expect(result).toMatchObject({ outcome: 'done' });
       expect(step).toHaveBeenCalledOnce();
-      expect(dispatch).not.toHaveBeenCalled();
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          task: expect.objectContaining({ id: current.id }),
+          toolName: 'docs.get',
+          args: { documentId: 'doc-1234567890' },
+        }),
+      );
     });
 
     it('reuses the persisted message after a definitive delivery rejection', async () => {
       const task = await pendingFinalTask();
-      deps.deliverFinal = vi
-        .fn()
-        .mockRejectedValueOnce(new Error('definitive rejection'))
-        .mockResolvedValue(undefined);
-      expect((await executeTask(deps, task.id)).outcome).toBe('failed');
+      let attempts = 0;
+      deps.deliverFinal = vi.fn(async (_task, _text, attemptId) => {
+        attempts += 1;
+        return attempts === 1
+          ? finalChannelDelivery('dashboard', 'rejected', attemptId, 'provider-rejected')
+          : finalChannelDelivery('dashboard', 'accepted', attemptId);
+      });
+      expect((await executeTask(deps, task.id)).outcome).toBe('needs_attention');
       expect((await store.collection('messages').get()).size).toBe(1);
-      await store.doc('tasks', task.id).update({ runAfter: new Date(0) });
+      await store.doc('tasks', task.id).update({ status: 'pending', runAfter: new Date(0) });
       expect((await executeTask(deps, task.id)).outcome).toBe('done');
       expect(deps.deliverFinal).toHaveBeenCalledTimes(2);
       expect((await store.collection('messages').get()).size).toBe(1);

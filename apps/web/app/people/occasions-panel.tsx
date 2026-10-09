@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useTransition } from 'react';
+import { useRef, useState, useTransition } from 'react';
 import {
   addOccasionAction,
   forgetOccasionAction,
@@ -95,6 +95,19 @@ export function OccasionsPanel({
   const [busyAction, setBusyAction] = useState<'approve' | 'reject' | 'forget' | null>(null);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<OccasionView | null>(null);
+  const [draft, setDraft] = useState({
+    kind: 'birthday',
+    label: '',
+    month: '',
+    day: '',
+    year: '',
+    leadDays: '7',
+    notes: '',
+  });
+  const saveInFlight = useRef(false);
+  const editorGeneration = useRef(0);
+  const currentContact = useRef(contactId);
+  currentContact.current = contactId;
   const [error, setError] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
 
@@ -108,6 +121,8 @@ export function OccasionsPanel({
     startTransition(async () => {
       try {
         await action();
+      } catch {
+        setError('That change could not be saved. Try again.');
       } finally {
         setBusyId(null);
         setBusyAction(null);
@@ -119,17 +134,21 @@ export function OccasionsPanel({
     const key = `${suggestion.month}-${suggestion.day}`;
     startTransition(async () => {
       setError(null);
-      const result = await addOccasionAction(contactId, {
-        kind: suggestion.kind,
-        label: '',
-        month: String(suggestion.month),
-        day: String(suggestion.day),
-        year: '',
-        leadDays: '7',
-        notes: '',
-      });
-      if (result.error) setError(result.error);
-      else setDismissed((prev) => new Set(prev).add(key));
+      try {
+        const result = await addOccasionAction(contactId, {
+          kind: suggestion.kind,
+          label: '',
+          month: String(suggestion.month),
+          day: String(suggestion.day),
+          year: '',
+          leadDays: '7',
+          notes: '',
+        });
+        if (result.error) setError(result.error);
+        else setDismissed((prev) => new Set(prev).add(key));
+      } catch {
+        setError('The suggested occasion could not be saved. Try again.');
+      }
     });
   };
 
@@ -179,7 +198,7 @@ export function OccasionsPanel({
                     <ActionButton
                       variant="primary"
                       size="sm"
-                      disabled={busyId === o.id}
+                      disabled={pending || busyId === o.id}
                       pending={busyId === o.id && busyAction === 'approve'}
                       pendingLabel="Confirming…"
                       aria-label={`Confirm ${rowName(o)}`}
@@ -196,7 +215,7 @@ export function OccasionsPanel({
                       size="sm"
                       confirmLabel="Reject?"
                       pendingLabel="Rejecting…"
-                      disabled={busyId === o.id}
+                      disabled={pending || busyId === o.id}
                       pending={busyId === o.id && busyAction === 'reject'}
                       title={`Deletes this ${kindLabel(o)} permanently`}
                       onConfirm={() =>
@@ -209,10 +228,21 @@ export function OccasionsPanel({
                 ) : null}
                 <button
                   type="button"
-                  disabled={busyId === o.id}
+                  disabled={pending || busyId === o.id}
                   className={btnSm.outline}
                   aria-label={`Edit ${rowName(o)}`}
                   onClick={() => {
+                    if (saveInFlight.current) return;
+                    editorGeneration.current += 1;
+                    setDraft({
+                      kind: o.kind,
+                      label: o.label,
+                      month: String(o.month),
+                      day: String(o.day),
+                      year: o.year == null ? '' : String(o.year),
+                      leadDays: String(o.leadDays ?? 7),
+                      notes: o.notes,
+                    });
                     setEditing(o);
                     setAdding(true);
                     setError(null);
@@ -225,7 +255,7 @@ export function OccasionsPanel({
                     size="sm"
                     confirmLabel="Forget?"
                     pendingLabel="Forgetting…"
-                    disabled={busyId === o.id}
+                    disabled={pending || busyId === o.id}
                     pending={busyId === o.id && busyAction === 'forget'}
                     title={`Deletes this ${kindLabel(o)} permanently`}
                     onConfirm={() => runForRow(o.id, () => forgetOccasionAction(o.id), 'forget')}
@@ -268,35 +298,54 @@ export function OccasionsPanel({
         <form
           key={editing?.id ?? 'new'}
           className="mt-3 flex flex-col gap-3 rounded-2xl bg-sunken/55 p-4"
-          action={(formData) =>
+          aria-busy={pending}
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (saveInFlight.current) return;
+            saveInFlight.current = true;
+            const generation = editorGeneration.current;
+            const ownerContact = contactId;
+            const submitted = { ...draft };
+            const rowId = editing?.id;
+            setError(null);
             startTransition(async () => {
-              setError(null);
-              const save = editing
-                ? updateOccasionAction.bind(null, editing.id)
-                : addOccasionAction.bind(null, contactId);
-              const result = await save({
-                kind: String(formData.get('kind') ?? ''),
-                label: String(formData.get('label') ?? ''),
-                month: String(formData.get('month') ?? ''),
-                day: String(formData.get('day') ?? ''),
-                year: String(formData.get('year') ?? ''),
-                leadDays: String(formData.get('leadDays') ?? ''),
-                notes: String(formData.get('notes') ?? ''),
-              });
-              if (result.error) setError(result.error);
-              else {
-                setAdding(false);
-                setEditing(null);
+              try {
+                const result = rowId
+                  ? await updateOccasionAction(rowId, submitted)
+                  : await addOccasionAction(ownerContact, submitted);
+                if (
+                  generation !== editorGeneration.current ||
+                  currentContact.current !== ownerContact
+                )
+                  return;
+                if (result.error) setError(result.error);
+                else {
+                  setAdding(false);
+                  setEditing(null);
+                  editorGeneration.current += 1;
+                }
+              } catch {
+                if (
+                  generation === editorGeneration.current &&
+                  currentContact.current === ownerContact
+                )
+                  setError('The occasion could not be saved. Your draft is kept here.');
+              } finally {
+                saveInFlight.current = false;
               }
-            })
-          }
+            });
+          }}
         >
           <div className="flex flex-wrap items-end gap-3">
             <label className={`flex flex-col gap-1 ${labelClass}`}>
               Type
               <select
                 name="kind"
-                defaultValue={editing?.kind ?? 'birthday'}
+                value={draft.kind}
+                disabled={pending}
+                onChange={(event) =>
+                  setDraft((current) => ({ ...current, kind: event.target.value }))
+                }
                 className={selectClass}
               >
                 <option value="birthday">Birthday</option>
@@ -310,7 +359,11 @@ export function OccasionsPanel({
                 name="label"
                 type="text"
                 placeholder="e.g. graduation"
-                defaultValue={editing?.label ?? ''}
+                value={draft.label}
+                disabled={pending}
+                onChange={(event) =>
+                  setDraft((current) => ({ ...current, label: event.target.value }))
+                }
                 className={`${inputClass} w-40`}
               />
             </label>
@@ -318,7 +371,11 @@ export function OccasionsPanel({
               Month
               <input
                 name="month"
-                defaultValue={editing?.month ?? ''}
+                value={draft.month}
+                disabled={pending}
+                onChange={(event) =>
+                  setDraft((current) => ({ ...current, month: event.target.value }))
+                }
                 type="number"
                 min={1}
                 max={12}
@@ -330,7 +387,11 @@ export function OccasionsPanel({
               Day
               <input
                 name="day"
-                defaultValue={editing?.day ?? ''}
+                value={draft.day}
+                disabled={pending}
+                onChange={(event) =>
+                  setDraft((current) => ({ ...current, day: event.target.value }))
+                }
                 type="number"
                 min={1}
                 max={31}
@@ -342,7 +403,11 @@ export function OccasionsPanel({
               Year (optional)
               <input
                 name="year"
-                defaultValue={editing?.year ?? ''}
+                value={draft.year}
+                disabled={pending}
+                onChange={(event) =>
+                  setDraft((current) => ({ ...current, year: event.target.value }))
+                }
                 type="number"
                 min={1900}
                 max={2200}
@@ -356,7 +421,11 @@ export function OccasionsPanel({
                 type="number"
                 min={0}
                 max={60}
-                defaultValue={editing?.leadDays ?? 7}
+                value={draft.leadDays}
+                disabled={pending}
+                onChange={(event) =>
+                  setDraft((current) => ({ ...current, leadDays: event.target.value }))
+                }
                 className={`${inputClass} w-24`}
               />
             </label>
@@ -365,7 +434,11 @@ export function OccasionsPanel({
             Notes / gift ideas (optional)
             <input
               name="notes"
-              defaultValue={editing?.notes ?? ''}
+              value={draft.notes}
+              disabled={pending}
+              onChange={(event) =>
+                setDraft((current) => ({ ...current, notes: event.target.value }))
+              }
               type="text"
               className={inputClass}
             />
@@ -376,7 +449,10 @@ export function OccasionsPanel({
             </button>
             <button
               type="button"
+              disabled={pending}
               onClick={() => {
+                if (saveInFlight.current) return;
+                editorGeneration.current += 1;
                 setAdding(false);
                 setEditing(null);
                 setError(null);
@@ -390,7 +466,19 @@ export function OccasionsPanel({
       ) : (
         <button
           type="button"
+          disabled={pending}
           onClick={() => {
+            if (saveInFlight.current) return;
+            editorGeneration.current += 1;
+            setDraft({
+              kind: 'birthday',
+              label: '',
+              month: '',
+              day: '',
+              year: '',
+              leadDays: '7',
+              notes: '',
+            });
             setEditing(null);
             setAdding(true);
           }}

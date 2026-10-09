@@ -245,11 +245,11 @@ export function PageHeader({
       {back ? <BackLink href={back.href}>{back.label}</BackLink> : null}
       <div className="grid min-w-0 gap-x-6 gap-y-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
         <div className="min-w-0">
-          <h1 className="min-w-0 font-display text-[1.75rem] leading-tight font-semibold tracking-[-0.025em] text-balance text-strong [overflow-wrap:anywhere] sm:text-3xl">
+          <h1 className="min-w-0 font-display text-2xl leading-8 font-semibold tracking-[-0.025em] text-balance text-strong [hyphens:auto] [overflow-wrap:break-word] sm:text-3xl sm:leading-9">
             {title}
           </h1>
           {intro ? (
-            <p className="mt-3 max-w-[65ch] text-base leading-6 text-pretty text-muted">{intro}</p>
+            <p className="mt-2 max-w-[65ch] text-sm leading-6 text-pretty text-muted">{intro}</p>
           ) : null}
         </div>
         {actions ? (
@@ -390,7 +390,7 @@ export function Badge({
   return (
     <span
       title={title}
-      className={`inline-flex max-w-full shrink-0 items-center gap-1 rounded-full font-medium leading-5 whitespace-normal [overflow-wrap:anywhere] ${sizeClass} ${pillTones[tone]}`}
+      className={`inline-flex max-w-full shrink-0 items-center gap-1 rounded-xl font-medium leading-5 whitespace-normal [overflow-wrap:anywhere] ${sizeClass} ${pillTones[tone]}`}
     >
       {children}
     </span>
@@ -477,7 +477,7 @@ export function SectionHeading({
   hint?: string;
 }) {
   return (
-    <h2 className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 text-lg leading-7 font-semibold text-strong">
+    <h2 className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1 text-base leading-6 font-semibold text-strong">
       <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
         <span>{title}</span>
         {count !== undefined ? <CountBadge>{count}</CountBadge> : null}
