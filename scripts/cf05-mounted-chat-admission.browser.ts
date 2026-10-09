@@ -12,6 +12,7 @@
  */
 import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { chromium, type Page, type Route } from 'playwright';
 
 const configuredBaseUrl = process.env.ASSISTANT_CHAT_BASE_URL;
@@ -87,7 +88,13 @@ async function verifyIsolatedProfile(): Promise<RootVerifiedRunManifest> {
   assert.equal(attestation.sourceTreeClean, true);
   assert(Number.isSafeInteger(attestation.serverPid) && attestation.serverPid > 0);
   assert.match(attestation.serverCommandSha256, /^[0-9a-f]{64}$/i);
-  assert.equal(attestation.serverWorkingDirectory, attestation.sourceRoot);
+  const sourceRoot = resolve(attestation.sourceRoot);
+  const serverWorkingDirectory = resolve(attestation.serverWorkingDirectory);
+  assert(
+    serverWorkingDirectory === sourceRoot ||
+      serverWorkingDirectory === resolve(sourceRoot, 'apps/web'),
+    'The app must run from the selected worktree root or its web app directory',
+  );
   assert.equal(attestation.persistenceDriver, 'firestore');
   assert.equal(attestation.queueDriver, 'local');
   assert.match(

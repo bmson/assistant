@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import type { TaskLease } from '@assistant/persistence';
 import { Firestore } from '@google-cloud/firestore';
 import { seedContextWithEvidence } from '../packages/core/src/workflow/executor/seed.js';
@@ -49,6 +50,8 @@ interface Attestation {
   firestoreDatabaseId: string;
   installationId: string;
   ownerId: string;
+  sourceRoot: string;
+  serverWorkingDirectory: string;
 }
 
 function getAttempt(value: AdmissionAttempt | undefined, label: string) {
@@ -75,6 +78,13 @@ assert.equal(receipt.schemaVersion, 1);
 assert.equal(receipt.sourceSha, expectedSha);
 assert.equal(receipt.installationId, attestation.installationId);
 assert.equal(receipt.ownerId, attestation.ownerId);
+const sourceRoot = resolve(attestation.sourceRoot);
+const serverWorkingDirectory = resolve(attestation.serverWorkingDirectory);
+assert(
+  serverWorkingDirectory === sourceRoot ||
+    serverWorkingDirectory === resolve(sourceRoot, 'apps/web'),
+  'The app must run from the selected worktree root or its web app directory',
+);
 assert.match(attestation.firestoreEmulatorHost, /^(?:localhost|127\.0\.0\.1|\[::1\]):\d+$/i);
 assert(
   attestation.firestoreProjectId.startsWith('demo-'),
