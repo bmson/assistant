@@ -122,15 +122,24 @@ verify_database_free_template() {
     const fs = require("node:fs");
     const [kind, name, requireFirestore] = process.argv.slice(1);
     const value = JSON.parse(fs.readFileSync(0, "utf8"));
-    const spec = kind === "service" ? value.spec?.template?.spec : value.spec?.template?.template?.spec;
-    const env = spec?.containers?.[0]?.env ?? [];
-    const databaseEnv = /^(DATABASE_URL|PROD_DATABASE_URL|MIGRATION_DATABASE_URL|PG[A-Z_]*|POSTGRES_[A-Z_]+|NEON_[A-Z_]+)$/; // retirement-scan: forbids
+    const spec = kind === "service"
+      ? value.spec?.template?.spec
+      : value.spec?.template?.spec?.template?.spec ?? value.template?.template;
+    const containers = spec?.containers;
+    const databaseEnv = /^(DATABASE_URL|DIRECT_DATABASE_URL|PROD_DATABASE_URL|MIGRATION_DATABASE_URL|PG[A-Z_]*|POSTGRES_[A-Z_]+|NEON_[A-Z_]+)$/; // retirement-scan: forbids
     const databaseSecret = /^database-url($|-)|neon|postgres/i; // retirement-scan: forbids
     const problems = [];
-    for (const entry of env) {
-      if (databaseEnv.test(entry.name ?? "")) problems.push(`env ${entry.name}`);
-      const secret = entry.valueFrom?.secretKeyRef?.name ?? "";
-      if (secret && databaseSecret.test(secret)) problems.push(`${entry.name} from secret ${secret}`);
+    if (!Array.isArray(containers) || containers.length === 0) {
+      problems.push("missing container template");
+    }
+    const env = [];
+    for (const container of containers ?? []) {
+      for (const entry of container.env ?? []) {
+        env.push(entry);
+        if (databaseEnv.test(entry.name ?? "")) problems.push(`env ${entry.name}`);
+        const secret = entry.valueFrom?.secretKeyRef?.name ?? entry.valueSource?.secretKeyRef?.secret ?? "";
+        if (secret && databaseSecret.test(secret.split("/").at(-1))) problems.push(`${entry.name} from secret ${secret}`);
+      }
     }
     const driver = env.find((entry) => entry.name === "PERSISTENCE_DRIVER")?.value;
     if (requireFirestore === "true" && driver !== "firestore")

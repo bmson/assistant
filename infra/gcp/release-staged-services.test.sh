@@ -30,7 +30,10 @@ if a[:3]==['artifacts','docker','images']:
  if os.getenv('FAIL_AGENT_BUILD')=='1' and '/agent:' in image: sys.exit(1)
  print('sha256:'+('a' if '/agent:' in image else 'b')*64); sys.exit(0)
 if a[:3]==['run','jobs','describe']:
- name=a[3]; print(json.dumps({'spec':{'template':{'template':{'spec':{'containers':[{'image':s[name]['image']}]}}}}})); sys.exit(0)
+ name=a[3]; containers=[{'image':s[name]['image']}]
+ shape=os.getenv('STUB_JOB_SHAPE','v1')
+ job={'template':{'template':{'containers':containers}}} if shape=='v2' else {'spec':{'template':{'spec':{'template':{'spec':{'containers':containers}}}}}}
+ print(json.dumps(job)); sys.exit(0)
 if a[:3]==['run','jobs','update']:
  name=a[3]; s[name]['next']+=1
  image=val('--image')
@@ -122,6 +125,10 @@ with open(os.environ['STUB_DRAIN_CALLS'],'a') as f: f.write(sys.argv[1]+'\n')
 PY
 chmod +x "$TEST_ROOT/bin/sleep"
 source "$ROOT/release-staged-services.sh"
+v1_job='{"spec":{"template":{"spec":{"template":{"spec":{"containers":[{"image":"registry/v1-image"}]}}}}}}'
+v2_job='{"template":{"template":{"containers":[{"image":"registry/v2-image"}]}}}'
+[[ "$(release_job_image "$v1_job")" == registry/v1-image ]] || { echo 'v1 job image path not parsed' >&2; exit 1; }
+[[ "$(release_job_image "$v2_job")" == registry/v2-image ]] || { echo 'v2 job image path not parsed' >&2; exit 1; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 reset_case() {
  cat >"$TEST_ROOT/state.json" <<JSON

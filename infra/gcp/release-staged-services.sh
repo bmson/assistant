@@ -194,7 +194,7 @@ release_worker_enabled() {
 }
 
 release_job_image() {
-  node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(String(x.spec?.template?.template?.spec?.containers?.[0]?.image??""))' "$1"
+  node -e 'const x=JSON.parse(process.argv[1]);const spec=x.spec?.template?.spec?.template?.spec??x.template?.template;process.stdout.write(String(spec?.containers?.[0]?.image??""))' "$1"
 }
 
 release_restore_jobs() {
