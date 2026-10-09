@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { detectPersonalReadRequest } from './read-intent.js';
 import {
   availabilityResponseCards,
   calendarResponseCards,
@@ -45,6 +46,185 @@ describe('response cards', () => {
     expect(calendarResponseCards(evidence, request)).toMatchObject([
       { kind: 'calendar-event', title: 'SFO to BER flight (United)', time: '9:15 AM–10:15 AM' },
     ]);
+  });
+
+  it('does not project booking history, newsletters, or other mail threads on a focused flight read', () => {
+    const cards = responseCardsForFinal({
+      requestText: 'Show me the Berlin flight confirmation in the calendar.',
+      readRequest: {
+        ...request,
+        kind: 'calendar_email',
+        firstToolName: 'calendar.search_events',
+        requiresThreadRead: true,
+        answerFocus: 'flight',
+      },
+      evidence: [
+        {
+          toolName: 'gmail.search',
+          status: 'succeeded',
+          result: {
+            complete: true,
+            mailboxSearched: 'owner@example.com',
+            results: [
+              {
+                threadId: 'current-booking',
+                from: 'booking@airline.example',
+                subject: 'Berlin flight booking confirmation',
+                snippet: 'Your departure details',
+              },
+              {
+                threadId: 'old-history',
+                from: 'history@airline.example',
+                subject: 'Old itinerary from 2022',
+                snippet: 'Previous Asiana flight',
+              },
+              {
+                threadId: 'newsletter',
+                from: 'newsletter@airline.example',
+                subject: 'This week at Asiana',
+                snippet: 'News and offers',
+              },
+            ],
+          },
+        },
+        {
+          toolName: 'gmail.read_thread',
+          status: 'succeeded',
+          args: { threadId: 'current-booking' },
+          result: {
+            threadId: 'current-booking',
+            messages: [{ subject: 'Booking confirmation', text: 'Flight departs at 1:45 PM.' }],
+          },
+        },
+        {
+          toolName: 'gmail.read_thread',
+          status: 'succeeded',
+          args: { threadId: 'old-history' },
+          result: {
+            threadId: 'old-history',
+            messages: [{ subject: 'Old itinerary', text: 'Asiana departed at 9:15 AM in 2022.' }],
+          },
+        },
+        {
+          toolName: 'gmail.read_thread',
+          status: 'succeeded',
+          args: { threadId: 'newsletter' },
+          result: {
+            threadId: 'newsletter',
+            messages: [{ subject: 'This week at Asiana', text: 'Read our latest newsletter.' }],
+          },
+        },
+      ],
+    });
+
+    expect(
+      cards.some((card) => card.kind === 'email-results' || card.kind === 'email-thread'),
+    ).toBe(false);
+    expect(JSON.stringify(cards)).not.toMatch(
+      /booking@airline|history@airline|newsletter@airline|Asiana/,
+    );
+  });
+
+  it.each([
+    'Show me the Berlin flight confirmation email.',
+    'Open the Berlin flight confirmation email.',
+    'Read my Berlin flight confirmation email.',
+    'Find the Berlin flight confirmation email.',
+    'Pull up my confirmation email for Berlin flight.',
+    'What does the email say about my Berlin flight?',
+  ])('preserves the explicitly requested mail surface: %s', (requestText) => {
+    const readRequest = detectPersonalReadRequest([{ role: 'user', content: requestText }], {
+      now: new Date('2026-10-08T18:00:00Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    expect(readRequest?.answerFocus).toBe('flight');
+    const cards = responseCardsForFinal({
+      requestText,
+      readRequest,
+      evidence: [
+        {
+          toolName: 'gmail.search',
+          status: 'succeeded',
+          result: {
+            complete: true,
+            mailboxSearched: 'owner@example.com',
+            results: [
+              {
+                threadId: 'booking',
+                from: 'booking@airline.example',
+                subject: 'Berlin flight confirmation',
+              },
+            ],
+          },
+        },
+        {
+          toolName: 'gmail.read_thread',
+          status: 'succeeded',
+          args: { threadId: 'booking' },
+          result: {
+            threadId: 'booking',
+            messages: [
+              { subject: 'Berlin flight confirmation', text: 'Flight departs at 1:45 PM.' },
+            ],
+          },
+        },
+      ],
+    });
+    expect(cards.map((card) => card.kind)).toEqual(['email-thread']);
+  });
+
+  it('keeps the verified calendar update and other explicit result cards for a focused flight read', () => {
+    const cards = responseCardsForFinal({
+      readRequest: {
+        ...request,
+        kind: 'calendar_email',
+        firstToolName: 'calendar.search_events',
+        requiresThreadRead: true,
+        answerFocus: 'flight',
+      },
+      lookupOrder: ['web'],
+      evidence: [
+        {
+          toolName: 'calendar.update_event',
+          status: 'succeeded',
+          args: { eventId: 'flight', start: '2026-10-09T09:15:00-07:00' },
+          result: {
+            eventId: 'flight',
+            updated: true,
+            start: '2026-10-09T13:45:00-07:00',
+            summary: 'Berlin flight',
+          },
+        },
+        {
+          toolName: 'gmail.search',
+          status: 'succeeded',
+          result: {
+            complete: true,
+            mailboxSearched: 'owner@example.com',
+            results: [
+              { threadId: 'booking', from: 'booking@airline.example', subject: 'Confirmation' },
+            ],
+          },
+        },
+        {
+          toolName: 'web.search',
+          status: 'succeeded',
+          args: { query: 'airport status' },
+          result: {
+            query: 'airport status',
+            results: [{ url: 'https://example.test/status', title: 'Airport status' }],
+          },
+        },
+      ],
+    });
+
+    expect(cards.map((card) => card.kind)).toEqual(['status', 'web-search-results']);
+    expect(cards[0]).toMatchObject({
+      id: 'calendar-updated-flight',
+      title: 'Calendar event updated',
+      details: [{ label: 'Time', value: '2026-10-09T13:45:00-07:00' }],
+    });
+    expect(JSON.stringify(cards)).not.toContain('booking@airline.example');
   });
 
   it('does not pair a successful flight update with an obsolete flight card', () => {

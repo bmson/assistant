@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { evidenceClaimFacts } from './claim-facts.js';
 import { correctFlightWriteClaims } from './flight-write-contract.js';
+import { detectPersonalReadRequest } from './read-intent.js';
 import {
   type ActionEvidence,
   activeWatchReceipt,
@@ -2933,6 +2934,93 @@ describe('groundReadDraft', () => {
       })),
     ] satisfies ActionEvidence[];
   }
+
+  it.each(['Are you sure?', 'There is nothing in the calendar about 9:15 flight.'])(
+    'answers the challenged flight without exposing unrelated source records: %s',
+    (content) => {
+      const readRequest = detectPersonalReadRequest(
+        [
+          { role: 'user', content: 'When is my flight to Berlin on October 9, 2026?' },
+          { role: 'assistant', content: 'Your flight departs at 9:15 AM.' },
+          { role: 'user', content },
+        ],
+        { now: new Date('2026-10-08T18:00:00Z'), timeZone: 'America/Los_Angeles' },
+      );
+      if (!readRequest) throw new Error('expected a flight correction read');
+      const evidence = flightEvidence(
+        [
+          {
+            threadId: 'booking',
+            messageId: 'm1',
+            subject: 'Berlin flight confirmation',
+            text: 'Berlin itinerary for October 9, 2026. Departure is at 1:45 PM.',
+          },
+          {
+            threadId: 'old',
+            messageId: 'm2',
+            subject: 'Previous Berlin itinerary',
+            text: 'Berlin flight itinerary for January 4, 2026. Departure is at 09:15 AM.',
+          },
+          {
+            threadId: 'newsletter',
+            messageId: 'm3',
+            subject: 'Gaussian Splatting Newsletter',
+            text: 'Asiana offers and unrelated newsletter content.',
+          },
+        ],
+        [
+          { eventId: 'old-dec', summary: 'Flight to Seattle', start: '2025-12-18T10:13:00-08:00' },
+          { eventId: 'berlin', summary: 'Berlin flight', start: '2026-10-09T13:45:00-07:00' },
+          {
+            eventId: 'return',
+            summary: 'Berlin return flight',
+            start: '2026-10-16T21:10:00+02:00',
+          },
+        ],
+      );
+      const published = enforceResponseContract(
+        'I rechecked it — this is everything the sources actually return:',
+        evidence,
+        { requestText: content, readRequest },
+      );
+      expect(published).toMatchObject({
+        blocked: false,
+        text: 'The matching berlin booking message lists departure at 1:45 PM.',
+      });
+      expect(published.text).not.toMatch(
+        /Seattle|January|December|Asiana|Newsletter|coverage|9:15|everything the sources/i,
+      );
+      const partial = enforceResponseContract(
+        'Your flight is definitely at 9:15 AM.',
+        evidence.filter((row) => row.toolName !== 'gmail.read_thread'),
+        { requestText: content, readRequest },
+      );
+      expect(partial.blocked).toBe(true);
+      expect(partial.text.length).toBeLessThan(350);
+      expect(partial.text).not.toMatch(
+        /Seattle|Newsletter|Asiana|metadata|thread|9:15|everything the sources/i,
+      );
+      expect(partial.text).toContain('unverified');
+    },
+  );
+
+  it('asks one short trip question before an unscoped flight correction', () => {
+    const content = 'There is nothing in the calendar about 9:15 flight.';
+    const readRequest = detectPersonalReadRequest([{ role: 'user', content }], {
+      now: new Date('2026-10-08T18:00:00Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!readRequest) throw new Error('expected a flight correction read');
+    expect(
+      enforceResponseContract('Your flight is at 9:15 AM.', [], {
+        requestText: content,
+        readRequest,
+      }),
+    ).toMatchObject({
+      blocked: true,
+      text: 'What date and destination is the flight you want me to recheck?',
+    });
+  });
 
   it('binds the departure clock to the requested date and matching Berlin source', () => {
     const evidence = flightEvidence([

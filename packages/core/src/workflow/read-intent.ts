@@ -61,6 +61,10 @@ export interface PersonalReadRequest {
   temporalIntent?: ResolvedTemporalIntent;
   /** A recognized temporal phrase that this deterministic resolver cannot safely bound. */
   temporalIssue?: string;
+  /** A correction has no bounded trip to verify; ask before searching unrelated records. */
+  scopeIssue?: string;
+  /** Owner-supplied trip fields retained only while a bounded clarification is pending. */
+  scopeContext?: { kind: 'flight'; date?: string };
   /** Gmail query derived from the owner's words, not model-proposed narrowing. */
   mailQuery?: string;
   /** Used only to render returned timestamps for the owner. */
@@ -522,6 +526,171 @@ function hasExplicitTemporalPhrase(text: string): boolean {
   );
 }
 
+interface FlightScopeDateAnswer {
+  date: string;
+  destination?: string;
+}
+
+const FLIGHT_SCOPE_DATE =
+  '(?:20\\d{2}-\\d{2}-\\d{2}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\s+\\d{1,2}(?:,?\\s+20\\d{2})?)';
+
+function parseFlightScopeDateAnswer(text: string): FlightScopeDateAnswer | undefined {
+  // This is deliberately a complete-answer grammar. Quoted mail, explanations,
+  // and a new request cannot become lookup instructions through a clarification.
+  const match = new RegExp(
+    `^\\s*(?:on\\s+)?(${FLIGHT_SCOPE_DATE})(?:\\s+to\\s+([a-z][a-z'’.-]*(?:\\s+[a-z][a-z'’.-]*){0,2}))?[.!]?\\s*$`,
+    'i',
+  ).exec(text);
+  if (!match?.[1]) return undefined;
+  return { date: match[1], ...(match[2] ? { destination: match[2] } : {}) };
+}
+
+function parseFlightScopeDestinationAnswer(text: string): string | undefined {
+  const match =
+    /^\s*(?:to\s+)?((?:[a-z][a-z'’.-]+|[A-Z]{3,})(?:\s+(?:[a-z][a-z'’.-]+|[A-Z]{3,})){0,2})[.!]?\s*$/i.exec(
+      text,
+    );
+  const destination = match?.[1]?.trim();
+  if (!destination) return undefined;
+  const nonDestination = new Set([
+    'actually',
+    'also',
+    'appointment',
+    'appointments',
+    'calendar',
+    'check',
+    'dentist',
+    'doctor',
+    'do',
+    'dont',
+    'email',
+    'flight',
+    'flights',
+    'ignore',
+    'instructions',
+    'itinerary',
+    'meeting',
+    'meetings',
+    'me',
+    'my',
+    'no',
+    'okay',
+    'please',
+    'previous',
+    'read',
+    'sure',
+    'thanks',
+    'yes',
+  ]);
+  const words = destination.toLowerCase().split(/\s+/);
+  if (words.some((word) => nonDestination.has(word.replace(/[^a-z]/g, '')))) return undefined;
+  return destination;
+}
+
+function flightScopeClarificationContinuation(
+  messages: ReadonlyArray<ReadIntentMessage>,
+  latestIndex: number,
+  latest: string,
+  options: PersonalReadDetectionOptions,
+  clarificationDepth: number,
+): PersonalReadRequest | undefined {
+  let assistantIndex = -1;
+  for (let index = latestIndex - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'assistant') {
+      assistantIndex = index;
+      break;
+    }
+  }
+  if (assistantIndex < 0) return undefined;
+
+  const assistantQuestion = readIntentText(messages[assistantIndex]);
+  const dateQuestion =
+    /^What (?:is the date of the flight|date and destination is the flight) you want me to recheck\?$/i.test(
+      assistantQuestion,
+    );
+  const destinationQuestion = assistantQuestion === 'What destination should I use for the flight?';
+  if (!dateQuestion && !destinationQuestion) return undefined;
+
+  // Parse the current owner answer before looking back. Besides making authority
+  // explicit, this bounds the only recursive detection to a small local window.
+  const dateAnswer = dateQuestion ? parseFlightScopeDateAnswer(latest) : undefined;
+  const destinationAnswer = destinationQuestion
+    ? parseFlightScopeDestinationAnswer(latest)
+    : undefined;
+  if (!dateAnswer && !destinationAnswer) return undefined;
+
+  // A clarification is valid only as the immediate next owner turn after the
+  // assistant marker; do not reach across a later owner topic change.
+  if (messages.slice(assistantIndex + 1, latestIndex).some((message) => message.role === 'user'))
+    return undefined;
+
+  // Re-detect only the owner history before the assistant's exact clarification.
+  // The assistant text is a continuation marker, never a source of trip facts.
+  const prior = detectPersonalReadRequestInternal(
+    messages.slice(Math.max(0, assistantIndex - 12), assistantIndex),
+    options,
+    clarificationDepth + 1,
+  );
+  if (
+    prior?.answerFocus !== 'flight' ||
+    !prior.scopeIssue ||
+    prior.scopeIssue !== assistantQuestion
+  )
+    return undefined;
+
+  const date = dateAnswer?.date ?? prior.scopeContext?.date;
+  if (!date) return undefined;
+  const suppliedTerms =
+    (dateAnswer?.destination ?? destinationAnswer)
+      ? flightDestinationTerms(`flight to ${dateAnswer?.destination ?? destinationAnswer}`)
+      : [];
+  const inheritedTerms = prior.queryTerms.filter(
+    (term) =>
+      !SCHEDULED_THING.test(term) && !/^(?:flight|flights|airline|itinerary|boarding)$/i.test(term),
+  );
+  const terms = suppliedTerms.length > 0 ? suppliedTerms : inheritedTerms;
+  const asksForDestination = /date and destination/i.test(assistantQuestion);
+
+  const requestBase: PersonalReadRequest = {
+    ...prior,
+    scopeIssue: undefined,
+    temporalIssue: undefined,
+    timeWindow: undefined,
+    temporalIntent: undefined,
+    queryTerms: terms,
+    verification: true,
+    answerFocus: 'flight',
+    requiresThreadRead: true,
+    firstToolName: 'calendar.search_events',
+  };
+  if ((asksForDestination && suppliedTerms.length === 0) || terms.length === 0) {
+    return {
+      ...requestBase,
+      scopeIssue: 'What destination should I use for the flight?',
+      scopeContext: { kind: 'flight', date },
+    };
+  }
+
+  const temporal = resolveTemporalIntent(date, 'calendar_email', terms.length > 0, options);
+  if (temporal.kind !== 'resolved') {
+    return {
+      ...requestBase,
+      temporalIssue:
+        temporalIssueFor(date, temporal) ??
+        'I can’t safely resolve that flight date. Please give me a valid calendar date.',
+      scopeContext: { kind: 'flight', date },
+    };
+  }
+
+  return {
+    ...requestBase,
+    timeWindow: temporal.intent.window,
+    temporalIntent: temporal.intent,
+    scopeContext: undefined,
+    mailQuery: gmailQuery(`flight ${terms.join(' ')}`, terms),
+  };
+}
+
 function temporalIssueFor(text: string, temporal: TemporalIntentResolution): string | undefined {
   if (temporal.kind === 'unsupported') return temporal.message;
   if (temporal.kind === 'unresolved' && hasExplicitTemporalPhrase(text))
@@ -671,6 +840,9 @@ const QUERY_STOP_WORDS = new Set([
   'did',
   'do',
   'does',
+  'double',
+  'double-check',
+  'verify',
   'find',
   'found',
   'for',
@@ -723,6 +895,7 @@ const QUERY_STOP_WORDS = new Set([
   'source',
   'system',
   'the',
+  'there',
   'this',
   'time',
   'to',
@@ -992,6 +1165,14 @@ export function detectPersonalReadRequest(
   messages: ReadonlyArray<ReadIntentMessage>,
   options: PersonalReadDetectionOptions = {},
 ): PersonalReadRequest | null {
+  return detectPersonalReadRequestInternal(messages, options, 0);
+}
+
+function detectPersonalReadRequestInternal(
+  messages: ReadonlyArray<ReadIntentMessage>,
+  options: PersonalReadDetectionOptions,
+  clarificationDepth: number,
+): PersonalReadRequest | null {
   let latestIndex = -1;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index]?.role === 'user') {
@@ -1001,6 +1182,17 @@ export function detectPersonalReadRequest(
   }
   if (latestIndex === -1) return null;
   const latest = readIntentText(messages[latestIndex]);
+  const flightContinuation =
+    clarificationDepth < 2
+      ? flightScopeClarificationContinuation(
+          messages,
+          latestIndex,
+          latest,
+          options,
+          clarificationDepth,
+        )
+      : undefined;
+  if (flightContinuation) return flightContinuation;
   // A future notification request needs an executable watch plan. Do not let
   // broad words such as "tell me when" force a read-only answer route.
   if (detectFutureWatchIntent(latest)) return null;
@@ -1130,8 +1322,42 @@ export function detectPersonalReadRequest(
   // owner is disputing instead of the thing they named. Only a subject-less
   // challenge ("are you sure?") needs the prior turn.
   const namesSender = /\bfrom\s+[a-z0-9][\w.'’-]*/i.test(latest);
-  const contextualQuery = verification && queryTerms(latest).length === 0 && !namesSender;
-  const hypothesis = contextualQuery ? recentContext : latest;
+  const latestTerms = queryTerms(latest);
+  const flightLanguage = /\b(?:flight|flights|airline|itinerary|boarding)\b/i;
+  const genericFlightChallenge =
+    verification &&
+    !namesSender &&
+    latestTerms.every((term) => flightLanguage.test(term)) &&
+    (!SCHEDULED_THING.test(latest) || flightLanguage.test(latest));
+  // Inherit the nearest owner's trip, never the assistant's disputed time.
+  // A substantive change of topic ends this search instead of reviving an old trip.
+  let ownerFlight: string | undefined;
+  if (genericFlightChallenge) {
+    for (const prior of [...recentOwnerTurns].reverse()) {
+      if (
+        ACCEPT_LOOKUP.test(prior) ||
+        (VERIFY.test(prior) &&
+          queryTerms(prior).every((term) => flightLanguage.test(term)) &&
+          !hasExplicitTemporalPhrase(prior))
+      )
+        continue;
+      if (
+        detectPersonalReadRequest([{ role: 'user', content: prior }], options)?.answerFocus ===
+        'flight'
+      )
+        ownerFlight = prior;
+      break;
+    }
+  }
+  const contextualQuery = verification && latestTerms.length === 0 && !namesSender;
+  const hypothesis = ownerFlight ?? (contextualQuery ? recentContext : latest);
+  const temporalText = ownerFlight
+    ? hasExplicitTemporalPhrase(latest)
+      ? latest
+      : ownerFlight
+    : contextualQuery
+      ? `${latest}\n${recentContext}`
+      : latest;
   let terms = queryTerms(hypothesis);
   const flightTerms = flightDestinationTerms(hypothesis);
   if (flightTerms.length > 0) terms = flightTerms;
@@ -1150,6 +1376,7 @@ export function detectPersonalReadRequest(
   if (nextEventQuestion) terms = [];
   const personalSchedule =
     /\b(?:my|our|the|this|that|do i|did i|is there|are there)\b/i.test(latest) ||
+    (verification && flightLanguage.test(latest)) ||
     terms.some((term) => !SCHEDULED_THING.test(term));
   const namedSchedule =
     !genericScheduleList &&
@@ -1201,7 +1428,7 @@ export function detectPersonalReadRequest(
   const request: PersonalReadRequest = {
     kind,
     queryTerms: terms,
-    ...(namedSchedule && /\b(?:flight|flights|airline|itinerary|boarding)\b/i.test(latest)
+    ...(namedSchedule && (flightLanguage.test(latest) || Boolean(ownerFlight))
       ? { answerFocus: 'flight' as const }
       : {}),
     firstToolName,
@@ -1219,7 +1446,7 @@ export function detectPersonalReadRequest(
   }
   if (kind !== 'email') {
     const temporal = resolveTemporalIntent(
-      contextualQuery ? `${latest}\n${recentContext}` : latest,
+      temporalText,
       kind,
       terms.length > 0,
       options,
@@ -1229,7 +1456,6 @@ export function detectPersonalReadRequest(
       request.timeWindow = temporal.intent.window;
       request.temporalIntent = temporal.intent;
     } else {
-      const temporalText = contextualQuery ? `${latest}\n${recentContext}` : latest;
       const issue = temporalIssueFor(temporalText, temporal);
       if (issue) request.temporalIssue = issue;
     }
@@ -1243,6 +1469,26 @@ export function detectPersonalReadRequest(
     if (request.answerFocus === 'flight' && !explicitMailAge) {
       request.mailQuery = request.mailQuery.replace(/\s+newer_than:\d+d\b/gi, '').trim();
     }
+  }
+  if (
+    verification &&
+    request.answerFocus === 'flight' &&
+    !hasExplicitTemporalPhrase(temporalText)
+  ) {
+    request.scopeIssue = 'What date and destination is the flight you want me to recheck?';
+  }
+  if (
+    ownerFlight &&
+    request.answerFocus === 'flight' &&
+    !hasExplicitTemporalPhrase(latest) &&
+    /\b(?:today|tomorrow|yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|(?:next|last|this|past|previous)\s+(?:week|month|year))\b/i.test(
+      ownerFlight,
+    ) &&
+    !/\b20\d{2}-\d{2}-\d{2}\b/.test(ownerFlight)
+  ) {
+    // Model history does not carry the original turn's timestamp. Re-resolving
+    // its "tomorrow" at this task's clock could move the trip across midnight.
+    request.scopeIssue = 'What is the date of the flight you want me to recheck?';
   }
   if (options.timeZone) request.timeZone = options.timeZone;
   if (verification) request.verification = true;
@@ -1460,7 +1706,7 @@ export function nextRequiredReadTool(
   request: PersonalReadRequest,
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): string | undefined {
-  if (request.temporalIssue) return undefined;
+  if (request.temporalIssue || request.scopeIssue) return undefined;
   if (request.kind === 'drive' || request.kind === 'memory' || request.kind === 'knowledge_graph') {
     if (evidence.some((row) => matchingPrivateRead(row, request))) return undefined;
     return attempts(evidence, request.firstToolName) < 2 ? request.firstToolName : undefined;
@@ -1493,7 +1739,7 @@ export function groundReadToolInput(
   input: Record<string, unknown>,
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): Record<string, unknown> {
-  if (request.temporalIssue) return {};
+  if (request.temporalIssue || request.scopeIssue) return {};
   if (toolName === 'calendar.list_events') {
     const { calendarIds: _ignored, ...allCalendars } = input;
     const interval = calendarReadInterval(request);
@@ -1550,7 +1796,7 @@ export function buildReadToolInput(
   toolName: string,
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): Record<string, unknown> | null {
-  if (request.temporalIssue) return null;
+  if (request.temporalIssue || request.scopeIssue) return null;
   if (toolName === 'calendar.list_events' && !request.timeWindow) return null;
   if (toolName === 'calendar.search_events' && request.queryTerms.length === 0) return null;
   if (toolName === 'calendar.availability' && !request.timeWindow) return null;
