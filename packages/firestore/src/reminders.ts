@@ -147,7 +147,7 @@ export class FirestoreReminderRepository implements ReminderRepository {
       const template = reminderScheduleTemplate(row.taskTemplate);
       tx.update(scheduleRef, {
         updatedAt: now,
-        ...(template.reminderKind === 'once'
+        ...(template.reminderKind === 'once' || template.reminderKind === 'event_completion'
           ? {
               enabled: false,
               nextRunAt: null,

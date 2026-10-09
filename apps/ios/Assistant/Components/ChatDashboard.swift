@@ -41,6 +41,7 @@ struct ChatDashboard: View {
                 .init(
                     marker: "Now",
                     title: approval.approval.summary,
+                    detail: pendingApprovalCount == 1 ? "Ready for your review" : "\(pendingApprovalCount) decisions waiting",
                     tag: "Approval",
                     action: "Review",
                     icon: "hand.raised.fill",
@@ -55,6 +56,7 @@ struct ChatDashboard: View {
                 .init(
                     marker: "Now",
                     title: "Review pending approvals",
+                    detail: "\(pendingApprovalCount) decisions are waiting for you.",
                     tag: "\(pendingApprovalCount) waiting",
                     action: "Review",
                     icon: "hand.raised.fill",
@@ -66,6 +68,7 @@ struct ChatDashboard: View {
                 .init(
                     marker: "Now",
                     title: "A task is waiting for your direction",
+                    detail: "\(needsAttentionCount) \(needsAttentionCount == 1 ? "item needs" : "items need") your attention.",
                     tag: "Needs you",
                     action: "Open",
                     icon: "exclamationmark.circle",
@@ -79,6 +82,7 @@ struct ChatDashboard: View {
                 .init(
                     marker: items.isEmpty ? "Now" : "Next",
                     title: work.displayTitle,
+                    detail: work.displayProgress.isEmpty ? "The assistant is keeping this moving." : work.displayProgress,
                     tag: work.status == "running" ? "In motion" : "Scheduled",
                     action: "Track",
                     icon: "arrow.triangle.2.circlepath",
@@ -87,12 +91,13 @@ struct ChatDashboard: View {
             )
         }
 
-        if items.count < 2, let goal = firstGoal {
+        if items.count < 3, let goal = firstGoal {
             items.append(
                 .init(
                     marker: items.isEmpty ? "Next" : "Later",
-                    title: goal.goal.nextAction.isEmpty ? goal.goal.displayTitle : goal.goal.nextAction,
-                    tag: "Goal",
+                    title: goal.goal.displayTitle,
+                    detail: goal.goal.nextAction.isEmpty ? goal.cadenceLabel : "Next: \(goal.goal.nextAction)",
+                    tag: goal.workActive ? "Active" : goal.cadenceLabel,
                     action: "Open",
                     icon: "scope",
                     destination: .route(.goals)
@@ -105,6 +110,7 @@ struct ChatDashboard: View {
                 .init(
                     marker: "Ready",
                     title: "Put a task in motion",
+                    detail: "Choose a starting point below.",
                     tag: "Start here",
                     action: "Ask",
                     icon: "sparkles",
@@ -117,12 +123,9 @@ struct ChatDashboard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: AssistantTheme.cardStackSpacing) {
             greeting
             upNextCard
-            attentionCard
-            workCard
-            goalsCard
             startCard
         }
         .padding(.top, 76)
@@ -135,9 +138,6 @@ struct ChatDashboard: View {
             Text(greetingTitle)
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(.white)
-            Text("A quick view of what can move forward with \(agentName).")
-                .font(.subheadline)
-                .foregroundStyle(.white.opacity(0.68))
         }
         .padding(.horizontal, 4)
         .accessibilityElement(children: .combine)
@@ -152,7 +152,7 @@ struct ChatDashboard: View {
     }
 
     private var upNextCard: some View {
-        DashboardCard(title: "Up next", icon: "calendar", tint: AssistantTheme.accent(for: colorScheme)) {
+        DashboardCard(title: "Up next") {
             VStack(spacing: 0) {
                 ForEach(Array(agendaItems.enumerated()), id: \.offset) { index, item in
                     agendaRow(item)
@@ -161,7 +161,7 @@ struct ChatDashboard: View {
                     }
                 }
                 DashboardDivider()
-                dashboardFooter("View all activity", icon: "calendar") {
+                dashboardFooter("View all activity") {
                     onRoute(.activity)
                 }
             }
@@ -172,222 +172,131 @@ struct ChatDashboard: View {
         Button {
             perform(item.destination)
         } label: {
-            HStack(alignment: .top, spacing: 12) {
-                Text(item.marker)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                    .frame(width: usesAccessibilityLayout ? 62 : 54, alignment: .leading)
-
-                VStack(alignment: .leading, spacing: 7) {
-                    Text(item.title)
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(AssistantTheme.ink(for: colorScheme))
-                        .lineLimit(usesAccessibilityLayout ? nil : 2)
-                        .multilineTextAlignment(.leading)
-                    DashboardTag(title: item.tag, icon: item.icon)
+            Group {
+                if usesAccessibilityLayout {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(item.marker)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                        agendaDetails(item)
+                        Text(item.action)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    HStack(alignment: .top, spacing: 12) {
+                        Text(item.marker)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                            .frame(width: 54, alignment: .leading)
+                        agendaDetails(item)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text(item.action)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                            .padding(.top, 1)
+                    }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text(item.action)
-                        .font(.subheadline.weight(.medium))
-                    Image(systemName: "arrow.right")
-                        .font(.caption.weight(.bold))
-                }
-                .foregroundStyle(AssistantTheme.accent(for: colorScheme))
-                .padding(.top, 1)
             }
-            .padding(.vertical, 13)
+            .padding(.vertical, 12)
             .contentShape(Rectangle())
         }
         .buttonStyle(DashboardButtonStyle(reduceMotion: reduceMotion))
         .disabled(isSending && item.destination.isPrompt)
     }
 
-    private var attentionCard: some View {
-        DashboardCard(
-            title: pendingApprovalCount > 0 || needsAttentionCount > 0 ? "Needs you" : "Approvals",
-            icon: "checkmark.shield",
-            tint: pendingApprovalCount > 0 || needsAttentionCount > 0
-                ? AssistantTheme.warning(for: colorScheme)
-                : AssistantTheme.accent(for: colorScheme)
-        ) {
-            if let approval = firstApproval {
-                dashboardDetail(
-                    approval.approval.summary,
-                    detail: "\(pendingApprovalCount) \(pendingApprovalCount == 1 ? "decision" : "decisions") waiting",
-                    tag: "Review needed",
-                    action: "Review"
-                ) {
-                    onRoute(.approvals)
-                }
-            } else if pendingApprovalCount > 0 {
-                dashboardDetail(
-                    "Review pending approvals",
-                    detail: "\(pendingApprovalCount) \(pendingApprovalCount == 1 ? "decision is" : "decisions are") waiting for you.",
-                    tag: "Review needed",
-                    action: "Review"
-                ) {
-                    onRoute(.approvals)
-                }
-            } else if needsAttentionCount > 0 {
-                dashboardDetail(
-                    "A task is waiting for your direction",
-                    detail: "\(needsAttentionCount) \(needsAttentionCount == 1 ? "item" : "items") need attention",
-                    tag: "Needs you",
-                    action: "Open"
-                ) {
-                    onRoute(.activity)
-                }
-            } else {
-                dashboardDetail(
-                    "Nothing needs approval",
-                    detail: "The assistant will surface outward actions here before it takes them.",
-                    tag: "All clear",
-                    action: "History"
-                ) {
-                    onRoute(.approvals)
-                }
+    private func agendaDetails(_ item: DashboardAgendaItem) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(item.title)
+                .font(.body.weight(.semibold))
+                .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+                .lineLimit(usesAccessibilityLayout ? nil : 2)
+                .multilineTextAlignment(.leading)
+            if !item.detail.isEmpty {
+                Text(item.detail)
+                    .font(.subheadline)
+                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .lineLimit(usesAccessibilityLayout ? nil : 2)
             }
-        }
-    }
-
-    private var workCard: some View {
-        DashboardCard(title: "In motion", icon: "arrow.triangle.2.circlepath", tint: AssistantTheme.accent(for: colorScheme)) {
-            if let work = activeWork.first {
-                dashboardDetail(
-                    work.displayTitle,
-                    detail: work.displayProgress.isEmpty ? "The assistant is keeping this moving." : work.displayProgress,
-                    tag: work.status == "running" ? "Working" : "Scheduled",
-                    action: "Track"
-                ) {
-                    onRoute(.activity)
-                }
-            } else {
-                dashboardDetail(
-                    "No work is running right now",
-                    detail: "Hand off research, a draft, or a follow-up and it will stay visible here.",
-                    tag: "Ready",
-                    action: "Start"
-                ) {
-                    onPrompt("Help me plan the next piece of work")
-                }
-            }
-        }
-    }
-
-    private var goalsCard: some View {
-        DashboardCard(title: "Goals", icon: "scope", tint: AssistantTheme.accent(for: colorScheme)) {
-            if let goal = firstGoal {
-                dashboardDetail(
-                    goal.goal.displayTitle,
-                    detail: goal.goal.nextAction.isEmpty ? goal.cadenceLabel : "Next: \(goal.goal.nextAction)",
-                    tag: goal.workActive ? "Active" : goal.cadenceLabel,
-                    action: "Open"
-                ) {
-                    onRoute(.goals)
-                }
-            } else {
-                dashboardDetail(
-                    "Give a goal a home",
-                    detail: "Name an outcome and the assistant can keep it moving between conversations.",
-                    tag: "Plan ahead",
-                    action: "Create"
-                ) {
-                    onPrompt("Help me define a goal and the first next steps")
-                }
-            }
+            DashboardTag(title: item.tag, icon: item.icon)
         }
     }
 
     private var startCard: some View {
-        DashboardCard(title: "Start a workstream", icon: "sparkles", tint: AssistantTheme.accent(for: colorScheme)) {
+        DashboardCard(title: "Try a task") {
             VStack(spacing: 0) {
                 promptRow("Plan a project", prompt: "Help me make a practical plan for a project", icon: "list.bullet.clipboard")
                 DashboardDivider()
                 promptRow("Research a decision", prompt: "Research the options and help me make a decision", icon: "magnifyingglass")
                 DashboardDivider()
                 promptRow("Draft something", prompt: "Help me draft a message", icon: "square.and.pencil")
+                DashboardDivider()
+                promptRow("Define a goal", prompt: "Help me define a goal and the first next steps", icon: "scope")
             }
         }
-    }
-
-    private func dashboardDetail(
-        _ title: String,
-        detail: String,
-        tag: String,
-        action: String,
-        perform actionHandler: @escaping () -> Void
-    ) -> some View {
-        Button(action: actionHandler) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text(title)
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(AssistantTheme.ink(for: colorScheme))
-                        .lineLimit(usesAccessibilityLayout ? nil : 2)
-                    Text(detail)
-                        .font(.subheadline)
-                        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                        .lineLimit(usesAccessibilityLayout ? nil : 3)
-                    DashboardTag(title: tag)
-                }
-                Spacer(minLength: 8)
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text(action)
-                        .font(.subheadline.weight(.medium))
-                    Image(systemName: "arrow.right")
-                        .font(.caption.weight(.bold))
-                }
-                .foregroundStyle(AssistantTheme.accent(for: colorScheme))
-                .padding(.top, 2)
-            }
-            .padding(.vertical, 5)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(DashboardButtonStyle(reduceMotion: reduceMotion))
-        .disabled(isSending)
     }
 
     private func promptRow(_ title: String, prompt: String, icon: String) -> some View {
         Button {
             onPrompt(prompt)
         } label: {
-            HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.subheadline.weight(.semibold))
-                    .frame(width: 26)
-                    .foregroundStyle(AssistantTheme.accent(for: colorScheme))
-                Text(title)
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(AssistantTheme.ink(for: colorScheme))
-                Spacer()
-                Image(systemName: "arrow.up.right")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+            Group {
+                if usesAccessibilityLayout {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Image(systemName: icon)
+                                .font(.system(size: 16, weight: .regular))
+                                .frame(width: 24, height: 24)
+                                .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                                .accessibilityHidden(true)
+                            Spacer(minLength: 8)
+                            Image(systemName: "arrow.up.right")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                                .accessibilityHidden(true)
+                        }
+                        Text(title)
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    HStack(spacing: 12) {
+                        Image(systemName: icon)
+                            .font(.body.weight(.regular))
+                            .frame(width: 24)
+                            .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                        Text(title)
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+                        Spacer()
+                        Image(systemName: "arrow.up.right")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                            .accessibilityHidden(true)
+                    }
+                }
             }
             .frame(minHeight: 46)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(DashboardButtonStyle(reduceMotion: reduceMotion))
         .disabled(isSending)
     }
 
-    private func dashboardFooter(
-        _ title: String,
-        icon: String,
-        action: @escaping () -> Void
-    ) -> some View {
+    private func dashboardFooter(_ title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.subheadline.weight(.semibold))
-                    .frame(width: 26)
                 Text(title)
                     .font(.body.weight(.medium))
                 Spacer()
                 Image(systemName: "chevron.right")
-                    .font(.caption.weight(.bold))
+                    .font(.caption.weight(.medium))
+                    .accessibilityHidden(true)
             }
             .foregroundStyle(AssistantTheme.ink(for: colorScheme))
             .frame(minHeight: 48)
@@ -406,19 +315,13 @@ struct ChatDashboard: View {
 
 private struct DashboardCard<Content: View>: View {
     let title: String
-    let icon: String
-    let tint: Color
     let content: Content
 
     init(
         title: String,
-        icon: String,
-        tint: Color,
         @ViewBuilder content: () -> Content
     ) {
         self.title = title
-        self.icon = icon
-        self.tint = tint
         self.content = content()
     }
 
@@ -427,24 +330,15 @@ private struct DashboardCard<Content: View>: View {
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: AssistantTheme.cardCornerRadius, style: .continuous)
 
-        VStack(alignment: .leading, spacing: 13) {
-            HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.title3.weight(.medium))
-                    .foregroundStyle(tint)
-                    .frame(width: 36, height: 36)
-                    .background(tint.opacity(colorScheme == .dark ? 0.16 : 0.1), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-                    .accessibilityHidden(true)
-                Text(title)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(AssistantTheme.ink(for: colorScheme))
-                Spacer(minLength: 0)
-            }
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(AssistantTheme.ink(for: colorScheme))
 
             DashboardDivider()
             content
         }
-        .padding(18)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(AssistantTheme.dashboardPaper(for: colorScheme), in: shape)
         .overlay {
@@ -453,7 +347,6 @@ private struct DashboardCard<Content: View>: View {
                 lineWidth: 0.8
             )
         }
-        .shadow(color: .black.opacity(colorScheme == .dark ? 0.18 : 0.12), radius: 18, y: 8)
     }
 }
 
@@ -506,6 +399,7 @@ private struct DashboardButtonStyle: ButtonStyle {
 private struct DashboardAgendaItem {
     let marker: String
     let title: String
+    let detail: String
     let tag: String
     let action: String
     let icon: String

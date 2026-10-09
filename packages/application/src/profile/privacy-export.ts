@@ -7,6 +7,10 @@ export const LONG_TERM_MEMORY_EXPORT_SCOPE = [
   'writing samples and voice profile',
   'compiled recall card',
   'situation packs and decision reasons',
+  'durable mission reports and delivery receipts',
+  'notification delivery receipts',
+  'recall source identities and owner controls',
+  'security incident evidence and attention history',
 ] as const;
 
 /** Bind the owner-readable export without retaining a database or SQL fallback. */

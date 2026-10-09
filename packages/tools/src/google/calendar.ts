@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { ToolRegistry } from '../registry.js';
 import type { AssistantTool, ToolFlags } from '../types.js';
@@ -11,6 +12,63 @@ const CAL = 'https://www.googleapis.com/calendar/v3';
  * push the list up, and every extra calendar is another HTTP round trip.
  */
 const MAX_CALENDAR_FANOUT = 50;
+const MAX_CALENDAR_ROSTER_PAGES = 10;
+const MAX_CALENDAR_CURSOR_BYTES = 2_000_000;
+const MAX_EVENT_PAGES_PER_CALENDAR_PER_CALL = 20;
+
+async function assertBookingCurrent(ctx: Parameters<AssistantTool['execute']>[1]): Promise<void> {
+  if (!ctx.bookingOccurrence) return;
+  if (!ctx.assertBookingOccurrenceCurrent || !(await ctx.assertBookingOccurrenceCurrent())) {
+    throw new Error(
+      'This booking changed after the suggestion was accepted. Review the latest email before changing the calendar.',
+    );
+  }
+}
+
+async function cancelBoundBooking(
+  deps: CalendarToolDeps,
+  args: { eventId: string; ownerOnly?: boolean },
+  ctx: Parameters<AssistantTool['execute']>[1],
+): Promise<{ cancelled: string }> {
+  const booking = ctx.bookingOccurrence;
+  if (
+    booking?.operation !== 'cancel_existing' ||
+    !booking.calendarEventId ||
+    !booking.bookingIdentity ||
+    args.eventId !== booking.calendarEventId
+  )
+    throw new Error('This cancellation is not bound to the exact approved booking event.');
+  await assertBookingCurrent(ctx);
+  const event = await deps.client.api<CalendarEventSnapshot>(
+    `${CAL}/calendars/primary/events/${encodeURIComponent(booking.calendarEventId)}?fields=id,etag,status,summary,description,attendees`,
+  );
+  if (
+    event.id !== booking.calendarEventId ||
+    event.status === 'cancelled' ||
+    !hasExactBookingMarker(
+      `${event.summary ?? ''}\n${event.description ?? ''}`,
+      booking.bookingIdentity,
+    )
+  )
+    throw new Error(
+      'The calendar event no longer matches this cancelled booking. Review it before making a change.',
+    );
+  const attendees = event.attendees ?? [];
+  if (args.ownerOnly && attendees.length > 0) {
+    throw new Error(
+      `Cannot cancel event ${args.eventId} as owner-only: it has ${attendees.length} attendee(s) who would be notified. Retry without ownerOnly so the owner can approve it.`,
+    );
+  }
+  const etag = requireEventEtag(event, args.eventId);
+  // Recheck after the provider read so reinstatement during that read cannot
+  // authorize deletion of a now-current booking.
+  await assertBookingCurrent(ctx);
+  await deps.client.api(
+    `${CAL}/calendars/primary/events/${encodeURIComponent(args.eventId)}?sendUpdates=${args.ownerOnly ? 'none' : 'all'}`,
+    { method: 'DELETE', headers: { 'If-Match': etag } },
+  );
+  return { cancelled: args.eventId };
+}
 
 /** freeBusy accepts at most 50 items per request. */
 const MAX_FREEBUSY_ITEMS = 50;
@@ -32,8 +90,10 @@ interface RawEvent {
   id: string;
   iCalUID?: string;
   recurringEventId?: string;
+  originalStartTime?: { dateTime?: string; date?: string };
   /** 'confirmed' | 'tentative' | 'cancelled'. Not every provider populates it. */
   status?: string;
+  transparency?: string;
   summary?: string;
   description?: string;
   location?: string;
@@ -45,7 +105,7 @@ interface RawEvent {
   };
   start?: { dateTime?: string; date?: string };
   end?: { dateTime?: string; date?: string };
-  attendees?: Array<{ email: string; responseStatus?: string }>;
+  attendees?: Array<{ email: string; responseStatus?: string; self?: boolean }>;
 }
 
 function urlsIn(text: string): string[] {
@@ -92,7 +152,22 @@ function register<S extends z.ZodType, Out>(
  * calendars; before this the tools only ever addressed `calendars/primary`, so
  * a calendar shared with the bot was invisible no matter how it was shared.
  */
-async function fetchCalendars(client: GoogleClient): Promise<CalendarEntry[]> {
+interface CalendarRoster {
+  calendars: CalendarEntry[];
+  /** Provider page left unread when the bounded roster walk reaches its limit. */
+  nextPageToken?: string;
+}
+
+async function fetchCalendarPage(
+  client: GoogleClient,
+  pageToken?: string,
+): Promise<CalendarRoster> {
+  const params = new URLSearchParams({
+    minAccessRole: 'reader',
+    maxResults: '250',
+    showDeleted: 'false',
+  });
+  if (pageToken) params.set('pageToken', pageToken);
   const res = await client.api<{
     items?: Array<{
       id?: string;
@@ -102,16 +177,33 @@ async function fetchCalendars(client: GoogleClient): Promise<CalendarEntry[]> {
       accessRole?: string;
       deleted?: boolean;
     }>;
-  }>(`${CAL}/users/me/calendarList?minAccessRole=reader&maxResults=250&showDeleted=false`);
-  return (res.items ?? [])
-    .filter((c): c is typeof c & { id: string } => Boolean(c.id) && c.deleted !== true)
-    .map((c) => ({
-      id: c.id,
-      // summaryOverride is the name the owner gave it locally; prefer it.
-      name: c.summaryOverride || c.summary || c.id,
-      primary: c.primary === true,
-      accessRole: c.accessRole ?? 'reader',
-    }));
+    nextPageToken?: string;
+  }>(`${CAL}/users/me/calendarList?${params.toString()}`);
+  return {
+    calendars: (res.items ?? [])
+      .filter((c): c is typeof c & { id: string } => Boolean(c.id) && c.deleted !== true)
+      .map((c) => ({
+        id: c.id,
+        name: c.summaryOverride || c.summary || c.id,
+        primary: c.primary === true,
+        accessRole: c.accessRole ?? 'reader',
+      })),
+    ...(res.nextPageToken ? { nextPageToken: res.nextPageToken } : {}),
+  };
+}
+
+async function fetchCalendars(client: GoogleClient): Promise<CalendarRoster> {
+  const calendars: CalendarEntry[] = [];
+  let pageToken: string | undefined;
+  let pages = 0;
+  while (pages < MAX_CALENDAR_ROSTER_PAGES) {
+    const res = await fetchCalendarPage(client, pageToken);
+    calendars.push(...res.calendars);
+    pages += 1;
+    pageToken = res.nextPageToken;
+    if (!pageToken) break;
+  }
+  return { calendars, ...(pageToken ? { nextPageToken: pageToken } : {}) };
 }
 
 function startedAt(event: { start: string }): number {
@@ -145,17 +237,21 @@ function normalizeEvent(raw: RawEvent, calendar: CalendarEntry) {
     eventId: raw.id,
     iCalUID: raw.iCalUID,
     recurringEventId: raw.recurringEventId,
+    originalStartTime: raw.originalStartTime?.dateTime ?? raw.originalStartTime?.date,
     // Carried through verbatim so a caller can tell a merely-tentative hold
     // from a firm booking, and — the reason this was added — so a change-diff
     // downstream can recognize an explicit cancellation when the provider
     // sends one, rather than inferring it purely from the event's absence.
     status: raw.status,
+    blocksTime: raw.transparency !== 'transparent',
+    ownerResponse: raw.attendees?.find((attendee) => attendee.self === true)?.responseStatus,
     // Which calendar this came from — without it a merged list can't say
     // whether something is on the work calendar or the family one.
     calendar: calendar.name,
     calendarId: calendar.id,
     summary: raw.summary ?? '',
     location: raw.location ?? '',
+    description: (raw.description ?? '').slice(0, 4000),
     start: raw.start?.dateTime ?? raw.start?.date ?? '',
     end: raw.end?.dateTime ?? raw.end?.date ?? '',
     organizer: raw.organizer?.email
@@ -183,74 +279,243 @@ async function collectEvents(
   opts: {
     calendarIds?: string[];
     maxResults: number;
-    query: (calendarId: string) => string;
+    pageToken?: string;
+    queryKey: string;
+    query: (calendarId: string, maxResults: number, pageToken?: string) => string;
   },
 ) {
-  const available = await fetchCalendars(deps.client);
-  const requested = opts.calendarIds?.length
-    ? available.filter(
-        (c) => opts.calendarIds?.includes(c.id) || opts.calendarIds?.includes(c.name),
-      )
-    : available;
-  if (requested.length === 0) {
-    throw new Error(
-      opts.calendarIds?.length
-        ? 'none of the requested calendars are readable by the assistant'
-        : 'the assistant account returned no readable calendars',
-    );
+  const roster = await fetchCalendars(deps.client);
+  const available = roster.calendars;
+  const explicit = Boolean(opts.calendarIds?.length);
+  const requestedNames = opts.calendarIds ?? [];
+  const resolved: CalendarEntry[] = [];
+  const unresolved: Array<{ requested: string; reason: string; candidates?: string[] }> = [];
+  if (explicit) {
+    for (const requested of requestedNames) {
+      const byId = available.filter((calendar) => calendar.id === requested);
+      const matches =
+        byId.length > 0 ? byId : available.filter((calendar) => calendar.name === requested);
+      if (matches.length === 1) {
+        const match = matches[0];
+        if (match && !resolved.some((calendar) => calendar.id === match.id)) resolved.push(match);
+      } else if (matches.length > 1) {
+        unresolved.push({
+          requested,
+          reason: 'calendar name is ambiguous; select by calendar ID',
+          candidates: matches.map((calendar) => calendar.id),
+        });
+      } else {
+        unresolved.push({
+          requested,
+          reason: roster.nextPageToken
+            ? 'calendar was not found in the readable roster pages inspected'
+            : 'calendar was not found in the readable roster',
+        });
+      }
+    }
+  } else {
+    resolved.push(...available);
   }
-  const targets = requested.slice(0, MAX_CALENDAR_FANOUT);
+  const targets = resolved.slice(0, MAX_CALENDAR_FANOUT);
+  if (targets.length === 0 && !explicit)
+    throw new Error('the assistant account returned no readable calendars');
+
+  const queryKey = createHash('sha256')
+    .update(
+      JSON.stringify({
+        query: opts.queryKey,
+        requested: requestedNames,
+        calendars: targets.map((calendar) => calendar.id),
+        maxResults: opts.maxResults,
+      }),
+    )
+    .digest('hex');
+  const cursorSchema = z
+    .object({
+      version: z.literal(1),
+      queryKey: z.string().regex(/^[a-f0-9]{64}$/),
+      calendars: z.array(
+        z
+          .object({
+            id: z.string().min(1).max(512),
+            token: z.string().max(4096).nullable(),
+            buffered: z.array(z.record(z.string(), z.unknown())).max(50),
+          })
+          .strict(),
+      ),
+    })
+    .strict();
+  type Event = ReturnType<typeof normalizeEvent>;
+  type PageCursor = { id: string; token: string | null; buffered: Event[] };
+  let priorCursors: PageCursor[] | undefined;
+  if (opts.pageToken) {
+    if (opts.pageToken.length > MAX_CALENDAR_CURSOR_BYTES)
+      throw new Error('Calendar page token is too large');
+    let decoded: unknown;
+    try {
+      const verified = deps.client.verifyOpaqueToken(opts.pageToken);
+      if (!verified) throw new Error('signature mismatch');
+      decoded = JSON.parse(verified);
+    } catch {
+      throw new Error('Invalid calendar page token');
+    }
+    const parsed = cursorSchema.safeParse(decoded);
+    if (!parsed.success || parsed.data.queryKey !== queryKey)
+      throw new Error('Calendar page token does not match this request');
+    const currentIds = targets.map((calendar) => calendar.id).sort();
+    const cursorIds = parsed.data.calendars.map((calendar) => calendar.id).sort();
+    if (
+      currentIds.length !== cursorIds.length ||
+      currentIds.some((id, index) => id !== cursorIds[index])
+    )
+      throw new Error('Calendar roster changed; restart the calendar search');
+    priorCursors = parsed.data.calendars.map((cursor) => ({
+      id: cursor.id,
+      token: cursor.token,
+      buffered: cursor.buffered as Event[],
+    }));
+  }
+
+  const cursorById = new Map(priorCursors?.map((cursor) => [cursor.id, cursor]));
+  const queryIndexes = targets
+    .map((calendar, index) => ({ calendar, index, prior: cursorById.get(calendar.id) }))
+    .filter(
+      ({ prior }) => !prior || (prior.token !== null && prior.buffered.length < opts.maxResults),
+    )
+    .map(({ index }) => index);
 
   const settled = await Promise.allSettled(
-    targets.map(async (calendar) => {
-      const res = await deps.client.api<{
-        items?: RawEvent[];
-        nextPageToken?: string;
-      }>(opts.query(calendar.id));
-      return {
-        events: (res.items ?? []).map((raw) => normalizeEvent(raw, calendar)),
-        truncated: Boolean(res.nextPageToken),
-      };
+    queryIndexes.map(async (index) => {
+      const calendar = targets[index];
+      if (!calendar) throw new Error('Calendar page target was lost');
+      const prior = cursorById.get(calendar.id);
+      let token: string | null = prior?.token ?? '';
+      const buffered = [...(prior?.buffered ?? [])];
+      let pages = 0;
+      while (
+        buffered.length < opts.maxResults &&
+        token !== null &&
+        pages < MAX_EVENT_PAGES_PER_CALENDAR_PER_CALL
+      ) {
+        const pageSize = opts.maxResults - buffered.length;
+        const page: { items?: RawEvent[]; nextPageToken?: string } = await deps.client.api(
+          opts.query(calendar.id, pageSize, token || undefined),
+        );
+        buffered.push(...(page.items ?? []).map((raw: RawEvent) => normalizeEvent(raw, calendar)));
+        token = page.nextPageToken ?? null;
+        pages += 1;
+      }
+      return { id: calendar.id, token, buffered };
     }),
   );
 
-  const events: ReturnType<typeof normalizeEvent>[] = [];
-  const unavailable: Array<{ calendar: string; reason: string }> = [];
-  const truncatedCalendars: string[] = [];
+  const unavailable: Array<{ calendar: string; reason: string; candidates?: string[] }> = [];
+  const nextCursorById = new Map<string, PageCursor>();
+  for (const calendar of targets)
+    nextCursorById.set(
+      calendar.id,
+      cursorById.get(calendar.id) ?? { id: calendar.id, token: '', buffered: [] },
+    );
   settled.forEach((result, index) => {
-    const calendar = targets[index];
+    const targetIndex = queryIndexes[index];
+    const calendar = targetIndex === undefined ? undefined : targets[targetIndex];
     if (!calendar) return;
-    if (result.status === 'fulfilled') {
-      events.push(...result.value.events);
-      if (result.value.truncated) truncatedCalendars.push(calendar.name);
-    } else
+    if (result.status === 'fulfilled') nextCursorById.set(calendar.id, result.value);
+    else
       unavailable.push({
         calendar: calendar.name,
         reason: result.reason instanceof Error ? result.reason.message : String(result.reason),
       });
   });
-  events.sort((a, b) => startedAt(a) - startedAt(b));
-  const mergedTruncated = events.length > opts.maxResults;
+
+  const candidates = [...nextCursorById.values()].flatMap((cursor) => cursor.buffered);
+  candidates.sort((a, b) => startedAt(a) - startedAt(b));
+  const events = candidates.slice(0, opts.maxResults);
+  const selected = new Set(
+    events.map((event) => `${event.calendarId}\0${event.eventId}\0${event.start}`),
+  );
+  for (const [calendarId, cursor] of nextCursorById) {
+    nextCursorById.set(calendarId, {
+      ...cursor,
+      buffered: cursor.buffered.filter(
+        (event) => !selected.has(`${event.calendarId}\0${event.eventId}\0${event.start}`),
+      ),
+    });
+  }
+
+  unavailable.push(
+    ...unresolved.map(({ requested, reason, candidates }) => ({
+      calendar: requested,
+      reason,
+      ...(candidates ? { candidates } : {}),
+    })),
+  );
+  const searchedIds = new Set([
+    ...(priorCursors ?? []).map((cursor) => cursor.id),
+    ...queryIndexes.map((index) => targets[index]?.id).filter(Boolean),
+  ]);
+  const calendarsSearched = targets
+    .filter((calendar) => searchedIds.has(calendar.id))
+    .map((calendar) => calendar.name);
+  const fanoutTruncated = resolved.length > targets.length;
+  const rosterTruncated = Boolean(roster.nextPageToken);
+  const remainingCursors = [...nextCursorById.values()];
+  const moreEvents = remainingCursors.some(
+    (cursor) => cursor.token !== null || cursor.buffered.length > 0,
+  );
+  const signedToken = moreEvents
+    ? deps.client.signOpaqueToken(
+        JSON.stringify({ version: 1, queryKey, calendars: remainingCursors }),
+      )
+    : undefined;
+  const paginationUnavailable = Boolean(
+    signedToken && signedToken.length > MAX_CALENDAR_CURSOR_BYTES,
+  );
+  const nextPageToken = signedToken && !paginationUnavailable ? signedToken : undefined;
+  const truncatedCalendars = remainingCursors
+    .filter((cursor) => cursor.token !== null || cursor.buffered.length > 0)
+    .map((cursor) => targets.find((calendar) => calendar.id === cursor.id)?.name)
+    .filter((name): name is string => Boolean(name));
   const notes: string[] = [];
   if (truncatedCalendars.length > 0) {
-    notes.push(`Google reported additional matching events on: ${truncatedCalendars.join(', ')}.`);
+    notes.push(
+      `Additional matching events remain on: ${[...new Set(truncatedCalendars)].join(', ')}.`,
+    );
   }
-  if (mergedTruncated) {
-    notes.push(`Returned the first ${opts.maxResults} events after merging all calendar results.`);
+  if (unresolved.length > 0) {
+    notes.push('Some requested calendars could not be resolved; their results are not covered.');
   }
-  if (requested.length > targets.length) {
-    notes.push(`Searched the first ${targets.length} of ${requested.length} calendars.`);
+  if (fanoutTruncated) {
+    notes.push(`Searched the first ${targets.length} of ${resolved.length} resolved calendars.`);
+  }
+  if (paginationUnavailable)
+    notes.push(
+      'The remaining event cursor exceeds the response size limit; narrow the date range.',
+    );
+  if (rosterTruncated) {
+    notes.push(
+      'The readable calendar roster is truncated; use calendar.list_calendars to continue.',
+    );
   }
 
   return {
-    events: events.slice(0, opts.maxResults),
-    calendarsSearched: targets.map((c) => c.name),
+    events,
+    calendarsRequested: requestedNames,
+    calendarsResolved: resolved.map(({ id, name }) => ({ id, name })),
+    calendarsSearched,
+    unavailable,
+    calendarRosterComplete: !rosterTruncated,
+    ...(roster.nextPageToken ? { calendarRosterNextPageToken: roster.nextPageToken } : {}),
+    ...(nextPageToken ? { nextPageToken } : {}),
+    ...(paginationUnavailable ? { paginationUnavailable: true } : {}),
     complete:
+      unresolved.length === 0 &&
       unavailable.length === 0 &&
-      requested.length === targets.length &&
+      !fanoutTruncated &&
+      !rosterTruncated &&
       truncatedCalendars.length === 0 &&
-      !mergedTruncated,
-    ...(unavailable.length > 0 ? { unavailable } : {}),
+      !nextPageToken &&
+      !paginationUnavailable,
     ...(notes.length > 0 ? { note: notes.join(' ') } : {}),
   };
 }
@@ -285,13 +550,11 @@ const respondSchema = z.object({
 });
 
 /**
- * Which guest row is us.
- *
- * Google marks the row belonging to the calendar being read with `self: true`,
- * which is the only answer that stays correct when the assistant and the owner
- * are both on the guest list, or when an invitation arrived at an alias. The
- * address match is a fallback for the shared-calendar case, where `self` is
- * relative to the calendar's owner rather than to this account.
+ * Identify the configured actor whose attendee row is authorized to respond.
+ * Google defines `self` relative to the event's calendar copy, so a self flag
+ * on an arbitrary shared calendar cannot prove that the bot or owner is the
+ * responding attendee. Prefer explicit configured email identity, using the
+ * selected calendar only to disambiguate when both are guests.
  *
  * Returns -1 when no row is ours, which the caller reports rather than
  * papering over: replying to an invitation and adding yourself to someone
@@ -300,35 +563,126 @@ const respondSchema = z.object({
 function selfAttendeeIndex(
   attendees: ReadonlyArray<Record<string, unknown>>,
   identity: { botEmail: string; ownerEmail: string },
+  calendarId: string,
 ): number {
-  const flagged = attendees.findIndex((a) => a.self === true);
-  if (flagged >= 0) return flagged;
-  const mine = new Set(
-    [identity.botEmail, identity.ownerEmail]
-      .filter((email) => Boolean(email))
-      .map((email) => email.trim().toLocaleLowerCase()),
+  const normalize = (email: string) => email.trim().toLowerCase();
+  const bot = identity.botEmail.trim() ? normalize(identity.botEmail) : '';
+  const owner = identity.ownerEmail.trim() ? normalize(identity.ownerEmail) : '';
+  const configured = [...new Set([bot, owner].filter(Boolean))];
+  if (configured.length === 0) return -1;
+  const calendar = normalize(calendarId);
+  const calendarActor =
+    calendar === 'primary' || (bot && calendar === bot)
+      ? bot
+      : owner && calendar === owner
+        ? owner
+        : '';
+  const matchingIndexes = attendees.flatMap((attendee, index) =>
+    typeof attendee.email === 'string' && configured.includes(normalize(attendee.email))
+      ? [index]
+      : [],
   );
-  if (mine.size === 0) return -1;
-  return attendees.findIndex(
-    (a) => typeof a.email === 'string' && mine.has(a.email.trim().toLocaleLowerCase()),
+  if (calendarActor) {
+    const actorMatches = matchingIndexes.filter(
+      (index) => normalize(String(attendees[index]?.email ?? '')) === calendarActor,
+    );
+    return actorMatches.length === 1 ? (actorMatches[0] ?? -1) : -1;
+  }
+  // A self flag is relative to the calendar copy. It cannot establish that
+  // the configured owner or bot is the responding attendee on a shared one.
+  return matchingIndexes.length === 1 ? (matchingIndexes[0] ?? -1) : -1;
+}
+
+interface CalendarEventSnapshot {
+  id?: string;
+  etag?: string;
+  attendees?: Array<Record<string, unknown>>;
+  summary?: string;
+  description?: string;
+  status?: string;
+  htmlLink?: string;
+  organizer?: { email?: string };
+}
+
+function hasExactBookingMarker(sourceText: string, identity: string): boolean {
+  const escaped = identity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}])${escaped}(?:$|[^\\p{L}\\p{N}])`, 'iu').test(
+    sourceText.normalize('NFKC'),
   );
+}
+
+function requireEventEtag(event: CalendarEventSnapshot, eventId: string): string {
+  if (typeof event.etag !== 'string' || !event.etag.trim())
+    throw new Error(`Google did not return an ETag for event ${eventId}; refusing an unsafe write`);
+  return event.etag;
+}
+
+function mergeAttendeeRows(
+  existing: ReadonlyArray<Record<string, unknown>>,
+  additions: readonly string[],
+): Array<Record<string, unknown>> {
+  const seen = new Set<string>();
+  const merged: Array<Record<string, unknown>> = [];
+  for (const attendee of existing) {
+    const key = typeof attendee.email === 'string' ? attendee.email.trim().toLowerCase() : '';
+    if (key) seen.add(key);
+    merged.push({ ...attendee });
+  }
+  for (const address of additions) {
+    const normalized = address.trim().toLowerCase();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    merged.push({ email: normalized });
+  }
+  return merged;
 }
 
 async function assertNoAttendees(
   deps: CalendarToolDeps,
   eventId: string,
   action: 'update' | 'cancel',
-): Promise<void> {
-  const event = await deps.client.api<{ attendees?: Array<{ email: string }> }>(
-    `${CAL}/calendars/primary/events/${encodeURIComponent(eventId)}`,
+  requireEmpty = true,
+): Promise<{ event: CalendarEventSnapshot; etag: string }> {
+  const event = await deps.client.api<CalendarEventSnapshot>(
+    `${CAL}/calendars/primary/events/${encodeURIComponent(eventId)}?fields=id,etag,attendees`,
   );
   const attendees = event.attendees ?? [];
-  if (attendees.length > 0) {
+  if (requireEmpty && attendees.length > 0) {
     throw new Error(
       `Cannot ${action} event ${eventId} as owner-only: it has ${attendees.length} attendee(s) ` +
         `who would be notified. Retry without ownerOnly so the owner can approve it.`,
     );
   }
+  const etag = requireEventEtag(event, eventId);
+  return { event, etag };
+}
+
+/** An absent/inaccessible point read is unknown, never a cancellation receipt. */
+export async function readCalendarEvent(
+  client: GoogleClient,
+  input: { calendarId: string; eventId: string; signal?: AbortSignal },
+) {
+  const raw = await client.api<RawEvent>(
+    `${CAL}/calendars/${encodeURIComponent(input.calendarId)}/events/${encodeURIComponent(input.eventId)}`,
+    { signal: input.signal },
+  );
+  if (!raw || raw.id !== input.eventId)
+    throw new Error('Calendar point read returned a different identity');
+  const event = normalizeEvent(raw, {
+    id: input.calendarId,
+    name: input.calendarId,
+    primary: false,
+    accessRole: 'reader',
+  });
+  if (
+    event.status !== 'cancelled' &&
+    (!event.start ||
+      !event.end ||
+      !Number.isFinite(Date.parse(event.start)) ||
+      !Number.isFinite(Date.parse(event.end)))
+  )
+    throw new Error('Calendar point read lacks valid event times');
+  return event;
 }
 
 export async function listEventsInWindow(
@@ -340,14 +694,16 @@ export async function listEventsInWindow(
     { client, botEmail: '', ownerEmail: '' },
     {
       maxResults,
-      query: (calendarId) => {
+      queryKey: `events:${opts.timeMin.toISOString()}:${opts.timeMax.toISOString()}:singleEvents=true:orderBy=startTime`,
+      query: (calendarId, pageSize, pageToken) => {
         const params = new URLSearchParams({
           timeMin: opts.timeMin.toISOString(),
           timeMax: opts.timeMax.toISOString(),
-          maxResults: String(maxResults),
+          maxResults: String(pageSize),
           singleEvents: 'true',
           orderBy: 'startTime',
         });
+        if (pageToken) params.set('pageToken', pageToken);
         return `${CAL}/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`;
       },
     },
@@ -377,14 +733,15 @@ export function registerCalendarTools(
         // and the owner's address: a busy block on a shared "Work" calendar is
         // exactly as blocking as one on the owner's primary.
         let calendarRosterComplete = true;
-        const available = await fetchCalendars(deps.client).catch(() => {
+        const roster: CalendarRoster = await fetchCalendars(deps.client).catch(() => {
           calendarRosterComplete = false;
-          return [] as CalendarEntry[];
+          return { calendars: [] as CalendarEntry[], nextPageToken: undefined };
         });
+        calendarRosterComplete = calendarRosterComplete && !roster.nextPageToken;
         const ids = new Set<string>([deps.botEmail, deps.ownerEmail]);
-        for (const calendar of available) ids.add(calendar.id);
+        for (const calendar of roster.calendars) ids.add(calendar.id);
         const items = [...ids].slice(0, MAX_FREEBUSY_ITEMS).map((id) => ({ id }));
-        const nameFor = new Map(available.map((c) => [c.id, c.name]));
+        const nameFor = new Map(roster.calendars.map((c) => [c.id, c.name]));
 
         const res = await deps.client.api<{
           calendars?: Record<
@@ -431,6 +788,7 @@ export function registerCalendarTools(
           busy,
           calendarsChecked: items.map(({ id }) => nameFor.get(id) ?? id),
           complete,
+          ...(roster.nextPageToken ? { calendarRosterNextPageToken: roster.nextPageToken } : {}),
           ...(unavailable.length > 0 ? { unavailable } : {}),
           ...(coverageNotes.length > 0 ? { note: coverageNotes.join(' ') } : {}),
         };
@@ -448,20 +806,22 @@ export function registerCalendarTools(
       name: 'calendar.list_calendars',
       description:
         'List every calendar the assistant can read — its own and any shared with it. Use this to find out which calendars exist before reading a specific one.',
-      inputSchema: z.object({}),
+      inputSchema: z.object({ pageToken: z.string().max(4096).optional() }),
       risk: 'autonomous',
       acceptsUntrustedInput: true,
       cacheTtlSeconds: 300,
-      execute: async () => {
-        const calendars = await fetchCalendars(deps.client);
+      execute: async (args) => {
+        const roster = await fetchCalendarPage(deps.client, args.pageToken);
         return {
-          calendars: calendars.map((c) => ({
+          calendars: roster.calendars.map((c) => ({
             id: c.id,
             name: c.name,
             primary: c.primary,
             // reader = shared read-only; owner/writer = the bot can edit it.
             access: c.accessRole,
           })),
+          ...(roster.nextPageToken ? { nextPageToken: roster.nextPageToken } : {}),
+          complete: !roster.nextPageToken,
         };
       },
     },
@@ -481,6 +841,7 @@ export function registerCalendarTools(
         timeMin: z.string().datetime({ offset: true }),
         timeMax: z.string().datetime({ offset: true }),
         maxResults: z.number().int().min(1).max(50).default(20),
+        pageToken: z.string().max(MAX_CALENDAR_CURSOR_BYTES).optional(),
         /** Names or ids from calendar.list_calendars. Omit to read every one. */
         calendarIds: z.array(z.string().min(1).max(200)).max(25).optional(),
       }),
@@ -490,17 +851,17 @@ export function registerCalendarTools(
         collectEvents(deps, {
           calendarIds: args.calendarIds,
           maxResults: args.maxResults,
-          query: (calendarId) => {
+          pageToken: args.pageToken,
+          queryKey: `events:${args.timeMin}:${args.timeMax}:singleEvents=true:orderBy=startTime`,
+          query: (calendarId, pageSize, pageToken) => {
             const params = new URLSearchParams({
               timeMin: args.timeMin,
               timeMax: args.timeMax,
-              // Fetch a full page per calendar; the merged list is trimmed to
-              // maxResults after sorting, so a busy calendar can't crowd out an
-              // earlier event on a quieter one.
-              maxResults: String(args.maxResults),
+              maxResults: String(pageSize),
               singleEvents: 'true',
               orderBy: 'startTime',
             });
+            if (pageToken) params.set('pageToken', pageToken);
             return `${CAL}/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`;
           },
         }),
@@ -514,15 +875,33 @@ export function registerCalendarTools(
   // and audit path.
   if (options.readOnly) return registry;
 
-  const createSchema = z.object({
-    summary: z.string().min(1).max(200),
-    start: z.string().datetime({ offset: true }),
-    end: z.string().datetime({ offset: true }),
-    description: z.string().max(4000).default(''),
-    location: z.string().max(300).default(''),
-    /** Adding attendees sends real invite emails — that's what gates approval. */
-    attendees: z.array(z.string().email()).max(20).default([]),
-  });
+  const createSchema = z
+    .object({
+      summary: z.string().min(1).max(200),
+      start: z.union([
+        z.string().datetime({ offset: true }),
+        z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      ]),
+      end: z.union([
+        z.string().datetime({ offset: true }),
+        z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      ]),
+      allDay: z.boolean().default(false),
+      description: z.string().max(4000).default(''),
+      location: z.string().max(300).default(''),
+      /** Adding attendees sends real invite emails — that's what gates approval. */
+      attendees: z.array(z.string().email()).max(20).default([]),
+    })
+    .refine(
+      (event) =>
+        event.allDay
+          ? /^\d{4}-\d{2}-\d{2}$/.test(event.start) && /^\d{4}-\d{2}-\d{2}$/.test(event.end)
+          : !/^\d{4}-\d{2}-\d{2}$/.test(event.start) && !/^\d{4}-\d{2}-\d{2}$/.test(event.end),
+      {
+        message:
+          'all-day events require date-only start and exclusive end; timed events require zoned datetimes',
+      },
+    );
 
   register(
     registry,
@@ -544,7 +923,8 @@ export function registerCalendarTools(
         const a = args as z.infer<typeof createSchema>;
         return `cal-create-${ctx.taskId}-${a.summary}-${a.start}`;
       },
-      execute: async (args) => {
+      execute: async (args, ctx) => {
+        await assertBookingCurrent(ctx);
         const event = await deps.client.api<{ id: string; htmlLink?: string }>(
           `${CAL}/calendars/primary/events?sendUpdates=all`,
           {
@@ -553,8 +933,8 @@ export function registerCalendarTools(
               summary: args.summary,
               description: args.description || undefined,
               location: args.location || undefined,
-              start: { dateTime: args.start },
-              end: { dateTime: args.end },
+              start: args.allDay ? { date: args.start } : { dateTime: args.start },
+              end: args.allDay ? { date: args.end } : { dateTime: args.end },
               attendees: args.attendees.map((email) => ({ email })),
             }),
           },
@@ -603,6 +983,7 @@ export function registerCalendarTools(
         timeMin: z.string().datetime({ offset: true }).optional(),
         timeMax: z.string().datetime({ offset: true }).optional(),
         maxResults: z.number().int().min(1).max(50).default(20),
+        pageToken: z.string().max(MAX_CALENDAR_CURSOR_BYTES).optional(),
         /** Names or ids from calendar.list_calendars. Omit to search every one. */
         calendarIds: z.array(z.string().min(1).max(200)).max(25).optional(),
       }),
@@ -612,15 +993,18 @@ export function registerCalendarTools(
         collectEvents(deps, {
           calendarIds: args.calendarIds,
           maxResults: args.maxResults,
-          query: (calendarId) => {
+          pageToken: args.pageToken,
+          queryKey: `search:${args.query}:${args.timeMin ?? ''}:${args.timeMax ?? ''}:singleEvents=true:orderBy=startTime`,
+          query: (calendarId, pageSize, pageToken) => {
             const params = new URLSearchParams({
               q: args.query,
-              maxResults: String(args.maxResults),
+              maxResults: String(pageSize),
               singleEvents: 'true',
               orderBy: 'startTime',
             });
             if (args.timeMin) params.set('timeMin', args.timeMin);
             if (args.timeMax) params.set('timeMax', args.timeMax);
+            if (pageToken) params.set('pageToken', pageToken);
             return `${CAL}/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`;
           },
         }),
@@ -695,14 +1079,21 @@ export function registerCalendarTools(
         ].filter(Boolean);
         return `Update calendar event ${a.eventId}: ${changes.join('; ') || 'edit details'}`;
       },
-      execute: async (args) => {
-        // Verify the owner-only claim before acting on it. An event with
-        // attendees would mail every one of them about the change, which is
-        // exactly the outward action the autonomous tier must not cover — so a
-        // wrong claim fails loudly rather than quietly notifying people.
-        if (args.ownerOnly) await assertNoAttendees(deps, args.eventId, 'update');
-        // Merge added attendees onto the existing set so the PATCH doesn't drop
-        // current invitees (Calendar replaces the attendees array wholesale).
+      execute: async (args, ctx) => {
+        await assertBookingCurrent(ctx);
+        const needsSnapshot = args.ownerOnly === true || (args.addAttendees?.length ?? 0) > 0;
+        let etag: string | undefined;
+        let attendeeSnapshot: CalendarEventSnapshot | undefined;
+        if (needsSnapshot) {
+          const checked = await assertNoAttendees(
+            deps,
+            args.eventId,
+            'update',
+            args.ownerOnly === true,
+          );
+          etag = checked.etag;
+          attendeeSnapshot = checked.event;
+        }
         const patch: Record<string, unknown> = {};
         if (args.summary !== undefined) patch.summary = args.summary;
         if (args.start !== undefined) patch.start = { dateTime: args.start };
@@ -710,26 +1101,31 @@ export function registerCalendarTools(
         if (args.location !== undefined) patch.location = args.location;
         if (args.description !== undefined) patch.description = args.description;
         if (args.addAttendees?.length) {
-          const existing = await deps.client.api<{
-            attendees?: Array<{ email: string }>;
-          }>(`${CAL}/calendars/primary/events/${encodeURIComponent(args.eventId)}`);
-          const emails = new Set((existing.attendees ?? []).map((a) => a.email.toLowerCase()));
-          for (const email of args.addAttendees) emails.add(email.toLowerCase());
-          patch.attendees = [...emails].map((email) => ({ email }));
+          patch.attendees = mergeAttendeeRows(attendeeSnapshot?.attendees ?? [], args.addAttendees);
         }
+        const sendUpdates = args.ownerOnly && !args.addAttendees?.length ? 'none' : 'all';
         const updated = await deps.client.api<{
           id: string;
           htmlLink?: string;
+          summary?: string;
+          start?: { dateTime?: string; date?: string };
+          end?: { dateTime?: string; date?: string };
         }>(
-          `${CAL}/calendars/primary/events/${encodeURIComponent(args.eventId)}?sendUpdates=${
-            args.ownerOnly ? 'none' : 'all'
-          }`,
+          `${CAL}/calendars/primary/events/${encodeURIComponent(args.eventId)}?sendUpdates=${sendUpdates}`,
           {
             method: 'PATCH',
             body: JSON.stringify(patch),
+            ...(etag ? { headers: { 'If-Match': etag } } : {}),
           },
         );
-        return { eventId: updated.id, link: updated.htmlLink, updated: true };
+        return {
+          eventId: updated.id,
+          link: updated.htmlLink,
+          updated: true,
+          ...(updated.summary ? { summary: updated.summary } : {}),
+          ...(updated.start?.dateTime ? { start: updated.start.dateTime } : {}),
+          ...(updated.end?.dateTime ? { end: updated.end.dateTime } : {}),
+        };
       },
     },
     {
@@ -771,13 +1167,21 @@ export function registerCalendarTools(
         (args as { ownerOnly?: boolean }).ownerOnly === true ? 'autonomous' : 'approval',
       acceptsUntrustedInput: false,
       approvalSummary: (args) => `Cancel calendar event ${(args as { eventId: string }).eventId}`,
-      execute: async (args) => {
-        if (args.ownerOnly) await assertNoAttendees(deps, args.eventId, 'cancel');
+      execute: async (args, ctx) => {
+        const booking = ctx.bookingOccurrence;
+        if (booking?.operation === 'cancel_existing') return cancelBoundBooking(deps, args, ctx);
+        await assertBookingCurrent(ctx);
+        const checked = args.ownerOnly
+          ? await assertNoAttendees(deps, args.eventId, 'cancel')
+          : undefined;
         await deps.client.api(
           `${CAL}/calendars/primary/events/${encodeURIComponent(args.eventId)}?sendUpdates=${
             args.ownerOnly ? 'none' : 'all'
           }`,
-          { method: 'DELETE' },
+          {
+            method: 'DELETE',
+            ...(checked ? { headers: { 'If-Match': checked.etag } } : {}),
+          },
         );
         return { cancelled: args.eventId };
       },
@@ -788,6 +1192,31 @@ export function registerCalendarTools(
       ownerVisibleOnly: (args) => (args as { ownerOnly?: boolean }).ownerOnly === true,
     },
   );
+
+  register(registry, {
+    name: 'calendar.cancel_booking_event',
+    description:
+      'Cancel only the exact calendar event bound to a current cancelled email booking suggestion. The event is fetched again, its booking reference and revision are rechecked, and its ETag is required before deletion.',
+    inputSchema: z.object({
+      eventId: z.string().min(3).max(200),
+      ownerOnly: z.boolean().optional(),
+    }),
+    risk: (args) =>
+      (args as { ownerOnly?: boolean }).ownerOnly === true ? 'autonomous' : 'approval',
+    acceptsUntrustedInput: true,
+    prepareSecurity: async (args, ctx) => {
+      if (
+        ctx.bookingOccurrence?.operation !== 'cancel_existing' ||
+        ctx.bookingOccurrence.calendarEventId !== args.eventId ||
+        !ctx.bookingOccurrence.bookingIdentity?.trim()
+      )
+        throw new Error('This cancellation is missing its current booking authority binding.');
+      return args;
+    },
+    approvalSummary: (args) =>
+      `Cancel the confirmed booking event ${(args as { eventId: string }).eventId}`,
+    execute: async (args, ctx) => cancelBoundBooking(deps, args, ctx),
+  });
 
   register(
     registry,
@@ -818,15 +1247,10 @@ export function registerCalendarTools(
       },
       execute: async (args) => {
         const path = `${CAL}/calendars/${encodeURIComponent(args.calendarId)}/events/${encodeURIComponent(args.eventId)}`;
-        const event = await deps.client.api<{
-          summary?: string;
-          htmlLink?: string;
-          organizer?: { email?: string };
-          attendees?: Array<Record<string, unknown>>;
-        }>(path);
+        const event = await deps.client.api<CalendarEventSnapshot>(path);
 
         const attendees = event.attendees ?? [];
-        const index = selfAttendeeIndex(attendees, deps);
+        const index = selfAttendeeIndex(attendees, deps, args.calendarId);
         if (index < 0) {
           // Without an attendee row there is nothing to answer. Saying so beats
           // inventing one: adding the assistant to someone else's guest list is
@@ -853,10 +1277,15 @@ export function registerCalendarTools(
               }
             : attendee,
         );
+        const etag = requireEventEtag(event, args.eventId);
 
         const updated = await deps.client.api<{ id: string; htmlLink?: string }>(
           `${path}?sendUpdates=all`,
-          { method: 'PATCH', body: JSON.stringify({ attendees: patched }) },
+          {
+            method: 'PATCH',
+            headers: { 'If-Match': etag },
+            body: JSON.stringify({ attendees: patched }),
+          },
         );
         return {
           eventId: updated.id,

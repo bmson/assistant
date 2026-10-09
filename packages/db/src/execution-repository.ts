@@ -5,10 +5,12 @@ import { createPostgresApprovalRepository } from './approval-repository.js';
 import { createPostgresCallSessionRepository } from './call-session-repository.js';
 import { createPostgresCardRefreshRepository } from './card-refresh-repository.js';
 import type { Db } from './client.js';
+import { createPostgresConversationSearchRepository } from './conversation-search-repository.js';
 import { createPostgresCostRepository } from './cost-repository.js';
 import { createPostgresDeviceTokenRepository } from './device-token-repository.js';
 import { createPostgresDocumentProcessorRepository } from './document-processor-repository.js';
 import { createPostgresDocumentSearchRepository } from './document-search-repository.js';
+import { createPostgresEmailAttachmentCustodyRepository } from './email-attachment-custody-repository.js';
 import { createPostgresEmailSyncRepository } from './email-sync-repository.js';
 import { createPostgresExecutionContextRepository } from './execution-context-repository.js';
 import { createPostgresExecutionEvidenceRepository } from './execution-evidence-repository.js';
@@ -25,11 +27,13 @@ import { createPostgresMissionRepository } from './mission-repository.js';
 import { createPostgresModelCatalogRepository } from './model-catalog-repository.js';
 import { createPostgresModelConnectionRepository } from './model-connection-repository.js';
 import { createPostgresModelRoutingRepository } from './model-routing-repository.js';
+import { createPostgresNotificationOutboxRepository } from './notification-outbox-repository.js';
 import { createPostgresNotificationsConversationRepository } from './notifications-conversation-repository.js';
 import { createPostgresNudgePolicyRepository } from './nudge-policy-repository.js';
 import { createPostgresOwnerCardCompilationRepository } from './owner-card-compilation-repository.js';
 import { createPostgresOwnerContextRepository } from './owner-context-repository.js';
 import { createPostgresRecallMetricsRepository } from './recall-metrics-repository.js';
+import { createPostgresRecallSurfacingRepository } from './recall-surfacing-repository.js';
 import { createPostgresSkillContextRepository } from './skill-context-repository.js';
 import { createPostgresSmsChannelRepository } from './sms-channel-repository.js';
 import { createPostgresTaskRepository } from './task-lifecycle-repository.js';
@@ -40,6 +44,7 @@ import { createPostgresWatchRepository } from './watch-repository.js';
 export function createPostgresExecutionPersistence(db: Db): ExecutionPersistence {
   return {
     driver: 'postgres',
+    conversationSearch: createPostgresConversationSearchRepository(db),
     tasks: createPostgresTaskRepository(db),
     costs: createPostgresCostRepository(db),
     messages: createPostgresMessageRepository(db),
@@ -61,8 +66,10 @@ export function createPostgresExecutionPersistence(db: Db): ExecutionPersistence
     generatedCards: createPostgresGeneratedCardRepository(db),
     cardRefresh: createPostgresCardRefreshRepository(db),
     recallMetrics: createPostgresRecallMetricsRepository(db),
+    recallSurfacing: createPostgresRecallSurfacingRepository(db),
     watches: createPostgresWatchRepository(db),
     notifications: createPostgresNotificationsConversationRepository(db),
+    notificationOutbox: createPostgresNotificationOutboxRepository(db),
     goals: createPostgresGoalRuntimeRepository(db),
     missions: createPostgresMissionRepository(db),
     deviceTokens: createPostgresDeviceTokenRepository(db),
@@ -74,6 +81,7 @@ export function createPostgresExecutionPersistence(db: Db): ExecutionPersistence
     modelCatalog: createPostgresModelCatalogRepository(db),
     applications: createPostgresApplicationConfirmationRepository(db),
     emailSync: createPostgresEmailSyncRepository(db),
+    emailAttachmentCustody: createPostgresEmailAttachmentCustodyRepository(db),
     documentSearch: createPostgresDocumentSearchRepository(db),
     documentProcessor: createPostgresDocumentProcessorRepository(db),
   };

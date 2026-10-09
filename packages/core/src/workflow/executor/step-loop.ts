@@ -1,21 +1,22 @@
-import { createPostgresExecutionEvidenceRepository } from '@assistant/db';
+import { createPostgresExecutionEvidenceRepository, suggestions } from '@assistant/db';
 import type { ModelMessage } from 'ai';
+import { and, eq } from 'drizzle-orm';
 import { hashCallbackToken } from '../../browse.js';
 import { buildSystemPrompt, PROMPT_VERSION } from '../../chat.js';
 import { isJobPending } from '../../code-exec.js';
 import { loadConfig } from '../../config.js';
 import { isForwardedIngest } from '../../email-provenance.js';
-import type { Plan, TaskState, Trust } from '../../events.js';
+import type { PendingToolBatchCall, Plan, TaskState, Trust } from '../../events.js';
 import { getAmbientBlock } from '../../memory/ambient.js';
 import { listOpenCommitments, renderOpenCommitments } from '../../memory/commitments.js';
 import { getOwnerCard } from '../../memory/consolidation.js';
-import { recallKnowledgeGraph, recallWithGraphFallback } from '../../memory/graph-recall.js';
-import { recallRelevantContext, recentWindowStart } from '../../memory/recall.js';
+import { retrieveOwnerContext } from '../../memory/recall-context.js';
 import { recordRecallMetric } from '../../memory/recall-metrics.js';
 import { bumpSkillUse, recallSkills, renderSkillsBlock } from '../../memory/skills.js';
 import type { StepCallOutcome } from '../../model-router/router.js';
 import { approvalHeadline, approvalPrompt } from '../../owner-text.js';
 import { isSituationRequest } from '../../situations-schema.js';
+import { acceptedKnownSenderReplyIntent } from '../accepted-suggestion-intent.js';
 import { deliveredChannels, markApprovalsNotified } from '../approvals.js';
 import {
   artifactRoutingFailure,
@@ -23,6 +24,12 @@ import {
   needsArtifactToolRetry,
 } from '../artifact-intent.js';
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
+import { requestedCardIntent } from '../card-intent.js';
+import {
+  detectFutureWatchIntent,
+  futureWatchRecoveryCallMatches,
+  shouldAttemptFutureWatchRecovery,
+} from '../future-watch-intent.js';
 import {
   buildGoalProgressCheckpoint,
   isGoalWorkEvidence,
@@ -37,12 +44,14 @@ import {
 } from '../live-lookup.js';
 import {
   checkpointTask,
+  completeTask,
   markTaskNeedsAttention,
   parkForApproval,
   parkForBudget,
   renewTaskLease,
   sleepTask,
 } from '../machine.js';
+import { latestOwnerIntent, type OwnerIntent, ownerAuthoredWindow } from '../owner-intent.js';
 import { isConceptualNoToolRequest, PLANNER_VERSION } from '../planner.js';
 import {
   buildReadToolInput,
@@ -53,12 +62,19 @@ import {
   type ReadToolEvidence,
   readIntentText,
 } from '../read-intent.js';
+import {
+  bindReminderEventDependency,
+  isCompletionDependentReminderRequest,
+  shouldUseTaskScheduleDirective,
+} from '../reminder-grounding.js';
 import { requestChecklistDirective } from '../request-checklist.js';
 import { responseCardsForFinal } from '../response-cards.js';
 import {
   enforcePersonalReadResponse,
+  enforceResponseContract,
   isSimulatedApprovalNotice,
   verifiedCurrentActionSummary,
+  withMissingFutureWatchNotice,
 } from '../response-contract.js';
 import { isMemoryWriteRequest, stepLimitResponse } from '../saved-work.js';
 import { groundWorkspaceWrite, writeGroundingCorpus } from '../write-grounding.js';
@@ -85,8 +101,9 @@ import {
 } from './notices.js';
 import type { RunContext } from './phases.js';
 import { roleForTask } from './role.js';
+import { canCompleteSilently } from './silent-completion.js';
 import { type ExecuteResult, LOST_LEASE } from './types.js';
-import { compact, latestUserText, toolResultMessage } from './util.js';
+import { compact, latestUserText, replaceToolResultMessage } from './util.js';
 
 /**
  * The model step loop: build the system prompt, let the model propose tool
@@ -154,7 +171,9 @@ function readAnswerDirective(request: PersonalReadRequest): string {
       'Recent owner messages identify the topic only. Earlier assistant prose, saved-card titles, and the current location are not proof of the requested facts.',
       request.answerFocus === 'lodging'
         ? 'Identify the lodging, address, or check-in detail only if the returned booking/calendar evidence supports it for the requested stay. Distinguish booking date from travel dates. If several stays match, show their dates and ask which one; if the requested detail is missing, say exactly what could not be confirmed. Never infer a hotel or stay from a nearby event or typical travel plans.'
-        : 'List only companies whose returned mail establishes an application. Separate application confirmations, rejections, interviews, and job recommendations. An interview or a public job listing alone is not an application receipt. This is the history found in these sources, not necessarily every application ever submitted.',
+        : request.answerFocus === 'applications'
+          ? 'List only companies whose returned mail establishes an application. Separate application confirmations, rejections, interviews, and job recommendations. An interview or a public job listing alone is not an application receipt. This is the history found in these sources, not necessarily every application ever submitted.'
+          : 'For a flight-time question, use a dated itinerary matching the requested destination and day. Bind the departure time to that same itinerary; never substitute a boarding time or a clock from another message. If the matching sources conflict or do not state one date-bound departure time, say that you could not confirm it.',
       'Lead with the answer, then concise source-backed details. Do not substitute an unrelated agenda or ask permission to perform a lookup that already ran. Do not claim any booking, application, save, or reminder was created by this read-only task.',
     ].join('\n');
   }
@@ -229,16 +248,69 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   const evidence =
     deps.persistence?.executionEvidence ?? createPostgresExecutionEvidenceRepository(db);
   const lease = task;
-  // One clock for the whole run: the system prompt embeds it, and a per-step
-  // timestamp would break the cacheable prompt prefix on every minute boundary.
-  const runStartedAt = new Date();
-  // Relative dates belong to the owner's request, not the worker attempt. A
-  // crash/retry tomorrow must not silently move "Monday" to a different week.
+  // Relative dates belong to the owner's request, not the worker attempt. Keep
+  // the same clock in the model prompt and deterministic reads so a retry over
+  // local midnight cannot move "tomorrow" to another day.
   const readReferenceAt = task.createdAt;
-  const ownerText = latestUserText(rc.window) ?? '';
-  const directOwner = task.trust === 'owner' && !isForwardedIngest(task) && !state.untrustedContext;
+  const requestTimeZone = state.requestTimeZone ?? agent.timezone;
+  const trigger = task.trigger as {
+    source?: unknown;
+    payload?: { suggestionId?: unknown };
+  } | null;
+  const suggestionId = trigger?.payload?.suggestionId;
+  let acceptedReplyIntent: OwnerIntent | null = null;
+  if (task.type === 'adhoc' && typeof suggestionId === 'string' && task.trust === 'owner') {
+    try {
+      const proposal = deps.persistence?.suggestions
+        ? await deps.persistence.suggestions.acceptedForTask({
+            agentId: task.agentId,
+            suggestionId,
+            taskId: task.id,
+          })
+        : ((
+            await db
+              .select()
+              .from(suggestions)
+              .where(
+                and(
+                  eq(suggestions.id, suggestionId),
+                  eq(suggestions.agentId, task.agentId),
+                  eq(suggestions.acceptedTaskId, task.id),
+                  eq(suggestions.status, 'accepted'),
+                ),
+              )
+              .limit(1)
+          )[0] ?? null);
+      acceptedReplyIntent = acceptedKnownSenderReplyIntent({ task, proposal });
+    } catch (error) {
+      // A failed lookup fails closed: the dispatcher receives no acceptance
+      // scope and keeps the tainted external action blocked.
+      console.warn('accepted suggestion authority lookup failed; keeping task tainted', {
+        taskId: task.id,
+        suggestionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  const ownerIntent =
+    acceptedReplyIntent ??
+    ctx.ownerIntent ??
+    latestOwnerIntent(rc.window, {
+      trust: task.trust as Trust,
+      trigger: task.trigger,
+      clarificationContinuation: state.clarificationContinuation,
+    });
+  ctx.ownerIntent = ownerIntent;
+  const ownerWindow = ownerAuthoredWindow(rc.window, ownerIntent);
+  const ownerText = ownerIntent.ownerAuthoredText;
+  const directOwner =
+    task.trust === 'owner' &&
+    !isForwardedIngest(task) &&
+    ownerIntent.separation !== 'unknown' &&
+    ownerText.length > 0;
+  const futureWatchIntent = directOwner ? detectFutureWatchIntent(ownerText) : null;
   const memoryWrite = directOwner && isMemoryWriteRequest(ownerText);
-  const detectedLookups = directOwner ? detectLiveLookups(rc.window) : [];
+  const detectedLookups = directOwner ? detectLiveLookups(ownerWindow) : [];
   // A registry without the scores tool (a trimmed install or trust tier) takes
   // a sports question down the general search-then-fetch path instead of
   // failing on a tool that is not there.
@@ -256,15 +328,14 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         : [lookup],
   );
   const liveLookup = liveLookups.length > 0;
-  const lookupContext = { now: readReferenceAt, timeZone: agent.timezone };
+  const lookupContext = { now: readReferenceAt, timeZone: requestTimeZone };
   // "How long to get to my 3pm" reads the calendar as the first step of the
   // trip. The private-read router must not also claim it: its answer contract
   // checks every stated time against the calendar alone, and "leave by 2:40"
   // comes from the route.
   const tripOwnsCalendar = liveLookups.some((lookup) => lookup.destination === 'calendar');
-  const birthdaySaves = directOwner ? requestedBirthdaySaves(rc.window) : [];
-  const situationRequest =
-    task.trust === 'owner' && !isForwardedIngest(task) && isSituationRequest(ownerText);
+  const birthdaySaves = directOwner ? requestedBirthdaySaves(ownerWindow) : [];
+  const situationRequest = directOwner && isSituationRequest(ownerText);
   // Private calendar/mail forcing belongs only to direct owner requests. Never
   // let third-party text or an assistant-generated child task trigger a search
   // of the owner's accounts or override its explicit action plan.
@@ -273,19 +344,28 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // guard, a crafted message reading like "what's on my calendar tomorrow?"
   // would force a search of the owner's own accounts and override the plan.
   const readRequest =
-    task.trust === 'owner' && !isForwardedIngest(task) && !situationRequest && !tripOwnsCalendar
-      ? detectPersonalReadRequest(rc.window, {
+    task.trust === 'owner' &&
+    !isForwardedIngest(task) &&
+    ownerIntent.authorizedScopes.includes('private_read') &&
+    !situationRequest &&
+    !tripOwnsCalendar
+      ? detectPersonalReadRequest(ownerWindow, {
           now: readReferenceAt,
-          timeZone: agent.timezone,
+          timeZone: requestTimeZone,
         })
       : null;
+  const stageReadFinal = (pending: Parameters<typeof stageFinalResponse>[4]) =>
+    directOwner && requestedCardIntent(ownerText)
+      ? stageModelFinalResponse(deps, lease, state, rc.window, pending, artifactIntent, {
+          readRequest,
+          lookupContext,
+        })
+      : stageFinalResponse(deps, lease, state, rc.window, pending);
   // A conceptual question was explicitly classified before the planner ran.
   // Keep the same no-tool guarantee at execution time: a model may still emit
   // a calendar or Gmail call when tools are present even for a `reply` plan.
   const conceptualNoTool =
-    task.trust === 'owner' &&
-    !situationRequest &&
-    isConceptualNoToolRequest(latestUserText(rc.window) ?? '');
+    task.trust === 'owner' && !situationRequest && isConceptualNoToolRequest(ownerText);
   // Route action requests to the reasoning model (see roleForTask): a goal
   // session, a mission, an email to triage, or a chat/SMS turn the planner
   // routed to real work all drive tools on the strong model. The draft model
@@ -297,8 +377,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // and budget pressure still use the router's bounded fallback path.
   const useForcedToolFallback = role !== 'reason';
   const privilegedTask = task.trust === 'owner' || task.trust === 'assistant';
+  const triggerPayload = (task.trigger as { payload?: Record<string, unknown> } | null)?.payload;
+  const arrivalTask = triggerPayload?.kind === 'arrival';
   const ownerCard =
-    privilegedTask && !readRequest && !state.untrustedContext
+    privilegedTask && !readRequest && !state.untrustedContext && !arrivalTask
       ? await getOwnerCard(deps.persistence?.ownerContext ?? db, agent.id)
       : undefined;
 
@@ -306,7 +388,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // (falls back to location-only when the snapshot is stale). Owner-private and
   // transient, so it mirrors the owner-card gate.
   let ambientBlock: string | undefined;
-  if (privilegedTask && !readRequest && !state.untrustedContext) {
+  if (privilegedTask && !readRequest && !state.untrustedContext && !arrivalTask) {
     try {
       ambientBlock = await getAmbientBlock(deps.persistence?.ownerContext ?? db, agent.id);
     } catch (err) {
@@ -326,6 +408,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   let openLoops: string | undefined;
   if (
     loadConfig().CHAT_RECALL_ENABLED &&
+    state.plannerState.planningRecall === undefined &&
     !readRequest &&
     privilegedTask &&
     !state.untrustedContext &&
@@ -345,55 +428,30 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     const queryText = `${emailMeta} ${baseText}`.trim();
     if (queryText) {
       try {
-        const since =
-          (await recentWindowStart(
-            deps.persistence?.history ?? db,
-            conversationId,
-            20,
-            agent.id,
-          )) ?? new Date();
-        const layered = await recallWithGraphFallback({
-          graph: loadConfig().GRAPH_RAG_ENABLED
-            ? async () => {
-                const [queryEmbedding] = await router.embed([queryText], { taskId: task.id });
-                return {
-                  graph: await recallKnowledgeGraph(deps.persistence?.graph ?? db, {
-                    agentId: agent.id,
-                    queryText,
-                    queryEmbedding,
-                  }),
-                  queryEmbedding,
-                };
-              }
-            : undefined,
-          history: (queryEmbedding, graph) =>
-            recallRelevantContext(
-              deps.persistence?.history ?? db,
-              {
-                agentId: agent.id,
-                queryText,
-                embed: (values, embedOpts) =>
-                  router.embed(values, { taskId: task.id, ...(embedOpts ?? {}) }),
-                exclude: { conversationId, sinceCreatedAt: since },
-              },
-              {
-                taskId: task.id,
-                ...(graph.used > 0 ? { maxChars: 1200 } : {}),
-                queryEmbedding,
-              },
+        const layered = await retrieveOwnerContext({
+          db,
+          persistence: deps.persistence,
+          router,
+          taskId: task.id,
+          agentId: agent.id,
+          conversationId,
+          queryText,
+          discussionTurns: rc.window
+            .filter(
+              (_, index) => index !== rc.window.findLastIndex((message) => message.role === 'user'),
+            )
+            .flatMap((message) =>
+              typeof message.content === 'string'
+                ? [
+                    {
+                      role: message.role,
+                      text: message.content,
+                      representation: 'rendered' as const,
+                    },
+                  ]
+                : [],
             ),
-          onGraphError: (err) => {
-            console.error(
-              'executor knowledge graph recall failed — falling back to chat recall',
-              err,
-            );
-          },
-          onHistoryError: (err) => {
-            console.error(
-              'executor history recall failed — continuing with graph evidence if available',
-              err,
-            );
-          },
+          graphEnabled: loadConfig().GRAPH_RAG_ENABLED,
         });
         recallBlock = layered.block || undefined;
         // Provenance for the chat UI affordance; checkpointed so it survives to
@@ -497,13 +555,29 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // could ping-pong until the step budget ran out.
   let readAnswerAttempted = false;
   while (state.step < bookkeepingStepCap) {
+    let resumingBatch = state.pendingToolBatch !== null && state.pendingToolBatch !== undefined;
+    if (resumingBatch && state.pendingToolBatch) {
+      const runnable = state.pendingToolBatch.calls.filter((call) =>
+        ['queued', 'budget', 'awaiting_approval', 'job'].includes(call.status),
+      );
+      if (runnable.length === 0) {
+        state.pendingToolBatch = null;
+        state.contextWindow = compact(rc.window) as unknown as TaskState['contextWindow'];
+        if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
+        resumingBatch = false;
+      }
+    }
     await refreshRequestChecklist(evidence, task, state);
     const goalToolEvidence = isUnattendedGoalSession(task)
       ? await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id })
       : [];
     const mustRecordGoalProgress = needsGoalProgressUpdate(goalToolEvidence);
     const readToolEvidence: ReadToolEvidence[] =
-      readRequest || situationRequest || liveLookup || birthdaySaves.length > 0
+      readRequest ||
+      situationRequest ||
+      liveLookup ||
+      futureWatchIntent !== null ||
+      birthdaySaves.length > 0
         ? await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id })
         : [];
     const forcedReadTool =
@@ -583,7 +657,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       );
       if (checked.blocked || isUnattendedGoalSession(task) || readAnswerAttempted) {
         rc.window.push({ role: 'assistant', content: checked.text } as ModelMessage);
-        return stageFinalResponse(deps, lease, state, rc.window, {
+        return stageReadFinal({
           text: checked.text,
           progress: checked.text.slice(0, 200),
           terminalStatus: 'done',
@@ -602,18 +676,21 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     // taints the context, the private owner card is removed from every later
     // model call instead of lingering in a constant system prompt.
     const system = [
-      buildSystemPrompt(agent, {
-        ownerCard: !state.untrustedContext ? ownerCard : undefined,
-        recall: !state.untrustedContext ? recallBlock : undefined,
-        openLoops: !state.untrustedContext ? openLoops : undefined,
-        skills: !state.untrustedContext ? skillsBlock : undefined,
-        ambient: !state.untrustedContext ? ambientBlock : undefined,
-        tainted: state.untrustedContext,
-        // Only the dashboard gets the companion persona and cue vocabulary;
-        // email/SMS/goal sessions must never learn the tags exist.
-        channel: task.type === 'chat_turn' ? 'dashboard-chat' : undefined,
-        now: runStartedAt,
-      }),
+      buildSystemPrompt(
+        { ...agent, timezone: requestTimeZone },
+        {
+          ownerCard: !state.untrustedContext ? ownerCard : undefined,
+          recall: !state.untrustedContext ? recallBlock : undefined,
+          openLoops: !state.untrustedContext ? openLoops : undefined,
+          skills: !state.untrustedContext ? skillsBlock : undefined,
+          ambient: !state.untrustedContext ? ambientBlock : undefined,
+          tainted: state.untrustedContext,
+          // Only the dashboard gets the companion persona and cue vocabulary;
+          // email/SMS/goal sessions must never learn the tags exist.
+          channel: task.type === 'chat_turn' ? 'dashboard-chat' : undefined,
+          now: readReferenceAt,
+        },
+      ),
       channelContext(task),
       isUnattendedGoalSession(task)
         ? `\nThis automatic session is bound to Goal ID ${task.goalId}. Work only on this goal; the runtime owns progress persistence.`
@@ -628,10 +705,13 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         next: forcedLiveLookup?.lookup,
         failures: liveFailures,
         requestAt: task.createdAt,
-        timeZone: agent.timezone,
+        timeZone: requestTimeZone,
       }),
-      plan?.action === 'schedule' ? SCHEDULE_DIRECTIVE : '',
+      shouldUseTaskScheduleDirective(plan?.action ?? null, ownerText) ? SCHEDULE_DIRECTIVE : '',
       requestChecklistDirective(state.requestChecklist),
+      state.futureWatchRecoveryAttempts > 0
+        ? 'This is the one persisted recovery attempt for the explicitly requested future watch. Do not repeat reads or completed actions. Emit only the matching watch.create or watch.web call when its exact target is grounded in this owner request and this task’s complete read evidence; otherwise ask one precise clarification. Do not claim the watch is active until its receipt arrives.'
+        : '',
       state.checklistRecoveryAttempts > 0
         ? 'The previous draft left requested outcomes unfinished. This is the one bounded recovery attempt: perform the still-authorized missing steps now, or state the specific blocker. Do not repeat completed actions or bypass approval.'
         : '',
@@ -642,17 +722,33 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     // (isMissionSessionTask). Keying off that — rather than "any adhoc child" —
     // stops unrelated adhoc children (e.g. the D9 known-sender-reply child) from
     // being offered mission.update, which they can only ever call in error.
-    const availableToolDefs = conceptualNoTool
-      ? []
-      : dispatcher.toolDefs(task.trust as Trust, {
-          isMissionSession: isMissionSessionTask(task),
-        });
+    const availableToolDefs =
+      conceptualNoTool || arrivalTask
+        ? []
+        : dispatcher.toolDefs(task.trust as Trust, {
+            isMissionSession: isMissionSessionTask(task),
+          });
     // Automatic goal checkpoints are runtime capabilities, not model
     // capabilities. Hiding the tool prevents an eager model from persisting
     // unverified prose before the ledger-backed checkpoint runs.
-    const toolDefs = isUnattendedGoalSession(task)
+    const goalFilteredTools = isUnattendedGoalSession(task)
       ? availableToolDefs.filter((tool) => tool.name !== 'goals.update_progress')
       : availableToolDefs;
+    const watchRecoveryHasPriorAttempt =
+      state.futureWatchRecoveryAttempts > 0 &&
+      readToolEvidence.some(
+        (row) => row.toolName === 'watch.create' || row.toolName === 'watch.web',
+      );
+    const toolDefs =
+      state.futureWatchRecoveryAttempts === 0 || !futureWatchIntent
+        ? goalFilteredTools
+        : watchRecoveryHasPriorAttempt
+          ? []
+          : goalFilteredTools.filter((tool) =>
+              futureWatchIntent.channel === 'email'
+                ? tool.name === 'watch.create'
+                : tool.name === 'watch.web',
+            );
     const toolSet = Object.fromEntries(
       toolDefs.map((def) => [
         def.name,
@@ -718,7 +814,24 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       (isUnattendedGoalSession(task) || plan?.action === 'workflow');
 
     let stepResult: StepCallOutcome;
-    if (mustRecordGoalProgress) {
+    if (resumingBatch && state.pendingToolBatch) {
+      // A suspended batch is the source of truth. Replaying the model here
+      // could change call ids, arguments, ordering, or omit an approval.
+      stepResult = {
+        ok: true,
+        modelId: state.pendingToolBatch.modelId,
+        degraded: false,
+        text: '',
+        toolCalls: state.pendingToolBatch.calls
+          .filter((call) => call.status === 'queued' || call.status === 'budget')
+          .map((call) => ({
+            toolCallId: call.toolCallId,
+            toolName: call.toolName,
+            input: call.input,
+          })),
+        finishReason: 'tool-calls',
+      };
+    } else if (mustRecordGoalProgress) {
       const checkpoint = buildGoalProgressCheckpoint(goalToolEvidence);
       if (!task.goalId || !checkpoint) {
         return stopForUnsavedGoalProgress(
@@ -815,17 +928,22 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         tools: toolSet as never,
         toolChoice: readAnswerTurn
           ? 'none'
-          : conceptualNoTool
+          : conceptualNoTool || watchRecoveryHasPriorAttempt
             ? 'none'
-            : forcedArtifact
-              ? { type: 'tool', toolName: forcedArtifact.toolName }
-              : forcedLiveLookup
-                ? { type: 'tool', toolName: forcedLiveLookup.toolName }
-                : forceSituationRead && toolDefs.some((tool) => tool.name === 'situations.read')
-                  ? { type: 'tool', toolName: 'situations.read' }
-                  : mustAct
-                    ? 'required'
-                    : undefined,
+            : state.futureWatchRecoveryAttempts > 0 && futureWatchIntent && toolDefs.length > 0
+              ? {
+                  type: 'tool',
+                  toolName: futureWatchIntent.channel === 'email' ? 'watch.create' : 'watch.web',
+                }
+              : forcedArtifact
+                ? { type: 'tool', toolName: forcedArtifact.toolName }
+                : forcedLiveLookup
+                  ? { type: 'tool', toolName: forcedLiveLookup.toolName }
+                  : forceSituationRead && toolDefs.some((tool) => tool.name === 'situations.read')
+                    ? { type: 'tool', toolName: 'situations.read' }
+                    : mustAct
+                      ? 'required'
+                      : undefined,
         // The primary chat model has intermittently timed out when a named
         // artifact tool is mandatory. Use the role's configured
         // tool-capable fallback where appropriate.
@@ -835,7 +953,23 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       if (!(await renewTaskLease(deps.persistence?.tasks ?? db, lease))) return LOST_LEASE;
     }
 
-    if (stepResult.ok && stepResult.qualityFailure) {
+    if (!resumingBatch && arrivalTask && stepResult.ok) {
+      const observationId = triggerPayload?.arrivalObservationId;
+      const stillActive =
+        typeof observationId === 'string' &&
+        Boolean(deps.isArrivalObservationActive) &&
+        (await deps.isArrivalObservationActive?.(task.agentId, observationId));
+      if (!stillActive) {
+        const completed = await completeTask(deps.persistence?.tasks ?? db, lease, {
+          status: 'cancelled',
+          progress: 'arrival observation expired before response; no location details used',
+        });
+        if (!completed) return LOST_LEASE;
+        return { outcome: 'cancelled', detail: 'arrival observation expired before response' };
+      }
+    }
+
+    if (!resumingBatch && stepResult.ok && stepResult.qualityFailure) {
       const safeText = stepResult.text.trim();
       rc.window.push({ role: 'assistant', content: safeText } as ModelMessage);
       return stageFinalResponse(deps, lease, state, rc.window, {
@@ -846,11 +980,30 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       });
     }
 
+    // Arrival checks are location-free. The observation is only a freshness
+    // gate; owner recall, ambient data, model-authored place claims, and tools
+    // are excluded from this task.
+    if (!resumingBatch && arrivalTask && stepResult.ok) {
+      stepResult = {
+        ...stepResult,
+        text: stepResult.toolCalls.length
+          ? ''
+          : stepResult.text.trim()
+            ? 'You’ve arrived. Would you like help with anything nearby?'
+            : '',
+      };
+    }
+
     // toolChoice 'none' already asks for this; dropping the calls outright is
     // what makes it a guarantee. The old ledger short-circuit got the same
     // property by never running a model turn at all, and letting the model
     // write the answer must not quietly buy that back for an unrequested send.
-    if (stepResult.ok && (readAnswerTurn || conceptualNoTool) && stepResult.toolCalls.length > 0) {
+    if (
+      !resumingBatch &&
+      stepResult.ok &&
+      (readAnswerTurn || conceptualNoTool) &&
+      stepResult.toolCalls.length > 0
+    ) {
       stepResult = { ...stepResult, toolCalls: [] };
       if (conceptualNoTool && !stepResult.text.trim() && !state.conceptualAnswerRetried) {
         // Some providers ignore `none` and return only a forbidden call. Give
@@ -871,7 +1024,12 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       }
     }
 
-    if (stepResult.ok && isUnattendedGoalSession(task) && !mustRecordGoalProgress) {
+    if (
+      !resumingBatch &&
+      stepResult.ok &&
+      isUnattendedGoalSession(task) &&
+      !mustRecordGoalProgress
+    ) {
       stepResult = {
         ...stepResult,
         toolCalls: stepResult.toolCalls.filter(
@@ -884,6 +1042,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     // it one tightly constrained retry; never turn that prose into a claimed
     // artifact or dispatch unrelated calls on behalf of this direct request.
     if (
+      !resumingBatch &&
       stepResult.ok &&
       forcedArtifact &&
       needsArtifactToolRetry(forcedArtifact, stepResult.toolCalls)
@@ -924,6 +1083,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     // give it one constrained chance to emit the real gated action instead of
     // publishing a phantom code that cannot exist on the Approvals page.
     if (
+      !resumingBatch &&
       stepResult.ok &&
       !readAnswerTurn &&
       !conceptualNoTool &&
@@ -952,6 +1112,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     // forwarded/planned action silently no-ops. (Forced artifacts have a
     // dedicated retry; private reads and goal progress bypass the model.)
     if (
+      !resumingBatch &&
       stepResult.ok &&
       !readAnswerTurn &&
       !conceptualNoTool &&
@@ -979,7 +1140,12 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
 
     // The must-act retry above is another model boundary, so apply the same
     // runtime-only checkpoint rule to its output as well.
-    if (stepResult.ok && isUnattendedGoalSession(task) && !mustRecordGoalProgress) {
+    if (
+      !resumingBatch &&
+      stepResult.ok &&
+      isUnattendedGoalSession(task) &&
+      !mustRecordGoalProgress
+    ) {
       stepResult = {
         ...stepResult,
         toolCalls: stepResult.toolCalls.filter(
@@ -988,7 +1154,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       };
     }
 
-    if (stepResult.ok && stepResult.degraded) {
+    if (!resumingBatch && stepResult.ok && stepResult.degraded) {
       if (state.degradedSteps === 0) {
         console.warn('step served by the fallback model', {
           taskId: task.id,
@@ -1032,11 +1198,11 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
 
     // Recovery turns are model boundaries too. Keep the no-tool guarantee
     // immediately before dispatch so any later retry cannot reopen it.
-    if (readAnswerTurn || conceptualNoTool) {
+    if (!resumingBatch && (readAnswerTurn || conceptualNoTool)) {
       stepResult = { ...stepResult, toolCalls: [] };
     }
 
-    if (forcedArtifact) {
+    if (!resumingBatch && forcedArtifact) {
       // A forced creation request authorizes only its matching tool. This is
       // defense in depth in case a provider emits additional calls anyway.
       const requiredCall = stepResult.toolCalls.find(
@@ -1044,7 +1210,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       );
       if (requiredCall) stepResult = { ...stepResult, toolCalls: [requiredCall] };
     }
-    if (mustRecordGoalProgress) {
+    if (!resumingBatch && mustRecordGoalProgress) {
       // A runtime progress step authorizes only the required bookkeeping write,
       // making the durable-success check below unambiguous.
       const requiredCall = stepResult.toolCalls.find(
@@ -1052,7 +1218,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       );
       if (requiredCall) stepResult = { ...stepResult, toolCalls: [requiredCall] };
     }
-    if (forcedReadTool && readRequest) {
+    if (!resumingBatch && forcedReadTool && readRequest) {
       // A forced read authorizes only that read, and runtime-owned bindings
       // remove model-invented calendar narrowing/query terms/thread ids.
       const requiredCall = stepResult.toolCalls.find(
@@ -1075,7 +1241,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         };
       }
     }
-    if (task.goalId) {
+    if (!resumingBatch && task.goalId) {
       // Goal identity is runtime-owned. Automatic checkpoints are also built by
       // the runtime; explicit progress calls from owner chat are still rebound
       // here so no model has to copy an opaque UUID. The dispatcher's binding
@@ -1087,6 +1253,20 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             ? { ...toolCall, input: { ...toolCall.input, goalId: task.goalId } }
             : toolCall,
         ),
+      };
+    }
+
+    if (state.futureWatchRecoveryAttempts > 0 && futureWatchIntent) {
+      const alreadyAttempted = readToolEvidence.some(
+        (row) => row.toolName === 'watch.create' || row.toolName === 'watch.web',
+      );
+      stepResult = {
+        ...stepResult,
+        toolCalls: alreadyAttempted
+          ? []
+          : stepResult.toolCalls.filter((call) =>
+              futureWatchRecoveryCallMatches(futureWatchIntent, readToolEvidence, call),
+            ),
       };
     }
 
@@ -1117,24 +1297,42 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       throw new Error(`model step ended with finish reason ${stepResult.finishReason}`);
     }
 
-    state.step += 1;
+    if (!resumingBatch) state.step += 1;
 
     // assistant turn (text and/or tool calls) into the rc.window
     if (stepResult.toolCalls.length > 0) {
-      rc.window.push({
-        role: 'assistant',
-        content: [
-          ...(stepResult.text ? [{ type: 'text' as const, text: stepResult.text }] : []),
-          ...stepResult.toolCalls.map((tc) => ({
-            type: 'tool-call' as const,
+      if (!resumingBatch) {
+        rc.window.push({
+          role: 'assistant',
+          content: [
+            ...(stepResult.text ? [{ type: 'text' as const, text: stepResult.text }] : []),
+            ...stepResult.toolCalls.map((tc) => ({
+              type: 'tool-call' as const,
+              toolCallId: tc.toolCallId,
+              toolName: tc.toolName,
+              input: tc.input,
+            })),
+          ],
+        } as ModelMessage);
+
+        state.pendingToolBatch = {
+          step: state.step,
+          modelId: stepResult.modelId,
+          calls: stepResult.toolCalls.map((tc) => ({
             toolCallId: tc.toolCallId,
             toolName: tc.toolName,
             input: tc.input,
+            status: 'queued',
           })),
-        ],
-      } as ModelMessage);
+        };
+        state.contextWindow = compact(rc.window) as unknown as TaskState['contextWindow'];
+        // Persist the whole ordered batch before any call can produce an effect.
+        if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
+      }
 
-      const pendingApprovals: TaskState['pendingApprovals'] = [];
+      const batch = state.pendingToolBatch;
+      if (!batch) throw new Error('tool batch journal missing before dispatch');
+      const pendingApprovals: TaskState['pendingApprovals'] = state.pendingApprovals;
       const approvalNotices: Array<{
         taskId: string;
         approvalId: string;
@@ -1144,22 +1342,38 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       }> = [];
       let requiredGoalProgressSaved = !mustRecordGoalProgress;
       let requiredGoalProgressFailure = 'the progress tool was not dispatched';
-      for (let toolIndex = 0; toolIndex < stepResult.toolCalls.length; toolIndex += 1) {
-        const tc = stepResult.toolCalls[toolIndex] as (typeof stepResult.toolCalls)[number];
-        // One browser job at a time: once a call in this batch launched a job,
-        // later calls are refused undispatched (parallel launches would race
-        // the shared profile and orphan all but the last callback token).
-        if (state.pendingJob) {
-          rc.window.push(
-            toolResultMessage(tc.toolCallId, tc.toolName, {
-              error:
-                'a browser job is already running for this task — wait for its result before making more tool calls',
-            }),
-          );
+      for (let toolIndex = 0; toolIndex < batch.calls.length; toolIndex += 1) {
+        const journalCall = batch.calls[toolIndex] as PendingToolBatchCall;
+        if (
+          journalCall.status === 'settled' ||
+          journalCall.status === 'awaiting_approval' ||
+          journalCall.status === 'job'
+        )
+          continue;
+        const tc = {
+          toolCallId: journalCall.toolCallId,
+          toolName: journalCall.toolName,
+          input: journalCall.input,
+        };
+        const updateCall = async (patch: Partial<PendingToolBatchCall>) => {
+          Object.assign(journalCall, patch);
+          state.contextWindow = compact(rc.window) as unknown as TaskState['contextWindow'];
+          if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return false;
+          return true;
+        };
+        if (arrivalTask) {
+          replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, {
+            error: 'Arrival checks cannot access tools or private location details.',
+          });
+          if (!(await updateCall({ status: 'settled' }))) return LOST_LEASE;
           continue;
         }
+        // One browser job at a time. Preserve later calls as queued in the
+        // durable journal and resume them in order after callback or timeout.
+        if (state.pendingJob) {
+          break;
+        }
         if (!(await renewTaskLease(deps.persistence?.tasks ?? db, lease))) return LOST_LEASE;
-        rc.browserStageRemainder = stepResult.toolCalls.slice(toolIndex + 1);
         if (tc.toolName === 'calendar.create_event' || tc.toolName === 'sheets.create') {
           const grounding = groundWorkspaceWrite(
             tc.toolName,
@@ -1169,11 +1383,42 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             task.createdAt,
           );
           if (!grounding.allowed) {
-            rc.window.push(
-              toolResultMessage(tc.toolCallId, tc.toolName, {
-                error: `Write not sent: ${grounding.reason}. Ask the owner to confirm the missing detail or read a source that contains it before trying again.`,
-              }),
-            );
+            replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, {
+              error: `Write not sent: ${grounding.reason}. Ask the owner to confirm the missing detail or read a source that contains it before trying again.`,
+            });
+            journalCall.status = 'settled';
+            if (!(await updateCall({ status: 'settled' }))) return LOST_LEASE;
+            continue;
+          }
+        }
+        let verifiedReminderEvent:
+          | import('@assistant/persistence').ReminderEventDependency
+          | undefined;
+        if (tc.toolName === 'reminder.create') {
+          const afterEventId = tc.input.afterEventId;
+          if (isCompletionDependentReminderRequest(ownerText)) {
+            const binding = bindReminderEventDependency({
+              eventId: afterEventId,
+              window: rc.window,
+              requestText: ownerText,
+              requestAt: readReferenceAt,
+              timeZone: requestTimeZone,
+            });
+            if ('reason' in binding) {
+              replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, {
+                error: `${binding.reason} For calendar events or other sources without a completion signal, ask whether a fixed time is acceptable.`,
+              });
+              journalCall.status = 'settled';
+              if (!(await updateCall({ status: 'settled' }))) return LOST_LEASE;
+              continue;
+            }
+            verifiedReminderEvent = binding.dependency;
+          } else if (afterEventId !== undefined) {
+            replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, {
+              error: 'An event-completion reminder is only available when the owner requested one.',
+            });
+            journalCall.status = 'settled';
+            if (!(await updateCall({ status: 'settled' }))) return LOST_LEASE;
             continue;
           }
         }
@@ -1183,15 +1428,13 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           modelToolCallId: tc.toolCallId,
           toolName: tc.toolName,
           args: tc.input,
-          ctx,
+          ctx: verifiedReminderEvent ? { ...ctx, verifiedReminderEvent } : ctx,
           provenance: {
             plannerVersion: PLANNER_VERSION,
             promptVersion: PROMPT_VERSION,
             model: stepResult.modelId,
           },
         });
-        rc.browserStageRemainder = [];
-
         if (outcome.kind === 'executed') {
           if (isJobPending(outcome.result)) {
             // Leave this tool call unmatched while the task sleeps. The
@@ -1204,33 +1447,63 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               callbackTokenHash: hashCallbackToken(outcome.result.callbackToken),
               timeoutAt: outcome.result.timeoutAt,
             };
+            journalCall.status = 'job';
+            journalCall.dbToolCallId = outcome.toolCallId;
             if (tc.toolName === 'goals.update_progress') {
               requiredGoalProgressFailure = 'the progress write returned an unfinished job';
             }
           } else {
-            rc.window.push(
-              toolResultMessage(tc.toolCallId, tc.toolName, outcome.result, {
-                dbToolCallId: outcome.toolCallId,
-              }),
-            );
+            replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, outcome.result, {
+              dbToolCallId: outcome.toolCallId,
+            });
             state.completedToolCallIds.push(outcome.toolCallId);
+            journalCall.status = 'settled';
+            journalCall.dbToolCallId = outcome.toolCallId;
             if (tc.toolName === 'goals.update_progress') requiredGoalProgressSaved = true;
             if (dispatcher.resultIsUntrusted(tc.toolName)) {
               state.untrustedContext = true;
               ctx.tainted = true;
             }
           }
+          if (
+            !(await updateCall({
+              status: journalCall.status,
+              dbToolCallId: journalCall.dbToolCallId,
+            }))
+          )
+            return LOST_LEASE;
+        } else if (outcome.kind === 'recorded') {
+          replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, {
+            recorded: true,
+            effectOutcome: outcome.effectOutcome,
+            detailsExpired: outcome.detailsExpired,
+            requestedArgumentsVerified: outcome.requestedArgumentsVerified,
+            note: 'This prior tool-call identity has a durable receipt, but the original arguments and result expired. The current request could not be compared with them, and the action was not repeated.',
+          });
+          state.completedToolCallIds.push(outcome.toolCallId);
+          journalCall.status = 'settled';
+          journalCall.dbToolCallId = outcome.toolCallId;
+          if (!(await updateCall({ status: 'settled', dbToolCallId: outcome.toolCallId })))
+            return LOST_LEASE;
         } else if (outcome.kind === 'budget_blocked') {
           // The pre-flight reservation failed: this expensive action does not
           // fit the remaining budget. Park BEFORE launching anything — the
           // task resumes (and the model retries the call) when the cap resets.
-          rc.window.push(
-            toolResultMessage(tc.toolCallId, tc.toolName, {
+          replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, {
+            deferred: true,
+            reason: outcome.reason,
+            note: 'budget exhausted — the task is parked and will retry this action when the budget resets',
+          });
+          journalCall.status = 'budget';
+          // Keep later calls explicitly represented in the transcript and
+          // journal so the batch resumes in its original order.
+          for (const sibling of batch.calls.slice(toolIndex + 1)) {
+            replaceToolResultMessage(rc.window, sibling.toolCallId, sibling.toolName, {
               deferred: true,
-              reason: outcome.reason,
-              note: 'budget exhausted — the task is parked and will retry this action when the budget resets',
-            }),
-          );
+              reason: 'waiting for an earlier call in this batch',
+            });
+          }
+          if (!(await updateCall({ status: 'budget' }))) return LOST_LEASE;
           state.contextWindow = compact(rc.window) as unknown as TaskState['contextWindow'];
           const parked = await parkForBudget(
             deps.persistence?.tasks ?? db,
@@ -1239,6 +1512,38 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             outcome.resumeAt,
           );
           if (!parked) return LOST_LEASE;
+          if (approvalNotices.length > 0) {
+            // A budget stop must not hide an earlier approval in this same
+            // ordered batch. Publish its decision card while the task is
+            // budget-parked; the resume phase also repairs any delivery leg
+            // lost to a crash between the park and these writes.
+            const conversationNotified = await postConversationNotice(
+              deps.persistence?.messages ?? db,
+              task,
+              approvalPrompt(approvalNotices.map((n) => approvalHeadline(n.summary))),
+              approvalNotices.map((notice) => ({
+                type: 'approval',
+                approvalId: notice.approvalId,
+                shortCode: notice.shortCode,
+                summary: approvalHeadline(notice.summary),
+              })),
+            );
+            let ownerNotified = false;
+            if (deps.notifyApproval) {
+              ownerNotified = await deps
+                .notifyApproval(task, approvalNotices)
+                .then(() => true)
+                .catch((err) => {
+                  console.error('approval notification failed', err);
+                  return false;
+                });
+            }
+            await markApprovalsNotified(
+              deps.persistence?.approvals ?? db,
+              approvalNotices.map((notice) => notice.approvalId),
+              deliveredChannels({ ownerNotified, conversationNotified }),
+            );
+          }
           await postConversationNotice(
             deps.persistence?.messages ?? db,
             task,
@@ -1249,12 +1554,28 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         } else if (outcome.kind === 'awaiting_approval') {
           // Approval is runtime state, not a tool result. The approved,
           // denied, or expired terminal outcome is stitched in on resume.
-          pendingApprovals.push({
+          const pending = {
             approvalId: outcome.approvalId,
             toolCallId: tc.toolCallId,
             dbToolCallId: outcome.toolCallId,
             toolName: tc.toolName,
+          };
+          if (!pendingApprovals.some((item) => item.approvalId === pending.approvalId))
+            pendingApprovals.push(pending);
+          journalCall.status = 'awaiting_approval';
+          journalCall.approvalId = outcome.approvalId;
+          journalCall.dbToolCallId = outcome.toolCallId;
+          replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, {
+            awaiting_owner_approval: true,
           });
+          if (
+            !(await updateCall({
+              status: 'awaiting_approval',
+              approvalId: outcome.approvalId,
+              dbToolCallId: outcome.toolCallId,
+            }))
+          )
+            return LOST_LEASE;
           approvalNotices.push({
             taskId: task.id,
             approvalId: outcome.approvalId,
@@ -1266,11 +1587,11 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             requiredGoalProgressFailure = 'the progress write unexpectedly required approval';
           }
         } else {
-          rc.window.push(
-            toolResultMessage(tc.toolCallId, tc.toolName, {
-              error: outcome.reason,
-            }),
-          );
+          replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, {
+            error: outcome.reason,
+          });
+          journalCall.status = 'settled';
+          if (!(await updateCall({ status: 'settled' }))) return LOST_LEASE;
           if (tc.toolName === 'goals.update_progress') {
             requiredGoalProgressFailure = outcome.reason;
           }
@@ -1358,6 +1679,33 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       continue;
     }
 
+    // Recover one missing future watch without replaying earlier reads or
+    // effects. The counter is checkpointed before the next model boundary and
+    // that recovery boundary is allowlisted to the exact grounded watch. A
+    // conditional read-then-watch request is excluded because this late path
+    // cannot prove whether its condition already occurred.
+    if (
+      !resumingBatch &&
+      stepResult.toolCalls.length === 0 &&
+      futureWatchIntent &&
+      shouldAttemptFutureWatchRecovery({
+        intent: futureWatchIntent,
+        evidence: readToolEvidence,
+        attempts: state.futureWatchRecoveryAttempts,
+        step: state.step,
+        maxSteps: task.maxSteps,
+      })
+    ) {
+      state.futureWatchRecoveryAttempts = 1;
+      rc.window.push({
+        role: 'assistant',
+        content: stepResult.text || 'The requested future watch is not confirmed yet.',
+      } as ModelMessage);
+      state.contextWindow = compact(rc.window) as unknown as TaskState['contextWindow'];
+      if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
+      continue;
+    }
+
     // A forced-action step (mustAct) that produced only prose — even after its
     // one constrained retry above — did NOT do the work it was planned to do.
     // On an unattended path, staging that prose as `done` is the "zero tool
@@ -1416,7 +1764,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         readToolEvidence.map((row) => ({ ...row, result: row.result })),
       );
       rc.window.push({ role: 'assistant', content: checked.text } as ModelMessage);
-      return stageFinalResponse(deps, lease, state, rc.window, {
+      return stageReadFinal({
         text: checked.text,
         progress: checked.text.slice(0, 200),
         terminalStatus: 'done',
@@ -1431,6 +1779,19 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     const text = stepResult.text.trim();
     if (!text) {
       const completed = await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id });
+      if (
+        canCompleteSilently(task, state, stepResult) &&
+        completed.every((row) => row.status === 'succeeded' || row.status === 'cached')
+      ) {
+        return stageFinalResponse(deps, lease, state, rc.window, {
+          completionKind: 'successful_silent',
+          text: '',
+          progress: 'Arrival observation completed; no useful notice to send.',
+          terminalStatus: 'done',
+          outcome: 'done',
+          contractBlocked: false,
+        });
+      }
       const receipt = verifiedCurrentActionSummary(completed);
       const notice = `${receipt ? `${receipt}\n\n` : ''}I couldn't finish the reply. Check Activity for anything that already ran before trying again.`;
       const cards = responseCardsForFinal({
@@ -1446,17 +1807,26 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         ...(cards.length ? { responseCards: cards } : {}),
       });
     }
-    rc.window.push({ role: 'assistant', content: text } as ModelMessage);
+    const missingRecoveredWatch =
+      state.futureWatchRecoveryAttempts > 0 &&
+      futureWatchIntent !== null &&
+      enforceResponseContract(
+        'I will notify you when the requested condition occurs.',
+        readToolEvidence.map((row) => ({ ...row, result: row.result })),
+        { requestText: ownerText },
+      ).unsupported.includes('background');
+    const finalText = missingRecoveredWatch ? withMissingFutureWatchNotice(text) : text;
+    rc.window.push({ role: 'assistant', content: finalText } as ModelMessage);
     return stageModelFinalResponse(
       deps,
       lease,
       state,
       rc.window,
       {
-        text,
-        progress: text.slice(0, 200),
-        terminalStatus: 'done',
-        outcome: 'done',
+        text: finalText,
+        progress: finalText.slice(0, 200),
+        terminalStatus: missingRecoveredWatch ? 'needs_attention' : 'done',
+        outcome: missingRecoveredWatch ? 'needs_attention' : 'done',
       },
       artifactIntent,
       // The ambient block is in the system prompt, not the window, so the
@@ -1484,7 +1854,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       readToolEvidence.map((row) => ({ ...row, result: row.result })),
     );
     rc.window.push({ role: 'assistant', content: checked.text } as ModelMessage);
-    return stageFinalResponse(deps, lease, state, rc.window, {
+    return stageReadFinal({
       text: checked.text,
       progress: checked.text.slice(0, 200),
       terminalStatus: 'done',

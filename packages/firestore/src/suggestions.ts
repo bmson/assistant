@@ -45,6 +45,14 @@ export class FirestoreSuggestionRepository implements SuggestionRepository {
 
   async create(input: CreateSuggestionRecord): Promise<SuggestionRecord | null> {
     if (!input.agentId || !input.sourceRef) throw new Error('Invalid suggestion');
+    if (
+      input.bookingCancellation &&
+      (!input.bookingKey ||
+        !Number.isInteger(input.bookingVersion) ||
+        !input.bookingCancellation.calendarEventId.trim() ||
+        !input.bookingCancellation.bookingIdentity.trim())
+    )
+      throw new Error('Invalid booking cancellation binding');
     const id = suggestionIdFor(input.agentId, input.sourceRef);
     const ref = this.store.doc('suggestions', id);
     // Imported proposals keep their random ids, so the source is also looked up.
@@ -69,6 +77,9 @@ export class FirestoreSuggestionRepository implements SuggestionRepository {
           expiresAt: input.expiresAt,
           conversationId: input.conversationId ?? null,
           origin: input.origin,
+          bookingKey: input.bookingKey ?? null,
+          bookingVersion: input.bookingVersion ?? null,
+          bookingCancellation: input.bookingCancellation ?? null,
           snoozedUntil: null,
           summary: input.summary,
           proposedAction: input.proposedAction,
@@ -109,5 +120,64 @@ export class FirestoreSuggestionRepository implements SuggestionRepository {
       if (scanned >= OPEN_SCAN_LIMIT) throw new Error('Open suggestion scan exceeded bound');
       cursor = page.docs[page.docs.length - 1];
     }
+  }
+
+  async inactiveSourceRefs(agentId: string, sourceRefs: readonly string[]): Promise<string[]> {
+    const refs = [...new Set(sourceRefs)];
+    if (!agentId || refs.length > 64 || refs.some((ref) => !ref || ref.length > 2048))
+      throw new Error('Invalid suggestion identity batch');
+    const inactive: string[] = [];
+    for (const sourceRef of refs) {
+      // Imported suggestions retain random IDs, so use the bounded exact-source
+      // lookup rather than assuming the current deterministic document key.
+      const page = await this.store
+        .collection('suggestions')
+        .where('agentId', '==', agentId)
+        .where('sourceRef', '==', sourceRef)
+        .limit(2)
+        .get();
+      if (
+        page.docs.some((snapshot) => {
+          const row = valid(snapshot, agentId);
+          return row && row.status !== 'pending';
+        })
+      )
+        inactive.push(sourceRef);
+    }
+    return inactive;
+  }
+
+  async acceptedForTask(input: {
+    agentId: string;
+    suggestionId: string;
+    taskId: string;
+  }): Promise<SuggestionRecord | null> {
+    if (!input.agentId || !input.suggestionId || !input.taskId) return null;
+    const snapshot = await this.store.doc('suggestions', input.suggestionId).get();
+    if (!snapshot.exists) return null;
+    const row = valid(snapshot as QueryDocumentSnapshot, input.agentId);
+    return row?.status === 'accepted' && row.acceptedTaskId === input.taskId ? row : null;
+  }
+
+  async supersedeBooking(agentId: string, bookingKey: string, now: Date): Promise<number> {
+    if (!agentId || !bookingKey) return 0;
+    const query = this.store
+      .collection('suggestions')
+      .where('agentId', '==', agentId)
+      .where('bookingKey', '==', bookingKey)
+      .where('status', 'in', ['pending', 'snoozed']);
+    return withEmulatorTransactionRetry(() =>
+      this.store.db.runTransaction(async (tx) => {
+        const page = await tx.get(query.limit(200));
+        let changed = 0;
+        for (const doc of page.docs) {
+          const row = valid(doc, agentId);
+          if (!row || row.bookingKey !== bookingKey) continue;
+          tx.update(doc.ref, encodeRecord({ status: 'superseded', updatedAt: now }));
+          changed += 1;
+        }
+        return changed;
+      }),
+    );
   }
 }

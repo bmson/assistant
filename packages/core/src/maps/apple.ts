@@ -100,8 +100,6 @@ const TRANSPORT: Record<TravelMode, string> = {
   walking: 'Walking',
   cycling: 'Cycling',
 };
-/** Apple Maps URL `dirflg`: driving, walking; cycling has no flag and opens as driving. */
-const DIRFLG: Record<TravelMode, string> = { driving: 'd', walking: 'w', cycling: 'd' };
 
 export interface Point {
   lat: number;
@@ -266,6 +264,9 @@ export function normalizeDirections(
   },
 ): DirectionsResult | undefined {
   const route = rec(arr(body.routes)[0]);
+  const reportedMode =
+    typeof route?.transportType === 'string' ? route.transportType.toLowerCase() : undefined;
+  if (!reportedMode || reportedMode !== TRANSPORT[input.mode]?.toLowerCase()) return undefined;
   const durationSeconds = num(route?.durationSeconds);
   const distanceMeters = num(route?.distanceMeters);
   const origin = place(body.origin, input.originLabel);
@@ -289,10 +290,10 @@ export function normalizeDirections(
     ? new Date(input.arriveBy.getTime() - durationSeconds * 1000)
     : (input.departAt ?? input.now);
   const arriveAt = input.arriveBy ?? new Date(departAt.getTime() + durationSeconds * 1000);
-  const mapsUrl = `https://maps.apple.com/?${new URLSearchParams({
-    saddr: `${origin.lat},${origin.lng}`,
-    daddr: `${destination.lat},${destination.lng}`,
-    dirflg: DIRFLG[input.mode],
+  const mapsUrl = `https://maps.apple.com/directions?${new URLSearchParams({
+    source: `${origin.lat},${origin.lng}`,
+    destination: `${destination.lat},${destination.lng}`,
+    mode: input.mode,
   })}`;
   const routeName = text(route.name);
   return {
@@ -364,7 +365,11 @@ export async function appleDirections(input: {
     ...(input.arriveBy ? { arriveBy: input.arriveBy } : {}),
     now: input.now ?? new Date(),
   });
-  return result ?? { error: `No route found to "${input.destination.slice(0, 80)}".` };
+  return (
+    result ?? {
+      error: `No route with the requested ${input.mode} mode was confirmed to "${input.destination.slice(0, 80)}".`,
+    }
+  );
 }
 
 /**

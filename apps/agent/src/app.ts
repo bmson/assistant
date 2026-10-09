@@ -1,6 +1,9 @@
+import { loadConfig } from '@assistant/config';
+import { assertPostgresInstallationOwner } from '@assistant/db';
+import { assertFirestoreInstallationOwner } from '@assistant/firestore';
 import { moduleDiagnostics } from '@assistant/modules/meta';
 import { Hono } from 'hono';
-import { buildDeps, firestoreOwnerReady } from './deps.js';
+import { buildDeps, firestoreMaintenanceReady } from './deps.js';
 import { api } from './routes/api.js';
 import { internal } from './routes/internal.js';
 import { webhooks } from './routes/webhooks.js';
@@ -8,19 +11,33 @@ import { webhooks } from './routes/webhooks.js';
 export function createApp() {
   const app = new Hono();
 
+  if (loadConfig().RESTORE_REHEARSAL) {
+    // The rehearsal exposes only health/readiness. Restored tasks, callbacks,
+    // provider probes, and application APIs cannot be dispatched by request.
+    app.use('*', async (c, next) => {
+      if (
+        (c.req.path === '/health' || c.req.path === '/ready') &&
+        (c.req.method === 'GET' || c.req.method === 'HEAD')
+      )
+        return next();
+      return c.json({ error: 'runtime endpoint disabled during restore rehearsal' }, 503);
+    });
+  }
+
   app.get('/health', (c) => c.json({ ok: true, service: 'agent' }));
   app.get('/ready', async (c) => {
     const deps = buildDeps();
     try {
       if (deps.firestoreStore) {
-        if (!(await firestoreOwnerReady(deps)))
-          throw new Error('configured Firestore agent is unavailable');
+        await assertFirestoreInstallationOwner(deps.firestoreStore, deps.config.FIRESTORE_AGENT_ID);
+        if (!(await firestoreMaintenanceReady(deps)))
+          throw new Error('configured Firestore installation is not operationally ready');
       } else {
-        await deps.db.execute('select 1');
+        await assertPostgresInstallationOwner(deps.db);
       }
       return c.json({
         ready: true,
-        database: deps.firestoreStore ? 'firestore' : 'ready',
+        database: deps.firestoreStore ? 'firestore' : 'postgres',
         modules: moduleDiagnostics(deps.config),
       });
     } catch {

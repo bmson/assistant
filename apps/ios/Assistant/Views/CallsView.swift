@@ -99,17 +99,23 @@ private struct CallDetailView: View {
                             Section("The assistant is asking you") {
                                 Text("“\(checkin.question)”")
                                 TextField("Your answer", text: $answer, axis: .vertical)
+                                if checkin.revision == nil {
+                                    Text("This question is from an older call record and can’t be answered from this screen.")
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
                                 Button(sending ? "Sending…" : "Send answer") {
+                                    guard let revision = checkin.revision else { return }
                                     sending = true
                                     Task {
-                                        if await model.answerCallCheckin(callId: call.id, checkinId: checkin.id, answer: answer) {
+                                        if await model.answerCallCheckin(callId: call.id, checkinId: checkin.id, revision: revision, answer: answer) {
                                             answer = ""
                                         }
                                         sending = false
                                         await reload()
                                     }
                                 }
-                                .disabled(sending || answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                .disabled(sending || checkin.revision == nil || answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             }
                         }
                         Section {

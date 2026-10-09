@@ -19,7 +19,6 @@ import {
   EmptyState,
   labelClass,
   MetaLine,
-  SectionHeading,
   inputClass as sharedInputClass,
   textareaClass,
 } from '@/lib/ui';
@@ -161,9 +160,11 @@ export function SkillsPanel({
   });
 
   return (
-    <section className="mt-8">
+    <section aria-label="Skills collection" className="mt-8">
       <div className="flex items-center justify-between gap-2">
-        <SectionHeading title="Skills" count={skills.length} />
+        <p className="text-sm text-muted tabular-nums">
+          {skills.length} {skills.length === 1 ? 'skill' : 'skills'}
+        </p>
         {!readOnly && !adding ? (
           <button
             type="button"
@@ -212,10 +213,7 @@ export function SkillsPanel({
       ) : (
         <div className="mt-3 grid gap-3 lg:grid-cols-2">
           {skills.map((s) => (
-            <article
-              key={s.id}
-              className={`${cardShellClass} flex h-full flex-col ${s.deprecated ? 'opacity-60' : ''}`}
-            >
+            <article key={s.id} className={`${cardShellClass} flex h-full flex-col`}>
               {!readOnly && editingId === s.id ? (
                 <div className={cardBodyClass}>
                   <SkillForm

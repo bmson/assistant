@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { Agent as HttpAgent, request as httpRequest } from 'node:http';
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
@@ -6,14 +5,21 @@ import { BlockList, isIP, type LookupFunction } from 'node:net';
 import { Readable } from 'node:stream';
 import { decryptMcpBearerToken } from '@assistant/core/mcp-secrets';
 import { mcpConnections } from '@assistant/db';
+import { mcpApprovalBindingFingerprint } from '@assistant/persistence';
 import { and, asc, eq } from 'drizzle-orm';
 import { z } from 'zod';
+import {
+  AmbiguousMcpMutationError,
+  type McpRpcResponse,
+  readMcpRpcResponse,
+} from './mcp-transport.js';
 import { register } from './register.js';
 import type { ToolRegistry } from './registry.js';
 
+export { mcpApprovalBindingFingerprint as mcpToolApprovalFingerprint } from '@assistant/persistence';
+
 const PROTOCOL_VERSION = '2025-11-25';
 const CLIENT_INFO = { name: 'assistant', version: '1.0.0' };
-const MAX_RESPONSE_BYTES = 300_000;
 const MAX_TOOLS = 80;
 const MAX_TOOL_NAME = 128;
 const MAX_TOOL_DESCRIPTION = 1_200;
@@ -53,36 +59,12 @@ export interface McpToolConnectionReadPort {
   get(agentId: string, connectionId: string): Promise<McpToolConnectionRecord | null>;
 }
 
-/** Bind approval to the connection identity, credentials, and cached tool definition. */
-export function mcpToolApprovalFingerprint(
-  connection: McpToolConnectionRecord,
+export type McpToolInvoker = (
+  endpoint: string,
   toolName: string,
-): string | null {
-  const tool = sanitizedTools(connection.tools).find((candidate) => candidate.name === toolName);
-  if (!tool || !connection.enabled || connection.status !== 'ready') return null;
-  const canonical = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(canonical);
-    if (value && typeof value === 'object')
-      return Object.fromEntries(
-        Object.entries(value)
-          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-          .map(([key, item]) => [key, canonical(item)]),
-      );
-    return value;
-  };
-  return createHash('sha256')
-    .update(
-      JSON.stringify(
-        canonical({
-          connectionId: connection.id,
-          endpoint: connection.endpoint,
-          credentials: connection.bearerTokenEncrypted,
-          tool,
-        }),
-      ),
-    )
-    .digest('hex');
-}
+  input: Record<string, unknown>,
+  bearerTokenEncrypted: string | null | undefined,
+) => Promise<Record<string, unknown>>;
 
 type FetchImplementation = typeof fetch;
 
@@ -94,10 +76,7 @@ interface McpSession {
   bearerToken?: string;
 }
 
-interface JsonRpcResponse {
-  result?: unknown;
-  error?: { code?: number; message?: string; data?: unknown };
-}
+type JsonRpcResponse = McpRpcResponse;
 
 function clip(value: unknown, max: number): string {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, max) : '';
@@ -277,54 +256,6 @@ function pinnedRequest(session: McpSession, init: RequestInit): Promise<Response
   });
 }
 
-function parsedSse(body: string): unknown {
-  const events = body.split(/\r?\n\r?\n/);
-  for (const event of events) {
-    const data = event
-      .split(/\r?\n/)
-      .filter((line) => line.startsWith('data:'))
-      .map((line) => line.slice(5).trim())
-      .join('\n');
-    if (!data) continue;
-    try {
-      return JSON.parse(data) as unknown;
-    } catch {
-      // A heartbeat or unrelated server notification is not a response.
-    }
-  }
-  throw new Error('MCP server returned an unreadable event stream.');
-}
-
-async function readRpcResponse(response: Response): Promise<JsonRpcResponse> {
-  const contentLength = Number(response.headers.get('content-length') ?? 0);
-  if (contentLength > MAX_RESPONSE_BYTES) throw new Error('MCP response is too large.');
-  const reader = response.body?.getReader();
-  const chunks: Uint8Array[] = [];
-  let bytes = 0;
-  if (reader) {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      bytes += value.byteLength;
-      if (bytes > MAX_RESPONSE_BYTES) {
-        await reader.cancel();
-        throw new Error('MCP response is too large.');
-      }
-      chunks.push(value);
-    }
-  }
-  const body = Buffer.concat(chunks, bytes).toString('utf8');
-  const contentType = response.headers.get('content-type') ?? '';
-  try {
-    return (
-      contentType.includes('text/event-stream') ? parsedSse(body) : JSON.parse(body)
-    ) as JsonRpcResponse;
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('MCP')) throw error;
-    throw new Error('MCP server returned invalid JSON.');
-  }
-}
-
 async function rpc(
   session: McpSession,
   payload: Record<string, unknown>,
@@ -333,6 +264,7 @@ async function rpc(
   const headers: Record<string, string> = {
     Accept: 'application/json, text/event-stream',
     'Content-Type': 'application/json',
+    'MCP-Protocol-Version': PROTOCOL_VERSION,
   };
   if (session.bearerToken) headers.Authorization = `Bearer ${session.bearerToken}`;
   if (session.sessionId) headers['Mcp-Session-Id'] = session.sessionId;
@@ -351,10 +283,9 @@ async function rpc(
   if (!response.ok && response.status !== 202) {
     throw new Error(`MCP server responded with HTTP ${response.status}.`);
   }
-  if (!expectsReply || response.status === 202)
-    return { sessionId: response.headers.get('mcp-session-id') ?? undefined };
+  if (!expectsReply) return { sessionId: response.headers.get('mcp-session-id') ?? undefined };
   return {
-    response: await readRpcResponse(response),
+    response: await readMcpRpcResponse(response, payload.id, init.signal as AbortSignal),
     sessionId: response.headers.get('mcp-session-id') ?? undefined,
   };
 }
@@ -475,7 +406,7 @@ export async function inspectMcpConnection(
   }
 }
 
-async function invokeMcpTool(
+export async function invokeMcpTool(
   endpointValue: string,
   toolName: string,
   input: Record<string, unknown>,
@@ -487,12 +418,24 @@ async function invokeMcpTool(
     : undefined;
   const { session } = await openMcpSession(endpointValue, fetchImpl, bearerToken);
   try {
-    const response = await rpc(session, {
-      id: 2,
-      method: 'tools/call',
-      params: { name: toolName, arguments: input },
-    });
-    return resultOf(response.response, 'tools/call');
+    let response: Awaited<ReturnType<typeof rpc>>;
+    try {
+      response = await rpc(session, {
+        id: 2,
+        method: 'tools/call',
+        params: { name: toolName, arguments: input },
+      });
+    } catch (error) {
+      if (error instanceof McpAuthorizationError) throw error;
+      // No negotiated remote idempotency or reconciliation exists. Never repeat an uncertain call.
+      throw new AmbiguousMcpMutationError();
+    }
+    if (response.response?.error) return resultOf(response.response, 'tools/call');
+    try {
+      return resultOf(response.response, 'tools/call');
+    } catch {
+      throw new AmbiguousMcpMutationError();
+    }
   } finally {
     session.agent.destroy();
   }
@@ -507,7 +450,9 @@ async function invokeMcpTool(
 export function registerMcpTools(
   registry: ToolRegistry,
   connectionReadPort?: McpToolConnectionReadPort,
+  options: { invoke?: McpToolInvoker } = {},
 ): ToolRegistry {
+  const invoke = options.invoke ?? invokeMcpTool;
   const listConnections = async (ctx: import('./types.js').ToolContext) => {
     if (connectionReadPort) return connectionReadPort.list(ctx.agentId);
     return ctx.db
@@ -607,11 +552,30 @@ export function registerMcpTools(
       inputSchema: callSchema,
       risk: 'approval',
       acceptsUntrustedInput: false,
-      prepare: async (args, ctx) => {
+      prepareSecurity: async (args, ctx, phase) => {
         const connection = await getConnection(ctx, args.connectionId);
-        const fingerprint = connection && mcpToolApprovalFingerprint(connection, args.toolName);
+        const fingerprint = connection && mcpApprovalBindingFingerprint(connection, args.toolName);
         if (!connection || !fingerprint) throw new Error('MCP connection or tool is not ready.');
-        return { ...args, _approvalMcpScope: { fingerprint, connectionName: connection.name } };
+        const prior = (
+          args as typeof args & {
+            _approvalMcpScope?: { connectionId?: unknown; fingerprint?: unknown };
+          }
+        )._approvalMcpScope;
+        if (
+          phase === 'approved' &&
+          (!prior || prior.connectionId !== args.connectionId || prior.fingerprint !== fingerprint)
+        ) {
+          throw new Error('MCP connection or tool changed since approval. Request fresh approval.');
+        }
+        if (phase === 'approved') return args;
+        return {
+          ...args,
+          _approvalMcpScope: {
+            connectionId: args.connectionId,
+            fingerprint,
+            connectionName: connection.name,
+          },
+        };
       },
       approvalSummary: (args) =>
         `Call MCP tool ${args.toolName} with ${clip(JSON.stringify(args.arguments), 360) || 'no arguments'}`,
@@ -628,15 +592,22 @@ export function registerMcpTools(
         }
         // Recheck at execution, including once-approved calls, so a connection
         // edited after dispatch never inherits approval for its former target.
-        const scope = (args as typeof args & { _approvalMcpScope?: { fingerprint?: unknown } })
-          ._approvalMcpScope;
-        if (scope && scope.fingerprint !== mcpToolApprovalFingerprint(connection, args.toolName)) {
+        const scope = (
+          args as typeof args & {
+            _approvalMcpScope?: { connectionId?: unknown; fingerprint?: unknown };
+          }
+        )._approvalMcpScope;
+        if (
+          !scope ||
+          scope.connectionId !== args.connectionId ||
+          scope.fingerprint !== mcpApprovalBindingFingerprint(connection, args.toolName)
+        ) {
           throw new Error('MCP connection or tool changed since approval. Request fresh approval.');
         }
         return {
           connection: connection.name,
           tool: args.toolName,
-          result: await invokeMcpTool(
+          result: await invoke(
             connection.endpoint,
             args.toolName,
             args.arguments,

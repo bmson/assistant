@@ -18,7 +18,7 @@ export type AssetObjectVersion = {
 };
 
 export type AssetReference = {
-  table: 'files' | 'import_sources';
+  table: 'email_attachment_custodies' | 'files' | 'import_sources';
   id: string;
   path: string;
   lifecycleStatus: string;
@@ -56,6 +56,7 @@ export const ASSET_REFERENCE_FIELDS: ReadonlyArray<{
   field: 'workspacePath';
 }> = [
   { table: 'files', field: 'workspacePath' },
+  { table: 'email_attachment_custodies', field: 'workspacePath' },
   { table: 'import_sources', field: 'workspacePath' },
 ];
 
@@ -72,6 +73,16 @@ const TASK_LIFECYCLE_STATUSES = new Set([
   'cancelled',
 ]);
 const IMPORT_LIFECYCLE_STATUSES = new Set(['pending', 'running', 'done', 'failed', 'purged']);
+const EMAIL_ATTACHMENT_CUSTODY_LIFECYCLE_STATUSES = new Set([
+  'marker_pending',
+  'marker_ready',
+  'content_authorized',
+  'object_written',
+  'catalogued',
+  'cleanup_pending',
+  'duplicate_cleaned',
+  'erased',
+]);
 
 function normalizeLifecycleStatus(
   table: AssetReference['table'],
@@ -79,6 +90,8 @@ function normalizeLifecycleStatus(
 ): string {
   if (!status) return 'unknown';
   if (table === 'import_sources') return IMPORT_LIFECYCLE_STATUSES.has(status) ? status : 'unknown';
+  if (table === 'email_attachment_custodies')
+    return EMAIL_ATTACHMENT_CUSTODY_LIFECYCLE_STATUSES.has(status) ? status : 'unknown';
   return TASK_LIFECYCLE_STATUSES.has(status) ? status : 'unknown';
 }
 
@@ -109,7 +122,12 @@ export function migrationAssetReferences(
     const normalized = normalizeWorkspacePath(path);
     if (!normalized || normalized === '.' || normalized.startsWith('..'))
       throw new Error(`Unsafe ${record.table} workspacePath`);
-    const rawBytes = record.table === 'files' ? record.data.bytes : undefined;
+    const rawBytes =
+      record.table === 'files'
+        ? record.data.bytes
+        : record.table === 'email_attachment_custodies'
+          ? (record.data.actualBytes ?? undefined)
+          : undefined;
     const bigintValue =
       rawBytes &&
       typeof rawBytes === 'object' &&
@@ -133,7 +151,10 @@ export function migrationAssetReferences(
       throw new Error(`Invalid ${record.table} byte count`);
     if (expectedBytes !== undefined && (!Number.isSafeInteger(expectedBytes) || expectedBytes < 0))
       throw new Error(`Invalid ${record.table} byte count`);
-    const rawSha = record.table === 'files' ? record.data.sha256 : undefined;
+    const rawSha =
+      record.table === 'files' || record.table === 'email_attachment_custodies'
+        ? record.data.sha256
+        : undefined;
     const expectedSha256 =
       typeof rawSha === 'string' && rawSha.length > 0 ? rawSha.toLowerCase() : undefined;
     if (expectedSha256 !== undefined && !/^[0-9a-f]{64}$/.test(expectedSha256))
@@ -141,9 +162,14 @@ export function migrationAssetReferences(
     const recordLifecycleStatus =
       record.table === 'import_sources'
         ? normalizeLifecycleStatus('import_sources', decodedString(record.data.status))
-        : decodedString(record.data.taskId)
-          ? (taskStatuses.get(decodedString(record.data.taskId) as string) ?? 'task-unavailable')
-          : 'unlinked';
+        : record.table === 'email_attachment_custodies'
+          ? normalizeLifecycleStatus(
+              'email_attachment_custodies',
+              decodedString(record.data.status),
+            )
+          : decodedString(record.data.taskId)
+            ? (taskStatuses.get(decodedString(record.data.taskId) as string) ?? 'task-unavailable')
+            : 'unlinked';
     references.push({
       table: assetField.table as AssetReference['table'],
       id: record.id,
@@ -196,6 +222,7 @@ export async function auditWorkspaceAssets(
   let digestChecked = 0;
   let digestMismatches = 0;
   const referencesByTable: Record<AssetReference['table'], number> = {
+    email_attachment_custodies: 0,
     files: 0,
     import_sources: 0,
   };

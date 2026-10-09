@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fast single-service release for day-to-day iteration:
 #   bash infra/gcp/release-fast.sh web
-#   bash infra/gcp/release-fast.sh agent
+#   bash infra/gcp/release-fast.sh web
 #
 # Builds ONE image, rolls out ONE service, and verifies the rollout. It skips
 # the database backup, the migration job, and every unrelated image, which is
@@ -12,13 +12,13 @@ set -euo pipefail
 
 TARGET="${1:-}"
 case "$TARGET" in
-  web|agent) ;;
+  web) ;;
   *)
-    echo "usage: bash infra/gcp/release-fast.sh [web|agent]" >&2
+    echo "usage: bash infra/gcp/release-fast.sh web" >&2
     echo "" >&2
     echo "Builds and rolls out a single service without backup or migration." >&2
     echo "Use infra/gcp/release.sh instead when the schema, seed data, or" >&2
-    echo "environment variables changed." >&2
+    echo "environment variables changed. Agent changes require the full staged release." >&2
     exit 2
     ;;
 esac
@@ -48,8 +48,22 @@ if [[ ! "$TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
   exit 2
 fi
 
-IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${TARGET}:${TAG}"
+IMAGE_ROOT="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}"
 SERVICE="assistant-${TARGET}"
+
+# A fast web release is valid for either storage composition, but it still
+# needs the live service contract and selected storage schema to be proven.
+# Resolve the driver before building, and let the staged protocol fail closed
+# when the current agent has no reviewed API/schema metadata.
+# shellcheck source=infra/gcp/release-persistence.sh
+source "$(dirname "${BASH_SOURCE[0]}")/release-persistence.sh"
+RELEASE_PERSISTENCE_DRIVER="$(resolve_release_persistence)" || exit $?
+export RELEASE_PERSISTENCE_DRIVER
+export RELEASE_COMPONENTS=web RELEASE_SCHEMA_UNCHANGED=true RELEASE_MODULES=none
+# shellcheck source=infra/gcp/release-staged-services.sh
+source "$(dirname "${BASH_SOURCE[0]}")/release-staged-services.sh"
+release_validate_worker_override || exit $?
+release_preflight_compatibility web
 
 echo "── building ${TARGET}:${TAG} (single image)"
 gcloud builds submit . \
@@ -58,35 +72,8 @@ gcloud builds submit . \
   --substitutions "^@@^_REGION=${REGION}@@_REPO=${REPO}@@_TAG=${TAG}" \
   --quiet
 
-echo "── rolling out ${SERVICE}"
-gcloud run services update "$SERVICE" \
-  --project "$PROJECT" --region "$REGION" \
-  --image "$IMAGE" --quiet
-# Re-assert latest so a pinned traffic split cannot outlive the rollout.
-gcloud run services update-traffic "$SERVICE" \
-  --project "$PROJECT" --region "$REGION" --to-latest --quiet
-
-if [[ "$TARGET" == "web" ]]; then
-  echo "── verifying ${SERVICE} serves ${TAG}"
-  URL="$(gcloud run services describe "$SERVICE" \
-    --project "$PROJECT" --region "$REGION" --format='value(status.url)')"
-  SHA=""
-  for _attempt in $(seq 1 30); do
-    PAYLOAD="$(curl --fail --silent --max-time 10 "${URL}/api/health")" || PAYLOAD=""
-    SHA="$(sed -n 's/.*"sha":"\([^"]*\)".*/\1/p' <<<"$PAYLOAD")"
-    if [[ "$SHA" == "$TAG" ]]; then
-      echo "   ${SERVICE} is serving ${TAG}"
-      break
-    fi
-    sleep 5
-  done
-  if [[ "$SHA" != "$TAG" ]]; then
-    echo "  ${SERVICE} reports '${SHA:-no sha}', expected '${TAG}'." >&2
-    echo "  The new revision exists but is not serving traffic. Inspect with:" >&2
-    echo "    gcloud run services describe ${SERVICE} --region ${REGION} --format='value(status.traffic)'" >&2
-    exit 1
-  fi
-fi
+echo "── staging, probing, and promoting ${SERVICE}"
+release_staged_services
 
 echo ""
 echo "${SERVICE} ${TAG} is live"

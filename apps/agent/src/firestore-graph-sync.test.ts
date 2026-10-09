@@ -1,5 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { syncKnowledgeGraph } from '@assistant/core/memory/knowledge-graph';
+import {
+  GRAPH_EXTRACTION_VERSION,
+  syncKnowledgeGraph,
+} from '@assistant/core/memory/knowledge-graph';
 import type { ModelRouter } from '@assistant/core/model-router';
 import { FirestoreKnowledgeGraphSyncRepository } from '@assistant/firestore';
 import { importWorkspaceBundle } from '@assistant/firestore/workspace-migration';
@@ -73,6 +76,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore knowledge graph
       agentId,
       expiresAt: null,
       embedding: [1, 0, 0],
+      embeddingSpaceKey: null,
       sourceTaskId: null,
       kind: 'fact',
       confidence: '0.80',
@@ -112,10 +116,14 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore knowledge graph
             relationships: [
               {
                 subject: { label: 'Owner', kind: 'person' },
+                subjectSpan: 'Owner',
                 predicate: 'works_at',
+                predicateSpan: 'works at',
                 object: { label: 'Acme', kind: 'organization' },
+                objectSpan: 'Acme',
                 evidenceQuote: content,
                 confidence: 0.9,
+                assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
               },
             ],
           },
@@ -188,7 +196,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore knowledge graph
       agentId,
       contentHash: row.contentHash,
       status: 'ready',
-      extractionVersion: 2,
+      extractionVersion: GRAPH_EXTRACTION_VERSION,
     });
     const relations = await store
       .collection('knowledgeGraphRelations')
@@ -215,6 +223,122 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore knowledge graph
     });
   });
 
+  it('creates UUID-compatible public graph IDs while retaining deterministic identity', async () => {
+    const content = 'Owner works at Acme.';
+    const { row } = await seedMemory(content);
+    const router = routerFor(content);
+    const first = await syncKnowledgeGraph({ graphSync: repository, router }, { agentId });
+    expect(first.relationships).toBe(1);
+    const relations = await store
+      .collection('knowledgeGraphRelations')
+      .where('sourceMemoryId', '==', row.id)
+      .get();
+    expect(relations.size).toBe(1);
+    const relationId = relations.docs[0]?.get('id');
+    expect(relationId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    const assertionId = relations.docs[0]?.get('assertionId');
+    expect(typeof assertionId).toBe('string');
+    const assertionDoc = await store.doc('knowledgeGraphAssertions', String(assertionId)).get();
+    expect(assertionDoc.data()).toMatchObject({
+      id: assertionId,
+      agentId,
+      predicate: 'works_at',
+      lifecycle: 'current',
+      reviewStatus: 'unreviewed',
+    });
+    const evidenceDocs = await store
+      .collection('knowledgeGraphAssertionEvidence')
+      .where('assertionId', '==', assertionId)
+      .get();
+    expect(evidenceDocs.size).toBe(1);
+    expect(evidenceDocs.docs[0]?.data()).toMatchObject({
+      agentId,
+      sourceMemoryId: row.id,
+      evidenceQuote: content,
+      sourceAuthor: 'owner',
+      spanStart: 0,
+      spanEnd: content.length,
+    });
+    const endpoints = await Promise.all([
+      store.doc('knowledgeGraphEntities', String(relations.docs[0]?.get('subjectEntityId'))).get(),
+      store.doc('knowledgeGraphEntities', String(relations.docs[0]?.get('objectEntityId'))).get(),
+    ]);
+    for (const entity of endpoints)
+      expect(entity.get('id')).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
+
+    const second = await syncKnowledgeGraph({ graphSync: repository, router }, { agentId });
+    expect(second.relationships).toBe(0);
+    expect((await store.doc('knowledgeGraphRelations', String(relationId)).get()).exists).toBe(
+      true,
+    );
+  });
+
+  it('rejects a positive relation quote whose source clause reports its denial', async () => {
+    const content = 'Alice denied that Alice is the father of Bob.';
+    const { row } = await seedMemory(content);
+    const router = {
+      async object() {
+        return {
+          ok: true,
+          object: {
+            relationships: [
+              {
+                subject: { label: 'Alice', kind: 'person' },
+                subjectSpan: 'Alice',
+                predicate: 'father_of',
+                predicateSpan: 'is the father of',
+                object: { label: 'Bob', kind: 'person' },
+                objectSpan: 'Bob',
+                evidenceQuote: 'Alice is the father of Bob.',
+                assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
+                confidence: 0.95,
+              },
+            ],
+          },
+        };
+      },
+    } as unknown as ModelRouter;
+
+    const result = await syncKnowledgeGraph({ graphSync: repository, router }, { agentId });
+    expect(result).toMatchObject({
+      candidates: 1,
+      processed: 1,
+      relationships: 0,
+      rejected: 1,
+      rejectionReasons: { assertion_mismatch: 1 },
+    });
+    const relations = await store
+      .collection('knowledgeGraphRelations')
+      .where('sourceMemoryId', '==', row.id)
+      .get();
+    expect(relations.empty).toBe(true);
+    const source = await store.doc('knowledgeGraphSources', row.id).get();
+    expect(source.get('lastError')).toContain('assertion_mismatch:1');
+  });
+
+  it('keeps historical source validity during graph extraction even when the model omits it', async () => {
+    const { row } = await seedMemory('Owner works at Acme.');
+    const from = new Date('2019-01-01Z'),
+      until = new Date('2023-01-01Z');
+    await store.doc('memories', row.id).update({ validFrom: from, validUntil: until });
+    const result = await syncKnowledgeGraph(
+      { graphSync: repository, router: routerFor(row.content) },
+      { agentId },
+    );
+    expect(result.relationships).toBe(1);
+    const relations = await store
+      .collection('knowledgeGraphRelations')
+      .where('sourceMemoryId', '==', row.id)
+      .get();
+    expect(relations.docs[0]?.data()).toMatchObject({
+      validFrom: from.toISOString(),
+      validUntil: until.toISOString(),
+    });
+  });
   it('keeps an imported ready, reviewed graph relation without re-extraction', async () => {
     const migrationStore = emulatorStore();
     const content = 'Owner works at Acme.';
@@ -269,7 +393,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore knowledge graph
           updatedAt: createdAt,
           contentHash,
           subjectContactId: null,
-          extractionVersion: 2,
+          extractionVersion: GRAPH_EXTRACTION_VERSION,
           status: 'ready',
           attempts: 1,
           lastError: null,

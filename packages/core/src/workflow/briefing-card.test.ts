@@ -5,6 +5,60 @@ const timeZone = 'America/Los_Angeles';
 const now = new Date('2026-09-22T14:00:00Z'); // 07:00 local
 
 describe('agendaSection', () => {
+  it.each(['Pacific/Kiritimati', 'Pacific/Tongatapu', 'Etc/GMT+12'])(
+    'keeps an all-day civil date on its own day in %s',
+    (zone) => {
+      const instant = new Date('2026-09-22T12:00:00Z');
+      const section = agendaSection({
+        events: [
+          {
+            summary: 'Offsite',
+            start: '2026-09-22',
+            end: '2026-09-23',
+            calendar: 'Work',
+            allDay: true,
+          },
+        ],
+        complete: true,
+        conflicts: [],
+        salient: [],
+        timeZone: zone,
+        now: instant,
+      });
+      const label = zone === 'Etc/GMT+12' ? 'Today' : 'Tue, Sep 22';
+      expect(section).toMatchObject({ items: [{ day: label, time: 'All day' }] });
+    },
+  );
+  it('keeps a salient event beyond the preview boundary and reports display omissions', () => {
+    const events = Array.from({ length: 21 }, (_, i) => ({
+      eventId: `e${i}`,
+      summary: `Event ${i}`,
+      start: '2026-09-22T16:00:00Z',
+      end: '2026-09-22T17:00:00Z',
+      calendar: 'Work',
+      allDay: false,
+    }));
+    const last = events[20];
+    const section = agendaSection({
+      events,
+      complete: true,
+      conflicts: [],
+      salient: [{ event: last!, score: 5, reasons: ['travel'] }],
+      timeZone,
+      now,
+    });
+    expect(section).toMatchObject({
+      complete: true,
+      omittedCount: 11,
+      title: 'Schedule (10 of 21 events)',
+    });
+    expect(
+      section && 'items' in section && section.items.some((item) => item.title === 'Event 20'),
+    ).toBe(true);
+    expect(briefingMarkdown('Your briefing', [section!])).toContain(
+      '11 other retrieved events are omitted',
+    );
+  });
   it('labels days and clock ranges in the owner zone and flags conflicts and salient events', () => {
     const dentist = {
       eventId: 'd',

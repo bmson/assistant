@@ -5,6 +5,7 @@ import {
   type SkillContextMatch,
   type SkillContextRepository,
   skillRecallBounds,
+  snapshotEmbeddingSpace,
   validateEmbedding,
   validateSkillEmbeddingSpace,
 } from '@assistant/persistence';
@@ -14,18 +15,22 @@ import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 /** Executor-facing learned-skill retrieval and lifecycle counters for Firestore. */
 export class FirestoreSkillContextRepository implements SkillContextRepository {
   readonly kind = 'skill-context-repository' as const;
+  readonly space: EmbeddingSpace;
 
   constructor(
     readonly store: InstallationStore,
-    readonly space: EmbeddingSpace,
+    space: EmbeddingSpace,
   ) {
-    validateSkillEmbeddingSpace(space);
+    this.space = snapshotEmbeddingSpace(space);
+    validateSkillEmbeddingSpace(this.space);
   }
 
   async recall(
     input: Parameters<SkillContextRepository['recall']>[0],
   ): Promise<SkillContextMatch[]> {
     validateEmbedding(this.space, input.embedding);
+    if (input.embeddingSpaceKey !== embeddingSpaceKey(this.space))
+      throw new Error('Learned-skill query embedding space does not match the configured space');
     const { limit, minSimilarity } = skillRecallBounds(input);
     const candidateLimit = Math.min(MAX_SKILL_RECALL_LIMIT, limit * 4);
     const candidates = await this.store

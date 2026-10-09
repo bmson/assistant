@@ -27,6 +27,8 @@ export const LocationPingSchema = z.object({
   source: z.string().max(40).default('shortcut'),
   /** IANA time zone id of the sending device — the owner's clock when traveling. */
   timeZone: z.string().max(64).optional(),
+  /** Explicit consent for a generic arrival nudge; never inferred from sharing location alone. */
+  arrivalOptIn: z.boolean().optional(),
 });
 export type LocationPingInput = z.infer<typeof LocationPingSchema>;
 
@@ -84,6 +86,9 @@ export async function recordLocationPing(
       source: input.source ?? 'shortcut',
       timeZone: input.timeZone ?? null,
       capturedAt: input.capturedAt ? new Date(input.capturedAt) : new Date(),
+      arrivalExpiresAt: input.arrivalOptIn
+        ? new Date(new Date(input.capturedAt ?? Date.now()).getTime() + 5 * 60_000)
+        : null,
     })
     .returning();
   if (!row) throw new Error('failed to record location ping');

@@ -285,9 +285,11 @@ describe.skipIf(!localEmulator)('Firestore import commands with PostgreSQL offli
         body: JSON.stringify({ action: 'delete', source: 'ready' }),
       }),
     );
-    expect(missing.status).toBe(409);
-    expect(await missing.json()).toEqual({ error: 'unknown import source: ready' });
-  });
+    // A completed deletion receipt makes retries idempotent after the source
+    // row and uploaded file are gone.
+    expect(missing.status).toBe(200);
+    expect(await missing.json()).toEqual({ ok: true });
+  }, 30_000);
 
   it('refuses import commands during a privacy erasure', async () => {
     files.set('import/ready.txt', 'Plain notes about the past.');

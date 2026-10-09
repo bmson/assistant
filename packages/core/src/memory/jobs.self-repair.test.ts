@@ -18,6 +18,12 @@ it('runs the hosted repair queue with dedicated credentials and no legacy Action
   });
   const repository = {
     failures: vi.fn(async () => []),
+    modelAccounting: vi.fn(async () => ({
+      observedModelCalls: 0,
+      knownCostUsd: '0',
+      unresolvedReservations: 0,
+      complete: false,
+    })),
     list: vi.fn(async () => []),
     claim: vi.fn(async () => null),
   } as unknown as SelfRepairRepository;
@@ -32,5 +38,5 @@ it('runs the hosted repair queue with dedicated credentials and no legacy Action
       { id: 'task', agentId: 'owner' } as TaskRow,
     ),
   ).toMatchObject({ done: true, summary: 'self-repair: 0 coding run(s) dispatched' });
-  expect(repository.claim).toHaveBeenCalledWith('owner', expect.any(Date), 2);
+  expect(repository.claim).toHaveBeenCalledWith('owner', expect.any(Date), 2, 'task');
 });

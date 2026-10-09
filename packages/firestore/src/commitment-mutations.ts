@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHash as hashBytes } from 'node:crypto';
 import type { DocumentSnapshot, Transaction } from '@google-cloud/firestore';
 import { privacyErasureIsActive } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
@@ -17,6 +17,13 @@ type Commitment = {
   confidence: string;
   contentHash: string;
   updatedAt: Date;
+  conversationId?: string;
+  sourceMessageId?: string | null;
+  sourceTaskId?: string | null;
+  sourceOccurrenceKey?: string | null;
+  dueAt?: Date | null;
+  reopenedFromId?: string | null;
+  reopenOperationId?: string | null;
 };
 
 type Correction = { title: string; details: string; nextAction: string };
@@ -43,6 +50,11 @@ function contentHash(kind: string, title: string, details: string): string {
   return createHash('sha256')
     .update(`${kind}\n${title.trim().toLowerCase()}\n${details.trim().toLowerCase()}`)
     .digest('hex');
+}
+
+function reopenDocumentId(agentId: string, parentId: string): string {
+  const hex = hashBytes('sha256').update(`${agentId}\0${parentId}`).digest('hex').slice(0, 32);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
 /** Atomic owner-fenced commitment mutations used by the mobile memory desk. */
@@ -83,7 +95,8 @@ export class FirestoreCommitmentMutationRepository {
       await this.ownerFence(tx);
       const snapshot = await tx.get(ref);
       const row = validCommitment(snapshot, this.configuredAgentId);
-      if (!row || !['open', 'snoozed'].includes(row.status)) return false;
+      if (!row || !['open', 'snoozed', 'stale'].includes(row.status) || row.resolvedAt)
+        return false;
       tx.update(ref, apply(row, this.store.now()));
       return true;
     });
@@ -130,21 +143,19 @@ export class FirestoreCommitmentMutationRepository {
       await this.ownerFence(tx);
       const snapshot = await tx.get(ref);
       const row = validCommitment(snapshot, this.configuredAgentId);
-      if (!row || !['open', 'snoozed'].includes(row.status)) return false;
+      if (!row || !['open', 'snoozed', 'stale'].includes(row.status) || row.resolvedAt)
+        return false;
       const hash = contentHash(row.kind, title, details);
       const duplicates = await tx.get(
         this.store
           .collection('commitments')
           .where('agentId', '==', this.configuredAgentId)
           .where('contentHash', '==', hash)
-          .limit(10),
+          .where('status', 'in', ['open', 'snoozed', 'stale'])
+          .where('resolvedAt', '==', null)
+          .limit(2),
       );
-      if (
-        duplicates.docs.some(
-          (doc) =>
-            doc.id !== snapshot.id && ['open', 'snoozed'].includes(String(doc.get('status'))),
-        )
-      )
+      if (duplicates.docs.some((doc) => doc.id !== snapshot.id))
         throw new Error('A matching active commitment already exists.');
       const now = this.store.now();
       tx.update(ref, {
@@ -156,6 +167,92 @@ export class FirestoreCommitmentMutationRepository {
         updatedAt: now,
       });
       return true;
+    });
+  }
+
+  async reopen(
+    id: string,
+    expectedUpdatedAt: Date,
+    operationId: string,
+  ): Promise<{ commitmentId: string; replay: boolean } | null> {
+    if (
+      !id ||
+      !(expectedUpdatedAt instanceof Date) ||
+      !Number.isFinite(expectedUpdatedAt.getTime()) ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        operationId,
+      )
+    )
+      return null;
+    const childId = reopenDocumentId(this.configuredAgentId, id);
+    const originalRef = this.store.doc('commitments', id);
+    const childRef = this.store.doc('commitments', childId);
+    return this.store.db.runTransaction(async (tx) => {
+      await this.ownerFence(tx);
+      const snapshots = await tx.getAll(originalRef, childRef);
+      const originalSnapshot = snapshots[0];
+      const childSnapshot = snapshots[1];
+      if (!originalSnapshot) return null;
+      if (childSnapshot?.exists) {
+        const existing = validCommitment(childSnapshot, this.configuredAgentId);
+        return existing?.reopenOperationId === operationId && existing.reopenedFromId === id
+          ? { commitmentId: existing.id, replay: true }
+          : null;
+      }
+      const closed = validCommitment(originalSnapshot, this.configuredAgentId);
+      if (
+        !closed ||
+        !['resolved', 'dismissed'].includes(closed.status) ||
+        !(closed.resolvedAt instanceof Date) ||
+        !(closed.updatedAt instanceof Date) ||
+        closed.updatedAt.getTime() !== expectedUpdatedAt.getTime()
+      )
+        return null;
+
+      const existingChildren = await tx.get(
+        this.store
+          .collection('commitments')
+          .where('agentId', '==', this.configuredAgentId)
+          .where('reopenedFromId', '==', id)
+          .limit(1),
+      );
+      if (!existingChildren.empty) return null;
+      const candidates = await tx.get(
+        this.store
+          .collection('commitments')
+          .where('agentId', '==', this.configuredAgentId)
+          .where('contentHash', '==', closed.contentHash)
+          .where('status', 'in', ['open', 'snoozed', 'stale'])
+          .where('resolvedAt', '==', null)
+          .limit(100),
+      );
+      if (candidates.docs.some((doc) => doc.id !== originalSnapshot.id)) return null;
+
+      const now = this.store.now();
+      tx.create(childRef, {
+        id: childId,
+        agentId: this.configuredAgentId,
+        kind: closed.kind,
+        title: closed.title,
+        details: closed.details,
+        nextAction: closed.nextAction,
+        status: 'open',
+        snoozedUntil: null,
+        resolvedAt: null,
+        resolution: null,
+        confidence: closed.confidence,
+        contentHash: closed.contentHash,
+        conversationId: closed.conversationId ?? null,
+        sourceMessageId: closed.sourceMessageId ?? null,
+        sourceTaskId: null,
+        sourceOccurrenceKey: `manual-reopen:v1:${this.configuredAgentId}:${operationId}`,
+        reopenedFromId: id,
+        reopenOperationId: operationId,
+        dueAt: closed.dueAt ?? null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return { commitmentId: childId, replay: false };
     });
   }
 }

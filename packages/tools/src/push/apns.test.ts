@@ -2,14 +2,19 @@ import { generateKeyPairSync } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { ClientHttp2Session, ClientHttp2Stream } from 'node:http2';
 import { describe, expect, it } from 'vitest';
-import { ApnsClient } from './apns.js';
+import { AmbiguousApnsDeliveryError, ApnsClient } from './apns.js';
 
 /**
  * A fake HTTP/2 session: captures the request headers + payload and answers
  * with a scripted status/reason. Stands in for api.push.apple.com so the
  * client's JWT, headers, and result mapping are covered without a network.
  */
-function fakeSession(script: { status: number; reason?: string; apnsId?: string }) {
+function fakeSession(script: {
+  status: number;
+  reason?: string;
+  apnsId?: string;
+  termination?: 'close' | 'goaway' | 'stall';
+}) {
   const requests: Array<{ headers: Record<string, unknown>; payload: string }> = [];
   const session = Object.assign(new EventEmitter(), {
     closed: false,
@@ -24,7 +29,9 @@ function fakeSession(script: { status: number; reason?: string; apnsId?: string 
           stream.emit('response', { ':status': script.status, 'apns-id': script.apnsId ?? 'id-1' });
           if (script.reason)
             stream.emit('data', Buffer.from(JSON.stringify({ reason: script.reason })));
-          stream.emit('end');
+          if (script.termination === 'close') stream.emit('close');
+          else if (script.termination === 'goaway') session.emit('goaway');
+          else if (script.termination !== 'stall') stream.emit('end');
         });
       };
       return stream as unknown as ClientHttp2Stream;
@@ -33,7 +40,15 @@ function fakeSession(script: { status: number; reason?: string; apnsId?: string 
   return { session: session as unknown as ClientHttp2Session, requests };
 }
 
-function makeClient(script: { status: number; reason?: string; apnsId?: string }) {
+function makeClient(
+  script: {
+    status: number;
+    reason?: string;
+    apnsId?: string;
+    termination?: 'close' | 'goaway' | 'stall';
+  },
+  timeoutMs = 15_000,
+) {
   const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   void publicKey;
   const pem = privateKey.export({ type: 'pkcs8', format: 'pem' });
@@ -43,12 +58,40 @@ function makeClient(script: { status: number; reason?: string; apnsId?: string }
     'TEAM123456',
     Buffer.from(pem).toString('base64'),
     'com.example.assistant',
-    { connect: () => fake.session },
+    { connect: () => fake.session, timeoutMs },
   );
   return { client, fake };
 }
 
 describe('ApnsClient', () => {
+  it.each(['close', 'goaway', 'stall'] as const)(
+    'settles %s without replaying a possibly accepted alert',
+    async (termination) => {
+      const { client, fake } = makeClient({ status: 200, termination }, 5);
+      await expect(
+        client.send({
+          token: 'a'.repeat(64),
+          environment: 'production',
+          title: 'Assistant',
+          body: 'Private notice',
+        }),
+      ).rejects.toBeInstanceOf(AmbiguousApnsDeliveryError);
+      expect(fake.requests).toHaveLength(1);
+    },
+  );
+  it('does not treat a missing status as a known rejection', async () => {
+    const { client, fake } = makeClient({ status: 0 });
+    await expect(
+      client.send({
+        token: 'a'.repeat(64),
+        environment: 'production',
+        title: 'Assistant',
+        body: 'Notice',
+      }),
+    ).rejects.toBeInstanceOf(AmbiguousApnsDeliveryError);
+    expect(fake.requests).toHaveLength(1);
+  });
+
   it('stands down until every setting is present', () => {
     expect(new ApnsClient('', '', '', '').configured()).toBe(false);
     expect(new ApnsClient('k', 't', 'p', '').configured()).toBe(false);

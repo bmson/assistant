@@ -36,16 +36,14 @@ export function listOpenAnomalies() {
 export async function dismissOwnerAnomaly(anomalyId: string): Promise<boolean> {
   const firestore = firestoreReviews();
   if (firestore) return firestore.anomalies.dismiss(firestore.agentId, anomalyId);
-  await getApplication().dismissAnomaly(anomalyId);
-  return true;
+  return getApplication().dismissAnomaly(anomalyId);
 }
 
 /** Disable the policy behind an anomaly and mark the anomaly acted on. */
 export async function suspendOwnerAnomalyPolicy(anomalyId: string): Promise<boolean> {
   const firestore = firestoreReviews();
   if (firestore) return firestore.anomalies.suspendPolicy(firestore.agentId, anomalyId);
-  await getApplication().suspendAnomaly(anomalyId);
-  return true;
+  return getApplication().suspendAnomaly(anomalyId);
 }
 
 /** The newest open improvement proposals for the owner. */

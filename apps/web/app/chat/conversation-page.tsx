@@ -14,7 +14,7 @@ export interface ChatPageQuery {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export async function renderChatConversation(id: string, query: ChatPageQuery) {
-  await requireOwner();
+  const owner = await requireOwner();
   if (!UUID_RE.test(id)) notFound();
 
   const view = await getChatApplication().getChatConversation(id, {
@@ -27,6 +27,7 @@ export async function renderChatConversation(id: string, query: ChatPageQuery) {
   return (
     <ChatClient
       conversationId={conversation.id}
+      formSessionScope={owner.formSessionScope}
       title={conversation.title || 'Untitled'}
       agentName={view.agentName}
       agentTimezone={view.agentTimezone}

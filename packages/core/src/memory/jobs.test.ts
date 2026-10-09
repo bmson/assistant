@@ -1,16 +1,34 @@
 import { randomUUID } from 'node:crypto';
-import { createDb, type Db, messages, schedules, type TaskRow, tasks } from '@assistant/db';
-import type { ExecutionPersistence, KnowledgeGraphSyncRepository } from '@assistant/persistence';
+import {
+  agents,
+  conversations,
+  createDb,
+  type Db,
+  messages,
+  schedules,
+  type TaskRow,
+  tasks,
+} from '@assistant/db';
+import type {
+  ExecutionPersistence,
+  KnowledgeGraphSyncRepository,
+  ReminderEventDependency,
+} from '@assistant/persistence';
 import { eq, inArray } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { getAgent } from '../chat.js';
 import { loadConfig, resetConfigForTest } from '../config.js';
 import type { InboundEvent } from '../events.js';
 import type { ModelRouter } from '../model-router/router.js';
+import type { ScoreboardGame } from '../sports/index.js';
 import type { DispatcherPort } from '../workflow/executor.js';
 import { executeTask } from '../workflow/executor.js';
 import { enqueueTask } from '../workflow/machine.js';
-import { codeJobName, isCodeJobEnabled, runCodeJob } from './jobs.js';
+import {
+  codeJobName,
+  isCodeJobEnabled,
+  isExactCompletedSportsOccurrence,
+  runCodeJob,
+} from './jobs.js';
 
 const DATABASE_URL =
   process.env.DATABASE_URL ?? 'postgres://assistant:assistant@localhost:5432/assistant';
@@ -20,6 +38,96 @@ let dbUp = false;
 let agentId: string;
 const createdTaskIds: string[] = [];
 const createdScheduleIds: string[] = [];
+
+describe('event-completion reminder verification', () => {
+  const dependency: ReminderEventDependency = {
+    provider: 'sports',
+    eventId: 'fixture-1',
+    league: 'mlb',
+    startsAt: '2026-10-08T02:00:00.000Z',
+    eventDate: '2026-10-07',
+    timezone: 'America/Los_Angeles',
+    homeTeamId: 'sf',
+    awayTeamId: 'la',
+    homeTeam: 'San Francisco Giants',
+    awayTeam: 'Los Angeles Dodgers',
+    verifiedAt: '2026-10-07T06:35:00.000Z',
+  };
+  const game: ScoreboardGame = {
+    id: dependency.eventId,
+    league: dependency.league,
+    leagueLabel: 'MLB',
+    state: 'post',
+    statusText: 'Final',
+    startsAt: dependency.startsAt,
+    home: {
+      id: dependency.homeTeamId,
+      name: dependency.homeTeam,
+      shortName: 'Giants',
+      abbreviation: 'SF',
+    },
+    away: {
+      id: dependency.awayTeamId,
+      name: dependency.awayTeam,
+      shortName: 'Dodgers',
+      abbreviation: 'LA',
+    },
+    line: 'Los Angeles Dodgers at San Francisco Giants: 3-4, Final',
+  };
+
+  it('only treats the exact bound fixture as complete after the provider reports post', () => {
+    expect(isExactCompletedSportsOccurrence(dependency, [game])).toBe(true);
+    expect(isExactCompletedSportsOccurrence(dependency, [{ ...game, state: 'in' }])).toBe(false);
+    expect(
+      isExactCompletedSportsOccurrence(dependency, [
+        { ...game, startsAt: '2026-10-08T03:00:00.000Z' },
+      ]),
+    ).toBe(false);
+    expect(isExactCompletedSportsOccurrence(dependency, [{ ...game, id: 'another-game' }])).toBe(
+      false,
+    );
+    expect(isExactCompletedSportsOccurrence(dependency, [game, game])).toBe(false);
+  });
+
+  it('withholds delivery while the exact game is live and delivers only after final status', async () => {
+    const deliver = vi.fn(async () => ({ delivered: true as const, conversationId: 'chat-1' }));
+    const task = {
+      id: 'task-reminder',
+      agentId: 'agent-reminder',
+      conversationId: null,
+      lockedUntil: new Date(Date.now() + 60_000),
+      leaseToken: 'lease',
+      trigger: {
+        payload: {
+          job: 'reminder.notify',
+          scheduleId: 'reminder-1',
+          occurrenceId: 'schedule:reminder-1:occurrence',
+          reminderKind: 'event_completion',
+          reminderText: 'Check the game result.',
+          reminderEventDependency: dependency,
+        },
+      },
+    } as unknown as TaskRow;
+    const run = (state: ScoreboardGame['state']) =>
+      runCodeJob(
+        {
+          db: {} as never,
+          router: fakeRouter,
+          persistence: { reminderDelivery: { deliver } } as unknown as ExecutionPersistence,
+          reminderSportsScoreboardReader: async () => [{ ...game, state }],
+        },
+        'reminder.notify',
+        task,
+      );
+
+    const pending = await run('in');
+    expect(pending.summary).toMatch(/has not finished/);
+    expect(deliver).not.toHaveBeenCalled();
+    const completed = await run('post');
+    expect(completed.summary).toMatch(/delivered/);
+    expect(deliver).toHaveBeenCalledTimes(1);
+  });
+});
 
 /** Extraction with no extractable conversations returns empty — the fake never gets called for facts. */
 const fakeRouter = {
@@ -53,7 +161,13 @@ const explodingDispatcher: DispatcherPort = {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   try {
-    agentId = (await getAgent(db)).id;
+    agentId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId,
+      name: 'Isolated code jobs',
+      email: `${agentId}@jobs.invalid`,
+      workspacePrefix: `jobs/${agentId}`,
+    });
     dbUp = true;
   } catch {
     console.warn('jobs.test: database unreachable — skipping');
@@ -67,6 +181,22 @@ afterAll(async () => {
   }
   if (dbUp && createdScheduleIds.length) {
     await db.delete(schedules).where(inArray(schedules.id, createdScheduleIds));
+  }
+  if (dbUp) {
+    const owned = await db
+      .select({ id: conversations.id })
+      .from(conversations)
+      .where(eq(conversations.agentId, agentId));
+    if (owned.length) {
+      await db.delete(messages).where(
+        inArray(
+          messages.conversationId,
+          owned.map((row) => row.id),
+        ),
+      );
+      await db.delete(conversations).where(eq(conversations.agentId, agentId));
+    }
+    await db.delete(agents).where(eq(agents.id, agentId));
   }
   await (db as unknown as { $client: { end: () => Promise<void> } }).$client?.end?.();
 });

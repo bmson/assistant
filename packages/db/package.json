@@ -6,11 +6,12 @@
   "exports": {
     ".": "./src/index.ts",
     "./schema": "./src/schema.ts",
-    "./workspace-migration": "./src/workspace-migration.ts"
+    "./workspace-migration": "./src/workspace-migration.ts",
+    "./test-target": "./src/test-target.ts"
   },
   "scripts": {
     "generate": "drizzle-kit generate",
-    "migrate": "drizzle-kit migrate",
+    "migrate": "tsx src/migrate.ts",
     "repair-agent-identity": "tsx src/repair-agent-identity.ts",
     "diagnose-schema": "tsx src/diagnose-schema.ts",
     "reconcile": "tsx src/reconcile.ts",
@@ -18,6 +19,7 @@
     "reconcile:direct": "pnpm migrate && pnpm repair-agent-identity && pnpm seed",
     "seed": "tsx src/seed.ts",
     "test:prepare": "tsx src/test-db.ts && pnpm migrate && pnpm seed",
+    "test:cleanup": "tsx src/cleanup-test-db.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

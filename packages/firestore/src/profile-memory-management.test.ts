@@ -14,6 +14,7 @@ const space: EmbeddingSpace = {
   revision: '1',
 };
 const vector = [1, 0, 0];
+const embeddingIdentity = { embeddingSpaceKey: embeddingSpaceKey(space) };
 
 function hash(content: string): string {
   return createHash('sha256').update(content).digest('hex');
@@ -50,6 +51,7 @@ function memory(
     ownerConfirmed: false,
     pinned: false,
     source: 'import:test',
+    embeddingSpaceKey: null,
     lastAccessedAt: null,
     lastConsolidatedAt: null,
     ...patch,
@@ -158,9 +160,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           content: correctedContent,
           contentHash: correctedHash,
           embedding: vector,
+          ...embeddingIdentity,
         }),
       ).toEqual({ status: 'stale' });
       expect((await store.doc('memoryTombstones', original.contentHash).get()).exists).toBe(false);
+      await store.doc('memories', id).update({ embeddingSpaceKey: 'b'.repeat(64) });
+      expect(await repository.get(id)).toEqual({ id, agentId, contentHash: original.contentHash });
 
       const result = await repository.correct({
         memoryId: id,
@@ -168,6 +173,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         content: correctedContent,
         contentHash: correctedHash,
         embedding: vector,
+        ...embeddingIdentity,
       });
       expect(result).toEqual({
         status: 'updated',
@@ -188,6 +194,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         quarantined: false,
       });
       expect(snapshot.get('embeddingSpace')).toBe(embeddingSpaceKey(space));
+      expect(snapshot.get('embeddingSpaceKey')).toBe(embeddingSpaceKey(space));
       expect(snapshot.get('embedding').toArray()).toEqual(vector);
       expect(
         (await store.doc('memoryTombstones', original.contentHash).get()).data(),
@@ -224,6 +231,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           content: forgottenContent,
           contentHash: forgottenHash,
           embedding: vector,
+          ...embeddingIdentity,
         }),
       ).toEqual({ status: 'tombstoned' });
       expect(
@@ -233,6 +241,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           content: duplicate.content,
           contentHash: duplicate.contentHash,
           embedding: vector,
+          ...embeddingIdentity,
         }),
       ).toEqual({ status: 'duplicate' });
       expect((await store.doc('memoryTombstones', source.contentHash).get()).exists).toBe(false);
@@ -250,12 +259,14 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           expectedContentHash: source.contentHash,
           ...first,
           embedding: vector,
+          ...embeddingIdentity,
         }),
         repository.correct({
           memoryId: source.id,
           expectedContentHash: source.contentHash,
           ...second,
           embedding: vector,
+          ...embeddingIdentity,
         }),
       ]);
       expect(results.map((result) => result.status).sort()).toEqual(['stale', 'updated']);
@@ -273,6 +284,8 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         quarantined: true,
       });
       await Promise.all([seed(forgotten), seed(rejected)]);
+      // Erasure depends on owner/document/content-hash identity, not vector metadata.
+      await store.doc('memories', forgotten.id).update({ embeddingSpaceKey: 'b'.repeat(64) });
 
       expect(await repository.forget(forgotten.id, 'owner_forget')).toMatchObject({
         status: 'updated',
@@ -312,6 +325,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         content: 'Missing subject fact',
         contentHash: hash('Missing subject fact'),
         embedding: vector,
+        ...embeddingIdentity,
         importance: 3,
         pinned: false,
         subjectContactId: 'missing-contact',
@@ -329,6 +343,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         content,
         contentHash: hash(content),
         embedding: vector,
+        ...embeddingIdentity,
         importance: 5,
         pinned: true,
         subjectContactId: contactId,

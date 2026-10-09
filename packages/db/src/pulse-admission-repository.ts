@@ -6,9 +6,12 @@ import { postgresPrivacyObservationFence } from './privacy-erasure-repository.js
 import {
   agents,
   conversations,
+  emailIngest,
   messages,
   notificationPrefs,
   proactiveMoments,
+  securityIncidentAttention,
+  securityIncidents,
   suggestions,
   tasks,
 } from './schema.js';
@@ -56,6 +59,78 @@ export function createPostgresPulseAdmissionRepository(
             ),
           );
         if (previous) return { status: 'already-said' as const };
+        if (input.emailSource) {
+          const source = input.emailSource;
+          const [current] = await tx
+            .select()
+            .from(emailIngest)
+            .where(
+              and(
+                eq(emailIngest.agentId, input.agentId),
+                eq(emailIngest.channelMessageId, source.channelMessageId),
+              ),
+            )
+            .for('update');
+          if (
+            !current ||
+            current.providerThreadId !== source.threadId ||
+            current.providerMessageId !== source.providerMessageId ||
+            current.obligationVersion !== source.obligationVersion ||
+            !current.actionable ||
+            current.pipelineStage !== 'complete' ||
+            !['unknown', 'open', 'snoozed'].includes(current.obligationStatus) ||
+            (current.obligationStatus === 'snoozed' &&
+              current.obligationSnoozedUntil &&
+              current.obligationSnoozedUntil > input.now)
+          )
+            return { status: 'stale-source' as const };
+          const [latest] = await tx
+            .select({ channelMessageId: emailIngest.channelMessageId })
+            .from(emailIngest)
+            .where(
+              and(
+                eq(emailIngest.agentId, input.agentId),
+                eq(emailIngest.providerThreadId, source.threadId),
+              ),
+            )
+            .orderBy(
+              sql`COALESCE(${emailIngest.providerReceivedAt}, ${emailIngest.createdAt}) DESC`,
+              sql`COALESCE(${emailIngest.providerMessageId}, ${emailIngest.channelMessageId}) DESC`,
+            )
+            .limit(1);
+          if (latest?.channelMessageId !== source.channelMessageId)
+            return { status: 'stale-source' as const };
+        }
+        if (input.securityIncident) {
+          const [incident] = await tx
+            .select()
+            .from(securityIncidents)
+            .where(
+              and(
+                eq(securityIncidents.agentId, input.agentId),
+                eq(securityIncidents.id, input.securityIncident.id),
+              ),
+            )
+            .for('update');
+          if (!incident || incident.revision !== input.securityIncident.revision)
+            return { status: 'already-said' as const };
+          if (
+            incident.decisionRevision === incident.revision &&
+            (incident.disposition === 'expected' || incident.disposition === 'dismissed')
+          )
+            return { status: 'already-said' as const };
+          const [attention] = await tx
+            .select({ id: securityIncidentAttention.id })
+            .from(securityIncidentAttention)
+            .where(
+              and(
+                eq(securityIncidentAttention.agentId, input.agentId),
+                eq(securityIncidentAttention.incidentId, input.securityIncident.id),
+                eq(securityIncidentAttention.revision, input.securityIncident.revision),
+              ),
+            );
+          if (attention) return { status: 'already-said' as const };
+        }
         const [prefs] = await tx
           .select({ cap: notificationPrefs.ambientDailyCap })
           .from(notificationPrefs)
@@ -83,6 +158,19 @@ export function createPostgresPulseAdmissionRepository(
           )
           .limit(1);
         if (recent) return { status: 'min-gap' as const };
+
+        if (input.securityIncident) {
+          await tx.insert(securityIncidentAttention).values({
+            id: randomUUID(),
+            agentId: input.agentId,
+            incidentId: input.securityIncident.id,
+            revision: input.securityIncident.revision,
+            producer: 'pulse',
+            deliveryStatus: 'accepted',
+            createdAt: input.now,
+            updatedAt: input.now,
+          });
+        }
 
         const [primary] = await tx
           .select()

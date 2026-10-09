@@ -9,10 +9,16 @@ import {
   tasks,
 } from '@assistant/db';
 import { eq } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createChatTask, ensureChatConversation, getAgent } from '../chat.js';
 import { BudgetReservationError, releaseReservation } from '../cost.js';
-import { isUnparseableObjectError, ModelRouter, objectFailureAuditOutput } from './router.js';
+import {
+  type CallOptions,
+  isProviderCapabilityError,
+  isUnparseableObjectError,
+  ModelRouter,
+  objectFailureAuditOutput,
+} from './router.js';
 
 const DATABASE_URL =
   process.env.DATABASE_URL ?? 'postgres://assistant:assistant@localhost:5432/assistant';
@@ -67,6 +73,86 @@ describe('objectFailureAuditOutput', () => {
 
   it('does not label unrelated provider errors as schema failures', () => {
     expect(objectFailureAuditOutput(new Error('fetch failed'))).toBeUndefined();
+  });
+});
+
+describe('single-attempt model calls', () => {
+  it('suppresses timeout retries only when requested', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const router = new ModelRouter(db, 'unused');
+    const internal = router as unknown as {
+      withTimeoutRetry: (opts: CallOptions, run: () => Promise<string>) => Promise<string>;
+    };
+    const timeout = Object.assign(new Error('deadline'), { name: 'TimeoutError' });
+    const oneShot = vi.fn().mockRejectedValue(timeout);
+    await expect(internal.withTimeoutRetry({ singleAttempt: true }, oneShot)).rejects.toBe(timeout);
+    expect(oneShot).toHaveBeenCalledTimes(1);
+
+    const normal = vi.fn().mockRejectedValueOnce(timeout).mockResolvedValueOnce('retried');
+    await expect(internal.withTimeoutRetry({}, normal)).resolves.toBe('retried');
+    expect(normal).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not run configured capability fallback for one-shot generation', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const router = new ModelRouter(db, 'unused');
+    const capabilityError = Object.assign(new Error('No endpoints match request'), {
+      name: 'AI_APICallError',
+      statusCode: 410,
+    });
+    expect(isProviderCapabilityError(capabilityError)).toBe(true);
+    const generateOnce = vi.fn().mockRejectedValue(capabilityError);
+    const route = vi.fn(async (_role: unknown, options: { forceFallback?: boolean }) => ({
+      ok: true as const,
+      modelId: options.forceFallback ? 'fallback' : 'primary',
+    }));
+    Object.defineProperty(router, 'generateOnce', { value: generateOnce });
+    Object.defineProperty(router, 'route', { value: route });
+
+    await expect(router.generate('draft', { prompt: 'test', singleAttempt: true })).rejects.toBe(
+      capabilityError,
+    );
+    expect(generateOnce).toHaveBeenCalledTimes(1);
+    expect(route).not.toHaveBeenCalled();
+
+    await expect(router.generate('draft', { prompt: 'test' })).rejects.toBe(capabilityError);
+    expect(generateOnce).toHaveBeenCalledTimes(3);
+    expect(route).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not run the step output-quality retry for one-shot calls', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const router = new ModelRouter(db, 'unused');
+    const malformed = {
+      ok: true as const,
+      modelId: 'primary',
+      degraded: false,
+      text: '23°Cwarming',
+      toolCalls: [],
+    };
+    const stepOnce = vi.fn().mockResolvedValue(malformed);
+    const route = vi.fn(async () => ({ ok: true as const, modelId: 'fallback' }));
+    Object.defineProperty(router, 'stepOnce', { value: stepOnce });
+    Object.defineProperty(router, 'route', { value: route });
+
+    const oneShot = await router.step('draft', {
+      prompt: 'test',
+      tools: {},
+      singleAttempt: true,
+    });
+    expect(oneShot).toMatchObject({ ok: true, qualityFailure: true });
+    expect(stepOnce).toHaveBeenCalledTimes(1);
+    expect(route).not.toHaveBeenCalled();
+
+    stepOnce.mockResolvedValueOnce(malformed).mockResolvedValueOnce({
+      ...malformed,
+      modelId: 'fallback',
+      text: 'The temperature is 23°C.',
+    });
+    const normal = await router.step('draft', { prompt: 'test', tools: {} });
+    expect(normal).toMatchObject({ ok: true, modelId: 'fallback' });
+    expect(stepOnce).toHaveBeenCalledTimes(3);
+    expect(route).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -233,6 +319,133 @@ describe('ModelRouter.route (integration)', () => {
     }
 
     await db.delete(tasks).where(eq(tasks.id, task.id));
+  });
+
+  it('keeps the cheaper primary when an explicitly configured budget fallback costs more', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const rollback = new Error('rollback expensive fallback fixture');
+    await expect(
+      db.transaction(async (tx) => {
+        const scoped = tx as unknown as Db;
+        const agent = await getAgent(scoped);
+        const conversation = await ensureChatConversation(scoped, agent.id);
+        const task = await createChatTask(scoped, {
+          agentId: agent.id,
+          conversationId: conversation.id,
+        });
+        await tx
+          .update(tasks)
+          .set({ budgetUsdLimit: '0.25', spentUsd: '0.21' })
+          .where(eq(tasks.id, task.id));
+        await tx
+          .update(modelRoles)
+          .set({ fallbackModel: 'moonshotai/kimi-k3' })
+          .where(eq(modelRoles.role, 'draft'));
+
+        const route = await new ModelRouter(scoped, 'unused').route('draft', {
+          taskId: task.id,
+          prompt: 'A bounded test prompt',
+        });
+        expect(route.ok).toBe(true);
+        if (route.ok) {
+          expect(route.modelId).toBe('google/gemini-3.8-flash');
+          expect(route.degraded).toBe(false);
+        }
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
+  });
+
+  it('validates the exact request shape for both configured routes', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const rollback = new Error('rollback unsupported profile fixture');
+    await expect(
+      db.transaction(async (tx) => {
+        const scoped = tx as unknown as Db;
+        const agent = await getAgent(scoped);
+        const conversation = await ensureChatConversation(scoped, agent.id);
+        const task = await createChatTask(scoped, {
+          agentId: agent.id,
+          conversationId: conversation.id,
+        });
+        await tx
+          .update(tasks)
+          .set({ budgetUsdLimit: '0.25', spentUsd: '0.21' })
+          .where(eq(tasks.id, task.id));
+        const [role] = await tx.select().from(modelRoles).where(eq(modelRoles.role, 'draft'));
+        if (!role) throw new Error('missing draft model role');
+        const [primary, fallback] = await Promise.all([
+          tx
+            .select()
+            .from(models)
+            .where(eq(models.id, role.primaryModel))
+            .then((rows) => rows[0]),
+          tx
+            .select()
+            .from(models)
+            .where(eq(models.id, role.fallbackModel))
+            .then((rows) => rows[0]),
+        ]);
+        if (!primary || !fallback) throw new Error('missing configured draft model');
+        const checkedAt = new Date().toISOString();
+        await tx
+          .update(models)
+          .set({
+            capabilities: {
+              ...(primary.capabilities as Record<string, unknown>),
+              supportedParameters: [
+                'tools',
+                'tool_choice',
+                'structured_outputs',
+                'json_object',
+                'reasoning',
+              ],
+              checkedAt,
+            },
+          })
+          .where(eq(models.id, role.primaryModel));
+        await tx
+          .update(models)
+          .set({
+            capabilities: {
+              ...(fallback.capabilities as Record<string, unknown>),
+              supportedParameters: ['tools', 'tool_choice', 'reasoning'],
+              checkedAt,
+            },
+          })
+          .where(eq(models.id, role.fallbackModel));
+        const router = new ModelRouter(scoped, 'unused');
+        const requestProfile = {
+          tools: 'required' as const,
+          toolChoice: 'required' as const,
+          output: 'json_schema' as const,
+          streaming: false,
+        };
+        expect(
+          (
+            await router.route('draft', {
+              requestProfile: { tools: 'none', output: 'json', streaming: false },
+            })
+          ).ok,
+        ).toBe(true);
+        await expect(
+          router.route('draft', {
+            forceFallback: true,
+            requestProfile: { tools: 'none', output: 'json', streaming: false },
+          }),
+        ).rejects.toThrow('json_object');
+        const budgetRoute = await router.route('draft', { taskId: task.id, requestProfile });
+        expect(budgetRoute.ok).toBe(true);
+        if (budgetRoute.ok) {
+          expect(budgetRoute.modelId).toBe(role.primaryModel);
+          expect(budgetRoute.degraded).toBe(false);
+        }
+        await expect(
+          router.route('draft', { forceFallback: true, requestProfile }),
+        ).rejects.toThrow('structured_outputs');
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
   });
 
   it('tries the cheaper fallback when the primary reservation does not fit', async (ctx) => {

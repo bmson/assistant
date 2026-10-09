@@ -18,6 +18,7 @@ import {
 } from '@assistant/tools/question-regression';
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
+import { allocateTestTarget, isolatedTestEnvironment } from './test-target.js';
 
 const { values } = parseArgs({
   options: {
@@ -37,9 +38,11 @@ if (values.help) {
   );
   process.exit(0);
 }
-const databaseUrl = assertReplayDatabaseUrl(
+const sourceDatabaseUrl = assertReplayDatabaseUrl(
   values.database ?? 'postgres://assistant:assistant@localhost:5432/assistant_questions_test',
 );
+const target = allocateTestTarget(sourceDatabaseUrl);
+const databaseUrl = target.databaseUrl;
 const maxSpend = Number(values.budget);
 if (!Number.isFinite(maxSpend) || maxSpend < 0.1 || maxSpend > 20)
   throw new Error('--budget must be $0.10–$20');
@@ -71,6 +74,8 @@ Object.assign(process.env, {
   ASSISTANT_TIMEZONE: 'America/Los_Angeles',
 });
 process.env.DATABASE_URL = databaseUrl;
+process.env.TEST_DATABASE_URL = databaseUrl;
+process.env.ASSISTANT_TEST_TARGET_TOKEN = target.token;
 process.env.CHAT_RECALL_ENABLED = 'false';
 process.env.AUTH_DEV_BYPASS = 'false';
 process.env.QUEUE_DRIVER = 'local';
@@ -140,18 +145,40 @@ process.on('exit', () => {
   closeSync(lock);
   unlinkSync(lockPath);
 });
+const isolatedEnv = {
+  ...(values.live ? process.env : isolatedTestEnvironment(process.env)),
+  DATABASE_URL: databaseUrl,
+  TEST_DATABASE_URL: databaseUrl,
+  ASSISTANT_TEST_TARGET_TOKEN: target.token,
+  ...(!values.live
+    ? {
+        NODE_OPTIONS: [
+          process.env.NODE_OPTIONS,
+          `--import=${new URL('./deny-test-egress.mjs', import.meta.url).href}`,
+        ]
+          .filter(Boolean)
+          .join(' '),
+      }
+    : {}),
+};
 const prepared = spawnSync('pnpm', ['--filter', '@assistant/db', 'test:prepare'], {
-  env: process.env,
+  env: isolatedEnv,
   encoding: 'utf8',
 });
 await writeFile(`${outputDir}/prepare.log`, `${prepared.stdout ?? ''}\n${prepared.stderr ?? ''}`, {
   mode: 0o600,
 });
-if (prepared.error || prepared.status !== 0)
+if (prepared.error || prepared.status !== 0) {
+  spawnSync('pnpm', ['--filter', '@assistant/db', 'test:cleanup'], {
+    env: isolatedEnv,
+    stdio: 'ignore',
+  });
   throw new Error(`Local test database preparation failed; see ${outputDir}/prepare.log`);
+}
 const db = createDb(databaseUrl);
 const results: QuestionResult[] = [];
 const notRun: string[] = [];
+let cleanupFailed = false;
 try {
   if (snapshot) {
     for (const model of snapshot.models)
@@ -219,7 +246,13 @@ try {
   }
 } finally {
   await db.$client.end();
+  const cleanup = spawnSync('pnpm', ['--filter', '@assistant/db', 'test:cleanup'], {
+    env: isolatedEnv,
+    stdio: 'inherit',
+  });
+  cleanupFailed = Boolean(cleanup.error || cleanup.status !== 0);
 }
+if (cleanupFailed) throw new Error('Disposable question replay database cleanup failed.');
 const summary = {
   ...summarizeQuestions(results),
   notRun,

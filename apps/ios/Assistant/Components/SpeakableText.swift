@@ -22,8 +22,8 @@ enum SpeakableText {
 
     /// Everything this message has to say, in the order it should be said.
     ///
-    /// Used by the long-press action and by the final pass when a turn settles.
-    /// The streaming path speaks prose as it arrives instead — see `SpeechProgress`.
+    /// Used by explicit playback and by automatic speech after the durable
+    /// response arrives, so approval and card privacy are known first.
     static func passages(for message: ChatMessage) -> [String] {
         guard message.role == .assistant else { return [] }
 
@@ -162,8 +162,19 @@ enum SpeakableText {
             sentence = join([spoken(subject), count(messageCount, "message", "messages")])
         case let .sheetRows(_, sheetName, _, totalRows, _):
             sentence = join([spoken(sheetName), count(totalRows, "row", "rows")])
-        case let .availability(_, _, _, busy, _, _, _):
-            sentence = busy.isEmpty ? "Nothing is booked." : count(busy.count, "booked block", "booked blocks")
+        case let .availability(_, _, _, busy, calendarsChecked, complete, _):
+            if !busy.isEmpty {
+                let booked = count(busy.count, "booked block", "booked blocks")
+                sentence = complete
+                    ? booked
+                    : "\(booked). Availability is incomplete; unlisted time is unknown."
+            } else if complete {
+                sentence = "Nothing is booked."
+            } else if calendarsChecked.isEmpty {
+                sentence = "Availability is unconfirmed."
+            } else {
+                sentence = "No conflicts were found in the checked calendars. Availability is incomplete; unlisted time is unknown."
+            }
         case let .knowledgeGraph(_, title, edges, _):
             sentence = join([spoken(title), count(edges.count, "connection", "connections")])
         case let .calendarConflicts(_, title, conflicts, _):
@@ -179,7 +190,8 @@ enum SpeakableText {
         // this audience. When the composer sent none, the parser falls back to
         // the title, which is a heading rather than an answer; read the facts
         // in that case instead.
-        let label = card.accessibilityLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = withoutSensitiveValues(card.accessibilityLabel, in: card)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         if !label.isEmpty, label != card.title { return spoken(label) }
 
         // A sensitive fact is held back on screen until it is asked for.
@@ -188,11 +200,27 @@ enum SpeakableText {
         let facts = card.facts
             .filter { !$0.sensitive }
             .map { fact in
-                let name = spoken(fact.label)
-                let value = spoken(fact.value)
+                let name = spoken(withoutSensitiveValues(fact.label, in: card))
+                let value = spoken(withoutSensitiveValues(fact.value, in: card))
                 return name.isEmpty ? value : "\(name): \(value)"
             }
-        return join([spoken(card.title), spoken(card.subtitle)] + facts)
+        return join([spoken(withoutSensitiveValues(card.title, in: card)),
+                     spoken(withoutSensitiveValues(card.subtitle, in: card))] + facts)
+    }
+
+    private static func withoutSensitiveValues(_ text: String, in card: MessageResponseCard.GeneratedCard) -> String {
+        card.facts.filter(\.sensitive).map(\.value)
+            .filter { $0.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2 }
+            .sorted { $0.count > $1.count }
+            .reduce(text) { result, secret in
+                result.replacingOccurrences(of: secret, with: "", options: [.caseInsensitive])
+            }
+    }
+
+    static func safeAccessibilityLabel(for card: MessageResponseCard.GeneratedCard) -> String {
+        let label = withoutSensitiveValues(card.accessibilityLabel, in: card)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return label.isEmpty ? card.title : label
     }
 
     // MARK: - Words

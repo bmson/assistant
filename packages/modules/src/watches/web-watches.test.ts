@@ -205,6 +205,43 @@ describe('web watch polling', () => {
     expect((await stateOf(watch.id)).fires).toBe(1);
   });
 
+  it.for(['change', 'contains'] as const)(
+    'admits repeated %s cycles without repeating a claimed poll',
+    async (mode, ctx) => {
+      if (!dbUp) return ctx.skip();
+      const watch = await createWebWatch('repeated-cycle', {
+        url: 'https://ex.test/repeat',
+        mode,
+        pattern: 'in stock',
+        intervalSeconds: 60,
+      });
+      const pages = new Map([['https://ex.test/repeat', 'Sold out']]);
+      const before = notices.length;
+      await pollDueWebWatches(deps, { now: T0, fetch: makeFetch(pages) });
+      for (const [minute, text] of [
+        [5, 'In stock'],
+        [10, 'Sold out'],
+        [15, 'In stock'],
+      ] as const) {
+        pages.set('https://ex.test/repeat', text);
+        const options = { now: at(minute * 60), fetch: makeFetch(pages) };
+        await Promise.all([pollDueWebWatches(deps, options), pollDueWebWatches(deps, options)]);
+      }
+      const fires = await db.select().from(watchFires).where(eq(watchFires.watchId, watch.id));
+      const expected = mode === 'contains' ? 2 : 3;
+      expect(fires).toHaveLength(expected);
+      expect(new Set(fires.map((fire) => fire.triggerRef)).size).toBe(expected);
+      expect((await stateOf(watch.id)).fireCount).toBe(expected);
+      expect(notices.length - before).toBe(expected);
+      expect(
+        await db
+          .select()
+          .from(messages)
+          .where(eq(messages.conversationId, watch.conversationId ?? '')),
+      ).toHaveLength(expected);
+    },
+  );
+
   it('backs off a persistently failing watch and expires it with one notice', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const watch = await createWebWatch('failing', {

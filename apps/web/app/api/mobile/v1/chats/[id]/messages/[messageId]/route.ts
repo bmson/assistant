@@ -1,3 +1,4 @@
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getChatApplication } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -21,11 +22,29 @@ export async function POST(
   if (!UUID_RE.test(messageId)) {
     return mobileJson({ error: 'invalid message id' }, { status: 400 });
   }
-  const body = (await request.json().catch(() => null)) as { action?: unknown } | null;
-  if (body?.action !== 'hide' && body?.action !== 'unhide') {
-    return mobileJson({ error: 'action must be hide or unhide' }, { status: 400 });
+  const mutationBody = await readMobileMutationBody(request, ['action', 'clientId']);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as { action?: unknown; clientId?: unknown } | null;
+  if (body?.action !== 'hide' && body?.action !== 'unhide' && body?.action !== 'delivered') {
+    return mobileJson({ error: 'action must be hide, unhide, or delivered' }, { status: 400 });
+  }
+  if (body.action === 'delivered') {
+    if (!/^Bearer\s+\S+/i.test(request.headers.get('authorization') ?? ''))
+      return mobileUnauthorized();
+    if (typeof body.clientId !== 'string' || !UUID_RE.test(body.clientId))
+      return mobileJson({ error: 'clientId must be a UUID' }, { status: 400 });
   }
   try {
+    if (body.action === 'delivered') {
+      const ok = await getChatApplication().acknowledgeMessageDelivery(
+        id,
+        messageId,
+        body.clientId as string,
+      );
+      return ok
+        ? mobileJson({ ok: true })
+        : mobileJson({ error: 'delivery receipt could not be recorded yet' }, { status: 409 });
+    }
     const ok =
       body.action === 'hide'
         ? await getChatApplication().hideChatMessage(id, messageId)

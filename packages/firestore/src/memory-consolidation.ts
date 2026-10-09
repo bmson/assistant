@@ -4,18 +4,25 @@ import {
   CONSOLIDATION_WINDOW_LIMIT,
   type ConsolidationFact,
   type ConsolidationReview,
+  canRewriteConsolidationFacts,
   type EmbeddingSpace,
+  earliestConsolidationSource,
+  type ImportUnitProvenance,
   type MemoryConsolidationRepository,
   type Records,
+  snapshotEmbeddingSpace,
   validateEmbedding,
 } from '@assistant/persistence';
 import {
+  type DocumentSnapshot,
   FieldValue,
   Filter,
   type Query,
   type QueryDocumentSnapshot,
 } from '@google-cloud/firestore';
 import { embeddingSpaceKey } from './memory.js';
+import { decodeMemoryRecord } from './memory-record.js';
+import { occasionDateKey, resolveOccasionIdentity } from './occasion-identity.js';
 import {
   assertPrivacyErasureFenceUnchanged,
   privacyErasureIsActive,
@@ -31,6 +38,63 @@ function version(doc: QueryDocumentSnapshot): string {
   return `${time.seconds}:${time.nanoseconds}`;
 }
 
+function importLineageId(source: string, memoryId: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify([source, memoryId]))
+    .digest('hex');
+}
+
+function occasionImportLineageId(source: string, occasionId: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify([source, occasionId]))
+    .digest('hex');
+}
+
+function importSourceKeyId(agentId: string, source: string): string {
+  return createHash('sha256').update(`${agentId}\0${source}`).digest('hex');
+}
+
+function readImportUnitProvenance(value: unknown): ImportUnitProvenance[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new Error('Memory import provenance is malformed');
+  return value.map((unit) => {
+    if (
+      !unit ||
+      typeof unit !== 'object' ||
+      !Number.isSafeInteger(unit.sourceOffset) ||
+      unit.sourceOffset < 0 ||
+      !Number.isSafeInteger(unit.unitOffset) ||
+      unit.unitOffset < 0 ||
+      (unit.observedAt !== null && typeof unit.observedAt !== 'string') ||
+      (unit.authorEmail !== null && typeof unit.authorEmail !== 'string') ||
+      typeof unit.header !== 'string' ||
+      typeof unit.hasQuotedContent !== 'boolean' ||
+      typeof unit.unitTextHash !== 'string'
+    )
+      throw new Error('Memory import provenance is malformed');
+    return {
+      sourceOffset: unit.sourceOffset,
+      unitOffset: unit.unitOffset,
+      observedAt: unit.observedAt,
+      authorEmail: unit.authorEmail,
+      header: unit.header,
+      hasQuotedContent: unit.hasQuotedContent,
+      unitTextHash: unit.unitTextHash,
+    };
+  });
+}
+
+function mergeImportUnitProvenance(...groups: ImportUnitProvenance[][]): ImportUnitProvenance[] {
+  const byIdentity = new Map<string, ImportUnitProvenance>();
+  for (const unit of groups.flat()) {
+    const key = `${unit.sourceOffset}\0${unit.unitOffset}\0${unit.unitTextHash}`;
+    byIdentity.set(key, unit);
+  }
+  return [...byIdentity.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, unit]) => unit);
+}
+
 function active(row: Memory, agentId: string, now: Date): boolean {
   return (
     row.agentId === agentId &&
@@ -42,7 +106,7 @@ function active(row: Memory, agentId: string, now: Date): boolean {
 }
 
 function fact(doc: QueryDocumentSnapshot, agentId: string, now: Date): ConsolidationFact | null {
-  const row = decodeRecord<Memory>(doc.data());
+  const row = decodeMemoryRecord(doc.data());
   if (row.id !== doc.get('id') || documentKey(row.id) !== doc.id || !active(row, agentId, now))
     return null;
   return {
@@ -84,11 +148,7 @@ function reviewOrder(a: ConsolidationFact, b: ConsolidationFact): number {
   );
 }
 
-/**
- * An occasion's identity is its owner, person, kind, and date, matching the
- * PostgreSQL unique key. Every Firestore writer derives the same UUID, so
- * upserts from different jobs converge on one record.
- */
+/** Deterministic key retained for identifying records created by older releases. */
 export function occasionDocumentId(
   agentId: string,
   contactId: string,
@@ -105,11 +165,14 @@ export function occasionDocumentId(
 /** Storage seam only: model decisions, occasions, card compilation, and dispatch stay in core. */
 export class FirestoreMemoryConsolidationRepository implements MemoryConsolidationRepository {
   readonly kind = 'memory-consolidation-repository' as const;
+  readonly space: EmbeddingSpace;
 
   constructor(
     readonly store: InstallationStore,
-    readonly space: EmbeddingSpace,
-  ) {}
+    space: EmbeddingSpace,
+  ) {
+    this.space = snapshotEmbeddingSpace(space);
+  }
 
   private async owner(agentId: string): Promise<void> {
     if (!agentId) throw new Error('Consolidation requires an agent');
@@ -165,6 +228,45 @@ export class FirestoreMemoryConsolidationRepository implements MemoryConsolidati
       if (standalone.length >= CONSOLIDATION_WINDOW_LIMIT) break;
     }
     await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
+    const allFacts = [...standalone, ...(window?.facts ?? [])];
+    const lineageByMemory = new Map<string, Map<string, ImportUnitProvenance[]>>();
+    for (let offset = 0; offset < allFacts.length; offset += 30) {
+      const group = allFacts.slice(offset, offset + 30);
+      const lineage = await this.store
+        .collection('memoryImportLineage')
+        .where(
+          'memoryId',
+          'in',
+          group.map((row) => row.id),
+        )
+        .get();
+      for (const doc of lineage.docs) {
+        const source = doc.get('source');
+        const memoryId = doc.get('memoryId');
+        const ownerId = doc.get('agentId');
+        if (
+          typeof source !== 'string' ||
+          !source ||
+          ownerId !== agentId ||
+          typeof memoryId !== 'string' ||
+          !group.some((row) => row.id === memoryId) ||
+          doc.id !== documentKey(importLineageId(source, memoryId))
+        )
+          throw new Error('Memory import lineage is malformed');
+        const sources = lineageByMemory.get(memoryId) ?? new Map();
+        if (sources.has(source)) throw new Error('Memory import lineage is duplicated');
+        sources.set(source, readImportUnitProvenance(doc.get('sourceUnitProvenance')));
+        lineageByMemory.set(memoryId, sources);
+      }
+    }
+    for (const row of allFacts) {
+      const sources = lineageByMemory.get(row.id) ?? new Map();
+      row.importSources = [...sources.keys()];
+      row.importSourceProvenance = [...sources].map(([source, sourceUnitProvenance]) => ({
+        source,
+        sourceUnitProvenance,
+      }));
+    }
     return { standalone, window };
   }
 
@@ -177,6 +279,48 @@ export class FirestoreMemoryConsolidationRepository implements MemoryConsolidati
       const erasure = await tx.get(this.store.doc('privacyErasureJobs', agentId));
       if (erasure.exists && privacyErasureIsActive(erasure.get('status')))
         throw new Error('Privacy erasure is in progress');
+      const contributingSources = [
+        ...new Set(facts.flatMap((fact) => fact.importSources ?? [])),
+      ].sort();
+      // Source state is part of the same transaction as derived facts and
+      // lineage. A concurrent delete either waits for this publication (then
+      // discovers it) or wins first and makes this review stale.
+      if (contributingSources.length > 200)
+        throw new Error('Consolidation has too many import sources to fence safely');
+      for (const source of contributingSources) {
+        const claimRef = this.store.doc('importSourceKeys', importSourceKeyId(agentId, source));
+        const claim = await tx.get(claimRef);
+        let sourceRow: DocumentSnapshot | null = null;
+        if (claim.exists) {
+          const sourceId = claim.get('sourceId');
+          if (
+            claim.get('agentId') !== agentId ||
+            claim.get('source') !== source ||
+            typeof sourceId !== 'string'
+          )
+            throw new Error('Consolidation import source identity claim is malformed');
+          const candidate = await tx.get(this.store.doc('importSources', sourceId));
+          if (candidate.exists) sourceRow = candidate;
+        } else {
+          const matches = await tx.get(
+            this.store
+              .collection('importSources')
+              .where('agentId', '==', agentId)
+              .where('source', '==', source)
+              .limit(2),
+          );
+          if (matches.size !== 1) throw new Error('Consolidation import source is unavailable');
+          sourceRow = matches.docs[0] ?? null;
+        }
+        if (
+          !sourceRow?.exists ||
+          sourceRow.get('id') !== sourceRow.id ||
+          sourceRow.get('agentId') !== agentId ||
+          sourceRow.get('source') !== source ||
+          sourceRow.get('status') === 'purged'
+        )
+          throw new Error('An imported source changed while consolidation was in flight');
+      }
       const docs = await tx.getAll(...facts.map((row) => this.store.doc('memories', row.id)));
       const now = this.store.now();
       for (let index = 0; index < docs.length; index++) {
@@ -220,6 +364,14 @@ export class FirestoreMemoryConsolidationRepository implements MemoryConsolidati
     )
       throw new Error('Invalid consolidation review');
     const ids = new Set(facts.map((row) => row.id));
+    const retiring = new Set(input.retirements.map((row) => row.id));
+    const survivors = new Set(input.retirements.map((row) => row.supersededById));
+    if (
+      retiring.size !== input.retirements.length ||
+      input.retirements.some((row) => retiring.has(row.supersededById)) ||
+      input.merges.some((merge) => merge.memberIds.some((id) => survivors.has(id)))
+    )
+      throw new Error('Consolidation retirements must point directly to surviving facts');
     if (
       input.retirements.some(
         (row) => !ids.has(row.id) || !ids.has(row.supersededById) || row.id === row.supersededById,
@@ -244,6 +396,8 @@ export class FirestoreMemoryConsolidationRepository implements MemoryConsolidati
       )
         throw new Error('Invalid consolidation content hash');
       validateEmbedding(this.space, merge.embedding);
+      if (merge.embeddingSpaceKey !== embeddingSpaceKey(this.space))
+        throw new Error('Consolidation embedding space changed');
     }
     await this.owner(agentId);
     return this.store.db.runTransaction(async (tx) => {
@@ -277,17 +431,102 @@ export class FirestoreMemoryConsolidationRepository implements MemoryConsolidati
         this.store.doc('memoryTombstones', merge.contentHash),
       ]);
       const mergeChecks = mergeRefs.length ? await tx.getAll(...mergeRefs) : [];
-      const occasionIds = (input.occasions ?? []).map((occasion) =>
-        occasionDocumentId(agentId, subjectContactId, occasion),
+      const mergeSourcePlans = input.merges.map((merge) => {
+        const bySource = new Map<string, ImportUnitProvenance[][]>();
+        for (const id of merge.memberIds) {
+          for (const provenance of facts.find((fact) => fact.id === id)?.importSourceProvenance ??
+            []) {
+            const groups = bySource.get(provenance.source) ?? [];
+            groups.push(provenance.sourceUnitProvenance);
+            bySource.set(provenance.source, groups);
+          }
+        }
+        return [...bySource].map(([source, groups]) => ({
+          source,
+          sourceUnitProvenance: mergeImportUnitProvenance(...groups),
+        }));
+      });
+      const mergeLineageRefs = input.merges.flatMap((merge, index) =>
+        (mergeSourcePlans[index] ?? []).map(({ source }) =>
+          this.store.doc('memoryImportLineage', importLineageId(source, merge.id)),
+        ),
       );
-      if (new Set(occasionIds).size !== occasionIds.length)
+      const mergeLineageChecks = mergeLineageRefs.length
+        ? await tx.getAll(...mergeLineageRefs)
+        : [];
+      let mergeLineageOffset = 0;
+      for (let index = 0; index < input.merges.length; index++) {
+        const merge = input.merges[index];
+        for (const { source } of mergeSourcePlans[index] ?? []) {
+          const lineage = mergeLineageChecks[mergeLineageOffset++];
+          if (
+            lineage?.exists &&
+            (lineage.get('source') !== source || lineage.get('memoryId') !== merge?.id)
+          )
+            throw new Error('Consolidated memory import lineage conflicts with its identity');
+        }
+      }
+      const occasionKeys = (input.occasions ?? []).map((occasion) =>
+        [agentId, subjectContactId, occasion.kind, occasion.month, occasion.day].join('\u0000'),
+      );
+      if (new Set(occasionKeys).size !== occasionKeys.length)
         throw new Error('Duplicate consolidation occasions');
-      const occasionRefs = occasionIds.map((id) => this.store.doc('occasions', id));
-      const [contact, ...existingOccasions] = occasionRefs.length
-        ? await tx.getAll(this.store.doc('contacts', subjectContactId), ...occasionRefs)
-        : [null];
+      const occasionResolutions = [];
+      for (const occasion of input.occasions ?? [])
+        occasionResolutions.push(
+          await resolveOccasionIdentity(tx, this.store, agentId, {
+            contactId: subjectContactId,
+            kind: occasion.kind,
+            month: occasion.month,
+            day: occasion.day,
+          }),
+        );
+      const occasionSourceIds = occasionResolutions.map((resolved) =>
+        resolved?.snapshot ? String(resolved.snapshot.get('id')) : randomUUID(),
+      );
+      const occasionSources = [...new Set(facts.flatMap((fact) => fact.importSources ?? []))];
+      const occasionLineagePlans = occasionResolutions.flatMap((resolved, index) => {
+        if (resolved?.snapshot?.get('source') !== 'consolidation') return [];
+        const occasionId = occasionSourceIds[index];
+        if (!occasionId) return [];
+        return occasionSources.map((source) => ({
+          source,
+          occasionId,
+          ref: this.store.doc('occasionImportLineage', occasionImportLineageId(source, occasionId)),
+        }));
+      });
+      // For new occasions, add plans now that the deterministic IDs are fixed.
+      for (let index = 0; index < occasionResolutions.length; index++) {
+        if (occasionResolutions[index]?.snapshot) continue;
+        const occasionId = occasionSourceIds[index];
+        if (!occasionId) continue;
+        for (const source of occasionSources)
+          occasionLineagePlans.push({
+            source,
+            occasionId,
+            ref: this.store.doc(
+              'occasionImportLineage',
+              occasionImportLineageId(source, occasionId),
+            ),
+          });
+      }
+      const occasionLineageChecks = occasionLineagePlans.length
+        ? await tx.getAll(...occasionLineagePlans.map((plan) => plan.ref))
+        : [];
+      for (let index = 0; index < occasionLineagePlans.length; index++) {
+        const plan = occasionLineagePlans[index];
+        const lineage = occasionLineageChecks[index];
+        if (
+          lineage?.exists &&
+          (lineage.get('source') !== plan?.source || lineage.get('occasionId') !== plan?.occasionId)
+        )
+          throw new Error('Consolidated occasion import lineage conflicts with its identity');
+      }
+      const contact = occasionKeys.length
+        ? await tx.get(this.store.doc('contacts', subjectContactId))
+        : null;
       if (
-        occasionRefs.length > 0 &&
+        occasionKeys.length > 0 &&
         (!contact?.exists ||
           contact.get('id') !== subjectContactId ||
           (contact.get('agentId') !== undefined && contact.get('agentId') !== agentId))
@@ -314,13 +553,22 @@ export class FirestoreMemoryConsolidationRepository implements MemoryConsolidati
           )
         )
           throw new Error('Invalid consolidation merge');
+        const members = merge.memberIds.map((id) => facts.find((fact) => fact.id === id));
+        if (
+          members.some((fact) => !fact) ||
+          !canRewriteConsolidationFacts(members as ConsolidationFact[])
+        )
+          throw new Error(
+            'Consolidation must retain temporally scoped or uncertain facts separately',
+          );
         const row: Memory = {
           id: merge.id,
           agentId,
           subjectContactId,
-          createdAt: now,
+          createdAt: earliestConsolidationSource(members as ConsolidationFact[]),
           expiresAt: null,
           embedding: merge.embedding,
+          embeddingSpaceKey: merge.embeddingSpaceKey,
           sourceTaskId: merge.sourceTaskId,
           kind: merge.kind,
           confidence: merge.confidence,
@@ -351,13 +599,42 @@ export class FirestoreMemoryConsolidationRepository implements MemoryConsolidati
           }),
         );
         tx.create(this.store.doc('memoryContentHashes', merge.contentHash), { memoryId: merge.id });
+        const planSources = mergeSourcePlans[index] ?? [];
+        let lineageIndex = mergeSourcePlans
+          .slice(0, index)
+          .reduce((total, sources) => total + sources.length, 0);
+        for (const { source, sourceUnitProvenance } of planSources) {
+          const lineage = mergeLineageChecks[lineageIndex];
+          const lineageRef = mergeLineageRefs[lineageIndex];
+          if (!lineage?.exists && lineageRef)
+            tx.create(
+              lineageRef,
+              encodeRecord({
+                agentId,
+                source,
+                memoryId: merge.id,
+                sourceUnitProvenance,
+                createdAt: now,
+              }),
+            );
+          lineageIndex += 1;
+        }
         merged.push(merge.id);
         for (const id of merge.memberIds) replacement.set(id, merge.id);
       }
       for (const row of input.retirements) {
         const winner = byId.get(row.supersededById);
         const loser = byId.get(row.id);
-        if (!winner || !loser || (loser.get('ownerConfirmed') && !winner.get('ownerConfirmed')))
+        if (
+          !winner ||
+          !loser ||
+          !canRewriteConsolidationFacts([
+            facts.find((fact) => fact.id === row.id),
+            facts.find((fact) => fact.id === row.supersededById),
+          ] as ConsolidationFact[]) ||
+          loser.get('pinned') ||
+          (loser.get('ownerConfirmed') && !winner.get('ownerConfirmed'))
+        )
           throw new Error('Invalid consolidation retirement');
       }
       for (const [id, supersededById] of replacement) {
@@ -375,10 +652,22 @@ export class FirestoreMemoryConsolidationRepository implements MemoryConsolidati
       }
       for (const item of input.timeline) {
         const doc = byId.get(item.id);
+        const original = facts.find((fact) => fact.id === item.id);
+        if (original) {
+          if (
+            (item.validFrom && original.validFrom && item.validFrom < original.validFrom) ||
+            (item.validUntil && original.validUntil && item.validUntil > original.validUntil)
+          )
+            throw new Error('Consolidation timeline cannot widen temporal truth');
+          const from = item.validFrom ?? original.validFrom;
+          const until = item.validUntil ?? original.validUntil;
+          if (from && until && from > until) throw new Error('Consolidation timeline is inverted');
+        }
         if (doc && !replacement.has(item.id) && (item.validFrom || item.validUntil))
           tx.update(
             doc.ref,
             encodeRecord({
+              retrievalRevision: randomUUID(),
               ...(item.validFrom ? { validFrom: item.validFrom } : {}),
               ...(item.validUntil ? { validUntil: item.validUntil } : {}),
             }),
@@ -386,10 +675,14 @@ export class FirestoreMemoryConsolidationRepository implements MemoryConsolidati
       }
       for (let index = 0; index < (input.occasions ?? []).length; index += 1) {
         const occasion = input.occasions?.[index];
-        const id = occasionIds[index];
-        const ref = occasionRefs[index];
-        const existing = existingOccasions[index];
-        if (!occasion || !id || !ref) continue;
+        const resolved = occasionResolutions[index];
+        const existing = resolved?.snapshot;
+        if (!occasion || !resolved || resolved.ambiguous || resolved.superseded) continue;
+        const id = existing
+          ? decodeRecord<Records['occasions']>(existing.data()).id
+          : occasionSourceIds[index];
+        if (!id) throw new Error('Consolidation occasion identity is missing');
+        const ref = existing?.ref ?? this.store.doc('occasions', id);
         if (
           !Number.isInteger(occasion.month) ||
           occasion.month < 1 ||
@@ -412,6 +705,8 @@ export class FirestoreMemoryConsolidationRepository implements MemoryConsolidati
             throw new Error('Existing consolidation occasion is malformed');
           if (row.ownerConfirmed || row.originTrust === 'owner') {
             occasionsSaved += 1;
+            if (!resolved.markerExists)
+              tx.create(resolved.markerRef, occasionDateKey(agentId, row, row.id));
             continue;
           }
           const notes =
@@ -421,6 +716,8 @@ export class FirestoreMemoryConsolidationRepository implements MemoryConsolidati
                 ? `${row.notes}; ${occasion.notes}`
                 : occasion.notes;
           tx.update(ref, { year: row.year ?? occasion.year, notes, updatedAt: now });
+          if (!resolved.markerExists)
+            tx.create(resolved.markerRef, occasionDateKey(agentId, row, row.id));
         } else {
           const row: Records['occasions'] = {
             id,
@@ -442,6 +739,18 @@ export class FirestoreMemoryConsolidationRepository implements MemoryConsolidati
             updatedAt: now,
           };
           tx.create(ref, encodeRecord(row));
+          tx.create(resolved.markerRef, occasionDateKey(agentId, row, id));
+        }
+        if (!existing || existing.get('source') === 'consolidation') {
+          for (let sourceIndex = 0; sourceIndex < occasionLineagePlans.length; sourceIndex++) {
+            const plan = occasionLineagePlans[sourceIndex];
+            const lineage = occasionLineageChecks[sourceIndex];
+            if (plan?.occasionId === id && !lineage?.exists)
+              tx.create(
+                plan.ref,
+                encodeRecord({ agentId, source: plan.source, occasionId: id, createdAt: now }),
+              );
+          }
         }
         occasionsSaved += 1;
       }

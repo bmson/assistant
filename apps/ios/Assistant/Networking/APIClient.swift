@@ -58,6 +58,7 @@ final class Transport: @unchecked Sendable {
 enum APIError: LocalizedError {
     case invalidServerURL
     case invalidResponse
+    case chatTurnCancelledBeforeAdmission(conversationId: String, clientOperationId: String)
     case unauthorized
     case server(status: Int, message: String)
     case decoding(model: String, detail: String)
@@ -69,6 +70,7 @@ enum APIError: LocalizedError {
         switch self {
         case .invalidServerURL: "Enter a valid Assistant server URL."
         case .invalidResponse: "The server returned an unreadable response."
+        case .chatTurnCancelledBeforeAdmission: "This turn was cancelled before it was admitted."
         case .unauthorized: "The access key was not accepted by this Assistant server."
         case let .server(_, message): message
         case let .decoding(model, detail): "Could not read the \(model) response: \(detail)."
@@ -121,22 +123,44 @@ enum APIError: LocalizedError {
     }
 }
 
+private final class NativeCardFormProjectionReadiness: @unchecked Sendable {
+    private let lock = NSLock()
+    private var enabled = false
+
+    var isEnabled: Bool { lock.withLock { enabled } }
+
+    func setEnabled(_ value: Bool) { lock.withLock { enabled = value } }
+}
+
 struct APIClient: Sendable {
     let configuration: APIConfiguration
+    let clientID: String?
     /// A test seam. Production passes nothing and reads `Transport.shared` on
     /// every call, so a pool reset reaches clients that were built before it.
     private let sessionOverride: URLSession?
+    /// Shared by value-copies of this client so session readiness gates every
+    /// request path consistently. Replacing a server configuration starts
+    /// with a fresh, disabled capability until that server's owner is verified.
+    private let nativeCardFormProjectionReadiness: NativeCardFormProjectionReadiness
 
-    init(configuration: APIConfiguration, session: URLSession? = nil) {
-        self.configuration = configuration
-        self.sessionOverride = session
+    init(configuration: APIConfiguration, session: URLSession? = nil, clientID: String? = nil) {
+      self.configuration = configuration
+      self.clientID = clientID ?? (session == nil ? KeychainStore.readOrCreateClientID() : nil)
+      self.sessionOverride = session
+      self.nativeCardFormProjectionReadiness = NativeCardFormProjectionReadiness()
     }
 
     /// Verify a candidate connection with the same transport. Production
     /// continues to use the shared pool; injected sessions remain isolated.
     func replacingConfiguration(_ configuration: APIConfiguration) -> APIClient {
-        APIClient(configuration: configuration, session: sessionOverride)
+      APIClient(configuration: configuration, session: sessionOverride, clientID: clientID)
     }
+
+    var nativeCardFormsEnabled: Bool { nativeCardFormProjectionReadiness.isEnabled }
+
+    func enableNativeCardForms() { nativeCardFormProjectionReadiness.setEnabled(true) }
+
+    func disableNativeCardForms() { nativeCardFormProjectionReadiness.setEnabled(false) }
 
     private var session: URLSession { sessionOverride ?? Transport.shared.session }
 
@@ -148,12 +172,28 @@ struct APIClient: Sendable {
         try await get("api/mobile/v1/overview")
     }
 
-    func activity(archived: Bool) async throws -> ActivityList {
+    func documentsPage(cursor: String, limit: Int = 50) async throws -> DocumentsOverview {
+        guard (1...100).contains(limit) else { throw APIError.invalidResponse }
+        var components = URLComponents(
+            url: configuration.baseURL.appending(path: "api/mobile/v1/documents"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [
+            URLQueryItem(name: "cursor", value: cursor),
+            URLQueryItem(name: "limit", value: String(limit)),
+        ]
+        guard let url = components?.url else { throw APIError.invalidResponse }
+        return try await perform(makeRequest(url: url), as: DocumentsOverview.self)
+    }
+
+    func activity(archived: Bool, query: String = "", filter: String = "all", cursor: String? = nil) async throws -> ActivityList {
         var components = URLComponents(
             url: configuration.baseURL.appending(path: "api/mobile/v1/activity"),
             resolvingAgainstBaseURL: false
         )
-        components?.queryItems = [.init(name: "archived", value: archived ? "true" : "false")]
+        components?.queryItems = [.init(name: "archived", value: archived ? "true" : "false"),
+                                  .init(name: "q", value: query), .init(name: "filter", value: filter)]
+        if let cursor { components?.queryItems?.append(.init(name: "cursor", value: cursor)) }
         guard let url = components?.url else { throw APIError.invalidServerURL }
         return try await perform(makeRequest(url: url), as: ActivityList.self)
     }
@@ -170,8 +210,14 @@ struct APIClient: Sendable {
         _ = try await perform(request, as: OkPayload.self)
     }
 
-    func archiveOldActivity() async throws {
-        try await postCollectionAction(path: "activity", action: "archive-old")
+    func archiveOldActivity(operationId: String? = nil) async throws -> ArchiveOldActivityProgress {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/activity"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        var body = ["action": "archive-old"]
+        if let operationId { body["operationId"] = operationId }
+        request.httpBody = try JSONEncoder().encode(body)
+        return try await perform(request, as: ArchiveOldActivityProgress.self)
     }
 
     func createGoal(_ goal: GoalMutation) async throws {
@@ -258,19 +304,85 @@ struct APIClient: Sendable {
         _ = try await perform(request, as: OkPayload.self)
     }
 
+    func setRecallSourceSuppressed(
+        surfaceKey: String,
+        sourceRevision: String,
+        suppressed: Bool
+    ) async throws {
+        guard Self.isDigest(surfaceKey), Self.isDigest(sourceRevision) else {
+            throw APIError.invalidResponse
+        }
+        var request = makeRequest(
+            url: configuration.baseURL.appending(path: "api/mobile/v1/recall/sources/\(surfaceKey)")
+        )
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(
+            RecallSourceMutationBody(suppressed: suppressed, expectedSourceRevision: sourceRevision)
+        )
+        let response = try await perform(request, as: RecallSourceMutationResponse.self)
+        guard response.ok, response.version > 0 else { throw APIError.invalidResponse }
+    }
+
+    func recallSourceSuppressed(surfaceKey: String, sourceRevision: String) async throws -> Bool {
+        guard Self.isDigest(surfaceKey), Self.isDigest(sourceRevision) else { throw APIError.invalidResponse }
+        var components = URLComponents(
+            url: configuration.baseURL.appending(path: "api/mobile/v1/recall/sources/\(surfaceKey)"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [URLQueryItem(name: "sourceRevision", value: sourceRevision)]
+        guard let url = components?.url else { throw APIError.invalidResponse }
+        let response: RecallSourceStateResponse = try await perform(makeRequest(url: url), as: RecallSourceStateResponse.self)
+        return response.suppressed
+    }
+
+    private static func isDigest(_ value: String) -> Bool {
+        value.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+
     func workspace() async throws -> WorkspaceResponse {
-        try await get("api/mobile/v1/workspace")
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/workspace"))
+        request.setValue("1", forHTTPHeaderField: "x-assistant-workspace-sections")
+        return try await perform(request, as: WorkspaceResponse.self)
+    }
+
+    func workspacePage<Item: Codable & Sendable>(
+        section: WorkspacePageSection,
+        cursor: String,
+        archived: Bool = false,
+        limit: Int = 50
+    ) async throws -> WorkspaceSectionPage<Item> {
+        guard (1...100).contains(limit) else { throw APIError.invalidResponse }
+        var components = URLComponents(
+            url: configuration.baseURL.appending(path: "api/mobile/v1/workspace/sections/\(section.rawValue)"),
+            resolvingAgainstBaseURL: false
+        )
+        var queryItems = [URLQueryItem(name: "cursor", value: cursor), URLQueryItem(name: "limit", value: String(limit))]
+        if section == .chats {
+            queryItems.append(URLQueryItem(name: "archived", value: archived ? "true" : "false"))
+        }
+        components?.queryItems = queryItems
+        guard let url = components?.url else { throw APIError.invalidResponse }
+        return try await perform(makeRequest(url: url), as: WorkspaceSectionPage<Item>.self)
     }
 
     func cards() async throws -> SavedCardsResponse {
         try await get("api/mobile/v1/cards")
     }
 
-    func refreshCard(id: String) async throws -> CardRefreshResult {
+    func refreshCard(
+        id: String,
+        expectedRevisionId: String?,
+        operationId: String
+    ) async throws -> CardRefreshResult {
         var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/cards/\(id)"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.httpBody = try JSONEncoder().encode(["action": "refresh"])
+        var body = ["action": "refresh", "operationId": operationId]
+        if let expectedRevisionId, !expectedRevisionId.isEmpty {
+            body["expectedRevisionId"] = expectedRevisionId
+        }
+        request.httpBody = try JSONEncoder().encode(body)
         return try await perform(request, as: CardRefreshResult.self)
     }
 
@@ -764,8 +876,13 @@ struct APIClient: Sendable {
         try await get("api/mobile/v1/calls/\(id)")
     }
 
-    func answerCallCheckin(callId: String, checkinId: String, answer: String) async throws {
-        try await callAction(callId: callId, body: ["action": "answer", "checkinId": checkinId, "answer": answer])
+    func answerCallCheckin(callId: String, checkinId: String, revision: Int, answer: String) async throws {
+        try await callAction(callId: callId, body: [
+            "action": "answer",
+            "checkinId": checkinId,
+            "revision": String(revision),
+            "answer": answer,
+        ])
     }
 
     func hangUpCall(callId: String) async throws {
@@ -935,6 +1052,20 @@ struct APIClient: Sendable {
         try await get("api/mobile/v1/people")
     }
 
+    func peoplePage(cursor: String, limit: Int = 50) async throws -> PersonDirectoryResponse {
+        guard (1...100).contains(limit) else { throw APIError.invalidResponse }
+        var components = URLComponents(
+            url: configuration.baseURL.appending(path: "api/mobile/v1/people"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [
+            URLQueryItem(name: "cursor", value: cursor),
+            URLQueryItem(name: "limit", value: String(limit)),
+        ]
+        guard let url = components?.url else { throw APIError.invalidResponse }
+        return try await perform(makeRequest(url: url), as: PersonDirectoryResponse.self)
+    }
+
     func personCard(id: String) async throws -> PersonCard {
         try await get("api/mobile/v1/people/\(id)")
     }
@@ -1085,12 +1216,119 @@ struct APIClient: Sendable {
         _ = try await perform(request, as: OkPayload.self)
     }
 
+    /// Sends the exact body persisted by CardFormDraftCoordinator. This write is
+    /// never retried here: a missing response remains unknown and the caller
+    /// replays the same frozen operation explicitly.
+    func submitCardForm(_ pending: CardFormPendingRequest) async throws -> CardFormHTTPResult {
+        guard pending.body.count <= 16 * 1024,
+              let encoded = try? JSONDecoder().decode(CardFormSubmission.self, from: pending.body),
+              encoded == pending.submission else {
+            throw APIError.invalidResponse
+        }
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/chat/forms"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = pending.body
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await load(request)
+        } catch {
+            return .init(admission: .init(operationId: encoded.operationId, outcome: .outcomeUnknown), messageCursor: nil)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            return .init(admission: .init(operationId: encoded.operationId, outcome: .outcomeUnknown), messageCursor: nil)
+        }
+        if (200..<300).contains(http.statusCode) {
+            guard let envelope = try? JSONDecoder().decode(CardFormAdmissionEnvelope.self, from: data),
+                  envelope.ok == true, let taskId = envelope.taskId, UUID(uuidString: taskId) != nil,
+                  let messageId = envelope.messageId, UUID(uuidString: messageId) != nil,
+                  let taskStatus = envelope.status ?? envelope.taskStatus,
+                  Self.isCardFormTaskStatus(taskStatus),
+                  let messageCursor = envelope.messageCursor,
+                  !messageCursor.isEmpty, messageCursor.utf8.count <= 4_096,
+                  (envelope.queueGeneration ?? 0) >= 0 else {
+                // A malformed success response may follow a committed task.
+                // Preserve the operation as unknown and retry only its body.
+                return .init(admission: .init(operationId: encoded.operationId, outcome: .outcomeUnknown), messageCursor: nil)
+            }
+            let receipt = CardFormAdmissionReceipt(
+                taskId: taskId, messageId: messageId, taskStatus: taskStatus,
+                queueGeneration: envelope.queueGeneration ?? 0, created: envelope.created ?? false,
+                dispatch: envelope.dispatch.flatMap(CardFormDispatch.init(rawValue:))
+            )
+            return .init(
+                admission: .init(operationId: encoded.operationId, outcome: .accepted(receipt)),
+                messageCursor: messageCursor
+            )
+        }
+        guard (400..<500).contains(http.statusCode),
+              let envelope = try? JSONDecoder().decode(CardFormAdmissionEnvelope.self, from: data),
+              envelope.ok != true else {
+            return .init(admission: .init(operationId: encoded.operationId, outcome: .outcomeUnknown), messageCursor: nil)
+        }
+        if http.statusCode == 409, envelope.ok == false, envelope.reason == "active_form",
+           let taskId = envelope.activeTaskId, UUID(uuidString: taskId) != nil,
+           let taskStatus = envelope.taskStatus,
+           Self.isCardFormTaskStatus(taskStatus) {
+            return .init(
+                admission: .init(
+                    operationId: encoded.operationId,
+                    outcome: .activeForm(.init(taskId: taskId, taskStatus: taskStatus))
+                ),
+                messageCursor: nil
+            )
+        }
+        // Only the exact typed freshness conflict proves the operation was not
+        // admitted. Other 4xx responses, including generic 409 and expired 401,
+        // may follow a commit and therefore remain replayable as unknown.
+        if http.statusCode == 409, envelope.ok == false, envelope.reason == "stale_revision" {
+            return .init(
+                admission: .init(operationId: encoded.operationId, outcome: .rejected(status: 409, code: "stale_revision")),
+                messageCursor: nil
+            )
+        }
+        return .init(admission: .init(operationId: encoded.operationId, outcome: .outcomeUnknown), messageCursor: nil)
+    }
+
+    private static func isCardFormTaskStatus(_ value: String) -> Bool {
+        CardFormDraftCoordinator.isKnownTaskStatus(value)
+    }
+
+    func encodeChatRequest(
+        conversationId: String,
+        text: String,
+        clientOperationId: String,
+        autonomous: Bool,
+        force: Bool,
+        spoken: Bool,
+        clientMessageId: String
+    ) throws -> Data {
+        let body = ChatRequest(
+            conversationId: conversationId,
+            clientOperationId: clientOperationId,
+            clientId: clientID,
+            autonomous: autonomous,
+            force: force,
+            spoken: spoken,
+            messages: [.init(
+                id: clientMessageId,
+                role: "user",
+                parts: [.init(type: "text", text: text)]
+            )]
+        )
+        return try JSONEncoder().encode(body)
+    }
+
     func sendMessage(
         conversationId: String,
         text: String,
+        clientOperationId: String = UUID().uuidString.lowercased(),
         autonomous: Bool,
         force: Bool = false,
         spoken: Bool = false,
+        encodedRequestBody: Data? = nil,
         onDelta: @escaping @Sendable (String) async -> Void,
         onCue: @escaping @Sendable (MessagePart) async -> Void
     ) async throws -> SendReceipt {
@@ -1098,18 +1336,19 @@ struct APIClient: Sendable {
         var request = makeRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        let body = ChatRequest(
-            conversationId: conversationId,
-            autonomous: autonomous,
-            force: force,
-            spoken: spoken,
-            messages: [.init(
-                id: UUID().uuidString,
-                role: "user",
-                parts: [.init(type: "text", text: text)]
-            )]
-        )
-        request.httpBody = try JSONEncoder().encode(body)
+        if let encodedRequestBody {
+            request.httpBody = encodedRequestBody
+        } else {
+            request.httpBody = try encodeChatRequest(
+                conversationId: conversationId,
+                text: text,
+                clientOperationId: clientOperationId,
+                autonomous: autonomous,
+                force: force,
+                spoken: spoken,
+                clientMessageId: UUID().uuidString
+            )
+        }
 
         let (bytes, response) = try await stream(request)
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
@@ -1118,6 +1357,18 @@ struct APIClient: Sendable {
         if !(200..<300).contains(http.statusCode) {
             var errorData = Data()
             for try await byte in bytes { errorData.append(byte) }
+            if http.statusCode == 409,
+               let cancellation = try? JSONDecoder().decode(ChatTurnCancellationEnvelope.self, from: errorData),
+               cancellation.outcome == "cancelled_before_admission",
+               cancellation.code == "chat_turn_cancelled_before_admission",
+               cancellation.conversationId == conversationId,
+               cancellation.clientOperationId == clientOperationId,
+               cancellation.taskId == nil,
+               cancellation.effectStatus == "not_started" {
+                throw APIError.chatTurnCancelledBeforeAdmission(
+                    conversationId: conversationId, clientOperationId: clientOperationId
+                )
+            }
             try await validate(http, data: errorData)
         }
         try await validate(http, data: nil)
@@ -1140,6 +1391,72 @@ struct APIClient: Sendable {
             }
         }
         return .init(taskId: taskId, cursor: cursor, conversationId: responseConversation)
+    }
+
+
+    func cancelChatOperation(conversationId: String, clientOperationId: String) async throws -> ChatOperationCancellationReceipt {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/chat/cancel"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(ChatOperationCancellationRequest(
+            conversationId: conversationId, clientOperationId: clientOperationId
+        ))
+        let (data, response) = try await load(request)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        guard let receipt = try? JSONDecoder().decode(ChatOperationCancellationReceipt.self, from: data),
+              receipt.conversationId == conversationId,
+              receipt.clientOperationId == clientOperationId else {
+            // Any unrecognized status/body, including a lost or malformed 503,
+            // leaves the operation outcome unknown at the caller.
+            if http.statusCode == 503 { throw APIError.invalidResponse }
+            try await validate(http, data: data)
+            throw APIError.invalidResponse
+        }
+        let isUnknown = receipt.outcome == .unknown
+        guard (isUnknown && http.statusCode == 503 && !receipt.ok && receipt.taskId == nil && receipt.effectStatus == "unknown")
+                || (!isUnknown && (200..<300).contains(http.statusCode) && receipt.ok) else {
+            throw APIError.invalidResponse
+        }
+        if receipt.outcome == .cancelledBeforeAdmission {
+            guard receipt.taskId == nil, receipt.transitioned != nil,
+                  receipt.effectStatus == "not_started" else { throw APIError.invalidResponse }
+        } else if !isUnknown {
+            guard let taskId = receipt.taskId, UUID(uuidString: taskId) != nil,
+                  receipt.effectStatus == "unknown" else { throw APIError.invalidResponse }
+            switch receipt.outcome {
+            case .cancelled:
+                guard receipt.taskStatus == "cancelled", receipt.transitioned == true else {
+                    throw APIError.invalidResponse
+                }
+            case .alreadyCancelled:
+                guard receipt.taskStatus == "cancelled", receipt.transitioned == false else {
+                    throw APIError.invalidResponse
+                }
+            case .alreadyTerminal:
+                guard (receipt.taskStatus == "done" || receipt.taskStatus == "failed"),
+                      receipt.transitioned == false else {
+                    throw APIError.invalidResponse
+                }
+            case .cancelledBeforeAdmission, .unknown:
+                throw APIError.invalidResponse
+            }
+        }
+        return receipt
+    }
+
+    func acknowledgeMessageDelivery(conversationId: String, messageId: String) async throws {
+        guard let clientID else { throw APIError.invalidResponse }
+        var request = makeRequest(
+            url: configuration.baseURL.appending(
+                path: "api/mobile/v1/chats/\(conversationId)/messages/\(messageId)"
+            )
+        )
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(
+            MessageDeliveryAcknowledgement(action: "delivered", clientId: clientID)
+        )
+        _ = try await perform(request, as: OkPayload.self)
     }
 
     private func get<T: Decodable>(_ path: String) async throws -> T {
@@ -1235,6 +1552,10 @@ struct APIClient: Sendable {
     private func makeRequest(url: URL) -> URLRequest {
         var request = URLRequest(url: url)
         request.setValue("application/json", forHTTPHeaderField: "accept")
+        request.setValue("1", forHTTPHeaderField: "x-assistant-card-schema")
+        if nativeCardFormsEnabled {
+            request.setValue("card-form-v1", forHTTPHeaderField: "x-assistant-card-forms")
+        }
         if !configuration.token.isEmpty {
             request.setValue("Bearer \(configuration.token)", forHTTPHeaderField: "authorization")
         }
@@ -1267,6 +1588,18 @@ struct APIClient: Sendable {
 }
 
 private struct ErrorBody: Decodable { let error: String }
+private struct ChatTurnCancellationEnvelope: Decodable {
+    let outcome: String?
+    let code: String?
+    let conversationId: String?
+    let clientOperationId: String?
+    let taskId: String?
+    let effectStatus: String?
+}
+private struct ChatOperationCancellationRequest: Encodable {
+    let conversationId: String
+    let clientOperationId: String
+}
 
 private struct OkPayload: Decodable { let ok: Bool }
 private struct KnowledgeConnectionSavedPayload: Decodable {
@@ -1321,6 +1654,7 @@ struct LocationPingBody: Encodable {
     let capturedAt: String
     let timeZone: String
     let source: String
+    let arrivalOptIn: Bool
 }
 
 /// Matches the server's DeviceTokenRegistrationSchema
@@ -1412,6 +1746,8 @@ struct ChatCreateReceipt: Decodable, Sendable {
 
 private struct ChatRequest: Encodable {
     let conversationId: String
+    let clientOperationId: String
+    let clientId: String?
     let autonomous: Bool
     /// "Run it for real" on an off-course reply: route straight to the
     /// executor without arming the autonomy grant.
@@ -1420,6 +1756,11 @@ private struct ChatRequest: Encodable {
     /// register that survives being spoken: short, no tables, no Markdown.
     let spoken: Bool
     let messages: [RequestMessage]
+}
+
+private struct MessageDeliveryAcknowledgement: Encodable {
+    let action: String
+    let clientId: String
 }
 
 private struct RequestMessage: Encodable {
@@ -1444,4 +1785,25 @@ private extension JSONValue {
         default: self = .null
         }
     }
+}
+
+struct CardFormHTTPResult: Sendable {
+    let admission: CardFormAdmissionResult
+    let messageCursor: String?
+}
+
+private struct CardFormAdmissionEnvelope: Decodable {
+    let ok: Bool?
+    let created: Bool?
+    let taskId: String?
+    let messageId: String?
+    let status: String?
+    let taskStatus: String?
+    let activeTaskId: String?
+    let messageCursor: String?
+    let queueGeneration: Int?
+    let dispatch: String?
+    let reason: String?
+    let code: String?
+    let error: String?
 }

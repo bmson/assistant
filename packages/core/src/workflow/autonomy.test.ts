@@ -43,6 +43,36 @@ describe('activeAutonomyGrant', () => {
     );
   });
 
+  it('fails closed for malformed, future, reversed, oversized and unproven grants', () => {
+    for (const invalid of [
+      { ...grant, expiresAt: '' },
+      { ...grant, expiresAt: 'invalid' },
+      { ...grant, expiresAt: 'Infinity' },
+      { ...grant, grantedAt: new Date(NOW + 1000).toISOString() },
+      { ...grant, expiresAt: grant.grantedAt },
+      { ...grant, expiresAt: new Date(NOW + 25 * 3_600_000).toISOString() },
+      { ...grant, grantedVia: 'card' },
+      { ...grant, revokedAt: '' },
+    ])
+      expect(activeAutonomyGrant({ autonomyGrant: invalid, trust: 'owner' }, NOW)).toBeNull();
+    expect(activeAutonomyGrant({ autonomyGrant: grant, trust: 'owner' }, Number.NaN)).toBeNull();
+    expect(
+      activeAutonomyGrant({ autonomyGrant: grant, trust: 'owner' }, Date.parse(grant.expiresAt)),
+    ).toBeNull();
+    expect(() =>
+      buildAutonomyGrant({ grantedVia: 'composer', nowMs: NOW, ttlHours: Infinity }),
+    ).toThrow();
+    expect(
+      activeAutonomyGrant(
+        {
+          autonomyGrant: { ...grant, grantedVia: 'card', approvalId: 'approved-owner-card' },
+          trust: 'owner',
+        },
+        NOW,
+      ),
+    ).not.toBeNull();
+  });
+
   it('is null once expired, revoked, or on a non-owner task', () => {
     expect(
       activeAutonomyGrant({ autonomyGrant: grant, trust: 'owner' }, NOW + 25 * 3_600_000),

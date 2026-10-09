@@ -5,7 +5,9 @@ import {
   PackDataSchema,
   type PackItem,
   type PackSnapshot,
+  type SituationDecisionContext,
   type SituationPackView,
+  selectSituationDecisionContext,
 } from '@assistant/persistence/situations';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
@@ -177,6 +179,32 @@ export class FirestoreSituationPackReadRepository {
     const views = await Promise.all(selected.map((row) => this.project(row)));
     await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
     return views;
+  }
+
+  async decisionContext(
+    agentId: string,
+    discussionFrame: string,
+    limit = 12,
+  ): Promise<SituationDecisionContext[]> {
+    const fence = await readPrivacyErasureFence(this.store, agentId);
+    const rows = (await this.ownedRows<Pack>('situationPacks', agentId))
+      .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime() || b.id.localeCompare(a.id))
+      .slice(0, 50)
+      .filter((row) => !row.archived);
+    const selected = selectSituationDecisionContext(
+      rows.map((row) => ({
+        id: row.id,
+        title: row.title,
+        version: row.version,
+        archived: row.archived,
+        updatedAt: row.updatedAt.toISOString(),
+        data: row.data,
+      })),
+      discussionFrame,
+      limit,
+    );
+    await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
+    return selected;
   }
 
   async get(agentId: string, id: string): Promise<SituationPackView | null> {

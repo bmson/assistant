@@ -9,6 +9,7 @@
     "./chat": "./src/chat.ts",
     "./chat-card": "./src/chat-card.ts",
     "./chat-cues": "./src/chat-cues.ts",
+    "./card-privacy": "./src/card-privacy.ts",
     "./config": "./src/config.ts",
     "./conversation-context": "./src/conversation-context.ts",
     "./cost": "./src/cost.ts",
@@ -19,9 +20,12 @@
     "./memory/ambient": "./src/memory/ambient.ts",
     "./memory/commitments": "./src/memory/commitments.ts",
     "./memory/consolidation": "./src/memory/consolidation.ts",
+    "./memory/embedding-refresh": "./src/memory/embedding-refresh.ts",
     "./memory/document-catalog": "./src/memory/document-catalog.ts",
     "./memory/document-types": "./src/memory/document-types.ts",
     "./memory/documents": "./src/memory/documents.ts",
+    "./memory/discussion-frame": "./src/memory/discussion-frame.ts",
+    "./memory/fused-owner-context": "./src/memory/fused-owner-context.ts",
     "./memory/extraction": "./src/memory/extraction.ts",
     "./memory/graph-recall": "./src/memory/graph-recall.ts",
     "./memory/health": "./src/memory/health.ts",
@@ -34,6 +38,7 @@
     "./memory/recall": "./src/memory/recall.ts",
     "./memory/recall-metrics": "./src/memory/recall-metrics.ts",
     "./memory/skills": "./src/memory/skills.ts",
+    "./memory/situation-context": "./src/memory/situation-context.ts",
     "./memory/supersede": "./src/memory/supersede.ts",
     "./memory/validity": "./src/memory/validity.ts",
     "./memory/voice-ingest": "./src/memory/voice-ingest.ts",
@@ -43,6 +48,7 @@
     "./proactive/arrival": "./src/proactive/arrival.ts",
     "./proactive/nudge-policy": "./src/proactive/nudge-policy.ts",
     "./proactive/pipeline-health": "./src/proactive/pipeline-health.ts",
+    "./public-web": "./src/public-web.ts",
     "./push/devices": "./src/push/devices.ts",
     "./queue": "./src/queue.ts",
     "./realtime-voice": "./src/realtime-voice/index.ts",
@@ -59,6 +65,7 @@
     "./workflow/machine": "./src/workflow/machine.ts",
     "./workflow/read-intent": "./src/workflow/read-intent.ts",
     "./workflow/request-checklist-schema": "./src/workflow/request-checklist-schema.ts",
+    "./workflow/owner-intent": "./src/workflow/owner-intent.ts",
     "./workflow/response-contract": "./src/workflow/response-contract.ts",
     "./workflow/saved-work": "./src/workflow/saved-work.ts",
     "./workflow/schedules": "./src/workflow/schedules.ts",
@@ -66,7 +73,8 @@
     "./audit-investigation": "./src/audit-investigation.ts",
     "./workflow/self-repair": "./src/workflow/self-repair.ts",
     "./workflow/repair-github": "./src/workflow/repair-github.ts",
-    "./workflow/repair-hosted": "./src/workflow/repair-hosted.ts"
+    "./workflow/repair-hosted": "./src/workflow/repair-hosted.ts",
+    "./decisions/jev": "./src/decisions/jev.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
@@ -84,6 +92,7 @@
     "ai": "^7.0.116",
     "croner": "^10.0.1",
     "drizzle-orm": "^0.45.3",
+    "postal-mime": "4.0.4",
     "unpdf": "^1.8.1",
     "ws": "8.22.0",
     "zod": "^4.6.5"

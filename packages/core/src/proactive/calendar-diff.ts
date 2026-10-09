@@ -55,7 +55,7 @@ export interface CalendarEventSnapshotRow {
   attendeeResponseHash: AttendeeResponseDigest;
 }
 
-export type CalendarChangeKind = 'cancelled' | 'moved' | 'declined';
+export type CalendarChangeKind = 'cancelled' | 'moved' | 'declined' | 'unverified';
 
 export interface CalendarChange {
   kind: CalendarChangeKind;
@@ -155,22 +155,11 @@ function newlyDeclined(
  * same way a briefing with nothing to say stays silent rather than
  * inventing a headline.
  *
- * `current` MUST be the events a read actually, successfully returned —
- * never an empty array standing in for a read that threw. A previous event
- * missing from `current` is exactly the signal this function uses to call
- * something cancelled, so passing `current: []` for a failed read would
- * read as "everything on the calendar just got cancelled," which is the
- * one outcome this feature must never produce. The caller
- * (`pulse.ts`) enforces this by only ever calling this function inside the
- * branch where the calendar read is known to have succeeded.
- *
- * `complete` is `BriefingCalendarWindow.complete` — false when the read was
- * truncated (too many events, a calendar the account lost access to
- * mid-read). A previous event absent from a TRUNCATED `current` may simply
- * have been cut, not cancelled, so cancellation-by-absence is suppressed
- * for that run; moves and declines are still detected for whatever DID come
- * back, since those are judged from a present, matched event rather than
- * from an absence.
+ * A window does not establish an event's cancellation. Missing events produce
+ * an unverified observation only; callers may augment the current list with
+ * authoritative point reads to establish a move or explicit cancellation.
+ * Incomplete windows suppress absence notices, while present explicit changes
+ * remain valid. A failed read must still skip comparison entirely.
  */
 export function diffCalendarEvents(
   current: readonly BriefingCalendarEvent[],
@@ -194,14 +183,14 @@ export function diffCalendarEvents(
 
     const match = currentByKey.get(eventKey(prev.calendarId, prev.eventId));
     if (!match || match.status === CANCELLED_STATUS) {
-      if (!match && !complete) continue; // truncated read: absence proves nothing
+      if (!match && !complete) continue; // incomplete windows do not even establish disappearance
       const prevStartMs = Date.parse(prev.start);
       // Only a still-upcoming event's disappearance is news. One that simply
       // finished and rolled out of the forward-looking window is routine —
       // the same self-silence rule the rest of proactive follows.
       if (Number.isNaN(prevStartMs) || prevStartMs < now.getTime()) continue;
       changes.push({
-        kind: 'cancelled',
+        kind: match?.status === CANCELLED_STATUS ? 'cancelled' : 'unverified',
         calendarId: prev.calendarId,
         eventId: prev.eventId,
         iCalUID: prev.iCalUID,

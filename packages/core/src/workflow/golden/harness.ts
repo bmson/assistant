@@ -29,6 +29,8 @@ export interface GoldenFixture {
   plan?: Plan;
   /** Bound a scenario to prove the owner-visible result when work runs out of steps. */
   maxSteps?: number;
+  /** Resume a budget-parked task once after moving its runAfter into the past. */
+  resumeAfterBudget?: boolean;
   /** One entry per model step: tool calls to propose and/or final text. */
   script: Array<{
     text?: string;
@@ -42,6 +44,13 @@ export interface GoldenFixture {
   card?: GenerativeCardSpecV1;
   /** Tool implementations available to the scripted model. */
   tools: Record<string, { schema: ZodType; execute: (args: unknown) => Promise<unknown> }>;
+  /** Optional deterministic dispatcher outcome, before the fixture tool executes. */
+  beforeDispatch?: (
+    input: Parameters<DispatcherPort['dispatch']>[0],
+  ) =>
+    | Awaited<ReturnType<DispatcherPort['dispatch']>>
+    | undefined
+    | Promise<Awaited<ReturnType<DispatcherPort['dispatch']>> | undefined>;
 }
 
 type GoldenVerification =
@@ -139,6 +148,8 @@ function fixtureDispatcher(db: Db, fixture: GoldenFixture): DispatcherPort {
       })),
     resultIsUntrusted: () => false,
     dispatch: async (input) => {
+      const overridden = await fixture.beforeDispatch?.(input);
+      if (overridden) return overridden;
       const tool = fixture.tools[input.toolName];
       if (!tool) throw new Error(`golden fixture has no tool named ${input.toolName}`);
       let result: unknown;
@@ -157,7 +168,9 @@ function fixtureDispatcher(db: Db, fixture: GoldenFixture): DispatcherPort {
           status: 'failed',
           error: message,
           step: input.step,
-          decision: input.provenance,
+          // The executor uses this durable identity to reconcile an emitted
+          // call after a crash between dispatch and checkpoint.
+          decision: { ...input.provenance, modelToolCallId: input.modelToolCallId },
           finishedAt: new Date(),
         });
         return { kind: 'rejected' as const, reason: `execution failed: ${message.slice(0, 500)}` };
@@ -172,7 +185,7 @@ function fixtureDispatcher(db: Db, fixture: GoldenFixture): DispatcherPort {
           status: 'succeeded',
           result: result as Record<string, unknown>,
           step: input.step,
-          decision: input.provenance,
+          decision: { ...input.provenance, modelToolCallId: input.modelToolCallId },
           finishedAt: new Date(),
         })
         .returning({ id: toolCalls.id });
@@ -209,6 +222,13 @@ export async function runGoldenTask(
     dispatcher: fixtureDispatcher(db, fixture),
   };
   await executeTask(deps, task.id);
+  if (fixture.resumeAfterBudget) {
+    await db
+      .update(tasks)
+      .set({ runAfter: new Date(0) })
+      .where(eq(tasks.id, task.id));
+    await executeTask(deps, task.id);
+  }
 
   const rows = await db
     .select({ toolName: toolCalls.toolName, step: toolCalls.step })

@@ -5,6 +5,9 @@
  * model room to invent a plausible calendar or inbox answer.
  */
 
+import { requestedCardIntent } from './card-intent.js';
+import { detectFutureWatchIntent } from './future-watch-intent.js';
+
 export type PersonalReadKind =
   | 'calendar'
   | 'email'
@@ -18,6 +21,24 @@ export interface PersonalReadTimeWindow {
   timeMax: string;
   label: string;
 }
+
+export type TemporalDirection = 'past' | 'present' | 'future' | 'spanning';
+export type TemporalGranularity = 'hour' | 'day' | 'week' | 'month' | 'year' | 'rolling';
+
+/** Normalized resolver output consumed by deterministic calendar selection. */
+export interface ResolvedTemporalIntent {
+  direction: TemporalDirection;
+  anchor: { instant: string; timeZone: string; localDate: string };
+  interval: { start: string; endExclusive: string };
+  granularity: TemporalGranularity;
+  /** Compatibility projection used by existing tool-argument bindings. */
+  window: PersonalReadTimeWindow;
+}
+
+export type TemporalIntentResolution =
+  | { kind: 'resolved'; intent: ResolvedTemporalIntent }
+  | { kind: 'unsupported'; granularity: TemporalGranularity; message: string }
+  | { kind: 'unresolved' };
 
 export interface PersonalReadRequest {
   kind: PersonalReadKind;
@@ -36,6 +57,10 @@ export interface PersonalReadRequest {
   requiresThreadRead: boolean;
   /** Runtime-resolved range; the model never chooses the date window. */
   timeWindow?: PersonalReadTimeWindow;
+  /** Typed request-time interval consumed by calendar selection; window stays compatibility-shaped. */
+  temporalIntent?: ResolvedTemporalIntent;
+  /** A recognized temporal phrase that this deterministic resolver cannot safely bound. */
+  temporalIssue?: string;
   /** Gmail query derived from the owner's words, not model-proposed narrowing. */
   mailQuery?: string;
   /** Used only to render returned timestamps for the owner. */
@@ -45,7 +70,11 @@ export interface PersonalReadRequest {
   /** The owner is challenging a prior claim; prior prose remains hypothesis-only. */
   verification?: boolean;
   /** Specific question to answer, rather than turning every lookup into an agenda. */
-  answerFocus?: 'lodging' | 'applications';
+  answerFocus?: 'lodging' | 'applications' | 'flight';
+  /** Broad mail-history requests use a bounded metadata-page continuation. */
+  requiresExhaustiveMail?: boolean;
+  /** Current/upcoming mail questions prioritize the newest matching thread. */
+  preferLatestMail?: boolean;
 }
 
 export interface PersonalReadDetectionOptions {
@@ -102,7 +131,9 @@ function contextualLodgingQuestion(latest: string, ownerTurns: string[]): boolea
 
 const CALENDAR_SURFACE =
   /\b(?:calendars?|schedule|agenda|appointments?|events?|meetings?|interviews?|calls?|chats?|flights?|reservations?)\b/i;
-const EMAIL_SURFACE = /\b(?:inbox|mailbox|e-?mails?|mail|messages?|threads?)\b/i;
+const EMAIL_SURFACE = /\b(?:inbox|mailbox|e-?mail(?:s|ed|ing)?|mail|messages?|threads?)\b/i;
+const EXHAUSTIVE_MAIL = /\b(?:all|every|entire|complete|exhaustive|history|ever|over time)\b/i;
+const CURRENT_MAIL = /\b(?:current|latest|newest|upcoming|now|still|this trip|next trip)\b/i;
 /**
  * Google Drive, not driving: "drive time to Napa", "drive to SFO", and "how long
  * a drive is it" are trips, so a bare "drive" followed by a trip word is not a
@@ -137,7 +168,7 @@ const VERIFY =
 // never matches one. Gated on EMAIL_SURFACE at the call site, which is what
 // keeps terms this broad from dragging ordinary chat into a forced read.
 const RECEIPT_TERMS =
-  /\b(?:any|anything|got|gotten|get|receive[ds]?|hear|heard|arrive[ds]?|came\s+in|come\s+in|show(?:ed)?\s+up|land(?:ed)?)\b/i;
+  /\b(?:any|anything|got|gotten|get|receive[ds]?|hear|heard|email(?:ed|s)?|arrive[ds]?|came\s+in|come\s+in|show(?:ed)?\s+up|land(?:ed)?)\b/i;
 // A receipt question is a QUESTION. "I got your email, thanks" is not one, and
 // answering it with a mailbox search would be absurd.
 const RECEIPT_OPENER =
@@ -149,8 +180,12 @@ function receiptQuestion(text: string): boolean {
 }
 const MUTATION_LEAD =
   /^\s*(?:(?:please|can you|could you|would you|i want you to)\s+)*(?:add|archive|block|book|cancel|create|delete|edit|forward|hold|invite|label|mark|move|reply|reschedule|schedule|send|update)\b/i;
+// An email imperative is a send/draft workflow, even when a later clause
+// mentions a prohibited search. Do not replace it with a mailbox-only read.
+const EMAIL_COMMAND_LEAD =
+  /^\s*(?:(?:please|can you|could you|would you|i want you to)\s+)*(?:email|e-mail)\s+\S/iu;
 const READ_THEN_MUTATION =
-  /(?:\b(?:and|then|also)\s+|[,;.!?\n]\s*)(?:please\s+)?(?:add|archive|block|book|cancel|create|delete|draft|edit|email|flag|forward|hold|invite|label|make|mark|move|remember|remind|reply|reschedule|save|schedule|send|update)\b/i;
+  /(?:\b(?:and|then|also)\s+|[,;.!?\n]\s*)(?:please\s+)?(?:add|archive|block|book|cancel|compose|create|delete|draft|edit|email|flag|forward|hold|invite|label|make|mark|move|prepare|remember|remind|reply|reschedule|save|schedule|send|update|write)\b/i;
 
 const WEEKDAYS = [
   'sunday',
@@ -216,6 +251,10 @@ function civilDateAt(instant: Date, timeZone: string): CivilDate {
   };
 }
 
+function civilDateKey(date: CivilDate): string {
+  return `${date.year.toString().padStart(4, '0')}-${date.month.toString().padStart(2, '0')}-${date.day.toString().padStart(2, '0')}`;
+}
+
 function addCivilDays(date: CivilDate, days: number): CivilDate {
   const value = new Date(Date.UTC(date.year, date.month - 1, date.day + days));
   return {
@@ -276,7 +315,7 @@ function timeWindow(
   };
 }
 
-function resolveTimeWindow(
+function resolveTimeWindowBounds(
   text: string,
   kind: PersonalReadKind,
   hasNamedTerms: boolean,
@@ -303,6 +342,13 @@ function resolveTimeWindow(
       month: Number(isoDate[2]),
       day: Number(isoDate[3]),
     };
+    const normalized = new Date(Date.UTC(start.year, start.month - 1, start.day));
+    if (
+      normalized.getUTCFullYear() !== start.year ||
+      normalized.getUTCMonth() + 1 !== start.month ||
+      normalized.getUTCDate() !== start.day
+    )
+      return undefined;
     return range(start, 1, isoDate[0]);
   }
 
@@ -319,7 +365,7 @@ function resolveTimeWindow(
       explicitYear === undefined &&
       Date.UTC(year, month - 1, day) < Date.UTC(today.year, today.month - 1, today.day)
     ) {
-      year += 1;
+      if (!/\b(?:last|previous|ago|did|was|were|had|happened)\b/i.test(text)) year += 1;
     }
     const valid = new Date(Date.UTC(year, month - 1, day));
     if (
@@ -329,22 +375,41 @@ function resolveTimeWindow(
     ) {
       return range({ year, month, day }, 1, namedDate[0]);
     }
+    return undefined;
   }
 
+  if (/\byesterday\b/i.test(text)) return range(addCivilDays(today, -1), 1, 'yesterday');
+  const pastCount = /\b(?:last|past)\s+(\d{1,2})\s+(days?|weeks?)\b/i.exec(text);
+  if (pastCount) {
+    const days = Number(pastCount[1]) * (pastCount[2]?.toLowerCase().startsWith('week') ? 7 : 1);
+    if (days > 0) return range(addCivilDays(today, -days), days, pastCount[0]);
+  }
   if (/\btomorrow\b/i.test(text)) return range(addCivilDays(today, 1), 1, 'tomorrow');
   if (/\btoday\b/i.test(text)) return range(today, 1, 'today');
 
-  const weekdayMatch = new RegExp(`\\b(next\\s+)?(${WEEKDAYS.join('|')})\\b`, 'i').exec(text);
+  const weekdayMatch = new RegExp(
+    `\\b((?:next|last|previous)\\s+)?(${WEEKDAYS.join('|')})\\b`,
+    'i',
+  ).exec(text);
   if (weekdayMatch?.[2]) {
     const target = WEEKDAYS.indexOf(weekdayMatch[2].toLowerCase() as (typeof WEEKDAYS)[number]);
     let delta = (target - civilWeekday(today) + 7) % 7;
-    if (weekdayMatch[1] && delta === 0) delta = 7;
+    if (/last|previous/i.test(weekdayMatch[1] ?? '')) delta = delta === 0 ? -7 : delta - 7;
+    else if (weekdayMatch[1] && delta === 0) delta = 7;
     const start = addCivilDays(today, delta);
     return range(start, 1, weekdayMatch[0].toLowerCase());
   }
 
   const mondayOffset = (1 - civilWeekday(today) + 7) % 7;
   const currentMonday = addCivilDays(today, mondayOffset === 0 ? 0 : mondayOffset - 7);
+  if (/\b(?:last|previous)\s+week(?:end)?\b/i.test(text)) {
+    const start = addCivilDays(currentMonday, /weekend/i.test(text) ? -2 : -7);
+    return range(
+      start,
+      /weekend/i.test(text) ? 2 : 7,
+      /weekend/i.test(text) ? 'last weekend' : 'last week',
+    );
+  }
   if (/\bnext\s+week(?:end)?\b/i.test(text)) {
     if (/weekend/i.test(text)) {
       const start = addCivilDays(currentMonday, 12);
@@ -368,6 +433,18 @@ function resolveTimeWindow(
     nextMonth.month === 12
       ? { year: nextMonth.year + 1, month: 1, day: 1 }
       : { year: nextMonth.year, month: nextMonth.month + 1, day: 1 };
+  if (/\b(?:last|previous)\s+year\b/i.test(text)) {
+    const start = { year: today.year - 1, month: 1, day: 1 };
+    const end = { year: today.year, month: 1, day: 1 };
+    return timeWindow(start, end, 'last year', timeZone);
+  }
+  if (/\b(?:last|previous)\s+month\b/i.test(text)) {
+    const previous =
+      today.month === 1
+        ? { year: today.year - 1, month: 12, day: 1 }
+        : { year: today.year, month: today.month - 1, day: 1 };
+    return timeWindow(previous, firstOfMonth, 'last month', timeZone);
+  }
   if (/\bnext\s+month\b/i.test(text)) {
     return timeWindow(nextMonth, followingMonth, 'next month', timeZone);
   }
@@ -385,6 +462,160 @@ function resolveTimeWindow(
         timeZone,
       )
     : range(today, 7, 'the next 7 days');
+}
+
+const RELATIVE_PERIOD =
+  /\b(?:(?:next|last|past|previous|prior|this|coming)\s+(?:(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+)?(?:hours?|days?|weeks?|weekends?|months?|quarters?|years?|decades?)|(?:in\s+)?(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:hours?|days?|weeks?|months?|quarters?|years?|decades?)(?:\s+(?:ago|from\s+now))?)\b/i;
+const SUPPORTED_RELATIVE_PERIODS = [
+  /\bnext\s+[1-9]\d?\s+(?:days?|weeks?)\b/i,
+  /\b(?:last|past)\s+[1-9]\d?\s+(?:days?|weeks?)\b/i,
+  /\b(?:last|previous)\s+(?:week(?:end)?|month|year)\b/i,
+  /\bnext\s+(?:week(?:end)?|month)\b/i,
+  /\bthis\s+(?:week(?:end)?|month)\b/i,
+  /\b(?:yesterday|today|tomorrow)\b/i,
+].map((pattern) => pattern);
+
+function unsupportedRelativePeriod(text: string): string | undefined {
+  const allPeriods = new RegExp(RELATIVE_PERIOD.source, `${RELATIVE_PERIOD.flags}g`);
+  for (const match of text.matchAll(allPeriods)) {
+    const phrase = match[0];
+    if (!SUPPORTED_RELATIVE_PERIODS.some((pattern) => pattern.test(phrase))) return phrase;
+  }
+  return undefined;
+}
+
+function hasHistoricalTemporalCue(text: string): boolean {
+  return /\b(?:yesterday|last|past|previous|prior|ago)\b/i.test(text);
+}
+
+function temporalGranularity(
+  text: string,
+  kind: PersonalReadKind,
+  hasNamedTerms: boolean,
+): TemporalGranularity {
+  if (/\bhours?\b/i.test(text)) return 'hour';
+  if (/\b(?:years?|decades?)\b/i.test(text)) return 'year';
+  if (/\b(?:months?|quarters?)\b/i.test(text)) return 'month';
+  if (/\bweeks?(?:ends?)?\b/i.test(text)) return 'week';
+  if (
+    /\b(?:today|tomorrow|yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|20\d{2}-\d{2}-\d{2}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2})\b/i.test(
+      text,
+    )
+  )
+    return 'day';
+  if (/\b\d{1,2}\s+days?\b/i.test(text)) return 'day';
+  if (/\b\d{1,2}\s+weeks?\b/i.test(text)) return 'week';
+  return kind === 'calendar_email' || hasNamedTerms ? 'rolling' : 'week';
+}
+
+function isNextEventRequest(text: string): boolean {
+  return /\b(?:next|nearest|soonest)\s+(?:calendar\s+)?(?:event|meeting|appointment|call)\b/i.test(
+    text,
+  );
+}
+
+function hasExplicitTemporalPhrase(text: string): boolean {
+  return (
+    /\b(?:today|tomorrow|yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|(?:last|next|this)\s+(?:week|month|year)|20\d{2}-\d{2}-\d{2}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2})\b/i.test(
+      text,
+    ) || RELATIVE_PERIOD.test(text)
+  );
+}
+
+function temporalIssueFor(text: string, temporal: TemporalIntentResolution): string | undefined {
+  if (temporal.kind === 'unsupported') return temporal.message;
+  if (temporal.kind === 'unresolved' && hasExplicitTemporalPhrase(text))
+    return 'I can’t safely resolve that calendar date or period from the available information. Please give me a valid date or a period such as last week or last year.';
+  return undefined;
+}
+
+export function resolveTemporalIntent(
+  text: string,
+  kind: PersonalReadKind,
+  hasNamedTerms: boolean,
+  options: PersonalReadDetectionOptions,
+  purpose: 'range' | 'next-event' | 'trip' = 'range',
+): TemporalIntentResolution {
+  if (!options.timeZone) return { kind: 'unresolved' };
+  const now = options.now ? new Date(options.now.getTime()) : new Date();
+  if (!Number.isFinite(now.getTime())) return { kind: 'unresolved' };
+  const boundOptions = { ...options, now };
+  const unsupported = unsupportedRelativePeriod(text);
+  if (unsupported) {
+    const granularity = temporalGranularity(unsupported, kind, hasNamedTerms);
+    return {
+      kind: 'unsupported',
+      granularity,
+      message: `I can’t safely search that calendar period (“${unsupported}”). Please give me a specific date or a period such as last week or last year.`,
+    };
+  }
+  const today = civilDateAt(now, options.timeZone);
+  let window = resolveTimeWindowBounds(text, kind, hasNamedTerms, boundOptions);
+  if (purpose === 'trip' && !hasExplicitTemporalPhrase(text)) {
+    window = {
+      timeMin: now.toISOString(),
+      timeMax: new Date(now.getTime() + 36 * 60 * 60 * 1000).toISOString(),
+      label: 'the next day and a half',
+    };
+  }
+  if (!window) return { kind: 'unresolved' };
+
+  const futureAnchored =
+    (purpose === 'next-event' || purpose === 'trip') &&
+    !hasHistoricalTemporalCue(text) &&
+    Date.parse(window.timeMax) > now.getTime();
+  if (futureAnchored) {
+    const anchor = now.toISOString();
+    const start = Date.parse(window.timeMin);
+    const end = Date.parse(window.timeMax);
+    if (
+      Number.isFinite(start) &&
+      Number.isFinite(end) &&
+      start < now.getTime() &&
+      end > now.getTime()
+    )
+      window = { ...window, timeMin: anchor };
+  }
+  const start = Date.parse(window.timeMin);
+  const end = Date.parse(window.timeMax);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start)
+    return { kind: 'unresolved' };
+  const interval = { start: window.timeMin, endExclusive: window.timeMax };
+  const anchorInstant = now.toISOString();
+  const direction: TemporalDirection = futureAnchored
+    ? 'future'
+    : end <= now.getTime()
+      ? 'past'
+      : start > now.getTime()
+        ? 'future'
+        : start < now.getTime() && end > now.getTime()
+          ? 'spanning'
+          : 'present';
+  return {
+    kind: 'resolved',
+    intent: {
+      direction,
+      anchor: {
+        instant: anchorInstant,
+        timeZone: options.timeZone,
+        localDate: civilDateKey(today),
+      },
+      interval,
+      granularity: temporalGranularity(text, kind, hasNamedTerms),
+      window,
+    },
+  };
+}
+
+/** Compatibility API: keep the established tool-window shape unchanged. */
+export function resolveTimeWindow(
+  text: string,
+  kind: PersonalReadKind,
+  hasNamedTerms: boolean,
+  options: PersonalReadDetectionOptions,
+): PersonalReadTimeWindow | undefined {
+  const resolved = resolveTemporalIntent(text, kind, hasNamedTerms, options);
+  return resolved.kind === 'resolved' ? resolved.intent.window : undefined;
 }
 
 function gmailQuery(text: string, terms: string[]): string {
@@ -445,6 +676,8 @@ const QUERY_STOP_WORDS = new Set([
   'for',
   'from',
   'get',
+  'email',
+  'emailed',
   'got',
   'gotten',
   'had',
@@ -470,6 +703,12 @@ const QUERY_STOP_WORDS = new Set([
   'please',
   'pm',
   'previously',
+  'last',
+  'past',
+  'previous',
+  'yesterday',
+  'week',
+  'month',
   'receive',
   'received',
   'said',
@@ -588,6 +827,30 @@ export function readIntentText(message: ReadIntentMessage | undefined): string {
     // A malformed runtime envelope is metadata, not a safe lookup instruction.
   }
   return '';
+}
+
+function flightDestinationTerms(text: string): string[] {
+  const route = /\bflights?\b[^.!?;\n]{0,100}?\bto\s+([^.!?;\n]+)/i.exec(text)?.[1];
+  if (!route) return [];
+  const destination =
+    route.split(
+      /\b(?:tomorrow|today|tonight|yesterday|next|this|on|at|from|via|through|leaving|departing|in the morning|in the afternoon|in the evening)\b/i,
+    )[0] ?? '';
+  return [
+    ...new Set(
+      destination
+        .toLowerCase()
+        .replace(/[^a-z0-9'’-]+/g, ' ')
+        .split(/\s+/)
+        .filter(
+          (word) =>
+            word.length > 1 &&
+            !QUERY_STOP_WORDS.has(word) &&
+            !QUERY_MODIFIERS.has(word) &&
+            !SCHEDULED_THING.test(word),
+        ),
+    ),
+  ].slice(0, 3);
 }
 
 function queryTerms(text: string): string[] {
@@ -738,6 +1001,9 @@ export function detectPersonalReadRequest(
   }
   if (latestIndex === -1) return null;
   const latest = readIntentText(messages[latestIndex]);
+  // A future notification request needs an executable watch plan. Do not let
+  // broad words such as "tell me when" force a read-only answer route.
+  if (detectFutureWatchIntent(latest)) return null;
   if (ACCEPT_LOOKUP.test(latest)) {
     const prior = messages.slice(Math.max(0, latestIndex - 8), latestIndex);
     const offer = readIntentText(prior.findLast((message) => message.role === 'assistant'));
@@ -750,10 +1016,32 @@ export function detectPersonalReadRequest(
       return request;
     }
   }
+  // A saved card copied from a personally requested mailbox reservation is
+  // composed by the finalizer after these reads. It is not a separate external
+  // mutation, so enforcing its source reads must not turn it into a tool-less
+  // answer or authorize any other follow-through.
+  if (
+    requestedCardIntent(latest) &&
+    /^\s*(?:(?:please|can you|could you|would you)\s+)*(?:create|make|save)\b/i.test(latest) &&
+    /\b(?:my|our)\s+(?:hotel|reservation|booking)\b/i.test(latest) &&
+    /\b(?:mailbox|inbox|email|mail)\b/i.test(latest) &&
+    !READ_THEN_MUTATION.test(latest)
+  ) {
+    const reference = /\bunder\s+([a-z0-9][a-z0-9_-]{2,100})\b/i.exec(latest)?.[1];
+    return {
+      kind: 'email',
+      queryTerms: [reference ?? 'hotel'],
+      firstToolName: 'gmail.search',
+      requiresThreadRead: true,
+      mailQuery: reference ?? '{hotel lodging "reservation confirmation" "booking confirmation"}',
+      answerFocus: 'lodging',
+    };
+  }
   if (
     !latest ||
     /^\s*i\s+(?:read|checked|reviewed|looked|searched|scanned|opened)\b/i.test(latest) ||
     READ_THEN_MUTATION.test(latest) ||
+    EMAIL_COMMAND_LEAD.test(latest) ||
     (MUTATION_LEAD.test(latest) && !/\b(?:check|find|search|look|show)\b/i.test(latest))
   ) {
     return null;
@@ -777,6 +1065,10 @@ export function detectPersonalReadRequest(
     // "tomorrow" into a Gmail received-date filter and hide its confirmation.
     // Likewise, application history must come from actual application mail,
     // not calendar interviews or public job listings.
+    const temporal = lodging
+      ? resolveTemporalIntent(latest, 'calendar_email', true, options)
+      : undefined;
+    const temporalIssue = temporal ? temporalIssueFor(latest, temporal) : undefined;
     return {
       kind: lodging ? 'calendar_email' : 'email',
       queryTerms: [lodging ? 'hotel' : 'application'],
@@ -787,9 +1079,10 @@ export function detectPersonalReadRequest(
         : gmailQuery(latest, [
             '{"application received" "application confirmation" "thank you for applying" "your application"}',
           ]),
-      ...(lodging
-        ? { timeWindow: resolveTimeWindow(latest, 'calendar_email', true, options) }
+      ...(temporal?.kind === 'resolved'
+        ? { timeWindow: temporal.intent.window, temporalIntent: temporal.intent }
         : {}),
+      ...(temporalIssue ? { temporalIssue } : {}),
       ...(options.timeZone ? { timeZone: options.timeZone } : {}),
       answerFocus: lodging ? 'lodging' : 'applications',
     };
@@ -840,6 +1133,8 @@ export function detectPersonalReadRequest(
   const contextualQuery = verification && queryTerms(latest).length === 0 && !namesSender;
   const hypothesis = contextualQuery ? recentContext : latest;
   let terms = queryTerms(hypothesis);
+  const flightTerms = flightDestinationTerms(hypothesis);
+  if (flightTerms.length > 0) terms = flightTerms;
   const scheduledNoun = SCHEDULED_THING.exec(hypothesis)?.[1]?.toLowerCase();
   const genericScheduleList = Boolean(
     scheduledNoun?.endsWith('s') &&
@@ -851,10 +1146,7 @@ export function detectPersonalReadRequest(
   const whyLookup =
     WHY_LOOKUP.test(latest) &&
     /\b(?:my|our|you said|said i|i had|i have|calendar|schedule)\b/i.test(latest);
-  const nextEventQuestion =
-    /\b(?:next|nearest|soonest)\s+(?:calendar\s+)?(?:event|meeting|appointment|call)\b/i.test(
-      latest,
-    );
+  const nextEventQuestion = isNextEventRequest(latest);
   if (nextEventQuestion) terms = [];
   const personalSchedule =
     /\b(?:my|our|the|this|that|do i|did i|is there|are there)\b/i.test(latest) ||
@@ -909,25 +1201,48 @@ export function detectPersonalReadRequest(
   const request: PersonalReadRequest = {
     kind,
     queryTerms: terms,
+    ...(namedSchedule && /\b(?:flight|flights|airline|itinerary|boarding)\b/i.test(latest)
+      ? { answerFocus: 'flight' as const }
+      : {}),
     firstToolName,
     requiresThreadRead:
       kind === 'calendar_email' ||
       (kind === 'email' &&
         (verification || /\b(?:when|where|what time|details?|what does|what did)\b/i.test(latest))),
   };
+  if (kind !== 'calendar') {
+    if (EXHAUSTIVE_MAIL.test(latest)) request.requiresExhaustiveMail = true;
+    if (CURRENT_MAIL.test(latest)) request.preferLatestMail = true;
+  }
   if (kind !== 'email' && nextEventQuestion) {
     request.maxResults = 1;
   }
   if (kind !== 'email') {
-    request.timeWindow = resolveTimeWindow(
+    const temporal = resolveTemporalIntent(
       contextualQuery ? `${latest}\n${recentContext}` : latest,
       kind,
       terms.length > 0,
       options,
+      nextEventQuestion ? 'next-event' : 'range',
     );
+    if (temporal.kind === 'resolved') {
+      request.timeWindow = temporal.intent.window;
+      request.temporalIntent = temporal.intent;
+    } else {
+      const temporalText = contextualQuery ? `${latest}\n${recentContext}` : latest;
+      const issue = temporalIssueFor(temporalText, temporal);
+      if (issue) request.temporalIssue = issue;
+    }
   }
   if (kind !== 'calendar') {
     request.mailQuery = gmailQuery(hypothesis, terms);
+    // A relative travel date describes the itinerary, not when its confirmation
+    // arrived. Older booking confirmations can still be authoritative for a
+    // future flight, so only an explicitly stated mail-age filter narrows them.
+    const explicitMailAge = /\b(?:last|past)\s+(?:\d{1,2}\s+days?|week|month)\b/i.test(hypothesis);
+    if (request.answerFocus === 'flight' && !explicitMailAge) {
+      request.mailQuery = request.mailQuery.replace(/\s+newer_than:\d+d\b/gi, '').trim();
+    }
   }
   if (options.timeZone) request.timeZone = options.timeZone;
   if (verification) request.verification = true;
@@ -958,6 +1273,15 @@ function queryIncludes(query: unknown, terms: string[]): boolean {
   return terms.every((term) => lower.includes(term.toLowerCase()));
 }
 
+function calendarReadInterval(
+  request: PersonalReadRequest,
+): { start: string; endExclusive: string } | undefined {
+  if (request.temporalIntent) return request.temporalIntent.interval;
+  return request.timeWindow
+    ? { start: request.timeWindow.timeMin, endExclusive: request.timeWindow.timeMax }
+    : undefined;
+}
+
 function matchingCalendarRead(row: ReadToolEvidence, request: PersonalReadRequest): boolean {
   if (!succeeded(row) || row.toolName !== request.firstToolName) return false;
   const args = argsRecord(row);
@@ -968,10 +1292,8 @@ function matchingCalendarRead(row: ReadToolEvidence, request: PersonalReadReques
   ) {
     return false;
   }
-  return (
-    !request.timeWindow ||
-    (args?.timeMin === request.timeWindow.timeMin && args?.timeMax === request.timeWindow.timeMax)
-  );
+  const interval = calendarReadInterval(request);
+  return !interval || (args?.timeMin === interval.start && args?.timeMax === interval.endExclusive);
 }
 
 function matchingGmailSearch(row: ReadToolEvidence, request: PersonalReadRequest): boolean {
@@ -1009,10 +1331,67 @@ export function gmailSearchThreadIds(
       if (typeof id === 'string' && id) ids.push(id);
     }
   }
-  return [...new Set(ids)];
+  const unique = [...new Set(ids)];
+  if (request?.answerFocus === 'flight') {
+    const scores = new Map<string, number>();
+    for (const row of evidence) {
+      if (
+        !succeeded(row) ||
+        row.toolName !== 'gmail.search' ||
+        !row.result ||
+        !matchingGmailSearch(row, request)
+      )
+        continue;
+      const results = (row.result as { results?: unknown }).results;
+      if (!Array.isArray(results)) continue;
+      for (const item of results) {
+        if (!item || typeof item !== 'object') continue;
+        const metadata = item as { threadId?: unknown; subject?: unknown; snippet?: unknown };
+        if (typeof metadata.threadId !== 'string') continue;
+        const subject = typeof metadata.subject === 'string' ? metadata.subject : '';
+        const snippet = typeof metadata.snippet === 'string' ? metadata.snippet : '';
+        const score =
+          (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass)\b/i.test(subject)
+            ? 2
+            : 0) +
+          (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass|departure)\b/i.test(
+            snippet,
+          )
+            ? 1
+            : 0);
+        scores.set(metadata.threadId, Math.max(scores.get(metadata.threadId) ?? 0, score));
+      }
+    }
+    return unique
+      .map((threadId, index) => ({ threadId, index, score: scores.get(threadId) ?? 0 }))
+      .sort((left, right) => right.score - left.score || left.index - right.index)
+      .map(({ threadId }) => threadId);
+  }
+  if (!request?.preferLatestMail) return unique;
+  const dateByThread = new Map<string, number>();
+  for (const row of evidence) {
+    if (
+      !succeeded(row) ||
+      row.toolName !== 'gmail.search' ||
+      !row.result ||
+      (request && !matchingGmailSearch(row, request))
+    )
+      continue;
+    const results = (row.result as { results?: unknown }).results;
+    if (!Array.isArray(results)) continue;
+    for (const result of results) {
+      if (!result || typeof result !== 'object') continue;
+      const item = result as { threadId?: unknown; date?: unknown };
+      if (typeof item.threadId !== 'string') continue;
+      const timestamp = typeof item.date === 'string' ? Date.parse(item.date) : NaN;
+      dateByThread.set(item.threadId, Number.isFinite(timestamp) ? timestamp : 0);
+    }
+  }
+  return unique.sort((a, b) => (dateByThread.get(b) ?? 0) - (dateByThread.get(a) ?? 0));
 }
 
 export const MAX_GMAIL_THREADS_TO_READ = 3;
+export const MAX_GMAIL_SEARCH_PAGES = 3;
 
 export function gmailThreadIdsToRead(
   evidence: ReadonlyArray<ReadToolEvidence>,
@@ -1057,6 +1436,21 @@ function nextGmailThreadId(
   );
 }
 
+function nextGmailSearchPage(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): string | undefined {
+  if (!request.requiresThreadRead && !request.requiresExhaustiveMail) return undefined;
+  const searches = evidence.filter((row) => matchingGmailSearch(row, request));
+  if (searches.length >= MAX_GMAIL_SEARCH_PAGES) return undefined;
+  const latest = searches.at(-1);
+  if (!latest?.result || typeof latest.result !== 'object') return undefined;
+  const result = latest.result as { hasMore?: unknown; nextPageToken?: unknown };
+  return result.hasMore === true && typeof result.nextPageToken === 'string'
+    ? result.nextPageToken
+    : undefined;
+}
+
 /**
  * Return the next read that must happen before a personal-data answer may be
  * drafted. Source retries are bounded; the response contract then publishes
@@ -1066,6 +1460,7 @@ export function nextRequiredReadTool(
   request: PersonalReadRequest,
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): string | undefined {
+  if (request.temporalIssue) return undefined;
   if (request.kind === 'drive' || request.kind === 'memory' || request.kind === 'knowledge_graph') {
     if (evidence.some((row) => matchingPrivateRead(row, request))) return undefined;
     return attempts(evidence, request.firstToolName) < 2 ? request.firstToolName : undefined;
@@ -1081,6 +1476,10 @@ export function nextRequiredReadTool(
     return undefined;
   }
 
+  if (request.kind !== 'calendar' && nextGmailSearchPage(request, evidence)) {
+    return 'gmail.search';
+  }
+
   if (request.requiresThreadRead && gmailThreadIdsToRead(evidence, request).length > 0) {
     return nextGmailThreadId(evidence, request) ? 'gmail.read_thread' : undefined;
   }
@@ -1094,37 +1493,38 @@ export function groundReadToolInput(
   input: Record<string, unknown>,
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): Record<string, unknown> {
+  if (request.temporalIssue) return {};
   if (toolName === 'calendar.list_events') {
     const { calendarIds: _ignored, ...allCalendars } = input;
+    const interval = calendarReadInterval(request);
     return {
       ...allCalendars,
-      ...(request.timeWindow
-        ? { timeMin: request.timeWindow.timeMin, timeMax: request.timeWindow.timeMax }
-        : {}),
+      ...(interval ? { timeMin: interval.start, timeMax: interval.endExclusive } : {}),
       maxResults: request.maxResults ?? 50,
     };
   }
   if (toolName === 'calendar.search_events') {
     const { calendarIds: _ignored, ...allCalendars } = input;
+    const interval = calendarReadInterval(request);
     return {
       ...allCalendars,
-      ...(request.timeWindow
-        ? { timeMin: request.timeWindow.timeMin, timeMax: request.timeWindow.timeMax }
-        : {}),
+      ...(interval ? { timeMin: interval.start, timeMax: interval.endExclusive } : {}),
       ...(request.queryTerms.length > 0 ? { query: request.queryTerms.join(' ') } : {}),
       maxResults: request.maxResults ?? 50,
     };
   }
   if (toolName === 'calendar.availability') {
-    return request.timeWindow
-      ? { timeMin: request.timeWindow.timeMin, timeMax: request.timeWindow.timeMax }
-      : input;
+    const interval = calendarReadInterval(request);
+    return interval ? { timeMin: interval.start, timeMax: interval.endExclusive } : input;
   }
   if (toolName === 'gmail.search') {
+    const pageToken = nextGmailSearchPage(request, evidence);
+    const { pageToken: _untrustedPageToken, ...searchInput } = input;
     return {
-      ...input,
+      ...searchInput,
       query: request.mailQuery || request.queryTerms.join(' ') || '-in:spam -in:trash',
       maxResults: 20,
+      ...(pageToken ? { pageToken } : {}),
     };
   }
   if (toolName === 'gmail.read_thread') {
@@ -1150,6 +1550,7 @@ export function buildReadToolInput(
   toolName: string,
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): Record<string, unknown> | null {
+  if (request.temporalIssue) return null;
   if (toolName === 'calendar.list_events' && !request.timeWindow) return null;
   if (toolName === 'calendar.search_events' && request.queryTerms.length === 0) return null;
   if (toolName === 'calendar.availability' && !request.timeWindow) return null;

@@ -4,7 +4,12 @@ import {
   decodeRecord,
   type InstallationStore,
 } from '@assistant/firestore';
-import { type Records, type RepairIssue, repairQueueReady } from '@assistant/persistence';
+import {
+  type Records,
+  type RepairIssue,
+  repairQueueNextEligibleAt,
+  repairQueueReady,
+} from '@assistant/persistence';
 export async function ensureRepairSchedule(
   store: InstallationStore,
   agentId: string,
@@ -34,12 +39,17 @@ export async function ensureRepairSchedule(
       const issues = rows.docs.map((doc) => decodeRecord<RepairIssue>(doc.data()));
       // Every minute sweep recovers missed wakes and starts waiting work as soon as the rolling
       // allowance returns. The claim transaction remains the final authority for dispatch.
-      if (
-        repairQueueReady(issues, now, dailyLimit) ||
-        issues.some((issue) => ['fixing', 'testing', 'pr_open', 'merged'].includes(issue.status))
-      ) {
+      const eligibleAt = repairQueueNextEligibleAt(issues, now, dailyLimit);
+      const followUp = issues.some((issue) =>
+        ['fixing', 'testing', 'pr_open', 'merged'].includes(issue.status),
+      );
+      const nextRunAt = repairQueueReady(issues, now, dailyLimit)
+        ? now
+        : (eligibleAt ?? (followUp ? now : undefined));
+      if (nextRunAt) {
         const next = schedule.get('nextRunAt')?.toDate?.();
-        if (!next || next > now) tx.update(schedule.ref, { nextRunAt: now, updatedAt: now });
+        if (!next || Math.abs(next.getTime() - nextRunAt.getTime()) > 1000)
+          tx.update(schedule.ref, { nextRunAt, updatedAt: now });
       }
       return;
     }
@@ -50,6 +60,13 @@ export async function ensureRepairSchedule(
       cron: '*/15 * * * *',
       taskTemplate: { type: 'scheduled', budgetUsdLimit: '0.50', job: 'self.repair' },
       enabled: true,
+      seedTemplateKey: 'assistant.schedule.self-repair',
+      seedTemplateRevision: 1,
+      seedDefinition: {
+        cron: '*/15 * * * *',
+        taskTemplate: { type: 'scheduled', budgetUsdLimit: '0.50', job: 'self.repair' },
+      },
+      seedReviewRequired: false,
       nextRunAt: now,
       lastRunAt: null,
       createdAt: now,

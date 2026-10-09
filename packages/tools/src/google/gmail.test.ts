@@ -48,6 +48,7 @@ describe('gmail.search', () => {
       complete: boolean;
       mailboxSearched: string;
       matchingMessagesEstimate?: number;
+      receipt: { continuation: { tool: string; input: { pageToken: string } } | null };
     };
 
     expect(api.mock.calls[0]?.[0]).not.toContain('in%3Ainbox');
@@ -55,7 +56,149 @@ describe('gmail.search', () => {
       complete: false,
       mailboxSearched: 'bot@example.com',
       matchingMessagesEstimate: 4,
+      coverage: { requested: 1, discovered: 4, returned: 1, hasMore: true },
+      nextPageToken: 'another-page',
     });
+    expect(result.receipt.continuation).toEqual({
+      tool: 'gmail.search',
+      input: { query: 'Clay', maxResults: 1, pageToken: 'another-page' },
+    });
+  });
+
+  it('resumes with Gmail page tokens and keeps inaccessible metadata in coverage', async () => {
+    const api = vi.fn(async (url: string) => {
+      if (url.includes('/messages?')) {
+        expect(url).toContain('pageToken=next-page');
+        return { messages: [{ id: 'message-2' }], resultSizeEstimate: 2 };
+      }
+      throw new Error('metadata unavailable');
+    });
+    const result = (await registerGmailTools(new ToolRegistry(), {
+      client: { api } as never,
+      botEmail: 'bot@example.com',
+    })
+      .get('gmail.search')
+      ?.tool.execute(
+        { query: 'current trip', maxResults: 1, pageToken: 'next-page' },
+        {} as never,
+      )) as {
+      complete: boolean;
+      unavailable: Array<{ messageId: string }>;
+      coverage: { returned: number; unavailable: number };
+    };
+
+    expect(api.mock.calls[0]?.[0]).toContain('pageToken=next-page');
+    expect(result).toMatchObject({
+      complete: false,
+      unavailable: [{ messageId: 'message-2' }],
+      coverage: { returned: 0, unavailable: 1 },
+    });
+  });
+
+  it('does not mark a truncated thread body complete', async () => {
+    const api = vi.fn().mockResolvedValue({
+      messages: [
+        {
+          id: 'message-1',
+          payload: {
+            mimeType: 'text/plain',
+            body: { data: Buffer.from('x'.repeat(8_001)).toString('base64url') },
+          },
+        },
+      ],
+    });
+    const result = (await registerGmailTools(new ToolRegistry(), {
+      client: { api } as never,
+      botEmail: 'bot@example.com',
+    })
+      .get('gmail.read_thread')
+      ?.tool.execute({ threadId: 'thread-1' }, {} as never)) as {
+      complete: boolean;
+      coverage: { complete: boolean };
+      messages: Array<{ truncated: boolean }>;
+    };
+
+    expect(result).toMatchObject({
+      complete: false,
+      coverage: { complete: false },
+      messages: [{ truncated: true }],
+    });
+  });
+
+  it('continues at the exact bounded message-body offset to retrieve decisive tail text', async () => {
+    const fullText = `${'x'.repeat(8_000)}DECISIVE source detail`;
+    const api = vi.fn().mockResolvedValue({
+      messages: [
+        {
+          id: 'message-1',
+          threadId: 'thread-1',
+          payload: {
+            mimeType: 'text/plain',
+            body: { data: Buffer.from(fullText).toString('base64url') },
+          },
+        },
+      ],
+    });
+    const read = registerGmailTools(new ToolRegistry(), {
+      client: { api } as never,
+      botEmail: 'bot@example.com',
+    }).get('gmail.read_thread')?.tool;
+    const first = (await read?.execute({ threadId: 'thread-1' }, {} as never)) as {
+      messages: Array<{ text: string; truncated: boolean }>;
+      receipt: {
+        complete: boolean;
+        continuation: { tool: string; input: Record<string, unknown> } | null;
+      };
+    };
+    expect(first.messages[0]?.text).toHaveLength(8_000);
+    expect(first.messages[0]?.truncated).toBe(true);
+    expect(first.receipt.complete).toBe(false);
+    const continuation = first.receipt.continuation;
+    expect(continuation).toMatchObject({
+      tool: 'gmail.read_thread',
+      input: { threadId: 'thread-1', startMessageIndex: 0, startMessageOffset: 8_000 },
+    });
+    const second = (await read?.execute(continuation?.input as never, {} as never)) as {
+      complete: boolean;
+      messages: Array<{ text: string; truncated: boolean }>;
+      receipt: { complete: boolean; continuation: unknown };
+    };
+    expect(second.messages[0]?.text).toContain('DECISIVE source detail');
+    expect(second.messages[0]?.truncated).toBe(false);
+    expect(second.complete).toBe(true);
+    expect(second.receipt).toMatchObject({ complete: true, continuation: null });
+  });
+
+  it('continues to later thread messages when the requested message page is full', async () => {
+    const api = vi.fn().mockResolvedValue({
+      messages: ['one', 'two', 'decisive third'].map((text, index) => ({
+        id: `message-${index}`,
+        threadId: 'thread-1',
+        payload: {
+          mimeType: 'text/plain',
+          body: { data: Buffer.from(text).toString('base64url') },
+        },
+      })),
+    });
+    const read = registerGmailTools(new ToolRegistry(), {
+      client: { api } as never,
+      botEmail: 'bot@example.com',
+    }).get('gmail.read_thread')?.tool;
+    const first = (await read?.execute({ threadId: 'thread-1', maxMessages: 2 }, {} as never)) as {
+      messages: Array<{ text: string }>;
+      receipt: { continuation: { input: Record<string, unknown> } | null };
+    };
+    expect(first.messages.map((message) => message.text)).toEqual(['one', 'two']);
+    expect(first.receipt.continuation?.input).toMatchObject({ startMessageIndex: 2 });
+    const second = (await read?.execute(
+      first.receipt.continuation?.input as never,
+      {} as never,
+    )) as {
+      complete: boolean;
+      messages: Array<{ text: string }>;
+    };
+    expect(second.messages[0]?.text).toBe('decisive third');
+    expect(second.complete).toBe(true);
   });
 });
 
@@ -191,5 +334,40 @@ describe('gmail.modify', () => {
       addLabelIds: ['Waiting'],
       removeLabelIds: ['UNREAD', 'INBOX'],
     });
+  });
+
+  it('reviews equivalent archive and consequential system-label mutations consistently', () => {
+    const tool = modifyTool()?.tool;
+    if (!tool || typeof tool.risk !== 'function') throw new Error('missing label risk function');
+    for (const labels of [
+      { removeLabels: ['INBOX'] },
+      { addLabels: ['TRASH'] },
+      { removeLabels: ['SPAM'] },
+      { addLabels: ['INBOX'] },
+      { addLabels: ['SENT'] },
+    ]) {
+      const args = tool.inputSchema.parse({ threadId: 't', archive: false, ...labels });
+      expect(tool.risk(args, context(false))).toBe('approval');
+    }
+    const ordinary = tool.inputSchema.parse({
+      threadId: 't',
+      addLabels: ['Label_123'],
+      markRead: true,
+    });
+    expect(tool.risk(ordinary, context(false))).toBe('autonomous');
+  });
+
+  it('rejects contradictory effective label operations, including convenience conversions', () => {
+    const schema = modifyTool()?.tool.inputSchema;
+    expect(schema?.safeParse({ threadId: 't', addLabels: ['INBOX'], archive: true }).success).toBe(
+      false,
+    );
+    expect(
+      schema?.safeParse({ threadId: 't', addLabels: ['UNREAD'], markRead: true }).success,
+    ).toBe(false);
+    expect(
+      schema?.safeParse({ threadId: 't', addLabels: ['Label_123'], removeLabels: ['Label_123'] })
+        .success,
+    ).toBe(false);
   });
 });

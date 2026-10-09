@@ -6,22 +6,33 @@ set -euo pipefail
 
 # shellcheck source=infra/gcp/release-diagnostics.sh
 source "$(dirname "${BASH_SOURCE[0]}")/release-diagnostics.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/release-staged-services.sh"
+release_validate_worker_override || exit $?
 
 PROJECT="${GCP_PROJECT:?Set GCP_PROJECT to the Google Cloud project id}"
 REGION="${GCP_REGION:-us-west1}"
 REPO="${ARTIFACT_REPOSITORY:-assistant}"
 TAG="${IMAGE_TAG:-$(git rev-parse --short=12 HEAD)}"
+RELEASE_COMPONENTS="${RELEASE_COMPONENTS:-agent,web}"
 
 if [[ ! "$TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
   echo "IMAGE_TAG may contain only letters, digits, '.', '_' and '-'." >&2
   exit 2
 fi
+case "$RELEASE_COMPONENTS" in
+  full|agent,web|web,agent) RELEASE_COMPONENTS=agent,web ;;
+  web)
+    if [[ "${RELEASE_SCHEMA_UNCHANGED:-false}" != true ]]; then
+      echo 'web-only release requires RELEASE_SCHEMA_UNCHANGED=true' >&2
+      exit 2
+    fi
+    ;;
+  *) echo 'RELEASE_COMPONENTS must be agent,web (default) or web' >&2; exit 2 ;;
+esac
+export RELEASE_COMPONENTS
 
 IMAGE_ROOT="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}"
 AGENT_SERVICE_ACCOUNT="assistant-agent@${PROJECT}.iam.gserviceaccount.com"
-BROWSER_SERVICE_ACCOUNT="assistant-browser@${PROJECT}.iam.gserviceaccount.com"
-CODE_SERVICE_ACCOUNT="assistant-code@${PROJECT}.iam.gserviceaccount.com"
-PROCESSOR_SERVICE_ACCOUNT="assistant-processor@${PROJECT}.iam.gserviceaccount.com"
 INTERNAL_INVOKER_SERVICE_ACCOUNT="assistant-internal-invoker@${PROJECT}.iam.gserviceaccount.com"
 
 # ── release bookkeeping ──────────────────────────────────────────────────────
@@ -89,6 +100,9 @@ else
   echo "Using pre-built release images ${TAG}"
 fi
 
+echo "Checking live/new schema and API compatibility before release mutations"
+release_preflight_compatibility "$RELEASE_COMPONENTS" || exit 1
+
 # A release-tagged, consistent dump is a hard gate before schema changes. The
 # backup job has the same database/storage access as the agent but no app code.
 #
@@ -96,7 +110,9 @@ fi
 # (a web-only copy change, an iOS-only commit) — the backup and its Cloud Run
 # Job round-trip cost one to two minutes that a same-day iteration loop feels.
 # It stays opt-OUT, never opt-in: the default path keeps the gate.
-if [[ "${SKIP_BACKUP:-false}" == "true" ]]; then
+if [[ "$RELEASE_COMPONENTS" == web ]]; then
+  echo 'Web-only release: schema is declared unchanged; skipping backup and migration.'
+elif [[ "${SKIP_BACKUP:-false}" == "true" ]]; then
   echo "Skipping the pre-migration backup (SKIP_BACKUP=true) — only safe when the schema is unchanged"
 else
 BACKUP_BUCKET="$(agent_env_value WORKSPACE_BUCKET)"
@@ -138,6 +154,7 @@ fi
 # and a failed migration stops the release before any new service revision is
 # made live. This one stays a hard gate on purpose: every rollout below assumes
 # the schema is current, so there is nothing safe to continue to.
+if [[ "$RELEASE_COMPONENTS" != web ]]; then
 echo "Migrating and reconciling database defaults"
 MIGRATION_ASSISTANT_NAME="$(agent_env_value ASSISTANT_NAME)"
 MIGRATION_ASSISTANT_EMAIL="$(agent_env_value ASSISTANT_EMAIL)"
@@ -165,6 +182,7 @@ else
     --memory 512Mi --cpu 1 --task-timeout 600 --max-retries 0 --quiet
 fi
 run_migration_job
+fi
 
 # This script rolls images only; deploy.sh owns environment and provisioning.
 # That split is silent by default: a commit that starts depending on a new env
@@ -350,35 +368,22 @@ verify_web_serving_release() {
 # Agent first (web calls it, so this is the ordering that minimises API skew),
 # then web, then the reconciliation tail. Independent, so the tail cannot strand
 # either service the way it used to.
-if step "Verifying agent configuration" verify_agent_configuration; then
-  step "Rolling out agent" roll_out_service assistant-agent "${IMAGE_ROOT}/agent:${TAG}" || true
+if [[ "$RELEASE_COMPONENTS" == agent,web ]]; then
+  if step "Verifying agent configuration" verify_agent_configuration; then
+    step "Staging, verifying, and promoting compatible services" release_staged_services || true
+  else
+    record_failure "Service promotion skipped — agent configuration unverified"
+  fi
+
+  AGENT_URL="$(gcloud run services describe assistant-agent --project "$PROJECT" --region "$REGION" --format='value(status.url)' 2>/dev/null || true)"
+  if [[ -n "$AGENT_URL" ]]; then
+    step "Refreshing internal scheduler OIDC" refresh_scheduler_oidc "$AGENT_URL" || true
+  else
+    record_failure "Refreshing internal scheduler OIDC (could not resolve the agent URL)"
+  fi
 else
-  record_failure "Rolling out agent (skipped — configuration unverified)"
+  step "Staging, verifying, and promoting web-only release" release_staged_services || true
 fi
-
-step "Rolling out web" roll_out_service assistant-web "${IMAGE_ROOT}/web:${TAG}" || true
-
-AGENT_URL="$(gcloud run services describe assistant-agent --project "$PROJECT" --region "$REGION" --format='value(status.url)' 2>/dev/null || true)"
-if [[ -n "$AGENT_URL" ]]; then
-  step "Refreshing internal scheduler OIDC" refresh_scheduler_oidc "$AGENT_URL" || true
-else
-  record_failure "Refreshing internal scheduler OIDC (could not resolve the agent URL)"
-fi
-
-if configured_module_enabled "$RELEASE_MODULES" browser; then
-  step "Rolling out browser job" \
-    roll_out_job assistant-browser "${IMAGE_ROOT}/browser:${TAG}" "$BROWSER_SERVICE_ACCOUNT" optional || true
-fi
-if configured_module_enabled "$RELEASE_MODULES" code; then
-  step "Rolling out code job" \
-    roll_out_job assistant-code "${IMAGE_ROOT}/code:${TAG}" "$CODE_SERVICE_ACCOUNT" optional || true
-fi
-if configured_module_enabled "$RELEASE_MODULES" documents; then
-  step "Rolling out document processor job" \
-    roll_out_job assistant-processor "${IMAGE_ROOT}/processor:${TAG}" "$PROCESSOR_SERVICE_ACCOUNT" optional || true
-fi
-
-step "Verifying assistant-web serves ${TAG}" verify_web_serving_release || true
 
 if (( FAILURE_COUNT )); then
   echo "" >&2

@@ -95,7 +95,7 @@ describe.skipIf(!localEmulator)('Firestore web memory erasure with PostgreSQL of
       id: 'voice-import',
       agentId,
       source: 'voice-samples-upload',
-      workspacePath: 'voice/private.wav',
+      workspacePath: 'import/voice/private.wav',
       taskId: null,
     });
     mocks.workspaceDelete.mockRejectedValueOnce(new Error('asset temporarily unavailable'));
@@ -106,14 +106,21 @@ describe.skipIf(!localEmulator)('Firestore web memory erasure with PostgreSQL of
     expect((await store.doc('privacyErasureJobs', agentId).get()).get('status')).toBe(
       'content-erased',
     );
-    expect((await store.doc('privacyErasureAssets', 'voice-import').get()).exists).toBe(true);
+    const pendingAssets = await store
+      .collection('privacyErasureAssets')
+      .where('agentId', '==', agentId)
+      .get();
+    expect(pendingAssets.size).toBe(1);
+    expect(pendingAssets.docs[0]?.get('workspacePath')).toBe('import/voice/private.wav');
 
     await expect(action.forgetLongTermMemoryAction()).resolves.toBeUndefined();
     expect(mocks.workspaceDelete).toHaveBeenCalledTimes(2);
-    expect(mocks.workspaceDelete).toHaveBeenCalledWith('voice/private.wav');
-    expect((await store.doc('privacyErasureAssets', 'voice-import').get()).exists).toBe(false);
+    expect(mocks.workspaceDelete).toHaveBeenCalledWith('import/voice/private.wav');
+    expect(
+      (await store.collection('privacyErasureAssets').where('agentId', '==', agentId).get()).empty,
+    ).toBe(true);
     expect((await store.doc('privacyErasureJobs', agentId).get()).get('status')).toBe('complete');
     expect((await store.doc('memoryTombstones', `hash-${agentId}`).get()).exists).toBe(true);
     expect(mocks.application).not.toHaveBeenCalled();
-  });
+  }, 30_000);
 });

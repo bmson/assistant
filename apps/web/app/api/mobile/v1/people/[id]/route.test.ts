@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { GRAPH_EXTRACTION_VERSION } from '@assistant/application/knowledge-graph';
 import { resetConfigForTest } from '@assistant/config';
-import { createInstallationStore } from '@assistant/firestore';
+import { createInstallationStore, embeddingSpaceKey } from '@assistant/firestore';
 import { FieldValue } from '@google-cloud/firestore';
 import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -33,6 +34,15 @@ describe.skipIf(!localEmulator)('Firestore mobile person card with PostgreSQL of
   const friendContactId = randomUUID();
   const eventEntityId = randomUUID();
   const companyEntityId = randomUUID();
+  const embeddingSpace = {
+    provider: 'vertex',
+    model: 'fixture',
+    dimensions: 768,
+    revision: '1',
+  } as const;
+  const embedding = Array.from({ length: embeddingSpace.dimensions }, (_, index) =>
+    index === 0 ? 1 : 0,
+  );
   const store = createInstallationStore({ projectId: 'demo-assistant-test', installationId });
   const foreignStore = createInstallationStore({
     projectId: 'demo-assistant-test',
@@ -188,7 +198,7 @@ describe.skipIf(!localEmulator)('Firestore mobile person card with PostgreSQL of
           memoryId: id,
           status: 'ready',
           contentHash: `hash-${id}`,
-          extractionVersion: 2,
+          extractionVersion: GRAPH_EXTRACTION_VERSION,
         }),
       ),
       ...['home', 'parent', 'met', 'work'].map((id) =>
@@ -201,7 +211,8 @@ describe.skipIf(!localEmulator)('Firestore mobile person card with PostgreSQL of
           expiresAt: null,
           createdAt: now,
           validFrom: null,
-          embedding: FieldValue.vector([1, 0]),
+          embedding: FieldValue.vector(embedding),
+          embeddingSpace: embeddingSpaceKey(embeddingSpace),
           contentHash: `hash-${id}`,
         }),
       ),

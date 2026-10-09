@@ -1,14 +1,17 @@
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { createRetirementProofDeps } from './cutover.js';
 import { EvidenceStore } from './cutover-evidence.js';
 import type { NeonApi, NeonEndpoint, NeonOperation, SqlProbe } from './cutover-neon-fence.js';
 import {
   type CutoverConfig,
   type CutoverDeps,
+  captureRetirementProof,
   cutoverStatus,
   lastJsonObject,
   type PushTarget,
@@ -755,6 +758,73 @@ async function runAll(
   }
 }
 
+type CrashWorkerMode = 'kill-after-effect' | 'evidence-write-eio' | 'retry';
+type CrashWorkerInput = {
+  config: CutoverConfig;
+  evidenceDirectory: string;
+  statePath: string;
+  mode: CrashWorkerMode;
+};
+type CrashSchedulerState = {
+  scheduler: 'ENABLED' | 'PAUSED';
+  effectCount: number;
+  pushEndpoint: string;
+};
+
+async function setupCrashRecovery(mode: CrashWorkerMode = 'kill-after-effect') {
+  const dir = mkdtempSync(join(tmpdir(), 'cutover-crash-test-'));
+  const config = baseConfig(dir);
+  config.appWriteGateServices = [];
+  const evidenceDirectory = join(dir, 'evidence');
+  const store = new EvidenceStore(evidenceDirectory);
+  const world = fakeWorld();
+  const preflight = await runCutoverStep('preflight', config, world.deps, store);
+  expect(preflight.status).toBe('passed');
+  const statePath = join(dir, 'fake-scheduler.json');
+  writeFileSync(
+    statePath,
+    `${JSON.stringify({
+      scheduler: 'ENABLED',
+      effectCount: 0,
+      pushEndpoint: config.dispatcher.pushSubscriptions[0]?.endpoint ?? '',
+    } satisfies CrashSchedulerState)}\n`,
+    { mode: 0o600 },
+  );
+  const inputPath = join(dir, 'worker-input.json');
+  writeFileSync(
+    inputPath,
+    `${JSON.stringify({ config, evidenceDirectory, statePath, mode } satisfies CrashWorkerInput)}\n`,
+    { mode: 0o600 },
+  );
+  return { config, dir, evidenceDirectory, inputPath, statePath, world };
+}
+
+function runCrashWorker(inputPath: string, mode?: CrashWorkerMode) {
+  if (mode) {
+    const current = JSON.parse(readFileSync(inputPath, 'utf8')) as CrashWorkerInput;
+    writeFileSync(inputPath, `${JSON.stringify({ ...current, mode })}\n`, { mode: 0o600 });
+  }
+  return spawnSync(
+    process.execPath,
+    [
+      '--import',
+      'tsx',
+      join(process.cwd(), 'scripts/cutover-crash-worker.test-fixture.ts'),
+      inputPath,
+    ],
+    {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      timeout: 20_000,
+      env: { PATH: process.env.PATH ?? '', NODE_ENV: 'test' },
+    },
+  );
+}
+
+function readCrashState(path: string): CrashSchedulerState {
+  return JSON.parse(readFileSync(path, 'utf8')) as CrashSchedulerState;
+}
+
 describe('cutover configuration', () => {
   it('rejects database settings in the target composition and unsafe identities', () => {
     const { config } = setup();
@@ -778,6 +848,27 @@ describe('cutover configuration', () => {
   it('parses the last JSON object printed by a CLI', () => {
     expect(lastJsonObject('noise\n{"a":1}\nmore\n{\n  "b": 2\n}\n')).toEqual({ b: 2 });
     expect(() => lastJsonObject('no json')).toThrow('JSON');
+  });
+});
+
+describe('retirement proof dependencies', () => {
+  it('refuses mutations and broader database queries outside the minimal fence probe', async () => {
+    vi.stubEnv('NEON_API_KEY', 'test-only-placeholder');
+    const { config } = setup();
+    try {
+      const deps = createRetirementProofDeps(config);
+      await expect(
+        deps.gcloud.run(['scheduler', 'jobs', 'resume', 'assistant-sweep']),
+      ).rejects.toThrow('Retirement proof dependencies refuse mutating operations');
+      await expect(
+        deps.neon.deleteBranch(config.neon.projectId, config.neon.branchId),
+      ).rejects.toThrow('Retirement proof dependencies refuse mutating operations');
+      await expect(deps.probe.readOnlyProof('postgres://not-used')).rejects.toThrow(
+        'Retirement proof dependencies refuse mutating operations',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
@@ -845,6 +936,27 @@ describe('cutover orchestration', () => {
       expect(text).not.toContain('push-token-secret');
       expect(statSync(join(store.directory, name)).mode & 0o077).toBe(0);
     }
+  });
+
+  it('captures current retirement proof and fails if traffic drifts off the Firestore revision', async () => {
+    const { config, store, world } = setup();
+    await runAll(config, world.deps, store);
+
+    const healthy = await captureRetirementProof(config, world.deps, store);
+    expect(healthy.checks).toEqual({
+      liveVerifyPassed: true,
+      healthAndReadyConfigured: true,
+      healthAndReadyPassed: true,
+      providerFencePassed: true,
+      dispatcherMatches: true,
+    });
+    expect(healthy.capturedAt).toBe(healthy.inventory.capturedAt);
+
+    const service = world.services.get('assistant-web');
+    if (!service) throw new Error('expected assistant-web in fake inventory');
+    service.traffic = [{ revisionName: 'assistant-web-old', percent: 100 }];
+    const drifted = await captureRetirementProof(config, world.deps, store);
+    expect(drifted.checks.liveVerifyPassed).toBe(false);
   });
 
   it('refuses a push subscription whose configured OIDC identity differs from the live one', async () => {
@@ -981,6 +1093,76 @@ describe('cutover retries', () => {
     await rollbackCutover(config, world.deps, store, { confirm: 'rollback' });
     expect(world.scheduler.get('assistant-sweep')?.state).toBe('ENABLED');
   });
+
+  it('journals a mutating intent before a lost response and rolls back from that intent', async () => {
+    const { config, store, world } = setup();
+    await runCutoverStep('preflight', config, world.deps, store);
+    const originalRun = world.deps.gcloud.run.bind(world.deps.gcloud);
+    world.deps.gcloud.run = async (args, options) => {
+      const response = await originalRun(args, options);
+      if (args[0] === 'scheduler' && args[1] === 'jobs' && args[2] === 'pause')
+        throw new Error('connection lost after the remote mutation');
+      return response;
+    };
+
+    const failed = await runCutoverStep('quiesce', config, world.deps, store, {
+      confirm: 'quiesce',
+    });
+    expect(failed.status).toBe('failed');
+    expect(world.scheduler.get('assistant-sweep')?.state).toBe('PAUSED');
+    expect(store.records('cutover-intent-')).toHaveLength(1);
+    const callsBeforeRetry = world.calls.length;
+    await expect(
+      runCutoverStep('quiesce', config, world.deps, store, { confirm: 'quiesce' }),
+    ).rejects.toThrow('unresolved durable intent');
+    expect(world.calls).toHaveLength(callsBeforeRetry);
+
+    world.deps.gcloud.run = originalRun;
+    const rolledBack = await rollbackCutover(config, world.deps, store, { confirm: 'rollback' });
+    expect(rolledBack.passed).toBe(true);
+    expect(rolledBack.restoredSourceWriteGates).toBe(true);
+    expect(world.scheduler.get('assistant-sweep')?.state).toBe('ENABLED');
+    expect(store.records('cutover-rollback-action-').length).toBeGreaterThan(0);
+  });
+
+  it('refuses a second effect after a process is killed between mutation and evidence', async () => {
+    const fixture = await setupCrashRecovery();
+    const child = runCrashWorker(fixture.inputPath);
+
+    expect(child.signal).toBe('SIGKILL');
+    const afterCrash = readCrashState(fixture.statePath);
+    expect(afterCrash).toMatchObject({ scheduler: 'PAUSED', effectCount: 1 });
+    const reopened = new EvidenceStore(fixture.evidenceDirectory);
+    expect(reopened.records('cutover-intent-')).toHaveLength(1);
+    expect(reopened.read(1, 'quiesce')).toBeNull();
+
+    const retry = runCrashWorker(fixture.inputPath, 'retry');
+    expect(retry.status).toBe(43);
+    expect(retry.stderr).toContain('unresolved durable intent');
+    expect(readCrashState(fixture.statePath)).toEqual(afterCrash);
+  });
+
+  it('keeps a successful effect fenced when writing its step evidence fails with EIO', async () => {
+    const fixture = await setupCrashRecovery();
+    const child = runCrashWorker(fixture.inputPath, 'evidence-write-eio');
+
+    expect(child.status).toBe(42);
+    expect(child.stderr).toContain('simulated evidence-store EIO');
+    const afterWriteFailure = readCrashState(fixture.statePath);
+    expect(afterWriteFailure).toMatchObject({
+      scheduler: 'PAUSED',
+      effectCount: 2,
+      pushEndpoint: '',
+    });
+    const reopened = new EvidenceStore(fixture.evidenceDirectory);
+    expect(reopened.records('cutover-intent-')).toHaveLength(1);
+    expect(reopened.read(1, 'quiesce')).toBeNull();
+
+    const retry = runCrashWorker(fixture.inputPath, 'retry');
+    expect(retry.status).toBe(43);
+    expect(retry.stderr).toContain('unresolved durable intent');
+    expect(readCrashState(fixture.statePath)).toEqual(afterWriteFailure);
+  });
 });
 
 describe('cutover rollback', () => {
@@ -1021,5 +1203,40 @@ describe('cutover rollback', () => {
     expect(world.services.get('assistant-web')?.traffic).toEqual([
       { revisionName: 'assistant-web-00001', percent: 100 },
     ]);
+  });
+
+  it('rejects a changed config and edited rollback material before any cloud read', async () => {
+    const { config, store, world } = setup();
+    await runAll(config, world.deps, store, 'quiesce');
+    const callsBefore = world.calls.length;
+    const changed = structuredClone(config);
+    changed.neon.snapshotBranchName = 'br-other-rehearsal';
+    await expect(
+      rollbackCutover(changed, world.deps, store, { confirm: 'rollback' }),
+    ).rejects.toThrow('different configuration');
+    expect(world.calls).toHaveLength(callsBefore);
+
+    writeFileSync(store.privatePath('push-endpoints.json'), '{}\n');
+    await expect(
+      rollbackCutover(config, world.deps, store, { confirm: 'rollback' }),
+    ).rejects.toThrow('does not match the preflight evidence');
+    expect(world.calls).toHaveLength(callsBefore);
+  });
+
+  it('rejects a broken evidence chain before the first rollback mutation', async () => {
+    const { config, store, world } = setup();
+    await runAll(config, world.deps, store, 'quiesce');
+    const preflight = store.read(1, 'preflight');
+    expect(preflight).not.toBeNull();
+    writeFileSync(
+      store.path(1, 'preflight'),
+      `${JSON.stringify({ ...preflight, result: { edited: true } })}\n`,
+    );
+    const callsBefore = world.calls.length;
+
+    await expect(
+      rollbackCutover(config, world.deps, store, { confirm: 'rollback' }),
+    ).rejects.toThrow('previous evidence hash does not match');
+    expect(world.calls).toHaveLength(callsBefore);
   });
 });

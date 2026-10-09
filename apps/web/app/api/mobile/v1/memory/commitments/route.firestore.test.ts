@@ -43,10 +43,12 @@ describe.skipIf(!localEmulator)('Firestore mobile commitments with PostgreSQL of
     status: 'open',
     dueAt,
     snoozedUntil: null,
-    resolvedAt: null,
+    resolvedAt: fields.status === 'resolved' || fields.status === 'dismissed' ? now : null,
     resolution: null,
     confidence: '0.90',
     contentHash: id,
+    reopenedFromId: null,
+    reopenOperationId: null,
     createdAt: now,
     updatedAt: now,
     ...fields,
@@ -121,7 +123,10 @@ describe.skipIf(!localEmulator)('Firestore mobile commitments with PostgreSQL of
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-store');
     const body = await response.json();
-    expect(Object.keys(body)).toEqual(['commitments']);
+    expect(Object.keys(body)).toEqual(['commitments', 'closedCommitments']);
+    expect(body.closedCommitments).toContainEqual(
+      expect.objectContaining({ id: 'resolved', status: 'resolved', updatedAt: now.toISOString() }),
+    );
     expect(body.commitments.map((item: { id: string }) => item.id)).toEqual([
       'elapsed-snooze',
       'open-later',
@@ -262,6 +267,48 @@ describe.skipIf(!localEmulator)('Firestore mobile commitments with PostgreSQL of
     } finally {
       await store.doc('privacyErasureJobs', agentId).delete();
     }
+  });
+
+  it('reopens a matching closed owner row through the authenticated route and replays by operation id', async () => {
+    const { POST } = await import('./route.js');
+    const closedAt = new Date(now.getTime() - 1000);
+    await store.doc('commitments', 'reopen-route').set(
+      row('reopen-route', {
+        status: 'resolved',
+        resolvedAt: closedAt,
+        updatedAt: closedAt,
+        resolution: 'Closed by owner',
+      }),
+    );
+    const send = () =>
+      POST(
+        new Request(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            action: 'reopen',
+            id: 'reopen-route',
+            expectedUpdatedAt: closedAt.toISOString(),
+            operationId: 'd274bc5a-8c2f-4d50-9449-32352555d24b',
+          }),
+        }),
+      );
+    const first = await send();
+    expect(first.status).toBe(200);
+    const firstBody = await first.json();
+    expect(firstBody).toMatchObject({ ok: true, replay: false });
+    const replay = await send();
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({ ...firstBody, replay: true });
+    expect((await store.doc('commitments', 'reopen-route').get()).data()).toMatchObject({
+      status: 'resolved',
+      resolution: 'Closed by owner',
+      reopenedFromId: null,
+    });
+    expect((await store.doc('commitments', firstBody.commitmentId).get()).data()).toMatchObject({
+      status: 'open',
+      reopenedFromId: 'reopen-route',
+    });
   });
 
   it('applies the same 30-row overview limit and preserves a null due date', async () => {

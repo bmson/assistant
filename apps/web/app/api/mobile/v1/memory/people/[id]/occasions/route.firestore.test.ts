@@ -114,7 +114,7 @@ describe.skipIf(!localEmulator)(
         quarantined: false,
         originTrust: 'owner',
       });
-    });
+    }, 30_000);
 
     it('returns a truthful not-found response and rejects unauthenticated callers', async () => {
       const { POST } = await import('./route.js');

@@ -111,4 +111,60 @@ describe('Google Sheets tools', () => {
       values: [['Acme', 'Applied', '=not a formula']],
     });
   });
+
+  it('returns an exact continuation for a bounded row read and reaches later rows', async () => {
+    const allRows = [['header'], ['ordinary'], ['decisive fact']];
+    const api = vi.fn(async (url: string) => {
+      if (url.includes('?fields=spreadsheetId')) {
+        return {
+          spreadsheetId: 'SHEET-123_abc',
+          sheets: [
+            {
+              properties: {
+                sheetId: 9,
+                title: 'Evidence',
+                gridProperties: { rowCount: 3, columnCount: 1 },
+              },
+            },
+          ],
+        };
+      }
+      const range = decodeURIComponent(url.split('/values/')[1] ?? '');
+      const start = Number(range.match(/A(\d+):/)?.[1] ?? 1);
+      const end = Number(range.match(/:ZZ(\d+)$/)?.[1] ?? start);
+      return { values: allRows.slice(start - 1, end) };
+    });
+    const tool = toolsWith(api).get('sheets.get_rows')?.tool;
+    const input = {
+      spreadsheetId: 'SHEET-123_abc',
+      sheetName: 'Evidence',
+      startRow: 1,
+      maxRows: 2,
+    };
+    const first = (await tool?.execute(input, {} as never)) as {
+      rows: unknown[][];
+      complete: boolean;
+      continuation: { tool: string; input: { startRow: number } };
+      receipt: { complete: boolean; covered: { count: number; total: number; ranges: unknown[] } };
+    };
+    expect(first.rows).toEqual(allRows.slice(0, 2));
+    expect(first.complete).toBe(false);
+    expect(first.receipt).toMatchObject({
+      complete: false,
+      covered: { count: 2, total: 3, ranges: [{ startRow: 0, endRow: 2 }] },
+    });
+    expect(first.continuation).toMatchObject({ tool: 'sheets.get_rows', input: { startRow: 3 } });
+
+    const second = (await tool?.execute(
+      { ...input, ...first.continuation.input },
+      {} as never,
+    )) as {
+      rows: unknown[][];
+      complete: boolean;
+      receipt: { covered: { count: number; total: number } };
+    };
+    expect(second.rows).toEqual([['decisive fact']]);
+    expect(second.complete).toBe(false); // A page is not a claim that earlier rows were also read.
+    expect(second.receipt.covered).toEqual(expect.objectContaining({ count: 1, total: 3 }));
+  });
 });

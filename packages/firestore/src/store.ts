@@ -120,7 +120,19 @@ export function encodeRecord(value: DocumentData): DocumentData {
       throw new Error('Nonfinite persisted number');
     return input;
   }
-  return visit(value) as DocumentData;
+  const message =
+    value &&
+    typeof value === 'object' &&
+    typeof value.conversationId === 'string' &&
+    typeof value.role === 'string' &&
+    typeof value.text === 'string' &&
+    Array.isArray(value.parts) &&
+    value.createdAt instanceof Date;
+  // Firestore assigns serverTimestamp at commit. It is the polling order key:
+  // client-created/transaction-start timestamps can be arbitrarily older than
+  // a row that commits after a page cursor has advanced.
+  const persisted = message ? { ...value, appendedAt: FieldValue.serverTimestamp() } : value;
+  return visit(persisted) as DocumentData;
 }
 
 export class InstallationStore {

@@ -38,14 +38,27 @@ export class FirestoreBriefingRepository implements BriefingRepository {
     agentId: string,
     window: Parameters<BriefingRepository['inputs']>[1],
   ): Promise<BriefingInputs> {
-    const [mail, attention, pending, goalDeltas, watchHits] = await Promise.all([
+    const [mail, bookings, attention, pending, goalDeltas, watchHits] = await Promise.all([
       this.mail(agentId, window.since),
+      this.bookings(agentId),
       this.attention(agentId, window.since, window.attentionLimit),
       this.pending(agentId, window.now, window.pendingLimit),
       this.goalDeltas(agentId, window.since, window.goalLimit),
       this.watchHits(agentId, window.since, window.watchLimit),
     ]);
-    return { mail, attention, pending, goalDeltas, watchHits };
+    return { mail, bookings, attention, pending, goalDeltas, watchHits };
+  }
+
+  private async bookings(agentId: string) {
+    const snapshot = await this.store
+      .collection('emailBookingOccurrences')
+      .where('agentId', '==', agentId)
+      .limit(2_000)
+      .get();
+    return snapshot.docs.flatMap((doc) => {
+      const row = owned<Records['emailBookingOccurrences']>(doc, agentId);
+      return row && row.sourceAuthenticated === true ? [row] : [];
+    });
   }
 
   private async mail(agentId: string, since: Date): Promise<BriefingMail[]> {
@@ -62,7 +75,12 @@ export class FirestoreBriefingRepository implements BriefingRepository {
       const page = await query.get();
       for (const doc of page.docs) {
         const row = owned<Records['emailIngest']>(doc, agentId);
-        if (!row || !(row.createdAt instanceof Date)) continue;
+        if (
+          !row ||
+          !(row.createdAt instanceof Date) ||
+          (row.pipelineStage !== undefined && row.pipelineStage !== 'complete')
+        )
+          continue;
         rows.push({
           fromEmail: row.fromEmail,
           fromName: row.fromName ?? null,
@@ -71,6 +89,7 @@ export class FirestoreBriefingRepository implements BriefingRepository {
           importance: Number(row.importance) || 0,
           dates: row.dates,
           channelMessageId: row.channelMessageId,
+          authenticated: row.authenticated === true,
           createdAt: row.createdAt,
         });
       }

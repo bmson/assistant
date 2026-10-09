@@ -63,6 +63,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         );
       persistence = createFirestoreExecutionPersistence(store, agentId, SPACE);
       const router = {
+        async embeddingSpace() {
+          return SPACE;
+        },
         async object(_role: string, input: { prompt: string }) {
           prompts.push(input.prompt);
           return { ok: true, modelId: 'fixture', degraded: false, object: { proposals } };

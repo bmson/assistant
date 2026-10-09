@@ -3,12 +3,26 @@ import type { Records } from './records.js';
 export interface ImportOverviewData {
   sources: Records['importSources'][];
   quarantineBySource: Record<string, number>;
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+export interface ImportSourcesPageInput {
+  afterSource?: string;
+  /** Optional source prefix omitted while paging, so excluded rows cannot hide later rows. */
+  excludeSourcePrefix?: string;
+  limit: number;
+}
+
+export interface ImportSourcePathsInput {
+  workspacePaths: string[];
 }
 
 /** Owner-scoped import metadata and quarantine counts for workspace views. */
 export interface ImportOverviewRepository {
   readonly kind: 'import-overview-repository';
-  load(): Promise<ImportOverviewData>;
+  listPage(input: ImportSourcesPageInput): Promise<ImportOverviewData>;
+  trackedWorkspacePaths(input: ImportSourcePathsInput): Promise<string[]>;
 }
 
 export function isImportOverviewRepository(value: unknown): value is ImportOverviewRepository {
@@ -17,7 +31,9 @@ export function isImportOverviewRepository(value: unknown): value is ImportOverv
     value !== null &&
     'kind' in value &&
     value.kind === 'import-overview-repository' &&
-    'load' in value &&
-    typeof value.load === 'function'
+    'listPage' in value &&
+    typeof value.listPage === 'function' &&
+    'trackedWorkspacePaths' in value &&
+    typeof value.trackedWorkspacePaths === 'function'
   );
 }

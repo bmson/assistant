@@ -91,41 +91,12 @@ project, finish the bootstrap deploy before enabling GitHub deployments.
 
 ## Why a web change reaches production
 
-Every release proves itself: `infra/gcp/release.sh` polls `/api/health` on the
-live `assistant-web` URL and fails unless it reports the commit being released.
-The commit is baked into the image by the `GIT_SHA` build arg (passed by both
-the GitHub workflow and `cloudbuild.yaml`), so "the image was pushed" can no
-longer be mistaken for "production is serving it".
+Every PostgreSQL release writes a release manifest with immutable Artifact Registry digests and declared API/schema compatibility ranges. It checks the live service compatibility metadata before backup or migration, stages candidate agent and web revisions with zero traffic, verifies the agent, web, and secret-safe web-to-agent readiness canary, then promotes. A failure before promotion leaves existing traffic in place. A failure after one or more promotions restores the captured revision/percentage maps; Cloud Run cannot atomically promote multiple services, so this is a bounded rollback rather than an atomic transaction. Worker job templates are checked against manifest digests before promotion and restored if a later release gate fails.
 
-Three things used to break that chain silently, and are now closed:
+The manifest is archived as `release-manifest-<sha>` by the workflow. `infra/gcp/release-contracts.json` is the reviewed compatibility declaration; update it whenever a release changes the supported API or database schema range. The provisioning script stamps these declarations onto service templates. A full release refuses to migrate when the live agent/web metadata cannot prove the migration-compatible range.
 
-- **The web rollout was last, behind fail-fast gates it did not depend on.** An
-  agent env var only `deploy.sh` sets, or one absent Cloud Scheduler job, exited
-  the script before web was ever updated. Rollout steps are now attempted
-  independently and their failures reported together at the end, so unrelated
-  drift still fails the release without stranding a component.
-- **Traffic could stay pinned to an old revision.** A manual rollback pins the
-  traffic split, after which every `services update --image` creates a revision
-  serving 0% of requests. Each rollout now re-asserts `--to-latest`.
-- **A skipped or unrelated-red CI run blocked deploys entirely.** Deployment
-  keys off a successful `CI` run, so a `[skip ci]` commit produces no deploy,
-  and CI can go red for reasons unrelated to the commit (a newly published
-  advisory failing `pnpm audit`, a fresh HIGH CVE failing Trivy). Use the
-  manual path below rather than pushing an empty commit.
+The workflow defaults to the agent+web set. Manual dispatch can explicitly select a web-only release for either supported persistence driver; it requires an explicit driver, the schema-unchanged declaration, and proven live-agent API/schema metadata. The fast local release accepts only `web`, resolves the live driver, and uses the same staged protocol. Firestore releases use the same no-traffic staging, cross-service readiness probe, captured-traffic rollback, and worker-image rollback path as PostgreSQL releases.
 
-### Forcing a release
-
-`Deploy production` accepts `workflow_dispatch`, with an optional `sha` input
-that defaults to the tip of `main`:
-
-```sh
-gh workflow run "Deploy production" --ref main
-gh workflow run "Deploy production" --ref main -f sha=<commit>
-```
-
-This still builds from the given commit and still runs the full verification,
-so it is a way to bypass a stuck *trigger* — not to bypass the release's own
-checks.
 
 ## GitHub configuration
 
@@ -157,16 +128,17 @@ The cleanup reads the live Cloud Run services and jobs, resolves their exact
 image digests, and retains those images plus their current Cosign signatures
 and attestations (including untagged OCI referrers). Everything else in the
 configured image repository is deleted. Only the current `assistant-agent`
-and `assistant-web` revisions remain. Each secret retains its newest enabled
-version and any explicitly referenced or aliased versions. Secret payloads are
-never read. An unfinished rollout, split traffic, active job execution,
-unsupported multi-architecture index, or changed inventory stops cleanup.
+and `assistant-web` revisions remain. Secret Manager history is retained
+because a regional Cloud Run inventory cannot prove that old versions are
+unused by services in other regions, offline decryptors, or non-Cloud-Run
+consumers. An unfinished rollout, split traffic, active job execution,
+unsupported multi-architecture index, or changed inventory stops image cleanup.
 Application data, database backups, buckets, and integration credentials are
 not removed.
 
 The deployment identity already has Artifact Registry read/write and Cloud Run
-admin access. Add just the missing image deletion and secret metadata/deletion
-permissions using the included custom role:
+admin access. Add just the missing image deletion permission using the
+included custom role:
 
 ```sh
 gcloud iam roles create assistantDeploymentCleanup --project="$PROJECT_ID" \
@@ -181,6 +153,7 @@ gh variable set CURRENT_ONLY_CLEANUP --body true
 Preview locally with
 `python3 infra/gcp/cleanup-current.py --project PROJECT_ID --region REGION --repository REPOSITORY`.
 Add `--apply` to execute after confirming that no deployment is running. This
-permanently destroys superseded secret versions and old image versions.
+permanently deletes old image versions. Secret versions are retained for
+rollback and offline recovery.
 Validate the protections with
 `PYTHONDONTWRITEBYTECODE=1 python3 infra/gcp/cleanup-current.test.py`.

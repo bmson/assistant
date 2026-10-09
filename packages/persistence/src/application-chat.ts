@@ -10,13 +10,72 @@ export const MAX_CHAT_CONVERSATION_LIMIT = 100;
 export type ApplicationChatAgent = Records['agents'];
 
 export type ApplicationChatConversation = Records['conversations'];
-export type ApplicationChatMessage = Records['messages'] & { createdAtExact?: string };
+export type ApplicationChatMessage = Records['messages'] & {
+  createdAtExact?: string;
+  appendSequence?: string;
+};
+
+export interface ChatTurnAdmissionInput {
+  agentId: string;
+  conversationId: string;
+  clientOperationId: string;
+  /** Authenticated native installation ID; absent for web and legacy clients. */
+  clientId?: string;
+  requestHash: string;
+  text: string;
+  autonomous: boolean;
+  force: boolean;
+  spoken: boolean;
+  goalId?: string;
+  autonomyGrant?: unknown;
+}
+
+export type ChatTurnAdmissionResult =
+  | {
+      kind: 'admitted';
+      created: boolean;
+      task: Records['tasks'];
+      message: ApplicationChatMessage;
+      /** Present only for the transaction that created the leased admission task. */
+      lease?: TaskLease;
+    }
+  | {
+      kind: 'cancelled_before_admission';
+      created: false;
+      task: Records['tasks'];
+      status: 'cancelled';
+      effectStatus: 'not_started';
+    };
+
+export type ChatTurnCancellationResult =
+  | {
+      kind: 'cancelled_before_admission';
+      task: Records['tasks'];
+      status: 'cancelled';
+      transitioned: boolean;
+      effectStatus: 'not_started';
+    }
+  | {
+      kind: 'admitted_task';
+      task: Records['tasks'];
+      status: string;
+      transitioned: boolean;
+      /** Conservatively unknown once a task has entered normal admission. */
+      effectStatus: 'unknown';
+    };
+
+export interface QueuedChatTurn {
+  id: string;
+  queueGeneration: number;
+}
 
 export interface ApplicationChatCursor {
   createdAt: Date;
   id: string;
   /** PostgreSQL keeps microseconds while JavaScript Date keeps milliseconds. */
   createdAtExact?: string;
+  /** Commit-ordered append position; present on v2 polling cursors. */
+  appendSequence?: string;
 }
 
 export interface ApplicationConversationCursor {
@@ -99,6 +158,8 @@ export type ApplicationChatArchiveResult = 'archived' | 'active' | 'primary';
 export interface ApplicationChatPersistence {
   readonly kind: 'application-chat-persistence';
   resolveAgent(): Promise<ApplicationChatAgent>;
+  /** Read before chat context retrieval; completion rejects if erasure changed afterward. */
+  privacyObservationGeneration(agentId: string): Promise<string | null>;
   getOrCreatePrimaryConversation(agentId: string): Promise<ApplicationChatConversation>;
   createConversation(agentId: string): Promise<ApplicationChatConversation>;
   getConversation(
@@ -151,7 +212,7 @@ export interface ApplicationChatPersistence {
   listMessages(
     agentId: string,
     conversationId: string,
-    input?: { limit?: number; after?: ApplicationChatCursor },
+    input?: { limit?: number; after?: ApplicationChatCursor; fromStart?: boolean },
   ): Promise<ApplicationChatMessagePage | null>;
   listMessagesByIds(
     agentId: string,
@@ -163,6 +224,12 @@ export interface ApplicationChatPersistence {
     conversationId: string,
     messageId: string,
     hidden: boolean,
+  ): Promise<boolean>;
+  acknowledgeMessageDelivery(
+    agentId: string,
+    conversationId: string,
+    messageId: string,
+    clientId: string,
   ): Promise<boolean>;
   listRuntimeMessages(
     agentId: string,
@@ -180,6 +247,29 @@ export interface ApplicationChatPersistence {
     agentId: string,
     input: AppendMessageInput,
   ): Promise<ApplicationChatMessage | undefined>;
+  /** Atomically records the owner message and its leased task admission receipt. */
+  admitChatTurn(input: ChatTurnAdmissionInput): Promise<ChatTurnAdmissionResult>;
+  /**
+   * Idempotently stops a send by operation ID, including before admission has a
+   * task receipt. An admitted task reports effect status as unknown.
+   */
+  cancelChatTurn(input: {
+    agentId: string;
+    conversationId: string;
+    clientOperationId: string;
+  }): Promise<ChatTurnCancellationResult>;
+  /** Fences the current admission lease and queues that same task for the executor. */
+  queueAdmittedChatTurn(input: {
+    agentId: string;
+    task: TaskLease;
+    triagedActionable: boolean;
+  }): Promise<QueuedChatTurn | null>;
+  /** Advances the phase while preserving the same live admission lease. */
+  markChatTurnStreaming(input: {
+    agentId: string;
+    task: TaskLease;
+    triageOutcome: 'conversational';
+  }): Promise<boolean>;
   createDirectChatTask(input: {
     agentId: string;
     conversationId: string;
@@ -191,6 +281,7 @@ export interface ApplicationChatPersistence {
     task: TaskLease;
     status: 'done' | 'failed';
     progress?: string;
+    privacyObservationGeneration?: string | null;
     messages: AppendMessageInput[];
   }): Promise<boolean>;
   raiseTaskBudget(agentId: string, taskId: string, requested: number): Promise<void>;

@@ -37,11 +37,23 @@ export class FirestoreCardRefreshRepository implements CardRefreshRepository {
     input: Parameters<CardRefreshRepository['request']>[0],
   ): Promise<CardRefreshRequestResult> {
     const taskId = randomUUID();
+    const externalEventId = input.operationId
+      ? `saved-card-refresh:${input.agentId}:${input.cardId}:${input.operationId}`
+      : undefined;
+    const operationRef = externalEventId
+      ? this.store.doc('taskEventKeys', createHash('sha256').update(externalEventId).digest('hex'))
+      : null;
     return this.store.db.runTransaction(async (tx) => {
       const cardRef = this.store.doc('generatedCards', input.cardId);
       const guardRef = this.store.doc('cardRefreshKeys', input.cardId);
       const erasureRef = this.store.doc('privacyErasureJobs', input.agentId);
-      const [cardSnapshot, guardSnapshot, erasure] = await tx.getAll(cardRef, guardRef, erasureRef);
+      const snapshots = await tx.getAll(
+        cardRef,
+        guardRef,
+        erasureRef,
+        ...(operationRef ? [operationRef] : []),
+      );
+      const [cardSnapshot, guardSnapshot, erasure, operation] = snapshots;
       if (!cardSnapshot || !guardSnapshot || !erasure)
         throw new Error('Card refresh transaction read failed');
       if (
@@ -59,6 +71,45 @@ export class FirestoreCardRefreshRepository implements CardRefreshRepository {
         card.dismissedAt !== null
       )
         return { ok: false, error: 'Card not found.', status: 404 } as const;
+      if (input.expectedRevisionId && input.expectedRevisionId !== card.currentRevisionId)
+        return {
+          ok: false,
+          status: 409,
+          error: 'This card changed. Reload it before starting another refresh.',
+        } as const;
+
+      if (operation?.exists) {
+        const priorTaskId = operation.get('taskId');
+        if (typeof priorTaskId !== 'string')
+          throw new Error('Saved-card refresh operation index is malformed');
+        const priorTaskSnapshot = await tx.get(this.store.doc('tasks', priorTaskId));
+        if (!priorTaskSnapshot.exists)
+          throw new Error('Saved-card refresh operation index points to a missing task');
+        const priorTask = decodeRecord<Records['tasks']>(priorTaskSnapshot.data());
+        const priorPayload = (priorTask.trigger as { payload?: Record<string, unknown> })?.payload;
+        const sameOperationIdentity =
+          priorTask.agentId === input.agentId && priorPayload?.refreshCardId === card.id;
+        if (
+          input.expectedRevisionId &&
+          (!sameOperationIdentity ||
+            priorPayload?.refreshCardRevisionId !== input.expectedRevisionId)
+        )
+          return {
+            ok: false,
+            status: 409,
+            error: 'This card changed. Reload it before starting another refresh.',
+          } as const;
+        if (!sameOperationIdentity)
+          throw new Error('Saved-card refresh operation identity collision');
+        return {
+          ok: true,
+          taskId: priorTask.id,
+          queueGeneration: priorTask.queueGeneration,
+          created: false,
+          dispatch: 'outbox',
+          refreshState: 'refreshing',
+        } as const;
+      }
 
       const guardedTaskId = guardSnapshot.exists ? String(guardSnapshot.get('taskId') ?? '') : '';
       const guardedTask = guardedTaskId
@@ -71,7 +122,17 @@ export class FirestoreCardRefreshRepository implements CardRefreshRepository {
           ACTIVE.includes(task.status) &&
           (task.trigger as { payload?: { refreshCardId?: unknown } })?.payload?.refreshCardId ===
             card.id
-        )
+        ) {
+          const taskRevisionId = (task.trigger as { payload?: Record<string, unknown> }).payload
+            ?.refreshCardRevisionId;
+          if (input.expectedRevisionId && taskRevisionId !== input.expectedRevisionId)
+            return {
+              ok: false,
+              status: 409,
+              error: 'This card changed. Reload it before starting another refresh.',
+            } as const;
+          if (operationRef)
+            tx.create(operationRef, { taskId: task.id, createdAt: this.store.now() });
           return {
             ok: true,
             taskId: task.id,
@@ -80,6 +141,7 @@ export class FirestoreCardRefreshRepository implements CardRefreshRepository {
             dispatch: 'outbox',
             refreshState: 'refreshing',
           } as const;
+        }
       }
 
       const activeQuery = this.store
@@ -94,7 +156,17 @@ export class FirestoreCardRefreshRepository implements CardRefreshRepository {
       if (existing) {
         const task = decodeRecord<Records['tasks']>(existing.data());
         if (ACTIVE.includes(task.status)) {
+          const taskRevisionId = (task.trigger as { payload?: Record<string, unknown> }).payload
+            ?.refreshCardRevisionId;
+          if (input.expectedRevisionId && taskRevisionId !== input.expectedRevisionId)
+            return {
+              ok: false,
+              status: 409,
+              error: 'This card changed. Reload it before starting another refresh.',
+            } as const;
           tx.set(guardRef, { taskId: task.id, updatedAt: this.store.now() });
+          if (operationRef)
+            tx.create(operationRef, { taskId: task.id, createdAt: this.store.now() });
           return {
             ok: true,
             taskId: task.id,
@@ -168,6 +240,7 @@ export class FirestoreCardRefreshRepository implements CardRefreshRepository {
           type: 'adhoc',
           title: formatted.title,
           trust: 'owner',
+          externalEventId,
           trigger: {
             source: 'internal',
             agentId: input.agentId,
@@ -176,6 +249,9 @@ export class FirestoreCardRefreshRepository implements CardRefreshRepository {
             payload: {
               instruction: formatted.instruction,
               refreshCardId: card.id,
+              ...(input.expectedRevisionId
+                ? { refreshCardRevisionId: input.expectedRevisionId }
+                : {}),
               taintedOrigin: true,
             },
           },
@@ -210,6 +286,7 @@ export class FirestoreCardRefreshRepository implements CardRefreshRepository {
           updatedAt: now,
         });
       tx.create(this.store.doc('tasks', task.id), encodeRecord(task));
+      if (operationRef) tx.create(operationRef, { taskId: task.id, createdAt: now });
       tx.set(guardRef, { taskId: task.id, updatedAt: now });
       createWakeIntent(tx, this.store, {
         taskId: task.id,

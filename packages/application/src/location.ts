@@ -29,14 +29,16 @@ export async function recordOwnerLocationPing(db: Db, body: unknown): Promise<Lo
   if (!parsed.success) return { ok: false, error: 'invalid ping', status: 400 };
   if (!locationPingFresh(parsed.data)) return { ok: false, error: 'stale ping', status: 409 };
   const agent = await getAgent(db);
-  await recordLocationPing(db, agent.id, parsed.data);
-  await maybeEnqueueArrivalNudge(db, agent, {
-    lat: parsed.data.lat,
-    lng: parsed.data.lng,
-    label: parsed.data.label,
-    accuracyM: parsed.data.accuracyM,
-    capturedAt: new Date(parsed.data.capturedAt ?? Date.now()),
-  }).catch((err) => console.error('location: arrival hook failed', err));
+  const observation = await recordLocationPing(db, agent.id, parsed.data);
+  if (parsed.data.arrivalOptIn) {
+    await maybeEnqueueArrivalNudge(db, agent, {
+      observationId: observation.id,
+      lat: parsed.data.lat,
+      lng: parsed.data.lng,
+      accuracyM: parsed.data.accuracyM,
+      capturedAt: new Date(parsed.data.capturedAt ?? Date.now()),
+    }).catch((err) => console.error('location: arrival hook failed', err));
+  }
   return { ok: true };
 }
 
@@ -51,7 +53,7 @@ export async function recordOwnerLocationPingWithRepository(
   if (!parsed.success) return { ok: false, error: 'invalid ping', status: 400 };
   if (!locationPingFresh(parsed.data)) return { ok: false, error: 'stale ping', status: 409 };
   const capturedAt = new Date(parsed.data.capturedAt ?? Date.now());
-  await locations.record(agent.id, {
+  const observation = await locations.record(agent.id, {
     lat: parsed.data.lat,
     lng: parsed.data.lng,
     label: parsed.data.label ?? '',
@@ -59,13 +61,16 @@ export async function recordOwnerLocationPingWithRepository(
     source: parsed.data.source ?? 'shortcut',
     timeZone: parsed.data.timeZone ?? null,
     capturedAt,
+    arrivalOptIn: parsed.data.arrivalOptIn,
   });
-  await maybeEnqueueArrivalNudgeWithRepository(locations, tasks, agent, {
-    lat: parsed.data.lat,
-    lng: parsed.data.lng,
-    label: parsed.data.label,
-    accuracyM: parsed.data.accuracyM,
-    capturedAt,
-  }).catch((err) => console.error('location: arrival hook failed', err));
+  if (parsed.data.arrivalOptIn) {
+    await maybeEnqueueArrivalNudgeWithRepository(locations, tasks, agent, {
+      observationId: observation.id,
+      lat: parsed.data.lat,
+      lng: parsed.data.lng,
+      accuracyM: parsed.data.accuracyM,
+      capturedAt,
+    }).catch((err) => console.error('location: arrival hook failed', err));
+  }
   return { ok: true };
 }

@@ -7,6 +7,9 @@ private enum ActivityFilter: String, CaseIterable, Identifiable {
     case scheduled = "Scheduled"
     case completed = "Done"
     var id: Self { self }
+    var requestValue: String {
+        switch self { case .all: "all"; case .needsYou: "needs-you"; case .working: "working"; case .scheduled: "scheduled"; case .completed: "completed" }
+    }
 }
 
 struct ActivityView: View {
@@ -17,23 +20,48 @@ struct ActivityView: View {
     @State private var filter: ActivityFilter = .all
     @State private var showingArchived = false
     @State private var activityActionInFlight: String?
+    @State private var archiveProgress: ArchiveOldActivityProgress?
     @State private var budgetItem: ActivityItem?
     @State private var itemPendingCancellation: ActivityItem?
     @State private var budgetText = ""
+    @State private var discoveryQuery = ""
+    @State private var discovery: ActivityList?
+    @State private var discoveryInFlight = false
+    @State private var discoveryGeneration = UUID()
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 filterControl
+                HStack {
+                    TextField("Search recorded work", text: $discoveryQuery)
+                        .textFieldStyle(.roundedBorder)
+                        .submitLabel(.search)
+                        .onSubmit { loadDiscovery(reset: true) }
+                        .accessibilityIdentifier("activity-search")
+                    Button("Search") { loadDiscovery(reset: true) }
+                        .disabled(discoveryInFlight)
+                }
+                if let archiveProgress, !archiveProgress.complete {
+                    Label(
+                        "Archived \(archiveProgress.archivedTotal) older tasks. Continue to process the next batch.",
+                        systemImage: "archivebox"
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .accessibilityIdentifier("activity-archive-progress")
+                }
                 if !items.isEmpty { activitySummary }
 
-                if showingArchived ? model.archivedActivity == nil : model.overview == nil {
+                if discovery == nil && (showingArchived ? model.archivedActivity == nil : model.overview == nil) {
                     AssistantLoadingState(title: "Loading activity…")
                 } else if filteredItems.isEmpty {
                     AssistantEmptyState(
-                        filter == .all ? "No activity yet" : "Nothing here",
+                        discovery != nil ? "No matches in these records" : (filter == .all ? "No activity yet" : "Nothing here"),
                         systemImage: "waveform.path.ecg",
-                        description: filter == .all
+                        description: discovery != nil
+                            ? "Continue to older records if available, or change the filters. Legacy records without creation times cannot match date filters."
+                            : filter == .all
                             ? "Work you hand off in chat will appear here with its evidence and decisions."
                             : "Try another activity filter."
                     )
@@ -56,12 +84,35 @@ struct ActivityView: View {
                         }
                     }
                 }
+                if let discovery {
+                    Text(discovery.searchIncomplete == true
+                         ? "More records remain. Continue searching before concluding that a task is absent."
+                         : "Reached the end of this search.")
+                        .font(.footnote).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    Text("Detailed audit evidence may be unavailable or redacted. Legacy records without creation times cannot match date filters.")
+                        .font(.footnote).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    if discovery.nextCursor != nil {
+                        Button("Continue to older records") { loadDiscovery(reset: false) }
+                            .disabled(discoveryInFlight)
+                            .accessibilityIdentifier("activity-load-older")
+                    }
+                } else {
+                    Button("Browse all recorded work") { loadDiscovery(reset: true) }
+                        .disabled(discoveryInFlight)
+                }
+                if discoveryInFlight { ProgressView("Reading records…") }
             }
             .padding(16)
             .padding(.bottom, 28)
             .frame(maxWidth: isLandscape ? 760 : .infinity, alignment: .leading)
         }
         .navigationTitle("Activity")
+        .onChange(of: showingArchived) { _, _ in
+            discoveryGeneration = UUID()
+            discoveryInFlight = false
+            discovery = nil
+        }
+        .onChange(of: filter) { _, _ in if discovery != nil { loadDiscovery(reset: true) } }
         .assistantSubmenuChrome()
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
@@ -75,10 +126,18 @@ struct ActivityView: View {
                         if showingArchived { Task { await model.refreshArchivedActivity() } }
                     }
                     if !showingArchived {
-                        Button("Archive old activity", systemImage: "archivebox") {
+                        Button(
+                            archiveProgress.map { $0.complete ? "Archive old activity" : "Continue archiving (\($0.archivedTotal))" } ?? "Archive old activity",
+                            systemImage: "archivebox"
+                        ) {
                             activityActionInFlight = "archive-old"
                             Task {
-                                _ = await model.archiveOldActivity()
+                                let operationId = archiveProgress?.complete == false
+                                    ? archiveProgress?.operationId
+                                    : nil
+                                if let progress = await model.archiveOldActivity(operationId: operationId) {
+                                    archiveProgress = progress
+                                }
                                 activityActionInFlight = nil
                             }
                         }
@@ -92,6 +151,7 @@ struct ActivityView: View {
         .refreshable {
             if showingArchived { await model.refreshArchivedActivity() }
             else { await model.refreshOverview() }
+            if discovery != nil { loadDiscovery(reset: true) }
         }
         .task {
             if showingArchived { await model.refreshArchivedActivity() }
@@ -161,10 +221,33 @@ struct ActivityView: View {
         .accessibilityElement(children: .combine)
     }
 
+    private func loadDiscovery(reset: Bool) {
+        if !reset && discoveryInFlight { return }
+        let generation = UUID()
+        discoveryGeneration = generation
+        discoveryInFlight = true
+        let archived = showingArchived
+        let query = discoveryQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let status = filter.requestValue
+        let cursor = reset ? nil : discovery?.nextCursor
+        let previous = reset ? [] : discovery?.items ?? []
+        Task {
+            let page = await model.activityDiscoveryPage(archived: archived, query: query, filter: status, cursor: cursor)
+            guard discoveryGeneration == generation, showingArchived == archived else { return }
+            discoveryInFlight = false
+            guard let page else { return }
+            var seen = Set(previous.map(\.id))
+            let newItems = page.items.filter { seen.insert($0.id).inserted }
+            discovery = ActivityList(items: previous + newItems, archivedCount: page.archivedCount,
+                                     nextCursor: page.nextCursor, searchIncomplete: page.searchIncomplete,
+                                     scanned: page.scanned, captureStatus: page.captureStatus)
+        }
+    }
+
     private var items: [ActivityItem] {
-        showingArchived
+        discovery?.items ?? (showingArchived
             ? model.archivedActivity?.items ?? []
-            : model.overview?.activity.items ?? []
+            : model.overview?.activity.items ?? [])
     }
 
     private var filteredItems: [ActivityItem] {
@@ -182,6 +265,14 @@ struct ActivityView: View {
     private func activityCard(_ item: ActivityItem) -> some View {
         VStack(alignment: .leading, spacing: AssistantTheme.cardContentSpacing) {
             activityHeader(item)
+            DisclosureGroup("Record identity") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Task \(item.id)")
+                    if let source = item.source { Text("Source: \(source)") }
+                    if let created = item.createdAt { Text("Created: \(created)") }
+                    if let event = item.externalEventId { Text("Source record: \(event)") }
+                }.font(.caption).textSelection(.enabled)
+            }.font(.caption)
 
             if !item.displayProgress.isEmpty {
                 Text((try? AttributedString(markdown: item.displayProgress,

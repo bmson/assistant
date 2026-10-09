@@ -1,4 +1,5 @@
 import { loadConfig } from '@assistant/config';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { writeFirestoreMobileSkill } from '@/lib/mobile-skill-write';
 import { getApplication } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
@@ -22,7 +23,14 @@ function skillInput(
 
 export async function POST(request: Request): Promise<Response> {
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
-  const input = skillInput(await request.json().catch(() => null));
+  const mutationBody = await readMobileMutationBody(request, [
+    'name',
+    'steps',
+    'preconditions',
+    'gotchas',
+  ]);
+  if (!mutationBody.ok) return mutationBody.response;
+  const input = skillInput(mutationBody.value);
   if ('error' in input) return mobileJson({ error: input.error }, { status: 400 });
   if (loadConfig().PERSISTENCE_DRIVER === 'firestore') {
     try {

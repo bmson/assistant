@@ -1,6 +1,7 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { chromium } from 'playwright';
+import { readPrivateJson } from './chat-readability-safety.js';
 
 // Re-render the saved model outputs, without generating new replies or changing
 // conversations. Top and bottom screenshots preserve the actual scrolling UI.
@@ -15,9 +16,24 @@ if ([...selectedCases].some((value) => !Number.isInteger(value) || value < 1 || 
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 try {
   for (const run of ['baseline', 'reframed']) {
-    const { conversationId } = JSON.parse(
-      await readFile(path.join(artifacts, `${run}-state.json`), 'utf8'),
+    const pointer = await readPrivateJson<{ runId: string; manifestFile: string }>(
+      path.join(artifacts, `${run}-current.json`),
     );
+    const manifest = await readPrivateJson<{
+      run: string;
+      runId: string;
+      status: string;
+      conversationId: string | null;
+    }>(path.join(artifacts, path.basename(pointer.manifestFile)));
+    if (
+      manifest.run !== run ||
+      manifest.runId !== pointer.runId ||
+      manifest.status !== 'complete' ||
+      !manifest.conversationId
+    ) {
+      throw new Error(`${run}: current readability run is missing or incomplete`);
+    }
+    const { conversationId } = manifest;
     for (const width of [1280, 390]) {
       const directory = path.join(output, `${run}-${width}`);
       await mkdir(directory, { recursive: true });

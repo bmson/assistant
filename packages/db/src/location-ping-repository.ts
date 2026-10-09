@@ -1,5 +1,5 @@
 import type { LocationPingRepository } from '@assistant/persistence';
-import { and, desc, eq, gte, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, gte, lt, lte, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { locationPings, tasks } from './schema.js';
 
@@ -8,16 +8,24 @@ export function createPostgresLocationPingRepository(db: Db): LocationPingReposi
   return {
     kind: 'location-ping-repository',
     async record(agentId, ping) {
-      await db.insert(locationPings).values({
-        agentId,
-        lat: String(ping.lat),
-        lng: String(ping.lng),
-        label: ping.label,
-        accuracyM: ping.accuracyM,
-        source: ping.source,
-        timeZone: ping.timeZone,
-        capturedAt: ping.capturedAt,
-      });
+      const [row] = await db
+        .insert(locationPings)
+        .values({
+          agentId,
+          lat: String(ping.lat),
+          lng: String(ping.lng),
+          label: ping.label,
+          accuracyM: ping.accuracyM,
+          source: ping.source,
+          timeZone: ping.timeZone,
+          capturedAt: ping.capturedAt,
+          arrivalExpiresAt: ping.arrivalOptIn
+            ? new Date(ping.capturedAt.getTime() + 5 * 60_000)
+            : null,
+        })
+        .returning({ id: locationPings.id, arrivalExpiresAt: locationPings.arrivalExpiresAt });
+      if (!row) throw new Error('failed to record location ping');
+      return row;
     },
     async recent(agentId, { from, before }) {
       const rows = await db
@@ -47,6 +55,21 @@ export function createPostgresLocationPingRepository(db: Db): LocationPingReposi
             eq(tasks.agentId, agentId),
             sql`${tasks.externalEventId} like 'arrival:%'`,
             gte(tasks.createdAt, since),
+          ),
+        )
+        .limit(1);
+      return Boolean(row);
+    },
+    async isArrivalObservationActive(agentId, id, now) {
+      const [row] = await db
+        .select({ id: locationPings.id })
+        .from(locationPings)
+        .where(
+          and(
+            eq(locationPings.id, id),
+            eq(locationPings.agentId, agentId),
+            gt(locationPings.arrivalExpiresAt, now),
+            lte(locationPings.capturedAt, now),
           ),
         )
         .limit(1);

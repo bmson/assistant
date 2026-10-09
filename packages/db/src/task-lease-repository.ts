@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { TaskLease, TaskLeaseRepository } from '@assistant/persistence';
+import type { TaskCheckpoint, TaskLease, TaskLeaseRepository } from '@assistant/persistence';
 import { and, eq, gt, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { type TaskRow, tasks } from './schema.js';
@@ -81,19 +81,20 @@ export async function checkpointTask(
   db: Db,
   task: TaskLease,
   state: unknown,
-  extra: Partial<{
-    progress: string;
-    progressPercent: number | null;
-    nextAction: string;
-    lastReflectedAt: Date;
-  }> = {},
+  extra: TaskCheckpoint = {},
 ): Promise<boolean> {
+  const { preserveFailureCounters, ...fields } = extra;
   const [updated] = await db
     .update(tasks)
-    // A checkpoint is proof of forward progress, so clear both failure counters:
-    // the retry attempt count AND the lease-reclaim count (this task is not a
-    // poison pill — it advanced past a step boundary).
-    .set({ state, ...extra, attempt: 0, reclaimCount: 0, updatedAt: sql`now()` })
+    // Work-step checkpoints clear failure counters. Preparing recall/checklist
+    // metadata must preserve them, or a failing first work step can evade its
+    // exhausted retry budget merely by saving setup state again.
+    .set({
+      state,
+      ...fields,
+      ...(preserveFailureCounters ? {} : { attempt: 0, reclaimCount: 0 }),
+      updatedAt: sql`now()`,
+    })
     .where(activeLease(task))
     .returning({ id: tasks.id });
   return Boolean(updated);

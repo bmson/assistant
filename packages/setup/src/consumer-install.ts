@@ -44,6 +44,10 @@ export interface ConsumerInstallOptions {
     evidence: (context: ConsumerVerifyContext) => Promise<ConsumerReadinessEvidence>;
     /** Google OAuth installs only: the operator confirms the owner signed in. */
     ownerSignInConfirmed?: boolean;
+    /** Operator observes the published native app installed; this is not machine distribution proof. */
+    nativeAppVersion?: string;
+    /** Operator confirms authenticated pairing on that newly installed native client. */
+    nativePairingConfirmed?: boolean;
   };
   now?: () => string;
 }
@@ -53,14 +57,20 @@ export interface ConsumerVerifyContext {
   webUrl: string;
   authOrigin: string;
   agentId: string;
+  /** Installed runtime checkpoint; readiness requires a later owner request and reply. */
+  runtimeInitializedAt: string;
+  /** Current agent revision observed from Cloud Run traffic metadata. */
+  servingAgentRevision: string;
+  /** Exact source commit injected into both services by the installer. */
+  releaseSha: string;
   embeddingSpace: { provider: string; model: string; dimensions: number; revision: string };
 }
 
 export interface ConsumerReadinessEvidence {
   /** Result of the read-only runtime data preflight (agent, budget, roles, catalog). */
   runtimeData: { ready: boolean; issues: readonly string[] };
-  /** A successful model call has been recorded, i.e. the owner got a model response. */
-  modelResponseObserved: boolean;
+  /** The paired native client acknowledged rendering this installation's owner reply. */
+  ownerReplyDelivered: boolean;
 }
 
 export interface ConsumerVerificationCheck {
@@ -115,6 +125,39 @@ function jsonOutput(result: CommandResult, description: string): unknown {
     return JSON.parse(result.stdout || 'null');
   } catch {
     throw new Error(`${description} returned invalid JSON`);
+  }
+}
+
+/**
+ * Consumer updates reuse a state that may already own live services and IAM.
+ * Review the saved plan before applying it and fail closed on any deletion or
+ * replacement. Terraform action arrays are intentionally inspected as arrays:
+ * a replacement is commonly represented as ["delete", "create"].
+ */
+function assertRuntimePlanPreservesResources(value: unknown): void {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    !Array.isArray((value as { resource_changes?: unknown }).resource_changes)
+  )
+    throw new Error('Runtime Terraform plan has no inspectable resource changes');
+  const destructive = (
+    value as { resource_changes: Array<{ address?: unknown; change?: { actions?: unknown } }> }
+  ).resource_changes.filter((item) => {
+    if (
+      !Array.isArray(item.change?.actions) ||
+      item.change.actions.some((action) => typeof action !== 'string')
+    )
+      return true;
+    return item.change.actions.includes('delete');
+  });
+  if (destructive.length) {
+    const addresses = destructive.map((item) =>
+      typeof item.address === 'string' ? item.address : 'unknown resource',
+    );
+    throw new Error(
+      `Runtime Terraform plan would delete or replace existing resources: ${addresses.join(', ')}`,
+    );
   }
 }
 
@@ -675,6 +718,7 @@ type ResolvedRuntime = RuntimeInput & {
   /** Null only during a preview before the installer has generated the secret. */
   authSecretVersion: number | null;
   generatedAuthSecret: boolean;
+  releaseSha: string;
 };
 
 function record(value: unknown, label: string, keys: readonly string[]): Record<string, unknown> {
@@ -896,6 +940,7 @@ function runtimeVars(input: ResolvedRuntime): string[] {
     owner_email: input.config.ownerEmail,
     web_auth_url: input.authUrl,
     auth_secret_version: String(input.authSecretVersion),
+    release_sha: input.releaseSha,
   };
   if (input.ownerAuth === 'google') {
     vars.google_client_id_version = String(input.config.googleClientIdVersion);
@@ -916,8 +961,9 @@ async function verifyRuntimeServices(
   runner: CommandRunner,
   manifest: InstallationManifest,
   input: ResolvedRuntime,
-): Promise<void> {
+): Promise<{ webRevision: string; agentRevision: string }> {
   const { projectId: project, region, installationId: id } = manifest.identity;
+  const revisions: Partial<Record<'web' | 'agent', string>> = {};
   for (const [name, digest] of [
     ['web', input.webDigest],
     ['agent', input.agentDigest],
@@ -938,24 +984,60 @@ async function verifyRuntimeServices(
     const service = jsonOutput(result, 'Cloud Run service') as Record<string, unknown>;
     const metadata = service?.metadata as { name?: unknown } | undefined;
     const spec = service?.spec as
-      | { template?: { spec?: { containers?: Array<{ image?: unknown }> } } }
+      | {
+          template?: {
+            spec?: {
+              containers?: Array<{
+                image?: unknown;
+                env?: Array<{ name?: unknown; value?: unknown }>;
+              }>;
+            };
+          };
+        }
       | undefined;
     const status = service?.status as
       | {
           conditions?: Array<{ type?: unknown; state?: unknown; status?: unknown }>;
           latestReadyRevisionName?: unknown;
           latestCreatedRevisionName?: unknown;
+          trafficStatuses?: Array<{ revision?: unknown; percent?: unknown }>;
+          traffic?: Array<{ revisionName?: unknown; revision?: unknown; percent?: unknown }>;
         }
       | undefined;
-    const template = service?.template as { containers?: Array<{ image?: unknown }> } | undefined;
+    const template = service?.template as
+      | {
+          containers?: Array<{
+            image?: unknown;
+            env?: Array<{ name?: unknown; value?: unknown }>;
+          }>;
+        }
+      | undefined;
     const conditions = (service?.conditions ?? status?.conditions) as
       | Array<{ type?: unknown; state?: unknown; status?: unknown }>
       | undefined;
     const image = `${region}-docker.pkg.dev/${project}/${id}/${name}@${digest}`;
     const deployedImage =
       template?.containers?.[0]?.image ?? spec?.template?.spec?.containers?.[0]?.image;
+    const env = (spec?.template?.spec?.containers?.[0]?.env ?? template?.containers?.[0]?.env) as
+      | Array<{ name?: unknown; value?: unknown }>
+      | undefined;
+    const releaseSha = env?.find((entry) => entry.name === 'ASSISTANT_RELEASE_SHA')?.value;
     const readyRevision = service?.latestReadyRevision ?? status?.latestReadyRevisionName;
     const createdRevision = service?.latestCreatedRevision ?? status?.latestCreatedRevisionName;
+    const revisionName = (value: unknown) =>
+      typeof value === 'string' ? value.split('/').filter(Boolean).at(-1) : undefined;
+    const normalizedReadyRevision = revisionName(readyRevision);
+    const traffic = Array.isArray(status?.trafficStatuses)
+      ? status.trafficStatuses.map((entry) => ({
+          revision: entry.revision,
+          percent: entry.percent,
+        }))
+      : Array.isArray(status?.traffic)
+        ? status.traffic.map((entry) => ({
+            revision: entry.revision ?? entry.revisionName,
+            percent: entry.percent,
+          }))
+        : null;
     if (
       (service?.name ?? metadata?.name) !== `${id}-${name}` ||
       deployedImage !== image ||
@@ -966,13 +1048,22 @@ async function verifyRuntimeServices(
           (condition.state === 'CONDITION_SUCCEEDED' || condition.status === 'True'),
       ) ||
       typeof readyRevision !== 'string' ||
-      !readyRevision ||
-      readyRevision !== createdRevision
+      !normalizedReadyRevision ||
+      revisionName(createdRevision) !== normalizedReadyRevision ||
+      releaseSha !== manifest.identity.release.commitSha ||
+      !traffic ||
+      traffic.length !== 1 ||
+      revisionName(traffic[0]?.revision) !== revisionName(readyRevision) ||
+      traffic[0]?.percent !== 100
     )
       throw new Error(
         `${name} Cloud Run service is not serving the expected ready digest revision`,
       );
+    revisions[name as 'web' | 'agent'] = normalizedReadyRevision;
   }
+  if (!revisions.web || !revisions.agent)
+    throw new Error('Cloud Run service revisions are incomplete');
+  return { webRevision: revisions.web, agentRevision: revisions.agent };
 }
 
 async function inspectOwnerAccess(
@@ -1234,6 +1325,7 @@ async function resolveRuntime(
     authUrl,
     authSecretVersion: recorded,
     generatedAuthSecret: input.config.authSecretVersion === undefined,
+    releaseSha: manifest.identity.release.commitSha,
   };
 }
 
@@ -1263,9 +1355,30 @@ async function verifyReadiness(
   verify: NonNullable<ConsumerInstallOptions['verify']>,
 ): Promise<{ checks: ConsumerVerificationCheck[]; access: ConsumerInstallResult['ownerAccess'] }> {
   const checks: ConsumerVerificationCheck[] = [];
+  const nativeVersion = verify.nativeAppVersion?.trim();
+  if (nativeVersion && !/^[0-9]+(?:\.[0-9]+){1,3}(?:[+(-][A-Za-z0-9._-]+\)?)?$/.test(nativeVersion))
+    throw new Error('Native app version must identify the installed version/build');
   const add = (name: string, ok: boolean, detail: string) => checks.push({ name, ok, detail });
-  await verifyRuntimeServices(dependencies.runner, manifest, input);
-  add('cloud-run-revisions', true, 'web and agent serve the recorded image digests');
+  add(
+    'native-app-installed',
+    Boolean(nativeVersion),
+    nativeVersion
+      ? `operator confirmed the native app installed: ${nativeVersion}; distribution availability is not machine-verified`
+      : 'install the published native app first, then supply its version/build; this installation uses native conversation',
+  );
+  add(
+    'native-pairing',
+    Boolean(nativeVersion && verify.nativePairingConfirmed),
+    nativeVersion && verify.nativePairingConfirmed
+      ? 'operator confirmed authenticated pairing and loading the new installation on that native client'
+      : 'create a device key in the owner administration console, pair the installed app, and confirm authenticated loading',
+  );
+  const serving = await verifyRuntimeServices(dependencies.runner, manifest, input);
+  add(
+    'cloud-run-revisions',
+    true,
+    `web and agent serve the recorded image digests; agent revision ${serving.agentRevision} receives 100% of traffic`,
+  );
   const access = await inspectOwnerAccess(dependencies.runner, manifest, input, false);
   add(
     'owner-access',
@@ -1311,6 +1424,9 @@ async function verifyReadiness(
     webUrl: access.webUrl,
     authOrigin: access.authOrigin,
     agentId: input.config.firestoreAgentId,
+    runtimeInitializedAt: manifest.stage.updatedAt,
+    servingAgentRevision: serving.agentRevision,
+    releaseSha: input.releaseSha,
     embeddingSpace: input.config.firestoreEmbeddingSpace,
   });
   add(
@@ -1321,11 +1437,11 @@ async function verifyReadiness(
       : `runtime data issues: ${evidence.runtimeData.issues.join(', ') || 'unknown'}`,
   );
   add(
-    'model-response',
-    evidence.modelResponseObserved,
-    evidence.modelResponseObserved
-      ? 'a completed model call is recorded'
-      : 'send a first chat message as the owner, then rerun verification',
+    'native-reply-delivery',
+    evidence.ownerReplyDelivered,
+    evidence.ownerReplyDelivered
+      ? 'a model call from the serving agent revision is linked to an owner request and reply acknowledged by the paired client; acknowledgement does not prove the owner read or understood it'
+      : 'send a first authenticated conversation from the paired native app, wait for its reply, then rerun verification',
   );
   return { checks, access };
 }
@@ -1591,13 +1707,36 @@ export async function provisionConsumerInstallation(
       ...terraformVars(current, options.stateBucket),
       ...runtimeVars(deploying),
     ];
+    const identityPlanPath = join(workspace.root, 'runtime-identities.tfplan');
+    const identityPlan = await terraformRunner.run('terraform', [
+      `-chdir=${workspace.terraformDir}`,
+      'plan',
+      '-input=false',
+      '-target=google_service_account.web',
+      `-out=${identityPlanPath}`,
+      ...runtimeVarsForApply,
+    ]);
+    if (!identityPlan.ok)
+      throw new Error(
+        'Could not plan the Cloud Run service identities for IAM preflight; retry the runtime install',
+      );
+    const identityPlanJson = await terraformRunner.run('terraform', [
+      `-chdir=${workspace.terraformDir}`,
+      'show',
+      '-json',
+      identityPlanPath,
+    ]);
+    if (!identityPlanJson.ok)
+      throw new Error('Could not inspect the runtime identity Terraform plan');
+    assertRuntimePlanPreservesResources(
+      jsonOutput(identityPlanJson, 'Runtime identity Terraform plan'),
+    );
     const identities = await terraformRunner.run('terraform', [
       `-chdir=${workspace.terraformDir}`,
       'apply',
       '-input=false',
       '-auto-approve',
-      '-target=google_service_account.web',
-      ...runtimeVarsForApply,
+      identityPlanPath,
     ]);
     if (!identities.ok)
       throw new Error(
@@ -1609,12 +1748,32 @@ export async function provisionConsumerInstallation(
       `${current.identity.installationId}-web@${current.identity.projectId}.iam.gserviceaccount.com`,
     ])
       await verifyCloudRunActAs(dependencies.runner, fetcher, current.identity.projectId, identity);
+    const runtimePlanPath = join(workspace.root, 'runtime.tfplan');
+    const planned = await terraformRunner.run('terraform', [
+      `-chdir=${workspace.terraformDir}`,
+      'plan',
+      '-input=false',
+      `-out=${runtimePlanPath}`,
+      ...runtimeVarsForApply,
+    ]);
+    if (!planned.ok)
+      throw new Error(
+        'Runtime Terraform plan failed; review the retained work directory and retry the same inputs',
+      );
+    const runtimePlanJson = await terraformRunner.run('terraform', [
+      `-chdir=${workspace.terraformDir}`,
+      'show',
+      '-json',
+      runtimePlanPath,
+    ]);
+    if (!runtimePlanJson.ok) throw new Error('Runtime Terraform plan inspection failed');
+    assertRuntimePlanPreservesResources(jsonOutput(runtimePlanJson, 'Runtime Terraform plan'));
     const applied = await terraformRunner.run('terraform', [
       `-chdir=${workspace.terraformDir}`,
       'apply',
       '-input=false',
       '-auto-approve',
-      ...runtimeVarsForApply,
+      runtimePlanPath,
     ]);
     if (!applied.ok)
       throw new Error(
@@ -1801,9 +1960,9 @@ export async function provisionConsumerInstallation(
     ownerAccess,
     note:
       ownerAccess?.ownerAuth === 'passkey'
-        ? 'Passkey web is public and claim-protected. Issue the one-time setup link (--issue-owner-claim), register the owner passkey, send a first chat message, then run --verify.'
+        ? 'Passkey web is public and claim-protected. Issue the one-time setup link (--issue-owner-claim), register the owner passkey and save the recovery code, create a device key in /security, pair the installed native app, send its first conversation, then run --verify with --native-app-version and --native-pairing-confirmed.'
         : ownerAccess
-          ? 'Web invocation is public for the operator-confirmed OAuth callback. Verify the customer OAuth client, owner sign-in, and an authenticated model response before claiming runtime readiness.'
+          ? 'Web invocation is public for the operator-confirmed OAuth callback. Verify the customer OAuth client, owner sign-in, native app installation and pairing, and an authenticated owner conversation before claiming runtime readiness.'
           : current.stage.current === 'initialized'
             ? 'Customer-owned Cloud Run services and revisions verified. Owner sign-in, model response, and end-to-end readiness remain gated.'
             : 'Customer-owned foundation and READY indexes verified. Runtime services, owner authentication, and end-to-end readiness remain gated.',

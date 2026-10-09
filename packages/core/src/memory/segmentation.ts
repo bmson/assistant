@@ -4,7 +4,8 @@ import type {
   ConversationSegmentationRepository,
   ConversationSegmentInput,
 } from '@assistant/persistence';
-import { and, asc, eq, gt, inArray, isNotNull, sql } from 'drizzle-orm';
+import { embeddingSpaceIdentityKey } from '@assistant/persistence';
+import { and, asc, eq, gt, inArray, or, sql } from 'drizzle-orm';
 import type { ModelRouter } from '../model-router/router.js';
 
 /**
@@ -19,7 +20,7 @@ import type { ModelRouter } from '../model-router/router.js';
  */
 
 /** Only the router surface segmentation needs — keeps the fake in tests small. */
-type Summarizer = Pick<ModelRouter, 'embed' | 'generate'>;
+type Summarizer = Pick<ModelRouter, 'embed' | 'generate' | 'embeddingSpace'>;
 
 export interface SegmentationOptions {
   taskId?: string;
@@ -55,7 +56,7 @@ const DEFAULTS = {
   driftSimilarity: 0.6,
   maxMessages: 24,
   settleMs: 30 * 60 * 1000,
-  minMessages: 2,
+  minMessages: 1,
   maxConversations: 50,
   maxSegments: 40,
   perConversationMessageCap: 400,
@@ -69,7 +70,8 @@ interface Msg {
   role: string;
   text: string;
   createdAt: Date;
-  embedding: number[];
+  embedding: number[] | null;
+  embeddingSpaceKey: string | null;
 }
 
 /** pgvector may surface as number[] (drizzle) or the raw '[...]' string. */
@@ -109,7 +111,12 @@ function roleLabel(role: string): string {
 /** Where segmentation reads threads and records segments: SQL or a portable repository. */
 interface SegmentStore {
   recentConversations(limit: number): Promise<Array<{ id: string; agentId: string }>>;
-  unsegmentedMessages(conversationId: string, agentId: string, limit: number): Promise<Msg[]>;
+  unsegmentedMessages(
+    conversationId: string,
+    agentId: string,
+    limit: number,
+    embeddingSpaceKey: string,
+  ): Promise<Msg[]>;
   commitSegment(input: ConversationSegmentInput): Promise<boolean>;
 }
 
@@ -121,8 +128,8 @@ function repositoryStore(
   return {
     recentConversations: async (limit) =>
       (await repository.recentConversations(agentId, limit)).map(({ id }) => ({ id, agentId })),
-    unsegmentedMessages: (conversationId, owner, limit) =>
-      repository.unsegmentedMessages(owner, conversationId, limit),
+    unsegmentedMessages: (conversationId, owner, limit, embeddingSpaceKey) =>
+      repository.unsegmentedMessages(owner, conversationId, limit, embeddingSpaceKey),
     commitSegment: (input) => repository.commitSegment(input),
   };
 }
@@ -141,12 +148,17 @@ function sqlStore(db: Db, agentId: string | undefined): SegmentStore {
         )
         .orderBy(sql`${conversations.updatedAt} desc`)
         .limit(limit),
-    unsegmentedMessages: async (conversationId, _agentId, limit) => {
+    unsegmentedMessages: async (conversationId, _agentId, limit, embeddingSpaceKey) => {
       const [watermark] = await db
-        .select({ endedAt: conversationSegments.endedAt })
+        .select({
+          endedAt: conversationSegments.endedAt,
+          endMessageId: conversationSegments.endMessageId,
+        })
         .from(conversationSegments)
         .where(eq(conversationSegments.conversationId, conversationId))
-        .orderBy(sql`${conversationSegments.endedAt} desc`)
+        .orderBy(
+          sql`${conversationSegments.endedAt} desc, ${conversationSegments.endMessageId} desc`,
+        )
         .limit(1);
 
       const rows = await db
@@ -156,28 +168,37 @@ function sqlStore(db: Db, agentId: string | undefined): SegmentStore {
           text: messages.text,
           createdAt: messages.createdAt,
           embedding: messages.embedding,
+          embeddingSpaceKey: messages.embeddingSpaceKey,
         })
         .from(messages)
         .where(
           and(
             eq(messages.conversationId, conversationId),
             inArray(messages.role, ['user', 'assistant']),
-            isNotNull(messages.embedding),
             sql`length(${messages.text}) > 0`,
-            watermark ? gt(messages.createdAt, watermark.endedAt) : sql`true`,
+            sql`(${messages.channelMessageId} is null or (${messages.channelMessageId} not like 'visual-qa:%' and ${messages.channelMessageId} not like 'readability-%'))`,
+            watermark
+              ? or(
+                  gt(messages.createdAt, watermark.endedAt),
+                  and(
+                    eq(messages.createdAt, watermark.endedAt),
+                    gt(messages.id, watermark.endMessageId),
+                  ),
+                )
+              : sql`true`,
           ),
         )
-        .orderBy(asc(messages.createdAt))
+        .orderBy(asc(messages.createdAt), asc(messages.id))
         .limit(limit);
 
-      const msgs: Msg[] = [];
-      for (const r of rows) {
-        const embedding = toVector(r.embedding);
-        if (embedding) {
-          msgs.push({ id: r.id, role: r.role, text: r.text, createdAt: r.createdAt, embedding });
-        }
-      }
-      return msgs;
+      return rows.map((r) => ({
+        id: r.id,
+        role: r.role,
+        text: r.text,
+        createdAt: r.createdAt,
+        embedding: r.embeddingSpaceKey === embeddingSpaceKey ? toVector(r.embedding) : null,
+        embeddingSpaceKey: r.embeddingSpaceKey,
+      }));
     },
     commitSegment: async (input) => {
       const [row] = await db
@@ -196,9 +217,23 @@ export async function segmentConversations(
   deps: { db: Db; router: Summarizer; segments?: ConversationSegmentationRepository },
   options: SegmentationOptions = {},
 ): Promise<SegmentationResult> {
-  const opts = { ...DEFAULTS, ...options };
+  const opts = {
+    ...DEFAULTS,
+    ...options,
+    // Keep the summarizer input bounded even when a caller supplies a larger
+    // batch size. Every committed segment therefore stays within one bounded
+    // source span whose beginning and last turn both fit the prompt.
+    maxMessages: Math.min(
+      DEFAULTS.maxMessages,
+      Number.isSafeInteger(options.maxMessages)
+        ? Math.max(1, options.maxMessages as number)
+        : DEFAULTS.maxMessages,
+    ),
+  };
   const now = options.now ?? new Date();
   const { router } = deps;
+  const embeddingSpace = await router.embeddingSpace();
+  const embeddingSpaceKey = embeddingSpaceIdentityKey(embeddingSpace);
   const store = deps.segments
     ? repositoryStore(deps.segments, options.agentId)
     : sqlStore(deps.db, options.agentId);
@@ -215,8 +250,16 @@ export async function segmentConversations(
       convo.id,
       convo.agentId,
       opts.perConversationMessageCap,
+      embeddingSpaceKey,
     );
-    const groups = groupByTopic(msgs, opts, now);
+    // Do not move the committed range past a substantive message whose vector
+    // is missing or belongs to another space. Short messages are intentionally
+    // not embedded and still remain inside the next summary's source range.
+    const unresolved = msgs.findIndex(
+      (message) => message.embedding === null && [...message.text].length > 20,
+    );
+    const coveredPrefix = unresolved < 0 ? msgs : msgs.slice(0, unresolved);
+    const groups = groupByTopic(coveredPrefix, opts, now);
 
     for (const group of groups) {
       if (segmentsCreated >= opts.maxSegments) break;
@@ -227,7 +270,10 @@ export async function segmentConversations(
         convo.id,
         group,
         opts.taskId,
+        embeddingSpace,
+        embeddingSpaceKey,
       );
+      if (created === null) break; // keep later source turns behind the unresolved group
       if (created) segmentsCreated += 1;
     }
   }
@@ -242,23 +288,33 @@ function groupByTopic(msgs: Msg[], opts: ResolvedOptions, now: Date): Msg[][] {
 
   const groups: Msg[][] = [];
   let current: Msg[] = [first];
-  let sum = [...first.embedding];
+  let sum = first.embedding ? [...first.embedding] : [];
+  let vectorCount = first.embedding ? 1 : 0;
   let prevCreatedAt = first.createdAt;
 
   for (let i = 1; i < msgs.length; i += 1) {
     const m = msgs[i];
     if (!m) continue;
-    const centroid = sum.map((x) => x / current.length);
+    const centroid = vectorCount > 0 ? sum.map((x) => x / vectorCount) : [];
     const gap = m.createdAt.getTime() - prevCreatedAt.getTime();
-    const drifted = cosine(m.embedding, centroid) < opts.driftSimilarity;
+    const drifted = Boolean(
+      m.embedding && vectorCount > 0 && cosine(m.embedding, centroid) < opts.driftSimilarity,
+    );
     if (gap > opts.gapMs || drifted || current.length >= opts.maxMessages) {
       groups.push(current);
       current = [m];
-      sum = [...m.embedding];
+      sum = m.embedding ? [...m.embedding] : [];
+      vectorCount = m.embedding ? 1 : 0;
     } else {
       current.push(m);
-      for (let k = 0; k < sum.length; k += 1) {
-        sum[k] = (sum[k] ?? 0) + (m.embedding[k] ?? 0);
+      if (m.embedding) {
+        if (vectorCount === 0) sum = [...m.embedding];
+        else {
+          for (let k = 0; k < sum.length; k += 1) {
+            sum[k] = (sum[k] ?? 0) + (m.embedding[k] ?? 0);
+          }
+        }
+        vectorCount += 1;
       }
     }
     prevCreatedAt = m.createdAt;
@@ -280,17 +336,19 @@ async function commitSegment(
   conversationId: string,
   group: Msg[],
   taskId: string | undefined,
-): Promise<boolean> {
+  embeddingSpace: import('@assistant/persistence').EmbeddingSpace,
+  embeddingSpaceKey: string,
+): Promise<boolean | null> {
   const first = group[0];
   const last = group[group.length - 1];
   if (!first || !last) return false;
 
   const transcript = group
     .map((m) => `${roleLabel(m.role)}: ${m.text.replace(/\s+/g, ' ').trim().slice(0, 500)}`)
-    .join('\n')
-    .slice(0, 6000);
+    .join('\n');
   const summary = await summarize(router, transcript, taskId);
-  const [embedding] = await router.embed([summary], { taskId });
+  if (!summary) return null;
+  const [embedding] = await router.embed([summary], { taskId, expectedSpace: embeddingSpace });
 
   return store.commitSegment({
     agentId,
@@ -299,6 +357,7 @@ async function commitSegment(
     endMessageId: last.id,
     summary,
     embedding: embedding ?? null,
+    embeddingSpaceKey: embedding ? embeddingSpaceKey : null,
     messageCount: group.length,
     startedAt: first.createdAt,
     endedAt: last.createdAt,
@@ -309,7 +368,7 @@ async function summarize(
   router: Summarizer,
   transcript: string,
   taskId: string | undefined,
-): Promise<string> {
+): Promise<string | null> {
   try {
     const res = await router.generate('extract', {
       taskId,
@@ -320,9 +379,7 @@ async function summarize(
     });
     if (res.ok && res.text.trim()) return res.text.trim().slice(0, 600);
   } catch (err) {
-    console.error('segment summarization failed — using fallback', err);
+    console.error('segment summarization failed — keeping source turns unsegmented', err);
   }
-  // Fallback: the first substantive line, so a segment still forms without the model.
-  const firstLine = transcript.split('\n')[0] ?? '';
-  return firstLine.slice(0, 200) || 'chat discussion';
+  return null;
 }

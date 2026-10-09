@@ -2,6 +2,8 @@ import { loadConfig } from '@assistant/config';
 import { and, eq, sql } from 'drizzle-orm';
 import { createDb } from './client.js';
 import { modelDefaults, modelRoleDefaults, reconcileModelConfig } from './model-config.js';
+import { lockPostgresPrivacyObservationFence } from './privacy-erasure-repository.js';
+import { decideScheduleSeed } from './schedule-seed.js';
 import {
   agents,
   approvalPolicies,
@@ -67,7 +69,7 @@ for (const b of budgetSeed) {
 
 const rateSeed = [
   { key: 'embedding_mtok', unit: 'mtok', unitPriceUsd: '0.02' },
-  { key: 'twilio_sms', unit: 'message', unitPriceUsd: '0.0079' },
+  { key: 'twilio_sms', unit: 'segment', unitPriceUsd: '0.0079' },
   { key: 'twilio_voice_min', unit: 'minute', unitPriceUsd: '0.014' },
   // 2 vCPU + 2 GiB Cloud Run job: ~2×$0.000024/vCPU-s + 2×$0.0000025/GiB-s
   { key: 'cloud_run_job_sec', unit: 'second', unitPriceUsd: '0.00006' },
@@ -75,7 +77,10 @@ const rateSeed = [
 ] as const;
 
 for (const r of rateSeed) {
-  await db.insert(rateTable).values(r).onConflictDoNothing();
+  await db
+    .insert(rateTable)
+    .values(r)
+    .onConflictDoUpdate({ target: rateTable.key, set: { unit: r.unit } });
 }
 
 const rateLimitSeed = [
@@ -173,24 +178,30 @@ const policySeed = [
   },
 ] as const;
 
-for (const p of policySeed) {
-  const existing = await db
-    .select()
-    .from(approvalPolicies)
-    .where(
-      and(eq(approvalPolicies.agentId, agent.id), eq(approvalPolicies.templateKey, p.templateKey)),
-    );
-  if (existing.length === 0) {
-    await db.insert(approvalPolicies).values({ ...p, agentId: agent.id, createdVia: 'seed' });
-  } else if (existing[0]?.createdVia === 'seed') {
-    // Seed-owned rules carry environment-derived owner addresses. Reconcile
-    // those values on release without re-enabling a rule the owner paused.
-    await db
-      .update(approvalPolicies)
-      .set({ toolName: p.toolName, match: p.match, effect: p.effect, updatedAt: sql`now()` })
-      .where(eq(approvalPolicies.id, existing[0].id));
+await db.transaction(async (tx) => {
+  await lockPostgresPrivacyObservationFence(tx as unknown as typeof db, agent.id);
+  for (const p of policySeed) {
+    const existing = await tx
+      .select()
+      .from(approvalPolicies)
+      .where(
+        and(
+          eq(approvalPolicies.agentId, agent.id),
+          eq(approvalPolicies.templateKey, p.templateKey),
+        ),
+      );
+    if (existing.length === 0) {
+      await tx.insert(approvalPolicies).values({ ...p, agentId: agent.id, createdVia: 'seed' });
+    } else if (existing[0]?.createdVia === 'seed') {
+      // Seed-owned rules carry environment-derived owner addresses. Reconcile
+      // those values on release without re-enabling a rule the owner paused.
+      await tx
+        .update(approvalPolicies)
+        .set({ toolName: p.toolName, match: p.match, effect: p.effect, updatedAt: sql`now()` })
+        .where(eq(approvalPolicies.id, existing[0].id));
+    }
   }
-}
+});
 
 // ── Default proactive schedules (next_run_at initialized by the first sweep) ─
 
@@ -211,9 +222,8 @@ const scheduleSeed = [
     cron: '0 22 * * *',
     taskTemplate: { type: 'scheduled', budgetUsdLimit: '0.10', job: 'memory.extract' },
   },
-  // Open loops age out on their own schedule rather than riding along with the
-  // nightly extraction above: one SQL update, no model, so there is no reason
-  // for a throttled or over-budget extraction to stop the desk being cleared.
+  // Wake elapsed snoozes independently of nightly model extraction.
+  // Unresolved obligations never disappear merely because they aged.
   {
     name: 'open-loop-sweep',
     cron: '35 */6 * * *',
@@ -376,47 +386,60 @@ const scheduleSeed = [
   },
 ] as const;
 
-/** Schedules whose definition the seed owns — updated in place on re-seed (prod picks up changes on deploy). */
-const SEED_OWNED_SCHEDULES = new Set([
-  'memory-extraction',
-  'open-loop-sweep',
-  'memory-consolidation',
-  'knowledge-graph-sync',
-  'knowledge-graph-date-backfill',
-  'knowledge-graph-curiosity',
-  'chat-segmentation',
-  'anomaly-scan',
-  'skill-reflection',
-  'self-improve',
-  'ambient-refresh',
-  'dream',
-  'self-maintain',
-  'self-repair',
-  'assistant-health-monitor',
-  'document-processing',
-]);
-
 for (const s of scheduleSeed) {
-  const existing = await db.select().from(schedules).where(eq(schedules.name, s.name));
-  if (existing.length === 0) {
+  const [existing] = await db
+    .select()
+    .from(schedules)
+    .where(and(eq(schedules.agentId, agent.id), eq(schedules.name, s.name)));
+  const definition = { cron: s.cron, taskTemplate: { ...s.taskTemplate } };
+  const seedTemplateKey = `assistant.schedule.${s.name}`;
+  const decision = decideScheduleSeed(existing ?? null, {
+    key: seedTemplateKey,
+    revision: 1,
+    definition,
+  });
+  if (decision.kind === 'insert') {
     await db.insert(schedules).values({
       agentId: agent.id,
       name: s.name,
       cron: s.cron,
       taskTemplate: { ...s.taskTemplate },
       enabled: true,
+      seedTemplateKey: decision.seedTemplateKey,
+      seedTemplateRevision: decision.seedTemplateRevision,
+      seedDefinition: decision.seedDefinition,
+      seedReviewRequired: false,
     });
-  } else if (SEED_OWNED_SCHEDULES.has(s.name)) {
+  } else if (decision.kind === 'update' && existing) {
     await db
       .update(schedules)
       .set({
         cron: s.cron,
         taskTemplate: { ...s.taskTemplate },
+        seedTemplateKey: decision.seedTemplateKey,
+        seedTemplateRevision: decision.seedTemplateRevision,
+        seedDefinition: decision.seedDefinition,
+        seedReviewRequired: false,
         // next_run_at recomputes on the next sweep against the new cron
         nextRunAt: null,
         updatedAt: sql`now()`,
       })
-      .where(eq(schedules.name, s.name));
+      .where(eq(schedules.id, existing.id));
+  } else if (decision.kind === 'adopt' && existing) {
+    await db
+      .update(schedules)
+      .set({
+        seedTemplateKey: decision.seedTemplateKey,
+        seedTemplateRevision: decision.seedTemplateRevision,
+        seedDefinition: decision.seedDefinition,
+        updatedAt: sql`now()`,
+      })
+      .where(eq(schedules.id, existing.id));
+  } else if (decision.kind === 'review' && existing && !existing.seedReviewRequired) {
+    await db
+      .update(schedules)
+      .set({ seedReviewRequired: true, updatedAt: sql`now()` })
+      .where(eq(schedules.id, existing.id));
   }
 }
 

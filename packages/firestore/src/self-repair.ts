@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   type RepairIssue,
+  type RepairModelAccounting,
   repairClaimCandidate,
   repairFailureKey,
   repairTransition,
@@ -90,7 +91,7 @@ export class FirestoreSelfRepairRepository implements SelfRepairRepository {
       .map((doc) => decodeRecord<RepairIssue>(doc.data()))
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   }
-  async claim(agentId: string, now: Date, dailyLimit: number) {
+  async claim(agentId: string, now: Date, dailyLimit: number, taskId?: string) {
     this.owned(agentId);
     return this.store.db.runTransaction(async (tx) => {
       await assertPrivacyErasureInactiveInTransaction(tx, this.store, agentId);
@@ -110,6 +111,12 @@ export class FirestoreSelfRepairRepository implements SelfRepairRepository {
         {
           manualRunStartedAt: issue.data.manualRunRequestedAt ?? issue.data.manualRunStartedAt,
           manualRunRequestedAt: undefined,
+          nextEligibleAt: undefined,
+          ownerActionRequired: undefined,
+          investigationStartedAt: now.toISOString(),
+          investigationTaskIds: taskId
+            ? [...new Set([...(issue.data.investigationTaskIds ?? []), taskId])].slice(-30)
+            : issue.data.investigationTaskIds,
         },
         now,
       );
@@ -117,6 +124,65 @@ export class FirestoreSelfRepairRepository implements SelfRepairRepository {
       tx.set(this.store.doc('selfRepairIssues', issue.id), encodeRecord(next));
       return next;
     });
+  }
+  async modelAccounting(
+    agentId: string,
+    taskIds: string[],
+    since: Date,
+  ): Promise<RepairModelAccounting> {
+    this.owned(agentId);
+    const fence = await readPrivacyErasureFence(this.store, agentId);
+    const ids = [...new Set(taskIds)].slice(-30);
+    if (ids.length === 0)
+      return {
+        observedModelCalls: 0,
+        knownCostUsd: null,
+        unresolvedReservations: 0,
+        complete: false,
+      };
+    let observedModelCalls = 0;
+    let knownMicros = 0;
+    let unresolvedReservations = 0;
+    for (const taskId of ids) {
+      const task = await this.store.doc('tasks', taskId).get();
+      if (!task.exists || task.get('agentId') !== agentId)
+        throw new Error('Repair accounting task is outside the owner');
+      const [calls, reservations] = await Promise.all([
+        this.store
+          .collection('modelCalls')
+          .where('taskId', '==', taskId)
+          .where('createdAt', '>=', since)
+          .limit(1001)
+          .get(),
+        this.store.collection('costReservations').where('taskId', '==', taskId).limit(1001).get(),
+      ]);
+      if (calls.size > 1000 || reservations.size > 1000)
+        throw new Error('Repair accounting ledger requires archival');
+      for (const row of calls.docs) {
+        if (row.get('agentId') !== agentId || row.get('taskId') !== taskId)
+          throw new Error('Repair model-call accounting identity mismatch');
+        const raw = row.get('costUsd');
+        const cost = typeof raw === 'string' || typeof raw === 'number' ? Number(raw) : NaN;
+        if (!Number.isFinite(cost) || cost < 0)
+          throw new Error('Repair model-call accounting is malformed');
+        knownMicros += Math.round(cost * 1_000_000);
+        observedModelCalls++;
+      }
+      for (const row of reservations.docs) {
+        const storedOwner = row.get('agentId');
+        if ((storedOwner !== undefined && storedOwner !== agentId) || row.get('taskId') !== taskId)
+          throw new Error('Repair reservation accounting identity mismatch');
+        if (['dispatching', 'unknown'].includes(String(row.get('status'))))
+          unresolvedReservations++;
+      }
+    }
+    await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
+    return {
+      observedModelCalls,
+      knownCostUsd: observedModelCalls > 0 ? (knownMicros / 1_000_000).toFixed(6) : null,
+      unresolvedReservations,
+      complete: observedModelCalls > 0 && unresolvedReservations === 0,
+    };
   }
   async update(
     issue: RepairIssue,
@@ -138,11 +204,20 @@ export class FirestoreSelfRepairRepository implements SelfRepairRepository {
       const next = repairTransition(issue, status, patch, now);
       const schedule =
         status === 'reported' &&
-        (issue.status !== 'reported' || Boolean(patch.manualRunRequestedAt))
+        (issue.status !== 'reported' ||
+          Boolean(patch.manualRunRequestedAt) ||
+          typeof patch.nextEligibleAt === 'string')
           ? await repairScheduleToWake(tx, this.store, issue.agentId)
           : null;
       tx.set(ref, encodeRecord(next));
-      if (schedule) tx.update(schedule.ref, { nextRunAt: now, updatedAt: now });
+      if (schedule) {
+        const nextRunAt = patch.manualRunRequestedAt
+          ? now
+          : patch.nextEligibleAt && Number.isFinite(Date.parse(patch.nextEligibleAt))
+            ? new Date(patch.nextEligibleAt)
+            : now;
+        tx.update(schedule.ref, { nextRunAt, updatedAt: now });
+      }
       return next;
     });
   }

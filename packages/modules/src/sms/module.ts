@@ -4,9 +4,11 @@ import { registerSmsTools, TwilioClient } from '@assistant/tools/modules/sms';
 import { defineModule, type ModuleHooks } from '../platform.js';
 import {
   deliverSmsFinal,
+  drainSmsNotificationOutbox,
   handleInboundSms,
   notifyApprovalsBySms,
   notifyOwnerBySms,
+  reconcilePendingSmsUsage,
   type SmsChannelDeps,
 } from './channel.js';
 import { smsMeta } from './meta.js';
@@ -69,17 +71,36 @@ export const smsModule = defineModule<TwilioClient>({
         notifyApprovals: (approvalsToPing) =>
           notifyApprovalsBySms(channelDeps, [...approvalsToPing]),
       },
+      sweepSteps: [
+        {
+          name: 'drainSmsNotificationOutbox',
+          portable: true,
+          run: async () => drainSmsNotificationOutbox(channelDeps),
+        },
+        {
+          name: 'reconcileSmsUsage',
+          portable: true,
+          run: async () => reconcilePendingSmsUsage(channelDeps),
+        },
+      ],
       channel: {
+        name: 'sms',
         assertDeliverable: (task) => {
           if (task.type === 'sms_turn' && task.trust === 'owner' && !client.configured()) {
             throw new Error('SMS final delivery is not configured');
           }
         },
-        deliverFinal: (_services, task, text) =>
+        deliverFinal: (_services, task, text, attemptId) =>
           deliverSmsFinal(
             channelDeps,
-            { id: task.id, conversationId: task.conversationId, trust: task.trust },
+            {
+              id: task.id,
+              type: task.type,
+              conversationId: task.conversationId,
+              trust: task.trust,
+            },
             text,
+            attemptId,
           ),
       },
       webhooks: [

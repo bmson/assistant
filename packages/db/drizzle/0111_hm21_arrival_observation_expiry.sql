@@ -1,0 +1,1 @@
+ALTER TABLE "location_pings" ADD COLUMN "arrival_expires_at" timestamp with time zone;

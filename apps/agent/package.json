@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@assistant/application": "workspace:*",
     "@assistant/config": "workspace:*",
     "@assistant/core": "workspace:*",
     "@assistant/db": "workspace:*",

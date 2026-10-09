@@ -1,8 +1,18 @@
-import { type CommitmentView, listCommitmentOverview } from '@assistant/application/commitments';
+import { randomUUID } from 'node:crypto';
+import {
+  type ClosedCommitmentView,
+  type CommitmentView,
+  listCommitmentOverview,
+} from '@assistant/application/commitments';
+import {
+  type EmailObligationView,
+  listOwnerEmailObligations,
+} from '@assistant/application/email-obligations';
 import { getMemoryHubOverview, type MemorySnapshot } from '@assistant/application/profile';
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import {
   FirestoreProfileMemoryHubRepository,
+  getFirestoreClosedCommitmentOverview,
   getFirestoreCommitmentOverview,
 } from '@assistant/firestore';
 import {
@@ -21,11 +31,17 @@ import {
 import Link from 'next/link';
 import { AutoRefresh } from '@/app/auto-refresh';
 import { CommitmentsPanel } from '@/app/profile/commitments-panel';
+import { EmailObligationsPanel } from '@/app/profile/email-obligations-panel';
 import { FactRow, type FactView } from '@/app/profile/fact-row';
 import { MemoryOrganizer } from '@/app/profile/memory-organizer';
 import { requireOwner } from '@/auth';
 import { relativeTime } from '@/lib/format';
-import { getDb, getFirestoreInstallationStore } from '@/lib/server';
+import {
+  getApplication,
+  getDb,
+  getEmailObligationRepository,
+  getFirestoreInstallationStore,
+} from '@/lib/server';
 import {
   CountBadge,
   cardInteractiveClass,
@@ -144,6 +160,19 @@ async function readOpenCommitments(now: Date): Promise<CommitmentView[]> {
   );
 }
 
+async function readClosedCommitments(): Promise<ClosedCommitmentView[]> {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER !== 'firestore') return getApplication().listClosedCommitments();
+  return getFirestoreClosedCommitmentOverview(
+    getFirestoreInstallationStore(),
+    config.FIRESTORE_AGENT_ID,
+  );
+}
+
+async function readEmailObligations(now: Date): Promise<EmailObligationView[]> {
+  return listOwnerEmailObligations(getEmailObligationRepository(), now);
+}
+
 export default async function ProfilePage() {
   await requireOwner();
   const now = new Date();
@@ -158,6 +187,8 @@ export default async function ProfilePage() {
     peopleCount,
   } = await readMemoryHub();
   const openCommitments = await readOpenCommitments(now);
+  const closedCommitments = await readClosedCommitments();
+  const emailObligations = await readEmailObligations(now);
 
   // Memory state only changes nightly or from an action on this page (which
   // revalidates on its own). The one thing that updates in the background is a
@@ -175,7 +206,14 @@ export default async function ProfilePage() {
         intro={`See what shapes the assistant’s understanding of ${owner?.name ?? 'you'}, what still needs care, and what stays available for recall.`}
       />
 
-      <CommitmentsPanel rows={openCommitments} />
+      <CommitmentsPanel
+        rows={openCommitments}
+        closedRows={closedCommitments}
+        reopenOperationIds={Object.fromEntries(
+          closedCommitments.map((row) => [row.id, randomUUID()]),
+        )}
+      />
+      <EmailObligationsPanel rows={emailObligations} />
 
       {/* Health first: the two numbers that say whether memory is in good order. */}
       <section className="mt-8">

@@ -61,6 +61,7 @@ describe('location context — pure helpers', () => {
         timeZone: null,
         capturedAt: new Date('2026-07-21T11:48:00Z'),
         createdAt: now,
+        arrivalExpiresAt: null,
       },
       now,
     );
@@ -84,6 +85,7 @@ describe('location context — pure helpers', () => {
       timeZone: 'America/Denver',
       capturedAt: now,
       createdAt: now,
+      arrivalExpiresAt: null,
     };
     expect(formatLocationLine(row, now)).toContain('device clock is in America/Denver');
     expect(formatLocationLine({ ...row, timeZone: null }, now)).not.toContain('device clock');

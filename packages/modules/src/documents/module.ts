@@ -1,9 +1,11 @@
 import {
   CloudRunDocumentJobLauncher,
   type DocumentProcessorConfig,
+  hashCallbackToken,
   LocalDocumentProcessLauncher,
   recordDocumentProcessorResult,
 } from '@assistant/core';
+import { embeddingSpaceIdentityKey } from '@assistant/persistence';
 import { registerDocumentTools } from '@assistant/tools/documents';
 import { defineModule, type ModuleHooks } from '../platform.js';
 import { documentsMeta } from './meta.js';
@@ -12,7 +14,13 @@ export const documentsModule = defineModule<DocumentProcessorConfig | undefined>
   meta: documentsMeta,
   create: ({ config, registry, repoRoot, router, workspacePrefix, workspaceRoot, persistence }) => {
     registerDocumentTools(registry, {
-      embed: (texts) => router.embed(texts),
+      embed: async (texts) => {
+        const space = await router.embeddingSpace();
+        return {
+          embeddings: await router.embed(texts, { expectedSpace: space }),
+          embeddingSpaceKey: embeddingSpaceIdentityKey(space),
+        };
+      },
       ...(persistence.documentSearch ? { search: persistence.documentSearch } : {}),
     });
 
@@ -38,8 +46,13 @@ export const documentsModule = defineModule<DocumentProcessorConfig | undefined>
             }
             const r = body.result;
             const processor = services.persistence.documentProcessor;
+            if (!processor)
+              return {
+                status: 503,
+                json: { error: 'document processor persistence is unavailable' },
+              };
             const outcome = await recordDocumentProcessorResult(
-              processor ? { processor, tasks: services.persistence.tasks } : services.db,
+              { processor, tasks: services.persistence.tasks },
               {
                 documentId: body.documentId,
                 token: body.token,
@@ -48,6 +61,20 @@ export const documentsModule = defineModule<DocumentProcessorConfig | undefined>
                   : { ok: false, error: 'job reported no result' },
               },
             );
+            if (!outcome.ok && outcome.status === 410 && outcome.cleanupPath) {
+              try {
+                await services.workspace.delete(outcome.cleanupPath);
+                await processor.resolveDeletedCallback({
+                  documentId: body.documentId,
+                  tokenMatches: (stored) => stored === hashCallbackToken(body.token as string),
+                  processedTextPath: outcome.cleanupPath,
+                });
+              } catch {
+                // Keep the tombstone and outbox so a replay can retry cleanup.
+                return { status: 503, json: { error: 'deleted document cleanup is pending' } };
+              }
+              return { status: 200, json: { ok: true, deleted: true } };
+            }
             if (!outcome.ok) return { status: outcome.status, json: { error: outcome.error } };
             return { status: 200, json: { ok: true } };
           },

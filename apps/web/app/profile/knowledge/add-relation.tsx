@@ -39,10 +39,20 @@ const MONTH_VALUES = Array.from({ length: 12 }, (_, index) => String(index + 1).
  * to round-trip through the canonicalizer and could be rejected as unreadable.
  * What you pick is what the graph stores — no interpretation step.
  */
-function DateValueInput({ name }: { name: string }) {
-  const [precision, setPrecision] = useState<DatePrecision>('day');
-  const [recurringMonth, setRecurringMonth] = useState('01');
-  const [recurringDay, setRecurringDay] = useState('1');
+export function DateValueInput({
+  name,
+  value,
+  onChange,
+}: {
+  name: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const [precision, setPrecision] = useState<DatePrecision>(
+    value.startsWith('--') ? 'recurring' : /^\d{4}-\d{2}$/.test(value) ? 'month' : 'day',
+  );
+  const recurringMonth = value.startsWith('--') ? value.slice(2, 4) : '01';
+  const recurringDay = value.startsWith('--') ? value.slice(5, 7) : '01';
   return (
     <div className="grid gap-1.5">
       <div className="flex gap-1">
@@ -56,7 +66,12 @@ function DateValueInput({ name }: { name: string }) {
           <button
             key={value}
             type="button"
-            onClick={() => setPrecision(value)}
+            onClick={() => {
+              if (value !== precision) {
+                setPrecision(value);
+                onChange(value === 'recurring' ? '--01-01' : '');
+              }
+            }}
             aria-pressed={precision === value}
             className={`rounded-lg px-2.5 py-1 text-xs font-medium motion-safe:transition-colors ${
               precision === value
@@ -69,22 +84,34 @@ function DateValueInput({ name }: { name: string }) {
         ))}
       </div>
       {precision === 'day' ? (
-        <input type="date" name={name} required className={inputClass} />
+        <input
+          type="date"
+          name={name}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          required
+          className={inputClass}
+        />
       ) : null}
       {precision === 'month' ? (
-        <input type="month" name={name} required className={inputClass} />
+        <input
+          type="month"
+          name={name}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          required
+          className={inputClass}
+        />
       ) : null}
       {precision === 'recurring' ? (
         <div className="flex items-center gap-2">
-          <input
-            type="hidden"
-            name={name}
-            value={`--${recurringMonth}-${recurringDay.padStart(2, '0')}`}
-          />
+          <input type="hidden" name={name} value={value} />
           <select
             aria-label="Month"
             value={recurringMonth}
-            onChange={(event) => setRecurringMonth(event.target.value)}
+            onChange={(event) =>
+              onChange(`--${event.target.value}-${recurringDay.padStart(2, '0')}`)
+            }
             className={selectClass}
           >
             {MONTH_VALUES.map((value) => (
@@ -101,7 +128,9 @@ function DateValueInput({ name }: { name: string }) {
             min={1}
             max={31}
             value={recurringDay}
-            onChange={(event) => setRecurringDay(event.target.value)}
+            onChange={(event) =>
+              onChange(`--${recurringMonth}-${event.target.value.padStart(2, '0')}`)
+            }
             className={`${inputClass} w-20`}
           />
         </div>
@@ -116,7 +145,7 @@ function DateValueInput({ name }: { name: string }) {
  * entities so linking never retypes (or duplicates) a name — typing a name
  * that matches nothing creates it, which the hint says out loud.
  */
-function EndpointPicker({
+export function EndpointPicker({
   name,
   legend,
   kind,
@@ -143,6 +172,9 @@ function EndpointPicker({
 }) {
   const [picked, setPicked] = useState<KnowledgeGraphEntityView | null>(prefill ?? null);
   const [query, setQuery] = useState(prefill ? '' : (prefillQuery ?? ''));
+  const [dateValue, setDateValue] = useState(
+    prefill?.kind === 'date' ? prefill.canonicalKey.replace(/^date:/, '') : '',
+  );
   const [results, setResults] = useState<KnowledgeGraphEntityView[]>([]);
   const [searching, startSearch] = useTransition();
   // Guards against an earlier, slower search landing after a later one and
@@ -171,6 +203,7 @@ function EndpointPicker({
     setPicked(null);
     setQuery('');
     setResults([]);
+    setDateValue('');
     onKindChange(next);
   };
 
@@ -180,8 +213,8 @@ function EndpointPicker({
   );
 
   useEffect(() => {
-    onValueChange?.({ label: picked?.label ?? query, kind });
-  }, [kind, onValueChange, picked?.label, query]);
+    onValueChange?.({ label: kind === 'date' ? dateValue : (picked?.label ?? query), kind });
+  }, [kind, onValueChange, picked?.label, query, dateValue]);
 
   return (
     <fieldset className="grid min-w-0 gap-2">
@@ -206,7 +239,14 @@ function EndpointPicker({
       {kind === 'date' ? (
         <div className="grid gap-1">
           <span className={labelClass}>{legend} date</span>
-          <DateValueInput name={`${name}Label`} />
+          <DateValueInput
+            name={`${name}Label`}
+            value={dateValue}
+            onChange={(value) => {
+              setDateValue(value);
+              if (value !== prefill?.canonicalKey.replace(/^date:/, '')) setPicked(null);
+            }}
+          />
         </div>
       ) : picked ? (
         <div className="grid gap-1">
@@ -336,6 +376,8 @@ export function AddKnowledgeRelation({
   correction?: KnowledgeGraphRelationView;
 }) {
   const [open, setOpen] = useState(false);
+  const [note, setNote] = useState('');
+  const [sourceDisposition, setSourceDisposition] = useState('graph_only');
   const action = correction
     ? correctKnowledgeRelation.bind(null, correction.id)
     : addKnowledgeRelation;
@@ -363,97 +405,139 @@ export function AddKnowledgeRelation({
 
   if (!open) {
     return (
-      <button type="button" onClick={() => setOpen(true)} className={btnSm.outline}>
-        <Plus className="size-3.5" aria-hidden="true" />
-        {correction ? 'Correct connection' : 'Add connection'}
-      </button>
+      <>
+        <button type="button" onClick={() => setOpen(true)} className={btnSm.outline}>
+          <Plus className="size-3.5" aria-hidden="true" />
+          {correction ? 'Correct connection' : 'Add connection'}
+        </button>
+        {state.success ? (
+          <p role="status" className="text-xs text-muted">
+            {state.success}
+          </p>
+        ) : null}
+        {state.error ? (
+          <p role="alert" className="text-xs text-red-600">
+            {state.error}
+          </p>
+        ) : null}
+      </>
     );
   }
 
   const title = correction ? 'Correct connection' : 'Add a connection';
 
   return (
-    <Modal label={title} onClose={() => setOpen(false)}>
-      <form action={formAction} className="grid gap-4">
-        {/* Only meaningful for a typed subject: an endpoint picked by id
+    <Modal
+      label={title}
+      dismissible={!pending}
+      onClose={() => {
+        if (!pending) setOpen(false);
+      }}
+    >
+      <form action={formAction} className="grid gap-4" aria-busy={pending}>
+        <fieldset disabled={pending} className="contents">
+          {/* Only meaningful for a typed subject: an endpoint picked by id
             carries its own contact and the server ignores this. */}
-        {subjectContactId && !correction && !selected ? (
-          <input type="hidden" name="subjectContactId" value={subjectContactId} />
-        ) : null}
-        <div>
-          <p className="font-display text-xl font-semibold text-strong">{title}</p>
-          <p className="mt-1 text-sm leading-5 text-muted">
-            {correction
-              ? 'Save the corrected fact first. The earlier connection will remain as evidence but stop being used.'
-              : 'Save a relationship the assistant can understand and trace back to you.'}
-          </p>
-        </div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <EndpointPicker
-            name="subject"
-            legend="First item"
-            kind={subjectKind}
-            onKindChange={setSubjectKind}
-            prefill={correction?.subject ?? selected}
-            prefillQuery={subjectLabel}
-            placeholder="Search or create…"
-            onValueChange={(value) => setSubjectValue(value.label)}
-          />
-          <EndpointPicker
-            name="object"
-            legend="Connected item"
-            kind={objectKind}
-            onKindChange={setObjectKind}
-            prefill={correction?.object}
-            placeholder="Search or create…"
-            onValueChange={(value) => setObjectValue(value.label)}
-          />
-        </div>
-        <label className={`grid gap-1 ${labelClass}`}>
-          Relationship
-          <select
-            value={predicate || suggestions[0] || ''}
-            onChange={(event) => setPredicate(event.target.value)}
-            className={selectClass}
-          >
-            {suggestions.map((suggestion) => (
-              <option key={suggestion} value={suggestion}>
-                {predicatePhrase(suggestion)}
-              </option>
-            ))}
-            <option value="__custom">Use my own words…</option>
-          </select>
-          {predicate === '__custom' ? (
-            <input
-              value={customPredicate}
-              onChange={(event) => setCustomPredicate(event.target.value)}
-              required
-              minLength={1}
-              maxLength={80}
-              placeholder="e.g. advises"
-              className={inputClass}
-            />
+          {subjectContactId && !correction && !selected ? (
+            <input type="hidden" name="subjectContactId" value={subjectContactId} />
           ) : null}
-          <input type="hidden" name="predicate" value={chosenPredicate} />
-        </label>
-        <div className="rounded-xl border border-accent/25 bg-sunken/55 p-3">
-          <p className="text-xs font-medium tracking-[0.08em] text-muted uppercase">
-            This will say
-          </p>
-          <p className="mt-1 text-sm font-medium leading-6 text-strong">
-            {connectionSentence(subjectValue, chosenPredicate, objectValue)}
-          </p>
-        </div>
-        <label className={`grid gap-1 ${labelClass}`}>
-          Note (optional)
-          <textarea
-            name="note"
-            maxLength={1000}
-            rows={2}
-            placeholder="How you know, e.g. met at university"
-            className={textareaClass}
-          />
-        </label>
+          <div>
+            <p className="font-display text-xl font-semibold text-strong">{title}</p>
+            <p className="mt-1 text-sm leading-5 text-muted">
+              {correction
+                ? 'Save the corrected fact first. The earlier connection will remain as evidence but stop being used.'
+                : 'Save a relationship the assistant can understand and trace back to you.'}
+            </p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <EndpointPicker
+              name="subject"
+              legend="First item"
+              kind={subjectKind}
+              onKindChange={setSubjectKind}
+              prefill={correction?.subject ?? selected}
+              prefillQuery={subjectLabel}
+              placeholder="Search or create…"
+              onValueChange={(value) => setSubjectValue(value.label)}
+            />
+            <EndpointPicker
+              name="object"
+              legend="Connected item"
+              kind={objectKind}
+              onKindChange={setObjectKind}
+              prefill={correction?.object}
+              placeholder="Search or create…"
+              onValueChange={(value) => setObjectValue(value.label)}
+            />
+          </div>
+          <label className={`grid gap-1 ${labelClass}`}>
+            Relationship
+            <select
+              value={predicate || suggestions[0] || ''}
+              onChange={(event) => setPredicate(event.target.value)}
+              className={selectClass}
+            >
+              {suggestions.map((suggestion) => (
+                <option key={suggestion} value={suggestion}>
+                  {predicatePhrase(suggestion)}
+                </option>
+              ))}
+              <option value="__custom">Use my own words…</option>
+            </select>
+            {predicate === '__custom' ? (
+              <input
+                value={customPredicate}
+                onChange={(event) => setCustomPredicate(event.target.value)}
+                required
+                minLength={1}
+                maxLength={80}
+                placeholder="e.g. advises"
+                className={inputClass}
+              />
+            ) : null}
+            <input type="hidden" name="predicate" value={chosenPredicate} />
+          </label>
+          <div className="rounded-xl border border-accent/25 bg-sunken/55 p-3">
+            <p className="text-xs font-medium tracking-[0.08em] text-muted uppercase">
+              This will say
+            </p>
+            <p className="mt-1 text-sm font-medium leading-6 text-strong">
+              {connectionSentence(subjectValue, chosenPredicate, objectValue)}
+            </p>
+          </div>
+          <label className={`grid gap-1 ${labelClass}`}>
+            Note (optional)
+            <textarea
+              name="note"
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+              maxLength={1000}
+              rows={2}
+              placeholder="How you know, e.g. met at university"
+              className={textareaClass}
+            />
+          </label>
+        </fieldset>
+        {correction ? (
+          <label className={`grid gap-1 ${labelClass}`}>
+            Earlier source
+            <select
+              name="sourceDisposition"
+              disabled={pending}
+              value={sourceDisposition}
+              onChange={(event) => setSourceDisposition(event.target.value)}
+              className={selectClass}
+            >
+              <option value="graph_only">Correct the connection only</option>
+              <option value="whole_fact">Replace the whole standalone fact</option>
+            </select>
+            <span className="text-xs text-muted">
+              {sourceDisposition === 'whole_fact'
+                ? 'The earlier fact will leave recall only if it is a standalone fact you authored; other source types require a connection-only correction.'
+                : 'The earlier connection will leave graph recall. Its original source text remains available to memory recall.'}
+            </span>
+          </label>
+        ) : null}
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="submit"
@@ -462,8 +546,13 @@ export function AddKnowledgeRelation({
           >
             {pending ? 'Saving…' : correction ? 'Save corrected connection' : 'Save connection'}
           </button>
-          <button type="button" onClick={() => setOpen(false)} className={btn.outline}>
-            Cancel
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => setOpen(false)}
+            className={btn.outline}
+          >
+            {pending ? 'Saving…' : state.success ? 'Close' : 'Cancel'}
           </button>
           {state.error ? (
             <p role="alert" className="text-xs text-red-600 dark:text-red-400">

@@ -35,6 +35,13 @@ const APNS_HOSTS = {
 /** APNs rejects provider tokens older than an hour; refresh well inside it. */
 const TOKEN_TTL_MS = 45 * 60 * 1000;
 
+export class AmbiguousApnsDeliveryError extends Error {
+  constructor(message: string) {
+    super(`APNs delivery outcome is unknown: ${message}`);
+    this.name = 'AmbiguousApnsDeliveryError';
+  }
+}
+
 function base64url(input: Buffer | string): string {
   return Buffer.from(input).toString('base64url');
 }
@@ -63,6 +70,7 @@ export class ApnsClient {
   private jwt: { value: string; issuedAt: number } | undefined;
   private sessions = new Map<string, ClientHttp2Session>();
   private readonly connect: (host: string) => ClientHttp2Session;
+  private readonly timeoutMs: number;
 
   constructor(
     private keyId: string,
@@ -70,9 +78,13 @@ export class ApnsClient {
     /** Base64-encoded .p8 (PKCS#8 PEM) ES256 private key. */
     private privateKeyBase64: string,
     private bundleId: string,
-    options: { connect?: (host: string) => ClientHttp2Session } = {},
+    options: { connect?: (host: string) => ClientHttp2Session; timeoutMs?: number } = {},
   ) {
     this.connect = options.connect ?? ((host) => http2.connect(host));
+    const timeoutMs = options.timeoutMs ?? 15_000;
+    this.timeoutMs = Number.isFinite(timeoutMs)
+      ? Math.max(1, Math.min(120_000, timeoutMs))
+      : 15_000;
   }
 
   configured(): boolean {
@@ -93,7 +105,9 @@ export class ApnsClient {
     try {
       return await this.request(session, alert.token, payload);
     } catch (err) {
-      // A dead session (GOAWAY, socket close) gets one fresh attempt.
+      if (err instanceof AmbiguousApnsDeliveryError) throw err;
+      // Only a failure before a stream exists may get a fresh attempt.
+      // Once dispatch is possible, the unknown result above prevents replay.
       this.sessions.delete(APNS_HOSTS[alert.environment]);
       try {
         return await this.request(
@@ -126,15 +140,53 @@ export class ApnsClient {
       let status = 0;
       let apnsId = '';
       let body = '';
+      let bodyBytes = 0;
+      let settled = false;
+      const fail = (message: string) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new AmbiguousApnsDeliveryError(message));
+        stream.close?.();
+      };
+      const sessionClosed = () => fail('session closed before a complete acknowledgement');
+      const timeout = setTimeout(
+        () => fail(`request timed out after ${this.timeoutMs}ms`),
+        this.timeoutMs,
+      );
+      const cleanup = () => {
+        clearTimeout(timeout);
+        session.removeListener('close', sessionClosed);
+        session.removeListener('goaway', sessionClosed);
+        session.removeListener('error', sessionClosed);
+      };
+      session.once('close', sessionClosed);
+      session.once('goaway', sessionClosed);
+      session.once('error', sessionClosed);
       stream.on('response', (headers) => {
         status = Number(headers[':status'] ?? 0);
         apnsId = String(headers['apns-id'] ?? '');
       });
       stream.on('data', (chunk: Buffer) => {
+        bodyBytes += chunk.byteLength;
+        if (bodyBytes > 64 * 1024) {
+          fail('response exceeds 65536 bytes');
+          return;
+        }
         body += chunk.toString('utf8');
       });
-      stream.on('error', reject);
+      stream.on('error', () => fail('stream failed before a complete acknowledgement'));
+      stream.on('close', () => {
+        if (!settled) fail('stream closed before a complete acknowledgement');
+      });
       stream.on('end', () => {
+        if (settled) return;
+        if (!Number.isInteger(status) || status < 100 || status > 599) {
+          fail('response ended without a valid acknowledgement status');
+          return;
+        }
+        settled = true;
+        cleanup();
         if (status === 200) {
           resolve({ ok: true, apnsId });
           return;
@@ -152,7 +204,11 @@ export class ApnsClient {
           reason,
         });
       });
-      stream.end(payload);
+      try {
+        stream.end(payload);
+      } catch {
+        fail('stream ended without a complete acknowledgement');
+      }
     });
   }
 

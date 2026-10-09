@@ -34,7 +34,7 @@ function setup(initial = connection) {
   const registered = registerMcpTools(new ToolRegistry(), { get, list: async () => [current] }).get(
     'mcp.call',
   );
-  if (!registered?.tool.prepare) throw new Error('Missing MCP preparation');
+  if (!registered?.tool.prepareSecurity) throw new Error('Missing MCP preparation');
   return {
     registered,
     get,
@@ -47,9 +47,10 @@ function setup(initial = connection) {
 describe('named MCP tool standing approval', () => {
   it('binds owner approval to a tool and connection, with any future arguments', async () => {
     const { registered, get } = setup();
-    const prepared = await registered.tool.prepare?.(
+    const prepared = await registered.tool.prepareSecurity?.(
       { connectionId: id, toolName: 'projects.list', arguments: {} },
       ctx,
+      'dispatch',
     );
     expect(get).toHaveBeenCalledWith('owner', id);
     const rule = approvalRule('mcp.call', prepared);
@@ -57,9 +58,10 @@ describe('named MCP tool standing approval', () => {
     if (!rule) throw new Error('Missing rule');
     const matches = policyTemplates[rule.templateKey];
     if (!matches) throw new Error('Missing matcher');
-    const next = await registered.tool.prepare?.(
+    const next = await registered.tool.prepareSecurity?.(
       { connectionId: id, toolName: 'projects.list', arguments: { query: 'changed' } },
       ctx,
+      'dispatch',
     );
     expect(matches(rule.match, next as Record<string, unknown>, ctx)).toBe(true);
     expect(matches(rule.match, { ...(next as object), toolName: 'projects.delete' }, ctx)).toBe(
@@ -136,9 +138,10 @@ describe('named MCP tool standing approval', () => {
 
   it('refuses execution if the target changed after the owner approved it', async () => {
     const fixture = setup();
-    const prepared = await fixture.registered.tool.prepare?.(
+    const prepared = await fixture.registered.tool.prepareSecurity?.(
       { connectionId: id, toolName: 'projects.list', arguments: {} },
       ctx,
+      'dispatch',
     );
     fixture.set({ ...connection, endpoint: 'https://different.example.com/mcp' });
     await expect(fixture.registered.tool.execute(prepared, ctx)).rejects.toThrow(

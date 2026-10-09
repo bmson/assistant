@@ -1,0 +1,93 @@
+{
+  "format": 1,
+  "storageSchemaVersion": {
+    "firestore": 1
+  },
+  "components": {
+    "agent": {
+      "apiContract": 1,
+      "peerApi": {
+        "min": 1,
+        "max": 1
+      },
+      "schema": {
+        "postgres": {
+          "min": 125,
+          "max": 126
+        },
+        "firestore": {
+          "min": 1,
+          "max": 1
+        }
+      }
+    },
+    "web": {
+      "apiContract": 1,
+      "peerApi": {
+        "min": 1,
+        "max": 1
+      },
+      "schema": {
+        "postgres": {
+          "min": 125,
+          "max": 126
+        },
+        "firestore": {
+          "min": 1,
+          "max": 1
+        }
+      }
+    },
+    "browser": {
+      "apiContract": 1,
+      "peerApi": {
+        "min": 1,
+        "max": 1
+      },
+      "schema": {
+        "postgres": {
+          "min": 0,
+          "max": 125
+        },
+        "firestore": {
+          "min": 1,
+          "max": 1
+        }
+      }
+    },
+    "code": {
+      "apiContract": 1,
+      "peerApi": {
+        "min": 1,
+        "max": 1
+      },
+      "schema": {
+        "postgres": {
+          "min": 0,
+          "max": 125
+        },
+        "firestore": {
+          "min": 1,
+          "max": 1
+        }
+      }
+    },
+    "processor": {
+      "apiContract": 1,
+      "peerApi": {
+        "min": 1,
+        "max": 1
+      },
+      "schema": {
+        "postgres": {
+          "min": 0,
+          "max": 125
+        },
+        "firestore": {
+          "min": 1,
+          "max": 1
+        }
+      }
+    }
+  }
+}

@@ -1,15 +1,24 @@
+import { randomUUID } from 'node:crypto';
 import {
   agents,
   contacts,
   createDb,
   type Db,
+  knowledgeGraphAssertionEvidence,
+  knowledgeGraphAssertions,
   knowledgeGraphEntities,
   knowledgeGraphEntityAliases,
   knowledgeGraphRelations,
   knowledgeGraphSources,
   memories,
 } from '@assistant/db';
-import { and, eq, like } from 'drizzle-orm';
+import {
+  canonicalizeKnowledgeAssertionDirection,
+  knowledgeAssertionEvidenceId,
+  knowledgeAssertionId,
+  knowledgeAssertionSemanticKey,
+} from '@assistant/persistence';
+import { and, eq, inArray, like } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ModelRouter } from '../model-router/router.js';
 import { recallKnowledgeGraph } from './graph-recall.js';
@@ -56,8 +65,11 @@ const router = {
           relationships: [
             {
               subject: { label: `${MARKER} Owner`, kind: 'person' },
+              subjectSpan: `${MARKER} Owner`,
               predicate: 'worked_at',
+              predicateSpan: 'worked at',
               object: { label: `${MARKER} Acme`, kind: 'organization' },
+              objectSpan: `${MARKER} Acme`,
               evidenceQuote: `${MARKER} Owner worked at ${MARKER} Acme from 2019 to March 2023.`,
               confidence: 0.9,
               validFrom: '2019',
@@ -65,8 +77,11 @@ const router = {
             },
             {
               subject: { label: `${MARKER} Owner`, kind: 'person' },
+              subjectSpan: `${MARKER} Owner`,
               predicate: 'visited',
+              predicateSpan: 'visited',
               object: { label: `${MARKER} Acme`, kind: 'organization' },
+              objectSpan: `${MARKER} Acme`,
               evidenceQuote: `${MARKER} Owner visited ${MARKER} Acme often.`,
               confidence: 0.9,
               // '1492' is unquoted; 'often' is quoted but names no date.
@@ -85,8 +100,11 @@ const router = {
           relationships: [
             {
               subject: { label: `${MARKER} Acme`, kind: 'organization' },
+              subjectSpan: `${MARKER} Acme`,
               predicate: 'operates',
+              predicateSpan: 'operates',
               object: { label: `${MARKER} Project Fox`, kind: 'project' },
+              objectSpan: `${MARKER} Project Fox`,
               evidenceQuote: `${MARKER} Acme operates ${MARKER} Project Fox.`,
               confidence: 0.9,
             },
@@ -105,8 +123,11 @@ const router = {
         relationships: [
           {
             subject: { label: `${MARKER} Owner`, kind: 'person' },
+            subjectSpan: `${MARKER} Owner`,
             predicate: 'works_at',
+            predicateSpan: 'works at',
             object: { label: employer, kind: 'organization' },
+            objectSpan: employer,
             evidenceQuote: `${MARKER} Owner works at ${employer}.`,
             confidence: 0.9,
           },
@@ -170,6 +191,392 @@ describe('knowledge graph sync and recall', () => {
         evidenceQuote: 'Anna visited Acme',
       }),
     ).toBe(false);
+  });
+
+  it('requires ordered literal spans and rejects polarity or modality that contradicts a positive edge', () => {
+    const source = 'Alice is the father of Bob.';
+    const base = {
+      subject: { label: 'Alice' },
+      subjectSpan: 'Alice',
+      predicate: 'father_of',
+      predicateSpan: 'is the father of',
+      object: { label: 'Bob' },
+      objectSpan: 'Bob',
+      evidenceQuote: source,
+    };
+    expect(graphRelationshipIsGrounded(source, base)).toBe(true);
+    expect(
+      graphRelationshipIsGrounded(source, {
+        ...base,
+        subject: { label: 'Bob' },
+        subjectSpan: 'Bob',
+        object: { label: 'Alice' },
+        objectSpan: 'Alice',
+      }),
+    ).toBe(false);
+    expect(
+      graphRelationshipIsGrounded('Alice is not the father of Bob.', {
+        ...base,
+        evidenceQuote: 'Alice is not the father of Bob.',
+      }),
+    ).toBe(false);
+    expect(
+      graphRelationshipIsGrounded('Alice is not the father of Bob.', {
+        ...base,
+        evidenceQuote: 'Alice is not the father of Bob.',
+        predicateSpan: 'the father of',
+        assertion: { tense: 'present', polarity: 'negative', modality: 'asserted' },
+      }),
+    ).toBe(true);
+    expect(
+      graphRelationshipIsGrounded('Alice might be the father of Bob.', {
+        ...base,
+        predicateSpan: 'the father of',
+        evidenceQuote: 'Alice might be the father of Bob.',
+      }),
+    ).toBe(false);
+    expect(
+      graphRelationshipIsGrounded('Alice might be the father of Bob.', {
+        ...base,
+        predicateSpan: 'the father of',
+        evidenceQuote: 'Alice might be the father of Bob.',
+        assertion: { tense: 'present', polarity: 'positive', modality: 'possible' },
+      }),
+    ).toBe(true);
+    expect(
+      graphRelationshipIsGrounded('If Alice were the father of Bob, they would move.', {
+        ...base,
+        predicateSpan: 'were the father of',
+        evidenceQuote: 'If Alice were the father of Bob',
+      }),
+    ).toBe(false);
+    expect(
+      graphRelationshipIsGrounded(source, {
+        ...base,
+        predicate: 'mother_of',
+      }),
+    ).toBe(false);
+    expect(
+      graphRelationshipIsGrounded('Alice was employed by Acme in 2019.', {
+        subject: { label: 'Alice' },
+        subjectSpan: 'Alice',
+        predicate: 'worked_at',
+        predicateSpan: 'was employed by',
+        object: { label: 'Acme' },
+        objectSpan: 'Acme',
+        evidenceQuote: 'Alice was employed by Acme',
+      }),
+    ).toBe(true);
+    expect(
+      graphRelationshipIsGrounded('Alice was married to Bob.', {
+        subject: { label: 'Alice' },
+        subjectSpan: 'Alice',
+        predicate: 'former_spouse_of',
+        predicateSpan: 'was married to',
+        object: { label: 'Bob' },
+        objectSpan: 'Bob',
+        evidenceQuote: 'Alice was married to Bob',
+      }),
+    ).toBe(true);
+    expect(
+      graphRelationshipIsGrounded('Alice works at Acme.', {
+        subject: { label: 'Alice' },
+        subjectSpan: 'She',
+        predicate: 'works_at',
+        predicateSpan: 'works at',
+        object: { label: 'Acme' },
+        objectSpan: 'Acme',
+        evidenceQuote: 'She works at Acme',
+      }),
+    ).toBe(false);
+    expect(
+      graphRelationshipIsGrounded('Alice works for him.', {
+        subject: { label: 'Alice' },
+        subjectSpan: 'Alice',
+        predicate: 'works_at',
+        predicateSpan: 'works for',
+        object: { label: 'Acme' },
+        objectSpan: 'him',
+        evidenceQuote: 'Alice works for him.',
+      }),
+    ).toBe(false);
+    expect(
+      graphRelationshipIsGrounded('Alice visited Acme and Bob works at Orbit.', {
+        subject: { label: 'Alice' },
+        subjectSpan: 'Alice',
+        predicate: 'works_at',
+        predicateSpan: 'works at',
+        object: { label: 'Orbit' },
+        objectSpan: 'Orbit',
+        evidenceQuote: 'Alice visited Acme and Bob works at Orbit',
+      }),
+    ).toBe(false);
+    expect(
+      graphRelationshipIsGrounded('Alice visited Acme and Bob works at Orbit.', {
+        subject: { label: 'Bob' },
+        subjectSpan: 'Bob',
+        predicate: 'works_at',
+        predicateSpan: 'works at',
+        object: { label: 'Orbit' },
+        objectSpan: 'Orbit',
+        evidenceQuote: 'Alice visited Acme and Bob works at Orbit',
+        assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
+      }),
+    ).toBe(true);
+  });
+
+  it('preserves reported and hypothetical scope outside the selected evidence quote', () => {
+    const positiveClaim = {
+      subject: { label: 'Alice' },
+      subjectSpan: 'Alice',
+      predicate: 'father_of',
+      predicateSpan: 'is the father of',
+      object: { label: 'Bob' },
+      objectSpan: 'Bob',
+      evidenceQuote: 'Alice is the father of Bob.',
+    };
+    const denialSource = 'Alice denied that Alice is the father of Bob.';
+    expect(
+      graphRelationshipIsGrounded(denialSource, {
+        ...positiveClaim,
+        assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
+      }),
+    ).toBe(false);
+    expect(
+      graphRelationshipIsGrounded(denialSource, {
+        ...positiveClaim,
+        assertion: { tense: 'present', polarity: 'positive', modality: 'reported' },
+      }),
+    ).toBe(true);
+
+    const quotedSource = 'Alice said, “Alice is the father of Bob.”';
+    expect(
+      graphRelationshipIsGrounded(quotedSource, {
+        ...positiveClaim,
+        assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
+      }),
+    ).toBe(false);
+    expect(
+      graphRelationshipIsGrounded(quotedSource, {
+        ...positiveClaim,
+        assertion: { tense: 'present', polarity: 'positive', modality: 'reported' },
+      }),
+    ).toBe(true);
+
+    const hypotheticalSource = 'If Alice was employed by Acme, she might know Bob.';
+    expect(
+      graphRelationshipIsGrounded(hypotheticalSource, {
+        subject: { label: 'Alice' },
+        subjectSpan: 'Alice',
+        predicate: 'worked_at',
+        predicateSpan: 'was employed by',
+        object: { label: 'Acme' },
+        objectSpan: 'Acme',
+        evidenceQuote: 'Alice was employed by Acme',
+        assertion: { tense: 'past', polarity: 'positive', modality: 'asserted' },
+      }),
+    ).toBe(false);
+    expect(
+      graphRelationshipIsGrounded(hypotheticalSource, {
+        subject: { label: 'Alice' },
+        subjectSpan: 'Alice',
+        predicate: 'worked_at',
+        predicateSpan: 'was employed by',
+        object: { label: 'Acme' },
+        objectSpan: 'Acme',
+        evidenceQuote: 'Alice was employed by Acme',
+        assertion: { tense: 'past', polarity: 'positive', modality: 'conditional' },
+      }),
+    ).toBe(true);
+  });
+
+  it('keeps an asserted relation in a separate clause from an unrelated denial', () => {
+    const source = 'Alice denied that Bob is her father, but Alice works at Acme.';
+    expect(
+      graphRelationshipIsGrounded(source, {
+        subject: { label: 'Alice' },
+        subjectSpan: 'Alice',
+        predicate: 'works_at',
+        predicateSpan: 'works at',
+        object: { label: 'Acme' },
+        objectSpan: 'Acme',
+        evidenceQuote: source,
+        assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
+      }),
+    ).toBe(true);
+  });
+
+  it('does not drop coordinated denial or sentence-spanning quotation scope', () => {
+    const relation = {
+      subject: { label: 'Carol' },
+      subjectSpan: 'Carol',
+      predicate: 'mother_of',
+      predicateSpan: 'the mother of',
+      object: { label: 'Dave' },
+      objectSpan: 'Dave',
+      evidenceQuote: 'Carol is the mother of Dave.',
+      assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' } as const,
+    };
+    const deniedCoordination =
+      'Alice denied that Alice is the father of Bob and Carol is the mother of Dave.';
+    expect(graphRelationshipIsGrounded(deniedCoordination, relation)).toBe(false);
+
+    const doubleQuoted = 'Alice said "Bob is the father of Eve. Carol is the mother of Dave."';
+    expect(graphRelationshipIsGrounded(doubleQuoted, relation)).toBe(false);
+
+    const asciiSingleQuoted = "Alice said 'Bob is the father of Eve. Carol is the mother of Dave.'";
+    expect(graphRelationshipIsGrounded(asciiSingleQuoted, relation)).toBe(false);
+
+    const possessiveInsideAsciiQuote =
+      "Alice said 'Bob's father is Eve. Carol is the mother of Dave.'";
+    expect(graphRelationshipIsGrounded(possessiveInsideAsciiQuote, relation)).toBe(false);
+
+    const curlySingleQuoted = 'Alice said ‘Bob is the father of Eve. Carol is the mother of Dave.’';
+    expect(graphRelationshipIsGrounded(curlySingleQuoted, relation)).toBe(false);
+
+    const curlyApostropheInsideQuote =
+      'Alice said ‘Bob’s father is Eve. Carol is the mother of Dave.’';
+    expect(graphRelationshipIsGrounded(curlyApostropheInsideQuote, relation)).toBe(false);
+
+    const unquotedPossessive = 'Bob’s cousin is Alice. Carol is the mother of Dave.';
+    expect(graphRelationshipIsGrounded(unquotedPossessive, relation)).toBe(true);
+
+    const unquotedSeparateSentence = 'Bob is the father of Eve. Carol is the mother of Dave.';
+    expect(graphRelationshipIsGrounded(unquotedSeparateSentence, relation)).toBe(true);
+  });
+
+  it('fails closed on excessive repeated relation spans without expanding their Cartesian product', () => {
+    const source = Array.from({ length: 20 }, () => 'Alice works at Acme.').join(' ');
+    const relation = {
+      subject: { label: 'Alice' },
+      subjectSpan: 'Alice',
+      predicate: 'works_at',
+      predicateSpan: 'works at',
+      object: { label: 'Acme' },
+      objectSpan: 'Acme',
+      evidenceQuote: source,
+      assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' } as const,
+    };
+    expect(source.length).toBeLessThanOrEqual(500);
+    expect(graphRelationshipIsGrounded(source, relation)).toBe(false);
+    expect(
+      graphRelationshipIsGrounded(source, {
+        ...relation,
+        evidenceQuote: `${source} ${'x'.repeat(501)}`,
+      }),
+    ).toBe(false);
+    expect(
+      graphRelationshipIsGrounded('Alice works at Acme.', {
+        ...relation,
+        evidenceQuote: 'Alice works at Acme.',
+      }),
+    ).toBe(true);
+    expect(graphRelationshipIsGrounded('Alice works at Acme. '.repeat(12_501), relation)).toBe(
+      false,
+    );
+  });
+
+  it('records why negated model output was rejected instead of storing a positive edge', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const content = `${MARKER} Alice is not the father of ${MARKER} Bob.`;
+    const [memory] = await db
+      .insert(memories)
+      .values({
+        agentId,
+        category: 'knowledge',
+        kind: 'fact',
+        content,
+        contentHash: `${MARKER}-negated-graph-output`,
+        embedding: unit(75),
+      })
+      .returning({ id: memories.id });
+    if (!memory) throw new Error('negated graph fixture was not created');
+    const negatedRouter = {
+      async object() {
+        return {
+          ok: true,
+          object: {
+            relationships: [
+              {
+                subject: { label: `${MARKER} Alice`, kind: 'person' },
+                subjectSpan: `${MARKER} Alice`,
+                predicate: 'father_of',
+                predicateSpan: 'the father of',
+                object: { label: `${MARKER} Bob`, kind: 'person' },
+                objectSpan: `${MARKER} Bob`,
+                evidenceQuote: content,
+                assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
+                confidence: 0.95,
+              },
+            ],
+          },
+        };
+      },
+    } as unknown as ModelRouter;
+    const result = await syncKnowledgeGraph({ db, router: negatedRouter }, { agentId });
+    expect(result).toMatchObject({
+      processed: 1,
+      relationships: 0,
+      rejected: 1,
+      rejectionReasons: { assertion_mismatch: 1 },
+    });
+    const [source] = await db
+      .select({ lastError: knowledgeGraphSources.lastError })
+      .from(knowledgeGraphSources)
+      .where(eq(knowledgeGraphSources.memoryId, memory.id));
+    expect(source?.lastError).toContain('assertion_mismatch:1');
+  });
+
+  it('does not promote a positive substring denied by the surrounding source clause', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const content = `${MARKER} Alice denied that ${MARKER} Alice is the father of ${MARKER} Bob.`;
+    const evidenceQuote = `${MARKER} Alice is the father of ${MARKER} Bob.`;
+    const [memory] = await db
+      .insert(memories)
+      .values({
+        agentId,
+        category: 'knowledge',
+        kind: 'fact',
+        content,
+        contentHash: `${MARKER}-denied-graph-output`,
+        embedding: unit(75),
+      })
+      .returning({ id: memories.id });
+    if (!memory) throw new Error('denied graph fixture was not created');
+    const deniedRouter = {
+      async object() {
+        return {
+          ok: true,
+          object: {
+            relationships: [
+              {
+                subject: { label: `${MARKER} Alice`, kind: 'person' },
+                subjectSpan: `${MARKER} Alice`,
+                predicate: 'father_of',
+                predicateSpan: 'is the father of',
+                object: { label: `${MARKER} Bob`, kind: 'person' },
+                objectSpan: `${MARKER} Bob`,
+                evidenceQuote,
+                assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
+                confidence: 0.95,
+              },
+            ],
+          },
+        };
+      },
+    } as unknown as ModelRouter;
+    const result = await syncKnowledgeGraph({ db, router: deniedRouter }, { agentId });
+    expect(result).toMatchObject({
+      processed: 1,
+      relationships: 0,
+      rejected: 1,
+      rejectionReasons: { assertion_mismatch: 1 },
+    });
+    const relations = await db
+      .select({ id: knowledgeGraphRelations.id })
+      .from(knowledgeGraphRelations)
+      .where(eq(knowledgeGraphRelations.sourceMemoryId, memory.id));
+    expect(relations).toEqual([]);
   });
 
   it('requires word-boundary matches, so substrings of real words cannot ground an edge', () => {
@@ -252,6 +659,35 @@ describe('knowledge graph sync and recall', () => {
     expect(recalled.sources.some((source) => source.hops === 2)).toBe(true);
   });
 
+  it('bounds graph assertions to historical source columns even when the model omits dates', async () => {
+    if (!dbUp) throw new Error('Local PostgreSQL qualification database is required');
+    const from = new Date('2019-01-01Z'),
+      until = new Date('2023-01-01Z');
+    const [source] = await db
+      .insert(memories)
+      .values({
+        agentId,
+        category: 'knowledge',
+        kind: 'fact',
+        content: `${MARKER} Owner works at ${MARKER} Acme.`,
+        contentHash: `${MARKER}-source-scope`,
+        originTrust: 'owner',
+        validFrom: from,
+        validUntil: until,
+      })
+      .returning();
+    if (!source) throw new Error('Missing historical source');
+    await syncKnowledgeGraph({ db, router }, { agentId });
+    const relations = await db
+      .select()
+      .from(knowledgeGraphRelations)
+      .where(eq(knowledgeGraphRelations.sourceMemoryId, source.id));
+    expect(relations).toHaveLength(1);
+    expect(relations[0]).toMatchObject({
+      validFrom: from.toISOString(),
+      validUntil: until.toISOString(),
+    });
+  });
   it('stores temporal qualifiers only when their wording is quoted and parseable', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const [memory] = await db
@@ -274,6 +710,7 @@ describe('knowledge graph sync and recall', () => {
     const relations = await db
       .select({
         predicate: knowledgeGraphRelations.predicate,
+        assertion: knowledgeGraphRelations.assertion,
         validFrom: knowledgeGraphRelations.validFrom,
         validUntil: knowledgeGraphRelations.validUntil,
       })
@@ -283,6 +720,11 @@ describe('knowledge graph sync and recall', () => {
     const worked = relations.find((row) => row.predicate === 'worked_at');
     expect(worked?.validFrom).toBe('2019');
     expect(worked?.validUntil).toBe('2023-03');
+    expect(worked?.assertion).toMatchObject({
+      tense: 'past',
+      polarity: 'positive',
+      modality: 'asserted',
+    });
 
     // The edge survives; its ungrounded qualifiers do not.
     const visited = relations.find((row) => row.predicate === 'visited');
@@ -298,6 +740,7 @@ describe('knowledge graph sync and recall', () => {
       queryEmbedding: unit(44),
     });
     expect(recalled.block).toContain('worked at');
+    expect(recalled.block).toContain('[past]');
     expect(recalled.block).toContain('(2019 to 2023-03)');
   });
 
@@ -386,7 +829,7 @@ describe('knowledge graph sync and recall', () => {
         .from(knowledgeGraphRelations)
         .where(eq(knowledgeGraphRelations.sourceMemoryId, memory.id)),
     ]);
-    expect(source[0]?.extractionVersion).toBe(2);
+    expect(source[0]?.extractionVersion).toBe(GRAPH_EXTRACTION_VERSION);
     expect(relation[0]?.evidenceQuote).toContain(`${MARKER} Owner works at`);
 
     const recalled = await recallKnowledgeGraph(db, {
@@ -427,7 +870,7 @@ describe('knowledge graph sync and recall', () => {
       .from(knowledgeGraphSources)
       .where(eq(knowledgeGraphSources.memoryId, memory.id));
     expect(synced.processed).toBeGreaterThanOrEqual(1);
-    expect(source).toEqual({ status: 'ready', attempts: 2 });
+    expect(source).toEqual({ status: 'ready', attempts: 1 });
   });
 
   it('backs off transient extraction failures, quarantines a persistent one, and retries after an edit', async (ctx) => {
@@ -679,6 +1122,9 @@ describe('knowledge graph sync and recall', () => {
         db,
         agentId,
         router: {
+          async embeddingSpace() {
+            return { provider: 'test', model: 'embedding', dimensions: 1536, revision: '1' };
+          },
           async embed() {
             return [unit(46)];
           },
@@ -748,6 +1194,9 @@ describe('knowledge graph sync and recall', () => {
         db,
         agentId,
         router: {
+          async embeddingSpace() {
+            return { provider: 'test', model: 'embedding', dimensions: 1536, revision: '1' };
+          },
           async embed() {
             return [unit(52)];
           },
@@ -812,6 +1261,9 @@ describe('knowledge graph sync and recall', () => {
         db,
         agentId,
         router: {
+          async embeddingSpace() {
+            return { provider: 'test', model: 'embedding', dimensions: 1536, revision: '1' };
+          },
           async embed() {
             return [unit(45)];
           },
@@ -844,6 +1296,9 @@ describe('knowledge graph sync and recall', () => {
         db,
         agentId,
         router: {
+          async embeddingSpace() {
+            return { provider: 'test', model: 'embedding', dimensions: 1536, revision: '1' };
+          },
           async embed() {
             return [unit(45)];
           },
@@ -938,102 +1393,104 @@ describe('knowledge graph sync and recall', () => {
     expect(result.error).toContain('canonical');
   });
 
-  it('deduplicates edges a merge makes identical, keeping the confirmed one', async (ctx) => {
-    if (!dbUp) return ctx.skip();
-    const [memory] = await db
-      .insert(memories)
-      .values({
-        agentId,
-        category: 'knowledge',
-        kind: 'fact',
-        content: `${MARKER} dedup source.`,
-        contentHash: `${MARKER}-dedup-source`,
-        embedding: unit(69),
-        originTrust: 'owner',
-      })
-      .returning({ id: memories.id });
-    if (!memory) throw new Error('dedup memory was not created');
-    const [target, absorbed, other] = await db
-      .insert(knowledgeGraphEntities)
-      .values([
+  it.for(['confirmed', 'rejected'] as const)(
+    'deduplicates edges while preserving the %s owner decision',
+    async (reviewStatus, ctx) => {
+      if (!dbUp) return ctx.skip();
+      const reviewMarker = `${MARKER}-${reviewStatus}`;
+      const [memory] = await db
+        .insert(memories)
+        .values({
+          agentId,
+          category: 'knowledge',
+          kind: 'fact',
+          content: `${reviewMarker} dedup source.`,
+          contentHash: `${reviewMarker}-dedup-source`,
+          embedding: unit(69),
+          originTrust: 'owner',
+        })
+        .returning({ id: memories.id });
+      if (!memory) throw new Error('dedup memory was not created');
+      const [target, absorbed, other] = await db
+        .insert(knowledgeGraphEntities)
+        .values([
+          {
+            agentId,
+            canonicalKey: `topic:${reviewMarker} dedup target`,
+            label: `${reviewMarker} Dedup Target`,
+            kind: 'topic',
+          },
+          {
+            agentId,
+            canonicalKey: `topic:${reviewMarker} dedup absorbed`,
+            label: `${reviewMarker} Dedup Absorbed`,
+            kind: 'topic',
+          },
+          {
+            agentId,
+            canonicalKey: `organization:${reviewMarker} dedup other`,
+            label: `${reviewMarker} Dedup Other`,
+            kind: 'organization',
+          },
+        ])
+        .returning({ id: knowledgeGraphEntities.id });
+      if (!target || !absorbed || !other) throw new Error('dedup fixtures were not created');
+
+      await db.insert(knowledgeGraphRelations).values([
+        // The confirmed edge on the survivor.
         {
           agentId,
-          canonicalKey: `topic:${MARKER} dedup target`,
-          label: `${MARKER} Dedup Target`,
-          kind: 'topic',
+          subjectEntityId: target.id,
+          predicate: 'likes',
+          objectEntityId: other.id,
+          sourceMemoryId: memory.id,
+          evidenceQuote: `${reviewMarker} dedup source.`,
+          sourceFingerprint: `${reviewMarker}-dedup-a`,
+          ordinal: 1,
+          confidence: '0.90',
+          reviewStatus,
         },
+        // The same semantic edge on the absorbed entity, still unreviewed.
         {
           agentId,
-          canonicalKey: `topic:${MARKER} dedup absorbed`,
-          label: `${MARKER} Dedup Absorbed`,
-          kind: 'topic',
+          subjectEntityId: absorbed.id,
+          predicate: 'likes',
+          objectEntityId: other.id,
+          sourceMemoryId: memory.id,
+          evidenceQuote: `${reviewMarker} dedup source.`,
+          sourceFingerprint: `${reviewMarker}-dedup-b`,
+          ordinal: 2,
+          confidence: '0.95',
+          reviewStatus: 'unreviewed' as const,
         },
+        // An edge between the two, which becomes a self-loop after the merge.
         {
           agentId,
-          canonicalKey: `organization:${MARKER} dedup other`,
-          label: `${MARKER} Dedup Other`,
-          kind: 'organization',
+          subjectEntityId: target.id,
+          predicate: 'mentions',
+          objectEntityId: absorbed.id,
+          sourceMemoryId: memory.id,
+          evidenceQuote: `${reviewMarker} dedup source.`,
+          sourceFingerprint: `${reviewMarker}-dedup-self`,
+          ordinal: 3,
+          confidence: '0.80',
         },
-      ])
-      .returning({ id: knowledgeGraphEntities.id });
-    if (!target || !absorbed || !other) throw new Error('dedup fixtures were not created');
+      ]);
 
-    await db.insert(knowledgeGraphRelations).values([
-      // The confirmed edge on the survivor.
-      {
-        agentId,
-        subjectEntityId: target.id,
-        predicate: 'likes',
-        objectEntityId: other.id,
-        sourceMemoryId: memory.id,
-        evidenceQuote: `${MARKER} dedup source.`,
-        sourceFingerprint: `${MARKER}-dedup-a`,
-        ordinal: 1,
-        confidence: '0.90',
-        reviewStatus: 'confirmed' as const,
-      },
-      // The same semantic edge on the absorbed entity, still unreviewed.
-      {
-        agentId,
-        subjectEntityId: absorbed.id,
-        predicate: 'likes',
-        objectEntityId: other.id,
-        sourceMemoryId: memory.id,
-        evidenceQuote: `${MARKER} dedup source.`,
-        sourceFingerprint: `${MARKER}-dedup-b`,
-        ordinal: 2,
-        confidence: '0.95',
-        reviewStatus: 'unreviewed' as const,
-      },
-      // An edge between the two, which becomes a self-loop after the merge.
-      {
-        agentId,
-        subjectEntityId: target.id,
-        predicate: 'mentions',
-        objectEntityId: absorbed.id,
-        sourceMemoryId: memory.id,
-        evidenceQuote: `${MARKER} dedup source.`,
-        sourceFingerprint: `${MARKER}-dedup-self`,
-        ordinal: 3,
-        confidence: '0.80',
-      },
-    ]);
+      await mergeGraphEntities(db, agentId, absorbed.id, target.id);
 
-    await mergeGraphEntities(db, agentId, absorbed.id, target.id);
-
-    const remaining = await db
-      .select({
-        predicate: knowledgeGraphRelations.predicate,
-        reviewStatus: knowledgeGraphRelations.reviewStatus,
-        confidence: knowledgeGraphRelations.confidence,
-      })
-      .from(knowledgeGraphRelations)
-      .where(eq(knowledgeGraphRelations.sourceMemoryId, memory.id));
-    // One deduplicated edge survives; the self-loop is gone.
-    expect(remaining).toEqual([
-      { predicate: 'likes', reviewStatus: 'confirmed', confidence: '0.90' },
-    ]);
-  });
+      const remaining = await db
+        .select({
+          predicate: knowledgeGraphRelations.predicate,
+          reviewStatus: knowledgeGraphRelations.reviewStatus,
+          confidence: knowledgeGraphRelations.confidence,
+        })
+        .from(knowledgeGraphRelations)
+        .where(eq(knowledgeGraphRelations.sourceMemoryId, memory.id));
+      // One deduplicated edge survives; the self-loop is gone.
+      expect(remaining).toEqual([{ predicate: 'likes', reviewStatus, confidence: '0.90' }]);
+    },
+  );
 
   it('retains a matching owner decision when its source is re-extracted', async (ctx) => {
     if (!dbUp) return ctx.skip();
@@ -1052,7 +1509,7 @@ describe('knowledge graph sync and recall', () => {
     if (!memory) throw new Error('test memory was not created');
     await syncKnowledgeGraph({ db, router }, { agentId });
     const [edge] = await db
-      .select({ id: knowledgeGraphRelations.id })
+      .select({ id: knowledgeGraphRelations.id, assertionId: knowledgeGraphRelations.assertionId })
       .from(knowledgeGraphRelations)
       .where(eq(knowledgeGraphRelations.sourceMemoryId, memory.id));
     if (!edge) throw new Error('graph relationship was not created');
@@ -1060,6 +1517,11 @@ describe('knowledge graph sync and recall', () => {
       .update(knowledgeGraphRelations)
       .set({ reviewStatus: 'rejected' })
       .where(eq(knowledgeGraphRelations.id, edge.id));
+    if (edge.assertionId)
+      await db
+        .update(knowledgeGraphAssertions)
+        .set({ reviewStatus: 'rejected', reviewedRevision: 1 })
+        .where(eq(knowledgeGraphAssertions.id, edge.assertionId));
 
     await db
       .update(memories)
@@ -1074,6 +1536,372 @@ describe('knowledge graph sync and recall', () => {
       .from(knowledgeGraphRelations)
       .where(eq(knowledgeGraphRelations.sourceMemoryId, memory.id));
     expect(reextracted?.reviewStatus).toBe('rejected');
+  });
+
+  it('keeps owner review on one canonical meaning and does not transfer it after semantic change', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const suffix = randomUUID().replaceAll('-', '').slice(0, 10);
+    const owner = `${MARKER} CanonicalOwner ${suffix}`;
+    const employer = `${MARKER} CanonicalEmployer ${suffix}`;
+    let firstText = `${owner} works at ${employer}.`;
+    let worked = false;
+    const focusedRouter = {
+      async object() {
+        return {
+          ok: true,
+          object: {
+            relationships: [
+              {
+                subject: { label: owner, kind: 'person' },
+                subjectSpan: owner,
+                predicate: worked ? 'worked_at' : 'works_at',
+                predicateSpan: worked ? 'worked at' : 'works at',
+                object: { label: employer, kind: 'organization' },
+                objectSpan: employer,
+                evidenceQuote: firstText,
+                assertion: {
+                  tense: worked ? 'past' : 'present',
+                  polarity: 'positive',
+                  modality: 'asserted',
+                },
+                confidence: 0.9,
+                ...(worked ? { validFrom: '2019', validUntil: 'March 2023' } : {}),
+              },
+            ],
+          },
+        };
+      },
+    } as unknown as ModelRouter;
+    const [memory] = await db
+      .insert(memories)
+      .values({
+        agentId,
+        category: 'knowledge',
+        kind: 'fact',
+        content: firstText,
+        contentHash: `${MARKER}-assertion-v1`,
+        embedding: unit(75),
+        originTrust: 'owner',
+      })
+      .returning({ id: memories.id });
+    if (!memory) throw new Error('canonical assertion fixture was not created');
+    await syncKnowledgeGraph({ db, router: focusedRouter }, { agentId });
+    const [firstRelation] = await db
+      .select({ assertionId: knowledgeGraphRelations.assertionId })
+      .from(knowledgeGraphRelations)
+      .where(eq(knowledgeGraphRelations.sourceMemoryId, memory.id));
+    if (!firstRelation?.assertionId)
+      throw new Error('source relation was not linked to its canonical assertion');
+    const [firstAssertion] = await db
+      .select({
+        semanticKey: knowledgeGraphAssertions.semanticKey,
+        semanticRevision: knowledgeGraphAssertions.semanticRevision,
+      })
+      .from(knowledgeGraphAssertions)
+      .where(eq(knowledgeGraphAssertions.id, firstRelation.assertionId));
+    if (!firstAssertion) throw new Error('canonical assertion was not created');
+    await db
+      .update(knowledgeGraphAssertions)
+      .set({
+        reviewStatus: 'rejected',
+        reviewedRevision: firstAssertion.semanticRevision,
+        reviewedPayloadHash: firstAssertion.semanticKey,
+      })
+      .where(eq(knowledgeGraphAssertions.id, firstRelation.assertionId));
+
+    worked = true;
+    firstText = `${owner} worked at ${employer} from 2019 to March 2023.`;
+    const revisedText = firstText;
+    await db
+      .update(memories)
+      .set({ content: revisedText, contentHash: `${MARKER}-assertion-v2` })
+      .where(eq(memories.id, memory.id));
+    await syncKnowledgeGraph({ db, router: focusedRouter }, { agentId });
+    const [secondRelation] = await db
+      .select({ assertionId: knowledgeGraphRelations.assertionId })
+      .from(knowledgeGraphRelations)
+      .where(eq(knowledgeGraphRelations.sourceMemoryId, memory.id));
+    if (!secondRelation?.assertionId)
+      throw new Error('revised relation was not linked to a canonical assertion');
+    expect(secondRelation.assertionId).not.toBe(firstRelation.assertionId);
+    const [oldAssertion] = await db
+      .select({
+        lifecycle: knowledgeGraphAssertions.lifecycle,
+        reviewStatus: knowledgeGraphAssertions.reviewStatus,
+      })
+      .from(knowledgeGraphAssertions)
+      .where(eq(knowledgeGraphAssertions.id, firstRelation.assertionId));
+    const [newAssertion] = await db
+      .select({
+        lifecycle: knowledgeGraphAssertions.lifecycle,
+        reviewStatus: knowledgeGraphAssertions.reviewStatus,
+      })
+      .from(knowledgeGraphAssertions)
+      .where(eq(knowledgeGraphAssertions.id, secondRelation.assertionId));
+    expect(oldAssertion).toEqual({ lifecycle: 'retracted', reviewStatus: 'rejected' });
+    expect(newAssertion).toEqual({ lifecycle: 'current', reviewStatus: 'unreviewed' });
+    expect(
+      await db
+        .select({ id: knowledgeGraphAssertionEvidence.id })
+        .from(knowledgeGraphAssertionEvidence)
+        .where(eq(knowledgeGraphAssertionEvidence.assertionId, firstRelation.assertionId)),
+    ).toEqual([]);
+    expect(
+      (
+        await db
+          .select({ id: knowledgeGraphAssertionEvidence.id })
+          .from(knowledgeGraphAssertionEvidence)
+          .where(eq(knowledgeGraphAssertionEvidence.assertionId, secondRelation.assertionId))
+      ).length,
+    ).toBe(1);
+  });
+
+  it('preserves a reviewed canonical meaning and both source lineages when merged', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const suffix = randomUUID().replaceAll('-', '').slice(0, 10);
+    const ownerA = `${MARKER} Merge Owner A ${suffix}`;
+    const ownerB = `${MARKER} Merge Owner B ${suffix}`;
+    const employerLabel = `${MARKER} Merge Employer ${suffix}`;
+    const assertion = {
+      tense: 'present' as const,
+      polarity: 'positive' as const,
+      modality: 'asserted' as const,
+    };
+    const [ownerSource, ownerTarget, employer] = await db
+      .insert(knowledgeGraphEntities)
+      .values([
+        { agentId, canonicalKey: `person:${normalizedKey(ownerA)}`, label: ownerA, kind: 'person' },
+        { agentId, canonicalKey: `person:${normalizedKey(ownerB)}`, label: ownerB, kind: 'person' },
+        {
+          agentId,
+          canonicalKey: `organization:${normalizedKey(employerLabel)}`,
+          label: employerLabel,
+          kind: 'organization',
+        },
+      ])
+      .returning({ id: knowledgeGraphEntities.id });
+    if (!ownerSource || !ownerTarget || !employer)
+      throw new Error('canonical merge entities were not created');
+    const [memoryA, memoryB] = await db
+      .insert(memories)
+      .values([
+        {
+          agentId,
+          category: 'knowledge',
+          kind: 'fact',
+          content: `${ownerA} works at ${employerLabel}.`,
+          contentHash: `${MARKER}-merge-a-${suffix}`,
+          embedding: unit(79),
+          originTrust: 'owner',
+        },
+        {
+          agentId,
+          category: 'knowledge',
+          kind: 'fact',
+          content: `${ownerB} works at ${employerLabel}.`,
+          contentHash: `${MARKER}-merge-b-${suffix}`,
+          embedding: unit(80),
+          originTrust: 'owner',
+        },
+      ])
+      .returning({ id: memories.id, content: memories.content, contentHash: memories.contentHash });
+    if (!memoryA || !memoryB) throw new Error('canonical merge memories were not created');
+    const meaningFor = (subjectEntityId: string) =>
+      canonicalizeKnowledgeAssertionDirection({
+        subjectEntityId,
+        predicate: 'works_at',
+        objectEntityId: employer.id,
+        assertion,
+        validFrom: null,
+        validUntil: null,
+        qualifiers: {},
+      });
+    const sourceMeaning = meaningFor(ownerSource.id);
+    const targetMeaning = meaningFor(ownerTarget.id);
+    const sourceKey = knowledgeAssertionSemanticKey(agentId, sourceMeaning);
+    const targetKey = knowledgeAssertionSemanticKey(agentId, targetMeaning);
+    const sourceAssertion = knowledgeAssertionId(agentId, sourceKey);
+    const targetAssertion = knowledgeAssertionId(agentId, targetKey);
+    const reviewed = (
+      subjectEntityId: string,
+      semanticKey: string,
+      id: string,
+      reviewStatus: 'confirmed' | 'unreviewed',
+    ) => ({
+      id,
+      agentId,
+      semanticKey,
+      subjectEntityId,
+      predicate: 'works_at',
+      objectEntityId: employer.id,
+      assertion,
+      qualifiers: {},
+      validFrom: null,
+      validUntil: null,
+      semanticRevision: 1,
+      evidenceRevision: 1,
+      lifecycle: 'current' as const,
+      reviewStatus,
+      reviewedRevision: reviewStatus === 'confirmed' ? 1 : null,
+      reviewedPayloadHash: reviewStatus === 'confirmed' ? semanticKey : null,
+      ownerAuthored: false,
+      supersededById: null,
+    });
+    await db
+      .insert(knowledgeGraphAssertions)
+      .values([
+        reviewed(ownerSource.id, sourceKey, sourceAssertion, 'confirmed'),
+        reviewed(ownerTarget.id, targetKey, targetAssertion, 'unreviewed'),
+      ]);
+    await db.insert(knowledgeGraphRelations).values([
+      {
+        agentId,
+        subjectEntityId: ownerSource.id,
+        predicate: 'works_at',
+        objectEntityId: employer.id,
+        assertion,
+        assertionId: sourceAssertion,
+        sourceMemoryId: memoryA.id,
+        sourceFingerprint: `merge-a-${suffix}`,
+        ordinal: 0,
+        evidenceQuote: memoryA.content,
+        reviewStatus: 'confirmed',
+      },
+      {
+        agentId,
+        subjectEntityId: ownerTarget.id,
+        predicate: 'works_at',
+        objectEntityId: employer.id,
+        assertion,
+        assertionId: targetAssertion,
+        sourceMemoryId: memoryB.id,
+        sourceFingerprint: `merge-b-${suffix}`,
+        ordinal: 0,
+        evidenceQuote: memoryB.content,
+        reviewStatus: 'unreviewed',
+      },
+    ]);
+    await db.insert(knowledgeGraphAssertionEvidence).values([
+      ...[
+        { id: sourceAssertion, memory: memoryA, fingerprint: `merge-a-${suffix}` },
+        { id: targetAssertion, memory: memoryB, fingerprint: `merge-b-${suffix}` },
+      ].map(({ id, memory, fingerprint }) => ({
+        id: knowledgeAssertionEvidenceId(agentId, id, memory.id, fingerprint),
+        agentId,
+        assertionId: id,
+        sourceMemoryId: memory.id,
+        sourceFingerprint: fingerprint,
+        sourceContentHash: memory.contentHash ?? '',
+        evidenceQuote: memory.content,
+        sourceAuthor: 'owner',
+        sourceTrust: 'owner',
+        independent: false,
+        spanStart: 0,
+        spanEnd: memory.content.length,
+        extractionVersion: GRAPH_EXTRACTION_VERSION,
+        evidenceRevision: 1,
+        observedAt: new Date(),
+      })),
+    ]);
+
+    await mergeGraphEntities(db, agentId, ownerSource.id, ownerTarget.id);
+    const [oldAfterMerge] = await db
+      .select({
+        lifecycle: knowledgeGraphAssertions.lifecycle,
+        supersededById: knowledgeGraphAssertions.supersededById,
+      })
+      .from(knowledgeGraphAssertions)
+      .where(eq(knowledgeGraphAssertions.id, sourceAssertion));
+    const [survivorAfterMerge] = await db
+      .select({
+        lifecycle: knowledgeGraphAssertions.lifecycle,
+        reviewStatus: knowledgeGraphAssertions.reviewStatus,
+        reviewedPayloadHash: knowledgeGraphAssertions.reviewedPayloadHash,
+      })
+      .from(knowledgeGraphAssertions)
+      .where(eq(knowledgeGraphAssertions.id, targetAssertion));
+    // The former assertion points at an absorbed entity. PostgreSQL cascades
+    // that row when the entity is removed; its source evidence has already
+    // been moved to the surviving canonical assertion below.
+    expect(oldAfterMerge).toBeUndefined();
+    expect(survivorAfterMerge).toEqual({
+      lifecycle: 'current',
+      reviewStatus: 'confirmed',
+      reviewedPayloadHash: targetKey,
+    });
+    const projected = await db
+      .select({
+        assertionId: knowledgeGraphRelations.assertionId,
+        reviewStatus: knowledgeGraphRelations.reviewStatus,
+      })
+      .from(knowledgeGraphRelations)
+      .where(inArray(knowledgeGraphRelations.sourceMemoryId, [memoryA.id, memoryB.id]));
+    expect(projected).toHaveLength(2);
+    expect(projected.map((row) => row.assertionId)).toEqual([targetAssertion, targetAssertion]);
+    const lineages = await db
+      .select({ sourceMemoryId: knowledgeGraphAssertionEvidence.sourceMemoryId })
+      .from(knowledgeGraphAssertionEvidence)
+      .where(eq(knowledgeGraphAssertionEvidence.assertionId, targetAssertion));
+    expect(lineages.map((row) => row.sourceMemoryId).sort()).toEqual(
+      [memoryA.id, memoryB.id].sort(),
+    );
+  });
+
+  it('does not recall an assertion when its canonical review state rejects a stale projection', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const suffix = randomUUID().replaceAll('-', '').slice(0, 10);
+    const content = `${MARKER} CanonicalRecallOwner ${suffix} works at ${MARKER} CanonicalRecallOrg ${suffix}.`;
+    const focusedRouter = {
+      async object() {
+        return {
+          ok: true,
+          object: {
+            relationships: [
+              {
+                subject: { label: `${MARKER} CanonicalRecallOwner ${suffix}`, kind: 'person' },
+                subjectSpan: `${MARKER} CanonicalRecallOwner ${suffix}`,
+                predicate: 'works_at',
+                predicateSpan: 'works at',
+                object: { label: `${MARKER} CanonicalRecallOrg ${suffix}`, kind: 'organization' },
+                objectSpan: `${MARKER} CanonicalRecallOrg ${suffix}`,
+                evidenceQuote: content,
+                confidence: 0.9,
+              },
+            ],
+          },
+        };
+      },
+    } as unknown as ModelRouter;
+    const [memory] = await db
+      .insert(memories)
+      .values({
+        agentId,
+        category: 'knowledge',
+        kind: 'fact',
+        content,
+        contentHash: `${MARKER}-canonical-recall-${suffix}`,
+        embedding: unit(79),
+        originTrust: 'owner',
+      })
+      .returning({ id: memories.id });
+    if (!memory) throw new Error('canonical recall fixture was not created');
+    await syncKnowledgeGraph({ db, router: focusedRouter }, { agentId });
+    const [edge] = await db
+      .select({ assertionId: knowledgeGraphRelations.assertionId })
+      .from(knowledgeGraphRelations)
+      .where(eq(knowledgeGraphRelations.sourceMemoryId, memory.id));
+    if (!edge?.assertionId) throw new Error('canonical recall edge has no assertion');
+    // Simulate a stale edge projection after a canonical owner decision.
+    await db
+      .update(knowledgeGraphAssertions)
+      .set({ reviewStatus: 'rejected' })
+      .where(eq(knowledgeGraphAssertions.id, edge.assertionId));
+    const recalled = await recallKnowledgeGraph(db, {
+      agentId,
+      queryText: `${MARKER} where does canonical recall owner work`,
+      queryEmbedding: unit(79),
+    });
+    expect(recalled.block).not.toContain(`CanonicalRecallOrg ${suffix}`);
   });
 
   // Date entities used to be whatever the extractor said, so "Friday", "next
@@ -1106,7 +1934,10 @@ describe('knowledge graph sync and recall', () => {
               {
                 subject: { label: `${MARKER} Dana`, kind: 'person' },
                 predicate: 'meets_the_board_on',
-                object: { label: 'Friday', kind: 'date' },
+                object: { label: '2026-03-06', kind: 'date' },
+                subjectSpan: `${MARKER} Dana`,
+                predicateSpan: 'meets the board on',
+                objectSpan: 'Friday',
                 evidenceQuote: `${MARKER} Dana meets the board on Friday`,
                 confidence: 0.9,
               },
@@ -1126,6 +1957,85 @@ describe('knowledge graph sync and recall', () => {
     // Resolved against the memory's own timestamp, not against "now".
     expect(dateEntity?.key).toBe('date:2026-03-06');
     expect(dateEntity?.label).not.toBe('Friday');
+  });
+
+  it('accepts canonical date labels only when their literal surface resolves to the same source date', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const anchor = new Date('2026-10-07T12:00:00Z');
+    const cases = [
+      { suffix: 'tomorrow', label: '2026-10-08', span: 'tomorrow' },
+      { suffix: 'Friday', label: '2026-10-09', span: 'Friday' },
+      { suffix: 'next month', label: '2026-11', span: 'next month' },
+      { suffix: 'March 6, 2026', label: '2026-03-06', span: 'March 6, 2026' },
+      { suffix: '2026-03-06', label: '2026-03-06', span: '2026-03-06' },
+    ];
+    const sourceIds: string[] = [];
+    for (const [index, item] of cases.entries()) {
+      const content = `${MARKER} trip ${index} starts ${item.suffix}.`;
+      const [memory] = await db
+        .insert(memories)
+        .values({
+          agentId,
+          category: 'knowledge',
+          kind: 'fact',
+          content,
+          contentHash: `${MARKER}-surface-date-${index}`,
+          embedding: unit(70 + index),
+          confidence: '0.90',
+          createdAt: anchor,
+        })
+        .returning({ id: memories.id });
+      if (!memory) throw new Error('date surface fixture was not created');
+      sourceIds.push(memory.id);
+    }
+    const router = {
+      async object(_operation: string, input: { prompt: string; system: string }) {
+        const index = cases.findIndex((item, candidate) =>
+          input.prompt.includes(`trip ${candidate} starts ${item.suffix}`),
+        );
+        const item = cases[index];
+        if (!item) throw new Error('date extraction prompt did not match a fixture');
+        expect(input.system).toContain('subjectSpan, predicateSpan, and objectSpan');
+        return {
+          ok: true,
+          object: {
+            relationships: [
+              {
+                subject: { label: `trip ${index}`, kind: 'event' },
+                subjectSpan: `trip ${index}`,
+                predicate: 'starts_on',
+                predicateSpan: 'starts',
+                object: { label: item.label, kind: 'date' },
+                objectSpan: item.span,
+                evidenceQuote: `trip ${index} starts ${item.span}`,
+                confidence: 0.9,
+              },
+            ],
+          },
+        };
+      },
+    } as unknown as ModelRouter;
+    const result = await syncKnowledgeGraph({ db, router }, { agentId, limit: 10 });
+    expect(result.relationships).toBe(cases.length);
+    expect(result.rejected).toBe(0);
+    const dates = await db
+      .select({ key: knowledgeGraphEntities.canonicalKey })
+      .from(knowledgeGraphEntities)
+      .where(
+        and(
+          eq(knowledgeGraphEntities.agentId, agentId),
+          eq(knowledgeGraphEntities.kind, 'date'),
+          inArray(knowledgeGraphEntities.canonicalKey, [
+            'date:2026-10-08',
+            'date:2026-10-09',
+            'date:2026-11',
+            'date:2026-03-06',
+          ]),
+        ),
+      );
+    expect(new Set(dates.map((row) => row.key))).toEqual(
+      new Set(['date:2026-10-08', 'date:2026-10-09', 'date:2026-11', 'date:2026-03-06']),
+    );
   });
 
   it('drops an edge whose date cannot be pinned down rather than storing the wording', async (ctx) => {

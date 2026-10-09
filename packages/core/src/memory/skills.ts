@@ -1,11 +1,13 @@
-import { type Db, type SkillRow, skills } from '@assistant/db';
+import { bumpSkillLibraryRevision, type Db, type SkillRow, skills } from '@assistant/db';
 import {
   DEFAULT_SKILL_RECALL_LIMIT,
+  embeddingSpaceIdentityKey,
   type LearnedSkill,
   MIN_SKILL_RECALL_SIMILARITY,
   type SkillContextRepository,
   skillEmbeddingText,
   skillRecallBounds,
+  validateEmbedding,
   validateSkillEmbedding,
 } from '@assistant/persistence';
 import { and, asc, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
@@ -60,7 +62,11 @@ export async function saveSkill(
     return { saved: false, skill: existing };
   }
 
-  const [embedding] = await router.embed([skillText({ name, preconditions, steps, gotchas })]);
+  const embeddingSpace = await router.embeddingSpace();
+  const embeddingSpaceKey = embeddingSpaceIdentityKey(embeddingSpace);
+  const [embedding] = await router.embed([skillText({ name, preconditions, steps, gotchas })], {
+    expectedSpace: embeddingSpace,
+  });
   const row = await writeSkill(
     db,
     {
@@ -74,7 +80,7 @@ export async function saveSkill(
       ownerAuthored: input.ownerAuthored ?? false,
     },
     embedding,
-    existing?.ownerAuthored ?? false,
+    embeddingSpaceKey,
   );
   if (!row) return { saved: false, skill: null };
   return { saved: !existing, skill: row };
@@ -94,28 +100,45 @@ export async function writeSkill(
     ownerAuthored: boolean;
   },
   embedding: number[] | undefined,
-  wasOwnerAuthored: boolean,
+  embeddingSpaceKey?: string | null,
 ): Promise<SkillRow | undefined> {
   const { preconditions, steps, gotchas } = skill;
-  const [row] = await db
-    .insert(skills)
-    .values({ ...skill, embedding, lastVerifiedAt: sql`now()` })
-    .onConflictDoUpdate({
-      target: [skills.agentId, skills.name],
-      set: {
-        preconditions,
-        steps,
-        gotchas,
+  if (embedding) validateSkillEmbedding(embedding);
+  return db.transaction(async (tx) => {
+    await bumpSkillLibraryRevision(tx, skill.agentId);
+    const [existing] = await tx
+      .select()
+      .from(skills)
+      .where(and(eq(skills.agentId, skill.agentId), eq(skills.name, skill.name)))
+      .limit(1)
+      .for('update');
+    if (existing?.ownerAuthored && !skill.ownerAuthored) return undefined;
+    const [row] = await tx
+      .insert(skills)
+      .values({
+        ...skill,
         embedding,
-        // A revision revives a deprecated skill and re-verifies it.
-        deprecated: false,
+        embeddingSpaceKey: embedding ? (embeddingSpaceKey ?? null) : null,
         lastVerifiedAt: sql`now()`,
-        ownerAuthored: skill.ownerAuthored ? true : wasOwnerAuthored,
-        updatedAt: sql`now()`,
-      },
-    })
-    .returning();
-  return row;
+      })
+      .onConflictDoUpdate({
+        target: [skills.agentId, skills.name],
+        set: {
+          preconditions,
+          steps,
+          gotchas,
+          embedding,
+          embeddingSpaceKey: embedding ? (embeddingSpaceKey ?? null) : null,
+          // A revision revives a deprecated skill and re-verifies it.
+          deprecated: false,
+          lastVerifiedAt: sql`now()`,
+          ownerAuthored: skill.ownerAuthored,
+          updatedAt: sql`now()`,
+        },
+      })
+      .returning();
+    return row;
+  });
 }
 
 function isSkillContextRepository(
@@ -159,13 +182,19 @@ export async function recallSkills(
     limit: opts.limit ?? DEFAULT_SKILL_RECALL_LIMIT,
     minSimilarity: opts.minSimilarity ?? MIN_SKILL_RECALL_SIMILARITY,
   });
-  const [embedding] = await router.embed([text.slice(0, 2000)], { taskId: opts.taskId });
+  const embeddingSpace = await router.embeddingSpace();
+  const exactSpaceKey = embeddingSpaceIdentityKey(embeddingSpace);
+  const [embedding] = await router.embed([text.slice(0, 2000)], {
+    taskId: opts.taskId,
+    expectedSpace: embeddingSpace,
+  });
   const queryEmbedding = embedding ?? [];
-  validateSkillEmbedding(queryEmbedding);
+  validateEmbedding(embeddingSpace, queryEmbedding);
   if (isSkillContextRepository(storage)) {
     const matches = await storage.recall({
       agentId,
       embedding: queryEmbedding,
+      embeddingSpaceKey: exactSpaceKey,
       limit,
       minSimilarity,
     });
@@ -182,6 +211,7 @@ export async function recallSkills(
       and(
         eq(skills.agentId, agentId),
         eq(skills.deprecated, false),
+        eq(skills.embeddingSpaceKey, exactSpaceKey),
         isNotNull(skills.embedding),
         sql`1 - (${skills.embedding} <=> ${vec}::vector) >= ${minSimilarity}`,
       ),
@@ -226,35 +256,76 @@ export async function updateSkill(
   db: Db,
   router: ModelRouter,
   id: string,
+  agentId: string,
   patch: { name: string; preconditions: string; steps: string; gotchas: string },
 ): Promise<void> {
+  if (!agentId) throw new Error('Skill mutation requires a configured owner');
   const name = patch.name.trim().slice(0, 200);
   const steps = patch.steps.trim();
   if (!name || !steps) return;
-  const [embedding] = await router.embed([
-    skillText({ name, preconditions: patch.preconditions, steps, gotchas: patch.gotchas }),
-  ]);
-  await db
-    .update(skills)
-    .set({
-      name,
-      steps,
-      preconditions: patch.preconditions.trim(),
-      gotchas: patch.gotchas.trim(),
-      embedding,
-      ownerAuthored: true,
-      deprecated: false,
-      updatedAt: sql`now()`,
-    })
-    .where(eq(skills.id, id));
+  const [owned] = await db
+    .select({ id: skills.id })
+    .from(skills)
+    .where(and(eq(skills.id, id), eq(skills.agentId, agentId)))
+    .limit(1);
+  if (!owned) throw new Error('Skill not found');
+  const embeddingSpace = await router.embeddingSpace();
+  const embeddingSpaceKey = embeddingSpaceIdentityKey(embeddingSpace);
+  const [embedding] = await router.embed(
+    [skillText({ name, preconditions: patch.preconditions, steps, gotchas: patch.gotchas })],
+    { expectedSpace: embeddingSpace },
+  );
+  if (!embedding) throw new Error('Skill update could not be prepared');
+  validateSkillEmbedding(embedding);
+  const updated = await db.transaction(async (tx) => {
+    await bumpSkillLibraryRevision(tx, agentId);
+    return tx
+      .update(skills)
+      .set({
+        name,
+        steps,
+        preconditions: patch.preconditions.trim(),
+        gotchas: patch.gotchas.trim(),
+        embedding,
+        embeddingSpaceKey,
+        ownerAuthored: true,
+        deprecated: false,
+        updatedAt: sql`now()`,
+      })
+      .where(and(eq(skills.id, id), eq(skills.agentId, agentId)))
+      .returning({ id: skills.id });
+  });
+  if (!updated.length) throw new Error('Skill not found');
 }
 
-export async function deleteSkill(db: Db, id: string): Promise<void> {
-  await db.delete(skills).where(eq(skills.id, id));
+export async function deleteSkill(db: Db, id: string, agentId: string): Promise<boolean> {
+  if (!agentId) return false;
+  const rows = await db.transaction(async (tx) => {
+    await bumpSkillLibraryRevision(tx, agentId);
+    return tx
+      .delete(skills)
+      .where(and(eq(skills.id, id), eq(skills.agentId, agentId)))
+      .returning({ id: skills.id });
+  });
+  return rows.length > 0;
 }
 
-export async function setSkillDeprecated(db: Db, id: string, deprecated: boolean): Promise<void> {
-  await db.update(skills).set({ deprecated, updatedAt: sql`now()` }).where(eq(skills.id, id));
+export async function setSkillDeprecated(
+  db: Db,
+  id: string,
+  deprecated: boolean,
+  agentId: string,
+): Promise<boolean> {
+  if (!agentId) return false;
+  const rows = await db.transaction(async (tx) => {
+    await bumpSkillLibraryRevision(tx, agentId);
+    return tx
+      .update(skills)
+      .set({ deprecated, updatedAt: sql`now()` })
+      .where(and(eq(skills.id, id), eq(skills.agentId, agentId)))
+      .returning({ id: skills.id });
+  });
+  return rows.length > 0;
 }
 
 /** Count a retrieval (the skill was put in front of the model for a task). */

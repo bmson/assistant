@@ -1,6 +1,12 @@
 import { outboundEmailAllowed } from '@assistant/config';
 import { appendSignature, isForwardedIngest } from '@assistant/core';
-import type { EmailSyncRepository, Records, VoiceContextRepository } from '@assistant/persistence';
+import {
+  type EmailSyncRepository,
+  type FinalChannelDeliveryResult,
+  finalChannelDelivery,
+  type Records,
+  type VoiceContextRepository,
+} from '@assistant/persistence';
 import {
   buildRawEmail,
   type GmailPayload,
@@ -114,15 +120,29 @@ export async function deliverEmailFinal(
   deps: EmailChannelDeps,
   task: TaskRow,
   text: string,
-): Promise<boolean> {
-  if (task.trust !== 'owner') return false;
-  if (!task.conversationId || !deps.googleClient.configured()) return false;
+  attemptId = `email-final:${task.id}`,
+): Promise<FinalChannelDeliveryResult> {
+  if (task.trust !== 'owner')
+    return finalChannelDelivery('email', 'not_applicable', attemptId, 'non-owner-task');
+  if (task.type === 'chat_turn')
+    return finalChannelDelivery('email', 'not_applicable', attemptId, 'dashboard-chat-turn');
+  const requiredByType = task.type === 'email_triage';
+  if (!task.conversationId) {
+    return requiredByType
+      ? finalChannelDelivery('email', 'rejected', attemptId, 'missing-conversation')
+      : finalChannelDelivery('email', 'not_applicable', attemptId, 'no-conversation');
+  }
 
   const conversation = await deps.persistence.emailSync.replyThread(task.conversationId);
-  if (conversation?.channel !== 'email') return false;
+  if (!requiredByType && conversation?.channel !== 'email')
+    return finalChannelDelivery('email', 'not_applicable', attemptId, 'not-email-conversation');
+  if (requiredByType && conversation?.channel !== 'email')
+    return finalChannelDelivery('email', 'rejected', attemptId, 'email-thread-unavailable');
+  if (!deps.googleClient.configured())
+    return finalChannelDelivery('email', 'rejected', attemptId, 'provider-not-configured');
 
   const target = await resolveEmailThreadTarget(deps, task);
-  if (!target) return false;
+  if (!target) return finalChannelDelivery('email', 'rejected', attemptId, 'missing-owner-target');
 
   // Positive confirmation that the auto-reply recipient really is the owner.
   //
@@ -136,11 +156,11 @@ export async function deliverEmailFinal(
     console.warn(
       `email-channel: refusing to auto-reply to ${target.to} — not an owner address (task ${task.id})`,
     );
-    return false;
+    return finalChannelDelivery('email', 'rejected', attemptId, 'recipient-not-owner');
   }
   if (!outboundEmailAllowed(target.to)) {
     console.warn(`email-channel: refusing to auto-reply to ${target.to} — outside allowed domains`);
-    return false;
+    return finalChannelDelivery('email', 'rejected', attemptId, 'recipient-domain-not-allowed');
   }
 
   // RFC threading headers so the reply nests in ANY mail client (Gmail
@@ -185,10 +205,14 @@ export async function deliverEmailFinal(
       body: JSON.stringify({ raw, threadId: target.threadId }),
     });
   } catch (error) {
-    if (!isAmbiguousGoogleMutationError(error)) throw error;
-    // The request may already be in Sent. Suppress an automatic duplicate;
-    // the workflow's durable delivery marker completes this ambiguous attempt.
-    console.error('email delivery outcome is ambiguous; suppressing duplicate retry', error);
+    if (isAmbiguousGoogleMutationError(error)) {
+      // The request may already be in Sent. Preserve this exact attempt as
+      // unknown so crash recovery never resends it automatically.
+      console.error('email delivery outcome is ambiguous; suppressing duplicate retry', error);
+      return finalChannelDelivery('email', 'unknown', attemptId, 'provider-outcome-unknown');
+    }
+    console.error('email provider rejected the final reply', error);
+    return finalChannelDelivery('email', 'rejected', attemptId, 'provider-rejected');
   }
-  return true;
+  return finalChannelDelivery('email', 'accepted', attemptId);
 }

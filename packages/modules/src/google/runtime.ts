@@ -16,6 +16,11 @@ export function gmailSyncEnabled(config: Config = loadConfig()): boolean {
   return process.env.NODE_ENV === 'production';
 }
 
+/** Durable observer work stays paused until its explicit rollout gate is enabled. */
+export function emailObserverWorkerEnabled(config: Config = loadConfig()): boolean {
+  return config.EMAIL_OBSERVER_WORKER_ENABLED === true && gmailSyncEnabled(config);
+}
+
 /**
  * Is this mailbox the owner's forwarding pipe rather than an inbox strangers
  * write to? This single predicate decides what inbound mail is owner-directed

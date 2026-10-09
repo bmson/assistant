@@ -76,6 +76,48 @@ describe('mergeChatLog', () => {
     expect(merged.map((message) => message.id)).toEqual(['a', 'b']);
   });
 
+  it('normalizes same-id SDK snapshots across a polling interleave, then retires the stream twin', () => {
+    const channelMessageId = 'chat-reply:task-1';
+    const firstStreamSnapshot = {
+      ...durable('qgz-stream', 'assistant', 'The reply is starting.'),
+      metadata: { channelMessageId },
+    } as UIMessage;
+    const persistedReply = {
+      ...durable('persisted-reply', 'assistant', 'This local chat is working.'),
+      metadata: { channelMessageId },
+    } as UIMessage;
+    const latestStreamSnapshot = {
+      ...durable('qgz-stream', 'assistant', 'This local chat is working.'),
+      metadata: { channelMessageId },
+    } as UIMessage;
+    const user = durable('owner-turn', 'user', 'Hello');
+    const current = [user, firstStreamSnapshot, persistedReply, latestStreamSnapshot];
+    const serverIds = new Set(['owner-turn', 'persisted-reply']);
+
+    const duringStream = mergeChatLog(current, [], {
+      streaming: true,
+      serverIds,
+      retracted: new Set(),
+    });
+    expect(duringStream.map((message) => message.id)).toEqual([
+      'owner-turn',
+      'persisted-reply',
+      'qgz-stream',
+    ]);
+    expect(duringStream.filter((message) => message.id === 'qgz-stream')).toHaveLength(1);
+    expect(duringStream.at(-1)?.parts).toEqual([
+      { type: 'text', text: 'This local chat is working.' },
+    ]);
+
+    const afterStream = mergeChatLog(duringStream, [], {
+      streaming: false,
+      serverIds,
+      retracted: new Set(),
+    });
+    expect(afterStream.map((message) => message.id)).toEqual(['owner-turn', 'persisted-reply']);
+    expect(afterStream.filter((message) => message.role === 'assistant')).toHaveLength(1);
+  });
+
   it('replaces a row whose content actually changed', () => {
     const current = [card('c1', 'pending')];
     const merged = mergeChatLog(current, [card('c1', 'approved')], {
@@ -103,6 +145,7 @@ describe('mergeChatLog', () => {
     const provisional = {
       id: 'local',
       role: 'user',
+      metadata: { durableMessageId: 's1' },
       parts: [{ type: 'text', text: 'go' }],
     } as UIMessage;
     const current = [durable('s1', 'user', 'go'), provisional];

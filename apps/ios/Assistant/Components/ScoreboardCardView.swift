@@ -58,12 +58,22 @@ struct ScoreGame: Hashable, Identifiable {
             shortName: team["shortName"]?.string ?? name,
             abbreviation: team["abbreviation"]?.string ?? "",
             // Logos load straight from the provider's image CDN, and only from it.
-            logo: logo.range(of: #"^https://[a-z0-9.-]*espncdn\.com/"#, options: .regularExpression) != nil
-                ? URL(string: logo) : nil,
+            logo: approvedLogoURL(logo),
             score: team["score"]?.string,
             winner: winner,
             record: team["record"]?.string
         )
+    }
+
+    static func approvedLogoURL(_ raw: String) -> URL? {
+        guard let components = URLComponents(string: raw),
+              components.scheme?.lowercased() == "https",
+              components.user == nil, components.password == nil,
+              components.port == nil,
+              let host = components.host?.lowercased(), !host.hasSuffix("."),
+              host == "espncdn.com" || host.hasSuffix(".espncdn.com"),
+              let url = components.url else { return nil }
+        return url
     }
 
     /// Whether this game can still change: it is on, or starts within 10 minutes.
@@ -126,6 +136,7 @@ struct ScoreboardCardView: View {
     @State private var games: [ScoreGame] = []
     @State private var updatedAt: Date?
     @State private var onScreen = false
+    @State private var clockNow = Date.now
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
@@ -134,7 +145,11 @@ struct ScoreboardCardView: View {
     private var shown: [ScoreGame] { games.isEmpty ? initialGames : games }
     private var polling: Bool {
         live && fetchLive != nil && onScreen && scenePhase == .active
-            && shown.contains { $0.canChange(at: .now) }
+            && shown.contains { $0.canChange(at: clockNow) }
+    }
+    private var clockActive: Bool {
+        live && fetchLive != nil && onScreen && scenePhase == .active
+            && shown.contains { $0.state == "pre" && $0.startsAt.map { $0 > clockNow } == true }
     }
 
     var body: some View {
@@ -166,6 +181,18 @@ struct ScoreboardCardView: View {
         .onScrollVisibilityChange(threshold: 0.2) { onScreen = $0 }
         .onAppear { onScreen = true }
         .onDisappear { onScreen = false }
+        // A future game can be outside the polling window when this card first
+        // appears. Wall-clock time alone does not invalidate SwiftUI state, so
+        // wake while the visible card has a future kickoff and let `polling`
+        // turn on as soon as the game enters its ten-minute window.
+        .task(id: clockActive) {
+            guard clockActive else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                guard !Task.isCancelled else { return }
+                clockNow = .now
+            }
+        }
         .task(id: polling) {
             guard polling else { return }
             while !Task.isCancelled {

@@ -1,3 +1,4 @@
+import { FieldPath } from '@google-cloud/firestore';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FirestoreExecutionEvidenceRepository } from './execution-evidence.js';
 import { documentKey, type InstallationStore } from './store.js';
@@ -130,7 +131,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore execution evide
     ).resolves.toEqual([]);
   });
 
-  it('finds only an exact document tool call in the owner conversation regardless of status', async () => {
+  it('finds only an exact document tool call successful document evidence in the owner conversation', async () => {
     await store.doc('toolCalls', 'foreign-doc-read').set({
       id: 'foreign-doc-read',
       taskId: 'foreign-task',
@@ -160,6 +161,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore execution evide
       documentId: 'doc-1',
     };
 
+    await expect(repository.hasConversationToolCall(input)).resolves.toBe(false);
+    await store
+      .doc('toolCalls', 'doc-read')
+      .update({ status: 'succeeded', result: { content: 'Current document' }, error: null });
     await expect(repository.hasConversationToolCall(input)).resolves.toBe(true);
     await expect(
       repository.hasConversationToolCall({ ...input, documentId: 'doc-2' }),
@@ -198,8 +203,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore execution evide
     const messageBatch = store.db.batch();
     const messageIds = Array.from({ length: 121 }, (_, index) => `message-${index}`);
     const finalMessageId = messageIds.toSorted((a, b) =>
-      documentKey(a).localeCompare(documentKey(b)),
+      Buffer.compare(Buffer.from(documentKey(a), 'utf8'), Buffer.from(documentKey(b), 'utf8')),
     )[120];
+    if (!finalMessageId) throw new Error('The final-message pagination fixture is empty');
     for (const id of messageIds) {
       messageBatch.set(store.doc('messages', id), {
         id,
@@ -211,6 +217,14 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore execution evide
       });
     }
     await messageBatch.commit();
+    const firstPage = await store
+      .collection('messages')
+      .where('taskId', '==', 'task')
+      .orderBy(FieldPath.documentId())
+      .limit(100)
+      .get();
+    expect(firstPage.size).toBe(100);
+    expect(firstPage.docs.map((doc) => doc.id)).not.toContain(documentKey(finalMessageId));
     expect(
       await repository.finalMessageExists({
         agentId: 'owner',
@@ -321,6 +335,43 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore execution evide
     });
     // Six prior rows exist; the three newest come back, oldest first.
     expect(window.map((row) => row.id)).toEqual(['older-1-2', 'older-2-1', 'older-2-2']);
+  });
+
+  it('merges latest receipts across task starts and beyond document-ID page boundaries', async () => {
+    const time = (minute: number) => new Date(Date.UTC(2026, 8, 12, 12, minute));
+    for (const [id, minute] of [
+      ['old-long-running', 0],
+      ['new-short', 30],
+    ] as const)
+      await store
+        .doc('tasks', id)
+        .set({ id, agentId: 'owner', conversationId: 'conversation', createdAt: time(minute) });
+    for (const [id, taskId, minute] of [
+      ['a-early', 'old-long-running', 1],
+      ['b-early', 'old-long-running', 2],
+      ['c-early', 'old-long-running', 3],
+      ['z-latest', 'old-long-running', 50],
+      ['new-result', 'new-short', 31],
+      ['tied-result', 'new-short', 50],
+    ] as const)
+      await store.doc('toolCalls', id).set({
+        id,
+        taskId,
+        step: 1,
+        toolName: 'test.merge',
+        status: 'succeeded',
+        args: {},
+        result: { minute },
+        error: null,
+        createdAt: time(minute),
+      });
+    const window = await repository.conversationEvidence({
+      agentId: 'owner',
+      conversationId: 'conversation',
+      excludeTaskId: 'task',
+      maxRows: 3,
+    });
+    expect(window.map((row) => row.id)).toEqual(['new-result', 'tied-result', 'z-latest']);
   });
 
   it('deduplicates notification finals for conversationless tasks and quality writes', async () => {

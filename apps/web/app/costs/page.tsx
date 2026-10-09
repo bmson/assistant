@@ -3,13 +3,12 @@ import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import { createInstallationStore, getFirestoreMobileCosts } from '@assistant/firestore';
 import { COST_BASIS_LABELS, costBasis } from '@assistant/persistence';
 import Link from 'next/link';
-import { updateCaps } from '@/app/costs/actions';
+import { BudgetCapsForm } from '@/app/costs/budget-caps-form';
 import { ProviderBillingCards } from '@/app/costs/provider-billing-cards';
 import { requireOwner } from '@/auth';
 import { formatDateTime, formatUsd, truncate } from '@/lib/format';
 import { getBillingOverview, getDb } from '@/lib/server';
-import { cardShellClass, InfoGrid, InfoItem, inputClass, PageHeader, PageShell } from '@/lib/ui';
-import { SubmitButton } from '@/lib/ui-client';
+import { cardShellClass, InfoGrid, InfoItem, PageHeader, PageShell } from '@/lib/ui';
 import { taskTypeLabel } from '@/lib/views';
 
 export const metadata = { title: 'Costs' };
@@ -139,46 +138,13 @@ export default async function CostsPage() {
           These limits pause assistant work using its usage ledger. They do not change Google Cloud
           billing budgets or stop hosting, storage and other cloud charges.
         </p>
-        <form action={updateCaps} className="flex flex-wrap items-end gap-3">
-          <label className="flex flex-col gap-1 text-xs font-medium text-muted">
-            Default task cap (USD)
-            <input
-              type="number"
-              name="task_default"
-              step="0.05"
-              min="0.05"
-              defaultValue={taskDefaultLimit ? Number(taskDefaultLimit) : ''}
-              className={`${inputClass} w-28`}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs font-medium text-muted">
-            Daily cap (USD)
-            <input
-              type="number"
-              name="daily"
-              step="0.5"
-              min="0.5"
-              defaultValue={Number.isFinite(totals.dailyLimitUsd) ? totals.dailyLimitUsd : ''}
-              className={`${inputClass} w-28`}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs font-medium text-muted">
-            Monthly cap (USD)
-            <input
-              type="number"
-              name="monthly"
-              step="1"
-              min="1"
-              defaultValue={Number.isFinite(totals.monthlyLimitUsd) ? totals.monthlyLimitUsd : ''}
-              className={`${inputClass} w-28`}
-            />
-          </label>
-          {/* Full width on a phone so it lands on its own row instead of
-              trailing whichever cap field happened to wrap last. */}
-          <SubmitButton variant="outline" pendingLabel="Updating…" className="w-full sm:w-auto">
-            Update caps
-          </SubmitButton>
-        </form>
+        <BudgetCapsForm
+          initial={{
+            task_default: taskDefaultLimit ?? '',
+            daily: Number.isFinite(totals.dailyLimitUsd) ? String(totals.dailyLimitUsd) : '',
+            monthly: Number.isFinite(totals.monthlyLimitUsd) ? String(totals.monthlyLimitUsd) : '',
+          }}
+        />
       </section>
 
       <details className="mt-8 rounded-2xl bg-sunken/55">

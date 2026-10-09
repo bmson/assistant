@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   config: {} as Record<string, unknown>,
   buildDeps: vi.fn(),
-  firestoreOwnerReady: vi.fn(),
+  firestoreMaintenanceReady: vi.fn(),
   generate: vi.fn(),
 }));
 
@@ -23,8 +23,7 @@ vi.mock('../deps.js', () => ({
   agentServices: vi.fn(),
   buildDeps: mocks.buildDeps,
   composedModuleMetas: [],
-  firestoreMaintenanceReady: vi.fn(),
-  firestoreOwnerReady: mocks.firestoreOwnerReady,
+  firestoreMaintenanceReady: mocks.firestoreMaintenanceReady,
 }));
 vi.mock('../google-oidc.js', () => ({
   oidcAudienceForPath: (_audience: string, path: string) => path,
@@ -48,7 +47,7 @@ describe('private Vertex model probe', () => {
       PERSISTENCE_DRIVER: 'firestore',
       LLM_PROVIDER: 'vertex',
     };
-    mocks.firestoreOwnerReady.mockResolvedValue(true);
+    mocks.firestoreMaintenanceReady.mockResolvedValue(true);
     mocks.generate.mockResolvedValue({ ok: true, text: 'PROBE_OK', modelId: 'vertex/test-model' });
     mocks.buildDeps.mockReturnValue({
       config: mocks.config,
@@ -74,7 +73,7 @@ describe('private Vertex model probe', () => {
       matched: true,
       modelId: 'vertex/test-model',
     });
-    expect(mocks.firestoreOwnerReady).toHaveBeenCalledOnce();
+    expect(mocks.firestoreMaintenanceReady).toHaveBeenCalledOnce();
     expect(mocks.generate).toHaveBeenCalledOnce();
     const [role, options] = mocks.generate.mock.calls[0] as [string, Record<string, unknown>];
     expect(role).toBe('draft');
@@ -87,6 +86,18 @@ describe('private Vertex model probe', () => {
     });
     expect(options).not.toHaveProperty('taskId');
     expect(options.abortSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('does not call the model while a Firestore import awaits activation', async () => {
+    mocks.firestoreMaintenanceReady.mockResolvedValue(false);
+
+    const response = await internal.request('/model-probe/vertex', {
+      method: 'POST',
+      headers: { authorization: 'Bearer internal-test-token' },
+    });
+
+    expect(response.status).toBe(503);
+    expect(mocks.generate).not.toHaveBeenCalled();
   });
 
   it('hides the endpoint in SQL mode and rejects caller-controlled prompts', async () => {

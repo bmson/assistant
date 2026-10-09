@@ -5,9 +5,11 @@ import { parseArgs, promisify } from 'node:util';
 import { EvidenceStore, verifyEvidenceChain } from './cutover-evidence.js';
 import {
   type CutoverConfig,
+  captureRetirementProof,
   configSha256,
   databaseDependencies,
   type Inventory,
+  isDatabaseEnvName,
   isDatabaseSecretName,
   readCutoverConfig,
   STEPS,
@@ -54,6 +56,23 @@ export type DependencyClass =
   | 'documentation'
   | 'postgres-only'
   | 'guard';
+
+export const RETIREMENT_INVENTORY_MAX_AGE_MS = 15 * 60_000;
+
+export type RetirementLiveProof = {
+  capturedAt: string;
+  inventory: Inventory;
+  services: Array<{
+    name: string;
+    ok: boolean;
+    probes?: {
+      health?: { ok?: boolean };
+      ready?: { ok?: boolean; database?: string | null };
+    };
+  }>;
+  sourceStillFenced?: { passed?: boolean };
+  dispatcher?: { ok?: boolean };
+};
 
 /** Classes whose presence means deleting Neon would break something still in use. */
 const BLOCKING_CLASSES = new Set<DependencyClass>([
@@ -281,6 +300,8 @@ export function buildRetirementReport(input: {
   now: Date;
   minObservationHours: number;
   liveInventory?: Inventory;
+  /** Current, read-only proof; historical cutover evidence is not sufficient. */
+  liveProof?: RetirementLiveProof;
   /** Static proof for the Firestore release path; computed by verifyFirestorePath. */
   firestorePath?: FirestorePathResult;
 }) {
@@ -311,15 +332,49 @@ export function buildRetirementReport(input: {
   const liveAt = steps.find((item) => item.step.name === 'live-verify')?.evidence?.completedAt;
   const observedHours = liveAt ? (input.now.getTime() - Date.parse(liveAt)) / 3_600_000 : 0;
   add(
-    `Firestore production observed for at least ${input.minObservationHours} hours`,
+    `Minimum production observation window elapsed (${input.minObservationHours} hours)`,
     observedHours >= input.minObservationHours,
     `${observedHours.toFixed(1)} hours since live verification`,
   );
 
   // 3. Live Cloud Run, Scheduler, and Pub/Sub configuration.
   const live = result<{ inventory: Inventory; services: Array<{ name: string }> }>('live-verify');
-  const inventory = input.liveInventory ?? live?.inventory;
-  const inventorySource = input.liveInventory ? 'fresh read-only capture' : 'live-verify evidence';
+  const inventory = input.liveProof?.inventory ?? input.liveInventory ?? live?.inventory;
+  const inventorySource = input.liveProof
+    ? 'fresh read-only operational proof'
+    : input.liveInventory
+      ? 'fresh read-only capture (operational proof missing)'
+      : 'historical live-verify evidence';
+  const captureAge = input.liveProof
+    ? input.now.getTime() - Date.parse(input.liveProof.capturedAt)
+    : Number.POSITIVE_INFINITY;
+  const inventoryAge = inventory
+    ? input.now.getTime() - Date.parse(inventory.capturedAt)
+    : Number.POSITIVE_INFINITY;
+  const inventoryFresh =
+    Number.isFinite(captureAge) &&
+    Number.isFinite(inventoryAge) &&
+    captureAge >= -2 * 60_000 &&
+    captureAge <= RETIREMENT_INVENTORY_MAX_AGE_MS &&
+    inventoryAge >= -2 * 60_000 &&
+    inventoryAge <= RETIREMENT_INVENTORY_MAX_AGE_MS &&
+    Math.abs(captureAge - inventoryAge) <= 60_000;
+  add(
+    `Current Cloud inventory is fresh (at most ${RETIREMENT_INVENTORY_MAX_AGE_MS / 60_000} minutes old)`,
+    inventoryFresh,
+    input.liveProof
+      ? `${Math.round(captureAge / 60_000)} minutes old`
+      : 'current proof not captured',
+  );
+  const rollbackRecords = [
+    ...store.records<unknown>('cutover-rollback-'),
+    ...store.records<unknown>('rollback-'),
+  ];
+  add(
+    'No rollback record invalidates this cutover retirement evidence',
+    rollbackRecords.length === 0,
+    rollbackRecords.map((record) => record.name).join(', ') || undefined,
+  );
   const cloudDependencies = inventory ? databaseDependencies(inventory) : [];
   add(
     'No Cloud Run service or job references DATABASE_URL or a database secret',
@@ -350,6 +405,68 @@ export function buildRetirementReport(input: {
     straySubscriptions.map((item) => item.name).join(', ') || undefined,
   );
 
+  const servingProof = config.services.map((target) => {
+    const service = inventory?.services.find((item) => item.name === target.name);
+    const serving = service?.traffic.filter((entry) => entry.percent > 0) ?? [];
+    return Boolean(
+      service &&
+        service.latestReadyRevision &&
+        serving.length === 1 &&
+        serving[0]?.percent === 100 &&
+        serving[0].revision === service.latestReadyRevision &&
+        service.config.PERSISTENCE_DRIVER === 'firestore' &&
+        service.config.FIRESTORE_DATABASE_ID === config.firestoreDatabaseId &&
+        service.envNames.every((name) => !isDatabaseEnvName(name)) &&
+        service.secretRefs.every(
+          (ref) => !isDatabaseEnvName(ref.env) && !isDatabaseSecretName(ref.secret),
+        ),
+    );
+  });
+  add(
+    'Every configured service currently serves its Firestore revision and database',
+    Boolean(input.liveProof) && servingProof.length > 0 && servingProof.every(Boolean),
+    config.services
+      .filter((_, index) => !servingProof[index])
+      .map((item) => item.name)
+      .join(', ') || (!input.liveProof ? 'current proof not captured' : undefined),
+  );
+  const targetProbes = input.liveProof?.services ?? [];
+  const healthReadyConfigured =
+    config.services.length > 0 &&
+    config.services.every((target) => Boolean(target.health || target.ready)) &&
+    config.services.some((target) => target.ready?.expectDatabase === 'firestore');
+  const healthReadyPassed = config.services.every((target) => {
+    const service = targetProbes.find((item) => item.name === target.name);
+    return Boolean(
+      service?.ok &&
+        (!target.health || service.probes?.health?.ok) &&
+        (!target.ready ||
+          (service.probes?.ready?.ok &&
+            service.probes.ready.database === target.ready.expectDatabase)),
+    );
+  });
+  add(
+    'Current health, Firestore readiness, dispatcher routing, and source provider fence are verified',
+    Boolean(
+      input.liveProof &&
+        healthReadyConfigured &&
+        healthReadyPassed &&
+        input.liveProof.sourceStillFenced?.passed === true &&
+        input.liveProof.dispatcher?.ok === true,
+    ),
+    !input.liveProof
+      ? 'current proof not captured'
+      : !healthReadyConfigured
+        ? 'every service needs a health or readiness probe, and a readiness probe must confirm Firestore'
+        : !healthReadyPassed
+          ? 'current health or readiness probe failed or did not identify the configured persistence driver'
+          : input.liveProof.sourceStillFenced?.passed !== true
+            ? 'source provider fence is not currently proven'
+            : input.liveProof.dispatcher?.ok !== true
+              ? 'current dispatcher state does not match the Firestore configuration'
+              : undefined,
+  );
+
   // 4. Repository: the Firestore release path, then release, backups, Terraform, CI.
   add(
     'Firestore release path reaches no PostgreSQL dependency',
@@ -362,11 +479,9 @@ export function buildRetirementReport(input: {
     blockingFindings.length === 0,
     blockingFindings.map((item) => item.path).join(', ') || undefined,
   );
-  const liveVerified =
-    steps.find((item) => item.step.name === 'live-verify')?.evidence?.status === 'passed';
   add(
     'Application PostgreSQL code is inactive (no serving template sets DATABASE_URL)',
-    liveVerified,
+    Boolean(input.liveProof) && servingProof.length > 0 && servingProof.every(Boolean),
   );
 
   // 5. PostgreSQL-independent recovery exists.
@@ -628,12 +743,13 @@ async function main() {
   const decisions = values.decisions
     ? (JSON.parse(await readFile(values.decisions, 'utf8')) as OwnerDecisions)
     : {};
-  let liveInventory: Inventory | undefined;
+  let liveProof: RetirementLiveProof | undefined;
   if (values.live) {
-    // Read-only list/describe calls only.
-    const { captureInventory } = await import('./cutover-steps.js');
-    const { createReadOnlyDeps } = await import('./cutover.js');
-    liveInventory = (await captureInventory(config, createReadOnlyDeps(config))).inventory;
+    // Fresh list/describe, health/readiness, dispatcher, and provider-fence
+    // checks only. Sensitive source URL and identity-token values stay in
+    // memory and are never included in the report.
+    const { createRetirementProofDeps } = await import('./cutover.js');
+    liveProof = await captureRetirementProof(config, createRetirementProofDeps(config), store);
   }
   const report = buildRetirementReport({
     config,
@@ -642,7 +758,7 @@ async function main() {
     decisions,
     now: new Date(),
     minObservationHours: Number(values['min-observation-hours']),
-    liveInventory,
+    liveProof,
     firestorePath,
   });
   await writeFile(values.out, renderRetirementReport(report), { flag: 'wx', mode: 0o600 });

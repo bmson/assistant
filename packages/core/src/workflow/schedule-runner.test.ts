@@ -24,6 +24,10 @@ function schedule(patch: Partial<ScheduleRecord> = {}): ScheduleRecord {
     enabled: patch.enabled ?? true,
     createdAt: patch.createdAt ?? new Date('2025-06-01T00:00:00.000Z'),
     updatedAt: patch.updatedAt ?? new Date('2025-06-01T00:00:00.000Z'),
+    seedTemplateKey: null,
+    seedTemplateRevision: null,
+    seedDefinition: null,
+    seedReviewRequired: false,
     lastRunAt: patch.lastRunAt ?? null,
     nextRunAt: patch.nextRunAt === undefined ? DUE : patch.nextRunAt,
   };

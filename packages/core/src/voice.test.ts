@@ -1,4 +1,5 @@
 import { createDb, type Db, writingSamples } from '@assistant/db';
+import type { VoiceContextRepository } from '@assistant/persistence';
 import { eq, like } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { ModelRouter } from './model-router/router.js';
@@ -181,6 +182,12 @@ describe('captureOwnerWritingSample (integration)', () => {
   let dbUp = false;
   const marker = `auto:test-${Date.now()}`;
   const embedRouter = {
+    embeddingSpace: async () => ({
+      provider: 'synthetic',
+      model: 'voice-capture-fixture',
+      dimensions: 1536,
+      revision: '1',
+    }),
     embed: async (texts: string[]) => texts.map(() => new Array(1536).fill(0.01)),
   } as unknown as ModelRouter;
 
@@ -201,8 +208,7 @@ describe('captureOwnerWritingSample (integration)', () => {
     await (db as unknown as { $client: { end: () => Promise<void> } }).$client?.end?.();
   });
 
-  const longText =
-    'Hey — can you grab the flight details and put lunch on Friday at noon? Loki works. Thanks a lot.';
+  const longText = `Hey — can you grab the flight details and put lunch on Friday at noon? Loki works. Thanks a lot. ${marker}`;
 
   it('captures a substantial owner message, deduping exact repeats', async (ctx) => {
     if (!dbUp) return ctx.skip();
@@ -233,5 +239,56 @@ describe('captureOwnerWritingSample (integration)', () => {
       context: marker.slice('auto:'.length),
     });
     expect(stored).toBe(false);
+  });
+
+  it('rejects an auto sample whose embed finishes after owner erasure', async () => {
+    let generation = 'before-erasure';
+    let wrote = false;
+    const repository: VoiceContextRepository = {
+      kind: 'voice-context-repository',
+      async profile() {
+        return null;
+      },
+      async hasSamples() {
+        return false;
+      },
+      async nearestSamples() {
+        return [];
+      },
+      async hasSampleText() {
+        return false;
+      },
+      async countSamplesWithContextPrefix() {
+        return 0;
+      },
+      async observationGeneration() {
+        return generation;
+      },
+      async addSample(_input, observed) {
+        if (observed !== generation) throw new Error('Privacy erasure changed during observation');
+        wrote = true;
+      },
+    };
+    const delayedRouter = {
+      embeddingSpace: async () => ({
+        provider: 'synthetic',
+        model: 'voice-capture-fixture',
+        dimensions: 1536,
+        revision: '1',
+      }),
+      embed: async () => {
+        generation = 'after-erasure';
+        return [new Array(1536).fill(0.01)];
+      },
+    } as unknown as ModelRouter;
+    await expect(
+      captureOwnerWritingSample(repository, delayedRouter, {
+        text: `${longText} ${marker}`,
+        register: 'email_casual',
+        context: marker.slice('auto:'.length),
+      }),
+    ).resolves.toBe(false);
+    expect(generation).toBe('after-erasure');
+    expect(wrote).toBe(false);
   });
 });

@@ -1,17 +1,25 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
+  canonicalizeKnowledgeAssertionDirection,
   type EmbeddingSpace,
+  knowledgeAssertionEvidenceId,
+  knowledgeAssertionId,
+  knowledgeAssertionSemanticKey,
+  type OwnerGraphCorrectionTarget,
   type OwnerKnowledgeGraphEntityEndpoint,
   type OwnerKnowledgeGraphFactAtomicInput,
   type OwnerKnowledgeGraphFactContext,
   type OwnerKnowledgeGraphFactRepository,
   type OwnerKnowledgeGraphFactResult,
   type Records,
+  snapshotEmbeddingSpace,
   validateEmbedding,
 } from '@assistant/persistence';
 import { type DocumentSnapshot, FieldValue, type Transaction } from '@google-cloud/firestore';
 import { embeddingSpaceKey } from './memory.js';
+import { decodeMemoryRecord } from './memory-record.js';
 import { privacyErasureIsActive } from './privacy-erasure.js';
+import { deterministicUuid } from './stable-id.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 type Contact = Records['contacts'];
@@ -63,7 +71,7 @@ function entityDoc(snapshot: DocumentSnapshot, agentId: string): Entity | null {
 }
 
 function deterministicEntityId(agentId: string, canonicalKey: string): string {
-  return `owner-${createHash('sha256').update(`${agentId}\0${canonicalKey}`).digest('hex')}`;
+  return deterministicUuid('owner-knowledge-graph-entity', agentId, canonicalKey);
 }
 
 interface EntityWrite {
@@ -78,12 +86,15 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
   implements OwnerKnowledgeGraphFactRepository
 {
   readonly kind = 'owner-knowledge-graph-fact-repository' as const;
+  readonly embeddingSpace: EmbeddingSpace;
 
   constructor(
     readonly store: InstallationStore,
-    readonly embeddingSpace: EmbeddingSpace,
+    embeddingSpace: EmbeddingSpace,
     readonly configuredAgentId: string,
-  ) {}
+  ) {
+    this.embeddingSpace = snapshotEmbeddingSpace(embeddingSpace);
+  }
 
   private async soleOwner(): Promise<OwnerKnowledgeGraphFactContext> {
     const owners = await this.store.collection('agents').limit(2).get();
@@ -137,6 +148,49 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
       canonicalKey: row.canonicalKey,
       contactId: row.contactId,
       authoritativeLabel: Boolean(row.contactId) || row.kind === 'date',
+    };
+  }
+
+  async correctionTarget(
+    agentId: string,
+    relationId: string,
+  ): Promise<OwnerGraphCorrectionTarget | null> {
+    const context = await this.context(agentId);
+    const relationSnapshot = await this.store.doc('knowledgeGraphRelations', relationId).get();
+    if (!relationSnapshot.exists) return null;
+    const relation = decodeRecord<Records['knowledgeGraphRelations']>(relationSnapshot.data());
+    if (
+      !identity(relationSnapshot, relation) ||
+      relation.agentId !== context.agentId ||
+      relation.id !== relationId
+    )
+      return null;
+    const memorySnapshot = await this.store.doc('memories', relation.sourceMemoryId).get();
+    if (!memorySnapshot.exists) return null;
+    const memory = decodeMemoryRecord(memorySnapshot.data());
+    if (
+      !identity(memorySnapshot, memory) ||
+      memory.agentId !== context.agentId ||
+      memory.id !== relation.sourceMemoryId
+    )
+      return null;
+    return {
+      relationId,
+      sourceMemoryId: memory.id,
+      sourceContentHash: memory.contentHash,
+      reviewStatus: relation.reviewStatus,
+      source: memory.source,
+      sourceOriginTrust: memory.originTrust,
+      sourceOwnerConfirmed: memory.ownerConfirmed,
+      sourceSupersededById: memory.supersededById,
+      sourceExpiresAt: memory.expiresAt,
+      correctedByRelationId: relation.correctedByRelationId ?? null,
+      correctionSourceContentHash: relation.correctionSourceContentHash ?? null,
+      correctionDisposition:
+        relation.correctionDisposition === 'whole_fact' ||
+        relation.correctionDisposition === 'graph_only'
+          ? relation.correctionDisposition
+          : null,
     };
   }
 
@@ -252,6 +306,8 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
   async createAtomic(
     input: OwnerKnowledgeGraphFactAtomicInput,
   ): Promise<OwnerKnowledgeGraphFactResult> {
+    if (input.embeddingSpaceKey !== embeddingSpaceKey(this.embeddingSpace))
+      throw new Error('Knowledge graph embedding space changed');
     validateEmbedding(this.embeddingSpace, input.embedding);
     const memoryId = randomUUID();
     const relationId = randomUUID();
@@ -261,6 +317,12 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
     const tombstoneRef = this.store.doc('memoryTombstones', input.contentHash);
     const sourceRef = this.store.doc('knowledgeGraphSources', memoryId);
     const erasureRef = this.store.doc('privacyErasureJobs', input.agentId);
+    const correctionRelationRef = input.correction
+      ? this.store.doc('knowledgeGraphRelations', input.correction.target.relationId)
+      : null;
+    const correctionMemoryRef = input.correction
+      ? this.store.doc('memories', input.correction.target.sourceMemoryId)
+      : null;
     return this.store.db.runTransaction(async (tx) => {
       const ownerId = await this.configuredOwnerInTransaction(tx);
       if (ownerId !== input.agentId) throw new Error('Knowledge graph owner changed');
@@ -270,6 +332,95 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
         tombstoneRef,
         erasureRef,
       );
+      let oldRelationSnapshot: DocumentSnapshot | null = null;
+      let oldMemorySnapshot: DocumentSnapshot | null = null;
+      let oldAssertionSnapshot: DocumentSnapshot | null = null;
+      if (correctionRelationRef && correctionMemoryRef) {
+        const correctionSnapshots = await tx.getAll(correctionRelationRef, correctionMemoryRef);
+        oldRelationSnapshot = correctionSnapshots[0] ?? null;
+        oldMemorySnapshot = correctionSnapshots[1] ?? null;
+      }
+      let oldRelation: Records['knowledgeGraphRelations'] | null = null;
+      let oldMemory: Records['memories'] | null = null;
+      if (oldRelationSnapshot?.exists && oldMemorySnapshot?.exists) {
+        oldRelation = decodeRecord<Records['knowledgeGraphRelations']>(oldRelationSnapshot.data());
+        oldMemory = decodeMemoryRecord(oldMemorySnapshot.data());
+        if (
+          !identity(oldRelationSnapshot, oldRelation) ||
+          !identity(oldMemorySnapshot, oldMemory) ||
+          oldRelation.agentId !== input.agentId ||
+          oldMemory.agentId !== input.agentId ||
+          oldRelation.sourceMemoryId !== oldMemory.id
+        )
+          return { error: 'That relationship or its source changed. Review it again.' };
+        if (oldRelation.assertionId) {
+          oldAssertionSnapshot = await tx.get(
+            this.store.doc('knowledgeGraphAssertions', oldRelation.assertionId),
+          );
+          if (!oldAssertionSnapshot.exists || oldAssertionSnapshot.get('agentId') !== input.agentId)
+            throw new Error('Canonical knowledge assertion is missing or belongs to another owner');
+        }
+        if (oldRelation.correctedByRelationId) {
+          const replacementSnapshot = await tx.get(
+            this.store.doc('knowledgeGraphRelations', oldRelation.correctedByRelationId),
+          );
+          if (!replacementSnapshot.exists)
+            throw new Error('Knowledge graph correction receipt is incomplete');
+          const replacement = decodeRecord<Records['knowledgeGraphRelations']>(
+            replacementSnapshot.data(),
+          );
+          if (
+            replacement.agentId !== input.agentId ||
+            documentKey(replacement.id) !== replacementSnapshot.id
+          )
+            throw new Error('Knowledge graph correction receipt is invalid');
+          return {
+            relationId: replacement.id,
+            memoryId: replacement.sourceMemoryId,
+            sourceDisposition:
+              oldRelation.correctionDisposition === 'whole_fact' ? 'whole_fact' : 'graph_only',
+            alreadyApplied: true,
+          };
+        }
+        const target = input.correction?.target;
+        if (
+          !target ||
+          oldRelation.reviewStatus !== target.reviewStatus ||
+          oldMemory.id !== target.sourceMemoryId ||
+          oldMemory.contentHash !== target.sourceContentHash ||
+          (oldMemory.supersededById ?? null) !== target.sourceSupersededById ||
+          (oldMemory.expiresAt?.getTime() ?? null) !==
+            (target.sourceExpiresAt?.getTime() ?? null) ||
+          !['confirmed', 'unreviewed'].includes(oldRelation.reviewStatus)
+        )
+          return {
+            error:
+              'The source changed while this relationship was being corrected. Review it again.',
+          };
+        if (input.correction?.disposition === 'whole_fact') {
+          if (
+            oldMemory.source !== 'knowledge-graph-owner' ||
+            oldMemory.originTrust !== 'owner' ||
+            !oldMemory.ownerConfirmed ||
+            oldMemory.supersededById ||
+            oldMemory.expiresAt
+          )
+            return {
+              error: 'This source is not a standalone owner fact; choose graph-only correction.',
+            };
+          const siblingRelations = await tx.get(
+            this.store
+              .collection('knowledgeGraphRelations')
+              .where('sourceMemoryId', '==', oldMemory.id),
+          );
+          if (siblingRelations.docs.some((doc) => doc.id !== oldRelationSnapshot?.id))
+            return {
+              error: 'This source supports other relationships; choose graph-only correction.',
+            };
+        }
+      } else if (input.correction) {
+        return { error: 'That relationship or its source no longer exists.' };
+      }
       if (erasure?.exists) {
         if (
           erasure.get('agentId') !== input.agentId ||
@@ -330,6 +481,34 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
         input.predicate,
         input.object.canonicalKey,
       );
+      const ownerMeaning = canonicalizeKnowledgeAssertionDirection({
+        subjectEntityId: subject.id,
+        predicate: input.predicate,
+        objectEntityId: object.id,
+        assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
+        validFrom: null,
+        validUntil: null,
+      });
+      const semanticKey = knowledgeAssertionSemanticKey(input.agentId, ownerMeaning);
+      const assertionId = knowledgeAssertionId(input.agentId, semanticKey);
+      const assertionRef = this.store.doc('knowledgeGraphAssertions', assertionId);
+      const assertionSnapshot = await tx.get(assertionRef);
+      const existingAssertion = assertionSnapshot.exists
+        ? decodeRecord<Records['knowledgeGraphAssertions']>(assertionSnapshot.data())
+        : null;
+      if (existingAssertion && existingAssertion.agentId !== input.agentId)
+        throw new Error('Canonical knowledge assertion belongs to another owner');
+      const evidenceId = knowledgeAssertionEvidenceId(
+        input.agentId,
+        assertionId,
+        memoryId,
+        fingerprint,
+      );
+      const evidenceRef = this.store.doc('knowledgeGraphAssertionEvidence', evidenceId);
+      const existingEvidenceSnapshot = await tx.get(evidenceRef);
+      const existingEvidence = existingEvidenceSnapshot.exists
+        ? decodeRecord<Records['knowledgeGraphAssertionEvidence']>(existingEvidenceSnapshot.data())
+        : null;
       const relationRef = this.store.doc('knowledgeGraphRelations', relationId);
       const memoryRow: Records['memories'] = {
         id: memoryId,
@@ -337,6 +516,7 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
         agentId: input.agentId,
         expiresAt: null,
         embedding: input.embedding,
+        embeddingSpaceKey: input.embeddingSpaceKey,
         sourceTaskId: null,
         kind: 'fact',
         confidence: '1.00',
@@ -382,12 +562,17 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
         validUntil: null,
         subjectEntityId: subject.id,
         predicate: input.predicate,
+        assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
+        assertionId,
         objectEntityId: object.id,
         sourceMemoryId: memoryId,
         evidenceQuote: input.content,
         ordinal: 1,
         reviewStatus: 'confirmed',
         reviewedAt: now,
+        correctedByRelationId: null,
+        correctionSourceContentHash: null,
+        correctionDisposition: null,
       };
       if (hash?.exists || tombstone?.exists || memory?.exists)
         throw new Error('Knowledge graph write fence changed');
@@ -413,14 +598,92 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
         encodeRecord({
           ...memoryRow,
           embedding: FieldValue.vector(input.embedding),
+          embeddingSpaceKey: input.embeddingSpaceKey,
           embeddingSpace: embeddingSpaceKey(this.embeddingSpace),
           retrievalRevision,
         }),
       );
       tx.create(hashRef, { memoryId });
       tx.create(sourceRef, encodeRecord(sourceRow));
+      const assertionRow: Records['knowledgeGraphAssertions'] = {
+        id: assertionId,
+        agentId: input.agentId,
+        semanticKey,
+        subjectEntityId: ownerMeaning.subjectEntityId,
+        predicate: ownerMeaning.predicate,
+        objectEntityId: ownerMeaning.objectEntityId,
+        assertion: ownerMeaning.assertion,
+        qualifiers: ('qualifiers' in ownerMeaning ? ownerMeaning.qualifiers : {}) as Record<
+          string,
+          string | number | boolean | null
+        >,
+        validFrom: ownerMeaning.validFrom,
+        validUntil: ownerMeaning.validUntil,
+        semanticRevision: existingAssertion?.semanticRevision ?? 1,
+        evidenceRevision: (existingAssertion?.evidenceRevision ?? 0) + (existingEvidence ? 0 : 1),
+        lifecycle: 'current',
+        reviewStatus: existingAssertion?.reviewStatus ?? 'confirmed',
+        reviewedRevision: existingAssertion?.reviewedRevision ?? 1,
+        reviewedPayloadHash: existingAssertion?.reviewedPayloadHash ?? semanticKey,
+        ownerAuthored: true,
+        supersededById: existingAssertion?.supersededById ?? null,
+        createdAt: existingAssertion?.createdAt ?? now,
+        updatedAt: now,
+      };
+      const assertionData = encodeRecord(assertionRow);
+      if (assertionSnapshot.exists) tx.set(assertionRef, assertionData);
+      else tx.create(assertionRef, assertionData);
+      const evidenceRow: Records['knowledgeGraphAssertionEvidence'] = {
+        id: evidenceId,
+        agentId: input.agentId,
+        assertionId,
+        sourceMemoryId: memoryId,
+        sourceFingerprint: fingerprint,
+        sourceContentHash: input.contentHash,
+        evidenceQuote: input.content,
+        sourceAuthor: 'owner',
+        sourceTrust: 'owner',
+        independent: false,
+        spanStart: 0,
+        spanEnd: input.content.length,
+        extractionVersion: input.extractionVersion,
+        evidenceRevision: (existingEvidence?.evidenceRevision ?? 0) + 1,
+        observedAt: now,
+        createdAt: existingEvidence?.createdAt ?? now,
+      };
+      tx.set(evidenceRef, encodeRecord(evidenceRow));
       tx.create(relationRef, encodeRecord(relationRow));
-      return { memoryId, relationId };
+      if (input.correction && oldRelationSnapshot && oldMemorySnapshot) {
+        tx.update(oldRelationSnapshot.ref, {
+          reviewStatus: 'rejected',
+          reviewedAt: now,
+          correctedByRelationId: relationId,
+          correctionSourceContentHash: input.correction.target.sourceContentHash,
+          correctionDisposition: input.correction.disposition,
+        });
+        if (oldAssertionSnapshot?.exists) {
+          const oldAssertion = decodeRecord<Records['knowledgeGraphAssertions']>(
+            oldAssertionSnapshot.data(),
+          );
+          tx.update(oldAssertionSnapshot.ref, {
+            reviewStatus: 'rejected',
+            reviewedRevision: oldAssertion.semanticRevision,
+            reviewedPayloadHash: oldAssertion.semanticKey,
+            updatedAt: now,
+          });
+        }
+        if (input.correction.disposition === 'whole_fact') {
+          tx.update(oldMemorySnapshot.ref, {
+            supersededById: memoryId,
+            expiresAt: now,
+          });
+        }
+      }
+      return {
+        memoryId,
+        relationId,
+        ...(input.correction ? { sourceDisposition: input.correction.disposition } : {}),
+      };
     });
   }
 }

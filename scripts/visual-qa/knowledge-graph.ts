@@ -3,7 +3,8 @@
  * boot on the loopback IP (the RSC payload never runs, so nothing hydrates) and
  * every interaction below would fail for a reason that has nothing to do with
  * the map. launch.json opens localhost for the same reason.
- * DATABASE_URL=postgres://assistant:assistant@localhost:5432/assistant_test pnpm tsx scripts/visual-qa/knowledge-graph.ts
+ * DATABASE_URL=<allocated URL> ASSISTANT_TEST_TARGET_TOKEN=<token> pnpm tsx scripts/visual-qa/knowledge-graph.ts
+ * Cleanup: pnpm visual-qa:cleanup <printed-run-id> with the same allocated target.
  */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -18,14 +19,23 @@ import {
   memories,
 } from '@assistant/db';
 import { chromium } from 'playwright';
+import {
+  assertAllocatedTestDatabaseOwnership,
+  assertAllocatedTestTargetMarker,
+} from '../test-target.js';
+import { markVisualQaRun, newVisualQaRunId, writeVisualQaManifest } from './fixture-runs.js';
 
-const databaseUrl = process.env.DATABASE_URL ?? '';
-const parsed = new URL(databaseUrl);
-if (!['localhost', '127.0.0.1'].includes(parsed.hostname) || !parsed.pathname.endsWith('_test'))
-  throw new Error('QA requires a local _test database.');
-const db = createDb(databaseUrl);
+const target = assertAllocatedTestTargetMarker({
+  databaseUrl: process.env.DATABASE_URL,
+  testDatabaseUrl: process.env.TEST_DATABASE_URL,
+  token: process.env.ASSISTANT_TEST_TARGET_TOKEN,
+  kind: process.env.ASSISTANT_TEST_TARGET_KIND === 'restore' ? 'restore' : 'standard',
+});
+const db = createDb(target.databaseUrl);
+await assertAllocatedTestDatabaseOwnership(db, target);
 const agent = await getAgent(db);
-const marker = randomUUID();
+const runId = newVisualQaRunId();
+const marker = `visual-qa:${runId}:knowledge-graph`;
 const fixture = [
   ['Alex Rivera', 'person'],
   ['Robin Rivera', 'person'],
@@ -34,17 +44,6 @@ const fixture = [
   ['School fundraiser', 'project'],
   ['Maya Chen', 'person'],
 ];
-const nodes = fixture.map(([label, kind]) => ({
-  id: randomUUID(),
-  agentId: agent.id,
-  label: label as string,
-  kind: kind as string,
-  canonicalKey: `${kind}:graph-qa-${marker}-${label}`,
-}));
-await db.insert(knowledgeGraphEntities).values(nodes);
-const alex = nodes[0];
-const robin = nodes[1];
-if (!alex || !robin) throw new Error('Missing fixture');
 const facts: Array<[number, string, number, string, 'confirmed' | 'unreviewed']> = [
   [0, 'parent_of', 1, 'Alex Rivera is the parent of Robin Rivera.', 'confirmed'],
   [0, 'parent_of', 1, 'Family notes: Alex Rivera is the parent of Robin Rivera.', 'unreviewed'],
@@ -54,40 +53,84 @@ const facts: Array<[number, string, number, string, 'confirmed' | 'unreviewed']>
   [5, 'works_at', 2, 'Maya Chen works at Northstar Robotics.', 'unreviewed'],
   [5, 'organizes', 4, 'Maya Chen organizes the School fundraiser.', 'confirmed'],
 ];
-for (const [index, [from, predicate, to, content, reviewStatus]] of facts.entries()) {
-  const subject = nodes[from];
-  const object = nodes[to];
-  if (!subject || !object) throw new Error('Missing endpoint');
-  const memoryId = randomUUID();
-  const contentHash = randomUUID();
-  await db.insert(memories).values({
-    id: memoryId,
-    agentId: agent.id,
-    category: 'knowledge',
-    kind: 'fact',
-    content,
-    contentHash,
-    embedding: Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0)),
-  });
-  await db.insert(knowledgeGraphSources).values({
-    memoryId,
-    contentHash,
-    status: 'ready',
-    extractionVersion: GRAPH_EXTRACTION_VERSION,
-  });
-  await db.insert(knowledgeGraphRelations).values({
-    agentId: agent.id,
-    subjectEntityId: subject.id,
-    objectEntityId: object.id,
-    predicate,
-    sourceMemoryId: memoryId,
-    evidenceQuote: content,
-    sourceFingerprint: `${marker}-${index}`,
-    ordinal: 0,
-    confidence: '0.9',
-    reviewStatus,
-  });
-}
+const entityIds = fixture.map(() => randomUUID());
+const entityCanonicalKeys = fixture.map(([label, kind]) => `${kind}:graph-qa-${runId}-${label}`);
+const memoryIds = facts.map(() => randomUUID());
+const memoryContentHashes = facts.map((_, index) => `${marker}:memory:${index}`);
+const relationIds = facts.map(() => randomUUID());
+const relationFingerprints = facts.map((_, index) => `${marker}:relation:${index}`);
+const manifest = await writeVisualQaManifest({
+  fixtureKind: 'knowledge-graph',
+  runId,
+  targetDatabaseName: target.databaseName,
+  targetToken: target.token,
+  agentId: agent.id,
+  ids: {
+    entityIds,
+    memoryIds,
+    memoryContentHashes,
+    relationIds,
+  },
+  provenance: {
+    marker,
+    entityCanonicalKeys,
+    relationFingerprintPrefix: `${marker}:relation:`,
+  },
+});
+const nodes = fixture.map(([label, kind], index) => ({
+  id: entityIds[index],
+  agentId: agent.id,
+  label: label as string,
+  kind: kind as string,
+  canonicalKey: entityCanonicalKeys[index] as string,
+}));
+const alex = nodes[0];
+const robin = nodes[1];
+if (!alex || !robin) throw new Error('Missing fixture');
+await db.transaction(async (tx) => {
+  await tx.insert(knowledgeGraphEntities).values(nodes);
+  for (const [index, [from, predicate, to, content, reviewStatus]] of facts.entries()) {
+    const subject = nodes[from];
+    const object = nodes[to];
+    const memoryId = memoryIds[index];
+    const contentHash = memoryContentHashes[index];
+    const relationId = relationIds[index];
+    const fingerprint = relationFingerprints[index];
+    if (!subject || !object || !memoryId || !contentHash || !relationId || !fingerprint)
+      throw new Error('Incomplete knowledge graph fixture manifest');
+    await tx.insert(memories).values({
+      id: memoryId,
+      agentId: agent.id,
+      category: 'knowledge',
+      kind: 'fact',
+      content,
+      contentHash,
+      originTrust: 'assistant',
+      quarantined: true,
+      embedding: Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0)),
+    });
+    await tx.insert(knowledgeGraphSources).values({
+      memoryId,
+      contentHash,
+      status: 'ready',
+      extractionVersion: GRAPH_EXTRACTION_VERSION,
+    });
+    await tx.insert(knowledgeGraphRelations).values({
+      id: relationId,
+      agentId: agent.id,
+      subjectEntityId: subject.id,
+      objectEntityId: object.id,
+      predicate,
+      sourceMemoryId: memoryId,
+      evidenceQuote: content,
+      sourceFingerprint: fingerprint,
+      ordinal: 0,
+      confidence: '0.9',
+      reviewStatus,
+    });
+  }
+});
+await markVisualQaRun(manifest, 'seeded');
 
 mkdirSync('/tmp/assistant-graph-qa', { recursive: true });
 const browser = await chromium.launch({ channel: 'chrome' });
@@ -196,6 +239,7 @@ try {
   console.log(
     JSON.stringify({
       passed: true,
+      runId,
       alexId: alex.id,
       robinId: robin.id,
       screenshots: '/tmp/assistant-graph-qa',
@@ -203,5 +247,6 @@ try {
   );
 } finally {
   await browser.close();
+  await db.$client.end({ timeout: 5 });
 }
-process.exit(0);
+await markVisualQaRun(manifest, 'complete');

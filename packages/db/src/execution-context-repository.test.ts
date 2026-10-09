@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { inArray } from 'drizzle-orm';
+import { inArray, sql } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, type Db } from './client.js';
 import { createPostgresExecutionContextRepository } from './execution-context-repository.js';
@@ -47,6 +47,20 @@ describe('PostgreSQL execution context repository', () => {
     conversationIds.push(row.id);
     return row.id;
   }
+  it('rejects a syntactically shaped but impossible checkpoint date', async () => {
+    const repository = createPostgresExecutionContextRepository(db);
+    const conversationId = await makeConversation('chat');
+    await expect(
+      repository.getOwnerRepliesAfter({
+        agentId,
+        conversationId,
+        after: {
+          createdAt: new Date('2026-03-01T00:00:00Z'),
+          exactCreatedAt: '2026-02-30T00:00:00.123456Z',
+        },
+      }),
+    ).rejects.toThrow('Invalid conversation watermark');
+  });
 
   async function addMessage(input: {
     conversationId: string;
@@ -136,6 +150,16 @@ describe('PostgreSQL execution context repository', () => {
     expect(rows.map((row) => row.text)).toEqual(
       Array.from({ length: 20 }, (_, index) => `history-${index + 5}`),
     );
+    const wider = {
+      agentId: agentId,
+      conversationId: emailId,
+      before: new Date('2026-09-12T11:00:00Z'),
+      limit: 100,
+    };
+    expect(await repository.seedHistory(wider)).toHaveLength(25);
+    await expect(repository.seedHistory({ ...wider, limit: 101 })).rejects.toThrow(
+      'between 1 and 100',
+    );
     await expect(
       repository.seedHistory({
         agentId: randomUUID(),
@@ -143,6 +167,52 @@ describe('PostgreSQL execution context repository', () => {
         before: new Date('2026-09-12T11:00:00Z'),
       }),
     ).resolves.toEqual([]);
+  });
+
+  it('pins seed history to a scoped persisted message at native timestamp precision', async () => {
+    const repository = createPostgresExecutionContextRepository(db);
+    const chatId = await makeConversation('chat');
+    const otherId = await makeConversation('chat');
+    const at = new Date('2026-09-12T10:00:00.000Z');
+    const prior = await addMessage({ conversationId: chatId, at, text: 'prior' });
+    const trigger = await addMessage({ conversationId: chatId, at, text: 'request A' });
+    const later = await addMessage({ conversationId: chatId, at, text: 'request B' });
+    const foreign = await addMessage({ conversationId: otherId, at, text: 'another conversation' });
+    await db.execute(
+      sql`update ${messages} set created_at = '2026-09-12T10:00:00.000100Z'::timestamptz where id = ${prior}`,
+    );
+    await db.execute(
+      sql`update ${messages} set created_at = '2026-09-12T10:00:00.000200Z'::timestamptz where id = ${trigger}`,
+    );
+    await db.execute(
+      sql`update ${messages} set created_at = '2026-09-12T10:00:00.000300Z'::timestamptz where id = ${later}`,
+    );
+    expect(
+      (
+        await repository.seedHistory({
+          agentId,
+          conversationId: chatId,
+          before: at,
+          throughMessageId: trigger,
+        })
+      ).map((row) => row.text),
+    ).toEqual(['prior', 'request A']);
+    expect(
+      await repository.seedHistory({
+        agentId,
+        conversationId: chatId,
+        before: new Date(),
+        throughMessageId: foreign,
+      }),
+    ).toEqual([]);
+    expect(
+      await repository.seedHistory({
+        agentId: randomUUID(),
+        conversationId: chatId,
+        before: new Date(),
+        throughMessageId: trigger,
+      }),
+    ).toEqual([]);
   });
 
   it('uses a stable timestamp/id cursor and refuses email folding', async () => {
@@ -170,7 +240,11 @@ describe('PostgreSQL execution context repository', () => {
     await expect(
       repository.getLatestOwnerReplyCursor({ agentId, conversationId: chatId }),
     ).resolves.toEqual({
-      cursor: { createdAt: at, id: '00000000-0000-4000-8000-000000000004' },
+      cursor: {
+        createdAt: at,
+        exactCreatedAt: at.toISOString().replace(/(\.\d{3})Z$/, '$1000000Z'),
+        id: '00000000-0000-4000-8000-000000000004',
+      },
     });
     const newer = await repository.getOwnerRepliesAfter({
       agentId,
@@ -194,6 +268,60 @@ describe('PostgreSQL execution context repository', () => {
         after: { createdAt: new Date(0) },
       }),
     ).resolves.toEqual([]);
+  });
+
+  it('round-trips a microsecond reply cursor and orders ties by message ID', async () => {
+    const repository = createPostgresExecutionContextRepository(db);
+    const conversationId = await makeConversation('chat');
+    const ids = [
+      '00000000-0000-4000-8000-000000000101',
+      '00000000-0000-4000-8000-000000000102',
+      '00000000-0000-4000-8000-000000000103',
+    ];
+    for (const id of ids) {
+      await addMessage({
+        conversationId,
+        id,
+        at: new Date('2026-09-12T10:00:00.123Z'),
+        text: id,
+      });
+    }
+    await db.execute(
+      sql`update messages set created_at = ${'2026-09-12T10:00:00.123456Z'}::timestamptz where id = ${ids[0]}::uuid`,
+    );
+    await db.execute(
+      sql`update messages set created_at = ${'2026-09-12T10:00:00.123456Z'}::timestamptz where id = ${ids[1]}::uuid`,
+    );
+    await db.execute(
+      sql`update messages set created_at = ${'2026-09-12T10:00:00.123457Z'}::timestamptz where id = ${ids[2]}::uuid`,
+    );
+
+    const latest = await repository.getLatestOwnerReplyCursor({ agentId, conversationId });
+    expect(latest?.cursor?.exactCreatedAt).toBe('2026-09-12T10:00:00.123457000Z');
+    const afterFirst = await repository.getOwnerRepliesAfter({
+      agentId,
+      conversationId,
+      after: {
+        createdAt: new Date('2026-09-12T10:00:00.123Z'),
+        exactCreatedAt: '2026-09-12T10:00:00.123456000Z',
+        id: ids[0],
+      },
+    });
+    expect(afterFirst.map(({ id, exactCreatedAt }) => [id, exactCreatedAt])).toEqual([
+      [ids[1], '2026-09-12T10:00:00.123456000Z'],
+      [ids[2], '2026-09-12T10:00:00.123457000Z'],
+    ]);
+    await expect(
+      repository.getOwnerRepliesAfter({
+        agentId,
+        conversationId,
+        after: {
+          createdAt: new Date('2026-09-12T10:00:00.123Z'),
+          exactCreatedAt: '2026-09-12T10:00:00.123456000Z',
+          id: ids[1],
+        },
+      }),
+    ).resolves.toMatchObject([{ id: ids[2], exactCreatedAt: '2026-09-12T10:00:00.123457000Z' }]);
   });
 
   it('bounds only replies after the cursor and rejects overflow instead of dropping it', async () => {

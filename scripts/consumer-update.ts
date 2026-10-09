@@ -17,11 +17,12 @@ const usage = `Usage: pnpm consumer:update --state PATH --state-bucket NAME --ar
 Moves an initialized or ready customer installation to another verified source
 release (an update, or a rollback to an earlier release). Run it from a clean
 checkout of that exact commit. It verifies the archive digest, uploads the
-release receipt to the customer state bucket, returns the installation to the
-bootstrapped stage, and writes install-manifest-<sha>.json beside the state.
-Then rerun consumer:install with that manifest: it reapplies the foundation and
-indexes, builds (or, for a rollback, reuses --images image-manifest-<sha>.json)
-and deploys the release, and requires --verify again before ready.
+release receipt to the customer state bucket, preserves Terraform-owned runtime
+resources, returns the selected release to the provisioned stage, and writes
+install-manifest-<sha>.json beside the state. Then rerun consumer:install with
+that manifest: it builds and deploys the release (or, for a rollback, reuses
+--images image-manifest-<sha>.json) without applying a foundation-only plan, and
+requires --verify again before ready.
 Without --apply nothing changes.
 `;
 
@@ -91,7 +92,6 @@ export async function runConsumerUpdateCli(
     applied: true,
     ...summary,
     next: [
-      `pnpm consumer:install --manifest ${manifestPath} --archive ${archive} --state ${statePath} --state-bucket ${stateBucket} --terraform-dir infra/gcp/consumer/terraform --apply`,
       `pnpm consumer:install --manifest ${manifestPath} --archive ${archive} --state ${statePath} --state-bucket ${stateBucket} --terraform-dir infra/gcp/consumer/terraform --build-images --runtime-config RUNTIME_CONFIG --apply`,
       `pnpm consumer:install --manifest ${manifestPath} --archive ${archive} --state ${statePath} --state-bucket ${stateBucket} --terraform-dir infra/gcp/consumer/terraform --images ${path.join(path.dirname(statePath), `image-manifest-${commitSha}.json`)} --runtime-config RUNTIME_CONFIG --verify --apply`,
     ],

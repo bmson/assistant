@@ -22,6 +22,17 @@ export async function unreadSharedDocumentIntent(
   if (task.trust !== 'owner') return undefined;
   const intent = sharedDocumentIntent(window);
   if (!intent || !task.conversationId) return intent;
+  const latestOwnerText = [...window]
+    .reverse()
+    .find((message) => message.role === 'user' && typeof message.content === 'string')?.content;
+  // A renewed explicit read belongs to this request, even after a prior success.
+  if (
+    typeof latestOwnerText === 'string' &&
+    /\b(?:read|re[- ]?read|review|open|fetch|retry|try again|updated|edited|fresh)\b/i.test(
+      latestOwnerText,
+    )
+  )
+    return intent;
   const alreadyRead = await evidence.hasConversationToolCall({
     agentId: task.agentId,
     conversationId: task.conversationId,

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  curiosityNudgePingId,
   insideQuietHours,
   type NudgePolicyRepository,
   type OutOfBandPingInput,
@@ -40,7 +41,9 @@ export class FirestoreNudgePolicyRepository implements NudgePolicyRepository {
     const now = opts.now ?? this.store.now();
     if (!Number.isFinite(now.getTime())) throw new Error('Invalid nudge policy time');
     const channel = opts.channel ?? 'out-of-band';
-    const id = randomUUID();
+    const id = channel.startsWith('curiosity-nudge:')
+      ? curiosityNudgePingId(agent.id, channel)
+      : randomUUID();
     for (let attempt = 0; ; attempt++) {
       try {
         return await this.store.db.runTransaction(async (tx) => {
@@ -54,6 +57,20 @@ export class FirestoreNudgePolicyRepository implements NudgePolicyRepository {
             // Read before any ledger count so a concurrent ambient evaluation
             // for this owner contends here and reruns against the committed slot.
             await tx.get(this.store.doc('coordination', `ambient-pings:${agent.id}`));
+            if (channel.startsWith('curiosity-nudge:')) {
+              const prior = await tx.get(this.store.doc('proactivePings', id));
+              if (prior.exists) {
+                const row = decodeRecord<Records['proactivePings']>(prior.data());
+                if (row.agentId !== agent.id || row.channel !== channel)
+                  throw new Error('Curiosity nudge reservation ownership mismatch');
+                return {
+                  deliver: row.delivered,
+                  ...(!row.delivered && (row.reason === 'quiet-hours' || row.reason === 'daily-cap')
+                    ? { reason: row.reason }
+                    : {}),
+                };
+              }
+            }
             const prefsSnapshot = await tx.get(this.store.doc('notificationPrefs', agent.id));
             const row = prefsSnapshot.exists
               ? decodeRecord<Records['notificationPrefs']>(prefsSnapshot.data())

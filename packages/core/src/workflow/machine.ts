@@ -5,6 +5,7 @@ import {
   type TaskRow,
 } from '@assistant/db';
 import type {
+  EmailObserverTaskCreationFence,
   TaskCheckpoint,
   TaskLease,
   TaskLeaseRepository,
@@ -53,6 +54,12 @@ export type { TaskLease } from '@assistant/persistence';
 
 export { TaskRateLimitError } from '@assistant/persistence';
 
+/** Signal a task created by a larger adapter transaction only after commit. */
+export function notifyTaskEnqueued(task: TaskRow, created: boolean): void {
+  if (created && task.status === 'pending')
+    getQueueNotifier().notify(task.id, task.queueGeneration);
+}
+
 /** Create a task atomically; transport notification happens after persistence. */
 export async function enqueueTask(
   db: Db | TaskRepository,
@@ -82,6 +89,8 @@ export async function enqueueTask(
     nextAction?: string;
     /** Caller is inside a larger transaction and will notify only after commit. */
     deferNotification?: boolean;
+    /** Bind durable email triage enqueue to its prepared observer/source row. */
+    emailObserverTaskFence?: EmailObserverTaskCreationFence;
   },
 ): Promise<{ task: TaskRow; created: boolean }> {
   const result = await lifecycle(db).createTask({
@@ -102,10 +111,9 @@ export async function enqueueTask(
     autonomyGrant: input.autonomyGrant,
     reflectEvery: input.reflectEvery,
     nextAction: input.nextAction,
+    emailObserverTaskFence: input.emailObserverTaskFence,
   });
-  if (result.created && result.task.status === 'pending' && !input.deferNotification) {
-    getQueueNotifier().notify(result.task.id, result.task.queueGeneration);
-  }
+  if (!input.deferNotification) notifyTaskEnqueued(result.task, result.created);
   return result;
 }
 

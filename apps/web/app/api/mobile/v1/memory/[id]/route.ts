@@ -1,4 +1,5 @@
 import type { ProminenceLevel } from '@assistant/application/profile';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getOwnerMemoryCommands } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -13,7 +14,9 @@ export async function PATCH(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid memory id' }, { status: 400 });
-  const body = (await request.json().catch(() => null)) as { content?: unknown } | null;
+  const mutationBody = await readMobileMutationBody(request, ['content']);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as { content?: unknown } | null;
   if (typeof body?.content !== 'string')
     return mobileJson({ error: 'content is required' }, { status: 400 });
   const result = await getOwnerMemoryCommands().correctMemory(id, body.content);
@@ -27,7 +30,9 @@ export async function POST(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid memory id' }, { status: 400 });
-  const body = (await request.json().catch(() => null)) as {
+  const mutationBody = await readMobileMutationBody(request, ['action', 'prominence']);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as {
     action?: unknown;
     prominence?: unknown;
   } | null;

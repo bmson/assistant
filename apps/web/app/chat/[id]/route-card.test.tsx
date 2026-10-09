@@ -1,6 +1,11 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { cardsReplaceProse, ResponseCards, rendersAllCards } from './response-card';
+import {
+  cardsReplaceProse,
+  ResponseCards,
+  rendersAllCards,
+  rendersSomeCards,
+} from './response-card';
 import { formatDistance, formatDuration } from './route-card';
 
 const card = {
@@ -51,5 +56,19 @@ describe('route card', () => {
       <ResponseCards cards={[{ ...card, mapsUrl: 'https://evil.example/' }]} timeZone="UTC" />,
     );
     expect(html).not.toContain('evil.example');
+  });
+
+  it('keeps prose fallback and labels missing or invalid measurements as unavailable', () => {
+    for (const value of [undefined, null, '540', -1]) {
+      const invalid = { ...card, durationSeconds: value };
+      expect(rendersAllCards([invalid])).toBe(false);
+      expect(rendersSomeCards([invalid])).toBe(true);
+      const html = renderToStaticMarkup(<ResponseCards cards={[invalid]} timeZone="UTC" />);
+      expect(html).toContain('Duration unavailable');
+    }
+    const invalidDistance = { ...card, distanceMeters: -10 };
+    expect(rendersAllCards([invalidDistance])).toBe(false);
+    const html = renderToStaticMarkup(<ResponseCards cards={[invalidDistance]} timeZone="UTC" />);
+    expect(html).toContain('Distance unavailable');
   });
 });

@@ -109,3 +109,14 @@ describe('validitySuffix', () => {
     expect(span(null, '2027-01-01')).toBe(' (until 2027-01-01)');
   });
 });
+
+describe('future validity', () => {
+  it('does not present a future-starting fact as current', () => {
+    const at = new Date('2026-10-07Z');
+    const from = new Date('2099-01-01Z');
+    expect(isCurrentAt(null, at, from)).toBe(false);
+    expect(validitySuffix({ validFrom: from, validUntil: null }, at)).toBe(
+      ' (future: from 2099-01-01)',
+    );
+  });
+});

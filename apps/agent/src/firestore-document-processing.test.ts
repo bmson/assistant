@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Db } from '@assistant/db';
 import { createFirestoreExecutionPersistence } from '@assistant/firestore';
 import type { ExecutionPersistence } from '@assistant/persistence';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   recordDocumentProcessorResult,
   runDocumentProcessing,
@@ -84,6 +84,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           processorStartedAt: null,
           processorAttempts: 0,
           processedTextPath: null,
+          extractionMetadata: null,
           createdAt: now,
           updatedAt: now,
           ...extra,
@@ -153,9 +154,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         documentId: id,
         enqueued: true,
       });
-      expect(await callback(id, launch?.callbackToken ?? '', { ok: true })).toMatchObject({
-        ok: false,
-        status: 409,
+      expect(await callback(id, launch?.callbackToken ?? '', { ok: true })).toEqual({
+        ok: true,
+        documentId: id,
+        enqueued: true,
       });
       const doc = (await store.doc('documents', id).get()).data();
       expect(doc?.processedTextPath).toBe(`documents/${id}/extracted.txt`);
@@ -188,6 +190,83 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect((await store.doc('documents', exhausted).get()).get('status')).toBe('failed');
       expect(launches.map((launch) => launch.documentId)).toEqual([stale]);
       expect((await store.doc('documents', stale).get()).get('processorAttempts')).toBe(2);
+    });
+    it('keeps the third live attempt valid and excludes accepted text from future launches', async () => {
+      const id = await pdf({ processorAttempts: 2 });
+      await run(id);
+      await run(id);
+      expect(launches).toHaveLength(1);
+      expect((await store.doc('documents', id).get()).get('processorAttempts')).toBe(3);
+      expect((await store.doc('documents', id).get()).get('status')).toBe('pending');
+      expect((await callback(id, launches[0]?.callbackToken ?? '', { ok: true })).ok).toBe(true);
+      await store
+        .doc('documents', id)
+        .update({ processorStartedAt: new Date(Date.now() - 86_400_000) });
+      await run(id);
+      expect(launches).toHaveLength(1);
+      expect((await store.doc('documents', id).get()).get('status')).toBe('pending');
+    });
+    it('fences a stale release after a newer claim', async () => {
+      const id = await pdf();
+      const repository = persistence.documentProcessor;
+      if (!repository) throw new Error('missing repository');
+      const now = new Date();
+      expect(
+        await repository.claim(id, { tokenHash: 'first', now, staleBefore: now, maxAttempts: 3 }),
+      ).toBe(true);
+      expect(
+        await repository.claim(id, {
+          tokenHash: 'newer',
+          now: new Date(now.getTime() + 16 * 60_000),
+          staleBefore: new Date(now.getTime() + 60_000),
+          maxAttempts: 3,
+        }),
+      ).toBe(true);
+      await repository.release(id, new Date(), 'first');
+      expect((await store.doc('documents', id).get()).get('processorTokenHash')).toBe('newer');
+    });
+    it('commits extraction wake and successful result together across failed settlement and replay', async () => {
+      const id = await pdf();
+      await run(id);
+      const token = launches[0]?.callbackToken ?? '';
+      const original = store.db.runTransaction.bind(store.db);
+      const fault = vi.spyOn(store.db, 'runTransaction').mockImplementation((action) =>
+        original(async (tx) =>
+          action(
+            new Proxy(tx, {
+              get(target, key) {
+                if (key === 'update')
+                  return (ref: { path: string }, values: Record<string, unknown>) => {
+                    if (values.processedTextPath) throw new Error('callback commit interrupted');
+                    return Reflect.apply(target.update, target, [ref, values]);
+                  };
+                const value = Reflect.get(target, key, target);
+                return typeof value === 'function' ? value.bind(target) : value;
+              },
+            }),
+          ),
+        ),
+      );
+      try {
+        await expect(callback(id, token, { ok: true })).rejects.toThrow(
+          'callback commit interrupted',
+        );
+      } finally {
+        fault.mockRestore();
+      }
+      expect((await store.doc('documents', id).get()).get('processedTextPath')).toBeNull();
+      expect((await store.collection('tasks').get()).size).toBe(0);
+      expect((await store.collection('outbox').get()).size).toBe(0);
+      const outcome = await callback(id, token, { ok: true });
+      // A fresh composition after process loss sees the same durable receipt.
+      persistence = createFirestoreExecutionPersistence(store, agentId, SPACE);
+      expect(await callback(id, token, { ok: true })).toEqual(outcome);
+      expect((await store.collection('tasks').get()).size).toBe(1);
+      expect((await store.collection('outbox').get()).size).toBe(1);
+      expect(await callback(id, token, { ok: true, kind: 'text' })).toMatchObject({
+        ok: false,
+        status: 409,
+      });
     });
   },
 );

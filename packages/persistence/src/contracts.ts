@@ -31,6 +31,8 @@ export interface CostEventInput {
   unitPriceUsd?: number;
   description?: string;
   reservationId?: string;
+  /** Stable operation identity for safe replay after an ambiguous commit. */
+  idempotencyKey?: string;
   addToTaskSpend?: boolean;
 }
 
@@ -58,11 +60,30 @@ export interface ReservationActual {
   description?: string;
 }
 
+/** Privacy-minimized provider dispatch metadata; never store prompt content here. */
+export interface CostAttemptMetadata {
+  provider: string;
+  model: string;
+  role: string;
+  requestDigest: string;
+  inputTokenEstimate: number;
+  outputTokenLimit: number;
+  reasoning: 'enabled' | 'disabled' | 'unsupported' | 'unknown';
+}
+
 export interface CostRepository {
   readonly kind: 'cost-repository';
   getRate(key: string): Promise<{ unit: string; unitPriceUsd: number } | null>;
   totals(): Promise<CostTotals>;
   reserve(input: ReserveCostInput): Promise<ReserveOutcome>;
+  /** Durably mark the one provider dispatch before network work begins. False means already dispatched/closed. */
+  beginAttempt(reservationId: string, metadata: CostAttemptMetadata): Promise<boolean>;
+  /** Keep the estimate as a held liability when a paid result or metering is uncertain. */
+  markAttemptUnknown(
+    reservationId: string,
+    reason: string,
+    providerReceipt?: { requestId?: string; endpoint?: string },
+  ): Promise<void>;
   record(input: CostEventInput): Promise<void>;
   reconcile(reservationId: string, actual: ReservationActual): Promise<void>;
   release(reservationId: string): Promise<void>;
@@ -93,6 +114,8 @@ export function nextUtcMonthlyReset(from = new Date()): Date {
 /** Timestamp enforces expiry; the opaque token fences replaced leases. Null supports existing PostgreSQL leases during upgrade. */
 export type TaskLease = Records['tasks'] & { lockedUntil: Date };
 export interface TaskCheckpoint {
+  /** Metadata alone is durable state, not proof of a completed work step. */
+  preserveFailureCounters?: boolean;
   progress?: string;
   progressPercent?: number | null;
   nextAction?: string;
@@ -113,6 +136,10 @@ export interface AppendMessageInput {
   parts: unknown[];
   text: string;
   channelMessageId?: string;
+  /** Present only for dashboard notification append; checked inside the message transaction. */
+  notificationOutboxFence?: import('./generated-cards.js').NotificationOutboxAppendFence;
+  /** A delayed application-confirmation task result; checked in the same append transaction. */
+  applicationConfirmationNoticeFence?: import('./application-confirmation-notice.js').ApplicationConfirmationNoticeFence;
 }
 export interface MessageRepository {
   readonly kind: 'message-repository';

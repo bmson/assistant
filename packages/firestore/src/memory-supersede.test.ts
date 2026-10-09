@@ -49,6 +49,7 @@ function memory(
     ownerConfirmed: false,
     pinned: false,
     source: 'test',
+    embeddingSpaceKey: null,
     lastAccessedAt: null,
     lastConsolidatedAt: null,
     ...input,

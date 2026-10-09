@@ -8,6 +8,7 @@ import {
   createInstallationStore,
   FirestoreOwnerAuthRepository,
 } from '@assistant/firestore';
+import { chatAdmissionPayload } from '@assistant/persistence';
 import {
   type ConsumerInstallDependencies,
   type ConsumerInstallOptions,
@@ -28,7 +29,7 @@ import {
 } from './consumer-runtime-seed.js';
 import { createGcloudAuthClient } from './gcloud-auth.js';
 
-const usage = `Usage: pnpm consumer:install --manifest PATH --archive PATH --state PATH --state-bucket NAME --terraform-dir PATH [--seed-plan PATH] [--gcloud-auth] [--images PATH --runtime-config PATH] [--owner-access-callback HTTPS_URL] [--issue-owner-claim] [--verify [--owner-signed-in]] [--apply]
+const usage = `Usage: pnpm consumer:install --manifest PATH --archive PATH --state PATH --state-bucket NAME --terraform-dir PATH [--seed-plan PATH] [--gcloud-auth] [--images PATH --runtime-config PATH] [--owner-access-callback HTTPS_URL] [--issue-owner-claim] [--verify [--owner-signed-in] --native-app-version VERSION --native-pairing-confirmed] [--apply]
 
 Without --apply this verifies the release archive, customer project billing, and selected Firestore database absence.
 With --apply it bootstraps customer-owned state, runs Terraform, and records resumable foundation stages.
@@ -37,7 +38,7 @@ Supply --seed-plan with an explicit customer runtime seed plan to create require
 With --seed-plan, --gcloud-auth uses the active gcloud account in memory for the Firestore seed when ADC is unavailable. Terraform can use a short-lived GOOGLE_OAUTH_ACCESS_TOKEN from the active gcloud login.
 On an initialized private runtime, pass --owner-access-callback with the exact Google OAuth Web client redirect URI. Preview is read-only; --apply grants public invocation to web only after the customer has configured the OAuth client and HTTPS routing.
 With a passkey runtime config ("ownerAuth": "passkey"), no Google OAuth client is used: the installer generates the session secret, makes web public at deploy (application sign-in is claim-protected), and --issue-owner-claim --apply prints a one-time 24-hour setup link for the owner passkey.
---verify runs the final readiness checks (revisions, public health on the release, owner claimed or --owner-signed-in, runtime data, a recorded model response); with --apply a full pass records the ready stage.
+--verify runs the native-first readiness checks (operator-confirmed installed app version and authenticated pairing, revisions, release health, owner authentication, runtime data, a post-installation owner conversation and model response); with --apply a full pass records the ready stage.
 On an already provisioned foundation, --build-images --runtime-config PATH --apply builds and pushes the exact source commit's web and agent images into the customer repository, then deploys those digests. Docker Buildx and an active customer gcloud login are required; Docker authentication is configured for this run.
 `;
 
@@ -231,12 +232,130 @@ export async function provisionConsumerInstallationWithPublishedImages(
   }
 }
 
-async function modelResponseObserved(store: ReturnType<typeof createInstallationStore>) {
-  const recent = await store.collection('modelCalls').orderBy('createdAt', 'desc').limit(20).get();
-  return recent.docs.some((doc) => {
-    const data = doc.data() as { outputTokens?: unknown; model?: unknown };
-    return typeof data.outputTokens === 'number' && data.outputTokens > 0;
-  });
+async function ownerReplyDelivered(
+  store: ReturnType<typeof createInstallationStore>,
+  context: ConsumerVerifyContext,
+): Promise<boolean> {
+  const asDate = (value: unknown): Date | null => {
+    if (value instanceof Date) return value;
+    if (value && typeof value === 'object' && 'toDate' in value) {
+      const converted = (value as { toDate?: unknown }).toDate;
+      if (typeof converted === 'function') {
+        const date = converted.call(value);
+        if (date instanceof Date) return date;
+      }
+    }
+    return null;
+  };
+  const initializedAt = new Date(context.runtimeInitializedAt);
+  if (!Number.isFinite(initializedAt.getTime())) return false;
+  const recentCalls = await store
+    .collection('modelCalls')
+    .where('createdAt', '>=', initializedAt)
+    .orderBy('createdAt', 'desc')
+    .limit(50)
+    .get();
+  for (const callDoc of recentCalls.docs) {
+    const call = callDoc.data() as {
+      outputTokens?: unknown;
+      taskId?: unknown;
+      createdAt?: unknown;
+      runtimeRevision?: unknown;
+      runtimeReleaseSha?: unknown;
+    };
+    if (
+      typeof call.outputTokens !== 'number' ||
+      call.outputTokens <= 0 ||
+      typeof call.taskId !== 'string' ||
+      call.runtimeRevision !== context.servingAgentRevision ||
+      call.runtimeReleaseSha !== context.releaseSha
+    )
+      continue;
+    const taskSnapshot = await store.doc('tasks', call.taskId).get();
+    if (!taskSnapshot.exists) continue;
+    const task = taskSnapshot.data() as {
+      agentId?: unknown;
+      trust?: unknown;
+      type?: unknown;
+      status?: unknown;
+      conversationId?: unknown;
+      trigger?: unknown;
+      createdAt?: unknown;
+    };
+    const admission = chatAdmissionPayload(task as Parameters<typeof chatAdmissionPayload>[0]);
+    const taskCreatedAt = asDate(task.createdAt);
+    if (
+      task.agentId !== context.agentId ||
+      task.trust !== 'owner' ||
+      task.type !== 'chat_turn' ||
+      task.status !== 'done' ||
+      !admission ||
+      typeof task.conversationId !== 'string' ||
+      !(taskCreatedAt instanceof Date) ||
+      taskCreatedAt < initializedAt
+    )
+      continue;
+    const callAt = asDate(call.createdAt);
+    if (!(callAt instanceof Date)) continue;
+    const messages = await store.collection('messages').where('taskId', '==', call.taskId).get();
+    const request = messages.docs.find((messageDoc) => {
+      const message = messageDoc.data() as {
+        role?: unknown;
+        origin?: unknown;
+        text?: unknown;
+        createdAt?: unknown;
+        clientId?: unknown;
+        conversationId?: unknown;
+      };
+      const createdAt = asDate(message.createdAt);
+      return (
+        message.role === 'user' &&
+        message.origin === 'owner' &&
+        messageDoc.get('id') === admission.triggerMessageId &&
+        message.conversationId === task.conversationId &&
+        typeof message.text === 'string' &&
+        message.text.trim().length > 0 &&
+        typeof message.clientId === 'string' &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(message.clientId) &&
+        typeof message.conversationId === 'string' &&
+        createdAt instanceof Date &&
+        createdAt >= initializedAt &&
+        createdAt <= callAt
+      );
+    });
+    if (!request) continue;
+    const requestData = request.data() as { clientId?: unknown; conversationId?: unknown };
+    const replies = messages.docs.filter((messageDoc) => {
+      const message = messageDoc.data() as {
+        role?: unknown;
+        origin?: unknown;
+        text?: unknown;
+        createdAt?: unknown;
+        conversationId?: unknown;
+        clientDeliveredAt?: unknown;
+        clientDeliveredBy?: unknown;
+      };
+      const createdAt = asDate(message.createdAt);
+      const deliveredAt = asDate(message.clientDeliveredAt);
+      return (
+        message.role === 'assistant' &&
+        message.origin === 'assistant' &&
+        message.conversationId === task.conversationId &&
+        typeof message.text === 'string' &&
+        message.text.trim().length > 0 &&
+        typeof message.conversationId === 'string' &&
+        deliveredAt instanceof Date &&
+        typeof message.clientDeliveredBy === 'string' &&
+        createdAt instanceof Date &&
+        createdAt >= initializedAt &&
+        deliveredAt >= createdAt &&
+        createdAt >= callAt &&
+        message.clientDeliveredBy === requestData.clientId
+      );
+    });
+    if (replies.length) return true;
+  }
+  return false;
 }
 
 type StoreFactory = (authClient?: AuthClient) => ReturnType<typeof createInstallationStore>;
@@ -259,7 +378,7 @@ export function firestoreReadinessEvidence(
           ready: preflight.ready,
           issues: preflight.issues.map((issue) => `${issue.code}:${issue.subject}`),
         },
-        modelResponseObserved: await modelResponseObserved(store),
+        ownerReplyDelivered: await ownerReplyDelivered(store, context),
       };
     } finally {
       await store.db.terminate();
@@ -318,6 +437,8 @@ async function main(): Promise<void> {
       'issue-owner-claim': { type: 'boolean', default: false },
       verify: { type: 'boolean', default: false },
       'owner-signed-in': { type: 'boolean', default: false },
+      'native-app-version': { type: 'string' },
+      'native-pairing-confirmed': { type: 'boolean', default: false },
       state: { type: 'string' },
       'state-bucket': { type: 'string' },
       'terraform-dir': { type: 'string' },
@@ -350,6 +471,8 @@ async function main(): Promise<void> {
     (values['build-images'] || values['seed-plan'])
   )
     throw new Error('--verify and --issue-owner-claim run on an already deployed runtime');
+  if ((values['native-app-version'] || values['native-pairing-confirmed']) && !values.verify)
+    throw new Error('Native client confirmation only applies to --verify');
   if (values['owner-signed-in'] && !values.verify)
     throw new Error('--owner-signed-in only applies to --verify');
   const options: ConsumerInstallOptions = {
@@ -389,6 +512,8 @@ async function main(): Promise<void> {
     options.verify = {
       evidence: firestoreReadinessEvidence(createStore, seedAuthClient),
       ownerSignInConfirmed: values['owner-signed-in'] === true,
+      nativeAppVersion: values['native-app-version'],
+      nativePairingConfirmed: values['native-pairing-confirmed'] === true,
     };
   const installOptions = {
     ...options,

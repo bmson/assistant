@@ -1,3 +1,5 @@
+import { projectMobileCardCapabilities } from '@/lib/mobile-card-capabilities';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getChatApplication } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -14,7 +16,7 @@ export async function GET(
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid chat id' }, { status: 400 });
   const conversation = await getChatApplication().getChatConversation(id, {});
   return conversation
-    ? mobileJson(conversation)
+    ? mobileJson(projectMobileCardCapabilities(conversation, request))
     : mobileJson({ error: 'chat not found' }, { status: 404 });
 }
 
@@ -26,7 +28,9 @@ export async function POST(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid chat id' }, { status: 400 });
-  const body = (await request.json().catch(() => null)) as {
+  const mutationBody = await readMobileMutationBody(request, ['action', 'modelId']);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as {
     action?: unknown;
     modelId?: unknown;
   } | null;

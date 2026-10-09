@@ -38,6 +38,11 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore pulse job', () 
       router: unavailable('router') as ExecutorDeps['router'],
       dispatcher: unavailable('dispatcher') as ExecutorDeps['dispatcher'],
       persistence,
+      emailThreadReader: async ({ threadId }) => ({
+        threadId,
+        latestMessageId: threadId.replace(/^thread:/, ''),
+        latestReceivedAt: at(-4),
+      }),
     };
     await put('agents', {
       id: agentId,
@@ -94,6 +99,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore pulse job', () 
       agentId,
       conversationId: null,
       channelMessageId,
+      providerMessageId: channelMessageId,
+      providerThreadId: `thread:${channelMessageId}`,
+      providerReceivedAt: at(-4),
       category: 'personal',
       importance,
       reason: 'internal rationale',
@@ -103,6 +111,8 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore pulse job', () 
       contentTrust: 'external',
       authenticated: true,
       actionable: true,
+      pipelineStage: 'complete',
+      obligationStatus: 'open',
       dates: [],
       triaged: true,
       extractedAt: null,
@@ -154,24 +164,52 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore pulse job', () 
     // Just arrived: the arrival alert is still the latest word on it.
     await mail('mail-fresh', 5, { createdAt: at(-1), updatedAt: at(-1) });
 
-    expect(await runJob()).toBe('pulse: mail-action delivered with a suggestion, 2 candidate(s)');
+    expect(await runJob()).toBe('pulse: mail-action delivered with a suggestion, 4 candidate(s)');
     const [notice] = await notices();
-    expect(notice?.text).toBe('Still open: “Lease question mail-open” from Landlord');
+    expect(notice?.text).toBe(
+      'You confirmed this still needed attention: “Lease question mail-handled” from Landlord',
+    );
     const suggestion = await store
       .collection('suggestions')
-      .where('sourceRef', '==', 'pulse:mail-open')
+      .where('sourceRef', '==', 'pulse:mail-handled')
       .get();
     expect(suggestion.size).toBe(1);
     expect(suggestion.docs[0]?.get('origin')).toBe('pulse');
 
     const moments = await store.collection('proactiveMoments').get();
     expect(moments.docs.map((doc) => [doc.get('momentKey'), doc.get('pinged')])).toEqual([
-      ['mail-action:mail-open', false],
+      ['mail-action:mail-handled', false],
     ]);
 
     // Inside the hour after speaking, the pulse stays quiet.
     expect(await runJob()).toBe('pulse: quiet (min-gap)');
     expect(await notices()).toHaveLength(1);
+  });
+
+  it('holds a thread with a later provider reply while unrelated commitments still surface', async () => {
+    await mail('mail-old', 5);
+    await commitment('Quarterly report', 3);
+    deps.emailThreadReader = async ({ threadId }) => ({
+      threadId,
+      latestMessageId: 'owner-reply',
+      latestReceivedAt: at(-1),
+    });
+    expect(await runJob()).toBe('pulse: commitment-due delivered, 1 candidate(s)');
+    expect((await store.collection('suggestions').get()).size).toBe(0);
+    expect((await notices())[0]?.text).toContain('Quarterly report');
+  });
+
+  it('rechecks owner decisions at admission after provider metadata succeeds', async () => {
+    const id = await mail('mail-resolved', 5);
+    deps.emailThreadReader = async ({ threadId }) => {
+      await store
+        .doc('emailIngest', id)
+        .update({ obligationStatus: 'resolved', obligationVersion: 1 });
+      return { threadId, latestMessageId: 'mail-resolved', latestReceivedAt: at(-4) };
+    };
+    expect(await runJob()).toBe('pulse: quiet (stale-source)');
+    expect(await notices()).toHaveLength(0);
+    expect((await store.collection('suggestions').get()).size).toBe(0);
   });
 
   it('delivers the next moment after the gap and never repeats one already said', async () => {
@@ -189,7 +227,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore pulse job', () 
 
     // The stronger mail candidate was already said outside the gap. It must
     // not hide the new commitment, and it must not be announced again.
-    expect(await runJob()).toBe('pulse: commitment-due delivered, 2 candidate(s)');
+    expect(await runJob()).toBe('pulse: commitment-due delivered, 1 candidate(s)');
     expect((await notices()).map((row) => row.text)).toEqual([
       expect.stringMatching(/^"Quarterly report" is due .* — next: Send the draft\.$/),
     ]);

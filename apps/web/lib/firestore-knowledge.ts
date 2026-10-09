@@ -1,22 +1,19 @@
-import {
-  correctKnowledgeGraphRelationWith,
-  GRAPH_EXTRACTION_VERSION,
-  knowledgeGraphCurationCommands,
-  knowledgeWorkspaceQueries,
-} from '@assistant/application';
+import { knowledgeGraphCurationCommands, knowledgeWorkspaceQueries } from '@assistant/application';
 import { profileLibraryQueries } from '@assistant/application/profile';
-import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
+import {
+  loadConfig,
+  parseFirestoreEmbeddingSpace,
+  validateAgentPersistenceConfig,
+} from '@assistant/config';
 import {
   assertPrivacyErasureFenceUnchanged,
   FirestoreKnowledgeGraphCurationRepository,
-  FirestoreKnowledgeGraphRelationMutationRepository,
   FirestoreKnowledgeWorkspaceReadRepository,
   FirestoreProfileLibraryRepository,
-  getFirestoreKnowledgeGraphRelation,
   readPrivacyErasureFence,
 } from '@assistant/firestore';
 import {
-  addOwnerKnowledgeGraphFactForCurrentPersistence,
+  correctOwnerKnowledgeGraphFactForCurrentPersistence,
   getFirestoreInstallationStore,
 } from '@/lib/server';
 
@@ -32,7 +29,13 @@ function firestoreOwner() {
 /** SQL-free knowledge workspace reads for the configured Firestore owner. */
 export function getFirestoreKnowledgeWorkspace() {
   const { store, agentId } = firestoreOwner();
-  return knowledgeWorkspaceQueries(new FirestoreKnowledgeWorkspaceReadRepository(store, agentId));
+  return knowledgeWorkspaceQueries(
+    new FirestoreKnowledgeWorkspaceReadRepository(
+      store,
+      agentId,
+      parseFirestoreEmbeddingSpace(loadConfig().FIRESTORE_EMBEDDING_SPACE),
+    ),
+  );
 }
 
 /** Owner rename, retype, merge, orphan removal, retry, and search on the Firestore graph. */
@@ -44,27 +47,12 @@ export function getFirestoreKnowledgeCuration() {
   );
 }
 
-/** Save the owner's replacement fact, then retire the corrected relation. */
+/** Compatibility entry point; correction and source retirement share one transaction. */
 export function correctFirestoreKnowledgeRelation(
   relationId: string,
-  input: Parameters<typeof addOwnerKnowledgeGraphFactForCurrentPersistence>[0],
+  input: Parameters<typeof correctOwnerKnowledgeGraphFactForCurrentPersistence>[1],
 ) {
-  const { store, agentId } = firestoreOwner();
-  return correctKnowledgeGraphRelationWith(
-    {
-      relationExists: async (id) =>
-        (await getFirestoreKnowledgeGraphRelation(store, agentId, GRAPH_EXTRACTION_VERSION, id)) !==
-        null,
-      addFact: addOwnerKnowledgeGraphFactForCurrentPersistence,
-      reject: (id) =>
-        new FirestoreKnowledgeGraphRelationMutationRepository(store, agentId).review(
-          id,
-          'rejected',
-        ),
-    },
-    relationId,
-    input,
-  );
+  return correctOwnerKnowledgeGraphFactForCurrentPersistence(relationId, input);
 }
 
 /** The memory library page and its filters, fenced by the owner and privacy erasure. */

@@ -6,6 +6,7 @@ import {
   suggestions,
   tasks,
   watches,
+  watchFireEffects,
   watchFires,
 } from '@assistant/db';
 import { eq, inArray, like } from 'drizzle-orm';
@@ -74,6 +75,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (dbUp) {
     await db.delete(suggestions).where(like(suggestions.sourceRef, `watch:${watchId}:%`));
+    await db.delete(watchFireEffects).where(eq(watchFireEffects.agentId, agentId));
     await db.delete(watchFires).where(eq(watchFires.watchId, watchId));
     await db.delete(watches).where(eq(watches.id, watchId));
     if (acceptedTaskIds.length) {
@@ -128,8 +130,15 @@ describe('runWatchSuggest', () => {
     if (!dbUp) return ctx.skip();
     // Same trigger as the previous test: re-running proposes nothing twice
     // and posts no second message — the sourceRef and channelMessageId fences.
+    let modelCalled = false;
+    const retryRouter = {
+      async object() {
+        modelCalled = true;
+        throw new Error('changed retry model verdict');
+      },
+    } as unknown as ModelRouter;
     const result = await runWatchSuggest(
-      { db, router: fakeRouter(GOOD_DRAFT) },
+      { db, router: retryRouter },
       { agentId, watchId, triggerRef: 'gmail:msg-a' },
     );
     const posted = await db
@@ -138,6 +147,90 @@ describe('runWatchSuggest', () => {
       .where(eq(messages.conversationId, conversationId));
     expect(posted).toHaveLength(1);
     expect(result.suggested).toBe(true);
+    expect(modelCalled).toBe(false);
+  });
+
+  it('recovers an atomically prepared proposal after a crash before message append', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const triggerRef = 'gmail:msg-crash-before-append';
+    const fireId = await addFire(triggerRef);
+    const { createPostgresWatchRepository } = await import('@assistant/db');
+    const committed = await createPostgresWatchRepository(db).commitSuggestion({
+      agentId,
+      watchId,
+      triggerRef,
+      summary: GOOD_DRAFT.summary,
+      proposedAction: GOOD_DRAFT.proposedAction,
+    });
+    if (!committed) throw new Error('suggestion fixture failed');
+    expect(
+      await db
+        .select()
+        .from(messages)
+        .where(eq(messages.channelMessageId, `watch-suggest:${fireId}`)),
+    ).toHaveLength(0);
+
+    let modelCalled = false;
+    const result = await runWatchSuggest(
+      {
+        db,
+        router: {
+          async object() {
+            modelCalled = true;
+            throw new Error('model unavailable after restart');
+          },
+        } as unknown as ModelRouter,
+      },
+      { agentId, watchId, triggerRef },
+    );
+    expect(result.suggested).toBe(true);
+    expect(modelCalled).toBe(false);
+    expect(
+      await db
+        .select()
+        .from(messages)
+        .where(eq(messages.channelMessageId, `watch-suggest:${fireId}`)),
+    ).toHaveLength(1);
+  });
+
+  it('does not surface a committed suggestion accepted before its message leg runs', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const triggerRef = 'gmail:msg-accepted-before-delivery';
+    await addFire(triggerRef);
+    const { createPostgresWatchRepository } = await import('@assistant/db');
+    const repository = createPostgresWatchRepository(db);
+    const committed = await repository.commitSuggestion({
+      agentId,
+      watchId,
+      triggerRef,
+      summary: `${MARKER} already accepted`,
+      proposedAction: `Do the accepted work. ${MARKER}`,
+    });
+    if (!committed) throw new Error('suggestion fixture failed');
+    const accepted = await acceptSuggestion(db, committed.suggestion.id);
+    expect(accepted.ok).toBe(true);
+    if (accepted.ok) acceptedTaskIds.push(accepted.taskId);
+
+    let modelCalled = false;
+    const result = await runWatchSuggest(
+      {
+        db,
+        router: {
+          async object() {
+            modelCalled = true;
+            throw new Error('must not recompose an existing proposal');
+          },
+        } as unknown as ModelRouter,
+      },
+      { agentId, watchId, triggerRef },
+    );
+    expect(result.suggested).toBe(false);
+    expect(modelCalled).toBe(false);
+    const posted = await db
+      .select()
+      .from(messages)
+      .where(eq(messages.channelMessageId, `watch-suggest:${committed.fireId}`));
+    expect(posted).toHaveLength(0);
   });
 
   it('proposes nothing when the composer sees no concrete next step', async (ctx) => {

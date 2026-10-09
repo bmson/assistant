@@ -10,6 +10,7 @@ import {
   type QueryDocumentSnapshot,
   Timestamp,
 } from '@google-cloud/firestore';
+import { decodeMemoryRecord } from './memory-record.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
 const PAGE_SIZE = 200;
@@ -40,7 +41,7 @@ async function collectFacts(query: Query): Promise<PreciseFact[]> {
     if (cursor) pageQuery = pageQuery.startAfter(cursor);
     const page = await pageQuery.get();
     for (const doc of page.docs) {
-      const row = decodeRecord<ProfileFact>(doc.data());
+      const row = decodeMemoryRecord(doc.data());
       if (documentKey(row.id) !== doc.id || !(row.createdAt instanceof Date)) continue;
       const createdAt = doc.get('createdAt');
       rows.push({

@@ -1,15 +1,90 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Records, WatchCreateInput, WatchRepository } from '@assistant/persistence';
-import type { QueryDocumentSnapshot } from '@google-cloud/firestore';
+import type { DocumentSnapshot, QueryDocumentSnapshot } from '@google-cloud/firestore';
+import { conversationDocument } from './conversation-document.js';
 import { isEmulatorClosedTransaction } from './emulator-transaction.js';
+import { assertPrivacyErasureInactiveInTransaction } from './privacy-erasure.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
+import { suggestionIdFor } from './suggestions.js';
 
 type Watch = Records['watches'];
+type FireEffect = Records['watchFireEffects'];
 
-function watchSuggestionId(agentId: string, sourceRef: string): string {
-  return `watch-suggestion:${createHash('sha256')
-    .update(JSON.stringify([agentId, sourceRef]))
-    .digest('hex')}`;
+function fireEffectDocumentId(fireId: string, kind: string): string {
+  return createHash('sha256').update(`${fireId}:${kind}`).digest('hex');
+}
+
+function sourceEventId(triggerRef: string): string {
+  const separator = triggerRef.indexOf(':');
+  return separator < 0 ? triggerRef : triggerRef.slice(separator + 1);
+}
+
+function fireEffectRecord(
+  watch: Watch,
+  fire: Records['watchFires'],
+  kind: FireEffect['kind'],
+  payload: unknown,
+  now: Date,
+  status: string = 'pending',
+): FireEffect {
+  return {
+    id: fireEffectDocumentId(fire.id, kind),
+    agentId: watch.agentId,
+    watchId: watch.id,
+    fireId: fire.id,
+    kind,
+    status,
+    idempotencyKey: `watch-fire:${watch.id}:${fire.triggerRef}:${kind}`,
+    payload,
+    attempts: 0,
+    claimedAt: null,
+    leaseUntil: null,
+    result: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function effectsForFire(watch: Watch, fire: Records['watchFires'], now: Date): FireEffect[] {
+  const effects = [
+    fireEffectRecord(
+      watch,
+      fire,
+      'dashboard_notice',
+      watch.conversationId
+        ? {
+            conversationId: watch.conversationId,
+            text: fire.summary,
+            channelMessageId: `watch-fire:${watch.id}:${sourceEventId(fire.triggerRef)}`,
+          }
+        : { reason: 'watch has no conversation' },
+      now,
+      watch.conversationId ? 'pending' : 'skipped',
+    ),
+    fireEffectRecord(
+      watch,
+      fire,
+      'owner_notification',
+      { text: fire.summary, urgency: 'ambient' },
+      now,
+    ),
+  ];
+  if (watch.tier === 'suggest')
+    effects.push(
+      fireEffectRecord(
+        watch,
+        fire,
+        'suggestion_enqueue',
+        {
+          agentId: watch.agentId,
+          watchId: watch.id,
+          triggerRef: fire.triggerRef,
+          externalEventId: `watch-suggest:${watch.id}:${sourceEventId(fire.triggerRef)}`,
+        },
+        now,
+      ),
+    );
+  return effects;
 }
 
 function notificationsConversationId(agentId: string): string {
@@ -70,14 +145,13 @@ export class FirestoreWatchRepository implements WatchRepository {
       } else {
         tx.create(
           conversation,
-          encodeRecord({
+          conversationDocument({
             id: conversationId,
             agentId: input.agentId,
             channel: 'chat',
             trust: 'owner',
             title: `Watch: ${input.name}`.slice(0, 80),
             isPrimary: false,
-            archived: false,
             createdAt: now,
             updatedAt: now,
             archivedAt: null,
@@ -216,11 +290,38 @@ export class FirestoreWatchRepository implements WatchRepository {
     for (let attempt = 0; ; attempt += 1) {
       try {
         return await this.store.db.runTransaction(async (tx) => {
+          await assertPrivacyErasureInactiveInTransaction(tx, this.store, input.agentId);
           const watchSnapshot = await tx.get(watchRef);
           if (!watchSnapshot.exists) return { recorded: false, watch: null };
           const watch = decodeRecord<Watch>(watchSnapshot.data());
           if (watch.agentId !== input.agentId || documentKey(watch.id) !== watchSnapshot.id)
             return { recorded: false, watch: null };
+          const duplicate = await tx.get(
+            this.store
+              .collection('watchFires')
+              .where('agentId', '==', input.agentId)
+              .where('watchId', '==', watch.id)
+              .where('triggerRef', '==', input.triggerRef)
+              .limit(1),
+          );
+          if (!duplicate.empty) {
+            const fireDoc = duplicate.docs[0];
+            if (!fireDoc) return { recorded: false, watch };
+            const fire = decodeRecord<Records['watchFires']>(fireDoc.data());
+            const effects = effectsForFire(watch, fire, input.now);
+            const refs = effects.map((effect) => this.store.doc('watchFireEffects', effect.id));
+            const snapshots: DocumentSnapshot[] = [];
+            for (const ref of refs) snapshots.push(await tx.get(ref));
+            effects.forEach((effect, index) => {
+              if (!snapshots[index]?.exists) {
+                const ref = refs[index];
+                if (ref) tx.create(ref, encodeRecord(effect));
+              }
+            });
+            if (input.state !== undefined)
+              tx.update(watchRef, encodeRecord({ state: input.state, updatedAt: input.now }));
+            return { recorded: false, watch, fireId: fire.id };
+          }
           if (
             watch.status !== 'active' ||
             watch.expiresAt <= input.now ||
@@ -229,18 +330,6 @@ export class FirestoreWatchRepository implements WatchRepository {
             (watch.maxFires != null && watch.fireCount >= watch.maxFires)
           )
             return { recorded: false, watch };
-          const duplicate = await tx.get(
-            this.store
-              .collection('watchFires')
-              .where('watchId', '==', watch.id)
-              .where('triggerRef', '==', input.triggerRef)
-              .limit(1),
-          );
-          if (!duplicate.empty) {
-            if (input.state !== undefined)
-              tx.update(watchRef, encodeRecord({ state: input.state, updatedAt: input.now }));
-            return { recorded: false, watch };
-          }
           const fireCount = watch.fireCount + 1;
           const updated: Watch = {
             ...watch,
@@ -251,26 +340,146 @@ export class FirestoreWatchRepository implements WatchRepository {
             status: watch.maxFires != null && fireCount >= watch.maxFires ? 'fired' : 'active',
           };
           const fireId = randomUUID();
-          tx.create(
-            this.store.doc('watchFires', fireId),
-            encodeRecord({
-              id: fireId,
-              watchId: watch.id,
-              agentId: input.agentId,
-              triggerRef: input.triggerRef,
-              summary: input.summary,
-              excerpt: input.excerpt.slice(0, 2048),
-              createdAt: input.now,
-            }),
-          );
+          const fire = {
+            id: fireId,
+            watchId: watch.id,
+            agentId: input.agentId,
+            triggerRef: input.triggerRef,
+            summary: input.summary,
+            excerpt: input.excerpt.slice(0, 2048),
+            createdAt: input.now,
+          };
+          tx.create(this.store.doc('watchFires', fireId), encodeRecord(fire));
+          for (const effect of effectsForFire(updated, fire, input.now))
+            tx.create(this.store.doc('watchFireEffects', effect.id), encodeRecord(effect));
           tx.set(watchRef, encodeRecord(updated));
-          return { recorded: true, watch: updated };
+          return { recorded: true, watch: updated, fireId };
         });
       } catch (error) {
         if (!isEmulatorClosedTransaction(error) || attempt >= 2) throw error;
         await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
       }
     }
+  }
+
+  async pendingFireEffects(agentId: string, limit = 100): Promise<FireEffect[]> {
+    const cap = Math.max(1, Math.min(500, limit));
+    const [pending, failed] = await Promise.all([
+      this.store
+        .collection('watchFireEffects')
+        .where('agentId', '==', agentId)
+        .where('status', '==', 'pending')
+        .orderBy('updatedAt')
+        .limit(cap)
+        .get(),
+      this.store
+        .collection('watchFireEffects')
+        .where('agentId', '==', agentId)
+        .where('status', '==', 'failed')
+        .orderBy('updatedAt')
+        .limit(cap)
+        .get(),
+    ]);
+    return [...pending.docs, ...failed.docs]
+      .map((doc) => decodeRecord<FireEffect>(doc.data()))
+      .sort((a, b) => a.updatedAt.getTime() - b.updatedAt.getTime())
+      .slice(0, cap);
+  }
+
+  async fireEffectsForFire(agentId: string, fireId: string): Promise<FireEffect[]> {
+    const snapshots = await this.store
+      .collection('watchFireEffects')
+      .where('agentId', '==', agentId)
+      .where('fireId', '==', fireId)
+      .get();
+    return snapshots.docs.map((doc) => decodeRecord<FireEffect>(doc.data()));
+  }
+
+  async claimFireEffect(input: Parameters<WatchRepository['claimFireEffect']>[0]) {
+    const ref = this.store.doc('watchFireEffects', input.effectId);
+    return this.store.db.runTransaction(async (tx) => {
+      await assertPrivacyErasureInactiveInTransaction(tx, this.store, input.agentId);
+      const snapshot = await tx.get(ref);
+      if (!snapshot.exists) return false;
+      const row = decodeRecord<FireEffect>(snapshot.data());
+      if (
+        row.agentId !== input.agentId ||
+        documentKey(row.id) !== snapshot.id ||
+        (row.status !== 'pending' && row.status !== 'failed')
+      )
+        return false;
+      tx.update(ref, {
+        status: 'sending',
+        attempts: row.attempts + 1,
+        claimedAt: input.now,
+        leaseUntil: new Date(input.now.getTime() + Math.max(1000, input.leaseMs)),
+        updatedAt: input.now,
+      });
+      return true;
+    });
+  }
+
+  async finishFireEffect(input: Parameters<WatchRepository['finishFireEffect']>[0]) {
+    const ref = this.store.doc('watchFireEffects', input.effectId);
+    return this.store.db.runTransaction(async (tx) => {
+      await assertPrivacyErasureInactiveInTransaction(tx, this.store, input.agentId);
+      const snapshot = await tx.get(ref);
+      if (!snapshot.exists) return false;
+      const row = decodeRecord<FireEffect>(snapshot.data());
+      if (
+        row.agentId !== input.agentId ||
+        documentKey(row.id) !== snapshot.id ||
+        row.status !== 'sending'
+      )
+        return false;
+      tx.update(
+        ref,
+        encodeRecord({
+          status: input.status,
+          result: input.result ?? null,
+          claimedAt: null,
+          leaseUntil: null,
+          updatedAt: input.now,
+        }),
+      );
+      return true;
+    });
+  }
+
+  async recoverExpiredFireEffectClaims(agentId: string, now: Date): Promise<number> {
+    const expired = await this.store
+      .collection('watchFireEffects')
+      .where('agentId', '==', agentId)
+      .where('status', '==', 'sending')
+      .where('leaseUntil', '<=', now)
+      .limit(400)
+      .get();
+    let recovered = 0;
+    for (const snapshot of expired.docs) {
+      const ref = snapshot.ref;
+      const didRecover = await this.store.db.runTransaction(async (tx) => {
+        const current = await tx.get(ref);
+        if (!current.exists) return false;
+        const row = decodeRecord<FireEffect>(current.data());
+        if (row.status !== 'sending' || !row.leaseUntil || row.leaseUntil > now) return false;
+        tx.update(
+          ref,
+          encodeRecord({
+            status: row.kind === 'owner_notification' ? 'unknown' : 'pending',
+            result:
+              row.kind === 'owner_notification'
+                ? { reason: 'claim expired after notification may have started' }
+                : null,
+            claimedAt: null,
+            leaseUntil: null,
+            updatedAt: now,
+          }),
+        );
+        return true;
+      });
+      if (didRecover) recovered += 1;
+    }
+    return recovered;
   }
 
   async getSuggestionContext(input: Parameters<WatchRepository['getSuggestionContext']>[0]) {
@@ -295,6 +504,78 @@ export class FirestoreWatchRepository implements WatchRepository {
     )
       return null;
     return { watch, fire };
+  }
+
+  async getPreparedSuggestion(input: Parameters<WatchRepository['getPreparedSuggestion']>[0]) {
+    const [fires, suggestions] = await Promise.all([
+      this.store
+        .collection('watchFires')
+        .where('agentId', '==', input.agentId)
+        .where('watchId', '==', input.watchId)
+        .where('triggerRef', '==', input.triggerRef)
+        .limit(1)
+        .get(),
+      this.store
+        .collection('suggestions')
+        .where('agentId', '==', input.agentId)
+        .where('sourceRef', '==', `watch:${input.watchId}:${input.triggerRef}`)
+        .limit(1)
+        .get(),
+    ]);
+    const fireDoc = fires.docs[0];
+    const suggestionDoc = suggestions.docs[0];
+    if (!fireDoc || !suggestionDoc) return null;
+    const fire = decodeRecord<Records['watchFires']>(fireDoc.data());
+    const suggestion = decodeRecord<Records['suggestions']>(suggestionDoc.data());
+    const watchDoc = await this.store.doc('watches', input.watchId).get();
+    if (
+      fire.agentId !== input.agentId ||
+      fire.watchId !== input.watchId ||
+      fire.triggerRef !== input.triggerRef ||
+      suggestion.agentId !== input.agentId ||
+      suggestion.sourceRef !== `watch:${input.watchId}:${input.triggerRef}`
+    )
+      return null;
+    const watch = watchDoc.exists ? decodeRecord<Watch>(watchDoc.data()) : null;
+    if (watch && (watch.agentId !== input.agentId || watch.tier !== 'suggest')) return null;
+    const effectId = fireEffectDocumentId(fire.id, 'suggestion_message');
+    const effectRef = this.store.doc('watchFireEffects', effectId);
+    await this.store.db.runTransaction(async (tx) => {
+      await assertPrivacyErasureInactiveInTransaction(tx, this.store, input.agentId);
+      const snapshot = await tx.get(effectRef);
+      if (snapshot.exists) return;
+      const now = this.store.now();
+      const text = `One more thing from your "${watch?.name ?? 'watch'}" watch:`;
+      const effect: FireEffect = {
+        id: effectId,
+        agentId: input.agentId,
+        watchId: input.watchId,
+        fireId: fire.id,
+        kind: 'suggestion_message',
+        status: suggestion.status === 'pending' ? 'pending' : 'skipped',
+        idempotencyKey: `watch-fire:${input.watchId}:${input.triggerRef}:suggestion_message`,
+        payload: {
+          watchId: input.watchId,
+          triggerRef: fire.triggerRef,
+          conversationId: suggestion.conversationId,
+          suggestionId: suggestion.id,
+          summary: suggestion.summary,
+          proposedAction: suggestion.proposedAction,
+          text,
+          channelMessageId: `watch-suggest:${fire.id}`,
+        },
+        attempts: 0,
+        claimedAt: null,
+        leaseUntil: null,
+        result: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      tx.create(effectRef, encodeRecord(effect));
+    });
+    const effectSnapshot = await effectRef.get();
+    if (!effectSnapshot.exists) return null;
+    return { suggestion, effect: decodeRecord<FireEffect>(effectSnapshot.data()) };
   }
 
   async commitSuggestion(input: Parameters<WatchRepository['commitSuggestion']>[0]) {
@@ -328,7 +609,7 @@ export class FirestoreWatchRepository implements WatchRepository {
     const legacyNotifications = notifications.docs[0];
     const suggestionRef =
       legacySuggestion?.ref ??
-      this.store.doc('suggestions', watchSuggestionId(input.agentId, sourceRef));
+      this.store.doc('suggestions', suggestionIdFor(input.agentId, sourceRef));
     const notificationsRef =
       legacyNotifications?.ref ??
       this.store.doc('conversations', notificationsConversationId(input.agentId));
@@ -390,14 +671,13 @@ export class FirestoreWatchRepository implements WatchRepository {
         const id = notificationsConversationId(input.agentId);
         try {
           await notificationsRef.create(
-            encodeRecord({
+            conversationDocument({
               id,
               agentId: input.agentId,
               channel: 'chat',
               trust: 'assistant',
               title: 'Notifications',
               isPrimary: false,
-              archived: false,
               createdAt: now,
               updatedAt: now,
               archivedAt: null,
@@ -427,7 +707,7 @@ export class FirestoreWatchRepository implements WatchRepository {
     }
 
     if (!suggestion) {
-      const id = watchSuggestionId(input.agentId, sourceRef);
+      const id = suggestionIdFor(input.agentId, sourceRef);
       try {
         await suggestionRef.create(
           encodeRecord({
@@ -507,6 +787,7 @@ export class FirestoreWatchRepository implements WatchRepository {
       const latestSuggestion = await suggestionRef.get();
       if (!latestSuggestion.exists) return null;
       if (!latestSuggestion.updateTime?.isEqual(priorUpdateTime)) continue;
+      await this.getPreparedSuggestion(input);
       return { suggestion, conversationId: selectedId, fireId: fire.id, watchName: watch.name };
     }
     throw new Error('Watch suggestion destination changed during concurrent commits');

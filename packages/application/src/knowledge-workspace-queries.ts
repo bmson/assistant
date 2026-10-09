@@ -1,10 +1,12 @@
 import type { MemoryHealth } from '@assistant/core/memory/health';
 import { GRAPH_EXTRACTION_VERSION } from '@assistant/core/memory/knowledge-graph';
 import type {
+  KnowledgeAssertionEndpointView,
   KnowledgeCleanupSource,
   KnowledgeMapEdgeRecord,
   KnowledgeWorkspaceReadRepository,
 } from '@assistant/persistence';
+import { knowledgeAssertionEndpointView } from '@assistant/persistence';
 import type {
   KnowledgeGraphDuplicate,
   KnowledgeGraphEntityView,
@@ -70,6 +72,7 @@ export interface KnowledgeMapEdge {
   presentation: RelationshipPresentation;
   validFrom: string | null;
   validUntil: string | null;
+  endpointViews?: KnowledgeAssertionEndpointView[];
 }
 
 export interface KnowledgeMapComponent {
@@ -239,6 +242,42 @@ export async function assembleKnowledgeMapSnapshot(input: {
   >();
   const edges: KnowledgeMapEdge[] = [];
   const edgeIds = new Set<string>();
+  const endpointViewsFor = (
+    row: KnowledgeMapEdgeRecord,
+  ): KnowledgeAssertionEndpointView[] | undefined => {
+    const assertion = row.assertionContext;
+    if (
+      !assertion ||
+      assertion.lifecycle !== 'current' ||
+      assertion.subjectEntityId !== row.subjectId ||
+      assertion.predicate !== row.predicate ||
+      assertion.objectEntityId !== row.objectId ||
+      !Number.isInteger(assertion.semanticRevision) ||
+      assertion.semanticRevision < 1
+    )
+      return undefined;
+    const reviewStatus =
+      assertion.reviewStatus === 'confirmed' || assertion.reviewStatus === 'rejected'
+        ? assertion.reviewStatus
+        : 'unreviewed';
+    const views = [row.subjectId, row.objectId].flatMap((id) => {
+      const view = knowledgeAssertionEndpointView({
+        assertionId: assertion.id,
+        semanticRevision: assertion.semanticRevision,
+        subjectEntityId: row.subjectId,
+        subjectLabel: row.subjectLabel,
+        predicate: row.predicate,
+        objectEntityId: row.objectId,
+        objectLabel: row.objectLabel,
+        evidenceQuote: row.evidenceQuote ?? row.sourceContent,
+        evidenceCount: assertion.evidenceCount,
+        reviewStatus,
+        focusEntityId: id,
+      });
+      return view ? [view] : [];
+    });
+    return views.length > 0 ? views : undefined;
+  };
   const appendRow = (row: KnowledgeMapEdgeRecord) => {
     if (edgeIds.has(row.id) || edges.length >= edgeLimit) return;
     const newIds = [row.subjectId, row.objectId].filter((id) => !nodeData.has(id));
@@ -270,6 +309,7 @@ export async function assembleKnowledgeMapSnapshot(input: {
       presentation: presentKnowledgeGraphRelation(row),
       validFrom: row.validFrom,
       validUntil: row.validUntil,
+      endpointViews: endpointViewsFor(row),
     });
   };
   if (input.completeOverview) {

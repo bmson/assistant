@@ -80,7 +80,7 @@ export function resolveAuthMode(options: {
   devBypass: boolean;
   localhostBypass?: boolean;
   authUrl?: string;
-  queueDriver?: 'local' | 'cloudtasks';
+  queueDriver?: 'local' | 'cloudtasks' | 'inert';
   nodeEnv: string | undefined;
   ownerAuthMode?: 'google' | 'passkey';
   persistenceDriver?: 'postgres' | 'firestore';

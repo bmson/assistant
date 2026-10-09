@@ -6,12 +6,17 @@ import {
   presentKnowledgeGraphRelation,
   searchKnowledgeGraphEntities,
 } from '@assistant/application';
-import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
+import {
+  loadConfig,
+  parseFirestoreEmbeddingSpace,
+  validateAgentPersistenceConfig,
+} from '@assistant/config';
 import {
   getFirestoreKnowledgeGraphOverview,
   getFirestoreKnowledgeGraphReviewQueue,
 } from '@assistant/firestore';
 import { getFirestoreKnowledgeCuration } from '@/lib/firestore-knowledge';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import {
   addOwnerKnowledgeGraphFactForCurrentPersistence,
   getDb,
@@ -79,6 +84,8 @@ export async function GET(request: Request): Promise<Response> {
         store,
         config.FIRESTORE_AGENT_ID,
         GRAPH_EXTRACTION_VERSION,
+        undefined,
+        parseFirestoreEmbeddingSpace(config.FIRESTORE_EMBEDDING_SPACE),
       );
       return mobileJson({ relations: rows.map(withPresentation) });
     }
@@ -94,6 +101,7 @@ export async function GET(request: Request): Promise<Response> {
       },
       undefined,
       config.GRAPH_SYNC_BATCH_LIMIT,
+      parseFirestoreEmbeddingSpace(config.FIRESTORE_EMBEDDING_SPACE),
     );
     return mobileJson({ ...graph, relations: graph.relations.map(withPresentation) });
   }
@@ -112,7 +120,18 @@ export async function GET(request: Request): Promise<Response> {
 
 export async function POST(request: Request): Promise<Response> {
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
-  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+  const mutationBody = await readMobileMutationBody(request, [
+    'note',
+    'objectId',
+    'objectKind',
+    'objectLabel',
+    'predicate',
+    'subjectId',
+    'subjectKind',
+    'subjectLabel',
+  ]);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as Record<string, unknown> | null;
   if (!body) return mobileJson({ error: 'invalid connection body' }, { status: 400 });
   const result = await addOwnerKnowledgeGraphFactForCurrentPersistence({
     subjectLabel: typeof body.subjectLabel === 'string' ? body.subjectLabel : '',

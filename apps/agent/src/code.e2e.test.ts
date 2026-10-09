@@ -1,3 +1,4 @@
+import type { Config } from '@assistant/config';
 import type { CodeSpec, InboundEvent, ModelRouter, StepCallOutcome } from '@assistant/core';
 import {
   enqueueTask,
@@ -12,11 +13,19 @@ import {
   costEvents,
   costReservations,
   createDb,
+  createPostgresExecutionPersistence,
   type Db,
+  executionJobCallbackReceipts,
   files,
   tasks,
   toolCalls,
 } from '@assistant/db';
+import {
+  codeModule,
+  type ModulePlatformContext,
+  type ModuleServices,
+  noopOwnerNotifier,
+} from '@assistant/modules';
 import {
   type CodeJobLaunchInput,
   registerCodeTools,
@@ -104,6 +113,53 @@ function makeDispatcher(launches: CodeJobLaunchInput[]) {
   return new ToolDispatcher(db, registry);
 }
 
+async function invokeCodeModuleCallback(
+  taskId: string,
+  token: string,
+  result: Record<string, unknown>,
+) {
+  const config = {
+    CODE_DRIVER: 'local',
+    PUBLIC_URL: 'http://localhost:8787',
+    PROFILE_ENC_KEY: 'synthetic-only',
+    GCP_PROJECT: 'synthetic-project',
+    GCP_LOCATION: 'us-central1',
+    CODE_JOB_NAME: 'synthetic-code',
+    WORKSPACE_BUCKET: 'synthetic-bucket',
+    TRACES_BUCKET: '',
+    ASSISTANT_WORKSPACE_ID: 'synthetic',
+  } as unknown as Config;
+  const registry = new ToolRegistry();
+  const persistence = createPostgresExecutionPersistence(db);
+  const runtime = codeModule.create({
+    config,
+    registry,
+    router: {} as ModelRouter,
+    repoRoot: process.cwd(),
+    workspacePrefix: 'fs13-test',
+    workspaceRoot: process.cwd(),
+    persistence,
+  } as unknown as ModulePlatformContext);
+  const route = runtime.hooks?.webhooks?.find((hook) => hook.path === '/code/callback');
+  if (!route) throw new Error('module callback route is not installed');
+  const services = {
+    config,
+    db,
+    router: {} as ModelRouter,
+    registry,
+    dispatcher: {} as never,
+    workspace: {} as never,
+    ownerNotifier: noopOwnerNotifier,
+    emailObservers: [],
+    persistence,
+  } as unknown as ModuleServices;
+  return route.handler(services, {
+    json: async <T>() => ({ taskId, token, result }) as T,
+    form: async () => ({}),
+    header: () => undefined,
+  });
+}
+
 function event(): InboundEvent {
   return { source: 'internal', agentId, trust: 'owner', payload: {} };
 }
@@ -171,20 +227,43 @@ describe('code job end-to-end (integration, scripted model)', () => {
     expect(bad).toMatchObject({ ok: false, status: 403 });
 
     const outputPath = `code/${task.id}/answer.txt`;
-    const cb = await recordCodeJobResult(db, {
-      taskId: task.id,
-      token: launches[0]?.callbackToken ?? '',
-      result: {
-        ok: true,
-        goal: computeSpec.goal,
-        language: 'javascript',
-        exitCode: 0,
-        stdout: '4\n',
-        stderr: '',
-        outputs: [outputPath],
-      },
-    });
-    expect(cb.ok).toBe(true);
+    const token = launches[0]?.callbackToken ?? '';
+    const result = {
+      ok: true,
+      goal: computeSpec.goal,
+      language: 'javascript',
+      exitCode: 0,
+      stdout: '4\n',
+      stderr: '',
+      outputs: [outputPath],
+    };
+    const [cb, concurrentRetry] = await Promise.all([
+      invokeCodeModuleCallback(task.id, token, result),
+      invokeCodeModuleCallback(task.id, token, result),
+    ]);
+    expect(cb).toEqual({ status: 200, json: { ok: true } });
+    expect(concurrentRetry).toEqual(cb);
+    const [acceptedTask] = await db.select().from(tasks).where(eq(tasks.id, task.id));
+    const receipts = await db
+      .select()
+      .from(executionJobCallbackReceipts)
+      .where(eq(executionJobCallbackReceipts.taskId, task.id));
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]?.tokenHash).toBe(expectedHash);
+    expect(receipts[0]?.idempotencyKey).not.toContain(token);
+    expect(await invokeCodeModuleCallback(task.id, token, result)).toEqual(cb);
+    expect(await db.select().from(files).where(eq(files.taskId, task.id))).toHaveLength(1);
+    const [afterDuplicate] = await db.select().from(tasks).where(eq(tasks.id, task.id));
+    expect(afterDuplicate?.queueGeneration).toBe(acceptedTask?.queueGeneration);
+    expect(
+      await db
+        .select()
+        .from(executionJobCallbackReceipts)
+        .where(eq(executionJobCallbackReceipts.taskId, task.id)),
+    ).toHaveLength(1);
+    expect(
+      await invokeCodeModuleCallback(task.id, token, { ok: false, error: 'changed payload' }),
+    ).toMatchObject({ status: 409 });
 
     [row] = await db.select().from(tasks).where(eq(tasks.id, task.id));
     expect(row?.status).toBe('pending');
@@ -194,6 +273,17 @@ describe('code job end-to-end (integration, scripted model)', () => {
 
     const run2 = await executeTask({ db, router, dispatcher }, task.id);
     expect(run2.outcome).toBe('done');
+    expect(await invokeCodeModuleCallback(task.id, token, result)).toEqual(cb);
+    expect(
+      await invokeCodeModuleCallback(task.id, token, { ...result, stdout: 'different result' }),
+    ).toMatchObject({ status: 409 });
+    expect(await db.select().from(files).where(eq(files.taskId, task.id))).toHaveLength(1);
+    expect(
+      await db
+        .select()
+        .from(executionJobCallbackReceipts)
+        .where(eq(executionJobCallbackReceipts.taskId, task.id)),
+    ).toHaveLength(1);
   });
 
   it('network spec: parks for approval of the exact script before any launch', async (ctx) => {

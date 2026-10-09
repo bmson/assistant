@@ -45,7 +45,9 @@ jobs:
           exit-code: '1'
       - run: pnpm lint
       - name: Verify current deployment cleanup protection
-        run: PYTHONDONTWRITEBYTECODE=1 python3 infra/gcp/cleanup-current.test.py
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 infra/gcp/cleanup-current.test.py
+          bash infra/gcp/verify-release-source.test.sh
       # 900+ lines of deploy bash run against production with no other check.
       - name: Lint shell scripts
         run: |
@@ -144,7 +146,6 @@ jobs:
           version: '576.0.0'
           install_components: cloud-firestore-emulator
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @assistant/db test:prepare
       # No cloud authentication, project creation, or billable API calls.
       - name: Verify Firestore transactions and vector retrieval
         shell: bash

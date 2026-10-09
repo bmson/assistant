@@ -5,13 +5,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentDeps } from './deps.js';
 import { executeAgentTask } from './task-runner.js';
 
+const appResume = vi.hoisted(() => vi.fn(async () => 200));
+vi.mock('@assistant/application', () => ({ resumeAdmittedChatTask: appResume }));
+
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('agent task repository routing', () => {
   let tasks: FirestoreTaskRepository;
   let close: () => Promise<void>;
+  let store: ReturnType<typeof createInstallationStore>;
 
   beforeEach(() => {
     vi.stubEnv('METADATA_SERVER_DETECTION', 'none');
-    const store = createInstallationStore({
+    store = createInstallationStore({
       projectId: 'demo-assistant-test',
       installationId: `task-runner-${randomUUID()}`,
     });
@@ -39,6 +43,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('agent task repository rou
     return {
       db: sqlThrowingDb,
       persistence: { tasks },
+      firestoreStore: store,
       modules,
       outOfBandNotifier: noopOwnerNotifier,
       config: {},
@@ -94,5 +99,101 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('agent task repository rou
       progress: unavailable,
       leaseToken: null,
     });
+  });
+
+  it('cancels an arrival task before model dispatch when its opted-in source reference expired', async () => {
+    const agentId = randomUUID();
+    await store.doc('agents', agentId).set({ id: agentId });
+    const created = await tasks.createTask({
+      agentId,
+      type: 'adhoc',
+      trust: 'assistant',
+      trigger: {
+        source: 'internal',
+        agentId,
+        trust: 'assistant',
+        externalEventId: `arrival:${agentId}:2026-09-24`,
+        payload: {
+          kind: 'arrival',
+          arrivalObservationId: randomUUID(),
+          arrivalExpiresAt: '2026-09-24T11:00:00.000Z',
+          instruction: 'generic instruction without location details',
+        },
+      },
+    });
+    const run = vi.fn();
+    const modules = {
+      taskHandlerFor: () => ({ kind: 'arrival', run }),
+      taskKindUnavailable: () => null,
+      emailObservers: [],
+    } as unknown as InstalledModuleSet;
+
+    await expect(
+      executeAgentTask(
+        {
+          ...deps(modules),
+          config: { PERSISTENCE_DRIVER: 'firestore', FIRESTORE_AGENT_ID: agentId },
+        } as unknown as AgentDeps,
+        created.task.id,
+        0,
+      ),
+    ).resolves.toMatchObject({ outcome: 'cancelled' });
+    expect(run).not.toHaveBeenCalled();
+    const cancelled = await tasks.getTask(created.task.id);
+    expect(cancelled).toMatchObject({ status: 'cancelled', externalEventId: null });
+    expect(JSON.stringify(cancelled?.trigger)).not.toContain('arrivalObservationId');
+    expect(JSON.stringify(cancelled?.trigger)).not.toContain('arrivalExpiresAt');
+  });
+
+  it('claims and resumes a stale direct chat admission through the application handler', async () => {
+    appResume.mockClear().mockResolvedValue(200);
+    const agentId = randomUUID();
+    const conversationId = randomUUID();
+    const operationId = randomUUID();
+    const triggerMessageId = randomUUID();
+    const created = await tasks.createTask({
+      agentId,
+      conversationId,
+      type: 'chat_turn',
+      trust: 'owner',
+      trigger: {
+        source: 'chat',
+        agentId,
+        conversationId,
+        trust: 'owner',
+        payload: {
+          text: 'Say hello.',
+          triggerMessageId,
+          clientOperationId: operationId,
+          chatAdmission: {
+            protocol: 'owner-chat-v1',
+            clientOperationId: operationId,
+            requestHash: 'a'.repeat(64),
+            triggerMessageId,
+            phase: 'streaming',
+            triageOutcome: 'conversational',
+          },
+        },
+      },
+    });
+    const modules = {
+      taskHandlerFor: () => undefined,
+      taskKindUnavailable: () => null,
+      emailObservers: [],
+    } as unknown as InstalledModuleSet;
+    const dependencies = deps(modules);
+    dependencies.config = {
+      PERSISTENCE_DRIVER: 'firestore',
+      FIRESTORE_AGENT_ID: agentId,
+    } as AgentDeps['config'];
+
+    await expect(executeAgentTask(dependencies, created.task.id, 0)).resolves.toEqual({
+      outcome: 'admission_recovered',
+      status: 200,
+    });
+    expect(appResume).toHaveBeenCalledWith(
+      expect.objectContaining({ id: created.task.id, status: 'running' }),
+      expect.objectContaining({ config: dependencies.config, router: dependencies.router }),
+    );
   });
 });

@@ -32,10 +32,17 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
     async function conversation(id: string, agentId = 'owner', trust = 'owner') {
       await store.doc('conversations', id).set({ id, agentId, trust });
     }
-    async function message(id: string, conversationId: string, createdAt = before, revision = '1') {
+    async function message(
+      id: string,
+      conversationId: string,
+      createdAt = before,
+      revision = '1',
+      channelMessageId?: string,
+    ) {
       await store.doc('messages', id).set({
         id,
         conversationId,
+        ...(channelMessageId ? { channelMessageId } : {}),
         role: 'user',
         text: `History ${id}`,
         createdAt,
@@ -46,6 +53,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
     const input = () => ({
       agentId: 'owner',
       embedding: vector,
+      embeddingSpaceKey: embeddingSpaceKey(space),
       exclude: { conversationId: 'current', sinceCreatedAt: now },
       limit: 4,
     });
@@ -56,11 +64,29 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       await conversation('untrusted', 'owner', 'unknown');
       await message('old', 'current');
       await message('recent', 'current', now);
+      await message('visual-fixture', 'current', before, '1', 'visual-qa:test-run:message-1');
+      await message(
+        'visual-window-fixture',
+        'current',
+        new Date(now.getTime() + 1000),
+        '1',
+        'visual-qa:test-run:message-2',
+      );
+      await message(
+        'readability-window-fixture',
+        'current',
+        new Date(now.getTime() + 2000),
+        '1',
+        'readability-run-test-02-assistant',
+      );
       await message('foreign', 'other');
       await message('tainted', 'untrusted');
       await message('different-model', 'current', before, '2');
       const repo = new FirestoreHistoryRecallRepository(store, space);
       expect((await repo.messages(input())).map((row) => row.id)).toEqual(['old']);
+      expect(
+        await repo.recentWindowStart({ agentId: 'owner', conversationId: 'current', size: 1 }),
+      ).toEqual(now);
       expect(
         await repo.recentWindowStart({ agentId: 'owner', conversationId: 'other', size: 20 }),
       ).toBeNull();
@@ -73,6 +99,234 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect(
         await repo.neighborhood({ agentId: 'owner', anchor, radius: 1, exclude: input().exclude }),
       ).toEqual([]);
+    });
+
+    it('excludes tagged visual fixtures from semantic message recall and segment endpoints', async () => {
+      await conversation('current');
+      await message('real-history', 'current');
+      await message('fixture-history', 'current', before, '1', 'visual-qa:test-run:history');
+      await message('readability-history', 'current', before, '1', 'readability-run-test-03-user');
+      await store.doc('conversationSegments', 'fixture-segment').set({
+        id: 'fixture-segment',
+        agentId: 'owner',
+        conversationId: 'current',
+        startMessageId: 'fixture-history',
+        endMessageId: 'fixture-history',
+        summary: 'Visual QA synthetic conversation segment',
+        startedAt: before,
+        endedAt: before,
+        embedding: FieldValue.vector(vector),
+        embeddingSpace: embeddingSpaceKey(space),
+      });
+      await store.doc('conversationSegments', 'readability-segment').set({
+        id: 'readability-segment',
+        agentId: 'owner',
+        conversationId: 'current',
+        startMessageId: 'readability-history',
+        endMessageId: 'readability-history',
+        summary: 'Readability synthetic conversation segment',
+        startedAt: before,
+        endedAt: before,
+        embedding: FieldValue.vector(vector),
+        embeddingSpace: embeddingSpaceKey(space),
+      });
+      const repo = new FirestoreHistoryRecallRepository(store, space);
+      expect((await repo.messages(input())).map((row) => row.id)).toEqual(['real-history']);
+      expect(await repo.segments(input())).toEqual([]);
+    });
+
+    it('returns empty when every stored segment contains a fixture-only interior row', async () => {
+      await conversation('current');
+      for (const [index, marker] of [
+        'visual-qa:legacy-run:interior',
+        'readability-legacy-run-interior',
+      ].entries()) {
+        const startedAt = new Date(before.getTime() - 40_000 + index * 10_000);
+        const middleAt = new Date(startedAt.getTime() + 1_000);
+        const endedAt = new Date(startedAt.getTime() + 2_000);
+        const prefix = 'all-fixture-' + index;
+        await message(prefix + '-start', 'current', startedAt);
+        await message(prefix + '-middle', 'current', middleAt, '1', marker);
+        await message(prefix + '-end', 'current', endedAt);
+        await store.doc('conversationSegments', prefix + '-segment').set({
+          id: prefix + '-segment',
+          agentId: 'owner',
+          conversationId: 'current',
+          startMessageId: prefix + '-start',
+          endMessageId: prefix + '-end',
+          summary: 'Fixture-only legacy segment ' + index,
+          messageCount: 3,
+          startedAt,
+          endedAt,
+          embedding: FieldValue.vector(vector),
+          embeddingSpace: embeddingSpaceKey(space),
+        });
+      }
+
+      const rows = await new FirestoreHistoryRecallRepository(store, space).segments(input());
+      expect(rows).toEqual([]);
+    });
+
+    it('excludes stored segments containing an interior fixture row but keeps clean segments', async () => {
+      await conversation('current');
+      const mixedStartAt = new Date(before.getTime() - 20_000);
+      const mixedMiddleAt = new Date(mixedStartAt.getTime() + 1_000);
+      const mixedEndAt = new Date(mixedStartAt.getTime() + 2_000);
+      await message('mixed-start', 'current', mixedStartAt);
+      await message(
+        'mixed-middle',
+        'current',
+        mixedMiddleAt,
+        '1',
+        'readability-legacy-run-01-assistant',
+      );
+      await message('mixed-end', 'current', mixedEndAt);
+      const secondMixedStartAt = new Date(before.getTime() - 15_000);
+      const secondMixedMiddleAt = new Date(secondMixedStartAt.getTime() + 1_000);
+      const secondMixedEndAt = new Date(secondMixedStartAt.getTime() + 2_000);
+      await message('second-mixed-start', 'current', secondMixedStartAt);
+      await message(
+        'second-mixed-middle',
+        'current',
+        secondMixedMiddleAt,
+        '1',
+        `visual-qa:${randomUUID()}:assistant`,
+      );
+      await message('second-mixed-end', 'current', secondMixedEndAt);
+      const cleanStartAt = new Date(before.getTime() - 10_000);
+      const cleanMiddleAt = new Date(cleanStartAt.getTime() + 1_000);
+      const cleanEndAt = new Date(cleanStartAt.getTime() + 2_000);
+      await message('clean-start', 'current', cleanStartAt);
+      await message('clean-middle', 'current', cleanMiddleAt);
+      await message('clean-end', 'current', cleanEndAt);
+      await store.doc('conversationSegments', 'mixed-range-segment').set({
+        id: 'mixed-range-segment',
+        agentId: 'owner',
+        conversationId: 'current',
+        startMessageId: 'mixed-start',
+        endMessageId: 'mixed-end',
+        summary: 'MIXED_RANGE_SEGMENT_MARKER legacy segment summary',
+        messageCount: 3,
+        startedAt: mixedStartAt,
+        endedAt: mixedEndAt,
+        embedding: FieldValue.vector(vector),
+        embeddingSpace: embeddingSpaceKey(space),
+      });
+      await store.doc('conversationSegments', 'second-mixed-range-segment').set({
+        id: 'second-mixed-range-segment',
+        agentId: 'owner',
+        conversationId: 'current',
+        startMessageId: 'second-mixed-start',
+        endMessageId: 'second-mixed-end',
+        summary: 'SECOND_MIXED_RANGE_SEGMENT_MARKER legacy segment summary',
+        messageCount: 3,
+        startedAt: secondMixedStartAt,
+        endedAt: secondMixedEndAt,
+        embedding: FieldValue.vector(vector),
+        embeddingSpace: embeddingSpaceKey(space),
+      });
+      await store.doc('conversationSegments', 'clean-range-segment').set({
+        id: 'clean-range-segment',
+        agentId: 'owner',
+        conversationId: 'current',
+        startMessageId: 'clean-start',
+        endMessageId: 'clean-end',
+        summary: 'CLEAN_ORDINARY_SEGMENT_MARKER ordinary history summary',
+        messageCount: 3,
+        startedAt: cleanStartAt,
+        endedAt: cleanEndAt,
+        embedding: FieldValue.vector(vector),
+        embeddingSpace: embeddingSpaceKey(space),
+      });
+
+      const rows = await new FirestoreHistoryRecallRepository(store, space).segments(input());
+      expect(rows.map((row) => row.summary)).toEqual([
+        'CLEAN_ORDINARY_SEGMENT_MARKER ordinary history summary',
+      ]);
+    });
+
+    it('keeps automatic history recall behind the completed erasure boundary', async () => {
+      await conversation('current');
+      await conversation('history');
+      await message('current-conversation-before-reset', 'current');
+      await message('before-erasure', 'history');
+      const fenceRef = store.doc('privacyErasureJobs', 'owner');
+      await fenceRef.set({ agentId: 'owner', generation: 'completed-reset', status: 'complete' });
+      const fence = await fenceRef.get();
+      if (!fence.updateTime) throw new Error('Missing Firestore erasure update time');
+      const afterBoundary = new Date(fence.updateTime.toMillis() + 1000);
+      await message('after-erasure', 'history', afterBoundary);
+      const repo = new FirestoreHistoryRecallRepository(store, space);
+      expect((await repo.messages(input())).map((row) => row.id).sort()).toEqual([
+        'after-erasure',
+        'current-conversation-before-reset',
+      ]);
+
+      await store.doc('conversationSegments', 'before-reset-segment').set({
+        id: 'before-reset-segment',
+        agentId: 'owner',
+        conversationId: 'history',
+        startMessageId: 'before-erasure',
+        endMessageId: 'before-erasure',
+        summary: 'Summary from before the reset',
+        startedAt: before,
+        endedAt: before,
+        embedding: FieldValue.vector(vector),
+        embeddingSpace: embeddingSpaceKey(space),
+        embeddingSpaceKey: embeddingSpaceKey(space),
+      });
+      await store.doc('conversationSegments', 'after-reset-segment').set({
+        id: 'after-reset-segment',
+        agentId: 'owner',
+        conversationId: 'history',
+        startMessageId: 'after-erasure',
+        endMessageId: 'after-erasure',
+        summary: 'Summary authored after the reset',
+        startedAt: afterBoundary,
+        endedAt: afterBoundary,
+        embedding: FieldValue.vector(vector),
+        embeddingSpace: embeddingSpaceKey(space),
+      });
+      await store.doc('conversationSegments', 'after-reset-old-key-segment').set({
+        id: 'after-reset-old-key-segment',
+        agentId: 'owner',
+        conversationId: 'history',
+        startMessageId: 'before-erasure',
+        endMessageId: 'after-erasure',
+        summary: 'A forged post-reset segment with a pre-reset key message',
+        startedAt: afterBoundary,
+        endedAt: afterBoundary,
+        embedding: FieldValue.vector(vector),
+        embeddingSpace: embeddingSpaceKey(space),
+      });
+      await store.doc('conversationSegments', 'current-before-reset-segment').set({
+        id: 'current-before-reset-segment',
+        agentId: 'owner',
+        conversationId: 'current',
+        startMessageId: 'current-conversation-before-reset',
+        endMessageId: 'current-conversation-before-reset',
+        summary: 'Earlier messages from this same conversation',
+        startedAt: before,
+        endedAt: before,
+        embedding: FieldValue.vector(vector),
+        embeddingSpace: embeddingSpaceKey(space),
+      });
+      expect((await repo.segments(input())).map((row) => row.startMessageId).sort()).toEqual([
+        'after-erasure',
+        'current-conversation-before-reset',
+      ]);
+    });
+
+    it('fails closed while an owner erasure is active', async () => {
+      await conversation('history');
+      await message('active-reset-source', 'history');
+      await store.doc('privacyErasureJobs', 'owner').set({
+        agentId: 'owner',
+        generation: 'active-reset',
+        status: 'active',
+      });
+      const repo = new FirestoreHistoryRecallRepository(store, space);
+      await expect(repo.messages(input())).rejects.toThrow(/privacy erasure/i);
     });
 
     it('does not attach a foreign key message to an otherwise owned segment', async () => {
@@ -129,6 +383,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         ownerConfirmed: true,
         pinned: false,
         source: 'synthetic',
+        embeddingSpaceKey: null,
         lastAccessedAt: null,
         lastConsolidatedAt: null,
         ...options,
@@ -155,6 +410,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           predicate: 'knows',
           evidenceQuote: `Fact ${id}`,
           confidence: '1',
+          assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
           reviewStatus: 'pending',
           validFrom: null,
           validUntil: null,

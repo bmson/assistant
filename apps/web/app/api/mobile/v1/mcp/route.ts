@@ -3,6 +3,7 @@ import {
   FirestoreMcpConnectionMutationRepository,
   FirestoreMcpConnectionReadRepository,
 } from '@assistant/firestore';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import {
   discoverFirestoreMcpConnection,
   encryptMcpConnectionBearerToken,
@@ -31,7 +32,9 @@ export async function GET(request: Request): Promise<Response> {
 
 export async function POST(request: Request): Promise<Response> {
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
-  const body = (await request.json().catch(() => null)) as {
+  const mutationBody = await readMobileMutationBody(request, ['bearerToken', 'endpoint', 'name']);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as {
     name?: unknown;
     endpoint?: unknown;
     bearerToken?: unknown;

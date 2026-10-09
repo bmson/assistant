@@ -1,3 +1,4 @@
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getChatApplication } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -6,7 +7,9 @@ export const dynamic = 'force-dynamic';
 /** Create a conversation or run the same history cleanup offered by the web chat index. */
 export async function POST(request: Request): Promise<Response> {
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
-  const body = (await request.json().catch(() => null)) as { action?: unknown } | null;
+  const mutationBody = await readMobileMutationBody(request, ['action']);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as { action?: unknown } | null;
   try {
     if (body?.action === 'create') {
       const conversationId = await getChatApplication().createChat();

@@ -8,10 +8,16 @@ import {
   embeddingSpaceKey,
   FirestoreImportCommandRepository,
   FirestoreImportJobRepository,
+  FirestoreOwnerCardCompilationRepository,
+  FirestoreProfileOccasionCommandRepository,
 } from '@assistant/firestore';
 import type { EmbeddingSpace, ImportJobRepository } from '@assistant/persistence';
 import { Firestore } from '@google-cloud/firestore';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  deleteImportedSource,
+  type ImportCommandPersistence,
+} from '../../../packages/application/src/imports.js';
 import {
   decodeRecord,
   encodeRecord,
@@ -61,6 +67,22 @@ function windowFacts(letter: string, source: string): { facts: Fact[]; occasions
           },
         ],
         occasions: [
+          // Earlier source-deletion cases tombstone Grace's birthday. This
+          // retry fixture also needs a distinct, newly imported occasion to
+          // exercise asset cleanup without resurrecting that forgotten date.
+          ...(source === 'delete-retry'
+            ? [
+                {
+                  subject: 'owner',
+                  kind: 'custom',
+                  label: 'Synthetic archive milestone',
+                  month: 6,
+                  day: 25,
+                  year: null,
+                  notes: '',
+                },
+              ]
+            : []),
           {
             subject: 'Grace Hopper',
             kind: 'birthday',
@@ -84,6 +106,16 @@ function windowFacts(letter: string, source: string): { facts: Fact[]; occasions
       return {
         facts: [
           { content: `The owner learned to sail on Lake Union (${source}).`, subject: 'owner' },
+        ],
+        occasions: [],
+      };
+    case 'Q':
+      return {
+        facts: [
+          {
+            content: `The owner worked with a quoted archive source (${source}).`,
+            subject: 'owner',
+          },
         ],
         occasions: [],
       };
@@ -116,13 +148,25 @@ describe.skipIf(!emulator)('Firestore import jobs with PostgreSQL offline', () =
       files.set(relPath, content);
       return { bytes: content.length };
     },
+    async readBytes(relPath: string) {
+      const content = files.get(relPath);
+      if (content === undefined)
+        throw Object.assign(new Error(`ENOENT: no such file ${relPath}`), { code: 'ENOENT' });
+      return Buffer.from(content);
+    },
+    async writeBytes(relPath: string, content: Buffer) {
+      files.set(relPath, content.toString('utf8'));
+      return { bytes: content.byteLength };
+    },
     async list() {
       return [];
     },
     async delete(relPath: string) {
+      if (failWorkspaceDeletes) throw new Error('synthetic workspace delete failure');
       files.delete(relPath);
     },
   };
+  let failWorkspaceDeletes = false;
   const sqlAccess = vi.fn();
   const unavailable = new Proxy(
     {},
@@ -156,6 +200,7 @@ describe.skipIf(!emulator)('Firestore import jobs with PostgreSQL offline', () =
     };
   });
   const router = {
+    embeddingSpace: async () => space,
     object: distill,
     embed: vi.fn(async (texts: string[]) => texts.map(vectorFor)),
   } as unknown as ExecutorDeps['router'];
@@ -187,8 +232,23 @@ describe.skipIf(!emulator)('Firestore import jobs with PostgreSQL offline', () =
       source,
       workspacePath,
       kind: 'text',
-      windowChars: 500,
+      // Each synthetic paragraph fits one bounded source window including
+      // provenance; two paragraphs cannot fit the same window.
+      windowChars: 1500,
       windowsPerRun,
+    });
+    return { ...started, workspacePath };
+  }
+
+  async function uploadMbox(source: string, raw: string) {
+    const workspacePath = `import/uploads/${randomUUID()}-${source}.mbox`;
+    await workspace.write(workspacePath, raw);
+    const started = await startPortableImport(commands, {
+      source,
+      workspacePath,
+      kind: 'mbox',
+      windowChars: 1500,
+      windowsPerRun: 2,
     });
     return { ...started, workspacePath };
   }
@@ -313,6 +373,31 @@ describe.skipIf(!emulator)('Firestore import jobs with PostgreSQL offline', () =
         source: 'old-notes',
       }),
     ]);
+    const occasionId = String(occasions.docs[0]?.get('id'));
+    await new FirestoreProfileOccasionCommandRepository(store, agentId).update(occasionId, {
+      kind: 'birthday',
+      label: 'Birthday',
+      month: 12,
+      day: 10,
+      year: null,
+      leadDays: 7,
+      notes: 'Owner corrected the date',
+    });
+    const replay = await upload('Replay Notes', ['A'], 1);
+    expect(await executeAgentTask(deps, replay.taskId)).toMatchObject({ outcome: 'done' });
+    const afterReplay = await store
+      .collection('occasions')
+      .where('contactId', '==', graceContactId)
+      .get();
+    // The corrected-away tuple is fenced: stale replay must not resurrect a
+    // second birthday on the date the owner explicitly corrected.
+    expect(afterReplay.size).toBe(1);
+    expect(afterReplay.docs.find((doc) => doc.get('id') === occasionId)?.data()).toMatchObject({
+      day: 10,
+      notes: 'Owner corrected the date',
+      ownerConfirmed: true,
+    });
+    expect(afterReplay.docs.some((doc) => doc.get('day') === 9)).toBe(false);
     expect(await sourceRow('old-notes')).toMatchObject({
       status: 'done',
       itemsTotal: 4,
@@ -335,6 +420,7 @@ describe.skipIf(!emulator)('Firestore import jobs with PostgreSQL offline', () =
       query: 'green tea',
       embedding: vectorFor(tea),
       limit: 3,
+      embeddingSpaceKey: embeddingSpaceKey(space),
     });
     expect(recalled.memories.map((memory) => memory.content)).toContain(tea);
 
@@ -364,9 +450,17 @@ describe.skipIf(!emulator)('Firestore import jobs with PostgreSQL offline', () =
         .doc('memories', keptId)
         .set({ id: keptId, agentId, source: 'other', quarantined: false }),
     ]);
+    if (!grace) throw new Error('Expected the approved imported memory');
+    // Import purge is an owner/source deletion path; a corrupt vector identity
+    // cannot make the source memory undeletable.
+    await grace.raw.ref.update({ embeddingSpaceKey: 'b'.repeat(64) });
 
     expect(await commands.purge('old-notes')).toEqual({ agentId, purged: 4 });
     expect(await sourceMemories('old-notes')).toEqual([]);
+    expect(
+      (await store.collection('memoryImportLineage').where('source', '==', 'old-notes').get())
+        .empty,
+    ).toBe(true);
     for (const { row } of memories) {
       const hash = String(row.contentHash);
       expect((await store.doc('memoryContentHashes', hash).get()).exists).toBe(false);
@@ -384,10 +478,21 @@ describe.skipIf(!emulator)('Firestore import jobs with PostgreSQL offline', () =
     expect(await sourceRow('old-notes')).toMatchObject({ status: 'purged', memoriesSaved: 0 });
 
     const removed = await commands.remove('old-notes');
-    expect(removed).toEqual({ agentId, purgedMemories: 0, workspacePath: started.workspacePath });
+    expect(removed).toEqual({ agentId, purgedMemories: 0, cleanupReady: true });
+    expect(
+      (await commands.pendingDeletionAssets('old-notes'))
+        .map((asset) => asset.workspacePath)
+        .sort(),
+    ).toEqual(
+      [
+        started.workspacePath,
+        `.assistant/imports/old-notes/${started.taskId}/manifest.json`,
+        `.assistant/imports/old-notes/${started.taskId}/windows-000000.json`,
+      ].sort(),
+    );
     expect(await sourceRow('old-notes')).toBeNull();
     expect(sqlAccess).not.toHaveBeenCalled();
-  });
+  }, 30_000);
 
   it('resumes after a partial run without saving a committed window twice', async () => {
     const started = await upload('retry-notes', ['A', 'B', 'C', 'D'], 6);
@@ -432,6 +537,81 @@ describe.skipIf(!emulator)('Firestore import jobs with PostgreSQL offline', () =
       (await store.doc('memoryTombstones', String(held?.row.contentHash)).get()).get('reason'),
     ).toBe('quarantine_reject');
     expect(await sourceMemories('retry-notes')).toHaveLength(3);
+    expect(sqlAccess).not.toHaveBeenCalled();
+  });
+
+  it('persists accepted source-unit provenance and rejected archive spans on Firestore', async () => {
+    const archiveText = [
+      'From owner@example.test Wed Jan  1 12:00:00 2020',
+      'From: Ada Owner <owner@example.test>',
+      'Date: Wed, 01 Jan 2020 12:00:00 +0000',
+      'Subject: WINDOW-Q archive fact',
+      'MIME-Version: 1.0',
+      'Content-Type: text/html; charset=UTF-8',
+      'Content-Transfer-Encoding: quoted-printable',
+      '',
+      '<p>WINDOW-Q supported archive fact for the owner.</p><blockquote>Quoted text from someone else.</blockquote>',
+      '',
+      'From older@example.test Tue Jan  1 12:00:00 2010',
+      'From: Older Sender <older@example.test>',
+      'Date: Tue, 01 Jan 2010 12:00:00 +0000',
+      'Subject: Earlier context',
+      'MIME-Version: 1.0',
+      'Content-Type: text/plain; charset=UTF-8',
+      '',
+      'Earlier source content from a different year.',
+      '',
+      'From empty@example.test Thu Jan  2 12:00:00 2020',
+      'From: Empty Sender <empty@example.test>',
+      'Date: Thu, 02 Jan 2020 12:00:00 +0000',
+      'Subject:',
+      'MIME-Version: 1.0',
+      'Content-Type: text/plain; charset=UTF-8',
+      '',
+      '',
+    ].join('\r\n');
+    const started = await uploadMbox('source-span-audit', archiveText);
+    expect(await executeAgentTask(deps, started.taskId)).toMatchObject({ outcome: 'done' });
+
+    const source = await sourceRow('source-span-audit');
+    expect(source?.parseDiagnostics).toMatchObject({
+      format: 'mbox',
+      acceptedUnits: 2,
+      rejectedUnits: 1,
+      partial: true,
+      issues: [expect.objectContaining({ code: 'empty_message', offset: expect.any(Number) })],
+    });
+    const memories = await sourceMemories('source-span-audit');
+    expect(memories).toHaveLength(1);
+    const lineage = await store
+      .collection('memoryImportLineage')
+      .where('source', '==', 'source-span-audit')
+      .get();
+    expect(lineage.size).toBe(1);
+    const provenance = lineage.docs[0]?.get('sourceUnitProvenance') as Array<
+      Record<string, unknown>
+    >;
+    expect(provenance).toEqual([
+      expect.objectContaining({
+        sourceOffset: 0,
+        unitOffset: 0,
+        observedAt: '2020-01-01T12:00:00.000Z',
+        authorEmail: 'owner@example.test',
+        hasQuotedContent: true,
+        header: expect.stringContaining('Ada Owner'),
+        unitTextHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+      expect.objectContaining({
+        sourceOffset: archiveText.indexOf('From older@example.test'),
+        unitOffset: 0,
+        observedAt: '2010-01-01T12:00:00.000Z',
+        authorEmail: 'older@example.test',
+        hasQuotedContent: false,
+        header: expect.stringContaining('Older Sender'),
+        unitTextHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    ]);
+    expect(JSON.stringify(provenance)).not.toContain('Quoted text from someone else');
     expect(sqlAccess).not.toHaveBeenCalled();
   });
 
@@ -482,6 +662,7 @@ describe.skipIf(!emulator)('Firestore import jobs with PostgreSQL offline', () =
               content: 'A stale worker fact.',
               contentHash: hashOf('A stale worker fact.'),
               embedding: vectorFor('A stale worker fact.'),
+              embeddingSpaceKey: embeddingSpaceKey(space),
               kind: 'fact',
               domain: null,
               importance: 3,
@@ -489,6 +670,7 @@ describe.skipIf(!emulator)('Firestore import jobs with PostgreSQL offline', () =
               quarantined: false,
               subjectContactId: null,
               validFrom: null,
+              sourceUnitProvenance: [],
             },
           ],
           occasions: [],
@@ -516,6 +698,224 @@ describe.skipIf(!emulator)('Firestore import jobs with PostgreSQL offline', () =
     });
     expect(sqlAccess).not.toHaveBeenCalled();
   });
+
+  it('retains raw and snapshot deletion paths across a failed workspace delete and fresh retry', async () => {
+    const started = await upload('delete-retry', ['A', 'B'], 2);
+    expect(await executeAgentTask(deps, started.taskId)).toMatchObject({ outcome: 'done' });
+    const derivedMemoryId = randomUUID();
+    const derivedMemoryHash = hashOf(`derived memory ${derivedMemoryId}`);
+    const predecessorId = randomUUID();
+    await Promise.all([
+      store.doc('memories', derivedMemoryId).set(
+        encodeRecord({
+          id: derivedMemoryId,
+          agentId,
+          category: 'knowledge',
+          kind: 'fact',
+          content: `Derived from delete-retry ${started.taskId}`,
+          contentHash: derivedMemoryHash,
+          source: 'consolidation',
+          supersededById: null,
+          quarantined: false,
+        }),
+      ),
+      store.doc('memoryContentHashes', derivedMemoryHash).set({ memoryId: derivedMemoryId }),
+      store
+        .doc(
+          'memoryImportLineage',
+          createHash('sha256')
+            .update(JSON.stringify(['delete-retry', derivedMemoryId]))
+            .digest('hex'),
+        )
+        .set({
+          agentId,
+          source: 'delete-retry',
+          memoryId: derivedMemoryId,
+          sourceUnitProvenance: [],
+        }),
+      store.doc('memories', predecessorId).set(
+        encodeRecord({
+          id: predecessorId,
+          agentId,
+          category: 'knowledge',
+          kind: 'fact',
+          content: 'Unrelated owner fact before imported consolidation',
+          contentHash: hashOf(`predecessor ${predecessorId}`),
+          source: 'owner',
+          supersededById: derivedMemoryId,
+          expiresAt: new Date(),
+        }),
+      ),
+    ]);
+    const derivedOccasionId = randomUUID();
+    const derivedOccasionMarkerId = createHash('sha256')
+      .update([agentId, ownerContactId, 'anniversary', 4, 23].join('\u0000'))
+      .digest('hex');
+    const derivedOccasion = {
+      id: derivedOccasionId,
+      agentId,
+      contactId: ownerContactId,
+      kind: 'anniversary',
+      label: 'Imported anniversary note',
+      month: 4,
+      day: 23,
+      year: null,
+      recurrence: 'annual',
+      leadDays: 7,
+      notes: 'Derived from this import',
+      originTrust: 'assistant',
+      quarantined: false,
+      ownerConfirmed: false,
+      source: 'consolidation',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const unrelatedOccasionId = randomUUID();
+    await Promise.all([
+      store.doc('occasions', derivedOccasionId).set(encodeRecord(derivedOccasion)),
+      store
+        .doc(
+          'occasionImportLineage',
+          createHash('sha256')
+            .update(JSON.stringify(['delete-retry', derivedOccasionId]))
+            .digest('hex'),
+        )
+        .set({ agentId, source: 'delete-retry', occasionId: derivedOccasionId }),
+      store.doc('occasionDateKeys', derivedOccasionMarkerId).set({
+        id: derivedOccasionMarkerId,
+        agentId,
+        contactId: ownerContactId,
+        kind: 'anniversary',
+        month: 4,
+        day: 23,
+        occasionId: derivedOccasionId,
+      }),
+      store.doc('occasions', unrelatedOccasionId).set(
+        encodeRecord({
+          ...derivedOccasion,
+          id: unrelatedOccasionId,
+          kind: 'custom',
+          label: 'Unrelated owner occasion',
+          month: 5,
+          day: 24,
+          originTrust: 'owner',
+          ownerConfirmed: true,
+          source: 'owner',
+        }),
+      ),
+    ]);
+    const purgedMemories = (await sourceMemories('delete-retry')).length + 1;
+    const importedOccasions = await store
+      .collection('occasions')
+      .where('agentId', '==', agentId)
+      .where('source', '==', 'delete-retry')
+      .get();
+    expect(importedOccasions.size).toBeGreaterThan(0);
+    const snapshotBase = `.assistant/imports/delete-retry/${started.taskId}`;
+    const paths = [...files.keys()].filter((path) => path.startsWith(snapshotBase)).sort();
+    expect(paths).toEqual([`${snapshotBase}/manifest.json`, `${snapshotBase}/windows-000000.json`]);
+
+    const appPersistence = {
+      kind: 'import-command-persistence',
+      imports: commands,
+      ownerCards: new FirestoreOwnerCardCompilationRepository(store),
+    } as ImportCommandPersistence;
+    failWorkspaceDeletes = true;
+    await expect(deleteImportedSource(appPersistence, workspace, 'delete-retry')).resolves.toEqual({
+      purgedMemories,
+      pendingAssets: true,
+    });
+    expect(await sourceRow('delete-retry')).toBeNull();
+    expect((await store.doc('memories', derivedMemoryId).get()).exists).toBe(false);
+    expect((await store.doc('memories', predecessorId).get()).data()).toMatchObject({
+      expiresAt: null,
+      supersededById: null,
+    });
+    expect((await store.doc('memoryContentHashes', derivedMemoryHash).get()).exists).toBe(false);
+    expect(
+      (await store.collection('memoryImportLineage').where('source', '==', 'delete-retry').get())
+        .empty,
+    ).toBe(true);
+    expect((await store.doc('occasions', derivedOccasionId).get()).exists).toBe(false);
+    expect((await store.doc('occasionDateKeys', derivedOccasionMarkerId).get()).exists).toBe(false);
+    expect((await store.doc('occasions', unrelatedOccasionId).get()).exists).toBe(true);
+    expect(
+      (await store.collection('occasionImportLineage').where('source', '==', 'delete-retry').get())
+        .empty,
+    ).toBe(true);
+    expect(
+      (
+        await store
+          .collection('occasions')
+          .where('agentId', '==', agentId)
+          .where('source', '==', 'delete-retry')
+          .get()
+      ).empty,
+    ).toBe(true);
+    expect(files.has(started.workspacePath)).toBe(true);
+    expect(paths.every((path) => files.has(path))).toBe(true);
+
+    const freshCommands = new FirestoreImportCommandRepository(store, agentId);
+    const pending = await freshCommands.pendingDeletionAssets('delete-retry');
+    expect(pending.map((asset) => asset.workspacePath).sort()).toEqual(
+      [started.workspacePath, ...paths].sort(),
+    );
+    expect(
+      await new FirestoreImportCommandRepository(store, randomUUID())
+        .pendingDeletionAssets('delete-retry')
+        .catch((error: unknown) => (error instanceof Error ? error.message : String(error))),
+    ).toContain('exactly one matching configured owner');
+
+    // The current erasure generation fences every owner-scoped retry. A later
+    // completed erasure may resume the already durable cleanup intent.
+    await store.doc('privacyErasureJobs', agentId).set({
+      agentId,
+      generation: randomUUID(),
+      status: 'active',
+    });
+    await expect(freshCommands.pendingDeletionAssets('delete-retry')).rejects.toThrow(
+      'Privacy erasure is in progress',
+    );
+    await store.doc('privacyErasureJobs', agentId).update({ status: 'complete' });
+
+    // Corrupted or foreign paths never reach the workspace adapter.
+    const asset = pending[0];
+    if (!asset) throw new Error('Expected durable cleanup assets');
+    await store.doc('privacyErasureAssets', asset.id).update({ workspacePath: '../foreign.txt' });
+    await expect(freshCommands.pendingDeletionAssets('delete-retry')).rejects.toThrow(
+      'ownership or path is invalid',
+    );
+    await expect(
+      freshCommands.assetDeleted('delete-retry', asset.id, asset.workspacePath),
+    ).rejects.toThrow('belongs to another source');
+    await store
+      .doc('privacyErasureAssets', asset.id)
+      .update({ workspacePath: asset.workspacePath });
+
+    failWorkspaceDeletes = false;
+    await expect(
+      deleteImportedSource(
+        {
+          ...appPersistence,
+          imports: freshCommands,
+        },
+        workspace,
+        'delete-retry',
+      ),
+    ).resolves.toEqual({ purgedMemories, pendingAssets: false });
+    expect(files.has(started.workspacePath)).toBe(false);
+    expect(paths.some((path) => files.has(path))).toBe(false);
+    await expect(freshCommands.pendingDeletionAssets('delete-retry')).resolves.toEqual([]);
+
+    // Repeating a completed removal is idempotent and cannot recreate paths.
+    await expect(
+      deleteImportedSource(
+        { ...appPersistence, imports: new FirestoreImportCommandRepository(store, agentId) },
+        workspace,
+        'delete-retry',
+      ),
+    ).resolves.toEqual({ purgedMemories, pendingAssets: false });
+  }, 30_000);
 
   it('ingests uploaded voice samples once per owner text', async () => {
     const texts = [

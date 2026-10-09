@@ -72,7 +72,8 @@ export async function writeMobileSkill(
     gotchas: input.gotchas.trim(),
   };
   if (!normalized.name || !normalized.steps) throw new Error('Name and steps are required.');
-  await repository.assertOwnerWritable(agentId);
+  if (skillId) await repository.assertOwnerCanEdit(agentId, skillId);
+  else await repository.assertOwnerWritable(agentId);
   const vector = await embed(skillEmbeddingText(normalized));
   if (skillId) await repository.editOwner(agentId, skillId, normalized, vector);
   else await repository.saveOwner(agentId, normalized, vector);

@@ -3,49 +3,36 @@ import Foundation
 import MapKit
 import UIKit
 
-/// Location for the assistant's ambient context, in two gears:
+/// Foreground-only location for the assistant's ambient context:
 ///
 /// - Foreground bounded fixes (`captureCurrentPlace`) — the phone's position
 ///   goes to the owner's OWN server as a transient ping (it ages out with
 ///   LOCATION_RETENTION_DAYS and never enters memory). Two fresh, consistent
 ///   samples avoid treating the first cached or wandering fix as authoritative.
-/// - Background arrival awareness (`setBackgroundMonitoring`) — the
-///   significant-change service wakes the app on ~500m moves so the server can
-///   notice an arrival and consider one nudge. Coarse by design: no continuous
-///   tracking, and pings are throttled below what the service could deliver.
+/// - Background arrival awareness is paused until every durable task derivative
+///   can follow the source location's expiry. Existing preference state is
+///   cleared on launch so an older installation cannot keep collecting pings.
 @MainActor
 final class LocationManager: NSObject, ObservableObject {
     static let shared = LocationManager()
 
     @Published private(set) var authorizationStatus: CLAuthorizationStatus
-    @Published private(set) var backgroundMonitoring = false
-
-    /// Wired by AppModel: post one background ping per wake. The server applies
-    /// its own arrival logic — the app only reports movement.
-    var backgroundHandler: (@MainActor (CLLocation, String) async -> Void)?
 
     private let manager = CLLocationManager()
     private var locationContinuation: CheckedContinuation<CLLocation?, Never>?
     private var fixCandidate: CLLocation?
     private var fixTimeout: Task<Void, Never>?
-    private var backgroundCaptureInFlight = false
     private let defaults = UserDefaults.standard
     private let backgroundEnabledKey = "assistant.share-location-background"
-    private let lastBackgroundPostKey = "assistant.background-location-posted"
 
     private override init() {
         authorizationStatus = manager.authorizationStatus
         super.init()
         manager.delegate = self
         manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
-        // A background relaunch (iOS waking the app for a significant change)
-        // re-runs this init: resume monitoring when the owner left it on.
-        if defaults.bool(forKey: backgroundEnabledKey),
-           manager.authorizationStatus == .authorizedAlways {
-            backgroundMonitoring = true
-            manager.startMonitoringSignificantLocationChanges()
-            manager.startMonitoringVisits()
-        }
+        defaults.set(false, forKey: backgroundEnabledKey)
+        manager.stopMonitoringSignificantLocationChanges()
+        manager.stopMonitoringVisits()
     }
 
     var isAuthorized: Bool {
@@ -56,34 +43,8 @@ final class LocationManager: NSObject, ObservableObject {
         authorizationStatus == .denied || authorizationStatus == .restricted
     }
 
-    var hasAlwaysAccess: Bool {
-        authorizationStatus == .authorizedAlways
-    }
-
     func requestAccess() {
         manager.requestWhenInUseAuthorization()
-    }
-
-    /// The toggle in More → Assistant context. Enabling asks iOS for Always
-    /// access (the prompt belongs to the intent, never to app launch); without
-    /// it the app keeps foreground-only sharing and says so in the UI.
-    func setBackgroundMonitoring(_ enabled: Bool) {
-        defaults.set(enabled, forKey: backgroundEnabledKey)
-        if enabled {
-            if manager.authorizationStatus != .authorizedAlways {
-                manager.requestAlwaysAuthorization()
-                // Did the owner already decline Always? Keep the honest state.
-                if manager.authorizationStatus != .authorizedAlways { return }
-            }
-            backgroundMonitoring = true
-            manager.startMonitoringSignificantLocationChanges()
-            manager.startMonitoringVisits()
-        } else {
-            backgroundMonitoring = false
-            manager.stopMonitoringSignificantLocationChanges()
-            manager.stopMonitoringVisits()
-            if backgroundCaptureInFlight { finishFix(nil) }
-        }
     }
 
     /// This app's page in iOS Settings, for recovering from a denied permission.
@@ -124,14 +85,6 @@ final class LocationManager: NSObject, ObservableObject {
         continuation.resume(returning: location)
     }
 
-    private func postBackground(_ location: CLLocation, label: String, bypassThrottle: Bool = false) async {
-        guard backgroundMonitoring, LocationFixPolicy.isUsable(location) else { return }
-        let lastPost = defaults.double(forKey: lastBackgroundPostKey)
-        guard bypassThrottle || Date().timeIntervalSince1970 - lastPost > 15 * 60 else { return }
-        defaults.set(Date().timeIntervalSince1970, forKey: lastBackgroundPostKey)
-        await backgroundHandler?(location, label)
-    }
-
     private func reverseGeocodeLabel(for location: CLLocation) async -> String {
         if #available(iOS 26.0, *) {
             guard let request = MKReverseGeocodingRequest(location: location) else { return "" }
@@ -166,20 +119,6 @@ extension LocationManager: CLLocationManagerDelegate {
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         Task { @MainActor in
             authorizationStatus = manager.authorizationStatus
-            // A granted Always upgrade completes the pending toggle intent.
-            if defaults.bool(forKey: backgroundEnabledKey),
-               authorizationStatus == .authorizedAlways,
-               !backgroundMonitoring {
-                backgroundMonitoring = true
-                manager.startMonitoringSignificantLocationChanges()
-                manager.startMonitoringVisits()
-            }
-            if authorizationStatus != .authorizedAlways, backgroundMonitoring {
-                backgroundMonitoring = false
-                manager.stopMonitoringSignificantLocationChanges()
-                manager.stopMonitoringVisits()
-                if backgroundCaptureInFlight { finishFix(nil) }
-            }
             if !isAuthorized { finishFix(nil) }
         }
     }
@@ -204,37 +143,6 @@ extension LocationManager: CLLocationManagerDelegate {
                 }
                 return
             }
-            // A significant-change wake: post one ping per wake, throttled so
-            // a day of moving stays a handful of radio hits (and the server's
-            // arrival gate does the real dedupe).
-            guard backgroundMonitoring, !backgroundCaptureInFlight,
-                  !locations.isEmpty,
-                  Date().timeIntervalSince1970 - defaults.double(forKey: lastBackgroundPostKey) > 15 * 60 else { return }
-            backgroundCaptureInFlight = true
-            defer { backgroundCaptureInFlight = false }
-            if let place = await captureCurrentPlace() {
-                await postBackground(place.location, label: place.label)
-            }
-        }
-    }
-
-    nonisolated func locationManager(_ manager: CLLocationManager, didVisit visit: CLVisit) {
-        Task { @MainActor in
-            // Significant-change events describe movement, not a stop. A visit
-            // gives us a low-power opportunity to confirm the phone is still
-            // nearby, even when no further movement events arrive.
-            guard backgroundMonitoring, !backgroundCaptureInFlight, visit.departureDate == .distantFuture,
-                  visit.arrivalDate != .distantPast,
-                  Date().timeIntervalSince(visit.arrivalDate) >= 3 * 60,
-                  visit.horizontalAccuracy >= 0, visit.horizontalAccuracy <= 200 else { return }
-            backgroundCaptureInFlight = true
-            defer { backgroundCaptureInFlight = false }
-            guard let place = await captureCurrentPlace() else { return }
-            let center = CLLocation(latitude: visit.coordinate.latitude, longitude: visit.coordinate.longitude)
-            guard place.location.distance(from: center) <= 200 else { return }
-            // Do not let the movement ping's 15-minute throttle swallow the
-            // stationary confirmation. The server still enforces dwell/dedupe.
-            await postBackground(place.location, label: place.label, bypassThrottle: true)
         }
     }
 

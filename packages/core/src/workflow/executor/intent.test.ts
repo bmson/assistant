@@ -39,7 +39,7 @@ describe('unreadSharedDocumentIntent', () => {
     const intent = await unreadSharedDocumentIntent(evidence, task as TaskRow, [
       {
         role: 'user',
-        content: 'Please read this: https://docs.google.com/document/d/doc-1234567890/edit',
+        content: 'https://docs.google.com/document/d/doc-1234567890/edit',
       },
     ]);
 
@@ -60,10 +60,23 @@ describe('unreadSharedDocumentIntent', () => {
     const intent = await unreadSharedDocumentIntent(evidence, task as TaskRow, [
       {
         role: 'user',
-        content: 'Please read this: https://docs.google.com/document/d/doc-1234567890/edit',
+        content: 'https://docs.google.com/document/d/doc-1234567890/edit',
       },
     ]);
 
     expect(intent).toBeUndefined();
+  });
+  it('requires a current read for an explicit renewed request after earlier success or failure', async () => {
+    const { evidence, hasConversationToolCall } = makeEvidence(true);
+    expect(
+      await unreadSharedDocumentIntent(evidence, task as TaskRow, [
+        {
+          role: 'user',
+          content:
+            'Please reread this updated document: https://docs.google.com/document/d/doc-1234567890/edit',
+        },
+      ]),
+    ).toEqual({ toolName: 'docs.get', documentId: 'doc-1234567890' });
+    expect(hasConversationToolCall).not.toHaveBeenCalled();
   });
 });

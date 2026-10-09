@@ -15,7 +15,7 @@ const CARD = /\bcards?\b/i;
  * a card" still reads as a card request.
  */
 const PHYSICAL_CARD =
-  /\b(?:credit|debit|gift|sim|id|business|library|key|loyalty|membership|boarding|birthday|greeting|holiday|christmas|post)\s+cards?\b/i;
+  /\b(?:credit|debit|gift|sim|id|business|library|key|loyalty|membership|boarding|birthday|greeting|holiday|christmas|post)\s+cards?\b/gi;
 
 /**
  * Whether the owner explicitly asked for a saved card. Capability questions
@@ -23,7 +23,7 @@ const PHYSICAL_CARD =
  * exclusions requestedArtifactIntent already applies.
  */
 export function requestedCardIntent(text: string): boolean {
-  const normalized = text.trim();
+  const normalized = text.trim().replace(/```[\s\S]*?```|`[^`]*`|"[^"]*"|“[^”]*”/g, '');
   if (!CREATION_VERB.test(normalized)) return false;
   if (/^\s*(?:how|why|what|where|when)\b/i.test(normalized)) return false;
   // "can it make cards?" asks about the capability; "can you make a card out of

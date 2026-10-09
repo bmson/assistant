@@ -46,6 +46,21 @@ const source = (id: string, path: string) =>
     checksum: 'x',
   }) as unknown as MigrationRecord;
 
+const custody = (
+  id: string,
+  path: string,
+  status = 'object_written',
+  actualBytes: number | null = 43,
+  sha256: string | null = 'c'.repeat(64),
+) =>
+  ({
+    table: 'email_attachment_custodies',
+    collection: 'emailAttachmentCustodies',
+    id,
+    data: { id, workspacePath: path, status, actualBytes, sha256 },
+    checksum: 'x',
+  }) as unknown as MigrationRecord;
+
 describe('workspace asset audit', () => {
   it('declares and extracts every direct workspace path field in the source schema', async () => {
     const { readFile } = await import('node:fs/promises');
@@ -55,6 +70,7 @@ describe('workspace asset audit', () => {
     );
     expect(ASSET_REFERENCE_FIELDS).toEqual([
       { table: 'files', field: 'workspacePath' },
+      { table: 'email_attachment_custodies', field: 'workspacePath' },
       { table: 'import_sources', field: 'workspacePath' },
     ]);
     expect(
@@ -85,6 +101,38 @@ describe('workspace asset audit', () => {
     expect(migrationAssetReferences(bundle([file('f3', 'browser\\shot.png')]))[0]?.path).toBe(
       'browser/shot.png',
     );
+    expect(
+      migrationAssetReferences(
+        bundle([custody('c1', 'email-attachments/custody/123e4567-e89b-42d3-a456-426614174000')]),
+      ),
+    ).toEqual([
+      {
+        table: 'email_attachment_custodies',
+        id: 'c1',
+        path: 'email-attachments/custody/123e4567-e89b-42d3-a456-426614174000',
+        lifecycleStatus: 'object_written',
+        expectedBytes: 43,
+        expectedSha256: 'c'.repeat(64),
+      },
+    ]);
+    expect(
+      migrationAssetReferences(
+        bundle([
+          custody(
+            'c2',
+            'email-attachments/custody/123e4567-e89b-42d3-a456-426614174001',
+            'erased',
+            null,
+            null,
+          ),
+        ]),
+      )[0],
+    ).toMatchObject({
+      table: 'email_attachment_custodies',
+      lifecycleStatus: 'erased',
+      expectedBytes: undefined,
+      expectedSha256: undefined,
+    });
   });
 
   it('compares current and historical generations and checks bytes/digests without mutating storage', async () => {
@@ -124,7 +172,7 @@ describe('workspace asset audit', () => {
     );
     expect(result).toEqual({
       references: 6,
-      referencesByTable: { files: 5, import_sources: 1 },
+      referencesByTable: { email_attachment_custodies: 0, files: 5, import_sources: 1 },
       expectedSizeReferences: 5,
       expectedDigestReferences: 1,
       currentObjects: 2,

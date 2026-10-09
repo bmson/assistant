@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { SuggestionStatus } from './suggestion-state';
 import {
   acceptedSuggestionLabel,
   suggestionStatus,
@@ -23,6 +24,12 @@ describe('suggestion answer reconciliation', () => {
     expect(suggestionStatus('accepted', snooze, Date.parse(wake) - 1)).toBe('accepted');
     expect(suggestionStatus('dismissed', snooze, Date.parse(wake) - 1)).toBe('dismissed');
     expect(suggestionStatus('expired', snooze)).toBe('expired');
+  });
+
+  it('keeps a newer unknown terminal status closed for an older client contract', () => {
+    const superseded = 'superseded' as SuggestionStatus;
+    expect(suggestionStatus(superseded, snooze, Date.parse(wake) - 1)).toBe('superseded');
+    expect(suggestionStatus(superseded, undefined)).not.toBe('pending');
   });
 
   it('describes the actual task outcome instead of claiming completed work is running', () => {

@@ -211,6 +211,39 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore profile occasio
         ownerConfirmed: true,
         quarantined: false,
       });
+      const oldDate = { ...input, year: 2020, notes: 'Old date observation' };
+      await expect(
+        repository.record(oldDate, {
+          originTrust: 'assistant',
+          quarantined: true,
+          ownerConfirmed: false,
+          source: 'extraction',
+        }),
+      ).rejects.toThrow('explicitly corrected by the owner');
+      const correctedResult = await repository.record(
+        { ...input, month: 4, day: 13, notes: 'New date observation' },
+        {
+          originTrust: 'assistant',
+          quarantined: true,
+          ownerConfirmed: false,
+          source: 'extraction',
+        },
+      );
+      expect(correctedResult.created).toBe(false);
+      const rowsAfterReingestion = await store
+        .collection('occasions')
+        .where('agentId', '==', agentId)
+        .get();
+      expect(rowsAfterReingestion.size).toBe(1);
+      expect(
+        rowsAfterReingestion.docs.find((row) => row.get('id') === createdId)?.data(),
+      ).toMatchObject({
+        day: 13,
+        notes: 'Call beforehand; New date observation',
+        ownerConfirmed: true,
+        quarantined: false,
+      });
+      expect(rowsAfterReingestion.docs.find((row) => row.get('day') === 12)).toBeUndefined();
       await repository.review(foreignOccasionId, 'approve');
       await repository.forget(foreignOccasionId);
       expect((await store.doc('occasions', foreignOccasionId).get()).exists).toBe(true);

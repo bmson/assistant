@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const state = vi.hoisted(() => ({ owner: vi.fn(), list: vi.fn(), detail: vi.fn() }));
 vi.mock('@/auth', () => ({ requireOwner: state.owner }));
 vi.mock('@/lib/task-activity', () => ({
-  listTaskActivity: state.list,
+  discoverTaskActivity: state.list,
   getTaskActivityDetail: state.detail,
 }));
 
@@ -27,9 +27,44 @@ describe('owner audit console', () => {
     const filtered = renderToStaticMarkup(
       await AuditPage({ searchParams: Promise.resolve({ q: 'meeting', filter: 'working' }) }),
     );
-    expect(filtered).toContain('No records match these filters.');
+    expect(filtered).toContain('No matches in this scanned page.');
     expect(filtered).toContain('Clear filters');
     expect(filtered).toContain('0 records');
+  });
+
+  it('keeps advanced filters open and clearable when their values are active', async () => {
+    state.list.mockResolvedValue({ items: [], nextCursor: 'older-page', searchIncomplete: true });
+    const query = {
+      type: 'chat',
+      trust: 'owner',
+      source: 'gmail',
+      from: '2026-10-01',
+      until: '2026-10-07',
+    };
+    const html = renderToStaticMarkup(await AuditPage({ searchParams: Promise.resolve(query) }));
+
+    expect(state.list).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: query.type,
+        trust: query.trust,
+        source: query.source,
+        from: '2026-10-01T00:00:00.000Z',
+        until: '2026-10-07T23:59:59.999Z',
+      }),
+    );
+    // Assert the semantic open state without pinning the CSS utility names.
+    expect(html).toMatch(/<details\b[^>]*\bopen="">/);
+    expect(html).toContain('5 active');
+    for (const [name, value] of Object.entries(query)) {
+      expect(html).toContain(`name="${name}"`);
+      expect(html).toContain(`value="${value}"`);
+    }
+    expect(html).toContain('href="/audit"');
+    expect(html).toContain('Continue to older records');
+    expect(html).toContain(
+      'href="/audit?type=chat&amp;trust=owner&amp;source=gmail&amp;from=2026-10-01&amp;until=2026-10-07&amp;cursor=older-page"',
+    );
+    expect(html).toContain('More remain; an empty page may be partial.');
   });
 
   it('searches a bounded view and links to audit records', async () => {
@@ -53,7 +88,9 @@ describe('owner audit console', () => {
         searchParams: Promise.resolve({ q: id, view: 'archived', filter: 'completed' }),
       }),
     );
-    expect(state.list).toHaveBeenCalledWith({ archived: true, filter: 'completed', limit: 100 });
+    expect(state.list).toHaveBeenCalledWith(
+      expect.objectContaining({ archived: true, filter: 'completed', limit: 100, q: id }),
+    );
     expect(html).toContain(`/audit/${id}`);
     expect(html).toContain('Provider timed out');
     expect(html).not.toContain('/chat');

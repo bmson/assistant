@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { communicationReceipt } from '../communication-receipt.js';
+import { effectiveReminders, reminderIdentity } from './reminder-state.js';
 import type { RequestChecklist } from './request-checklist-schema.js';
 import { isDurableSave } from './saved-work.js';
 
@@ -20,7 +22,7 @@ const CLAUSE = new RegExp(
   'gi',
 );
 const STOP = new Set(
-  'a an the my our your me us it this that them those these to for in on at with and then also please as into find check search look up read save remember create make remind send email draft schedule add card cards reminder reminders reservation reservations booking confirmation document doc about before after tomorrow today morning evening day days week next hour hours minutes again'.split(
+  'a an the my our your me us it this that them those these to for in on at with and then also please as into find check search look up read save remember create make remind send email draft schedule add card cards reminder reminders reservation reservations booking confirmation document doc about before after tomorrow today morning evening day days week next hour hours minutes again earlier exact own inbox message messages'.split(
     ' ',
   ),
 );
@@ -53,7 +55,7 @@ export function buildRequestChecklist(
   proposed: Array<{ requestSpan: string }> = [],
 ): RequestChecklist | undefined {
   if (request.length > 8_000 || !DIRECT_REQUEST.test(request)) return undefined;
-  const requestBody = request.replace(new RegExp(`^\\s*(?:${POLITE}\\s+)*`, 'i'), '');
+  const prohibitionAt = request.search(/\b(?:don't|do not|never|unless|if|maybe|might)\b/i);
   const starts = [...request.matchAll(CLAUSE)].map(
     (match) => (match.index ?? 0) + match[0].length - (match[1]?.length ?? 0),
   );
@@ -63,6 +65,9 @@ export function buildRequestChecklist(
       .replace(/[,;.!?\s]+$/, '')
       .replace(/\s+(?:and|then|also)\s*$/i, '')
       .replace(/[,;.!?\s]+$/, '')
+      // A prohibition qualifies this clause; it must not erase independent
+      // positive outcomes elsewhere in the same owner request.
+      .replace(/(?:[,;.]?\s+(?:but\s+)?(?:don't|do not|never)\b)[\s\S]*$/i, '')
       .trim(),
   );
   for (const { requestSpan } of proposed) {
@@ -76,7 +81,8 @@ export function buildRequestChecklist(
     if (!kind || label.length > 500) continue;
     // Embedded instructions and hypothetical/negated clauses are not new work.
     if (
-      /\b(?:don't|do not|never|unless|if|maybe|might|could)\b/i.test(requestBody) ||
+      /\b(?:don't|do not|never|unless|if|maybe|might|could)\b/i.test(label) ||
+      (prohibitionAt >= 0 && request.indexOf(label) > prohibitionAt) ||
       /["“”`]/.test(request.slice(0, request.indexOf(label)))
     )
       continue;
@@ -116,7 +122,7 @@ function record(value: unknown): Record<string, unknown> {
 function candidates(kind: Kind, name: string): boolean {
   switch (kind) {
     case 'lookup':
-      return /^(?:gmail\.(?:search|read_thread)|calendar\.(?:list_events|search_events)|memory\.recall|documents\.search|drive\.(?:search|read)|web\.(?:search|fetch)|docs\.get|contacts\.lookup)$/.test(
+      return /^(?:conversations\.search|gmail\.(?:search|read_thread)|calendar\.(?:list_events|search_events)|memory\.recall|documents\.search|drive\.(?:search|read)|web\.(?:search|fetch)|docs\.get|contacts\.lookup)$/.test(
         name,
       );
     case 'save':
@@ -149,6 +155,7 @@ function proven(kind: Kind, row: ChecklistEvidence): boolean {
     return false;
   if (row.toolName === 'cards.persist')
     return result.persisted === true && typeof result.revisionId === 'string';
+  if (kind === 'send' && row.toolName !== 'email.send') return !!communicationReceipt(row);
   if (kind === 'save') return isDurableSave({ ...row, result: row.result });
   if (kind === 'lookup')
     return (
@@ -184,8 +191,15 @@ export function reconcileRequestChecklist(
       result: { ...card, persisted: true },
     })),
   ];
+  const reminders = effectiveReminders(evidence);
   const used = new Set<string>();
   const items = checklist.items.map((item): RequestChecklist['items'][number] => {
+    if (item.ownerCancellation && item.status !== 'completed')
+      return {
+        ...item,
+        status: 'cancelled',
+        detail: 'Cancelled by the owner; no completion is claimed.',
+      };
     const matching = rows.filter((row) => {
       if (used.has(row.id) || !candidates(item.kind, row.toolName)) return false;
       const corpus = new Set(words(JSON.stringify([row.args, row.result])));
@@ -193,6 +207,10 @@ export function reconcileRequestChecklist(
     });
     const success = matching.find((row) => {
       if (!proven(item.kind, row)) return false;
+      if (item.kind === 'reminder') {
+        const id = reminderIdentity(row.result);
+        if (!id || !reminders.get(id)?.enabled) return false;
+      }
       // A query containing the target is not proof that the search found it.
       const resultWords = new Set(words(JSON.stringify(row.result ?? {})));
       return item.kind !== 'lookup' || item.targetTerms.every((term) => resultWords.has(term));
@@ -246,6 +264,86 @@ export function requestChecklistSummary(checklist: RequestChecklist): string {
     pending: 'Not completed',
     blocked: 'Blocked',
     awaiting_approval: 'Awaiting approval',
+    cancelled: 'Cancelled by owner',
   };
   return checklist.items.map((item) => `- ${label[item.status]}: ${item.label}`).join('\n');
+}
+
+/** Cancel only an explicit matching outcome, using a verified owner row identity. */
+export function reviseRequestChecklist(
+  checklist: RequestChecklist,
+  owner: { messageId: string; text: string },
+): RequestChecklist {
+  if (!owner.messageId || owner.text.length > 8000) return checklist;
+  const items = checklist.items.map((item) => ({ ...item }));
+  for (const span of owner.text.split(/[.;\n]+/)) {
+    const match = /^\s*(?:please\s+)?(?:don['’]t|do not|stop|skip|drop|cancel)\s+([^"“”`]+)$/i.exec(
+      span,
+    );
+    if (!match?.[1]) continue;
+    const body = match[1].trim().replace(
+      /^(sending|emailing|reminding|saving|creating|drafting|scheduling)\b/i,
+      (word) =>
+        ({
+          sending: 'send',
+          emailing: 'email',
+          reminding: 'remind',
+          saving: 'save',
+          creating: 'create',
+          drafting: 'draft',
+          scheduling: 'schedule',
+        })[word.toLowerCase()] ?? word,
+    );
+    if (/\b(?:if|unless|maybe|might|could|would|said|says|quoted)\b/i.test(body)) continue;
+    const kind =
+      kindOf(body) ?? (/^(?:(?:the|that|my|a)\s+)?reminder\b/i.test(body) ? 'reminder' : undefined);
+    if (!kind) continue;
+    const targets = words(body).filter(
+      (word) =>
+        word.length > 2 &&
+        !STOP.has(word) &&
+        ![
+          'stop',
+          'cancel',
+          'skip',
+          'drop',
+          'any',
+          'all',
+          'anymore',
+          'now',
+          'sending',
+          'emailing',
+          'reminding',
+          'saving',
+          'creating',
+          'drafting',
+          'scheduling',
+        ].includes(word),
+    );
+    const matches = items.filter(
+      (item) =>
+        item.kind === kind &&
+        targets.every((term) => new Set([...words(item.label), ...item.targetTerms]).has(term)),
+    );
+    if (matches.length > 1 && !/\b(?:all|any)\b/i.test(body)) continue;
+    for (const item of matches) {
+      item.ownerCancellation = {
+        messageId: owner.messageId,
+        requestSpan: span.trim().slice(0, 500),
+      };
+      if (item.status !== 'completed') item.status = 'cancelled';
+      item.detail =
+        item.status === 'completed'
+          ? 'The owner cancelled further work; the prior completed action is not undone.'
+          : 'Cancelled by the owner; no completion is claimed.';
+    }
+  }
+  return { ...checklist, items };
+}
+
+export function requestChecklistHasUnfinished(checklist: RequestChecklist | undefined): boolean {
+  return (
+    checklist?.items.some((item) => item.status !== 'completed' && item.status !== 'cancelled') ??
+    false
+  );
 }

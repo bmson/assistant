@@ -1,3 +1,4 @@
+import { projectMobileCardCapabilities } from '@/lib/mobile-card-capabilities';
 import { getAgentIdentity, getChatApplication } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -22,6 +23,6 @@ export async function GET(request: Request): Promise<Response> {
     generatedAt: new Date().toISOString(),
     identity,
     shell,
-    conversation,
+    conversation: projectMobileCardCapabilities(conversation, request),
   });
 }

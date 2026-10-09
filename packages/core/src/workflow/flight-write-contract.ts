@@ -4,6 +4,7 @@ import { explicitWriteInstants } from './write-grounding.js';
 export interface FlightWriteCorrection {
   text: string;
   changed: boolean;
+  flightUpdateReceipt?: string;
 }
 
 interface FlightFacts {
@@ -12,6 +13,7 @@ interface FlightFacts {
   flightNumbers: Set<string>;
   instants: Set<number>;
   utcMinutes: Set<number>;
+  localMinutes: Set<number>;
   dates: Set<string>;
   hasArrival: boolean;
   hasReturn: boolean;
@@ -95,6 +97,13 @@ function writeSource(item: ActionEvidence): string {
   if (item.toolName === 'calendar.create_event') {
     return JSON.stringify([args.summary, args.description, args.location, args.start, args.end]);
   }
+  if (item.toolName === 'calendar.update_event') {
+    const result = record(item.result);
+    if (result.updated !== true) return '';
+    // Patch input is intent, not proof. Only fields returned by Calendar can
+    // support the final schedule; absent canonical time suppresses stale claims.
+    return JSON.stringify([result.start]);
+  }
   if (item.toolName === 'sheets.create') {
     return JSON.stringify([args.title, args.sheetName, args.rows]);
   }
@@ -128,13 +137,21 @@ function dateParts(
 function temporalFacts(
   value: string,
   referenceAt: Date,
-): Pick<FlightFacts, 'instants' | 'utcMinutes' | 'dates'> {
+): Pick<FlightFacts, 'instants' | 'utcMinutes' | 'localMinutes' | 'dates'> {
   const instants = new Set(explicitWriteInstants(value, referenceAt));
   const utcMinutes = new Set<number>();
+  const localMinutes = new Set<number>();
   const dates = new Set<string>();
   const fallbackYear = referenceAt.getUTCFullYear();
   for (const match of value.matchAll(/\b(20\d{2})-(\d{2})-(\d{2})\b/g))
     dates.add(`${match[1]}-${match[2]}-${match[3]}`);
+  for (const match of value.matchAll(/\b(\d{1,2}):(\d{2})\s*(a\.?m\.?|p\.?m\.?)?\b/gi)) {
+    const rawHour = Number(match[1]);
+    const minute = Number(match[2]);
+    const meridiem = (match[3] ?? '').toLowerCase();
+    const hour = meridiem ? (rawHour % 12) + (meridiem.startsWith('p') ? 12 : 0) : rawHour;
+    if (hour <= 23 && minute <= 59) localMinutes.add(hour * 60 + minute);
+  }
   for (const match of value.matchAll(TIME_WITH_ZONE)) {
     const rawHour = Number(match[1]);
     const minute = Number(match[2] ?? 0);
@@ -157,12 +174,17 @@ function temporalFacts(
       );
   }
   MONTH_DATE.lastIndex = 0;
-  return { instants, utcMinutes, dates };
+  return { instants, utcMinutes, localMinutes, dates };
 }
 
 function normalizedFacts(source: string, item: ActionEvidence): FlightFacts {
   const args = record(item.args);
-  const names = `${source} ${String(args.summary ?? '')} ${String(args.description ?? '')}`;
+  const result = record(item.result);
+  const updateNames =
+    item.toolName === 'calendar.update_event'
+      ? ` ${String(result.summary ?? '')} ${String(result.description ?? '')} ${String(result.location ?? '')}`
+      : '';
+  const names = `${source} ${String(args.summary ?? '')} ${String(args.description ?? '')}${updateNames}`;
   const carriers = new Set(
     AIRLINES.filter(([, pattern]) => pattern.test(names)).map(([code]) => code),
   );
@@ -205,7 +227,26 @@ function flightWrites(evidence: ActionEvidence[], requestText: string): FlightWr
   return evidence.flatMap((item) => {
     if (!successful(item)) return [];
     const source = writeSource(item);
-    if (!source || !(FLIGHT_CONTEXT.test(requestText) || FLIGHT_CONTEXT.test(source))) return [];
+    if (!source) return [];
+    const args = record(item.args);
+    const result = record(item.result);
+    const target = [
+      args.summary,
+      args.description,
+      args.location,
+      result.summary,
+      result.description,
+      result.location,
+    ]
+      .filter((value): value is string => typeof value === 'string')
+      .join(' ');
+    if (item.toolName === 'calendar.update_event' && !FLIGHT_CONTEXT.test(target)) return [];
+    if (
+      !FLIGHT_CONTEXT.test(requestText) &&
+      !FLIGHT_CONTEXT.test(source) &&
+      !FLIGHT_CONTEXT.test(target)
+    )
+      return [];
     return [{ item, source, facts: normalizedFacts(source, item) }];
   });
 }
@@ -264,10 +305,11 @@ function contradicts(sentence: string, writes: FlightWrite[]): boolean {
       claimed.flightNumbers.size +
       claimed.instants.size +
       claimed.utcMinutes.size +
+      claimed.localMinutes.size +
       claimed.dates.size >
     0;
   if (!hasSpecificClaim) return false;
-  return !writes.some(({ facts }) => {
+  return !writes.some(({ facts, item }) => {
     const setSupported = <T>(values: Set<T>, support: Set<T>) =>
       [...values].every((value) => support.has(value));
     return (
@@ -276,6 +318,8 @@ function contradicts(sentence: string, writes: FlightWrite[]): boolean {
       setSupported(claimed.flightNumbers, facts.flightNumbers) &&
       setSupported(claimed.instants, facts.instants) &&
       setSupported(claimed.utcMinutes, facts.utcMinutes) &&
+      (item.toolName !== 'calendar.update_event' ||
+        setSupported(claimed.localMinutes, facts.localMinutes)) &&
       setSupported(claimed.dates, facts.dates)
     );
   });
@@ -290,6 +334,12 @@ function receipts(writes: FlightWrite[]): string {
         const start = typeof args.start === 'string' ? args.start : '(start unavailable)';
         const end = typeof args.end === 'string' ? args.end : '(end unavailable)';
         return `Saved to your calendar: “${summary}”, ${start} to ${end}.`;
+      }
+      if (item.toolName === 'calendar.update_event') {
+        const start = record(item.result).start;
+        if (typeof start !== 'string')
+          return "The calendar accepted the flight-time update, but its response did not include the updated departure, so I couldn't confirm the final schedule.";
+        return `Updated the calendar flight departure to ${start}.`;
       }
       const title = typeof args.title === 'string' ? args.title : 'flight spreadsheet';
       const url = record(item.result).spreadsheetUrl;
@@ -309,6 +359,17 @@ export function correctFlightWriteClaims(
     return { text, changed: false };
   const writes = flightWrites(evidence, requestText);
   if (writes.length === 0) return { text, changed: false };
+  const flightUpdateWrites = writes.filter(
+    (write) => write.item.toolName === 'calendar.update_event',
+  );
+  if (flightUpdateWrites.length > 0) {
+    const flightUpdateReceipt = receipts(flightUpdateWrites);
+    return {
+      text: flightUpdateReceipt,
+      changed: text.trim() !== flightUpdateReceipt.trim(),
+      flightUpdateReceipt,
+    };
+  }
   const receipt = receipts(writes);
   let changed = false;
   let inserted = false;

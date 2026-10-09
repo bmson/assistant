@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { type ExecutorDeps, executeTask, type ModelRouter } from '@assistant/core';
+import { GRAPH_EXTRACTION_VERSION } from '@assistant/core/memory/knowledge-graph';
 import type { Db } from '@assistant/db';
 import {
   createFirestoreExecutionPersistence,
@@ -8,7 +9,12 @@ import {
   FirestoreMemoryRepository,
   type InstallationStore,
 } from '@assistant/firestore';
-import type { EmbeddingSpace } from '@assistant/persistence';
+import {
+  type EmbeddingSpace,
+  embeddingSpaceIdentityKey,
+  finalChannelDelivery,
+  finalChannelDeliveryReport,
+} from '@assistant/persistence';
 import { FieldValue } from '@google-cloud/firestore';
 
 export const CHAT_SMOKE_SPACE: EmbeddingSpace = {
@@ -83,12 +89,23 @@ export async function firestoreChatSmoke(
   await store.doc('commitments', `${agentId}-commitment`).set({
     id: `${agentId}-commitment`,
     agentId,
+    conversationId,
+    sourceMessageId: null,
+    sourceTaskId: null,
+    sourceOccurrenceKey: null,
+    reopenedFromId: null,
+    reopenOperationId: null,
     kind: 'follow_up',
     title: 'Rainbow observation notes',
+    details: '',
     nextAction: 'Compare the rainbow notes',
     status: 'open',
-    snoozedUntil: null,
     dueAt: null,
+    snoozedUntil: null,
+    resolvedAt: null,
+    resolution: null,
+    confidence: '0.9',
+    contentHash: 'synthetic-source-free-commitment',
     createdAt: now,
     updatedAt: now,
   });
@@ -160,6 +177,7 @@ export async function firestoreChatSmoke(
       createdAt: historyAt,
       expiresAt: null,
       embedding,
+      embeddingSpaceKey: embeddingSpaceKey(CHAT_SMOKE_SPACE),
       sourceTaskId: null,
       kind: 'fact',
       confidence: '1',
@@ -189,7 +207,7 @@ export async function firestoreChatSmoke(
       memoryId,
       status: 'ready',
       contentHash: `synthetic-${memoryId}`,
-      extractionVersion: 2,
+      extractionVersion: GRAPH_EXTRACTION_VERSION,
     });
     await store.doc('knowledgeGraphRelations', relationId).set({
       id: relationId,
@@ -201,12 +219,14 @@ export async function firestoreChatSmoke(
       evidenceQuote: 'The owner observes rainbows by the sea.',
       confidence: '1',
       reviewStatus: 'pending',
+      assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
       validFrom: null,
       validUntil: null,
     });
     const anchors = await persistence.history.messages({
       agentId,
       embedding,
+      embeddingSpaceKey: embeddingSpaceKey(CHAT_SMOKE_SPACE),
       exclude: { conversationId, sinceCreatedAt: now },
       limit: 4,
     });
@@ -244,8 +264,15 @@ export async function firestoreChatSmoke(
   );
   const roles: string[] = [];
   let systemPrompt = '';
+  let modelMessages = '';
   let delivered = 0;
   const router = {
+    async embeddingSpace() {
+      return CHAT_SMOKE_SPACE;
+    },
+    async embeddingSpaceKey() {
+      return embeddingSpaceIdentityKey(CHAT_SMOKE_SPACE);
+    },
     async object(role: string) {
       roles.push(role);
       const object =
@@ -264,8 +291,9 @@ export async function firestoreChatSmoke(
     async embed() {
       return [embedding];
     },
-    async step(_role: string, input: { system: string }) {
+    async step(_role: string, input: { system: string; messages: unknown[] }) {
       systemPrompt = input.system;
+      modelMessages = JSON.stringify(input.messages);
       return {
         ok: true,
         modelId: 'synthetic/model',
@@ -290,8 +318,9 @@ export async function firestoreChatSmoke(
         throw new Error('Unexpected approval');
       },
     },
-    deliverFinal: async () => {
+    deliverFinal: async (_task, _text, attemptId) => {
       delivered++;
+      return finalChannelDeliveryReport([finalChannelDelivery('dashboard', 'accepted', attemptId)]);
     },
   };
   const outcome = await executeTask(deps, task.id);
@@ -304,12 +333,15 @@ export async function firestoreChatSmoke(
   assert.match(systemPrompt, /Rainbow observation notes/);
   assert.match(systemPrompt, /Explain science clearly/);
   if (options.recall) {
-    assert.match(systemPrompt, /Earlier rainbow discussion by the sea/);
-    assert.match(systemPrompt, /Coastal rainbows/);
+    // Pre-planning retrieval is carried into the model's message window as
+    // reference evidence; it is not duplicated in the static system prompt.
+    assert.match(modelMessages, /Earlier rainbow discussion by the sea/);
+    assert.match(modelMessages, /Coastal rainbows/);
     const metrics = await store.collection('recallMetrics').where('taskId', '==', task.id).get();
     assert.equal(metrics.size, 1);
     assert.equal(metrics.docs[0]?.get('graphUsed'), 1);
-    assert.equal(metrics.docs[0]?.get('historyUsed'), 1);
+    // Segment and raw-message tiers both contributed one complete source.
+    assert.equal(metrics.docs[0]?.get('historyUsed'), 2);
   }
   assert.equal((await store.doc('tasks', task.id).get()).get('plan.action'), 'reply');
   assert.equal((await store.doc('skills', skillId).get()).get('useCount'), 1);

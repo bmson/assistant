@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { emailBookingOccurrenceId } from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { InstallationStore } from './store.js';
 import { FirestoreSuggestionDecisionRepository } from './suggestion-decisions.js';
+import { FirestoreSuggestionRepository } from './suggestions.js';
 import { disposeStore, emulatorStore } from './test-store.js';
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore suggestion decisions', () => {
@@ -23,7 +25,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore suggestion deci
   async function seed(
     overrides: Record<string, unknown> = {},
   ): Promise<{ id: string; conversationId: string }> {
-    const id = randomUUID();
+    const id = typeof overrides.id === 'string' ? overrides.id : randomUUID();
     const conversationId = randomUUID();
     await Promise.all([
       store.doc('conversations', conversationId).set({
@@ -35,6 +37,8 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore suggestion deci
       }),
       store.doc('suggestions', id).set({
         id,
+        createdAt: now,
+        updatedAt: now,
         agentId,
         conversationId,
         origin: 'watch',
@@ -66,6 +70,94 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore suggestion deci
     expect(task.get('trigger.payload.suggestionId')).toBe(id);
     expect((await store.collection('taskEventKeys').get()).size).toBe(1);
     expect((await store.collection('outbox').get()).size).toBe(1);
+    const repository = new FirestoreSuggestionRepository(store);
+    expect(
+      await repository.acceptedForTask({
+        agentId,
+        suggestionId: id,
+        taskId: first.taskId as string,
+      }),
+    ).toMatchObject({ id, agentId, status: 'accepted', acceptedTaskId: first.taskId });
+    expect(
+      await repository.acceptedForTask({ agentId, suggestionId: id, taskId: randomUUID() }),
+    ).toBeNull();
+    expect(
+      await repository.acceptedForTask({
+        agentId: randomUUID(),
+        suggestionId: id,
+        taskId: first.taskId as string,
+      }),
+    ).toBeNull();
+  });
+
+  it('fences acceptance against a newer cancelled booking lifecycle', async () => {
+    const bookingKey = `booking-${randomUUID()}`;
+    const occurrenceId = emailBookingOccurrenceId(agentId, bookingKey);
+    const { id } = await seed({
+      origin: 'briefing',
+      bookingKey,
+      bookingVersion: 1,
+      proposedAction: 'Create a booking event after checking the calendar.',
+    });
+    await store.doc('emailBookingOccurrences', occurrenceId).set({
+      id: occurrenceId,
+      agentId,
+      bookingKey,
+      lifecycle: 'cancelled',
+      dates: [],
+      sourceChannelMessageId: `gmail:${randomUUID()}`,
+      sourceReceivedAt: now,
+      sourceAuthenticated: true,
+      version: 2,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    expect(await decisions.decide(id, 'accepted')).toMatchObject({
+      ok: false,
+      reason: 'This booking changed. Review the latest email before accepting.',
+    });
+    expect((await store.doc('suggestions', id).get()).get('status')).toBe('superseded');
+    expect((await store.collection('tasks').get()).size).toBe(0);
+  });
+
+  it('accepts only a current cancelled-booking binding and freezes event identity into the task', async () => {
+    const bookingKey = `booking-${randomUUID()}`;
+    const occurrenceId = emailBookingOccurrenceId(agentId, bookingKey);
+    const binding = {
+      calendarEventId: 'provider-event-314',
+      bookingIdentity: 'R-314',
+    };
+    const { id } = await seed({
+      origin: 'briefing',
+      bookingKey,
+      bookingVersion: 3,
+      bookingCancellation: binding,
+      proposedAction: 'Cancel only the exact cancelled booking event.',
+    });
+    await store.doc('emailBookingOccurrences', occurrenceId).set({
+      id: occurrenceId,
+      agentId,
+      bookingKey,
+      lifecycle: 'cancelled',
+      dates: [],
+      sourceChannelMessageId: `gmail:${randomUUID()}`,
+      sourceReceivedAt: now,
+      sourceAuthenticated: true,
+      version: 3,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const accepted = await decisions.decide(id, 'accepted');
+    expect(accepted.ok).toBe(true);
+    const task = await store.doc('tasks', accepted.taskId as string).get();
+    expect(task.get('trigger.payload.bookingOccurrence')).toEqual({
+      agentId,
+      bookingKey,
+      version: 3,
+      operation: 'cancel_existing',
+      ...binding,
+    });
   });
 
   it('keeps foreign, expired, and erased suggestions from creating work', async () => {
@@ -89,6 +181,57 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore suggestion deci
     expect(await decisions.decide(later.id, 'snoozed')).toEqual(snoozed);
     expect((await store.doc('suggestions', later.id).get()).get('status')).toBe('snoozed');
     expect((await store.collection('tasks').get()).size).toBe(0);
+  });
+
+  it('filters answered imported sources by exact owner and keeps pending sources open', async () => {
+    const refs = {
+      dismissed: `booking:${randomUUID()}:cancelled`,
+      accepted: `booking:${randomUUID()}:accepted`,
+      snoozed: `booking:${randomUUID()}:snoozed`,
+      pending: `booking:${randomUUID()}:pending`,
+      foreignOnly: `booking:${randomUUID()}:foreign`,
+    };
+    const foreignAgentId = randomUUID();
+    const [dismissed, accepted, snoozed, pending] = await Promise.all([
+      seed({ id: randomUUID(), status: 'dismissed', sourceRef: refs.dismissed }),
+      seed({ id: randomUUID(), status: 'accepted', sourceRef: refs.accepted }),
+      seed({
+        id: randomUUID(),
+        status: 'snoozed',
+        snoozedUntil: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+        sourceRef: refs.snoozed,
+      }),
+      seed({ id: randomUUID(), status: 'pending', sourceRef: refs.pending }),
+    ]);
+    await seed({ agentId: foreignAgentId, status: 'dismissed', sourceRef: refs.foreignOnly });
+    const ownerPending = await seed({ status: 'pending', sourceRef: refs.foreignOnly });
+
+    const repository = new FirestoreSuggestionRepository(store);
+    expect(
+      await repository.inactiveSourceRefs(agentId, [
+        refs.dismissed,
+        refs.accepted,
+        refs.snoozed,
+        refs.pending,
+        refs.foreignOnly,
+      ]),
+    ).toEqual([refs.dismissed, refs.accepted, refs.snoozed]);
+
+    const open = await repository.listOpen(agentId, now);
+    expect(open.map((row) => row.id)).toEqual(
+      expect.arrayContaining([pending.id, ownerPending.id]),
+    );
+    expect(open.map((row) => row.id)).not.toContain(dismissed.id);
+    expect(open.map((row) => row.id)).not.toContain(accepted.id);
+    expect(open.map((row) => row.id)).not.toContain(snoozed.id);
+  });
+
+  it('rejects more than 64 exact-source lookups before querying', async () => {
+    const repository = new FirestoreSuggestionRepository(store);
+    const refs = Array.from({ length: 65 }, (_, index) => `booking:${randomUUID()}:${index}`);
+    await expect(repository.inactiveSourceRefs(agentId, refs)).rejects.toThrow(
+      'Invalid suggestion identity batch',
+    );
   });
 
   it('rejects a foreign conversation and does not launder an outward action', async () => {

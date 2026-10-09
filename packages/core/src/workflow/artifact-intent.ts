@@ -81,7 +81,26 @@ export function requestedArtifactIntent(text: string): ArtifactIntent | undefine
  * promise to review a CV and then reply without attempting docs.get.
  */
 export function requestedDocumentReadIntent(text: string): DocumentReadIntent | undefined {
-  const documentId = GOOGLE_DOC_URL.exec(text)?.[1];
+  // Deterministic routing must not turn an example, quotation, or prohibition
+  // into authorization. Ambiguous multi-document requests stay with planning.
+  if (
+    /\b(?:do\s+not|don['’]?t|never|without)\b[^.!?;\n]{0,70}\b(?:read|open|access|fetch|review)\b/i.test(
+      text,
+    ) ||
+    /\b(?:example|hypothetical|translate|translation|what\s+(?:a|this)\s+google\s+doc\s+url|url\s+(?:looks|format))\b/i.test(
+      text,
+    )
+  )
+    return undefined;
+  const matches = [...text.matchAll(new RegExp(GOOGLE_DOC_URL.source, 'gi'))];
+  if (matches.length !== 1) return undefined;
+  const outsideQuoted = text.replace(/```[\s\S]*?```|`[^`]*`|"[^"]*"|“[^”]*”/g, '');
+  if (
+    !GOOGLE_DOC_URL.test(outsideQuoted) &&
+    !/\b(?:read|open|access|fetch|review)\b/i.test(outsideQuoted)
+  )
+    return undefined;
+  const documentId = matches[0]?.[1];
   return documentId ? { toolName: 'docs.get', documentId } : undefined;
 }
 

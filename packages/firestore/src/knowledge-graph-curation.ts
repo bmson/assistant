@@ -1,9 +1,14 @@
-import { createHash } from 'node:crypto';
 import type {
   KnowledgeGraphCurationEntity,
   KnowledgeGraphCurationRepository,
   KnowledgeWorkspaceEntity,
   Records,
+} from '@assistant/persistence';
+import {
+  canonicalizeKnowledgeAssertionDirection,
+  knowledgeAssertionEvidenceId,
+  knowledgeAssertionId,
+  knowledgeAssertionSemanticKey,
 } from '@assistant/persistence';
 import {
   type DocumentReference,
@@ -14,11 +19,14 @@ import {
 } from '@google-cloud/firestore';
 import { assertConfiguredOwner, RELATIVE_DATE } from './knowledge-graph-read.js';
 import { assertPrivacyErasureInactiveInTransaction } from './privacy-erasure.js';
+import { deterministicUuid } from './stable-id.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 type Entity = Records['knowledgeGraphEntities'];
 type Relation = Records['knowledgeGraphRelations'];
 type Alias = Records['knowledgeGraphEntityAliases'];
+type GraphAssertion = Records['knowledgeGraphAssertions'];
+type GraphAssertionEvidence = Records['knowledgeGraphAssertionEvidence'];
 
 const PAGE_SIZE = 1000;
 const ENTITY_LIMIT = 50_000;
@@ -28,10 +36,6 @@ const SOURCE_LIMIT = 100_000;
 const MERGE_WRITE_LIMIT = 450;
 const ALIAS_LIMIT = 100;
 const CONCURRENCY = 8;
-
-function deterministicId(prefix: string, ...parts: string[]): string {
-  return `${prefix}-${createHash('sha256').update(parts.join('\0')).digest('hex')}`;
-}
 
 function ownedEntity(doc: DocumentSnapshot | undefined, agentId: string): Entity | null {
   if (!doc?.exists) return null;
@@ -161,7 +165,7 @@ export class FirestoreKnowledgeGraphCurationRepository implements KnowledgeGraph
       tx.update(existing.ref, { entityId });
       return;
     }
-    const id = deterministicId('alias', agentId, canonicalKey);
+    const id = deterministicUuid('knowledge-graph-alias', agentId, canonicalKey);
     tx.create(this.store.doc('knowledgeGraphEntityAliases', id), {
       id,
       createdAt: this.store.now(),
@@ -260,7 +264,7 @@ export class FirestoreKnowledgeGraphCurationRepository implements KnowledgeGraph
           MERGE_WRITE_LIMIT,
           'Knowledge merge relation bound reached',
         );
-      const [pages, keyAliases, sourceAliases] = await Promise.all([
+      const [pages, keyAliases, sourceAliases, assertionPages] = await Promise.all([
         Promise.all([
           incident('subjectEntityId', sourceId),
           incident('objectEntityId', sourceId),
@@ -274,9 +278,132 @@ export class FirestoreKnowledgeGraphCurationRepository implements KnowledgeGraph
           ALIAS_LIMIT,
           'Graph entity alias merge bound reached',
         ),
+        Promise.all([
+          bounded(
+            tx,
+            this.store
+              .collection('knowledgeGraphAssertions')
+              .where('agentId', '==', agentId)
+              .where('subjectEntityId', '==', sourceId),
+            MERGE_WRITE_LIMIT,
+            'Knowledge merge assertion bound reached',
+          ),
+          bounded(
+            tx,
+            this.store
+              .collection('knowledgeGraphAssertions')
+              .where('agentId', '==', agentId)
+              .where('objectEntityId', '==', sourceId),
+            MERGE_WRITE_LIMIT,
+            'Knowledge merge assertion bound reached',
+          ),
+        ]),
       ]);
       if (sourceAliases.some((doc) => doc.get('agentId') !== agentId))
         throw new Error('Graph alias ownership mismatch');
+
+      const assertionDocs = [
+        ...new Map(assertionPages.flat().map((doc) => [doc.ref.path, doc])).values(),
+      ];
+      const assertionRows = assertionDocs.map((doc) => {
+        const row = decodeRecord<GraphAssertion>(doc.data());
+        if (row.agentId !== agentId || documentKey(row.id) !== doc.id)
+          throw new Error('Canonical assertion ownership mismatch');
+        return { doc, row };
+      });
+      const assertionPlans = assertionRows
+        .filter(({ row }) => row.lifecycle === 'current')
+        .map(({ doc, row }) => {
+          const meaning = canonicalizeKnowledgeAssertionDirection({
+            subjectEntityId: row.subjectEntityId === sourceId ? targetId : row.subjectEntityId,
+            predicate: row.predicate,
+            objectEntityId: row.objectEntityId === sourceId ? targetId : row.objectEntityId,
+            assertion: row.assertion,
+            validFrom: row.validFrom,
+            validUntil: row.validUntil,
+            qualifiers: row.qualifiers,
+          });
+          const semanticKey = knowledgeAssertionSemanticKey(agentId, meaning);
+          return {
+            doc,
+            row,
+            meaning,
+            semanticKey,
+            targetId: knowledgeAssertionId(agentId, semanticKey),
+          };
+        })
+        .filter((plan) => plan.targetId !== plan.row.id);
+      const targetAssertionDocs =
+        assertionPlans.length > 0
+          ? await tx.getAll(
+              ...[...new Set(assertionPlans.map((plan) => plan.targetId))].map((id) =>
+                this.store.doc('knowledgeGraphAssertions', id),
+              ),
+            )
+          : [];
+      const targetAssertionsById = new Map(
+        targetAssertionDocs.map((doc) => {
+          const row = decodeRecord<GraphAssertion>(doc.data());
+          if (row.agentId !== agentId || documentKey(row.id) !== doc.id)
+            throw new Error('Canonical assertion merge target ownership mismatch');
+          return [row.id, doc] as const;
+        }),
+      );
+      const evidenceByAssertion = await Promise.all(
+        assertionPlans.map((plan) =>
+          bounded(
+            tx,
+            this.store
+              .collection('knowledgeGraphAssertionEvidence')
+              .where('agentId', '==', agentId)
+              .where('assertionId', '==', plan.row.id),
+            MERGE_WRITE_LIMIT,
+            'Knowledge merge assertion evidence bound reached',
+          ),
+        ),
+      );
+      const evidenceRows = evidenceByAssertion.flat();
+      if (evidenceRows.some((doc) => doc.get('agentId') !== agentId))
+        throw new Error('Canonical assertion evidence ownership mismatch');
+      const evidenceTargetIds = evidenceRows.map((doc) => {
+        const row = decodeRecord<GraphAssertionEvidence>(doc.data());
+        const plan = assertionPlans.find((entry) => entry.row.id === row.assertionId);
+        if (!plan) throw new Error('Canonical assertion merge evidence has no owner plan');
+        return this.store.doc(
+          'knowledgeGraphAssertionEvidence',
+          knowledgeAssertionEvidenceId(
+            agentId,
+            plan.targetId,
+            row.sourceMemoryId,
+            row.sourceFingerprint,
+          ),
+        );
+      });
+      const evidenceTargetDocs =
+        evidenceTargetIds.length > 0 ? await tx.getAll(...evidenceTargetIds) : [];
+      const evidenceTargetByPath = new Map(
+        evidenceTargetDocs.map((doc) => [doc.ref.path, doc] as const),
+      );
+      const assertionIdRemap = new Map(
+        assertionPlans.map((plan) => [plan.row.id, plan.targetId] as const),
+      );
+      const assertionDecisions = new Map<string, Set<string>>();
+      for (const plan of assertionPlans) {
+        const statuses = assertionDecisions.get(plan.targetId) ?? new Set<string>();
+        statuses.add(plan.row.reviewStatus);
+        const targetDoc = targetAssertionsById.get(plan.targetId);
+        if (targetDoc?.exists) {
+          if (targetDoc.get('agentId') !== agentId)
+            throw new Error('Canonical assertion merge target belongs to another owner');
+          const targetRow = decodeRecord<GraphAssertion>(targetDoc.data());
+          statuses.add(targetRow.reviewStatus);
+        }
+        if (statuses.has('confirmed') && statuses.has('rejected'))
+          throw new Error(
+            'Merge conflicts with owner decisions on canonical assertions; review those decisions first',
+          );
+        assertionDecisions.set(plan.targetId, statuses);
+      }
 
       // Re-point every edge, then keep one survivor per semantic duplicate:
       // owner review state first, then confidence, then age, so a merge never
@@ -293,13 +420,28 @@ export class FirestoreKnowledgeGraphCurationRepository implements KnowledgeGraph
           moved,
           row: {
             ...row,
+            assertionId: row.assertionId
+              ? (assertionIdRemap.get(row.assertionId) ?? row.assertionId)
+              : null,
             subjectEntityId: row.subjectEntityId === sourceId ? targetId : row.subjectEntityId,
             objectEntityId: row.objectEntityId === sourceId ? targetId : row.objectEntityId,
           },
         });
       }
-      const rank = (status: string) =>
-        status === 'confirmed' ? 0 : status === 'unreviewed' ? 1 : 2;
+      const decisions = new Map<string, Set<string>>();
+      for (const { row } of rows.values()) {
+        const key = [row.subjectEntityId, row.predicate, row.objectEntityId, row.sourceMemoryId]
+          .map((part) => JSON.stringify(part))
+          .join('|');
+        const statuses = decisions.get(key) ?? new Set<string>();
+        statuses.add(row.reviewStatus);
+        decisions.set(key, statuses);
+        if (statuses.has('confirmed') && statuses.has('rejected'))
+          throw new Error(
+            'Merge conflicts with an owner-confirmed and owner-rejected assertion; review those decisions first',
+          );
+      }
+      const rank = (status: string) => (status === 'rejected' ? 0 : status === 'confirmed' ? 1 : 2);
       const survivors = new Map<string, { ref: DocumentReference; row: Relation }>();
       const deleted: DocumentReference[] = [];
       for (const entry of [...rows.values()].sort(
@@ -327,13 +469,97 @@ export class FirestoreKnowledgeGraphCurationRepository implements KnowledgeGraph
         ...keyAliases.map((doc) => doc.ref.path),
         ...sourceAliases.map((doc) => doc.ref.path),
       ]).size;
-      if (moved.length + deleted.length + aliasWrites + 2 > MERGE_WRITE_LIMIT)
+      if (
+        moved.length +
+          deleted.length +
+          aliasWrites +
+          2 +
+          assertionPlans.length * 2 +
+          evidenceRows.length * 2 >
+        MERGE_WRITE_LIMIT
+      )
         throw new Error('Knowledge merge write bound reached');
+
+      const targetEvidenceCreated = new Set<string>();
+      for (const oldEvidence of evidenceRows) {
+        const evidence = decodeRecord<GraphAssertionEvidence>(oldEvidence.data());
+        const plan = assertionPlans.find((entry) => entry.row.id === evidence.assertionId);
+        if (!plan) throw new Error('Canonical assertion merge evidence has no owner plan');
+        const targetRef = this.store.doc(
+          'knowledgeGraphAssertionEvidence',
+          knowledgeAssertionEvidenceId(
+            agentId,
+            plan.targetId,
+            evidence.sourceMemoryId,
+            evidence.sourceFingerprint,
+          ),
+        );
+        const targetEvidence = evidenceTargetByPath.get(targetRef.path);
+        if (!targetEvidence) throw new Error('Canonical assertion evidence lookup failed');
+        if (targetEvidence.exists) {
+          if (targetEvidence.get('agentId') !== agentId)
+            throw new Error('Canonical assertion evidence target belongs to another owner');
+          tx.delete(oldEvidence.ref);
+        } else if (!targetEvidenceCreated.has(targetRef.path)) {
+          const relocated: GraphAssertionEvidence = {
+            ...evidence,
+            id: targetRef.id,
+            assertionId: plan.targetId,
+          };
+          tx.create(targetRef, encodeRecord(relocated));
+          tx.delete(oldEvidence.ref);
+          targetEvidenceCreated.add(targetRef.path);
+        } else {
+          tx.delete(oldEvidence.ref);
+        }
+      }
+      for (const plan of assertionPlans) {
+        const targetDoc = targetAssertionsById.get(plan.targetId);
+        const targetRow = targetDoc?.exists ? decodeRecord<GraphAssertion>(targetDoc.data()) : null;
+        const status =
+          plan.row.reviewStatus !== 'unreviewed'
+            ? plan.row.reviewStatus
+            : (targetRow?.reviewStatus ?? 'unreviewed');
+        const semanticRevision = targetRow?.semanticRevision ?? plan.row.semanticRevision + 1;
+        const updated: GraphAssertion = {
+          id: plan.targetId,
+          agentId,
+          semanticKey: plan.semanticKey,
+          subjectEntityId: plan.meaning.subjectEntityId,
+          predicate: plan.meaning.predicate,
+          objectEntityId: plan.meaning.objectEntityId,
+          assertion: plan.meaning.assertion,
+          qualifiers: plan.meaning.qualifiers ?? {},
+          validFrom: plan.meaning.validFrom,
+          validUntil: plan.meaning.validUntil,
+          semanticRevision,
+          evidenceRevision: plan.row.evidenceRevision + (targetRow?.evidenceRevision ?? 0),
+          lifecycle: 'current',
+          reviewStatus: status,
+          reviewedRevision: status === 'unreviewed' ? null : semanticRevision,
+          reviewedPayloadHash: status === 'unreviewed' ? null : plan.semanticKey,
+          ownerAuthored: plan.row.ownerAuthored || (targetRow?.ownerAuthored ?? false),
+          supersededById: null,
+          createdAt: targetRow?.createdAt ?? plan.row.createdAt,
+          updatedAt: this.store.now(),
+        };
+        const targetRef =
+          targetDoc?.ref ?? this.store.doc('knowledgeGraphAssertions', plan.targetId);
+        if (targetDoc?.exists) tx.set(targetRef, encodeRecord(updated));
+        else tx.create(targetRef, encodeRecord(updated));
+        tx.update(plan.doc.ref, {
+          lifecycle: 'superseded',
+          supersededById: plan.targetId,
+          semanticRevision: plan.row.semanticRevision + 1,
+          updatedAt: this.store.now(),
+        });
+      }
 
       for (const entry of moved)
         tx.update(entry.ref, {
           subjectEntityId: entry.row.subjectEntityId,
           objectEntityId: entry.row.objectEntityId,
+          assertionId: entry.row.assertionId,
         });
       for (const ref of deleted) tx.delete(ref);
       // Later extractions of the absorbed identity land on the survivor.
@@ -657,7 +883,7 @@ export class FirestoreKnowledgeGraphCurationRepository implements KnowledgeGraph
   ): Promise<'updated' | 'missing' | 'changed' | 'conflict'> {
     const relations = this.store.collection('knowledgeGraphRelations');
     const sourceRef = this.store.doc('knowledgeGraphEntities', input.entityId);
-    const targetId = deterministicId('entity', agentId, input.canonicalKey);
+    const targetId = deterministicUuid('knowledge-graph-entity', agentId, input.canonicalKey);
     return this.store.db.runTransaction(async (tx) => {
       await this.begin(tx, agentId);
       const entity = ownedEntity(await tx.get(sourceRef), agentId);

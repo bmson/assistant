@@ -43,10 +43,11 @@ import {
 
 export function createPostgresProfileMemoryCommandPersistence(
   db: Db,
+  agentId?: string,
 ): ProfileMemoryCommandPersistence {
   return {
     kind: 'profile-memory-command-persistence',
-    memories: createPostgresProfileMemoryManagementRepository(db),
+    memories: createPostgresProfileMemoryManagementRepository(db, agentId),
     ownerCards: createPostgresOwnerCardCompilationRepository(db),
     maintenance: createPostgresProfileMemoryMaintenance(db, async (input) => {
       await enqueueTask(db, {
@@ -92,6 +93,7 @@ export function profileMemoryCommands(
 
 export interface EmbeddingPort {
   embed(texts: string[]): Promise<number[][]>;
+  embeddingSpace(): Promise<import('@assistant/persistence').EmbeddingSpace>;
 }
 
 export interface WorkspaceDeletePort {
@@ -654,7 +656,10 @@ export async function forgetPersonOccasion(
   if (!UUID_RE.test(occasionId)) return;
   if (isProfileOccasionCommandRepository(store)) return store.forget(occasionId);
   const db = store;
-  await db.delete(occasions).where(eq(occasions.id, occasionId));
+  const agent = await getAgent(db);
+  await db
+    .delete(occasions)
+    .where(and(eq(occasions.id, occasionId), eq(occasions.agentId, agent.id)));
 }
 
 export async function reviewPersonOccasion(
@@ -665,12 +670,15 @@ export async function reviewPersonOccasion(
   if (!UUID_RE.test(occasionId)) return;
   if (isProfileOccasionCommandRepository(store)) return store.review(occasionId, verdict);
   const db = store;
+  const agent = await getAgent(db);
   if (verdict === 'approve') {
     await db
       .update(occasions)
       .set({ quarantined: false, ownerConfirmed: true, updatedAt: sql`now()` })
-      .where(eq(occasions.id, occasionId));
+      .where(and(eq(occasions.id, occasionId), eq(occasions.agentId, agent.id)));
   } else {
-    await db.delete(occasions).where(eq(occasions.id, occasionId));
+    await db
+      .delete(occasions)
+      .where(and(eq(occasions.id, occasionId), eq(occasions.agentId, agent.id)));
   }
 }

@@ -7,6 +7,8 @@ import { z } from 'zod';
 const stubs = vi.hoisted(() => ({
   reserveCost: vi.fn(async () => ({ ok: true, reservationId: 'hold' })),
   releaseReservation: vi.fn(async () => {}),
+  beginCostAttempt: vi.fn(async () => true),
+  markCostAttemptUnknown: vi.fn(async () => {}),
 }));
 vi.mock('../cost.js', async (original) => ({
   ...(await original<typeof import('../cost.js')>()),

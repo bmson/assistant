@@ -27,6 +27,27 @@ export interface ReflectedSkill {
   originTrust: 'owner' | 'assistant';
 }
 
+export interface SkillReflectionCommit {
+  agentId: string;
+  taskId: string;
+  /** Opaque owner-library generation captured before model/embedding work. */
+  expectedLibraryRevision: string;
+  /** Omit when the model concluded that this task did not teach a reusable skill. */
+  skill?: ReflectedSkill;
+  embedding?: number[];
+  embeddingSpaceKey?: string;
+}
+
+export type SkillReflectionCommitResult =
+  | { status: 'created'; skillId: string }
+  | { status: 'revised'; skillId: string }
+  | { status: 'no_skill' }
+  | { status: 'superseded' }
+  | { status: 'owner_authored' }
+  | { status: 'capacity' }
+  | { status: 'already_processed' }
+  | { status: 'ineligible' };
+
 /** The `skill.reflect` job's reads and its one write. Drafting stays in core. */
 export interface SkillReflectionRepository {
   readonly kind: 'skill-reflection-repository';
@@ -34,12 +55,12 @@ export interface SkillReflectionRepository {
   candidates(since: Date, limit: number): Promise<ReflectionTask[]>;
   /** The subset of `taskIds` that already taught a skill. */
   sourcedTaskIds(taskIds: string[]): Promise<string[]>;
+  /** Opaque per-owner revision token, captured before model and embedding work. */
+  libraryRevision(agentId: string): Promise<string>;
   toolCalls(taskId: string): Promise<ReflectionToolCall[]>;
-  /** Whether a same-named skill was written by the owner, which reflection never overwrites. */
-  ownerAuthored(agentId: string, name: string): Promise<boolean>;
   /**
-   * Insert the skill, or revise the same-named one and revive it. Returns true
-   * only for a new skill; an owner-authored skill is left untouched.
+   * Atomically verifies the task and owner-library revision, writes any skill,
+   * and checkpoints the task receipt without changing original skill provenance.
    */
-  saveReflected(agentId: string, skill: ReflectedSkill, embedding: number[]): Promise<boolean>;
+  commitReflection(input: SkillReflectionCommit): Promise<SkillReflectionCommitResult>;
 }

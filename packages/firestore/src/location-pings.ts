@@ -22,10 +22,13 @@ export class FirestoreLocationPingRepository implements LocationPingRepository {
 
   constructor(readonly store: InstallationStore) {}
 
-  async record(agentId: string, ping: LocationPingWrite): Promise<void> {
+  async record(agentId: string, ping: LocationPingWrite) {
     if (!agentId) throw new Error('agent is required');
     if (!Number.isFinite(ping.capturedAt.getTime())) throw new Error('Invalid ping time');
     const id = randomUUID();
+    const arrivalExpiresAt = ping.arrivalOptIn
+      ? new Date(ping.capturedAt.getTime() + 5 * 60_000)
+      : null;
     await this.store.db.runTransaction(async (tx) => {
       const agents = await tx.get(this.store.collection('agents').limit(2));
       const owner = agents.docs[0];
@@ -55,9 +58,11 @@ export class FirestoreLocationPingRepository implements LocationPingRepository {
           accuracyM: ping.accuracyM,
           timeZone: ping.timeZone,
           capturedAt: ping.capturedAt,
+          arrivalExpiresAt,
         }),
       );
     });
+    return { id, arrivalExpiresAt };
   }
 
   async recent(
@@ -123,5 +128,24 @@ export class FirestoreLocationPingRepository implements LocationPingRepository {
       const row = decodeRecord<{ agentId?: unknown; createdAt?: unknown }>(doc.data());
       return row.agentId === agentId && row.createdAt instanceof Date && row.createdAt >= since;
     });
+  }
+
+  async isArrivalObservationActive(agentId: string, id: string, now: Date): Promise<boolean> {
+    const snapshot = await this.store.doc('locationPings', id).get();
+    if (!snapshot.exists) return false;
+    const row = decodeRecord<{
+      id?: unknown;
+      agentId?: unknown;
+      capturedAt?: unknown;
+      arrivalExpiresAt?: unknown;
+    }>(snapshot.data());
+    return (
+      row.id === id &&
+      row.agentId === agentId &&
+      row.capturedAt instanceof Date &&
+      row.capturedAt <= now &&
+      row.arrivalExpiresAt instanceof Date &&
+      row.arrivalExpiresAt > now
+    );
   }
 }

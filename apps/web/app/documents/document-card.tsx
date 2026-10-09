@@ -2,7 +2,7 @@
 
 import { FileText } from 'lucide-react';
 import Link from 'next/link';
-import { useTransition } from 'react';
+import { useState, useTransition } from 'react';
 import {
   Badge,
   type BadgeTone,
@@ -16,6 +16,7 @@ import {
 } from '@/lib/ui';
 import { ConfirmButton } from '@/lib/ui-client';
 import { purgeDocumentAction } from './actions';
+import { DocumentPassages } from './document-passages';
 
 export interface DocumentCardView {
   id: string;
@@ -44,6 +45,7 @@ const STATUS: Record<string, { label: string; tone: BadgeTone }> = {
 
 export function DocumentCard({ doc }: { doc: DocumentCardView }) {
   const [pending, startTransition] = useTransition();
+  const [deleteNotice, setDeleteNotice] = useState<string | null>(null);
   const status = STATUS[doc.status] ?? STATUS.pending;
   // A queued heavy format (scan/office/audio) waits for the document processor.
   const waitingForProcessor = doc.status === 'pending' && doc.extractor === 'pending_processor';
@@ -80,6 +82,9 @@ export function DocumentCard({ doc }: { doc: DocumentCardView }) {
               : 'Not searchable yet',
           ]}
         />
+        {doc.status === 'ready' && doc.chunkCount > 0 ? (
+          <DocumentPassages documentId={doc.id} total={doc.chunkCount} />
+        ) : null}
 
         {waitingForProcessor ? (
           <p className="rounded-xl bg-sunken/65 px-3 py-2.5 text-xs leading-5 text-muted">
@@ -91,9 +96,17 @@ export function DocumentCard({ doc }: { doc: DocumentCardView }) {
             {doc.error}
           </p>
         ) : null}
+        {deleteNotice ? (
+          <p
+            role="status"
+            className="rounded-xl bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-800 dark:bg-amber-950/35 dark:text-amber-200"
+          >
+            {deleteNotice}
+          </p>
+        ) : null}
       </div>
       <footer className={cardFooterClass}>
-        {doc.status === 'ready' ? (
+        {doc.status === 'ready' && !deleteNotice ? (
           <Link href={doc.askHref} className={btn.outline}>
             Ask about this
           </Link>
@@ -101,10 +114,19 @@ export function DocumentCard({ doc }: { doc: DocumentCardView }) {
         <ConfirmButton
           pending={pending}
           pendingLabel="Deleting…"
-          confirmLabel="Delete?"
-          onConfirm={() => startTransition(() => purgeDocumentAction(doc.id))}
+          confirmLabel={deleteNotice ? 'Retry delete?' : 'Delete?'}
+          onConfirm={() =>
+            startTransition(async () => {
+              const result = await purgeDocumentAction(doc.id);
+              setDeleteNotice(
+                result?.pendingAssets
+                  ? 'Removed from search. Stored bytes are still being deleted; try Delete again to retry.'
+                  : null,
+              );
+            })
+          }
         >
-          Delete
+          {deleteNotice ? 'Retry deletion' : 'Delete'}
         </ConfirmButton>
       </footer>
     </article>

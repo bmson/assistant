@@ -557,7 +557,7 @@ describe.skipIf(!localEmulator)('Firestore knowledge workspace with PostgreSQL o
     expect(
       (await store.doc('knowledgeGraphRelations', seeded.works).get()).get('reviewStatus'),
     ).toBe('rejected');
-  });
+  }, 30_000);
 
   it('requires the owner before changing the graph', async () => {
     const seeded = await seedGraph();

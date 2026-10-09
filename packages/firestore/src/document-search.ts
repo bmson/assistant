@@ -3,6 +3,7 @@ import {
   type DocumentSearchRepository,
   type EmbeddingSpace,
   type Records,
+  snapshotEmbeddingSpace,
   validateEmbedding,
   validateSkillEmbeddingSpace,
 } from '@assistant/persistence';
@@ -21,14 +22,16 @@ const CANDIDATE_LIMIT = 50;
 export class FirestoreDocumentSearchRepository implements DocumentSearchRepository {
   readonly kind = 'document-search-repository' as const;
   private readonly spaceKey: string;
+  readonly space: EmbeddingSpace;
 
   constructor(
     readonly store: InstallationStore,
     readonly agentId: string,
-    readonly space: EmbeddingSpace,
+    space: EmbeddingSpace,
   ) {
-    validateSkillEmbeddingSpace(space);
-    this.spaceKey = embeddingSpaceKey(space);
+    this.space = snapshotEmbeddingSpace(space);
+    validateSkillEmbeddingSpace(this.space);
+    this.spaceKey = embeddingSpaceKey(this.space);
   }
 
   async search(
@@ -36,6 +39,8 @@ export class FirestoreDocumentSearchRepository implements DocumentSearchReposito
   ): Promise<DocumentSearchHit[]> {
     if (input.agentId !== this.agentId)
       throw new Error('Document search is outside the configured owner');
+    if (input.embeddingSpaceKey !== this.spaceKey)
+      throw new Error('Document query embedding space does not match the configured space');
     validateEmbedding(this.space, input.embedding);
     let query: Query = this.store
       .collection('documentChunks')

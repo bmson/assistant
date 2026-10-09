@@ -1,10 +1,16 @@
-import type { SituationToolRepository } from '@assistant/persistence';
+import type {
+  SituationDecisionContextRepository,
+  SituationToolRepository,
+} from '@assistant/persistence';
 import { FirestoreSituationPackMutationRepository } from './situation-pack-mutations.js';
 import { FirestoreSituationPackReadRepository } from './situation-packs.js';
 import type { InstallationStore } from './store.js';
 
 /** The `situations.*` tools over the same pack reads and commands the owner UI uses. */
-export class FirestoreSituationToolRepository implements SituationToolRepository {
+export class FirestoreSituationToolRepository
+  implements SituationToolRepository, SituationDecisionContextRepository
+{
+  readonly kind = 'situation-decision-context-repository' as const;
   private readonly reads: FirestoreSituationPackReadRepository;
   private readonly mutations: FirestoreSituationPackMutationRepository;
 
@@ -36,6 +42,14 @@ export class FirestoreSituationToolRepository implements SituationToolRepository
 
   decisions(agentId: string, query: string, packId?: string) {
     return this.reads.decisions(this.owner(agentId), query, packId);
+  }
+
+  retrieve(input: { agentId: string; discussionFrame: string; limit?: number }) {
+    return this.reads.decisionContext(
+      this.owner(input.agentId),
+      input.discussionFrame,
+      input.limit,
+    );
   }
 
   command(agentId: string, input: unknown) {

@@ -23,7 +23,7 @@ export function SignInClient() {
 
   return (
     <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-5">
-      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4 rounded-xl bg-raised p-5 ring-1 ring-edge/70 sm:p-6">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4 rounded-xl bg-raised px-[min(1.25rem,5vw)] py-5 ring-1 ring-edge/70 sm:p-6">
         <p className="text-sm leading-6 text-muted">
           Unlock with Face ID, Touch ID, your screen lock, or a security key. Use a device where
           your passkey is available.
@@ -31,6 +31,7 @@ export function SignInClient() {
         <div>
           <ActionButton
             variant="primary"
+            className="w-full sm:w-auto"
             pending={pending === 'signin'}
             pendingLabel="Waiting for passkey…"
             disabled={pending !== null}

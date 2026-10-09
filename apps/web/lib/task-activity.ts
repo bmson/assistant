@@ -6,6 +6,7 @@ import {
   archiveOldActivityWithRepository,
   cancelActivity,
   cancelActivityWithRepository,
+  discoverActivityWithRepository,
   getTaskDetail,
   getTaskDetailWithRepository,
   listActivity,
@@ -25,7 +26,8 @@ import {
   FirestoreTaskActivityCommandRepository,
   FirestoreTaskActivityRepository,
 } from '@assistant/firestore';
-import { getDb, getFirestoreInstallationStore } from '@/lib/server';
+import type { TaskActivityCommandOutcome, TaskDiscoveryInput } from '@assistant/persistence';
+import { getDb, getFirestoreInstallationStore, getTaskDiscoveryPorts } from '@/lib/server';
 
 function firestoreActivity() {
   const config = loadConfig();
@@ -48,7 +50,7 @@ export function listTaskActivity(input: {
 
 export function getTaskActivityDetail(
   taskId: string,
-  options: { pageSize?: number; before?: Date } = {},
+  options: { pageSize?: number; before?: Date; cursor?: string } = {},
 ): Promise<TaskDetail | null> {
   if (loadConfig().PERSISTENCE_DRIVER === 'firestore') {
     const { repository, agentId } = firestoreActivity();
@@ -67,44 +69,49 @@ function firestoreActivityCommands() {
   };
 }
 
-export function archiveTaskActivity(taskId: string): Promise<void> {
+export function archiveTaskActivity(taskId: string): Promise<TaskActivityCommandOutcome> {
   const firestore = firestoreActivityCommands();
   if (firestore)
     return archiveActivityWithRepository(firestore.repository, firestore.agentId, taskId);
   return archiveActivity(getDb(), taskId);
 }
 
-export function restoreTaskActivity(taskId: string): Promise<void> {
+export function restoreTaskActivity(taskId: string): Promise<TaskActivityCommandOutcome> {
   const firestore = firestoreActivityCommands();
   if (firestore)
     return restoreActivityWithRepository(firestore.repository, firestore.agentId, taskId);
   return restoreActivity(getDb(), taskId);
 }
 
-export function archiveOldTaskActivity(): Promise<void> {
+export function archiveOldTaskActivity(operationId?: string) {
   const firestore = firestoreActivityCommands();
-  if (firestore) return archiveOldActivityWithRepository(firestore.repository, firestore.agentId);
+  if (firestore) {
+    return operationId
+      ? archiveOldActivityWithRepository(firestore.repository, firestore.agentId, 30, operationId)
+      : archiveOldActivityWithRepository(firestore.repository, firestore.agentId);
+  }
   return archiveOldActivity(getDb());
 }
 
 /** Re-queue a stalled task (needs_attention → pending). */
-export async function retryTaskActivity(taskId: string): Promise<void> {
+export async function retryTaskActivity(taskId: string): Promise<TaskActivityCommandOutcome> {
   const firestore = firestoreActivityCommands();
   if (firestore)
     return retryActivityWithRepository(firestore.repository, firestore.agentId, taskId);
-  await retryActivity(getDb(), taskId);
+  return retryActivity(getDb(), taskId);
 }
 
 /** Cancel owner work; the executor observes the terminal state at its next checkpoint. */
-export async function cancelTaskActivity(taskId: string): Promise<void> {
+export async function cancelTaskActivity(taskId: string): Promise<TaskActivityCommandOutcome> {
   const firestore = firestoreActivityCommands();
-  if (firestore)
+  if (firestore) {
     return cancelActivityWithRepository(firestore.repository, firestore.agentId, taskId);
-  await cancelActivity(getDb(), taskId);
+  }
+  return cancelActivity(getDb(), taskId);
 }
 
 /** Revoke a task's autonomy grant so its next gated call parks for approval. */
-export function revokeTaskActivityAutonomy(taskId: string): Promise<void> {
+export function revokeTaskActivityAutonomy(taskId: string): Promise<TaskActivityCommandOutcome> {
   const firestore = firestoreActivityCommands();
   if (firestore)
     return revokeTaskAutonomyWithRepository(firestore.repository, firestore.agentId, taskId);
@@ -112,9 +119,17 @@ export function revokeTaskActivityAutonomy(taskId: string): Promise<void> {
 }
 
 /** Raise a stalled task's hard cap and re-queue it in the same state change. */
-export function raiseTaskActivityBudget(taskId: string, limit: number): Promise<void> {
+export function raiseTaskActivityBudget(
+  taskId: string,
+  limit: number,
+): Promise<TaskActivityCommandOutcome> {
   const firestore = firestoreActivityCommands();
   if (firestore)
     return raiseTaskBudgetWithRepository(firestore.repository, firestore.agentId, taskId, limit);
   return raiseTaskBudget(getDb(), taskId, limit);
+}
+
+export async function discoverTaskActivity(input: TaskDiscoveryInput) {
+  const { repository, agentId } = await getTaskDiscoveryPorts();
+  return discoverActivityWithRepository(repository, agentId, input);
 }

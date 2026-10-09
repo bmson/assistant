@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { extractOwnerIntent } from '@assistant/core/workflow/owner-intent';
 import {
   FirestoreApprovalPolicyRepository,
   FirestoreApprovalRepository,
@@ -40,6 +41,7 @@ describe('Firestore portable web and workspace tool composition', () => {
           id: taskId,
           agentId,
           type: 'adhoc',
+          trust: 'owner',
           status: 'running',
         });
 
@@ -142,7 +144,14 @@ describe('Firestore portable web and workspace tool composition', () => {
 
         // Same taint policy as the PostgreSQL dispatcher: private workspace writes
         // stay autonomous, while network egress needs exact-argument approval.
-        const taintedContext = { ...ctx, tainted: true } as ToolContext;
+        const taintedContext = {
+          ...ctx,
+          tainted: true,
+          ownerIntent: extractOwnerIntent({
+            trust: 'owner',
+            text: 'Write this source to my workspace file and read the public article.',
+          }),
+        } as ToolContext;
         await expect(
           dispatch(
             'workspace.write',

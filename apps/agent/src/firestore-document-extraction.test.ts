@@ -7,7 +7,10 @@ import {
   FirestoreDocumentCatalogRepository,
   FirestoreDocumentExtractionRepository,
 } from '@assistant/firestore';
-import type { DocumentExtractionRepository } from '@assistant/persistence';
+import {
+  type DocumentExtractionRepository,
+  embeddingSpaceIdentityKey,
+} from '@assistant/persistence';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { decodeRecord } from '../../../packages/firestore/src/store.js';
 import type { AgentDeps } from './deps.js';
@@ -23,13 +26,18 @@ describe.skipIf(!emulator)('Firestore document extraction worker composition', (
     databaseId: 'assistant-document-worker-test',
   });
   const catalog = new FirestoreDocumentCatalogRepository(store, agentId);
-  const documentExtractionRepository = new FirestoreDocumentExtractionRepository(store, agentId);
-  const persistence = createFirestoreExecutionPersistence(store, agentId, {
+  const DOCUMENT_SPACE = {
     provider: 'synthetic',
     model: 'document-extraction-fixture',
     dimensions: 1536,
     revision: '1',
-  });
+  } as const;
+  const documentExtractionRepository = new FirestoreDocumentExtractionRepository(
+    store,
+    agentId,
+    DOCUMENT_SPACE,
+  );
+  const persistence = createFirestoreExecutionPersistence(store, agentId, DOCUMENT_SPACE);
   const content = `Quarterly planning notes.\n\n${'Milestone and owner details. '.repeat(4)}`;
   const workspace = {
     async read() {
@@ -46,6 +54,8 @@ describe.skipIf(!emulator)('Firestore document extraction worker composition', (
     },
   };
   const router = {
+    embeddingSpace: vi.fn(async () => DOCUMENT_SPACE),
+    embeddingSpaceKey: vi.fn(async () => embeddingSpaceIdentityKey(DOCUMENT_SPACE)),
     embed: vi.fn(async (texts: string[]) => texts.map(() => new Array(1536).fill(0.125))),
   } as unknown as ExecutorDeps['router'];
   const unavailable = new Proxy(
@@ -81,6 +91,8 @@ describe.skipIf(!emulator)('Firestore document extraction worker composition', (
         mime: 'text/plain',
         bytes: Buffer.byteLength(content),
         sha256,
+        objectGeneration: null,
+        emailAttachmentCustodyId: null,
       },
       document: {
         id: documentId,
@@ -103,6 +115,7 @@ describe.skipIf(!emulator)('Firestore document extraction worker composition', (
         processorStartedAt: null,
         processorAttempts: 0,
         processedTextPath: null,
+        extractionMetadata: null,
       },
     });
     if (!created.task) throw new Error('catalog did not create the extraction task');
@@ -141,11 +154,8 @@ describe.skipIf(!emulator)('Firestore document extraction worker composition', (
       outOfBandNotifier: unavailable as AgentDeps['outOfBandNotifier'],
     } as unknown as AgentDeps;
 
-    expect(
-      await executeAgentTask(deps, created.task.id, created.task.queueGeneration),
-    ).toMatchObject({
-      outcome: 'done',
-    });
+    const outcome = await executeAgentTask(deps, created.task.id, created.task.queueGeneration);
+    expect(outcome, JSON.stringify(outcome)).toMatchObject({ outcome: 'done' });
     expect(renewalsWithRotatedToken).toBeGreaterThanOrEqual(3);
     expect(router.embed).toHaveBeenCalledOnce();
 

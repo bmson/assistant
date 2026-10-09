@@ -10,16 +10,19 @@
     "./calls": "./src/calls.ts",
     "./chat": "./src/chat.ts",
     "./cards": "./src/cards.ts",
+    "./card-form-admission": "./src/card-form-admission.ts",
     "./situations": "./src/situations.ts",
     "./costs": "./src/costs.ts",
     "./commitments": "./src/commitments.ts",
     "./dashboard": "./src/dashboard.ts",
     "./documents": "./src/documents.ts",
+    "./email-obligations": "./src/email-obligations.ts",
     "./goals": "./src/goals.ts",
     "./health": "./src/health.ts",
     "./imports": "./src/imports.ts",
     "./knowledge-graph": "./src/knowledge-graph.ts",
     "./live-scores": "./src/live-scores.ts",
+    "./mobile-card-capabilities": "./src/mobile-card-capabilities.ts",
     "./maps": "./src/maps.ts",
     "./model-providers": "./src/model-providers.ts",
     "./operations": "./src/operations.ts",
@@ -36,7 +39,9 @@
     "./suggestions": "./src/suggestions.ts",
     "./tasks": "./src/tasks.ts",
     "./provider-billing": "./src/provider-billing.ts",
-    "./audit-investigation": "./src/audit-investigation.ts"
+    "./public-web": "./src/public-web.ts",
+    "./audit-investigation": "./src/audit-investigation.ts",
+    "./http-body": "./src/http-body.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

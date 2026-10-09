@@ -87,6 +87,7 @@ function harness(score: Record<string, unknown>) {
     persistence: createPostgresExecutionPersistence(db),
     config: {
       ASSISTANT_MODULES: ['google'],
+      GMAIL_SYNC_ENABLED: 'true',
       EMAIL_INGEST_MODE: 'forwarded',
       EMAIL_INGEST_IMPORTANCE_THRESHOLD: 3,
       EMAIL_INGEST_MAX_TRIAGE_PER_DAY: 40,

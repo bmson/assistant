@@ -33,6 +33,9 @@ REGION="${REGION:-us-west1}"
 # already runs the Firestore composition.
 # shellcheck source=infra/gcp/release-persistence.sh
 source "$(dirname "${BASH_SOURCE[0]}")/release-persistence.sh"
+POSTGRES_SCHEMA_VERSION="$(node "$(dirname "${BASH_SOURCE[0]}")/release-schema-version.mjs" postgres)"
+IFS=$'\t' read -r POSTGRES_AGENT_SCHEMA_MIN POSTGRES_AGENT_SCHEMA_MAX <<<"$(node "$(dirname "${BASH_SOURCE[0]}")/release-schema-version.mjs" postgres agent-range)"
+IFS=$'\t' read -r POSTGRES_WEB_SCHEMA_MIN POSTGRES_WEB_SCHEMA_MAX <<<"$(node "$(dirname "${BASH_SOURCE[0]}")/release-schema-version.mjs" postgres web-range)"
 refuse_firestore_installation || exit 1
 REPO="${ARTIFACT_REPOSITORY:-$(envval ARTIFACT_REPOSITORY)}"
 REPO="${REPO:-assistant}"
@@ -378,15 +381,13 @@ else
 fi
 
 echo "── deploying agent service"
-# The container runs validateProdConfig() at boot and exits if AGENT_URL is empty
-# while QUEUE_DRIVER=cloudtasks. Because --set-env-vars REPLACES the whole env set,
-# the first pass must carry the service's own (revision-stable) URL forward rather
-# than wait for the second pass — otherwise the new revision exits on boot and the
-# deploy fails before the Cloud Run Jobs below are created. Empty only on a
-# brand-new service's very first create (no prior URL yet).
-SELF_URL="$(gcloud run services describe assistant-agent --region "$REGION" --format='value(status.url)' 2>/dev/null || true)"
-SELF_URL_ENV=""
-[ -n "$SELF_URL" ] && SELF_URL_ENV="|AGENT_URL=${SELF_URL}|PUBLIC_URL=${SELF_URL}|INTERNAL_OIDC_AUDIENCE=${SELF_URL}"
+# Cloud Run's default URL is deterministic from service name, project number,
+# and region. Put it on the first revision so Cloud Tasks/OIDC configuration
+# passes production validation before the service exists. The describe below
+# reconciles with Cloud Run's actual URL after creation; errors there remain
+# fatal instead of being interpreted as an absent service.
+SELF_URL="https://assistant-agent-${PROJECT_NUMBER}.${REGION}.run.app"
+SELF_URL_ENV="|AGENT_URL=${SELF_URL}|PUBLIC_URL=${SELF_URL}|INTERNAL_OIDC_AUDIENCE=${SELF_URL}"
 TWILIO_ENV=""
 AGENT_SECRETS="DATABASE_URL=database-url:latest,OPENROUTER_API_KEY=openrouter-api-key:latest,GOOGLE_OAUTH_CLIENT_ID=google-oauth-client-id:latest,GOOGLE_OAUTH_CLIENT_SECRET=google-oauth-client-secret:latest,BOT_GOOGLE_REFRESH_TOKEN=bot-google-refresh-token:latest,MCP_ENC_KEY=mcp-enc-key:latest"
 if [ -n "$TWILIO_ACCOUNT_SID" ] && [ -n "$TWILIO_AUTH_TOKEN" ]; then
@@ -480,6 +481,12 @@ mail_env_add EMAIL_INGEST_MAX_TRIAGE_PER_DAY
 mail_env_add EMAIL_OUTBOUND_DOMAINS
 mail_env_add GMAIL_SYNC_ENABLED
 
+# This rollout flag belongs to the agent's observer sweep only. Keep it out of
+# MAIL_ENV because that fragment is also used by the web service.
+# shellcheck source=infra/gcp/email-observer-worker-env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/email-observer-worker-env.sh"
+EMAIL_OBSERVER_WORKER_ENV="$(email_observer_worker_env)"
+
 # ── model output review ──────────────────────────────────────────────────────
 # The same trap as the mail settings above, for the same reason. Capture is what
 # makes any question about answer quality answerable from production at all, and
@@ -512,7 +519,7 @@ gcloud run deploy assistant-agent \
   --region "$REGION" --allow-unauthenticated --service-account "$AGENT_SA" \
   --memory 1Gi --cpu 1 --min-instances 0 --max-instances 3 --concurrency 4 --timeout 3600 \
   --cpu-boost \
-  --set-env-vars "^|^ASSISTANT_NAME=${ASSISTANT_NAME}|ASSISTANT_EMAIL=${ASSISTANT_EMAIL}|ASSISTANT_WORKSPACE_ID=${ASSISTANT_WORKSPACE_ID}|ASSISTANT_TIMEZONE=${ASSISTANT_TIMEZONE}|ASSISTANT_LOCALE=${ASSISTANT_LOCALE}|ASSISTANT_MODULES=${PLAN_MODULES}|QUEUE_DRIVER=cloudtasks|FILES_DRIVER=gcs|WORKSPACE_BUCKET=${PROJECT}-workspace|GCP_PROJECT=${PROJECT}|GCP_LOCATION=${REGION}|CLOUD_TASKS_QUEUE=${QUEUE}|OWNER_NAME=${OWNER_NAME}|OWNER_EMAIL=${OWNER_EMAIL}|GMAIL_PUBSUB_TOPIC=${GMAIL_TOPIC_VALUE}|GMAIL_PUSH_SERVICE_ACCOUNT=${GMAIL_PUSH_IDENTITY}|APNS_KEY_ID=${APNS_KEY_ID}|APNS_TEAM_ID=${APNS_TEAM_ID}|APNS_BUNDLE_ID=${APNS_BUNDLE_ID}|INTERNAL_AUTH_MODE=oidc|INTERNAL_OIDC_SERVICE_ACCOUNT=${INTERNAL_INVOKER_SA}|BROWSER_DRIVER=cloudrun|BROWSER_JOB_NAME=assistant-browser|CODE_DRIVER=cloudrun|CODE_JOB_NAME=assistant-code|PROCESSOR_DRIVER=cloudrun|PROCESSOR_JOB_NAME=assistant-processor|TRACES_BUCKET=${TRACES_BUCKET}|CANARY_ENABLED=${CANARY_VALUE}|CANARY_MAX_COST_USD=0.03|CHAT_RECALL_ENABLED=${CHAT_RECALL_VALUE}|OTEL_EXPORTER=none${SEARCH_ENV}${GITHUB_ENV}${TWILIO_ENV}${MAIL_ENV}${AUDIT_ENV}${SELF_URL_ENV}${MAPS_ENV}${VOICE_ENV}" \
+  --set-env-vars "^|^ASSISTANT_NAME=${ASSISTANT_NAME}|ASSISTANT_EMAIL=${ASSISTANT_EMAIL}|ASSISTANT_WORKSPACE_ID=${ASSISTANT_WORKSPACE_ID}|ASSISTANT_TIMEZONE=${ASSISTANT_TIMEZONE}|ASSISTANT_LOCALE=${ASSISTANT_LOCALE}|ASSISTANT_MODULES=${PLAN_MODULES}|ASSISTANT_RELEASE_API_CONTRACT=1|ASSISTANT_RELEASE_WEB_API_MIN=1|ASSISTANT_RELEASE_WEB_API_MAX=1|ASSISTANT_RELEASE_SCHEMA_DRIVER=postgres|ASSISTANT_RELEASE_SCHEMA_MIN=${POSTGRES_AGENT_SCHEMA_MIN}|ASSISTANT_RELEASE_SCHEMA_MAX=${POSTGRES_AGENT_SCHEMA_MAX}|ASSISTANT_RELEASE_SCHEMA_VERSION=${POSTGRES_SCHEMA_VERSION}|QUEUE_DRIVER=cloudtasks|FILES_DRIVER=gcs|WORKSPACE_BUCKET=${PROJECT}-workspace|GCP_PROJECT=${PROJECT}|GCP_LOCATION=${REGION}|CLOUD_TASKS_QUEUE=${QUEUE}|OWNER_NAME=${OWNER_NAME}|OWNER_EMAIL=${OWNER_EMAIL}|GMAIL_PUBSUB_TOPIC=${GMAIL_TOPIC_VALUE}|GMAIL_PUSH_SERVICE_ACCOUNT=${GMAIL_PUSH_IDENTITY}|APNS_KEY_ID=${APNS_KEY_ID}|APNS_TEAM_ID=${APNS_TEAM_ID}|APNS_BUNDLE_ID=${APNS_BUNDLE_ID}|INTERNAL_AUTH_MODE=oidc|INTERNAL_OIDC_SERVICE_ACCOUNT=${INTERNAL_INVOKER_SA}|BROWSER_DRIVER=cloudrun|BROWSER_JOB_NAME=assistant-browser|CODE_DRIVER=cloudrun|CODE_JOB_NAME=assistant-code|PROCESSOR_DRIVER=cloudrun|PROCESSOR_JOB_NAME=assistant-processor|MOBILE_API_TOKEN_SECRET_NAME=mobile-api-token|MOBILE_API_TOKEN_ROTATION_ENABLED=true|TRACES_BUCKET=${TRACES_BUCKET}|CANARY_ENABLED=${CANARY_VALUE}|CANARY_MAX_COST_USD=0.03|CHAT_RECALL_ENABLED=${CHAT_RECALL_VALUE}|OTEL_EXPORTER=none${SEARCH_ENV}${GITHUB_ENV}${TWILIO_ENV}${MAIL_ENV}${EMAIL_OBSERVER_WORKER_ENV}${AUDIT_ENV}${SELF_URL_ENV}${MAPS_ENV}${VOICE_ENV}" \
   --set-secrets "$AGENT_SECRETS" \
   --quiet
 
@@ -548,13 +555,13 @@ if module_enabled code; then
   echo "── code job (Cloud Run Job — no DB creds, no secrets)"
   CODE_IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/code:latest"
   if gcloud run jobs describe assistant-code --region "$REGION" >/dev/null 2>&1; then
-    gcloud run jobs update assistant-code --region "$REGION" \
+    gcloud beta run jobs update assistant-code --region "$REGION" \
       --image "$CODE_IMAGE" --service-account "$CODE_SA" \
-      --memory 1Gi --cpu 1 --task-timeout 900 --max-retries 0 --quiet
+      --memory 1Gi --cpu 1 --task-timeout 900 --max-retries 0 --sandbox-launcher --quiet
   else
-    gcloud run jobs create assistant-code --region "$REGION" \
+    gcloud beta run jobs create assistant-code --region "$REGION" \
       --image "$CODE_IMAGE" --service-account "$CODE_SA" \
-      --memory 1Gi --cpu 1 --task-timeout 900 --max-retries 0 --quiet
+      --memory 1Gi --cpu 1 --task-timeout 900 --max-retries 0 --sandbox-launcher --quiet
   fi
   gcloud run jobs add-iam-policy-binding assistant-code --region "$REGION" \
     --member="serviceAccount:${AGENT_SA}" --role="roles/run.jobsExecutorWithOverrides" --quiet >/dev/null
@@ -678,7 +685,7 @@ if [ -n "$WEB_DOMAIN" ]; then
     gcloud beta run domain-mappings create --service assistant-web --domain "$WEB_DOMAIN" --region "$REGION" --quiet
 fi
 gcloud run services update assistant-web --region "$REGION" \
-  --update-env-vars "AGENT_URL=${AGENT_URL},PUBLIC_URL=${AGENT_URL},INTERNAL_OIDC_AUDIENCE=${AGENT_URL},AUTH_URL=${AUTH_URL}" --quiet
+  --update-env-vars "AGENT_URL=${AGENT_URL},PUBLIC_URL=${AGENT_URL},INTERNAL_OIDC_AUDIENCE=${AGENT_URL},AUTH_URL=${AUTH_URL},ASSISTANT_RELEASE_API_CONTRACT=1,ASSISTANT_RELEASE_AGENT_API_MIN=1,ASSISTANT_RELEASE_AGENT_API_MAX=1,ASSISTANT_RELEASE_SCHEMA_DRIVER=postgres,ASSISTANT_RELEASE_SCHEMA_MIN=${POSTGRES_WEB_SCHEMA_MIN},ASSISTANT_RELEASE_SCHEMA_MAX=${POSTGRES_WEB_SCHEMA_MAX},ASSISTANT_RELEASE_SCHEMA_VERSION=${POSTGRES_SCHEMA_VERSION}" --quiet
 
 echo "── monitoring (error-log metric + owner email alert)"
 gcloud services enable monitoring.googleapis.com logging.googleapis.com --quiet

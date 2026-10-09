@@ -1,18 +1,26 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  cardFormAdmissionActiveEventId,
+  cardFormAdmissionExternalEventId,
   checksum,
   checksumV3,
+  compositeMigrationId,
   deterministicMigrationCompare,
+  embeddingSpaceIdentityKey,
+  idempotencyIdentityDigest,
   MIGRATION_TABLES,
   type MigrationBundle,
   type MigrationRecord,
+  modelToolCallIdentityDigest,
   serializeMigrationTimestamp,
   serializeMigrationValue,
   serializeMigrationVector,
+  toolCallReceiptKeyId,
 } from '@assistant/persistence';
 import { FieldValue, Timestamp } from '@google-cloud/firestore';
 import { describe, expect, it, vi } from 'vitest';
-import { embeddingSpaceKey } from './memory.js';
+import { FirestoreCardFormAdmissionRepository } from './card-form-admission.js';
+import { FirestoreMemoryEmbeddingRefreshRepository } from './memory-embedding-refresh.js';
 import { FirestoreProfileMemoryMaintenance } from './profile-memory-maintenance.js';
 import { FirestoreScheduleRepository } from './schedules.js';
 import { decodeRecord } from './store.js';
@@ -218,6 +226,162 @@ function completeV3Bundle(target: MigrationBundle['manifest']['target']): Migrat
   return source;
 }
 
+function cardFormBundle(
+  target: MigrationBundle['manifest']['target'],
+  taskCount = 1,
+  status = 'pending',
+  malformedBinding = false,
+): {
+  source: MigrationBundle;
+  submission: Record<string, unknown>;
+  cardId: string;
+  revisionId: string;
+  conversationId: string;
+  messageId: string;
+} {
+  const source = bundle(target, taskCount);
+  const agentId = source.manifest.source.agentId;
+  const conversationId = randomUUID();
+  const cardId = randomUUID();
+  const taskRevisionId = randomUUID();
+  const revisionId = randomUUID();
+  const form = {
+    type: 'form',
+    id: 'meeting',
+    title: 'Meeting details',
+    serverAction: 'submit_owner_chat_turn',
+    submitLabel: 'Send',
+    warningFactIds: [],
+    fields: [{ id: 'date', type: 'date', label: 'Date', required: true, sensitive: false }],
+  };
+  const text = 'Please check whether this meeting date works.';
+  addRecord(source, {
+    table: 'conversations',
+    collection: 'conversations',
+    id: conversationId,
+    data: { id: conversationId, agentId, channel: 'chat', trust: 'owner' },
+    checksum: '',
+  });
+  addRecord(source, {
+    table: 'generated_cards',
+    collection: 'generatedCards',
+    id: cardId,
+    data: {
+      id: cardId,
+      agentId,
+      conversationId,
+      messageId: 'pending',
+      currentRevisionId: revisionId,
+      status: 'active',
+      expiresAt: null,
+      dismissedAt: null,
+    },
+    checksum: '',
+  });
+  addRecord(source, {
+    table: 'generated_card_revisions',
+    collection: 'generatedCardRevisions',
+    id: taskRevisionId,
+    data: { id: taskRevisionId, cardId, version: 1, spec: { blocks: [form] } },
+    checksum: '',
+  });
+  addRecord(source, {
+    table: 'generated_card_revisions',
+    collection: 'generatedCardRevisions',
+    id: revisionId,
+    data: { id: revisionId, cardId, version: 2, spec: { blocks: [form] } },
+    checksum: '',
+  });
+  let firstMessageId = '';
+  const tasks = source.records.filter((record) => record.table === 'tasks');
+  for (const [index, record] of tasks.entries()) {
+    const operationId = randomUUID();
+    const messageId = randomUUID();
+    if (index === 0) firstMessageId = messageId;
+    const binding = {
+      protocol: 'card-form-v1',
+      operationId,
+      cardId: malformedBinding && index === 0 ? randomUUID() : cardId,
+      expectedRevisionId: taskRevisionId,
+      conversationId,
+      formId: 'meeting',
+      payloadDigest: 'a'.repeat(64),
+      messageId,
+    };
+    record.data = {
+      ...record.data,
+      type: 'chat_turn',
+      status,
+      trust: 'owner',
+      conversationId,
+      externalEventId: cardFormAdmissionExternalEventId({ agentId, operationId }),
+      trigger: {
+        source: 'chat',
+        agentId,
+        conversationId,
+        trust: 'owner',
+        payload: {
+          text,
+          triggerMessageId: messageId,
+          clientOperationId: operationId,
+          chatAdmission: {
+            protocol: 'owner-chat-v1',
+            clientOperationId: operationId,
+            requestHash: binding.payloadDigest,
+            triggerMessageId: messageId,
+            phase: 'queued',
+            triageOutcome: 'actionable',
+          },
+          cardFormAdmission: binding,
+        },
+      },
+    };
+    addRecord(source, {
+      table: 'messages',
+      collection: 'messages',
+      id: messageId,
+      data: {
+        id: messageId,
+        taskId: record.id,
+        conversationId,
+        role: 'user',
+        origin: 'owner',
+        text,
+      },
+      checksum: '',
+    });
+  }
+  const card = source.records.find(
+    (record) => record.table === 'generated_cards' && record.id === cardId,
+  );
+  if (!card) throw new Error('test card missing');
+  card.data.messageId = firstMessageId;
+  upgradeFixtureToV3(source);
+  const firstTask = tasks[0];
+  const trigger = firstTask?.data.trigger as
+    | { payload?: { cardFormAdmission?: { operationId?: string } } }
+    | undefined;
+  const operationId = trigger?.payload?.cardFormAdmission?.operationId;
+  if (!operationId) throw new Error('test task operation missing');
+  return {
+    source,
+    submission: {
+      protocol: 'card-form-v1',
+      conversationId,
+      cardId,
+      expectedRevisionId: revisionId,
+      formId: 'meeting',
+      operationId,
+      values: { date: '2026-10-10' },
+      ownerMessageText: text,
+    },
+    cardId,
+    revisionId,
+    conversationId,
+    messageId: firstMessageId,
+  };
+}
+
 describe('Firestore migration preview', () => {
   const target = {
     projectId: 'demo-assistant-test',
@@ -225,6 +389,170 @@ describe('Firestore migration preview', () => {
     installationId: 'preview',
   };
   const previewStore = {} as Parameters<typeof importWorkspaceBundle>[0];
+
+  it.skipIf(!enabled)(
+    'round-trips active call identity and private-data-free compact receipts',
+    async () => {
+      const store = emulatorStore();
+      const target = {
+        projectId: 'demo-assistant-test',
+        databaseId: '(default)',
+        installationId: store.installationId,
+      };
+      try {
+        const source = completeV3Bundle(target);
+        const agentId = source.manifest.source.agentId;
+        const task = source.records.find((record) => record.table === 'tasks');
+        if (!task) throw new Error('migration task missing');
+        const activeCallId = randomUUID();
+        const compactCallId = randomUUID();
+        const modelToolCallId = 'private-model-call-identity';
+        const idempotencyKey = 'private-idempotency-key';
+        const modelHash = modelToolCallIdentityDigest(agentId, task.id, modelToolCallId);
+        const idempotencyHash = idempotencyIdentityDigest(idempotencyKey);
+        if (!modelHash || !idempotencyHash) throw new Error('invalid replay identity fixture');
+        addRecord(source, {
+          table: 'tool_calls',
+          collection: 'toolCalls',
+          id: activeCallId,
+          data: {
+            id: activeCallId,
+            taskId: task.id,
+            step: 1,
+            toolName: 'gmail.send',
+            args: { to: 'private@example.test', body: 'private full-call body' },
+            risk: 'approval',
+            status: 'approved',
+            idempotencyKey,
+            decision: { modelToolCallId, privateContext: 'active only' },
+          },
+          checksum: '',
+        });
+        addRecord(source, {
+          table: 'tool_call_receipts',
+          collection: 'toolCallReceipts',
+          id: compactCallId,
+          data: {
+            id: compactCallId,
+            agentId,
+            taskId: 'pruned-task',
+            toolCallId: compactCallId,
+            modelToolCallIdHash: modelHash,
+            idempotencyKeyHash: idempotencyHash,
+            toolName: 'gmail.send',
+            effectOutcome: 'unknown',
+            recordedAt: serializeMigrationTimestamp('2026-10-07 12:00:00+00'),
+          },
+          checksum: '',
+        });
+        for (const [kind, digest] of [
+          ['model_tool_call', modelHash],
+          ['idempotency', idempotencyHash],
+        ] as const) {
+          addRecord(source, {
+            table: 'tool_call_receipt_keys',
+            collection: 'toolCallReceiptKeys',
+            id: toolCallReceiptKeyId(kind, digest),
+            data: {
+              id: toolCallReceiptKeyId(kind, digest),
+              agentId,
+              taskId: 'pruned-task',
+              receiptId: compactCallId,
+              kind,
+              digest,
+            },
+            checksum: '',
+          });
+        }
+        const failedId = randomUUID();
+        const completedId = randomUUID();
+        for (const [id, effectOutcome] of [
+          [failedId, 'failed'],
+          [completedId, 'completed'],
+        ] as const) {
+          addRecord(source, {
+            table: 'tool_call_receipts',
+            collection: 'toolCallReceipts',
+            id,
+            data: {
+              id,
+              agentId,
+              taskId: 'pruned-task',
+              toolCallId: id,
+              modelToolCallIdHash: null,
+              idempotencyKeyHash: null,
+              toolName: 'gmail.send',
+              effectOutcome,
+              recordedAt: serializeMigrationTimestamp('2026-10-07 12:00:00+00'),
+            },
+            checksum: '',
+          });
+        }
+
+        const imported = await importWorkspaceBundle(store, source, {
+          sourceAgentId: agentId,
+          target,
+          mode: 'write',
+        });
+        expect(imported.verified).toBe(true);
+        expect((await store.doc('toolCalls', activeCallId).get()).data()).toMatchObject({
+          args: { to: 'private@example.test', body: 'private full-call body' },
+          idempotencyKey,
+          decision: { modelToolCallId, privateContext: 'active only' },
+        });
+        const compact = (await store.doc('toolCallReceipts', compactCallId).get()).data();
+        expect(compact).toMatchObject({
+          agentId,
+          taskId: 'pruned-task',
+          modelToolCallIdHash: modelHash,
+          idempotencyKeyHash: idempotencyHash,
+          effectOutcome: 'unknown',
+        });
+        expect(compact).not.toHaveProperty('args');
+        expect(compact).not.toHaveProperty('result');
+        expect(compact).not.toHaveProperty('error');
+        expect(compact).not.toHaveProperty('modelToolCallId');
+        expect(compact).not.toHaveProperty('idempotencyKey');
+        expect(
+          (
+            await store
+              .doc('toolCallReceiptKeys', toolCallReceiptKeyId('model_tool_call', modelHash))
+              .get()
+          ).exists,
+        ).toBe(true);
+        expect(
+          (
+            await store
+              .doc('toolCallReceiptKeys', toolCallReceiptKeyId('idempotency', idempotencyHash))
+              .get()
+          ).exists,
+        ).toBe(true);
+        expect((await store.doc('toolCallReceipts', failedId).get()).get('effectOutcome')).toBe(
+          'failed',
+        );
+        expect((await store.doc('toolCallReceipts', completedId).get()).get('effectOutcome')).toBe(
+          'completed',
+        );
+
+        const dangling = structuredClone(source);
+        const danglingKey = dangling.records.find(
+          (record) => record.table === 'tool_call_receipt_keys',
+        );
+        if (!danglingKey) throw new Error('receipt key fixture missing');
+        danglingKey.data.receiptId = randomUUID();
+        refreshRecord(dangling, danglingKey);
+        await expect(
+          importWorkspaceBundle(store, dangling, {
+            sourceAgentId: agentId,
+            target,
+            mode: 'preview',
+          }),
+        ).rejects.toThrow('Invalid compact tool-call receipt key');
+      } finally {
+        await disposeStore(store);
+      }
+    },
+  );
 
   it('previews a deterministic v3 bundle with Unicode data', async () => {
     const source = bundle(target);
@@ -291,9 +619,95 @@ describe('Firestore migration preview', () => {
       }),
     ).rejects.toThrow('exceeds safe Firestore inline size');
   });
+
+  it('previews bounded byte/count batches with nested Unicode and vector payloads', async () => {
+    const source = bundle(target, 500);
+    source.manifest.source.embeddingSpace = {
+      provider: 'synthetic',
+      model: 'migration-packing-fixture',
+      dimensions: 1536,
+      revision: '1',
+    };
+    const tasks = source.records
+      .filter((record) => record.table === 'tasks')
+      .sort((left, right) => left.id.localeCompare(right.id));
+    for (const [index, task] of tasks.entries()) {
+      const id = `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`;
+      task.id = id;
+      task.data.id = id;
+      task.data.state = {
+        nested: {
+          labels: ['ferry 🛳️', 'Reykjavík café'],
+          note: index % 5 === 0 ? 'é'.repeat(70_000) : `small-${index}`,
+          numeric: [1, 2, 3, 4],
+        },
+      };
+    }
+    const memoryId = '00000000-0000-4000-8000-999999999999';
+    addRecord(source, {
+      table: 'memories',
+      collection: 'memories',
+      id: memoryId,
+      data: {
+        id: memoryId,
+        agentId: source.manifest.source.agentId,
+        content: 'Vector packing fixture',
+        contentHash: 'vector-packing-fixture',
+        embedding: serializeMigrationVector(
+          Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0)),
+        ),
+      },
+      checksum: '',
+    });
+    upgradeFixtureToV3(source);
+
+    const preview = await importWorkspaceBundle(previewStore, source, {
+      sourceAgentId: source.manifest.source.agentId,
+      target,
+    });
+    expect(preview.writeBatches).toBeGreaterThan(1);
+    expect(preview.maxBatchBytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+    expect(preview.maxBatchWrites).toBeLessThanOrEqual(450);
+    expect(preview.maxBatchWrites).toBeGreaterThan(1);
+  });
 });
 
 describe.skipIf(!enabled)('Firestore workspace migration import', () => {
+  it('refuses a foreign installation owner before writing or verifying the destination', async () => {
+    const store = emulatorStore();
+    const target = {
+      projectId: 'demo-assistant-test',
+      databaseId: '(default)',
+      installationId: store.installationId,
+    };
+    const source = bundle(target);
+    const foreign = randomUUID();
+    try {
+      await store.doc('agents', foreign).set({ id: foreign, name: 'Existing foreign owner' });
+      await expect(
+        importWorkspaceBundle(store, source, {
+          sourceAgentId: source.manifest.source.agentId,
+          target,
+          mode: 'preview',
+        }),
+      ).resolves.toMatchObject({ mode: 'preview', destinationOwnerChecked: false });
+      for (const mode of ['write', 'verify'] as const) {
+        await expect(
+          importWorkspaceBundle(store, source, {
+            sourceAgentId: source.manifest.source.agentId,
+            target,
+            mode,
+          }),
+        ).rejects.toThrow('exactly one owner');
+      }
+      expect((await store.collection('tasks').get()).empty).toBe(true);
+      expect((await store.collection('agents').get()).docs.map((doc) => doc.get('id'))).toEqual([
+        foreign,
+      ]);
+    } finally {
+      await disposeStore(store);
+    }
+  });
   it('derives v3 approval policy keys with runtime code-unit ordering', async () => {
     const store = emulatorStore();
     const target = {
@@ -403,6 +817,219 @@ describe.skipIf(!enabled)('Firestore workspace migration import', () => {
           mode: 'write',
         }),
       ).rejects.toThrow('not empty');
+    } finally {
+      await disposeStore(store);
+    }
+  });
+
+  it.skipIf(!enabled)(
+    'rebuilds the active form guard for a migrated nonterminal owner chat task',
+    async () => {
+      const store = emulatorStore();
+      const target = {
+        projectId: 'demo-assistant-test',
+        databaseId: '(default)',
+        installationId: store.installationId,
+      };
+      try {
+        const fixture = cardFormBundle(target);
+        const result = await importWorkspaceBundle(store, fixture.source, {
+          sourceAgentId: fixture.source.manifest.source.agentId,
+          target,
+          mode: 'write',
+        });
+        expect(result.verified).toBe(true);
+        expect(result.collections.taskEventKeys).toBe(2);
+        const activeEventId = cardFormAdmissionActiveEventId({
+          agentId: fixture.source.manifest.source.agentId,
+          cardId: fixture.cardId,
+          formId: 'meeting',
+        });
+        const activeKeyId = createHash('sha256').update(activeEventId).digest('hex');
+        expect((await store.doc('taskEventKeys', activeKeyId).get()).data()).toMatchObject({
+          taskId: fixture.source.records.find((record) => record.table === 'tasks')?.id,
+          agentId: fixture.source.manifest.source.agentId,
+          cardId: fixture.cardId,
+          formId: 'meeting',
+        });
+        const initialTaskRecord = fixture.source.records.find((record) => record.table === 'tasks');
+        if (!initialTaskRecord) throw new Error('form task fixture missing');
+        const importedTaskSnapshot = await store.doc('tasks', initialTaskRecord.id).get();
+        const importedTrigger = importedTaskSnapshot.get('trigger') as {
+          payload?: { cardFormAdmission?: { expectedRevisionId?: string } };
+        };
+        const currentCard = await store.doc('generatedCards', fixture.cardId).get();
+        expect(currentCard.get('currentRevisionId')).toBe(fixture.revisionId);
+        const pinnedRevisionId = importedTrigger.payload?.cardFormAdmission?.expectedRevisionId;
+        expect(pinnedRevisionId).not.toBe(fixture.revisionId);
+        expect(
+          fixture.source.records.some(
+            (record) =>
+              record.table === 'generated_card_revisions' && record.id === pinnedRevisionId,
+          ),
+        ).toBe(true);
+        expect(importedTrigger.payload?.cardFormAdmission?.expectedRevisionId).toBe(
+          fixture.source.records.find(
+            (record) =>
+              record.table === 'generated_card_revisions' && record.id !== fixture.revisionId,
+          )?.id,
+        );
+        const repository = new FirestoreCardFormAdmissionRepository(
+          store,
+          fixture.source.manifest.source.agentId,
+        );
+        const duplicate = await repository.submit({
+          agentId: fixture.source.manifest.source.agentId,
+          submission: {
+            ...fixture.submission,
+            operationId: randomUUID(),
+            ownerMessageText: 'Please check another date.',
+          },
+          prepare: ({ ownerMessageText }) => ({ ownerMessageText }),
+        });
+        expect(duplicate).toMatchObject({ ok: false, status: 409 });
+        expect(
+          (
+            await store
+              .collection('tasks')
+              .where('agentId', '==', fixture.source.manifest.source.agentId)
+              .get()
+          ).size,
+        ).toBe(1);
+        const importedTask = fixture.source.records.find((record) => record.table === 'tasks');
+        if (!importedTask) throw new Error('form task fixture missing');
+        expect(
+          (await store.collection('messages').where('taskId', '==', importedTask.id).get()).size,
+        ).toBe(1);
+
+        await store.doc('tasks', importedTask.id).update({ status: 'done' });
+        const replacementOperationId = randomUUID();
+        const replacement = await repository.submit({
+          agentId: fixture.source.manifest.source.agentId,
+          submission: {
+            ...fixture.submission,
+            operationId: replacementOperationId,
+            ownerMessageText: 'Please check the updated meeting date.',
+          },
+          prepare: ({ ownerMessageText }) => ({ ownerMessageText }),
+        });
+        expect(replacement).toMatchObject({ ok: true, created: true });
+        if (!replacement.ok) throw new Error('terminal task should release its form guard');
+        const replacementGuard = (await store.doc('taskEventKeys', activeKeyId).get()).data();
+        expect(replacementGuard).toMatchObject({
+          taskId: replacement.taskId,
+          operationId: replacementOperationId,
+          agentId: fixture.source.manifest.source.agentId,
+          cardId: fixture.cardId,
+          formId: 'meeting',
+        });
+        expect(replacement.taskId).not.toBe(importedTask.id);
+        expect(
+          (
+            await store
+              .collection('tasks')
+              .where('agentId', '==', fixture.source.manifest.source.agentId)
+              .get()
+          ).size,
+        ).toBe(2);
+        expect(
+          (
+            await store
+              .collection('messages')
+              .where('conversationId', '==', fixture.conversationId)
+              .get()
+          ).size,
+        ).toBe(2);
+        expect((await store.doc('generatedCardRevisions', fixture.revisionId).get()).exists).toBe(
+          true,
+        );
+      } finally {
+        await disposeStore(store);
+      }
+    },
+  );
+
+  it('imports source lineage with deterministic composite IDs and owned references', async () => {
+    const store = emulatorStore();
+    const target = {
+      projectId: 'demo-assistant-test',
+      databaseId: '(default)',
+      installationId: store.installationId,
+    };
+    try {
+      const source = bundle(target);
+      const agentId = source.manifest.source.agentId;
+      const contactId = randomUUID();
+      const memoryId = randomUUID();
+      const occasionId = randomUUID();
+      const importId = randomUUID();
+      const sourceTag = `mail-${randomUUID()}`;
+      const records: MigrationRecord[] = [
+        {
+          table: 'contacts',
+          collection: 'contacts',
+          id: contactId,
+          data: { id: contactId, agentId, name: 'Lineage contact' },
+          checksum: '',
+        },
+        {
+          table: 'import_sources',
+          collection: 'importSources',
+          id: importId,
+          data: { id: importId, agentId, source: sourceTag, status: 'done' },
+          checksum: '',
+        },
+        {
+          table: 'memories',
+          collection: 'memories',
+          id: memoryId,
+          data: { id: memoryId, agentId, content: 'Imported fact', category: 'knowledge' },
+          checksum: '',
+        },
+        {
+          table: 'occasions',
+          collection: 'occasions',
+          id: occasionId,
+          data: { id: occasionId, agentId, contactId, kind: 'birthday', month: 6, day: 12 },
+          checksum: '',
+        },
+      ];
+      const memoryData = { source: sourceTag, memoryId };
+      const occasionData = { source: sourceTag, occasionId };
+      records.push(
+        {
+          table: 'memory_import_lineage',
+          collection: 'memoryImportLineage',
+          id: compositeMigrationId('memory_import_lineage', memoryData) ?? '',
+          data: memoryData,
+          checksum: '',
+        },
+        {
+          table: 'occasion_import_lineage',
+          collection: 'occasionImportLineage',
+          id: compositeMigrationId('occasion_import_lineage', occasionData) ?? '',
+          data: occasionData,
+          checksum: '',
+        },
+      );
+      for (const record of records) addRecord(source, record);
+      upgradeFixtureToV3(source);
+
+      const result = await importWorkspaceBundle(store, source, {
+        sourceAgentId: agentId,
+        target,
+        mode: 'write',
+      });
+      expect(result.verified).toBe(true);
+      const memoryLineage = records.at(-2);
+      const occasionLineage = records.at(-1);
+      if (!memoryLineage || !occasionLineage) throw new Error('lineage records are missing');
+      expect((await store.doc('memoryImportLineage', memoryLineage.id).get()).data()).toMatchObject(
+        memoryData,
+      );
+      expect(
+        (await store.doc('occasionImportLineage', occasionLineage.id).get()).data(),
+      ).toMatchObject(occasionData);
     } finally {
       await disposeStore(store);
     }
@@ -533,6 +1160,7 @@ describe.skipIf(!enabled)('Firestore workspace migration import', () => {
           agentId,
           contentHash: 'memory-hash',
           embedding: serializeMigrationVector([1, 0, 0]),
+          embeddingSpaceKey: null,
         },
         checksum: '',
       });
@@ -544,13 +1172,144 @@ describe.skipIf(!enabled)('Firestore workspace migration import', () => {
       expect(result.verified).toBe(true);
       const memory = await store.doc('memories', memoryId).get();
       expect(memory.get('embedding').toArray()).toEqual([1, 0, 0]);
-      expect(memory.get('embeddingSpace')).toBe(embeddingSpaceKey(space));
+      expect(memory.get('embeddingSpace')).toBeNull();
       expect(memory.get('retrievalRevision')).toBe(
         source.records.find((record) => record.id === memoryId)?.checksum,
       );
       expect((await store.doc('memoryContentHashes', 'memory-hash').get()).get('memoryId')).toBe(
         memoryId,
       );
+    } finally {
+      await disposeStore(store);
+    }
+  });
+
+  it('imports a prepared refresh vector as resumable private receipt state', async () => {
+    const store = emulatorStore();
+    const target = {
+      projectId: 'demo-assistant-test',
+      databaseId: '(default)',
+      installationId: store.installationId,
+    };
+    try {
+      const source = bundle(target);
+      const space = { provider: 'test', model: 'refresh', dimensions: 2048, revision: '2' };
+      source.manifest.source.embeddingSpace = space;
+      const agentId = source.manifest.source.agentId;
+      const memoryId = randomUUID();
+      const contentHash = createHash('sha256').update('portable-refresh-source').digest('hex');
+      const targetSpaceKey = embeddingSpaceIdentityKey(space);
+      const receiptId = `portable-refresh:${randomUUID()}`;
+      const now = new Date('2026-10-07T12:00:00Z');
+      const sourceVector = Array.from({ length: 2048 }, (_, index) => (index === 0 ? 1 : 0));
+      const preparedVector = Array.from({ length: 2048 }, (_, index) => (index === 0 ? 0.5 : 0));
+      addRecord(source, {
+        table: 'memories',
+        collection: 'memories',
+        id: memoryId,
+        data: {
+          id: memoryId,
+          agentId,
+          category: 'knowledge',
+          kind: 'fact',
+          content: 'A completed source carried across installations.',
+          contentHash,
+          embedding: serializeMigrationVector(sourceVector),
+          embeddingSpaceKey: null,
+        },
+        checksum: '',
+      });
+      addRecord(source, {
+        table: 'memory_embedding_refreshes',
+        collection: 'memoryEmbeddingRefreshes',
+        id: receiptId,
+        data: {
+          id: receiptId,
+          agentId,
+          memoryId,
+          sourceHash: contentHash,
+          targetSpaceKey,
+          targetDimensions: 2048,
+          observedSpaceKey: null,
+          status: 'prepared',
+          preparedVector: serializeMigrationVector(preparedVector),
+          privacyGeneration: null,
+          claimToken: null,
+          leaseUntil: null,
+          unknownReason: null,
+          createdAt: serializeMigrationTimestamp('2026-10-07 12:00:00+00'),
+          updatedAt: serializeMigrationTimestamp('2026-10-07 12:00:00+00'),
+        },
+        checksum: '',
+      });
+      await importWorkspaceBundle(store, source, {
+        sourceAgentId: agentId,
+        target,
+        mode: 'write',
+      });
+      const importedMemory = await store.doc('memories', memoryId).get();
+      expect(importedMemory.get('embedding').toArray()).toHaveLength(2048);
+      const importedReceipt = await store.doc('memoryEmbeddingRefreshes', receiptId).get();
+      expect(importedReceipt.get('targetDimensions')).toBe(2048);
+      expect(importedReceipt.get('preparedVector')).toHaveLength(2048);
+      const repository = new FirestoreMemoryEmbeddingRefreshRepository(store);
+      const resumed = await repository.claim({
+        agentId,
+        memoryId,
+        sourceHash: contentHash,
+        targetSpaceKey,
+        targetDimensions: 2048,
+        now: new Date(now.getTime() + 1),
+        leaseUntil: new Date(now.getTime() + 60_000),
+      });
+      expect(resumed.kind).toBe('prepared');
+      if (resumed.kind === 'prepared') {
+        expect(resumed.receipt.preparedVector).toHaveLength(2048);
+        expect(resumed.receipt.preparedVector?.[0]).toBe(0.5);
+      }
+    } finally {
+      await disposeStore(store);
+    }
+  });
+
+  it('preserves explicit memory embedding identity instead of guessing from the bundle manifest', async () => {
+    const store = emulatorStore();
+    const target = {
+      projectId: 'demo-assistant-test',
+      databaseId: '(default)',
+      installationId: store.installationId,
+    };
+    try {
+      const source = bundle(target);
+      source.manifest.source.embeddingSpace = {
+        provider: 'test',
+        model: 'migration',
+        dimensions: 3,
+        revision: '2',
+      };
+      const agentId = source.manifest.source.agentId;
+      const memoryId = randomUUID();
+      const explicitSpaceKey = 'a'.repeat(64);
+      addRecord(source, {
+        table: 'memories',
+        collection: 'memories',
+        id: memoryId,
+        data: {
+          id: memoryId,
+          agentId,
+          contentHash: 'memory-explicit-space-hash',
+          embedding: serializeMigrationVector([1, 0, 0]),
+          embeddingSpaceKey: explicitSpaceKey,
+        },
+        checksum: '',
+      });
+      await importWorkspaceBundle(store, source, {
+        sourceAgentId: agentId,
+        target,
+        mode: 'write',
+      });
+      const memory = await store.doc('memories', memoryId).get();
+      expect(memory.get('embeddingSpace')).toBe(explicitSpaceKey);
     } finally {
       await disposeStore(store);
     }
@@ -759,6 +1518,177 @@ describe.skipIf(!enabled)('Firestore workspace migration import', () => {
     }
   });
 
+  it.skipIf(!enabled)(
+    'rejects checksummed foreign and cross-parent card/segment links before any destination write',
+    async () => {
+      const store = emulatorStore();
+      const target = {
+        projectId: 'demo-assistant-test',
+        databaseId: '(default)',
+        installationId: store.installationId,
+      };
+      const makeLinkedBundle = () => {
+        const source = completeV3Bundle(target);
+        const agentId = source.manifest.source.agentId;
+        const conversationA = randomUUID();
+        const conversationB = randomUUID();
+        const messageA = randomUUID();
+        const messageB = randomUUID();
+        const cardA = randomUUID();
+        const cardB = randomUUID();
+        const revisionA = randomUUID();
+        const revisionB = randomUUID();
+        const segment = randomUUID();
+        for (const id of [conversationA, conversationB])
+          addRecord(source, {
+            table: 'conversations',
+            collection: 'conversations',
+            id,
+            data: { id, agentId, channel: 'web', purpose: 'owner_chat' },
+            checksum: '',
+          });
+        for (const [id, conversationId] of [
+          [messageA, conversationA],
+          [messageB, conversationB],
+        ] as const)
+          addRecord(source, {
+            table: 'messages',
+            collection: 'messages',
+            id,
+            data: { id, conversationId, role: 'assistant', text: `Fixture ${id}` },
+            checksum: '',
+          });
+        for (const [id, conversationId, messageId, currentRevisionId] of [
+          [cardA, conversationA, messageA, revisionA],
+          [cardB, conversationB, messageB, revisionB],
+        ] as const)
+          addRecord(source, {
+            table: 'generated_cards',
+            collection: 'generatedCards',
+            id,
+            data: { id, agentId, conversationId, messageId, currentRevisionId },
+            checksum: '',
+          });
+        for (const [id, cardId] of [
+          [revisionA, cardA],
+          [revisionB, cardB],
+        ] as const)
+          addRecord(source, {
+            table: 'generated_card_revisions',
+            collection: 'generatedCardRevisions',
+            id,
+            data: { id, cardId, revision: 1, payload: { title: `Card ${id}` } },
+            checksum: '',
+          });
+        addRecord(source, {
+          table: 'conversation_segments',
+          collection: 'conversationSegments',
+          id: segment,
+          data: {
+            id: segment,
+            agentId,
+            conversationId: conversationA,
+            startMessageId: messageA,
+            endMessageId: messageA,
+            content: 'Migration segment fixture',
+          },
+          checksum: '',
+        });
+        upgradeFixtureToV3(source);
+        return { source, ids: { cardA, cardB, messageB, revisionB, segment } };
+      };
+      const fixtureRecord = (source: MigrationBundle, table: string, id: string) => {
+        const record = source.records.find((row) => row.table === table && row.id === id);
+        if (!record) throw new Error(`Missing migration fixture record: ${table}/${id}`);
+        return record.data;
+      };
+      const rejected: Array<{
+        name: string;
+        edit: (source: MigrationBundle, ids: ReturnType<typeof makeLinkedBundle>['ids']) => void;
+        error: RegExp;
+      }> = [
+        {
+          name: 'card current revision from another card',
+          edit: (source, ids) => {
+            fixtureRecord(source, 'generated_cards', ids.cardA).currentRevisionId = ids.revisionB;
+          },
+          error: /parent linkage: currentRevisionId/,
+        },
+        {
+          name: 'card message from another conversation',
+          edit: (source, ids) => {
+            fixtureRecord(source, 'generated_cards', ids.cardA).messageId = ids.messageB;
+          },
+          error: /parent linkage: messageId/,
+        },
+        {
+          name: 'segment start message from another conversation',
+          edit: (source, ids) => {
+            fixtureRecord(source, 'conversation_segments', ids.segment).startMessageId =
+              ids.messageB;
+          },
+          error: /parent linkage: startMessageId/,
+        },
+        {
+          name: 'segment end message from another conversation',
+          edit: (source, ids) => {
+            fixtureRecord(source, 'conversation_segments', ids.segment).endMessageId = ids.messageB;
+          },
+          error: /parent linkage: endMessageId/,
+        },
+        {
+          name: 'foreign owner on card',
+          edit: (source, ids) => {
+            fixtureRecord(source, 'generated_cards', ids.cardA).agentId = randomUUID();
+          },
+          error: /outside source workspace: generated_cards/,
+        },
+        {
+          name: 'foreign owner on segment',
+          edit: (source, ids) => {
+            fixtureRecord(source, 'conversation_segments', ids.segment).agentId = randomUUID();
+          },
+          error: /outside source workspace: conversation_segments/,
+        },
+      ];
+      try {
+        for (const scenario of rejected) {
+          const { source, ids } = makeLinkedBundle();
+          scenario.edit(source, ids);
+          // Recompute every v3 checksum so import reaches the relationship validator,
+          // rather than passing because this test merely tampered with bytes.
+          upgradeFixtureToV3(source);
+          await expect(
+            importWorkspaceBundle(store, source, {
+              sourceAgentId: source.manifest.source.agentId,
+              target,
+              mode: 'write',
+            }),
+            scenario.name,
+          ).rejects.toThrow(scenario.error);
+          expect(await store.root.listCollections(), scenario.name).toHaveLength(0);
+          expect((await store.doc('coordination', 'migration').get()).exists, scenario.name).toBe(
+            false,
+          );
+        }
+
+        const { source, ids } = makeLinkedBundle();
+        const imported = await importWorkspaceBundle(store, source, {
+          sourceAgentId: source.manifest.source.agentId,
+          target,
+          mode: 'write',
+        });
+        expect(imported.verified).toBe(true);
+        expect((await store.doc('generatedCards', ids.cardA).get()).exists).toBe(true);
+        expect((await store.doc('generatedCardRevisions', ids.revisionB).get()).exists).toBe(true);
+        expect((await store.doc('conversationSegments', ids.segment).get()).exists).toBe(true);
+        expect((await store.doc('coordination', 'migration').get()).exists).toBe(true);
+      } finally {
+        await disposeStore(store);
+      }
+    },
+  );
+
   it('rejects a tampered bundle before reading or writing the target', async () => {
     const store = emulatorStore();
     const target = {
@@ -839,6 +1769,90 @@ describe.skipIf(!enabled)('Firestore workspace migration import', () => {
           mode: 'verify',
         }),
       ).resolves.toMatchObject({ verified: true });
+    } finally {
+      await disposeStore(store);
+    }
+  });
+
+  it('resumes a byte-packed variable-size chunk from its absolute write cursor', async () => {
+    const store = emulatorStore();
+    const target = {
+      projectId: 'demo-assistant-test',
+      databaseId: '(default)',
+      installationId: store.installationId,
+    };
+    try {
+      const source = bundle(target, 500);
+      source.manifest.source.embeddingSpace = {
+        provider: 'synthetic',
+        model: 'migration-packing-fixture',
+        dimensions: 1536,
+        revision: '1',
+      };
+      const tasks = source.records
+        .filter((record) => record.table === 'tasks')
+        .sort((left, right) => left.id.localeCompare(right.id));
+      for (const [index, task] of tasks.entries()) {
+        const id = `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`;
+        task.id = id;
+        task.data.id = id;
+        task.data.state = {
+          nested: {
+            labels: ['ferry 🛳️', 'Reykjavík café'],
+            note: index % 5 === 0 ? 'é'.repeat(70_000) : `small-${index}`,
+            numeric: [1, 2, 3, 4],
+          },
+        };
+      }
+      const memoryId = '00000000-0000-4000-8000-999999999999';
+      addRecord(source, {
+        table: 'memories',
+        collection: 'memories',
+        id: memoryId,
+        data: {
+          id: memoryId,
+          agentId: source.manifest.source.agentId,
+          content: 'Vector packing fixture',
+          contentHash: 'vector-packing-fixture',
+          embedding: serializeMigrationVector(
+            Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0)),
+          ),
+        },
+        checksum: '',
+      });
+      upgradeFixtureToV3(source);
+      const preview = await importWorkspaceBundle(store, source, {
+        sourceAgentId: source.manifest.source.agentId,
+        target,
+      });
+      expect(preview.writeBatches).toBeGreaterThan(1);
+      expect(preview.maxBatchBytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+      await expect(
+        importWorkspaceBundle(store, source, {
+          sourceAgentId: source.manifest.source.agentId,
+          target,
+          mode: 'write',
+          failAfterBatches: 1,
+        }),
+      ).rejects.toThrow('Injected migration batch failure');
+      const marker = store.doc('coordination', 'migration');
+      const interruptedAt = (await marker.get()).get('completedWrites');
+      expect(interruptedAt).toBeGreaterThan(0);
+      expect(interruptedAt).toBeLessThan(source.records.length);
+      expect(interruptedAt).toBeLessThan(450);
+
+      const resumed = await importWorkspaceBundle(store, source, {
+        sourceAgentId: source.manifest.source.agentId,
+        target,
+        mode: 'write',
+      });
+      expect(resumed).toMatchObject({ resumed: true, verified: true });
+      expect((await store.collection('tasks').get()).size).toBe(500);
+      const vector = (await store.doc('memories', memoryId).get()).get('embedding') as {
+        toArray?: () => number[];
+        _values?: number[];
+      };
+      expect(vector.toArray?.() ?? vector._values).toHaveLength(1536);
     } finally {
       await disposeStore(store);
     }
@@ -996,5 +2010,157 @@ describe.skipIf(!enabled)('Firestore workspace migration import', () => {
     } finally {
       await disposeStore(store);
     }
+  });
+});
+
+describe('Firestore card-form migration preview', () => {
+  const target = {
+    projectId: 'demo-assistant-test',
+    databaseId: '(default)',
+    installationId: 'preview',
+  };
+  const previewStore = {} as Parameters<typeof importWorkspaceBundle>[0];
+
+  it('derives no active-form guard for any terminal migrated task', async () => {
+    for (const status of ['done', 'failed', 'cancelled']) {
+      const fixture = cardFormBundle(target, 1, status);
+      const preview = await importWorkspaceBundle(previewStore, fixture.source, {
+        sourceAgentId: fixture.source.manifest.source.agentId,
+        target,
+        mode: 'preview',
+      });
+      expect(preview.collections.taskEventKeys, status).toBe(1);
+    }
+  });
+
+  it('rejects malformed task/card/message bindings and ambiguous active keys in preview', async () => {
+    const foreignOwner = cardFormBundle(target);
+    const foreignTask = foreignOwner.source.records.find((record) => record.table === 'tasks');
+    if (!foreignTask) throw new Error('form migration task missing');
+    foreignTask.data.agentId = randomUUID();
+    upgradeFixtureToV3(foreignOwner.source);
+    await expect(
+      importWorkspaceBundle(previewStore, foreignOwner.source, {
+        sourceAgentId: foreignOwner.source.manifest.source.agentId,
+        target,
+        mode: 'preview',
+      }),
+    ).rejects.toThrow(/outside source workspace: tasks/);
+
+    const corruptions = [
+      [
+        'card',
+        (admission: Record<string, unknown>) => {
+          admission.cardId = randomUUID();
+        },
+      ],
+      [
+        'revision',
+        (admission: Record<string, unknown>) => {
+          admission.expectedRevisionId = randomUUID();
+        },
+      ],
+      [
+        'conversation',
+        (admission: Record<string, unknown>) => {
+          admission.conversationId = randomUUID();
+        },
+      ],
+      [
+        'message',
+        (admission: Record<string, unknown>) => {
+          admission.messageId = randomUUID();
+        },
+      ],
+      [
+        'operation',
+        (admission: Record<string, unknown>) => {
+          admission.operationId = randomUUID();
+        },
+      ],
+      [
+        'malformed UUID',
+        (admission: Record<string, unknown>) => {
+          admission.operationId = 'not-a-uuid';
+        },
+      ],
+      [
+        'noncanonical uppercase UUID',
+        (admission: Record<string, unknown>) => {
+          admission.operationId = '11111111-1111-4111-8111-ABCDEFABCDEF';
+        },
+      ],
+      [
+        'non-ASCII form ID',
+        (admission: Record<string, unknown>) => {
+          admission.formId = 'réunion';
+        },
+      ],
+      [
+        'malformed receipt shape',
+        (admission: Record<string, unknown>) => {
+          admission.unexpected = true;
+        },
+      ],
+    ] as const;
+    for (const [name, corrupt] of corruptions) {
+      const fixture = cardFormBundle(target);
+      const task = fixture.source.records.find((record) => record.table === 'tasks');
+      if (!task) throw new Error('form migration task missing');
+      const trigger = task.data.trigger as {
+        payload?: { cardFormAdmission?: Record<string, unknown> };
+      };
+      const admission = trigger.payload?.cardFormAdmission;
+      if (!admission) throw new Error('form migration receipt missing');
+      corrupt(admission);
+      upgradeFixtureToV3(fixture.source);
+      await expect(
+        importWorkspaceBundle(previewStore, fixture.source, {
+          sourceAgentId: fixture.source.manifest.source.agentId,
+          target,
+          mode: 'preview',
+        }),
+        name,
+      ).rejects.toThrow();
+    }
+
+    const malformedTaskId = cardFormBundle(target);
+    const malformedTask = malformedTaskId.source.records.find((record) => record.table === 'tasks');
+    if (!malformedTask) throw new Error('form migration task missing');
+    malformedTask.data.id = 'not-a-uuid';
+    upgradeFixtureToV3(malformedTaskId.source);
+    await expect(
+      importWorkspaceBundle(previewStore, malformedTaskId.source, {
+        sourceAgentId: malformedTaskId.source.manifest.source.agentId,
+        target,
+        mode: 'preview',
+      }),
+    ).rejects.toThrow();
+
+    const badTaskReceipt = cardFormBundle(target);
+    const receiptTask = badTaskReceipt.source.records.find((record) => record.table === 'tasks');
+    if (!receiptTask) throw new Error('form migration task missing');
+    const taskTrigger = receiptTask.data.trigger as {
+      payload?: { chatAdmission?: Record<string, unknown> };
+    };
+    if (!taskTrigger.payload?.chatAdmission) throw new Error('chat admission receipt missing');
+    taskTrigger.payload.chatAdmission.requestHash = 'b'.repeat(64);
+    upgradeFixtureToV3(badTaskReceipt.source);
+    await expect(
+      importWorkspaceBundle(previewStore, badTaskReceipt.source, {
+        sourceAgentId: badTaskReceipt.source.manifest.source.agentId,
+        target,
+        mode: 'preview',
+      }),
+    ).rejects.toThrow(/Card form task owner or operation binding mismatch/);
+
+    const duplicate = cardFormBundle(target, 2);
+    await expect(
+      importWorkspaceBundle(previewStore, duplicate.source, {
+        sourceAgentId: duplicate.source.manifest.source.agentId,
+        target,
+        mode: 'preview',
+      }),
+    ).rejects.toThrow(/duplicate destination: taskEventKeys:/);
   });
 });

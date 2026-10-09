@@ -13,6 +13,7 @@ import {
   purgeExpired,
   renotifyStalledApprovals,
   renotifyStalledAttention,
+  repairMissionReports,
   resumeResolvedApprovalTasks,
   runDueSchedules,
 } from '@assistant/core';
@@ -106,6 +107,9 @@ export async function runFirestoreSweep(
         executorDeps(deps).notifyOwner,
       ),
     ),
+    missionReportsRepaired: await step('repairMissionReports', () =>
+      repairMissionReports({ ...executorDeps(deps), agentId: deps.config.FIRESTORE_AGENT_ID }, 20),
+    ),
     expiredWatches: await step('expireWatches', () =>
       persistence.watches.expire(deps.config.FIRESTORE_AGENT_ID, new Date()),
     ),
@@ -153,10 +157,12 @@ export async function runFirestoreSweep(
     // and only while the embed role still produces that space.
     messagesEmbedded: await step('backfillMessageEmbeddings', () =>
       backfillMessageEmbeddings(maintenance, {
+        embeddingSpace: async () =>
+          parseFirestoreEmbeddingSpace(deps.config.FIRESTORE_EMBEDDING_SPACE),
         embed: pinnedMemoryEmbed(
           parseFirestoreEmbeddingSpace(deps.config.FIRESTORE_EMBEDDING_SPACE),
           persistence.modelRouting,
-          (texts) => deps.router.embed(texts),
+          (texts, expectedSpace) => deps.router.embed(texts, { expectedSpace }),
         ),
       }),
     ),

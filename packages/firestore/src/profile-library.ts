@@ -5,6 +5,7 @@ import type {
   Records,
 } from '@assistant/persistence';
 import { Timestamp } from '@google-cloud/firestore';
+import { decodeMemoryRecord } from './memory-record.js';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
@@ -158,7 +159,7 @@ export class FirestoreProfileLibraryRepository implements ProfileLibraryReposito
       if (cursor) query = query.startAfter(cursor);
       const page = await query.get();
       for (const doc of page.docs) {
-        const memory = decodeRecord<Records['memories']>(doc.data());
+        const memory = decodeMemoryRecord(doc.data());
         if (memory.agentId !== agentId || documentKey(memory.id) !== doc.id) continue;
         const rawCreatedAt = doc.get('createdAt');
         const rawExpiresAt = doc.get('expiresAt');

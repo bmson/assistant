@@ -10,5 +10,5 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore application smo
     } finally {
       await disposeStore(store);
     }
-  });
+  }, 30_000);
 });

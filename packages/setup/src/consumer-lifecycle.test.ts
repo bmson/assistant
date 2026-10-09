@@ -62,7 +62,7 @@ function initialized(): InstallationManifest {
 }
 
 describe('release rebase (update and rollback)', () => {
-  it('returns to bootstrapped on the new release, keeping only bootstrap-owned inventory', () => {
+  it('returns to provisioned on the new release while preserving applied Terraform inventory', () => {
     const next = rebaseInstallationRelease(
       initialized(),
       { commitSha: newSha, archiveDigest: `sha256:${'b'.repeat(64)}` },
@@ -71,14 +71,17 @@ describe('release rebase (update and rollback)', () => {
     );
     expect(next.identity.release.commitSha).toBe(newSha);
     expect(next.stage).toEqual({
-      current: 'bootstrapped',
-      completed: ['previewed', 'authorized', 'bootstrapped'],
+      current: 'provisioned',
+      completed: ['previewed', 'authorized', 'bootstrapped', 'provisioned'],
       updatedAt: '2026-09-24T13:00:00.000Z',
     });
     expect(next.resources.map((resource) => resource.kind).sort()).toEqual([
+      'assets-bucket',
       'auth-secret-version',
+      'cloud-run-service',
       'release-receipt',
       'release-receipt',
+      'runtime-config',
       'secret',
       'state-bucket',
     ]);
@@ -141,10 +144,20 @@ describe('release rebase (update and rollback)', () => {
     await expect(
       persistInstallationProgress(state, foreign, persisted, 'release-rebase'),
     ).rejects.toThrow('may change only the release');
+    const lostRuntime = validateInstallationManifest({
+      ...next,
+      resources: next.resources.filter((resource) => resource.owner !== 'terraform'),
+    });
+    await expect(
+      persistInstallationProgress(state, lostRuntime, persisted, 'release-rebase'),
+    ).rejects.toThrow('must preserve Terraform-owned resources');
     await persistInstallationProgress(state, next, persisted, 'release-rebase');
     const saved = JSON.parse(await readFile(state, 'utf8'));
     expect(saved.identity.release.commitSha).toBe(newSha);
-    expect(saved.stage.current).toBe('bootstrapped');
+    expect(saved.stage.current).toBe('provisioned');
+    expect(
+      saved.resources.filter((resource: { owner: string }) => resource.owner === 'terraform'),
+    ).toEqual(current.resources.filter((resource) => resource.owner === 'terraform'));
   });
 });
 

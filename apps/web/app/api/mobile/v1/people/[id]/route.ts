@@ -6,7 +6,11 @@ import {
 } from '@assistant/application/people';
 import { projectPersonGraph } from '@assistant/application/people-graph-projection';
 import { toPersonCardView, toPersonCardViewFromParts } from '@assistant/application/people-view';
-import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
+import {
+  loadConfig,
+  parseFirestoreEmbeddingSpace,
+  validateAgentPersistenceConfig,
+} from '@assistant/config';
 import {
   assertPrivacyErasureFenceUnchanged,
   getFirestoreMobilePeopleDirectory,
@@ -55,7 +59,14 @@ export async function GET(
     if (!row) throw new Error('Person detail exceeds the directory projection bound');
     const [temporal, graph] = await Promise.all([
       getFirestorePersonTemporalDetails(store, config.FIRESTORE_AGENT_ID, id, now),
-      getFirestorePersonGraph(store, config.FIRESTORE_AGENT_ID, id, GRAPH_EXTRACTION_VERSION, now),
+      getFirestorePersonGraph(
+        store,
+        config.FIRESTORE_AGENT_ID,
+        id,
+        GRAPH_EXTRACTION_VERSION,
+        now,
+        parseFirestoreEmbeddingSpace(config.FIRESTORE_EMBEDDING_SPACE),
+      ),
     ]);
     if (!temporal || !graph) throw new Error('Person detail changed during read');
     const current = await getFirestorePersonDetail(store, config.FIRESTORE_AGENT_ID, id);

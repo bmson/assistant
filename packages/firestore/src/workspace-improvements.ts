@@ -61,11 +61,37 @@ function fromDocument(
   };
 }
 
-/** One owner-indexed scan avoids a composite index and never silently cuts off older rows. */
+/** Reads only actionable proposals so decided history cannot exhaust the workspace bound. */
 export class FirestoreWorkspaceImprovementRepository implements WorkspaceImprovementRepository {
   readonly kind = 'workspace-improvement-repository' as const;
 
   constructor(readonly store: InstallationStore) {}
+
+  async listOpenPage(agentId: string, input: { afterId?: string; limit: number }) {
+    const limit = boundedPageSize(input.limit);
+    if (!agentId) throw new Error('agent is required');
+    if (input.afterId !== undefined && !/^[0-9a-f-]{36}$/i.test(input.afterId))
+      throw new Error('Invalid improvement continuation');
+    const fence = await readPrivacyErasureFence(this.store, agentId);
+    let query = this.store
+      .collection('improvementProposals')
+      .where('agentId', '==', agentId)
+      .where('status', '==', 'open')
+      .orderBy('id', 'asc')
+      .select(...FIELDS);
+    if (input.afterId) query = query.startAfter(input.afterId);
+    const snapshot = await query.limit(limit + 1).get();
+    const page = snapshot.docs
+      .slice(0, limit)
+      .map((doc) => fromDocument(doc.data(), doc.id, agentId))
+      .filter((row): row is WorkspaceImprovementRecord => row !== null);
+    await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
+    return {
+      items: page,
+      hasMore: snapshot.size > limit,
+      nextCursor: snapshot.size > limit ? (page.at(-1)?.id ?? null) : null,
+    };
+  }
 
   /**
    * Apply or dismiss one owner proposal with the same effects as the
@@ -211,6 +237,7 @@ export class FirestoreWorkspaceImprovementRepository implements WorkspaceImprove
     const snapshot = await this.store
       .collection('improvementProposals')
       .where('agentId', '==', agentId)
+      .where('status', '==', 'open')
       .select(...FIELDS)
       .limit(MAX_OWNER_PROPOSALS + 1)
       .get();
@@ -227,4 +254,10 @@ export class FirestoreWorkspaceImprovementRepository implements WorkspaceImprove
     await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
     return result;
   }
+}
+
+function boundedPageSize(limit: number): number {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+    throw new Error('Workspace page size must be between 1 and 100');
+  return limit;
 }

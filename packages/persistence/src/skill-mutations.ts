@@ -9,6 +9,7 @@ export interface OwnerSkillInput {
 export interface SkillMutationRepository {
   readonly kind: 'skill-mutation-repository';
   assertOwnerWritable(agentId: string): Promise<void>;
+  assertOwnerCanEdit(agentId: string, skillId: string): Promise<void>;
   saveOwner(agentId: string, input: OwnerSkillInput, embedding: number[]): Promise<void>;
   editOwner(
     agentId: string,

@@ -3,8 +3,15 @@ import type {
   TaskActivityDetail,
   TaskActivityDetailRepository,
   TaskActivityRepository,
+  TaskTimelineCursor,
 } from '@assistant/persistence';
-import { FieldPath, type Query, type QueryDocumentSnapshot } from '@google-cloud/firestore';
+import { isChatAdmissionCancellationProjection } from '@assistant/persistence';
+import {
+  FieldPath,
+  type Query,
+  type QueryDocumentSnapshot,
+  Timestamp,
+} from '@google-cloud/firestore';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
@@ -15,6 +22,8 @@ const MAX_FILES_PER_TASK = 5_000;
 const FIELDS = [
   'id',
   'agentId',
+  'conversationId',
+  'externalEventId',
   'type',
   'status',
   'title',
@@ -32,6 +41,16 @@ function taskFromDocument(value: unknown, documentId: string, agentId: string): 
   const row = decodeRecord<Record<string, unknown>>(value);
   if (
     row.agentId !== agentId ||
+    !(
+      row.conversationId === undefined ||
+      row.conversationId === null ||
+      typeof row.conversationId === 'string'
+    ) ||
+    !(
+      row.externalEventId === undefined ||
+      row.externalEventId === null ||
+      typeof row.externalEventId === 'string'
+    ) ||
     typeof row.id !== 'string' ||
     documentKey(row.id) !== documentId ||
     typeof row.type !== 'string' ||
@@ -52,7 +71,11 @@ function taskFromDocument(value: unknown, documentId: string, agentId: string): 
     Array.isArray(row.trigger)
   )
     throw new Error('Invalid owner activity task');
-  return row as ActivityTaskRecord;
+  return {
+    ...row,
+    conversationId: row.conversationId ?? null,
+    externalEventId: row.externalEventId ?? null,
+  } as ActivityTaskRecord;
 }
 
 function isCanary(trigger: unknown): boolean {
@@ -96,6 +119,7 @@ export class FirestoreTaskActivityRepository
     const wanted = (row: ActivityTaskRecord) =>
       (input.archived ? row.archivedAt !== null : row.archivedAt === null) &&
       !isCanary(row.trigger) &&
+      !isChatAdmissionCancellationProjection(row) &&
       (!statuses || statuses.has(row.status));
     const newestFirst = async (query: Query): Promise<ActivityTaskRecord[]> => {
       const found: ActivityTaskRecord[] = [];
@@ -183,7 +207,7 @@ export class FirestoreTaskActivityRepository
   async getDetail(
     agentId: string,
     taskId: string,
-    input: { pageSize: number; before?: Date },
+    input: { pageSize: number; before?: Date; cursor?: TaskTimelineCursor },
   ): Promise<TaskActivityDetail | null> {
     if (
       !agentId ||
@@ -210,6 +234,9 @@ export class FirestoreTaskActivityRepository
       .select(
         'id',
         'agentId',
+        'conversationId',
+        'externalEventId',
+        'trigger',
         'type',
         'status',
         'title',
@@ -232,6 +259,7 @@ export class FirestoreTaskActivityRepository
     if (!taskDocument) return null;
     const task = decodeRecord<Record<string, unknown>>(taskDocument.data());
     if (task.agentId !== agentId) return null;
+    if (isChatAdmissionCancellationProjection(task)) return null;
     if (
       task.id !== taskId ||
       documentKey(taskId) !== taskDocument.id ||
@@ -259,8 +287,29 @@ export class FirestoreTaskActivityRepository
         .collection(collection)
         .where('taskId', '==', taskId)
         .select(...fields);
+      if (input.cursor) {
+        const kinds: Record<string, string> = {
+          toolCalls: 'tool',
+          modelCalls: 'model',
+          approvals: 'approval',
+          messages: 'message',
+        };
+        const kind = kinds[collection] ?? '';
+        const at = new Timestamp(
+          Math.floor(new Date(input.cursor.at).getTime() / 1000),
+          Number(input.cursor.at.slice(20, 29)),
+        );
+        query = query.orderBy(timeField, 'desc').orderBy('id', 'desc');
+        if (kind === input.cursor.kind) query = query.startAfter(at, input.cursor.id);
+        else query = query.where(timeField, kind < input.cursor.kind ? '<=' : '<', at);
+        return query.limit(input.pageSize + 1).get();
+      }
       if (input.before) query = query.where(timeField, '<', input.before);
-      return query.orderBy(timeField, 'desc').orderBy('id', 'desc').limit(input.pageSize).get();
+      return query
+        .orderBy(timeField, 'desc')
+        .orderBy('id', 'desc')
+        .limit(input.pageSize + 1)
+        .get();
     };
     const [
       toolSnapshot,
@@ -347,6 +396,11 @@ export class FirestoreTaskActivityRepository
         const row = decodeRecord<Record<string, unknown>>(doc.data());
         if (row.taskId !== taskId || typeof row.id !== 'string' || documentKey(row.id) !== doc.id)
           throw new Error('Invalid owner activity audit record');
+        const rawAt = doc.data().requestedAt ?? doc.data().createdAt;
+        if (rawAt instanceof Timestamp) {
+          const seconds = new Date(rawAt.seconds * 1000).toISOString().slice(0, 19);
+          row.timelineAt = `${seconds}.${String(rawAt.nanoseconds).padStart(9, '0')}Z`;
+        }
         return row as T;
       });
     const [toolCalls, modelCalls, approvals, messages, files, actions] = [

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { FieldValue } from '@google-cloud/firestore';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FirestoreSkillLibraryRepository } from './skill-library.js';
@@ -129,5 +130,43 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore learned-skill l
     await first.commit();
     await seed('skill-500');
     await expect(repository.list('owner')).rejects.toThrow('exceeds the mobile workspace limit');
+  });
+
+  it('continues through a library larger than the old 500-row limit in bounded pages', async () => {
+    const ids = Array.from({ length: 501 }, () => randomUUID()).sort();
+    for (let offset = 0; offset < ids.length; offset += 400) {
+      const batch = store.db.batch();
+      for (const id of ids.slice(offset, offset + 400)) {
+        batch.set(store.doc('skills', id), {
+          id,
+          agentId: 'owner',
+          name: `Skill ${id}`,
+          preconditions: 'when needed',
+          steps: 'do the work',
+          gotchas: 'check the result',
+          ownerAuthored: false,
+          deprecated: false,
+          useCount: 0,
+          successCount: 0,
+          failureCount: 0,
+          updatedAt: new Date('2026-09-10T12:00:00.000Z'),
+        });
+      }
+      await batch.commit();
+    }
+
+    const collected: string[] = [];
+    let afterId: string | undefined;
+    do {
+      const page = await repository.listPage('owner', {
+        ...(afterId ? { afterId } : {}),
+        limit: 100,
+      });
+      collected.push(...page.items.map((row) => row.id));
+      afterId = page.nextCursor ?? undefined;
+      expect(page.hasMore).toBe(Boolean(afterId));
+    } while (afterId);
+
+    expect(collected).toEqual(ids);
   });
 });

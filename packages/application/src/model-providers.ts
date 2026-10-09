@@ -401,6 +401,8 @@ export interface ProviderModelListing {
   promptCostPerMTok?: string;
   completionCostPerMTok?: string;
   thinking?: boolean;
+  /** Exact OpenRouter model-catalog parameters, when supplied by the source. */
+  supportedParameters?: string[];
 }
 
 function perMillion(value: unknown): string | undefined {
@@ -504,6 +506,12 @@ export async function testModelConnection(
             thinking: Array.isArray(item.supported_parameters)
               ? item.supported_parameters.includes('reasoning')
               : undefined,
+            supportedParameters: Array.isArray(item.supported_parameters)
+              ? item.supported_parameters
+                  .filter((value): value is string => typeof value === 'string')
+                  .filter((value) => /^[a-z][a-z0-9_]{0,63}$/.test(value))
+                  .slice(0, 100)
+              : undefined,
           },
         ];
       })
@@ -548,6 +556,8 @@ export interface AddCatalogModelInput {
   realtime?: {
     audioInputPerMTok: string | number;
     audioOutputPerMTok: string | number;
+    cachedAudioInputPerMTok?: string | number;
+    cachedTextInputPerMTok?: string | number;
     voice?: string;
   };
 }
@@ -587,6 +597,14 @@ export async function addCatalogModel(
       };
     const audioIn = cleanPrice(input.realtime.audioInputPerMTok);
     const audioOut = cleanPrice(input.realtime.audioOutputPerMTok);
+    const cachedAudioIn =
+      input.realtime.cachedAudioInputPerMTok === undefined
+        ? null
+        : cleanPrice(input.realtime.cachedAudioInputPerMTok);
+    const cachedTextIn =
+      input.realtime.cachedTextInputPerMTok === undefined
+        ? null
+        : cleanPrice(input.realtime.cachedTextInputPerMTok);
     if (audioIn === null || audioOut === null)
       return { ok: false, error: 'Enter the audio input and output price per million tokens.' };
     const voice = (input.realtime.voice ?? '').trim();
@@ -596,18 +614,80 @@ export async function addCatalogModel(
       realtime: true,
       audioInputPerMTok: Number(audioIn),
       audioOutputPerMTok: Number(audioOut),
+      ...(cachedAudioIn !== null ? { cachedAudioInputPerMTok: Number(cachedAudioIn) } : {}),
+      ...(cachedTextIn !== null ? { cachedTextInputPerMTok: Number(cachedTextIn) } : {}),
       ...(voice ? { voice } : {}),
     };
   }
   const id = catalogModelId(connection, model);
   const existing = (await ports.catalog.listModels()).find((row) => row.id === id);
+  if (
+    input.realtime &&
+    (await ports.catalog.listRoles()).some(
+      (role) =>
+        role.role !== 'voice' &&
+        role.role !== 'embed' &&
+        (role.primaryModel === id || role.fallbackModel === id),
+    )
+  ) {
+    return {
+      ok: false,
+      error:
+        'This model is assigned to chat work. Choose a different chat model before making it a live voice model.',
+    };
+  }
+  let verifiedCatalog: { supportedParameters: string[]; checkedAt: string } | undefined;
+  if (connection.kind === 'openrouter') {
+    const connectionRecord = (await ports.connections.list()).find(
+      (candidate) => candidate.id === input.connectionId,
+    );
+    let apiKey = '';
+    try {
+      apiKey = connectionRecord?.apiKeyEncrypted
+        ? ports.open(connectionRecord.apiKeyEncrypted)
+        : '';
+    } catch {
+      apiKey = '';
+    }
+    const listing = await fetchJson(
+      ports,
+      'https://openrouter.ai/api/v1/models',
+      apiKey || ports.config.OPENROUTER_API_KEY
+        ? { authorization: `Bearer ${apiKey || ports.config.OPENROUTER_API_KEY}` }
+        : {},
+    );
+    if (listing.ok) {
+      const entries = (listing.body as { data?: unknown }).data;
+      const selected = Array.isArray(entries)
+        ? entries.find(
+            (entry) =>
+              entry && typeof entry === 'object' && (entry as { id?: unknown }).id === model,
+          )
+        : undefined;
+      const parameters =
+        selected && (selected as { supported_parameters?: unknown }).supported_parameters;
+      if (Array.isArray(parameters)) {
+        verifiedCatalog = {
+          supportedParameters: parameters
+            .filter((value): value is string => typeof value === 'string')
+            .filter((value) => /^[a-z][a-z0-9_]{0,63}$/.test(value))
+            .slice(0, 100),
+          checkedAt: new Date().toISOString(),
+        };
+      }
+    }
+  }
   const capabilities = input.realtime
     ? realtime
     : {
         ...((existing?.capabilities as Record<string, unknown> | null) ?? {}),
-        tools: true,
-        json: true,
-        streaming: true,
+        ...(verifiedCatalog
+          ? {
+              supportedParameters: verifiedCatalog.supportedParameters,
+              checkedAt: verifiedCatalog.checkedAt,
+              capabilitySource: 'openrouter-model-catalog',
+            }
+          : {}),
         ...(input.thinking !== undefined ? { thinking: input.thinking } : {}),
       };
   await ports.catalog.upsertModel({
@@ -638,8 +718,17 @@ export async function chooseTextModels(
     ports.connections.list(),
   ]);
   const byId = new Map(models.map((model) => [model.id, model]));
+  const availableConnections = [
+    ...rows.map(view),
+    ...environmentConnections(ports.config, new Set(rows.map((row) => row.id))),
+  ];
   const connectionOff = (modelId: string) =>
-    rows.some((row) => row.id === connectionIdForModel(modelId) && !row.enabled);
+    !availableConnections.some((row) => row.id === connectionIdForModel(modelId) && row.enabled);
+  const textCompatible = (modelId: string) => {
+    const model = byId.get(modelId);
+    const caps = (model?.capabilities ?? {}) as { embedding?: boolean; realtime?: boolean };
+    return isRoutableModel(model) && !caps.embedding && !caps.realtime && !connectionOff(modelId);
+  };
   for (const chosen of [input.mainModel, input.fastModel]) {
     const model = byId.get(chosen);
     const caps = (model?.capabilities ?? {}) as { embedding?: boolean; realtime?: boolean };
@@ -653,7 +742,7 @@ export async function chooseTextModels(
     ...FAST_MODEL_ROLES.map((role) => ({ role, primaryModel: input.fastModel })),
   ].map(({ role, primaryModel }) => {
     const current = roles.find((row) => row.role === role)?.fallbackModel;
-    const keep = current && isRoutableModel(byId.get(current)) && !connectionOff(current);
+    const keep = current && textCompatible(current);
     return { role, primaryModel, fallbackModel: keep ? current : primaryModel };
   });
   if (!assignments.every(({ role }) => (MODEL_ROLE_NAMES as readonly string[]).includes(role)))
@@ -668,6 +757,8 @@ export interface VoiceModelPreset {
   label: string;
   audioInputPerMTok: number;
   audioOutputPerMTok: number;
+  cachedAudioInputPerMTok?: number;
+  cachedTextInputPerMTok?: number;
   textInputPerMTok: number;
   textOutputPerMTok: number;
   voice?: string;
@@ -677,9 +768,11 @@ export interface VoiceModelPreset {
 /**
  * Live voice models the app can add in one tap once their provider is
  * connected. Prices are the providers' published list prices, checked
- * 2026-09-27 (developers.openai.com/api/docs/pricing; Google Cloud Agent
- * Platform pricing, "Gemini 3.8 Live API", non-global). The owner can edit
- * them like any catalog price.
+ * 2026-10-07 (https://developers.openai.com/api/docs/models/gpt-realtime-2.1,
+ * https://developers.openai.com/api/docs/pricing, and
+ * https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing
+ * for Gemini 3.8 Live API, non-global). The owner can edit them like any
+ * catalog price; call ledgers freeze these configured values as estimates.
  */
 export const VOICE_MODEL_PRESETS: readonly VoiceModelPreset[] = [
   {
@@ -688,6 +781,8 @@ export const VOICE_MODEL_PRESETS: readonly VoiceModelPreset[] = [
     label: 'GPT-Realtime 2.1',
     audioInputPerMTok: 32,
     audioOutputPerMTok: 64,
+    cachedAudioInputPerMTok: 0.4,
+    cachedTextInputPerMTok: 0.4,
     textInputPerMTok: 4,
     textOutputPerMTok: 24,
     voice: 'marin',
@@ -699,6 +794,8 @@ export const VOICE_MODEL_PRESETS: readonly VoiceModelPreset[] = [
     label: 'GPT-Realtime 2.1 mini',
     audioInputPerMTok: 10,
     audioOutputPerMTok: 20,
+    cachedAudioInputPerMTok: 0.3,
+    cachedTextInputPerMTok: 0.06,
     textInputPerMTok: 0.6,
     textOutputPerMTok: 2.4,
     voice: 'marin',
@@ -734,6 +831,12 @@ export async function addVoicePreset(
     realtime: {
       audioInputPerMTok: preset.audioInputPerMTok,
       audioOutputPerMTok: preset.audioOutputPerMTok,
+      ...(preset.cachedAudioInputPerMTok !== undefined
+        ? { cachedAudioInputPerMTok: preset.cachedAudioInputPerMTok }
+        : {}),
+      ...(preset.cachedTextInputPerMTok !== undefined
+        ? { cachedTextInputPerMTok: preset.cachedTextInputPerMTok }
+        : {}),
       voice: preset.voice,
     },
   });

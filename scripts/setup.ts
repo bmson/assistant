@@ -1,8 +1,9 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseAssistantModules } from '@assistant/config';
+import { generateSetupEnv, writePrivateSetupEnv } from './setup-env.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const examplePath = path.join(repoRoot, '.env.example');
@@ -14,13 +15,6 @@ function argument(name: string): string | undefined {
   if (inline) return inline.slice(prefix.length);
   const index = process.argv.indexOf(`--${name}`);
   return index >= 0 ? process.argv[index + 1] : undefined;
-}
-
-function setValue(source: string, name: string, value: string): string {
-  if (/[\r\n]/.test(value)) throw new Error(`${name} cannot contain a newline`);
-  const line = `${name}=${value}`;
-  const pattern = new RegExp(`^${name}=.*$`, 'm');
-  return pattern.test(source) ? source.replace(pattern, line) : `${source.trimEnd()}\n${line}\n`;
 }
 
 if (existsSync(outputPath)) {
@@ -39,8 +33,7 @@ const assistantName = argument('assistant-name') ?? 'Assistant';
 const workspaceId = argument('workspace-id') ?? 'assistant';
 const timezone = argument('timezone') ?? 'UTC';
 
-let env = readFileSync(examplePath, 'utf8');
-for (const [name, value] of Object.entries({
+const env = generateSetupEnv(readFileSync(examplePath, 'utf8'), {
   ASSISTANT_NAME: assistantName,
   ASSISTANT_EMAIL: assistantEmail,
   ASSISTANT_WORKSPACE_ID: workspaceId,
@@ -54,10 +47,8 @@ for (const [name, value] of Object.entries({
   INTERNAL_API_SECRET: randomBytes(32).toString('hex'),
   PROFILE_ENC_KEY: randomBytes(32).toString('hex'),
   MCP_ENC_KEY: randomBytes(32).toString('hex'),
-})) {
-  env = setValue(env, name, value);
-}
-writeFileSync(outputPath, env, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+});
+writePrivateSetupEnv(outputPath, env);
 
 console.log('Created .env with generated local secrets.');
 console.log(`Optional modules: ${moduleValue || 'none (minimal)'}`);

@@ -76,10 +76,29 @@ const taskIcon = {
 export default async function TasksPage({
   searchParams,
 }: {
-  searchParams: Promise<{ view?: string; filter?: string }>;
+  searchParams: Promise<{
+    view?: string;
+    filter?: string;
+    archiveOperation?: string;
+    archivedTotal?: string;
+    archiveComplete?: string;
+  }>;
 }) {
   await requireOwner();
-  const { view, filter: rawFilter } = await searchParams;
+  const {
+    view,
+    filter: rawFilter,
+    archiveOperation: rawArchiveOperation,
+    archivedTotal: rawArchivedTotal,
+    archiveComplete,
+  } = await searchParams;
+  const archiveOperation =
+    rawArchiveOperation && /^[0-9a-f-]{36}$/i.test(rawArchiveOperation)
+      ? rawArchiveOperation
+      : undefined;
+  const archivedTotalValue = Number(rawArchivedTotal);
+  const archivedTotal =
+    Number.isSafeInteger(archivedTotalValue) && archivedTotalValue >= 0 ? archivedTotalValue : null;
   const archived = view === 'archived';
   const filter = FILTERS.some((item) => item.value === rawFilter)
     ? (rawFilter as ActivityFilter)
@@ -119,15 +138,26 @@ export default async function TasksPage({
                 </Link>
               ) : null}
               <form action={archiveOldTasks}>
+                {archiveOperation ? (
+                  <input type="hidden" name="operationId" value={archiveOperation} />
+                ) : null}
                 <SubmitButton pendingLabel="Archiving…">
                   <Archive className="size-3.5" aria-hidden="true" />
-                  Archive old
+                  {archiveOperation ? `Continue archiving (${archivedTotal ?? 0})` : 'Archive old'}
                 </SubmitButton>
               </form>
             </>
           )
         }
       />
+
+      {archivedTotal !== null ? (
+        <p className="mt-4 text-sm text-muted-foreground" role="status">
+          {archiveComplete === 'false'
+            ? `Archived ${archivedTotal} older tasks so far. Continue to process the next bounded batch.`
+            : `Archived ${archivedTotal} older ${archivedTotal === 1 ? 'task' : 'tasks'}.`}
+        </p>
+      ) : null}
 
       {!archived ? (
         <nav aria-label="Filter activity" className={`${segmentedControlClass} mt-6`}>

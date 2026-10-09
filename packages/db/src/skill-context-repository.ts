@@ -24,6 +24,7 @@ export function createPostgresSkillContextRepository(db: Db): SkillContextReposi
         .where(
           and(
             eq(skills.agentId, input.agentId),
+            eq(skills.embeddingSpaceKey, input.embeddingSpaceKey),
             eq(skills.deprecated, false),
             isNotNull(skills.embedding),
             sql`1 - (${skills.embedding} <=> ${vector}::vector) >= ${minSimilarity}`,

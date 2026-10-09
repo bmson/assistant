@@ -32,7 +32,12 @@ export type CodeCallbackOutcome = JobCallbackOutcome;
  */
 export async function recordCodeJobResult(
   store: Db | ExecutionJobRepository,
-  input: { taskId: string; token: string; result: Record<string, unknown> },
+  input: {
+    taskId: string;
+    token: string;
+    result: Record<string, unknown>;
+    idempotencyKey?: string;
+  },
 ): Promise<CodeCallbackOutcome> {
   // Inventory the files the script wrote (already uploaded to the workspace).
   const outputs = Array.isArray(input.result.outputs)

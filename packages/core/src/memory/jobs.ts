@@ -9,8 +9,10 @@ import {
 } from '@assistant/db';
 import type {
   DocumentExtractionRepository,
+  EmailThreadHeadReader,
   ExecutionPersistence,
   ImportJobRepository,
+  ReminderEventDependency,
 } from '@assistant/persistence';
 import { and, eq, sql } from 'drizzle-orm';
 import { getOrCreateNotificationsConversation, persistMessage } from '../chat.js';
@@ -20,8 +22,14 @@ import { curiositySummary, runCuriosity } from '../proactive/curiosity.js';
 import type { ProactiveNotifier } from '../proactive/notify.js';
 import { pingOwner } from '../proactive/notify.js';
 import { pulseSummary, runPulse } from '../proactive/pulse.js';
+import { fetchScoreboard, leagueByKey, type ScoreboardGame } from '../sports/index.js';
 import { runAnomalyScan } from '../workflow/anomaly.js';
-import { type BriefingCalendarReader, briefingSummary, runBriefing } from '../workflow/briefing.js';
+import {
+  type BriefingCalendarReader,
+  briefingSummary,
+  type CalendarEventReader,
+  runBriefing,
+} from '../workflow/briefing.js';
 import { runDream } from '../workflow/dream.js';
 import { runAssistantHealthMonitor } from '../workflow/health-monitor.js';
 import { runSelfImprove } from '../workflow/improve.js';
@@ -31,7 +39,7 @@ import { runSelfMaintenance } from '../workflow/self-maintenance.js';
 import { runRepairCycle } from '../workflow/self-repair.js';
 import { runWatchSuggest } from '../workflow/watch-suggest.js';
 import { refreshAmbientSnapshot } from './ambient.js';
-import { extractCommitments, markStaleCommitments } from './commitments.js';
+import { extractCommitments, maintainCommitments } from './commitments.js';
 import { runMemoryConsolidation } from './consolidation.js';
 import { type DocumentProcessorConfig, runDocumentProcessing } from './document-processor.js';
 import { runDocumentExtraction } from './documents.js';
@@ -49,6 +57,28 @@ import {
 import { segmentConversations } from './segmentation.js';
 import { runSkillReflection } from './skill-reflect.js';
 import { runVoiceIngest } from './voice-ingest.js';
+
+export type ReminderSportsScoreboardReader = (input: {
+  league: string;
+  date: string;
+  timeZone: string;
+  now: Date;
+}) => Promise<ScoreboardGame[]>;
+
+export function isExactCompletedSportsOccurrence(
+  dependency: ReminderEventDependency,
+  games: readonly ScoreboardGame[],
+): boolean {
+  const exact = games.filter(
+    (game) =>
+      game.id === dependency.eventId &&
+      game.league === dependency.league &&
+      game.startsAt === dependency.startsAt &&
+      game.home.id === dependency.homeTeamId &&
+      game.away.id === dependency.awayTeamId,
+  );
+  return exact.length === 1 && exact[0]?.state === 'post';
+}
 
 /**
  * Code jobs: tasks whose trigger payload carries { job: '<name>' } run a
@@ -215,6 +245,11 @@ export async function runCodeJob(
      * the google module is installed (core holds no provider credentials).
      */
     calendarReader?: BriefingCalendarReader;
+    calendarEventReader?: CalendarEventReader;
+    emailThreadReader?: EmailThreadHeadReader;
+    calendarCancellationEnabled?: boolean;
+    /** Synthetic provider seam for event-completion reminders; production uses the built-in scores reader. */
+    reminderSportsScoreboardReader?: ReminderSportsScoreboardReader;
     /**
      * The phone leg for proactive jobs, injected by the composition root.
      * Without it a job still posts its dashboard copy — the owner just has to
@@ -250,6 +285,7 @@ export async function runCodeJob(
             scheduleId?: unknown;
             schedule?: unknown;
             occurrenceId?: unknown;
+            reminderEventDependency?: unknown;
           };
         } | null
       )?.payload;
@@ -267,6 +303,58 @@ export async function runCodeJob(
       }
       const scheduleId = typeof payload?.scheduleId === 'string' ? payload.scheduleId : null;
       const scheduleName = typeof payload?.schedule === 'string' ? payload.schedule : null;
+      if (payload?.reminderKind === 'event_completion') {
+        const dependency = payload.reminderEventDependency as ReminderEventDependency | undefined;
+        if (
+          dependency?.provider !== 'sports' ||
+          !dependency.eventId ||
+          !dependency.league ||
+          !dependency.eventDate ||
+          !dependency.timezone ||
+          !dependency.homeTeamId ||
+          !dependency.awayTeamId
+        ) {
+          return { done: true, summary: 'reminder: event dependency is incomplete; not delivered' };
+        }
+        const league = leagueByKey(dependency.league);
+        if (!league)
+          return { done: true, summary: 'reminder: event league is unsupported; not delivered' };
+        const now = new Date();
+        const readScoreboard: ReminderSportsScoreboardReader =
+          deps.reminderSportsScoreboardReader ??
+          ((input) =>
+            fetchScoreboard({
+              league,
+              date: input.date,
+              timeZone: input.timeZone,
+              now: input.now,
+            }));
+        const games = await readScoreboard({
+          league: league.key,
+          date: dependency.eventDate,
+          timeZone: dependency.timezone,
+          now,
+        });
+        const exact = games.filter(
+          (game) =>
+            game.id === dependency.eventId &&
+            game.league === dependency.league &&
+            game.startsAt === dependency.startsAt &&
+            game.home.id === dependency.homeTeamId &&
+            game.away.id === dependency.awayTeamId,
+        );
+        if (exact.length !== 1)
+          return {
+            done: true,
+            summary:
+              'reminder: exact fixture not present in current provider result; not delivered',
+          };
+        if (!isExactCompletedSportsOccurrence(dependency, games))
+          return {
+            done: true,
+            summary: 'reminder: verified fixture has not finished; next check remains scheduled',
+          };
+      }
 
       // Portable stores commit the message, the occurrence receipt, and the
       // one-time delivered stamp in one fenced write. Every reminder they fire
@@ -322,7 +410,7 @@ export async function runCodeJob(
 
       const deliver = async (database: Db, schedule?: ScheduleRow): Promise<CodeJobOutcome> => {
         const template = (schedule?.taskTemplate ?? {}) as {
-          reminderKind?: 'once' | 'recurring';
+          reminderKind?: 'once' | 'recurring' | 'event_completion';
           reminderCancelledAt?: string;
           reminderDeliveredAt?: string;
         };
@@ -349,7 +437,17 @@ export async function runCodeJob(
           conversationId,
           text: reminderText,
         });
-        if (schedule && template.reminderKind === 'once') {
+        if (schedule && template.reminderKind === 'event_completion') {
+          await database
+            .update(schedules)
+            .set({
+              enabled: false,
+              nextRunAt: null,
+              taskTemplate: { ...template, reminderDeliveredAt: new Date().toISOString() },
+              updatedAt: sql`now()`,
+            })
+            .where(eq(schedules.id, schedule.id));
+        } else if (schedule && template.reminderKind === 'once') {
           await database
             .update(schedules)
             .set({
@@ -392,22 +490,33 @@ export async function runCodeJob(
         taskId: task.id,
         lease,
       });
+      const failuresByCategory = r.failedBatches.reduce<Record<string, number>>(
+        (counts, failure) => {
+          counts[failure.category] = (counts[failure.category] ?? 0) + 1;
+          return counts;
+        },
+        {},
+      );
+      const deferred = r.failedBatches.length
+        ? `, ${r.failedBatches.length} deferred batch(es): ${Object.entries(failuresByCategory)
+            .map(([category, count]) => `${count} ${category}`)
+            .join(', ')}`
+        : '';
       return {
         done: true,
-        summary: `extraction: ${r.saved} saved (${r.quarantined} quarantined, ${r.contactsCreated} new people), ${r.duplicates} duplicate, ${r.tombstoned} tombstoned, ${r.occasionsSaved} occasion(s), from ${r.conversationsScanned} conversation(s); open loops ${loops.saved} saved (${loops.duplicates} duplicate)`,
+        summary: `extraction: ${r.saved} saved (${r.quarantined} quarantined, ${r.contactsCreated} new people), ${r.duplicates} duplicate, ${r.tombstoned} tombstoned, ${r.occasionsSaved} occasion(s), ${r.occasionsRejected} occasion(s) rejected, from ${r.conversationsScanned} conversation(s)${deferred}; open loops ${loops.saved} saved (${loops.duplicates} duplicate)`,
       };
     }
-    // Retiring old loops used to ride along with memory.extract. It is a single
-    // SQL update with no model call, and pinning it to a nightly job that does
-    // LLM work meant a throttled or over-budget extraction also silently
-    // stopped the cleanup. It runs on its own clock now, and more often, so a
-    // loop that ages out leaves the desk the same day rather than the next.
+    // Wake obligations independently of model-backed extraction and its budget.
     case 'memory.sweep_loops': {
-      const stale = await markStaleCommitments(
+      const result = await maintainCommitments(
         deps.persistence?.commitmentMaintenance ?? deps.db,
         task.agentId,
       );
-      return { done: true, summary: `open loops: ${stale} retired as stale` };
+      return {
+        done: true,
+        summary: `open loops: ${result.woken} snooze(s) woken, ${result.restored} legacy obligation(s) restored`,
+      };
     }
     case 'email.extract': {
       await deps.heartbeat?.();

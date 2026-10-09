@@ -21,6 +21,32 @@ function sign(url: string, params: Record<string, string>, token = AUTH_TOKEN): 
 }
 
 describe('TwilioClient resilience', () => {
+  it('parses provider-billed segment count and USD price from the Message resource', async () => {
+    const sid = `SM${'a'.repeat(32)}`;
+    const fetchMock = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        Response.json({ sid, num_segments: '3', price: '-0.023700', price_unit: 'USD' }),
+      );
+    const client = new TwilioClient('AC123', AUTH_TOKEN, '+15550000000', { fetch: fetchMock });
+    await expect(client.getMessageUsage(sid)).resolves.toEqual({
+      billedSegments: 3,
+      priceUsd: 0.0237,
+    });
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe('GET');
+  });
+
+  it('does not infer billed usage from a zero-segment or non-USD provider response', async () => {
+    const sid = `SM${'b'.repeat(32)}`;
+    const fetchMock = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        Response.json({ sid, num_segments: '0', price: '0.02', price_unit: 'EUR' }),
+      );
+    const client = new TwilioClient('AC123', AUTH_TOKEN, '+15550000000', { fetch: fetchMock });
+    await expect(client.getMessageUsage(sid)).resolves.toEqual({});
+  });
+
   it('retries only an explicit 429 rejection and respects Retry-After', async () => {
     const sleep = vi.fn(async (_ms: number) => {});
     const fetchMock = vi
@@ -82,6 +108,28 @@ describe('TwilioClient resilience', () => {
       maxRetries: 3,
     });
 
+    await expect(client.send('+15551112222', 'hello')).rejects.toBeInstanceOf(
+      AmbiguousTwilioDeliveryError,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a stalled accepted response unknown and never sends a second message', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"sid":'));
+          },
+        }),
+        { status: 201 },
+      ),
+    );
+    const client = new TwilioClient('AC123', AUTH_TOKEN, '+15550000000', {
+      fetch: fetchMock,
+      timeoutMs: 5,
+      maxRetries: 3,
+    });
     await expect(client.send('+15551112222', 'hello')).rejects.toBeInstanceOf(
       AmbiguousTwilioDeliveryError,
     );

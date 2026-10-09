@@ -79,15 +79,27 @@ async function sqlProactiveCounts(
     db
       .select({ value: count() })
       .from(emailIngest)
-      .where(and(eq(emailIngest.agentId, agentId), gte(emailIngest.createdAt, since24h))),
+      .where(
+        and(
+          eq(emailIngest.agentId, agentId),
+          eq(emailIngest.pipelineStage, 'complete'),
+          gte(emailIngest.createdAt, since24h),
+        ),
+      ),
     db
       .select({ value: count() })
       .from(emailIngest)
-      .where(and(eq(emailIngest.agentId, agentId), gte(emailIngest.createdAt, since7d))),
+      .where(
+        and(
+          eq(emailIngest.agentId, agentId),
+          eq(emailIngest.pipelineStage, 'complete'),
+          gte(emailIngest.createdAt, since7d),
+        ),
+      ),
     db
       .select({ createdAt: emailIngest.createdAt })
       .from(emailIngest)
-      .where(eq(emailIngest.agentId, agentId))
+      .where(and(eq(emailIngest.agentId, agentId), eq(emailIngest.pipelineStage, 'complete')))
       .orderBy(desc(emailIngest.createdAt))
       .limit(1),
     db

@@ -6,7 +6,7 @@ The native SwiftUI client keeps the agent runtime on the existing Assistant serv
 - background polling for long-running turns and proactive updates;
 - native Activity, Goals, Approvals, Documents, and memory summaries;
 - a chat-first shell with no persistent navigation chrome; pull beyond the latest message to reveal controls;
-- a Live Activity with compact, minimal, and expanded Dynamic Island presentations;
+- an approval-only Live Activity with compact, minimal, and expanded Dynamic Island presentations;
 - opt-in local notifications for completed work and approval handoffs;
 - replies read aloud on device, from the long-press menu or automatically;
 - deliberate confirmation before approving or denying outward actions;
@@ -112,9 +112,10 @@ never silently reopens the microphone.
 
 ## System surfaces
 
-Long-running turns start a Live Activity automatically. Tool progress updates its Dynamic Island
-line, approval waits remain visible in amber, and completed work settles briefly before the activity
-closes. Tapping an attention activity opens the Approvals sheet through `assistant://approvals`.
+The app starts a Live Activity while an approval is waiting and the pending approval count is
+positive. It does not create a Dynamic Island activity for ordinary work progress or completion;
+those remain in the app's Activity view. Tapping an approval activity opens the Approvals sheet
+through `assistant://approvals`.
 
 Notifications are opt-in. Approval requests carry inline **Approve** / **Deny**
 actions (device unlock required) and may banner even while the app is open; routine updates post
@@ -127,10 +128,12 @@ The app icon badge mirrors the pending-approval count. Two delivery paths exist:
   server-side `push` module (gated on `APNS_*` settings) sends the alerts. Tapping a push opens the
   chat; an approval ping opens the Approvals sheet.
 
-Opt-in background arrival nudges (More → Assistant context) use the coarse significant-change
-location service: iOS wakes the app on ~500m moves, the app posts one throttled ping per wake, and
-the server's arrival gate decides whether a nudge (e.g. lunch picks in a new area) is warranted.
-Requires Always location access, which the app requests only when the toggle is switched on.
+Background location collection remains paused, and existing installs clear the former
+background-monitoring preference at launch. Foreground location sharing remains opt-in and uses the
+server's configured ping-retention period (three days by default). A separate generic-arrival option
+uses only foreground pings: a confirmed stop creates a short-lived owner-scoped reference, and the
+server sends a fixed location-free message only while that reference is valid. The task is cancelled
+if the reference expires before it runs, and the reference is removed when the task ends.
 
 ## Connect a deployed server
 

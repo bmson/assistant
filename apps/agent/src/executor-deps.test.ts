@@ -1,7 +1,9 @@
 import { sqlOnlyCodeJobs } from '@assistant/core';
 import type { TaskRow } from '@assistant/db';
 import type { InstalledModuleSet, ModuleChannel } from '@assistant/modules';
+import { finalChannelDelivery, finalChannelDeliveryReport } from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
+import { notifyAttention } from '../../../packages/core/src/workflow/executor/notices.js';
 import {
   type AgentDeps,
   approvalSummaryNotice,
@@ -58,10 +60,9 @@ describe('approvalNoticeEmail', () => {
     expect(notice).toContain('The Odyssey');
   });
 
-  it('states plainly that nothing has happened yet', () => {
-    // The whole point of the parked notice: the owner must not read it as a
-    // completion. This is the same failure the response contract exists to stop.
-    expect(notice).toMatch(/nothing has happened yet/i);
+  it('limits the pending claim to the listed actions', () => {
+    expect(notice).toMatch(/These actions are waiting for your approval/i);
+    expect(notice).not.toMatch(/nothing has happened|before I act on this/i);
   });
 
   it('does not invite an email reply, which cannot resolve an approval', () => {
@@ -118,8 +119,10 @@ describe('approvalSummaryNotice', () => {
 describe('executorDeps channel composition', () => {
   const calls: string[] = [];
   const channel = (name: string, over: Partial<ModuleChannel> = {}): ModuleChannel => ({
-    deliverFinal: async () => {
+    name,
+    deliverFinal: async (_services, _task, _text, attemptId) => {
       calls.push(`deliver:${name}`);
+      return finalChannelDelivery(name, 'accepted', attemptId);
     },
     deliverApprovalNotice: async () => {
       calls.push(`notice:${name}`);
@@ -160,26 +163,89 @@ describe('executorDeps channel composition', () => {
     }) as unknown as AgentDeps;
   const task = { id: 't1', type: 'email_triage', trust: 'owner' } as TaskRow;
 
-  it('runs every assertDeliverable before any delivery', async () => {
+  it('does not dispatch a channel that reports a required setup failure', async () => {
     calls.length = 0;
-    const throwing = channel('email', {
-      assertDeliverable: () => {
-        throw new Error('email final delivery is not configured');
-      },
+    const deps = depsWith([], () => 'google channel unavailable');
+    await expect(
+      executorDeps(deps).deliverFinal?.(task, 'answer', 'attempt-1'),
+    ).resolves.toMatchObject({
+      legs: [{ channel: 'email', status: 'rejected', attemptId: 'attempt-1' }],
     });
-    const deps = depsWith([throwing, channel('sms')]);
-    await expect(executorDeps(deps).deliverFinal?.(task, 'answer')).rejects.toThrow(
-      /email final delivery is not configured/,
-    );
-    // The failing check fired before EITHER channel delivered anything.
     expect(calls).toEqual([]);
   });
 
   it('delivers through every channel in composition order', async () => {
     calls.length = 0;
     const deps = depsWith([channel('email'), channel('sms')]);
-    await executorDeps(deps).deliverFinal?.(task, 'answer');
+    await executorDeps(deps).deliverFinal?.(task, 'answer', 'attempt-1');
     expect(calls).toEqual(['deliver:email', 'deliver:sms']);
+  });
+
+  it('returns each channel result separately so a mixed delivery is not flattened', async () => {
+    calls.length = 0;
+    const deps = depsWith([
+      channel('email', {
+        deliverFinal: async (_services, _task, _text, attemptId) =>
+          finalChannelDelivery('email', 'accepted', attemptId),
+      }),
+      channel('sms', {
+        deliverFinal: async (_services, _task, _text, attemptId) =>
+          finalChannelDelivery('sms', 'rejected', attemptId, 'missing-target'),
+      }),
+    ]);
+    await expect(
+      executorDeps(deps).deliverFinal?.(task, 'answer', 'attempt-1'),
+    ).resolves.toMatchObject({
+      legs: [
+        { channel: 'email', status: 'accepted', attemptId: 'attempt-1' },
+        { channel: 'sms', status: 'rejected', attemptId: 'attempt-1', reason: 'missing-target' },
+      ],
+    });
+  });
+
+  it('keeps accepted siblings when another channel throws after its attempt began', async () => {
+    const deps = depsWith([
+      channel('email'),
+      channel('sms', {
+        deliverFinal: async () => {
+          throw new Error('transport closed');
+        },
+      }),
+    ]);
+    await expect(
+      executorDeps(deps).deliverFinal?.(task, 'answer', 'attempt-2'),
+    ).resolves.toMatchObject({
+      legs: [
+        { channel: 'email', status: 'accepted' },
+        { channel: 'sms', status: 'unknown', attemptId: 'attempt-2' },
+      ],
+    });
+  });
+
+  it('retries only rejected legs and retains already accepted siblings', async () => {
+    calls.length = 0;
+    const deps = depsWith([
+      channel('email'),
+      channel('sms', {
+        deliverFinal: async (_services, _task, _text, attemptId) => {
+          calls.push('deliver:sms');
+          return finalChannelDelivery('sms', 'accepted', attemptId);
+        },
+      }),
+    ]);
+    const previous = finalChannelDeliveryReport([
+      finalChannelDelivery('email', 'accepted', 'attempt-1'),
+      finalChannelDelivery('sms', 'rejected', 'attempt-1', 'missing-target'),
+    ]);
+    await expect(
+      executorDeps(deps).deliverFinal?.(task, 'answer', 'attempt-2', previous),
+    ).resolves.toMatchObject({
+      legs: [
+        { channel: 'email', status: 'accepted', attemptId: 'attempt-1' },
+        { channel: 'sms', status: 'accepted', attemptId: 'attempt-2' },
+      ],
+    });
+    expect(calls).toEqual(['deliver:sms']);
   });
 
   it('pings the owner before posting the in-thread approval notice', async () => {
@@ -192,18 +258,18 @@ describe('executorDeps channel composition', () => {
   });
 
   it('fails an owner-facing task loudly when its owning channel module is uninstalled', async () => {
-    // With zero channels installed there is no assertDeliverable to fire, so
-    // without the channelUnavailable guard the task would complete as done with
-    // the answer silently undelivered.
+    // A missing owning module is a typed rejection, not a successful no-op.
     calls.length = 0;
     const deps = depsWith([], (type) =>
       type === 'email_triage'
         ? 'email_triage cannot be delivered because the google module is not installed'
         : null,
     );
-    await expect(executorDeps(deps).deliverFinal?.(task, 'answer')).rejects.toThrow(
-      /google module is not installed/,
-    );
+    await expect(
+      executorDeps(deps).deliverFinal?.(task, 'answer', 'attempt-1'),
+    ).resolves.toMatchObject({
+      legs: [{ status: 'rejected', reason: 'channel-module-unavailable' }],
+    });
     expect(calls).toEqual([]);
   });
 
@@ -211,8 +277,58 @@ describe('executorDeps channel composition', () => {
     calls.length = 0;
     const unknownTask = { id: 't2', type: 'email_triage', trust: 'unknown' } as TaskRow;
     const deps = depsWith([], () => 'should not be consulted for non-owner tasks');
-    await executorDeps(deps).deliverFinal?.(unknownTask, 'answer');
+    await expect(
+      executorDeps(deps).deliverFinal?.(unknownTask, 'answer', 'attempt-1'),
+    ).resolves.toMatchObject({
+      legs: [{ status: 'not_applicable' }],
+    });
     expect(calls).toEqual([]); // no channels, nothing delivered, no throw
+  });
+
+  it('does not stamp attention when the composed dashboard and phone legs all fail', async () => {
+    const append = vi.fn().mockRejectedValue(new Error('conversation store unavailable'));
+    const markAttentionNotified = vi.fn().mockResolvedValue(true);
+    const failedDeps = {
+      config: { PERSISTENCE_DRIVER: 'postgres' },
+      // Dashboard delivery reaches the actual agentServices composition and
+      // fails while looking up the owner. The phone leg then reports its own
+      // failed/skipped outcomes through the same executorDeps port.
+      db: {
+        select: () => {
+          throw new Error('database unavailable');
+        },
+      },
+      persistence: {
+        messages: { kind: 'message-repository', append },
+        tasks: { kind: 'task-lease-repository', markAttentionNotified },
+      },
+      outOfBandNotifier: {
+        notifyOwner: async () => ({
+          legs: [
+            { channel: 'sms', status: 'failed' as const },
+            { channel: 'push', status: 'skipped' as const },
+          ],
+        }),
+        notifyApprovals: async () => ({ legs: [{ channel: 'sms', status: 'skipped' as const }] }),
+      },
+      modules: {
+        channels: [],
+        emailObservers: [],
+        jobUnavailable: () => null,
+        channelUnavailable: () => null,
+      },
+    } as unknown as AgentDeps;
+    const task = {
+      id: 'notice-retry-task',
+      agentId: 'agent-1',
+      conversationId: 'owner-chat',
+      trust: 'owner',
+    } as TaskRow;
+
+    await notifyAttention(executorDeps(failedDeps), task, 'I could not finish.');
+
+    expect(append).toHaveBeenCalledOnce();
+    expect(markAttentionNotified).not.toHaveBeenCalled();
   });
 });
 
@@ -221,7 +337,9 @@ describe('executorDeps code-job availability', () => {
     ({
       config: { PERSISTENCE_DRIVER: driver, FIRESTORE_AGENT_ID: 'agent' },
       db: {},
-      firestoreStore: {},
+      ...(driver === 'firestore'
+        ? { firestoreStore: {}, persistence: { notificationOutbox: {} } }
+        : {}),
       outOfBandNotifier: { notifyOwner: async () => {}, notifyApprovals: async () => {} },
       modules: {
         channels: [],
@@ -248,5 +366,47 @@ describe('executorDeps code-job availability', () => {
     expect(executorDeps(depsFor('postgres')).jobUnavailable?.('dream.run')).toBeNull();
     const moduleOff = executorDeps(depsFor('firestore', 'documents.process: module off'));
     expect(moduleOff.jobUnavailable?.('documents.process')).toBe('documents.process: module off');
+  });
+});
+
+describe('calendar reader occurrence provenance', () => {
+  it('retains original occurrence identity through actual provider normalization and executor composition', async () => {
+    const client = {
+      configured: () => true,
+      api: async (url: string) =>
+        url.includes('calendarList')
+          ? { items: [{ id: 'work', summary: 'Work' }] }
+          : {
+              items: [
+                {
+                  id: 'moved',
+                  iCalUID: 'series',
+                  recurringEventId: 'r',
+                  originalStartTime: { dateTime: '2026-10-08T09:00:00Z' },
+                  start: { dateTime: '2026-10-07T09:00:00Z' },
+                  end: { dateTime: '2026-10-07T10:00:00Z' },
+                  summary: 'Standup',
+                },
+              ],
+            },
+    };
+    const deps = {
+      db: {},
+      persistence: {},
+      config: {},
+      modules: { channels: [], requireExports: () => client },
+    } as unknown as AgentDeps;
+    const read = executorDeps(deps).calendarReader;
+    if (!read) throw new Error('Calendar reader unavailable');
+    const result = await read({
+      timeMin: new Date('2026-10-07T00:00:00Z'),
+      timeMax: new Date('2026-10-08T00:00:00Z'),
+    });
+    expect(result.events[0]).toMatchObject({
+      eventId: 'moved',
+      calendarId: 'work',
+      iCalUID: 'series',
+      originalStartTime: '2026-10-08T09:00:00Z',
+    });
   });
 });

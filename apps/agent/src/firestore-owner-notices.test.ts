@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { createInstallationStore } from '@assistant/firestore';
+import { createFirestoreExecutionPersistence, createInstallationStore } from '@assistant/firestore';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { type AgentDeps, agentServices } from './deps.js';
 
@@ -13,6 +13,12 @@ describe.skipIf(!localEmulator)(
     const store = createInstallationStore({
       projectId: 'demo-assistant-test',
       installationId: `agent-notices-${randomUUID()}`,
+    });
+    const persistence = createFirestoreExecutionPersistence(store, agentId, {
+      provider: 'openai',
+      model: 'text-embedding-3-small',
+      dimensions: 1536,
+      revision: 'test',
     });
 
     afterAll(async () => {
@@ -48,7 +54,7 @@ describe.skipIf(!localEmulator)(
             },
           },
         ),
-        persistence: {},
+        persistence,
         modules: { emailObservers: [] },
         outOfBandNotifier: { notifyOwner: phone, notifyApprovals: phone },
       } as unknown as AgentDeps;

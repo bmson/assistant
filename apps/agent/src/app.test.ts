@@ -39,6 +39,42 @@ describe('agent app', () => {
     expect(await res.json()).toEqual({ ok: true, service: 'agent' });
   });
 
+  it('keeps due task, reminder, approval, and callback ingress inert in restore rehearsal', async () => {
+    resetConfigForTest();
+    loadConfig({
+      NODE_ENV: 'test',
+      RESTORE_REHEARSAL: 'true',
+      QUEUE_DRIVER: 'inert',
+      PERSISTENCE_DRIVER: 'postgres',
+      POSTGRES_SOURCE_WRITES_FENCED: 'true',
+    });
+    try {
+      const app = createApp();
+      const pendingWorkKinds = [
+        ['/internal/tasks/execute', { taskId: 'due-task', generation: 1 }],
+        ['/internal/sweep', {}],
+        ['/webhooks/twilio/sms', {}],
+        ['/api/mobile/v1/settings/reminders/due-reminder', { action: 'deliver' }],
+        ['/api/mobile/v1/approvals/due-approval', { action: 'approve' }],
+      ] as const;
+      for (const [path, body] of pendingWorkKinds) {
+        const result = await app.request(path, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        expect(result.status).toBe(503);
+        expect(await result.json()).toEqual({
+          error: 'runtime endpoint disabled during restore rehearsal',
+        });
+      }
+      expect((await app.request('/health')).status).toBe(200);
+    } finally {
+      resetConfigForTest();
+      loadConfig(process.env);
+    }
+  });
+
   it('rejects an unsigned Twilio webhook with the same 403 as a bad signature', async () => {
     // A missing TWILIO_AUTH_TOKEN must not answer with a distinguishable status
     // (it once returned 501). An unauthenticated caller gets a uniform 403

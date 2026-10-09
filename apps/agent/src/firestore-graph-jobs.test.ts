@@ -6,16 +6,18 @@ import { createFirestoreExecutionPersistence } from '@assistant/firestore';
 import type { ExecutionPersistence } from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { canonicalizeDateLabel } from '../../../packages/core/src/memory/date-labels.js';
+import { GRAPH_EXTRACTION_VERSION } from '../../../packages/core/src/memory/knowledge-graph.js';
+import { deterministicUuid } from '../../../packages/firestore/src/stable-id.js';
 import { encodeRecord, type InstallationStore } from '../../../packages/firestore/src/store.js';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
 
 const SPACE = { provider: 'synthetic', model: 'graph-fixture', dimensions: 1536, revision: '1' };
 const VECTOR = Array.from({ length: 1536 }, (_, i) => (i === 3 ? 1 : 0));
-const EXTRACTION_VERSION = 2;
+const EXTRACTION_VERSION = GRAPH_EXTRACTION_VERSION;
 
 /** The id Firestore graph sync derives for an entity's canonical key. */
 function entityId(agentId: string, canonicalKey: string): string {
-  return `entity-${createHash('sha256').update(`${agentId}\0${canonicalKey}`).digest('hex')}`;
+  return deterministicUuid('knowledge-graph-entity', agentId, canonicalKey);
 }
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
@@ -138,6 +140,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           sourceMemoryId,
           sourceFingerprint: id,
           evidenceQuote: 'quoted',
+          assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
           reviewStatus: 'confirmed',
           confidence: '0.90',
           validFrom: null,

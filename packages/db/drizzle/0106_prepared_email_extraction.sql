@@ -1,0 +1,1 @@
+ALTER TABLE "email_ingest" ADD COLUMN "prepared_extraction" jsonb;

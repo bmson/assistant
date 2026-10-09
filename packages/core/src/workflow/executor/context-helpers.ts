@@ -22,9 +22,39 @@ export function isKnownSenderReplyTask(task: Pick<TaskRow, 'trigger'>): boolean 
  * children (e.g. the D9 known-sender-reply child) from being offered a tool they
  * can only ever call in error.
  */
-export function isMissionSessionTask(task: Pick<TaskRow, 'trigger'>): boolean {
-  const trigger = task.trigger as { payload?: { missionId?: unknown } } | null;
-  return typeof trigger?.payload?.missionId === 'string';
+export function missionSessionId(
+  task: Pick<TaskRow, 'type' | 'parentTaskId' | 'trust' | 'trigger'>,
+): string | null {
+  if (
+    task.type !== 'adhoc' ||
+    (task.trust !== 'owner' && task.trust !== 'assistant') ||
+    typeof task.parentTaskId !== 'string' ||
+    task.parentTaskId.length === 0
+  ) {
+    return null;
+  }
+  const trigger = task.trigger as {
+    source?: unknown;
+    payload?: { missionId?: unknown };
+  } | null;
+  return trigger?.source === 'mission_wake' && trigger.payload?.missionId === task.parentTaskId
+    ? task.parentTaskId
+    : null;
+}
+
+export function missionSessionInstruction(
+  task: Pick<TaskRow, 'type' | 'parentTaskId' | 'trust' | 'trigger'>,
+): string | null {
+  if (!missionSessionId(task)) return null;
+  const trigger = task.trigger as { payload?: { instruction?: unknown } } | null;
+  const instruction = trigger?.payload?.instruction;
+  return typeof instruction === 'string' && instruction.trim() ? instruction : null;
+}
+
+export function isMissionSessionTask(
+  task: Pick<TaskRow, 'type' | 'parentTaskId' | 'trust' | 'trigger'>,
+): boolean {
+  return missionSessionId(task) !== null;
 }
 
 /**

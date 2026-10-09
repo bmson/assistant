@@ -4,6 +4,7 @@ import {
   type Records,
 } from '@assistant/persistence';
 import type { DocumentSnapshot } from '@google-cloud/firestore';
+import { decodeMemoryRecord } from './memory-record.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 import { createTask } from './task-creation.js';
 
@@ -46,7 +47,7 @@ export class FirestoreProfileMemoryMaintenance implements ProfileMemoryMaintenan
     await this.store.db.runTransaction(async (tx) => {
       const [memoryDoc, sourceDoc] = await tx.getAll(memoryRef, sourceRef);
       if (!memoryDoc?.exists || !sourceDoc?.exists) return;
-      const memory = decodeRecord<Records['memories']>(memoryDoc.data());
+      const memory = decodeMemoryRecord(memoryDoc.data());
       const source = decodeRecord<Records['knowledgeGraphSources']>(sourceDoc.data());
       if (
         documentKey(memory.id) !== memoryDoc.id ||
@@ -66,8 +67,58 @@ export class FirestoreProfileMemoryMaintenance implements ProfileMemoryMaintenan
     });
   }
 
+  private async removeDeletedSourceAssertionEvidence(input: {
+    agentId: string;
+    memoryId: string;
+  }): Promise<void> {
+    for (;;) {
+      const deleted = await this.store.db.runTransaction(async (tx) => {
+        const [memory, intent, evidence] = await Promise.all([
+          tx.get(this.store.doc('memories', input.memoryId)),
+          tx.get(this.store.doc('graphDeletionIntents', input.memoryId)),
+          tx.get(
+            this.store
+              .collection('knowledgeGraphAssertionEvidence')
+              .where('sourceMemoryId', '==', input.memoryId)
+              .limit(20),
+          ),
+        ]);
+        if (memory.exists)
+          throw new Error('Graph source cleanup requires the memory deletion fence');
+        const intentOwned =
+          intent.exists &&
+          intent.get('memoryId') === input.memoryId &&
+          intent.get('agentId') === input.agentId &&
+          typeof intent.get('contentHash') === 'string';
+        if (!intentOwned) throw new Error('Cannot prove graph source deletion ownership');
+        if (!untombstonedDeletion(intent)) {
+          const tombstone = await tx.get(
+            this.store.doc('memoryTombstones', String(intent.get('contentHash'))),
+          );
+          if (!tombstone.exists) throw new Error('Graph source deletion tombstone is missing');
+        }
+        for (const row of evidence.docs) {
+          if (
+            row.get('agentId') !== input.agentId ||
+            row.get('sourceMemoryId') !== input.memoryId ||
+            typeof row.get('id') !== 'string' ||
+            documentKey(row.get('id')) !== row.id
+          )
+            throw new Error('Graph source evidence belongs to another agent or record');
+        }
+        for (const row of evidence.docs) tx.delete(row.ref);
+        return evidence.size;
+      });
+      if (deleted === 0) return;
+    }
+  }
+
   async removeOrphanedGraphEntities(input: { agentId: string; memoryId: string }): Promise<void> {
+    // Canonical evidence has its own lifecycle; deleting legacy source edges
+    // must also remove copied quotes, while retaining semantic owner reviews.
+    await this.removeDeletedSourceAssertionEvidence(input);
     let deletedRelations = 0;
+    const pageSize = this.testFault ? 1 : 20;
     for (;;) {
       const deleted = await this.store.db.runTransaction(async (tx) => {
         const [memory, intent, relations] = await Promise.all([
@@ -77,7 +128,7 @@ export class FirestoreProfileMemoryMaintenance implements ProfileMemoryMaintenan
             this.store
               .collection('knowledgeGraphRelations')
               .where('sourceMemoryId', '==', input.memoryId)
-              .limit(1),
+              .limit(pageSize),
           ),
         ]);
         const intentOwned =
@@ -94,47 +145,70 @@ export class FirestoreProfileMemoryMaintenance implements ProfileMemoryMaintenan
           );
           if (!tombstone.exists) throw new Error('Graph source deletion tombstone is missing');
         }
-        const relation = relations.docs[0];
-        if (!relation) return false;
-        if (relation.get('agentId') !== input.agentId)
-          throw new Error('Graph source belongs to another agent');
-        const endpointIds = [relation.get('subjectEntityId'), relation.get('objectEntityId')];
-        if (endpointIds.some((id) => typeof id !== 'string' || !id))
-          throw new Error('Invalid graph relation endpoint');
-        const uniqueEndpointIds = [...new Set(endpointIds as string[])];
+        if (relations.empty) return 0;
+        const deletingIds = new Set(relations.docs.map((relation) => relation.id));
+        const endpointIds: string[] = [];
+        for (const relation of relations.docs) {
+          if (relation.get('agentId') !== input.agentId)
+            throw new Error('Graph source belongs to another agent');
+          for (const id of [relation.get('subjectEntityId'), relation.get('objectEntityId')]) {
+            if (typeof id !== 'string' || !id) throw new Error('Invalid graph relation endpoint');
+            endpointIds.push(id);
+          }
+        }
+        const uniqueEndpointIds = [...new Set(endpointIds)];
         const endpointReads = await Promise.all(
           uniqueEndpointIds.map(async (entityId) => {
             const entityRef = this.store.doc('knowledgeGraphEntities', entityId);
-            const [entity, subjects, objects, aliases] = await Promise.all([
-              tx.get(entityRef),
-              tx.get(
-                this.store
-                  .collection('knowledgeGraphRelations')
-                  .where('subjectEntityId', '==', entityId)
-                  .limit(2),
-              ),
-              tx.get(
-                this.store
-                  .collection('knowledgeGraphRelations')
-                  .where('objectEntityId', '==', entityId)
-                  .limit(2),
-              ),
-              tx.get(
-                this.store
-                  .collection('knowledgeGraphEntityAliases')
-                  .where('entityId', '==', entityId)
-                  .limit(MAX_ALIAS_WRITES_PER_RELATION + 1),
-              ),
-            ]);
-            const referenced = [...subjects.docs, ...objects.docs].some(
-              (candidate) => candidate.id !== relation.id,
-            );
+            const [entity, subjects, objects, assertionsAsSubject, assertionsAsObject, aliases] =
+              await Promise.all([
+                tx.get(entityRef),
+                tx.get(
+                  this.store
+                    .collection('knowledgeGraphRelations')
+                    .where('subjectEntityId', '==', entityId)
+                    .limit(pageSize + 1),
+                ),
+                tx.get(
+                  this.store
+                    .collection('knowledgeGraphRelations')
+                    .where('objectEntityId', '==', entityId)
+                    .limit(pageSize + 1),
+                ),
+                tx.get(
+                  this.store
+                    .collection('knowledgeGraphAssertions')
+                    .where('subjectEntityId', '==', entityId)
+                    .limit(1),
+                ),
+                tx.get(
+                  this.store
+                    .collection('knowledgeGraphAssertions')
+                    .where('objectEntityId', '==', entityId)
+                    .limit(1),
+                ),
+                tx.get(
+                  this.store
+                    .collection('knowledgeGraphEntityAliases')
+                    .where('entityId', '==', entityId)
+                    .limit(MAX_ALIAS_WRITES_PER_RELATION + 1),
+                ),
+              ]);
+            const referenced =
+              !assertionsAsSubject.empty ||
+              !assertionsAsObject.empty ||
+              [...subjects.docs, ...objects.docs].some(
+                (candidate) => !deletingIds.has(candidate.id),
+              );
             return { entityId, entityRef, entity, aliases, referenced };
           }),
         );
         const orphaned = endpointReads.filter((endpoint) => !endpoint.referenced);
         const aliasCount = orphaned.reduce((count, endpoint) => count + endpoint.aliases.size, 0);
-        if (aliasCount > MAX_ALIAS_WRITES_PER_RELATION)
+        if (
+          aliasCount >
+          Math.min(MAX_ALIAS_WRITES_PER_RELATION, 490 - relations.size - orphaned.length)
+        )
           throw new Error('Graph entity alias transaction bound reached');
         for (const endpoint of orphaned) {
           if (endpoint.entity.exists && endpoint.entity.get('agentId') !== input.agentId)
@@ -146,11 +220,11 @@ export class FirestoreProfileMemoryMaintenance implements ProfileMemoryMaintenan
           for (const alias of endpoint.aliases.docs) tx.delete(alias.ref);
           if (endpoint.entity.exists) tx.delete(endpoint.entityRef);
         }
-        tx.delete(relation.ref);
-        return true;
+        for (const relation of relations.docs) tx.delete(relation.ref);
+        return relations.size;
       });
       if (!deleted) break;
-      deletedRelations += 1;
+      deletedRelations += deleted;
       if (this.testFault && deletedRelations >= this.testFault.failAfterRelationDeletes)
         throw new Error('Injected graph cleanup failure');
     }

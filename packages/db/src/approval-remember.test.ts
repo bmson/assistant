@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createPostgresApprovalRepository,
@@ -19,6 +19,7 @@ function testDatabaseUrl(): string {
 
 describe('PostgreSQL approval remember flow', () => {
   let db: Db | undefined;
+  const ownerId = randomUUID();
   let secondaryAgentId: string | undefined;
   const taskIds: string[] = [];
   const toolCallIds: string[] = [];
@@ -34,7 +35,9 @@ describe('PostgreSQL approval remember flow', () => {
     if (approvalIds.length) await db.delete(approvals).where(inArray(approvals.id, approvalIds));
     if (toolCallIds.length) await db.delete(toolCalls).where(inArray(toolCalls.id, toolCallIds));
     if (taskIds.length) await db.delete(tasks).where(inArray(tasks.id, taskIds));
-    if (secondaryAgentId) await db.delete(agents).where(eq(agents.id, secondaryAgentId));
+    await db
+      .delete(agents)
+      .where(inArray(agents.id, [ownerId, ...(secondaryAgentId ? [secondaryAgentId] : [])]));
     await db.$client.end();
     db = undefined;
     secondaryAgentId = undefined;
@@ -45,8 +48,12 @@ describe('PostgreSQL approval remember flow', () => {
 
   it('scopes rememberable reads and rejects a mismatched policy atomically', async () => {
     db = createDb(testDatabaseUrl());
-    const [owner] = await db.select({ id: agents.id }).from(agents).limit(1);
-    if (!owner) throw new Error('Seed the test database');
+    await db.insert(agents).values({
+      id: ownerId,
+      name: `approval-remember-${ownerId.slice(0, 8)}`,
+      email: `${ownerId}@approval-remember.invalid`,
+      workspacePrefix: `approval-remember/${ownerId}`,
+    });
     const otherAgentId = randomUUID();
     secondaryAgentId = otherAgentId;
     await db.insert(agents).values({
@@ -65,7 +72,7 @@ describe('PostgreSQL approval remember flow', () => {
 
     await db.insert(tasks).values({
       id: taskId,
-      agentId: owner.id,
+      agentId: ownerId,
       type: 'chat_turn',
       trust: 'owner',
       status: 'waiting_approval',
@@ -88,25 +95,74 @@ describe('PostgreSQL approval remember flow', () => {
       payload: { to: ['friend@example.com'] },
       resolutionPayload: null,
       status: 'pending',
-      requestedAt: new Date('2026-09-12T12:00:00.000Z'),
+      requestedAt: new Date(),
       resolvedAt: null,
       resolvedVia: null,
-      expiresAt: new Date('2026-09-13T12:00:00.000Z'),
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
     });
     await db.update(toolCalls).set({ approvalId }).where(eq(toolCalls.id, toolCallId));
 
     const repository = createPostgresApprovalRepository(db);
-    await expect(getRememberableApproval(db, owner.id, approvalId)).resolves.toMatchObject({
+    await expect(getRememberableApproval(db, ownerId, approvalId)).resolves.toMatchObject({
       approval: { id: approvalId, status: 'pending' },
       toolName: 'gmail.send',
     });
     await expect(repository.getRememberable(otherAgentId, approvalId)).resolves.toBeNull();
 
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`set local statement_timeout = '3s'`);
+      await tx
+        .update(approvals)
+        .set({ expiresAt: sql`clock_timestamp() + interval '1 second'` })
+        .where(eq(approvals.id, approvalId));
+      const [deadline] = await tx
+        .select({
+          expiresAt: approvals.expiresAt,
+          startedBeforeExpiry: sql<boolean>`transaction_timestamp() < ${approvals.expiresAt}`,
+        })
+        .from(approvals)
+        .where(eq(approvals.id, approvalId));
+      expect(deadline?.startedBeforeExpiry).toBe(true);
+      await tx.execute(sql`select pg_sleep(1.1)`);
+      await expect(
+        getRememberableApproval(tx as unknown as Db, ownerId, approvalId),
+      ).resolves.toBeNull();
+    });
+    await db
+      .update(approvals)
+      .set({ expiresAt: sql`clock_timestamp() + interval '1 hour'` })
+      .where(eq(approvals.id, approvalId));
+
+    // The server-clock sample is at or before the next eligibility check; no
+    // expired row may be exposed even inside a long-running transaction.
+    await db.transaction(async (tx) => {
+      await tx
+        .update(approvals)
+        .set({ expiresAt: sql`clock_timestamp()` })
+        .where(eq(approvals.id, approvalId));
+      await expect(
+        getRememberableApproval(tx as unknown as Db, ownerId, approvalId),
+      ).resolves.toBeNull();
+    });
+    await db.transaction(async (tx) => {
+      await tx
+        .update(approvals)
+        .set({ expiresAt: sql`now() - interval '1 second'` })
+        .where(eq(approvals.id, approvalId));
+      await expect(
+        getRememberableApproval(tx as unknown as Db, ownerId, approvalId),
+      ).resolves.toBeNull();
+    });
+    await db
+      .update(approvals)
+      .set({ expiresAt: sql`now() + interval '1 hour'` })
+      .where(eq(approvals.id, approvalId));
+
     const mismatchedTaskId = randomUUID();
     taskIds.push(mismatchedTaskId);
     await db.insert(tasks).values({
       id: mismatchedTaskId,
-      agentId: owner.id,
+      agentId: ownerId,
       type: 'chat_turn',
       trust: 'owner',
       status: 'waiting_approval',
@@ -115,7 +171,7 @@ describe('PostgreSQL approval remember flow', () => {
       .update(toolCalls)
       .set({ taskId: mismatchedTaskId })
       .where(eq(toolCalls.id, toolCallId));
-    await expect(repository.getRememberable(owner.id, approvalId)).resolves.toBeNull();
+    await expect(repository.getRememberable(ownerId, approvalId)).resolves.toBeNull();
     await db.update(toolCalls).set({ taskId }).where(eq(toolCalls.id, toolCallId));
 
     await expect(

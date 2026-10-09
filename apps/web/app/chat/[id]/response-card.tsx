@@ -1,5 +1,16 @@
 'use client';
 
+import {
+  type GENERATED_CARD_LIMITS,
+  generatedBlockCapability,
+  generatedSpecBlockCapability,
+} from '@assistant/persistence/card-capabilities';
+import {
+  type CardForm,
+  CardFormSchema,
+  type CardFormValues,
+} from '@assistant/persistence/card-form';
+import { isSensitiveCardFact, publicCardText } from '@assistant/persistence/card-privacy';
 /*
  * Rich response cards — the structured `data-card` parts the executor attaches
  * to a final reply (response-cards.ts in core). The iOS app has rendered these
@@ -12,8 +23,10 @@
  */
 import {
   AlertTriangle,
+  BedDouble,
   Bell,
   CalendarDays,
+  Car,
   CheckCircle2,
   Clock,
   Cloud,
@@ -24,11 +37,15 @@ import {
   CloudRain,
   CloudSnow,
   CloudSun,
+  CreditCard,
   Droplets,
   FileText,
   FolderOpen,
   GitBranch,
   Globe,
+  Heart,
+  ListChecks,
+  type LucideIcon,
   Mail,
   MapPin,
   MessageCircle,
@@ -41,17 +58,22 @@ import {
   Sun,
   Table2,
   Ticket,
+  TrainFront,
   Trophy,
   Umbrella,
   Users,
+  Utensils,
   Video,
   Wind,
 } from 'lucide-react';
 import Image from 'next/image';
 import type { ReactNode } from 'react';
-import { useRef, useState } from 'react';
-import { chip, focusRing } from '@/lib/ui';
+import { useEffect, useRef, useState } from 'react';
+import { chip, focusRing, microLabelClass } from '@/lib/ui';
+import { CardFormBlock } from './card-form-block';
+import type { CardFormDraft, CardFormIdentity } from './card-form-operations';
 import { requestCardPolling } from './card-refresh-events';
+import { CardRefreshReceiptStorageError, submitCardRefresh } from './card-refresh-operations';
 import { CardSteps, cardStepsOf } from './card-steps';
 import { type CardRefreshAttempt, cardIsRefreshing } from './generated-card-state';
 import { RouteCard } from './route-card';
@@ -72,7 +94,11 @@ export interface CardRefreshResult {
   error?: string;
 }
 
-type RefreshCard = (cardId: string) => Promise<CardRefreshResult>;
+type RefreshCard = (
+  cardId: string,
+  expectedRevisionId: string,
+  operationId: string,
+) => Promise<CardRefreshResult>;
 
 function str(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -162,6 +188,27 @@ function timeRange(start: string, end: string, timeZone: string): string {
   return [fmt(start), end ? fmt(end) : ''].filter(Boolean).join('–');
 }
 
+export function generatedFactRevealKey(revision: string, id: string, value: string): string {
+  return JSON.stringify([revision, id, value]);
+}
+
+function availabilityInterval(start: string, end: string, timeZone: string): string {
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return 'Time unavailable';
+  const dateLabel = (value: string) =>
+    new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      timeZone,
+    }).format(new Date(value));
+  const startDate = dateLabel(start);
+  const endDate = dateLabel(end);
+  const times = timeRange(start, end, timeZone);
+  return startDate === endDate ? `${startDate} · ${times}` : `${startDate} ${times} → ${endDate}`;
+}
+
 function shortDate(value: string, timeZone: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.valueOf())) return value;
@@ -188,11 +235,9 @@ function CardShell({
       data-response-card="true"
       className={`paper relative ${CARD_WIDTH} overflow-hidden rounded-[var(--radius-card)] border border-edge/70 bg-raised`}
     >
-      <header className="flex items-center gap-2 border-b border-edge/60 bg-sunken/35 px-4 py-2.5 sm:px-5">
-        <span className="inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-accent/10 text-accent">
-          <Icon className="size-3.5" aria-hidden="true" />
-        </span>
-        <p className="min-w-0 truncate text-xs font-medium text-accent">{label}</p>
+      <header className="flex min-h-11 items-center gap-2.5 border-b border-edge/60 px-4 py-2.5 sm:px-5">
+        <Icon className="size-4 shrink-0 stroke-[1.75] text-accent" aria-hidden="true" />
+        <p className="min-w-0 truncate text-sm leading-5 font-medium text-strong">{label}</p>
       </header>
       <div className="min-w-0 px-4 pt-3 pb-4 sm:px-5">{children}</div>
     </section>
@@ -474,15 +519,11 @@ function WeatherCard({ data }: { data: Raw }) {
 
 /** One heading per briefing section, quiet and small, above its rows. */
 function BriefingHeading({ children }: { children: ReactNode }) {
-  return (
-    <h3 className="mb-1.5 text-[0.6875rem] font-semibold tracking-wide text-accent uppercase">
-      {children}
-    </h3>
-  );
+  return <h3 className={`mb-2 text-accent ${microLabelClass}`}>{children}</h3>;
 }
 
 function BriefingAgenda({ section }: { section: Raw }) {
-  const items = recs(section.items);
+  const items = recs(section.items).filter((item) => validAgendaItem(item, true));
   const days = [...new Set(items.map((item) => str(item.day)))];
   return (
     <>
@@ -565,26 +606,28 @@ function BriefingList({ section }: { section: Raw }) {
     <div>
       <BriefingHeading>{str(section.title)}</BriefingHeading>
       <ul className="flex flex-col gap-1.5">
-        {recs(section.items).map((item) => (
-          <li
-            key={`${str(item.meta)}-${str(item.title)}`}
-            className="flex items-baseline gap-2 text-sm"
-          >
-            <span className="min-w-0 flex-1">
-              <span className="text-strong">{str(item.title)}</span>
-              {str(item.detail) ? (
-                <span className="block text-xs text-muted [overflow-wrap:anywhere]">
-                  {str(item.detail)}
+        {recs(section.items)
+          .filter(validBriefingItem)
+          .map((item) => (
+            <li
+              key={`${str(item.meta)}-${str(item.title)}`}
+              className="flex items-baseline gap-2 text-sm"
+            >
+              <span className="min-w-0 flex-1">
+                <span className="text-strong">{str(item.title)}</span>
+                {str(item.detail) ? (
+                  <span className="block text-xs text-muted [overflow-wrap:anywhere]">
+                    {str(item.detail)}
+                  </span>
+                ) : null}
+              </span>
+              {str(item.meta) ? (
+                <span className="shrink-0 rounded bg-sunken px-1.5 py-0.5 font-mono text-[0.6875rem] text-muted">
+                  {str(item.meta)}
                 </span>
               ) : null}
-            </span>
-            {str(item.meta) ? (
-              <span className="shrink-0 rounded bg-sunken px-1.5 py-0.5 font-mono text-[0.6875rem] text-muted">
-                {str(item.meta)}
-              </span>
-            ) : null}
-          </li>
-        ))}
+            </li>
+          ))}
       </ul>
     </div>
   );
@@ -595,7 +638,7 @@ function BriefingList({ section }: { section: Raw }) {
  * from the same rows the text fallback lists. Mirrors BriefingCardView on iOS.
  */
 function BriefingCard({ data }: { data: Raw }) {
-  const sections = recs(data.sections);
+  const sections = recs(data.sections).filter(validBriefingSection);
   return (
     <CardShell icon={Sun} label={['Briefing', str(data.date)].filter(Boolean).join(' · ')}>
       {str(data.lead) ? (
@@ -682,7 +725,7 @@ function calendarEventTime(event: Raw, timeZone: string): string {
 }
 
 function CalendarDayCard({ data, timeZone }: { data: Raw; timeZone: string }) {
-  const events = recs(data.events);
+  const events = recs(data.events).filter(validEvent);
   return (
     <CardShell
       icon={CalendarDays}
@@ -727,7 +770,7 @@ function CalendarDayCard({ data, timeZone }: { data: Raw; timeZone: string }) {
 }
 
 function AgendaCard({ data }: { data: Raw }) {
-  const items = recs(data.items);
+  const items = recs(data.items).filter((item) => validAgendaItem(item));
   return (
     <CardShell icon={CalendarDays} label={str(data.title) || 'Your schedule'}>
       {str(data.subtitle) ? <p className="mb-3 text-xs text-muted">{str(data.subtitle)}</p> : null}
@@ -783,7 +826,7 @@ function ProactiveAlertCard({ data, timeZone }: { data: Raw; timeZone: string })
 }
 
 function EmailResultsCard({ data, timeZone }: { data: Raw; timeZone: string }) {
-  const messages = recs(data.messages);
+  const messages = recs(data.messages).filter(validEmailResult);
   const renderMessage = (message: Raw, index: number) => (
     <li key={str(message.id) || index} className="min-w-0 text-sm">
       <p className="flex min-w-0 flex-wrap items-baseline gap-x-2">
@@ -856,7 +899,7 @@ function TextPreview({ text, limit = 180 }: { text: string; limit?: number }) {
 }
 
 function EmailThreadCard({ data, timeZone }: { data: Raw; timeZone: string }) {
-  const messages = recs(data.messages);
+  const messages = recs(data.messages).filter(validEmailThreadMessage);
   const count = Math.max(messages.length, num(data.messageCount) ?? messages.length);
   const renderMessage = (message: Raw, index: number) => (
     <li key={str(message.id) || index} className="relative min-w-0 border-l border-accent/25 pl-4">
@@ -905,7 +948,7 @@ function EmailThreadCard({ data, timeZone }: { data: Raw; timeZone: string }) {
 function sheetRows(value: unknown): string[][] {
   return Array.isArray(value)
     ? value
-        .filter(Array.isArray)
+        .filter(validSheetRow)
         .map((row) =>
           row.map((cell: unknown) =>
             typeof cell === 'string' || typeof cell === 'number' || typeof cell === 'boolean'
@@ -1029,7 +1072,7 @@ function ResourceCard({ data }: { data: Raw }) {
 }
 
 function WebSearchCard({ data }: { data: Raw }) {
-  const results = recs(data.results);
+  const results = recs(data.results).filter(validSearchResult);
   const renderResult = (result: Raw, index: number) => (
     <li key={str(result.url) || index} className="min-w-0 text-sm">
       {cardHref(result.url) ? (
@@ -1062,12 +1105,25 @@ function WebSearchCard({ data }: { data: Raw }) {
 }
 
 function AvailabilityCard({ data, timeZone }: { data: Raw; timeZone: string }) {
-  const busy = recs(data.busy);
-  const checked = strs(data.calendarsChecked);
+  const rawBusyEntries = Array.isArray(data.busy) ? data.busy : [];
+  const hasBusyArray = Array.isArray(data.busy);
+  const rawBusy = recs(data.busy);
+  const busy = rawBusy.filter((slot) => {
+    const start = Date.parse(str(slot.start));
+    const end = Date.parse(str(slot.end));
+    return Number.isFinite(start) && Number.isFinite(end) && end > start;
+  });
+  const checked = strs(data.calendarsChecked)
+    .map((calendar) => calendar.trim())
+    .filter((calendar) => calendar.length > 0);
+  const discardedBusyRows = !hasBusyArray || busy.length !== rawBusyEntries.length;
+  const coverageComplete = data.complete === true && checked.length > 0 && !discardedBusyRows;
   return (
     <CardShell icon={Clock} label="Free / busy">
-      {busy.length === 0 ? (
-        <p className="text-sm text-strong">Nothing on the calendar in this window.</p>
+      {busy.length === 0 && coverageComplete ? (
+        <p className="text-sm text-strong">No busy blocks were found in this checked window.</p>
+      ) : busy.length === 0 ? (
+        <p className="text-sm text-strong">Calendar availability is incomplete or unknown.</p>
       ) : (
         <ul className="flex flex-col gap-1.5">
           {busy.map((slot) => (
@@ -1075,8 +1131,8 @@ function AvailabilityCard({ data, timeZone }: { data: Raw; timeZone: string }) {
               key={`${str(slot.start)}-${str(slot.end)}-${str(slot.calendar)}`}
               className="flex min-w-0 items-baseline gap-2 text-sm"
             >
-              <span className="shrink-0 font-medium text-strong">
-                {timeRange(str(slot.start), str(slot.end), timeZone)}
+              <span className="min-w-0 flex-1 break-words font-medium text-strong">
+                {availabilityInterval(str(slot.start), str(slot.end), timeZone)}
               </span>
               {str(slot.calendar) ? (
                 <span className="min-w-0 truncate text-xs text-muted">{str(slot.calendar)}</span>
@@ -1085,9 +1141,11 @@ function AvailabilityCard({ data, timeZone }: { data: Raw; timeZone: string }) {
           ))}
         </ul>
       )}
-      <p className="mt-2 text-xs text-muted">
-        Busy blocks{checked.length > 0 ? ` across ${checked.join(' + ')}` : ''} — the gaps are free.
-        {data.complete === false ? ' Some calendars could not be checked.' : ''}
+      <p role="status" aria-live="polite" className="mt-2 text-xs text-muted">
+        {coverageComplete
+          ? `Busy blocks${checked.length > 0 ? ` across ${checked.join(' + ')}` : ''} were fully checked; the remaining time in this window is free.`
+          : `Coverage is incomplete${checked.length > 0 ? ` across the checked calendars (${checked.join(' + ')})` : ''}. Unlisted time is unknown.`}
+        {discardedBusyRows ? ' Some busy intervals were malformed and could not be used.' : ''}
       </p>
       {str(data.note) ? <p className="mt-1 text-xs text-muted">{str(data.note)}</p> : null}
     </CardShell>
@@ -1128,7 +1186,7 @@ function ReminderCard({ data }: { data: Raw }) {
 }
 
 function DriveResultsCard({ data, timeZone }: { data: Raw; timeZone: string }) {
-  const files = recs(data.files);
+  const files = recs(data.files).filter(validDriveFile);
   const renderFile = (file: Raw, index: number) => {
     const url = cardHref(file.url);
     const name = str(file.name) || 'Untitled file';
@@ -1168,7 +1226,7 @@ function DriveResultsCard({ data, timeZone }: { data: Raw; timeZone: string }) {
 }
 
 function DocumentResultsCard({ data }: { data: Raw }) {
-  const passages = recs(data.passages);
+  const passages = recs(data.passages).filter(validDocumentPassage);
   const renderPassage = (passage: Raw, index: number) => (
     <li key={str(passage.id) || index} className="min-w-0 text-sm">
       <p className="font-medium text-strong">{str(passage.document)}</p>
@@ -1197,7 +1255,8 @@ function DocumentResultsCard({ data }: { data: Raw }) {
 }
 
 function KnowledgeGraphCard({ data }: { data: Raw }) {
-  const edges = recs(data.edges);
+  const nodes = new Map(recs(data.nodes).map((node) => [str(node.id), node]));
+  const edges = recs(data.edges).filter((edge) => validGraphEdge(edge, nodes));
   return (
     <CardShell icon={GitBranch} label={str(data.title) || 'Saved connections'}>
       <div className="flex flex-col gap-3">
@@ -1240,7 +1299,7 @@ function KnowledgeGraphCard({ data }: { data: Raw }) {
 }
 
 function CalendarConflictsCard({ data, timeZone }: { data: Raw; timeZone: string }) {
-  const conflicts = recs(data.conflicts);
+  const conflicts = recs(data.conflicts).filter(validConflict);
   return (
     <CardShell icon={AlertTriangle} label={str(data.title) || 'Schedule conflict'}>
       <div className="flex flex-col gap-4">
@@ -1255,6 +1314,10 @@ function CalendarConflictsCard({ data, timeZone }: { data: Raw; timeZone: string
                   str(conflict.overlapEnd),
                   str(data.timeZone) || timeZone,
                 )}
+              </p>
+              <p className="mb-2 text-xs text-muted">
+                {str(conflict.evidenceNote) ||
+                  'The times overlap; personal attendance and event identity are unverified.'}
               </p>
               <div className="grid gap-2 sm:grid-cols-2">
                 {groups.map((group) => {
@@ -1290,6 +1353,9 @@ function CalendarConflictsCard({ data, timeZone }: { data: Raw; timeZone: string
                             className="rounded-full border border-edge px-2 py-0.5 text-[10px] text-muted"
                           >
                             {str(source.calendar) || 'Calendar'}
+                            {events.length > 1
+                              ? ` · ${str(source.title)} · ${timeRange(str(source.start), str(source.end), str(data.timeZone) || timeZone)}`
+                              : ''}
                           </span>
                         ))}
                       </div>
@@ -1323,59 +1389,180 @@ const generatedIcons = {
   map: MapPin,
   music: Music,
   star: Star,
+  train: TrainFront,
+  car: Car,
+  hotel: BedDouble,
+  food: Utensils,
+  money: CreditCard,
+  health: Heart,
+  weather: CloudSun,
+  checklist: ListChecks,
   generic: Sparkles,
-} as const;
+} as const satisfies Record<(typeof GENERATED_CARD_LIMITS.spec.icons)[number], LucideIcon>;
 
-const accentClass: Record<string, string> = {
-  mint: 'from-emerald-500/18 via-teal-400/8 to-transparent',
-  sky: 'from-sky-500/18 via-cyan-400/8 to-transparent',
-  amber: 'from-amber-500/20 via-orange-400/8 to-transparent',
-  rose: 'from-rose-500/18 via-pink-400/8 to-transparent',
-  violet: 'from-violet-500/18 via-indigo-400/8 to-transparent',
-  slate: 'from-slate-500/16 via-slate-400/6 to-transparent',
-};
+const UUID_IDENTITY = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function sameCardFormIdentity(a: CardFormIdentity, b: CardFormIdentity): boolean {
+  return (
+    a.conversationId === b.conversationId &&
+    a.cardId === b.cardId &&
+    a.revisionId === b.revisionId &&
+    a.formId === b.formId
+  );
+}
+
+function cardFormDefaults(form: CardForm, facts: Map<string, Raw>): CardFormValues {
+  const values: CardFormValues = Object.create(null);
+  for (const field of form.fields) {
+    if (!field.defaultFact) continue;
+    const fact = facts.get(field.defaultFact);
+    if (!fact || sensitiveFactForForm(fact)) continue;
+    const raw = str(fact.value);
+    if (field.type === 'boolean') {
+      if (raw === 'true' || raw === 'false') values[field.id] = raw === 'true';
+    } else if (field.type === 'choice') {
+      if (field.options.some((option) => option.id === raw)) values[field.id] = raw;
+    } else if (field.type === 'date') {
+      const date = /^(?!0000)\d{4}-\d{2}-\d{2}$/.test(raw)
+        ? new Date(`${raw}T00:00:00.000Z`)
+        : null;
+      if (date && Number.isFinite(date.valueOf()) && date.toISOString().slice(0, 10) === raw)
+        values[field.id] = raw;
+    } else if (raw) values[field.id] = raw;
+  }
+  return values;
+}
+
+function sensitiveFactForForm(fact: Raw): boolean {
+  return isSensitiveCardFact({
+    id: str(fact.id),
+    label: str(fact.label),
+    value: str(fact.value),
+    sensitive: fact.sensitive === true,
+  });
+}
 
 function GeneratedCard({
   data,
+  conversationId,
+  formSessionScope,
+  formDraft,
+  formError,
+  onChangeForm,
+  onReviewForm,
+  onCarryForm,
+  onDiscardForm,
   onSend,
   onRefresh,
   timeZone,
 }: {
   data: Raw;
+  conversationId?: string;
+  formSessionScope?: string;
+  formDraft?: CardFormDraft | null;
+  formError?: string | null;
+  onChangeForm?: (identity: CardFormIdentity, form: CardForm, values: CardFormValues) => void;
+  onReviewForm?: (identity: CardFormIdentity, form: CardForm, values: CardFormValues) => void;
+  onCarryForm?: (identity: CardFormIdentity, form: CardForm) => void;
+  onDiscardForm?: (identity: CardFormIdentity) => void;
   onSend?: (text: string) => void;
   onRefresh?: RefreshCard;
   timeZone: string;
 }) {
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [now, setNow] = useState<number | null>(null);
+  const hasCountdown = recs(rec(data.spec)?.blocks).some(
+    (block) =>
+      block.type === 'countdown' ||
+      (block.type === 'section' && recs(block.blocks).some((child) => child.type === 'countdown')),
+  );
+  useEffect(() => {
+    if (!hasCountdown) return;
+    setNow(Date.now());
+    const interval = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(interval);
+  }, [hasCountdown]);
   const [refreshAttempt, setRefreshAttempt] = useState<CardRefreshAttempt | null>(null);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
   const refreshInFlight = useRef(false);
   const spec = rec(data.spec);
   const version = num(spec?.version);
+  const facts = new Map(recs(spec?.facts).map((item) => [str(item.id), item]));
+  const revision = str(data.revisionId) || str(data.updatedAt);
+  const sensitiveFact = (item: Raw | undefined) =>
+    !!item &&
+    isSensitiveCardFact({
+      id: str(item.id),
+      label: str(item.label),
+      value: str(item.value),
+      sensitive: item.sensitive === true,
+    });
+  const privateValues = recs(spec?.facts)
+    .filter(sensitiveFact)
+    .map((item) => str(item.value));
+  const publicText = (value: unknown) =>
+    publicCardText(str(value) || undefined, privateValues) ?? '';
+  const revealKey = (id: unknown) => {
+    const item = facts.get(str(id));
+    return generatedFactRevealKey(revision, str(item?.id), str(item?.value));
+  };
   if (!spec || version !== 1 || !str(spec.title)) return null;
-  const facts = new Map(recs(spec.facts).map((fact) => [str(fact.id), fact]));
   const blocks = recs(spec.blocks);
   const actions = recs(spec.actions).filter((action) => str(action.type) !== 'refresh');
   const refreshable = spec.refreshable === true;
-  const revision = str(data.revisionId) || str(data.updatedAt);
   const refreshing = cardIsRefreshing(data, refreshAttempt);
   const refresh = async () => {
     if (refreshing || refreshInFlight.current || !onRefresh) return;
     refreshInFlight.current = true;
     setActionFeedback(null);
-    setRefreshAttempt({ revision, state: 'saving' });
+    const cardId = str(data.id);
+    const expectedRevisionId = str(data.revisionId);
+    if (!cardId || !expectedRevisionId) {
+      setActionFeedback('This card version is unavailable. Reload it before refreshing.');
+      refreshInFlight.current = false;
+      return;
+    }
     try {
-      const result = await onRefresh(str(data.id));
+      if (typeof window === 'undefined' || !window.crypto?.randomUUID)
+        throw new Error('Refresh retries are unavailable in this browser session');
+      setRefreshAttempt({ revision: expectedRevisionId, state: 'saving' });
+      const result = await submitCardRefresh({
+        cardId,
+        revisionId: expectedRevisionId,
+        state: {
+          refreshState: data.refreshState,
+          refreshTaskId: data.refreshTaskId,
+        },
+        storage: window.sessionStorage,
+        createId: () => window.crypto.randomUUID(),
+        send: onRefresh,
+      });
       if (!result.ok) {
         setRefreshAttempt(null);
         setActionFeedback(result.error || 'Could not refresh this card. Try again.');
         return;
       }
-      setRefreshAttempt({ revision, taskId: result.taskId, state: 'refreshing' });
-      requestCardPolling(str(data.id), result.taskId);
-    } catch {
-      setRefreshAttempt(null);
-      setActionFeedback('Could not start the refresh. Try again.');
+      if (!result.taskId) throw new Error('Refresh task receipt is missing');
+      setRefreshAttempt({
+        revision: expectedRevisionId,
+        taskId: result.taskId,
+        state: 'refreshing',
+      });
+      requestCardPolling(cardId, result.taskId);
+    } catch (error) {
+      if (error instanceof CardRefreshReceiptStorageError) {
+        setRefreshAttempt({
+          revision: expectedRevisionId,
+          taskId: error.taskId,
+          state: 'refreshing',
+        });
+        requestCardPolling(cardId, error.taskId);
+        setActionFeedback('Refresh started. Check its status before trying again.');
+      } else {
+        setRefreshAttempt(null);
+        setActionFeedback('Could not confirm the refresh. Try again.');
+      }
     } finally {
       refreshInFlight.current = false;
     }
@@ -1405,14 +1592,18 @@ function GeneratedCard({
       detailBlocks.push({ ...block, factIds: block.factIds.slice(4), startIndex: 5 });
     } else previewBlocks.push(block);
   }
-  const Icon = generatedIcons[str(spec.icon) as keyof typeof generatedIcons] ?? Sparkles;
+  const icon = str(spec.icon);
+  const Icon = Object.hasOwn(generatedIcons, icon)
+    ? generatedIcons[icon as keyof typeof generatedIcons]
+    : Sparkles;
   const fact = (id: unknown) => facts.get(str(id));
   const value = (id: unknown) => str(fact(id)?.value);
-  const toggleReveal = (id: string) =>
+  const toggleReveal = (id: unknown) =>
     setRevealed((current) => {
       const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      const key = revealKey(id);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
   /**
@@ -1425,21 +1616,166 @@ function GeneratedCard({
     const item = fact(id);
     if (!item) return null;
     const text = str(item.value);
-    if (item.sensitive !== true) return text;
+    if (!sensitiveFact(item)) return publicText(text);
     return (
       <SensitiveValue
         value={text}
-        label={str(item.label)}
-        revealed={revealed.has(str(item.id))}
-        onToggle={() => toggleReveal(str(item.id))}
+        label={publicText(item.label)}
+        revealed={revealed.has(revealKey(item.id))}
+        onToggle={() => toggleReveal(item.id)}
         className={className}
       />
     );
   };
 
-  const renderBlock = (block: Raw) => {
+  const shownDateValue = (id: unknown): ReactNode => {
+    const item = fact(id);
+    const raw = value(id);
+    if (
+      sensitiveFact(item) ||
+      !/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(raw) ||
+      !Number.isFinite(Date.parse(raw))
+    )
+      return shownValue(id);
+    let display: string;
+    try {
+      display = new Intl.DateTimeFormat('en-US', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        timeZoneName: 'short',
+        timeZone,
+      }).format(new Date(raw));
+    } catch {
+      return shownValue(id);
+    }
+    return (
+      <time dateTime={raw} title={raw}>
+        {publicText(display)}
+      </time>
+    );
+  };
+
+  const numericValue = (id: unknown): number | null => {
+    const item = fact(id);
+    if (!item || (sensitiveFact(item) && !revealed.has(revealKey(id)))) return null;
+    const raw = str(item.value).replace(/%$/, '').trim();
+    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw)) return null;
+    const number = Number(raw);
+    return Number.isFinite(number) ? number : null;
+  };
+
+  const renderBlock = (block: Raw, depth = 0): ReactNode => {
     const type = str(block.type);
+    if (
+      !generatedBlockCapability(block, facts, 'web', depth, {
+        formRendererAvailable: Boolean(
+          conversationId && formSessionScope && onReviewForm && onChangeForm,
+        ),
+      }).shell
+    )
+      return null;
     const blockKey = JSON.stringify(block);
+    if (type === 'section') {
+      if (depth !== 0) return null;
+      return (
+        <section key={blockKey} aria-label={publicText(block.title)} className="grid gap-3">
+          <h4 className="text-sm font-semibold text-strong">{publicText(block.title)}</h4>
+          {recs(block.blocks).map((child) => renderBlock(child, depth + 1))}
+        </section>
+      );
+    }
+    if (type === 'form') {
+      const parsed = CardFormSchema.safeParse(block);
+      if (!parsed.success) return null;
+      const form = parsed.data;
+      const identity =
+        conversationId &&
+        UUID_IDENTITY.test(conversationId) &&
+        UUID_IDENTITY.test(str(data.id)) &&
+        UUID_IDENTITY.test(str(data.revisionId))
+          ? {
+              conversationId,
+              cardId: str(data.id),
+              revisionId: str(data.revisionId),
+              formId: form.id,
+            }
+          : null;
+      const matchingDraft =
+        identity && formDraft && sameCardFormIdentity(formDraft.identity, identity)
+          ? formDraft
+          : null;
+      const staleDraft =
+        !!formDraft &&
+        !!identity &&
+        !matchingDraft &&
+        !formDraft.operation &&
+        !formDraft.blockedByTask &&
+        formDraft.identity.conversationId === identity.conversationId &&
+        formDraft.identity.cardId === identity.cardId &&
+        formDraft.identity.formId === identity.formId;
+      const carryableDraft = staleDraft;
+      const defaults = cardFormDefaults(form, facts);
+      const values = matchingDraft?.values ?? (carryableDraft ? formDraft.values : defaults);
+      const warningFacts = form.warningFactIds.flatMap((id) => {
+        const item = facts.get(id);
+        return item && !sensitiveFact(item) && str(item.value)
+          ? [{ id, label: publicText(item.label) || id, value: publicText(item.value) }]
+          : [];
+      });
+      const canReview = !!identity && !!formSessionScope && !!onReviewForm && !!onChangeForm;
+      const lockedReason = staleDraft
+        ? null
+        : formDraft?.blockedByTask
+          ? 'Another request for this form is still running. Your message remains an unsent draft; send it after the task finishes.'
+          : formDraft?.operation
+            ? formDraft.operation.taskId
+              ? 'This request is waiting for its exact task result. Its answers and message stay fixed.'
+              : 'The result of this request is unconfirmed. Retry the same message before changing its answers.'
+            : formDraft && !matchingDraft
+              ? 'Review or clear the current form draft before opening another form.'
+              : null;
+      const editable =
+        canReview &&
+        !formDraft?.operation &&
+        !formDraft?.blockedByTask &&
+        (!formDraft || !!matchingDraft);
+      return (
+        <CardFormBlock
+          key={blockKey}
+          form={form}
+          identity={identity}
+          values={values}
+          warningFacts={warningFacts}
+          editable={editable}
+          staleDraft={staleDraft}
+          error={formError}
+          lockedReason={lockedReason}
+          onChange={
+            identity && onChangeForm ? (next) => onChangeForm(identity, form, next) : undefined
+          }
+          onReview={
+            canReview && identity ? (next) => onReviewForm?.(identity, form, next) : undefined
+          }
+          onCarry={
+            carryableDraft && identity && onCarryForm
+              ? () => onCarryForm(identity, form)
+              : undefined
+          }
+          onDiscard={
+            formDraft &&
+            !formDraft.operation &&
+            !formDraft.blockedByTask &&
+            identity &&
+            onDiscardForm
+              ? () => onDiscardForm(identity)
+              : undefined
+          }
+        />
+      );
+    }
     if (type === 'hero') {
       return (
         <div key={blockKey} className="border-y border-edge/60 py-3">
@@ -1472,7 +1808,7 @@ function GeneratedCard({
                 >
                   {(num(block.startIndex) ?? 1) + index}
                 </span>
-                <p className="text-xs font-medium text-muted">{str(item.label) || 'Step'}</p>
+                <p className="text-xs font-medium text-muted">{publicText(item.label) || 'Step'}</p>
                 <p className="mt-0.5 break-words text-sm font-medium text-strong [overflow-wrap:anywhere]">
                   {shownValue(item.id, 'text-sm font-medium')}
                 </p>
@@ -1485,14 +1821,17 @@ function GeneratedCard({
     if (type === 'facts') {
       const items = Array.isArray(block.factIds) ? block.factIds : [];
       return (
-        <dl key={blockKey} className="grid grid-cols-2 gap-x-5 gap-y-3">
+        <dl
+          key={blockKey}
+          className={`grid gap-x-5 gap-y-3 ${items.length === 1 ? 'grid-cols-1' : 'grid-cols-2'}`}
+        >
           {items.map((id) => {
             const item = fact(id);
             if (!item) return null;
             return (
               <div key={str(item.id)} className="min-w-0">
-                <dt className="font-mono text-[10px] tracking-[0.08em] text-muted uppercase">
-                  {str(item.label) || 'Detail'}
+                <dt className={`break-words text-muted ${microLabelClass}`}>
+                  {publicText(item.label) || 'Detail'}
                 </dt>
                 <dd className="mt-0.5 break-words text-sm font-medium text-strong [overflow-wrap:anywhere]">
                   {shownValue(item.id, 'text-sm font-medium')}
@@ -1515,7 +1854,10 @@ function GeneratedCard({
               {shownValue(block.leftValueFact, 'text-2xl font-semibold')}
             </p>
           </div>
-          <span className="text-xs text-muted">—</span>
+          <div className="text-xs text-muted">
+            <span>—</span>
+            {block.statusFact ? <p className="mt-1">{shownValue(block.statusFact)}</p> : null}
+          </div>
           <div>
             <p className="text-xs text-muted">{shownValue(block.rightLabelFact)}</p>
             <p className="mt-1 font-mono text-2xl font-semibold text-strong">
@@ -1528,33 +1870,38 @@ function GeneratedCard({
     if (type === 'code') {
       const item = fact(block.valueFact);
       if (!item) return null;
-      const sensitive = item.sensitive === true;
-      const shown = revealed.has(str(item.id)) || !sensitive;
-      const name = str(item.label).toLowerCase() || 'code';
+      const sensitive = sensitiveFact(item);
+      const shown = revealed.has(revealKey(item.id)) || !sensitive;
+      const name = publicText(item.label).toLowerCase() || 'code';
       if (!sensitive)
         return (
           <div
             key={blockKey}
             className="rounded-xl border border-dashed border-edge bg-sunken/45 px-4 py-3"
           >
-            <p className="font-mono text-[10px] tracking-[0.12em] text-muted uppercase">
-              {str(item.label) || 'Code'}
+            <p className={`break-words text-muted ${microLabelClass}`}>
+              {publicText(item.label) || 'Code'}
             </p>
             <p className="mt-1 break-all font-mono text-sm font-semibold tracking-[0.08em] text-strong">
-              {str(item.value)}
+              {publicText(item.value)}
             </p>
+            {block.format !== 'text' ? (
+              <p className="mt-2 text-xs text-muted">
+                The scannable code is available in the mobile app.
+              </p>
+            ) : null}
           </div>
         );
       return (
         <button
           key={blockKey}
           type="button"
-          onClick={() => toggleReveal(str(item.id))}
+          onClick={() => toggleReveal(item.id)}
           aria-pressed={sensitive ? shown : undefined}
           aria-label={sensitive ? `${shown ? 'Hide' : 'Show'} ${name}` : undefined}
           className={`rounded-xl border border-dashed border-edge bg-sunken/45 px-4 py-3 text-left ${focusRing}`}
         >
-          <span className="block font-mono text-[10px] tracking-[0.12em] text-muted uppercase">
+          <span className={`block break-words text-muted ${microLabelClass}`}>
             {shown ? str(block.format) : 'Tap to reveal'}
           </span>
           {/* One asterisk per character, in the face the value itself
@@ -1572,18 +1919,340 @@ function GeneratedCard({
           {shownValue(block.factId)}
         </p>
       );
+    if (type === 'metrics') {
+      return (
+        <dl key={blockKey} className="grid grid-cols-2 gap-x-5 gap-y-3">
+          {(block.factIds as string[]).map((id) => (
+            <div key={id} className="min-w-0">
+              <dt className="text-xs text-muted">{publicText(fact(id)?.label) || 'Metric'}</dt>
+              <dd className="mt-1 break-words text-lg font-semibold tabular-nums text-strong">
+                {shownValue(id)}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      );
+    }
+    if (type === 'journey') {
+      return (
+        <div key={blockKey} className="grid gap-3 border-y border-edge/60 py-3">
+          <p className="text-xs text-muted">{publicText(block.mode)}</p>
+          <div className="grid grid-cols-[1fr_auto_1fr] items-start gap-3">
+            <div className="min-w-0">
+              <p className="text-xs text-muted">From</p>
+              <p className="break-words font-semibold text-strong">{shownValue(block.fromFact)}</p>
+              {block.departFact ? (
+                <p className="mt-1 text-sm text-muted">{shownDateValue(block.departFact)}</p>
+              ) : null}
+            </div>
+            <span aria-hidden="true" className="text-muted">
+              →
+            </span>
+            <div className="min-w-0">
+              <p className="text-xs text-muted">To</p>
+              <p className="break-words font-semibold text-strong">{shownValue(block.toFact)}</p>
+              {block.arriveFact ? (
+                <p className="mt-1 text-sm text-muted">{shownDateValue(block.arriveFact)}</p>
+              ) : null}
+            </div>
+          </div>
+          {block.durationFact ? (
+            <p className="text-sm text-muted">Duration: {shownValue(block.durationFact)}</p>
+          ) : null}
+          {block.statusFact ? (
+            <p className="text-sm text-strong">{shownValue(block.statusFact)}</p>
+          ) : null}
+        </div>
+      );
+    }
+    if (type === 'progress') {
+      const raw = value(block.valueFact);
+      const amount = numericValue(block.valueFact);
+      const total = block.totalFact
+        ? numericValue(block.totalFact)
+        : raw.endsWith('%') && amount !== null
+          ? 100
+          : null;
+      const valid =
+        amount !== null && amount >= 0 && total !== null && total > 0 && amount <= total;
+      return (
+        <div key={blockKey} className="grid gap-2">
+          {block.labelFact ? (
+            <p className="text-sm font-medium text-strong">{shownValue(block.labelFact)}</p>
+          ) : null}
+          <p className="text-sm tabular-nums text-strong">
+            {shownValue(block.valueFact)}
+            {block.totalFact ? <> / {shownValue(block.totalFact)}</> : null}
+          </p>
+          {valid ? (
+            <progress
+              aria-label="Progress"
+              value={amount}
+              max={total}
+              className="h-2 w-full appearance-none overflow-hidden rounded bg-sunken [&::-webkit-progress-bar]:bg-sunken [&::-webkit-progress-value]:bg-accent [&::-moz-progress-bar]:bg-accent"
+            />
+          ) : (
+            <p className="text-xs text-muted">Progress unknown</p>
+          )}
+        </div>
+      );
+    }
+    if (type === 'stages') {
+      const current = value(block.currentFact);
+      const currentVisible =
+        !sensitiveFact(fact(block.currentFact)) || revealed.has(revealKey(block.currentFact));
+      return (
+        <div key={blockKey} className="grid gap-2">
+          <p className="text-sm text-muted">Current stage: {shownValue(block.currentFact)}</p>
+          <ol className="grid gap-2 border-l border-edge pl-4">
+            {(block.factIds as string[]).map((id) => (
+              <li
+                key={id}
+                aria-current={
+                  currentVisible &&
+                  (!sensitiveFact(fact(id)) || revealed.has(revealKey(id))) &&
+                  (id === current || value(id) === current)
+                    ? 'step'
+                    : undefined
+                }
+                className="text-sm text-strong"
+              >
+                {shownValue(id)}
+              </li>
+            ))}
+          </ol>
+        </div>
+      );
+    }
+    if (type === 'countdown') {
+      const privateDate =
+        sensitiveFact(fact(block.dateFact)) && !revealed.has(revealKey(block.dateFact));
+      const dateText = value(block.dateFact);
+      // Keep the actual date visible; avoid hydration drift from Date.now() or
+      // inventing a timezone for a date-only/ambiguous source value.
+      const known =
+        !privateDate &&
+        /^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(dateText) &&
+        Number.isFinite(Date.parse(dateText));
+      return (
+        <div key={blockKey} className="grid gap-1 border-l-2 border-accent/50 pl-3">
+          {block.labelFact ? (
+            <p className="text-xs text-muted">{shownValue(block.labelFact)}</p>
+          ) : null}
+          <p className="text-sm font-semibold text-strong">{shownDateValue(block.dateFact)}</p>
+          <p className="text-xs text-muted">
+            {known && now !== null
+              ? `${Date.parse(dateText) >= now ? 'In ' : ''}${Math.ceil(Math.abs(Date.parse(dateText) - now) / 60_000).toLocaleString()} minutes${Date.parse(dateText) < now ? ' ago' : ''}`
+              : known
+                ? `Scheduled ${shortDate(dateText, timeZone)}`
+                : 'Countdown unknown'}
+          </p>
+        </div>
+      );
+    }
+    if (type === 'table') {
+      return (
+        <div key={blockKey} className="overflow-x-auto">
+          <table
+            aria-label={publicText(spec.title)}
+            className="w-full border-collapse text-left text-sm"
+          >
+            <thead>
+              <tr>
+                {(block.columns as string[]).map((label, index) => (
+                  <th
+                    // biome-ignore lint/suspicious/noArrayIndexKey: column labels may repeat; cells have no component state.
+                    key={`${index}-${label}`}
+                    scope="col"
+                    className="border-b border-edge py-2 pr-4 font-medium text-muted"
+                  >
+                    {publicText(label)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {(block.rows as string[][]).map((cells, index) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: repeated table rows are valid; rows have no component state.
+                <tr key={`${index}-${cells.join(',')}`}>
+                  {cells.map((id, column) => (
+                    <td
+                      // biome-ignore lint/suspicious/noArrayIndexKey: repeated fact references in separate columns are valid.
+                      key={`${column}-${id}`}
+                      className="border-b border-edge/50 py-2 pr-4 align-top text-strong"
+                    >
+                      {shownValue(id)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+    if (type === 'chart') {
+      const points = recs(block.points);
+      const values = points.map((point) => numericValue(point.valueFact));
+      const known = values.filter((n): n is number => n !== null);
+      const low = Math.min(0, ...known);
+      const high = Math.max(0, ...known);
+      const scale = Math.max(Math.abs(low), Math.abs(high)) || 1;
+      const range = high / scale - low / scale || 1;
+      const y = (n: number) => 90 - ((n / scale - low / scale) / range) * 80;
+      const baseline = y(0);
+      const complete = values.every((n) => n !== null);
+      return (
+        <figure key={blockKey} className="grid gap-3">
+          {known.length > 0 ? (
+            <svg
+              viewBox="0 0 300 100"
+              role="img"
+              aria-label={`${str(block.kind) === 'line' ? 'Line' : 'Bar'} chart. Values listed below.`}
+              className="h-28 w-full text-accent"
+            >
+              <line
+                x1="0"
+                x2="300"
+                y1={baseline}
+                y2={baseline}
+                stroke="currentColor"
+                opacity="0.25"
+              />
+              {str(block.kind) === 'line'
+                ? points.map((point, index) => {
+                    const n = values[index];
+                    const previous = index ? values[index - 1] : null;
+                    if (n === null || n === undefined) return null;
+                    const x = 10 + (index / (points.length - 1)) * 280;
+                    return (
+                      // biome-ignore lint/suspicious/noArrayIndexKey: repeated labels are valid ordered samples; marks are stateless.
+                      <g key={`${index}-${str(point.labelFact)}`}>
+                        {previous !== null && previous !== undefined ? (
+                          <line
+                            x1={10 + ((index - 1) / (points.length - 1)) * 280}
+                            x2={x}
+                            y1={y(previous)}
+                            y2={y(n)}
+                            stroke="currentColor"
+                            strokeWidth="2"
+                          />
+                        ) : null}
+                        <circle cx={x} cy={y(n)} r="3" fill="currentColor" />
+                      </g>
+                    );
+                  })
+                : points.map((point, index) => {
+                    const n = values[index];
+                    if (n === null || n === undefined) return null;
+                    return (
+                      <rect
+                        // biome-ignore lint/suspicious/noArrayIndexKey: repeated labels are valid ordered samples; marks are stateless.
+                        key={`${index}-${str(point.labelFact)}`}
+                        x={(index / points.length) * 300 + 5}
+                        y={Math.min(y(n), baseline)}
+                        width={300 / points.length - 10}
+                        height={Math.abs(y(n) - baseline)}
+                        rx="2"
+                        fill="currentColor"
+                      />
+                    );
+                  })}
+            </svg>
+          ) : null}
+          {!complete ? (
+            <p className="text-xs text-muted">Some chart values are unknown or private.</p>
+          ) : null}
+          <dl className="grid gap-1">
+            {points.map((point, index) => (
+              <div
+                // biome-ignore lint/suspicious/noArrayIndexKey: repeated labels are valid ordered samples; entries are stateless.
+                key={`${index}-${str(point.labelFact)}`}
+                className="flex justify-between gap-4 text-sm"
+              >
+                <dt className="text-muted">{shownValue(point.labelFact)}</dt>
+                <dd className="font-medium tabular-nums text-strong">
+                  {shownValue(point.valueFact)}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </figure>
+      );
+    }
+    if (type === 'checklist') {
+      return (
+        <ul key={blockKey} aria-label="Personal checklist" className="grid gap-2">
+          {(block.factIds as string[]).map((id) => {
+            const key = `${blockKey}:${revealKey(id)}`;
+            return (
+              <li key={id} className="flex items-start gap-2 text-sm text-strong">
+                <input
+                  type="checkbox"
+                  aria-label={`Mark ${publicText(fact(id)?.label) || 'item'} complete`}
+                  checked={checked.has(key)}
+                  onChange={() =>
+                    setChecked((current) => {
+                      const next = new Set(current);
+                      if (next.has(key)) next.delete(key);
+                      else next.add(key);
+                      return next;
+                    })
+                  }
+                  className={`mt-1 shrink-0 accent-accent ${focusRing}`}
+                />
+                <span>{shownValue(id)}</span>
+              </li>
+            );
+          })}
+        </ul>
+      );
+    }
+    if (type === 'map') {
+      return (
+        <div key={blockKey} className="grid gap-2">
+          <p className="text-xs text-muted">
+            Open a place to view its map. The full map is available in the mobile app.
+          </p>
+          <ul className="grid gap-2">
+            {(block.placeFactIds as string[]).map((id) => {
+              const hidden = sensitiveFact(fact(id)) && !revealed.has(revealKey(id));
+              return (
+                <li key={id} className="flex flex-wrap items-center gap-2 text-sm text-strong">
+                  <MapPin className="size-4 text-accent" aria-hidden="true" />
+                  {shownValue(id)}
+                  {!hidden ? (
+                    <CardLink
+                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(value(id))}`}
+                      label="Open map"
+                    />
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      );
+    }
     if (type === 'image') {
-      const src = cardHref(value(block.urlFact));
+      const urlFact = fact(block.urlFact);
+      const altFact = fact(block.altFact);
+      const privateImage = sensitiveFact(urlFact) || sensitiveFact(altFact);
+      const src = privateImage ? '' : cardHref(value(block.urlFact));
       return src ? (
         <Image
           key={blockKey}
           src={`/api/card-image?url=${encodeURIComponent(src)}`}
-          alt={value(block.altFact) || ''}
+          alt={publicText(value(block.altFact))}
           className="max-h-64 w-full rounded-xl border border-edge/60 object-cover"
           width={1200}
           height={640}
           unoptimized
         />
+      ) : privateImage ? (
+        <p key={blockKey} className="text-xs text-muted">
+          Image withheld because its source or description is private.
+        </p>
       ) : null;
     }
     return null;
@@ -1591,49 +2260,44 @@ function GeneratedCard({
 
   return (
     <section
-      aria-label={str(spec.accessibilityLabel) || str(spec.title)}
+      aria-label={publicText(spec.accessibilityLabel) || publicText(spec.title) || 'Response card'}
       data-response-card="true"
       className="paper relative min-w-0 w-full overflow-hidden rounded-[var(--radius-card)] border border-edge/70 bg-raised"
     >
-      <div
-        className={`pointer-events-none absolute inset-0 bg-gradient-to-br ${accentClass[str(spec.accent)] ?? accentClass.mint}`}
-      />
       <div className="relative px-4 py-4 sm:px-5">
-        <header className="flex items-start gap-3">
-          <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-xl border border-accent/20 bg-raised/80 text-accent shadow-sm">
-            <Icon className="size-4" aria-hidden="true" />
-          </span>
+        <header className="grid min-w-0 grid-cols-[1rem_minmax(0,1fr)] items-start gap-3">
+          <Icon className="mt-1 size-4 shrink-0 stroke-[1.75] text-accent" aria-hidden="true" />
           <div className="min-w-0 flex-1">
-            <p className="font-mono text-[10px] tracking-[0.12em] text-accent uppercase">
-              {str(spec.sourceLabel)}
+            <p className="text-xs leading-5 font-medium text-muted">
+              {publicText(spec.sourceLabel)}
             </p>
-            <h3 className="mt-0.5 text-base font-semibold tracking-[-0.015em] text-strong">
-              {str(spec.title)}
+            <h3 className="text-base leading-6 font-semibold text-strong">
+              {publicText(spec.title)}
             </h3>
-            {str(spec.subtitle) ? (
-              <p className="mt-0.5 text-xs text-muted">{str(spec.subtitle)}</p>
+            {publicText(spec.subtitle) ? (
+              <p className="text-sm leading-5 text-muted">{publicText(spec.subtitle)}</p>
             ) : null}
           </div>
         </header>
 
         {str(data.updatedAt) ||
         data.stale === true ||
-        refreshing ||
-        data.refreshState === 'failed' ? (
+        (!onRefresh && refreshing) ||
+        (!refreshing && data.refreshState === 'failed') ? (
           <div
-            className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted"
+            className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted"
             role="status"
             aria-live="polite"
           >
             {str(data.updatedAt) ? (
               <span>Updated {shortDate(str(data.updatedAt), timeZone)}</span>
             ) : null}
-            {refreshing ? (
+            {refreshing && !onRefresh ? (
               <span className="inline-flex items-center gap-1 text-accent">
                 <RotateCw className="size-3 motion-safe:animate-spin" aria-hidden="true" />
                 Refreshing…
               </span>
-            ) : data.refreshState === 'failed' ? (
+            ) : !refreshing && data.refreshState === 'failed' ? (
               <span>Refresh failed. Showing the saved version.</span>
             ) : data.stale === true ? (
               <span className="inline-flex items-center gap-1">
@@ -1644,8 +2308,8 @@ function GeneratedCard({
           </div>
         ) : null}
 
-        <div className="mt-4 grid gap-3">
-          {previewBlocks.map(renderBlock)}
+        <div className="mt-3 grid gap-3">
+          {previewBlocks.map((block) => renderBlock(block))}
           {detailBlocks.length > 0 ? (
             <details className="border-t border-edge/60 pt-2.5">
               <summary
@@ -1653,7 +2317,9 @@ function GeneratedCard({
               >
                 More details
               </summary>
-              <div className="mt-3 grid gap-3">{detailBlocks.map(renderBlock)}</div>
+              <div className="mt-3 grid gap-3">
+                {detailBlocks.map((block) => renderBlock(block))}
+              </div>
             </details>
           ) : null}
         </div>
@@ -1665,7 +2331,7 @@ function GeneratedCard({
                 type="button"
                 disabled={refreshing}
                 onClick={() => void refresh()}
-                className={`${chip.accent} disabled:cursor-wait`}
+                className={`${chip.accent.replace('disabled:opacity-50', '')} disabled:cursor-wait`}
               >
                 <RotateCw
                   className={`size-3 ${refreshing ? 'motion-safe:animate-spin' : ''}`}
@@ -1682,10 +2348,27 @@ function GeneratedCard({
               const type = str(action.type);
               const id = str(action.id);
               const target = fact(action.factId);
-              if (type === 'open_url' && target && cardHref(target.value))
+              if (type === 'open_url' && target && cardHref(target.value)) {
+                if (sensitiveFact(target) && !revealed.has(revealKey(target.id))) {
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      className={chip.neutral}
+                      onClick={() => toggleReveal(target.id)}
+                    >
+                      Reveal {publicText(action.label) || 'private link'}
+                    </button>
+                  );
+                }
                 return (
-                  <CardLink key={id} href={cardHref(target.value)} label={str(action.label)} />
+                  <CardLink
+                    key={id}
+                    href={cardHref(target.value)}
+                    label={publicText(action.label)}
+                  />
                 );
+              }
               if (
                 type === 'open_url' ||
                 ((type === 'copy_value' || type === 'reveal_sensitive') && !target) ||
@@ -1699,8 +2382,12 @@ function GeneratedCard({
                   type="button"
                   className={chip.neutral}
                   onClick={() => {
-                    if (type === 'copy_value' && target) void copyValue(str(target.value));
-                    if (type === 'reveal_sensitive' && target) toggleReveal(str(target.id));
+                    if (type === 'copy_value' && target) {
+                      if (sensitiveFact(target) && !revealed.has(revealKey(target.id)))
+                        toggleReveal(target.id);
+                      else void copyValue(str(target.value));
+                    }
+                    if (type === 'reveal_sensitive' && target) toggleReveal(target.id);
                     if (type === 'ask_assistant' && str(action.prompt) && onSend)
                       onSend(str(action.prompt));
                   }}
@@ -1708,10 +2395,37 @@ function GeneratedCard({
                   {type === 'ask_assistant' ? (
                     <MessageCircle className="size-3" aria-hidden="true" />
                   ) : null}
-                  {str(action.label)}
+                  {type === 'copy_value' &&
+                  target &&
+                  sensitiveFact(target) &&
+                  !revealed.has(revealKey(target.id))
+                    ? `Reveal to copy ${publicText(target.label) || 'private value'}`
+                    : publicText(action.label)}
                 </button>
               );
             })}
+            {actions.some((action) =>
+              ['add_to_calendar', 'directions'].includes(str(action.type)),
+            ) ? (
+              <p className="w-full text-xs text-muted">
+                Some actions are available in the mobile app.
+              </p>
+            ) : null}
+            {actions.some(
+              (action) =>
+                ![
+                  'open_url',
+                  'copy_value',
+                  'reveal_sensitive',
+                  'ask_assistant',
+                  'add_to_calendar',
+                  'directions',
+                ].includes(str(action.type)),
+            ) ? (
+              <p className="w-full text-xs text-muted">
+                Some actions are unavailable in this version of the app.
+              </p>
+            ) : null}
           </div>
         ) : null}
         {actionFeedback ? (
@@ -1731,11 +2445,27 @@ function GeneratedCard({
 function ResponseCardView({
   data,
   timeZone,
+  conversationId,
+  formSessionScope,
+  formDraft,
+  formError,
+  onChangeForm,
+  onReviewForm,
+  onCarryForm,
+  onDiscardForm,
   onSend,
   onRefresh,
 }: {
   data: Raw;
   timeZone: string;
+  conversationId?: string;
+  formSessionScope?: string;
+  formDraft?: CardFormDraft | null;
+  formError?: string | null;
+  onChangeForm?: (identity: CardFormIdentity, form: CardForm, values: CardFormValues) => void;
+  onReviewForm?: (identity: CardFormIdentity, form: CardForm, values: CardFormValues) => void;
+  onCarryForm?: (identity: CardFormIdentity, form: CardForm) => void;
+  onDiscardForm?: (identity: CardFormIdentity) => void;
   onSend?: (text: string) => void;
   onRefresh?: RefreshCard;
 }) {
@@ -1791,7 +2521,20 @@ function ResponseCardView({
       return <ProactiveAlertCard data={data} timeZone={timeZone} />;
     case 'generated-card':
       return (
-        <GeneratedCard data={data} onSend={onSend} onRefresh={onRefresh} timeZone={timeZone} />
+        <GeneratedCard
+          data={data}
+          conversationId={conversationId}
+          formSessionScope={formSessionScope}
+          formDraft={formDraft}
+          formError={formError}
+          onChangeForm={onChangeForm}
+          onReviewForm={onReviewForm}
+          onCarryForm={onCarryForm}
+          onDiscardForm={onDiscardForm}
+          onSend={onSend}
+          onRefresh={onRefresh}
+          timeZone={timeZone}
+        />
       );
     default:
       // Newer card kinds keep their prose fallback until this client supports them.
@@ -1882,62 +2625,504 @@ function legacyTextCards(text: string): Raw[] {
  * leave — replacing the reply with it would delete the rest of the answer.
  */
 export function cardsReplaceProse(cards: Raw[]): boolean {
-  // A card built from the answer, or one marked to sit under it (a live
-  // scoreboard), leaves the reply's own words in place.
+  const containsForm = (blocks: unknown[]): boolean =>
+    blocks.some((value) => {
+      const block = rec(value);
+      return (
+        !!block &&
+        (block.type === 'form' || (block.type === 'section' && containsForm(recs(block.blocks))))
+      );
+    });
+  if (cards.some((card) => containsForm(recs(rec(card.spec)?.blocks)))) return false;
+  // Prose may carry context that no card redraws. Replace it only when every
+  // card is grounded in lookup evidence; one answer-derived/accompanying card
+  // means the message still has wording to preserve.
   return (
     cards.length > 0 &&
-    !cards.every(
+    cards.every(
       (card) =>
-        ['answer', 'message'].includes(str(card.grounding)) || card.accompaniesProse === true,
+        !['answer', 'message'].includes(str(card.grounding)) && card.accompaniesProse !== true,
     )
   );
 }
 
-/** True when every card on the message is one this surface can render. */
-export function rendersAllCards(cards: Raw[]): boolean {
-  return cards.every((card) => {
-    if (str(card.kind) === 'generated-card') {
-      const spec = rec(card.spec);
-      return (
-        num(spec?.version) === 1 &&
-        !!str(spec?.title) &&
-        recs(spec?.facts).length > 0 &&
-        recs(spec?.blocks).length > 0
-      );
-    }
-    return [
-      'weather',
-      'calendar',
-      'agenda',
-      'calendar-event',
-      'email-results',
-      'email-thread',
-      'sheet-rows',
-      'resource',
-      'web-search-results',
-      'availability',
-      'status',
-      'reminder',
-      'drive-results',
-      'document-results',
-      'knowledge-graph',
-      'calendar-conflicts',
-      'proactive-alert',
-      'briefing',
-      'scoreboard',
-      'route',
-    ].includes(str(card.kind));
+export interface CardCapabilityContext {
+  /** `ask_assistant` is only represented when this message can submit it. */
+  onSendAvailable?: boolean;
+  /** Form blocks are full only when the ordinary owner composer path is wired. */
+  onCardFormReviewAvailable?: boolean;
+}
+
+function hasText(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function hasFact(facts: Map<string, Raw>, id: unknown): boolean {
+  const fact = facts.get(str(id));
+  return !!fact && hasText(fact.value);
+}
+
+function generatedCardCapability(
+  card: Raw,
+  context: CardCapabilityContext,
+): { shell: boolean; full: boolean } {
+  const spec = rec(card.spec);
+  if (spec?.version !== 1 || !hasText(spec.title)) return { shell: false, full: false };
+  const facts = new Map(recs(spec.facts).map((fact) => [str(fact.id), fact]));
+  const capability = generatedSpecBlockCapability(spec, 'web', {
+    formRendererAvailable:
+      context.onCardFormReviewAvailable === true &&
+      UUID_IDENTITY.test(str(card.id)) &&
+      UUID_IDENTITY.test(str(card.revisionId)),
   });
+  if (!capability.shell) return { shell: false, full: false };
+  const blocksFullySupported = capability.full;
+  const actions = recs(spec.actions).filter((action) => str(action.type) !== 'refresh');
+  const actionsSupported =
+    (spec.actions === undefined ||
+      (Array.isArray(spec.actions) &&
+        spec.actions.length <= 6 &&
+        spec.actions.every((action) => !!rec(action)))) &&
+    actions.every((action) => {
+      const type = str(action.type);
+      if (type === 'ask_assistant')
+        return hasText(action.prompt) && context.onSendAvailable === true;
+      if (['open_url', 'copy_value', 'reveal_sensitive'].includes(type)) {
+        if (!hasFact(facts, action.factId)) return false;
+        return type !== 'open_url' || cardHref(facts.get(str(action.factId))?.value) !== '';
+      }
+      // These actions remain visible as an explicit mobile-app fallback.
+      return type === 'add_to_calendar' || type === 'directions';
+    });
+  return { shell: true, full: blocksFullySupported && actionsSupported };
+}
+
+function rows(value: unknown, valid: (row: unknown) => boolean): boolean {
+  return Array.isArray(value) && value.length > 0 && value.every(valid);
+}
+
+function hasValidRow(value: unknown, valid: (row: unknown) => boolean): boolean {
+  return Array.isArray(value) && value.some(valid);
+}
+
+function validDateText(value: unknown): boolean {
+  return hasText(value) && Number.isFinite(Date.parse(str(value)));
+}
+
+function validOptionalArray(card: Raw, key: string, valid: (row: unknown) => boolean): boolean {
+  if (!Object.hasOwn(card, key)) return true;
+  return Array.isArray(card[key]) && card[key].every(valid);
+}
+
+function validAgendaItem(value: unknown, withDay = false): boolean {
+  const item = rec(value);
+  return !!item && (!withDay || hasText(item.day)) && hasText(item.time) && hasText(item.title);
+}
+
+function validBriefingItem(value: unknown): boolean {
+  const item = rec(value);
+  return !!item && (hasText(item.title) || hasText(item.detail) || hasText(item.meta));
+}
+
+function validWeatherDetail(value: unknown): boolean {
+  const detail = rec(value);
+  return !!detail && hasText(detail.label) && hasText(detail.value);
+}
+
+function validWeatherDay(value: unknown): boolean {
+  const day = rec(value);
+  return (
+    !!day && hasText(day.weekday) && num(day.lowC) !== undefined && num(day.highC) !== undefined
+  );
+}
+
+function validBriefingSection(value: unknown): boolean {
+  const section = rec(value);
+  if (!section || !hasText(section.title)) return false;
+  if (section.type === 'agenda') return rows(section.items, (item) => validAgendaItem(item, true));
+  if (section.type === 'weather')
+    return hasText(section.temperature) || hasText(section.condition) || hasText(section.range);
+  if (['attention', 'mail', 'upcoming', 'goals', 'watches'].includes(str(section.type)))
+    return rows(section.items, validBriefingItem);
+  // Unknown section variants use the text-list fallback today, but cannot be
+  // claimed complete until the producer and renderer share a named contract.
+  return false;
+}
+
+function validEvent(value: unknown): boolean {
+  const event = rec(value);
+  const start = Date.parse(str(event?.start));
+  const end = event && hasText(event.end) ? Date.parse(str(event.end)) : undefined;
+  return (
+    !!event &&
+    hasText(event.title) &&
+    hasText(event.start) &&
+    Number.isFinite(start) &&
+    (end === undefined || (Number.isFinite(end) && end > start)) &&
+    validOptionalArray(event, 'calendars', hasText)
+  );
+}
+
+function validEmailResult(value: unknown): boolean {
+  const message = rec(value);
+  return (
+    !!message &&
+    (hasText(message.sender) || hasText(message.subject) || hasText(message.snippet)) &&
+    (!hasText(message.date) || validDateText(message.date))
+  );
+}
+
+function validEmailThreadMessage(value: unknown): boolean {
+  const message = rec(value);
+  return (
+    !!message &&
+    (hasText(message.sender) || hasText(message.excerpt)) &&
+    (!hasText(message.date) || validDateText(message.date))
+  );
+}
+
+function validSheetRow(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.some(
+      (cell) => typeof cell === 'string' || typeof cell === 'number' || typeof cell === 'boolean',
+    )
+  );
+}
+
+function validSearchResult(value: unknown): boolean {
+  const result = rec(value);
+  return !!result && (hasText(result.title) || hasText(result.snippet) || hasText(result.url));
+}
+
+function validDriveFile(value: unknown): boolean {
+  const file = rec(value);
+  return (
+    !!file &&
+    (hasText(file.name) || hasText(file.url)) &&
+    (!hasText(file.modifiedTime) || validDateText(file.modifiedTime))
+  );
+}
+
+function validDocumentPassage(value: unknown): boolean {
+  const passage = rec(value);
+  return !!passage && (hasText(passage.document) || hasText(passage.snippet));
+}
+
+function validGraphEdge(value: unknown, nodes: Map<string, Raw>): boolean {
+  const edge = rec(value);
+  if (!edge) return false;
+  const from = nodes.get(str(edge.from));
+  const to = nodes.get(str(edge.to));
+  const fromLabel = hasText(edge.fromLabel) || hasText(from?.label);
+  const toLabel = hasText(edge.toLabel) || hasText(to?.label);
+  return fromLabel && toLabel && (hasText(edge.label) || hasText(edge.evidenceQuote));
+}
+
+function validConflict(value: unknown): boolean {
+  const conflict = rec(value);
+  if (!conflict) return false;
+  const start = Date.parse(str(conflict.overlapStart));
+  const end = Date.parse(str(conflict.overlapEnd));
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return false;
+  return (
+    rows(conflict.groups, (groupValue) => {
+      const group = rec(groupValue);
+      return !!group && rows(group.events, (event) => validEvent(event));
+    }) && recs(conflict.groups).length >= 2
+  );
+}
+
+function validRouteStep(value: unknown): boolean {
+  const step = rec(value);
+  return (
+    !!step &&
+    hasText(step.instruction) &&
+    (!Object.hasOwn(step, 'distanceMeters') ||
+      (typeof step.distanceMeters === 'number' &&
+        Number.isFinite(step.distanceMeters) &&
+        step.distanceMeters >= 0))
+  );
+}
+
+function validScoreGame(value: unknown): boolean {
+  const game = rec(value);
+  if (!game || !hasText(game.id) || !['pre', 'in', 'post'].includes(str(game.state))) return false;
+  const home = rec(game.home);
+  const away = rec(game.away);
+  return (
+    !!home &&
+    !!away &&
+    hasText(home.name) &&
+    hasText(away.name) &&
+    (!hasText(game.startsAt) || validDateText(game.startsAt))
+  );
+}
+
+function specializedCardSupported(card: Raw): boolean {
+  const kind = str(card.kind);
+  if (kind === 'generated-card') return false;
+  if (kind === 'route') {
+    const validMetric = (value: unknown) =>
+      typeof value === 'number' && Number.isFinite(value) && value >= 0;
+    const origin = rec(card.origin);
+    const destination = rec(card.destination);
+    const mapsUrl = str(card.mapsUrl);
+    return (
+      validMetric(card.durationSeconds) &&
+      validMetric(card.distanceMeters) &&
+      hasText(destination?.label) &&
+      (origin?.current === true || hasText(origin?.label)) &&
+      ['driving', 'walking', 'cycling', ''].includes(str(card.mode)) &&
+      validOptionalArray(card, 'steps', validRouteStep) &&
+      (!hasText(card.departAt) || validDateText(card.departAt)) &&
+      (!hasText(card.arriveAt) || validDateText(card.arriveAt)) &&
+      (!mapsUrl || /^https:\/\/maps\.apple\.com\//.test(mapsUrl))
+    );
+  }
+  if (kind === 'scoreboard') return rows(card.games, validScoreGame);
+  if (kind === 'weather') {
+    const details = Array.isArray(card.details) ? card.details : [];
+    const days = Array.isArray(card.days) ? card.days : [];
+    const visible =
+      hasText(card.temperature) ||
+      hasText(card.condition) ||
+      hasValidRow(details, validWeatherDetail) ||
+      hasValidRow(days, validWeatherDay);
+    return (
+      visible &&
+      validOptionalArray(card, 'details', validWeatherDetail) &&
+      validOptionalArray(card, 'days', validWeatherDay)
+    );
+  }
+  if (kind === 'calendar' || kind === 'agenda')
+    return rows(card.items, (item) => validAgendaItem(item));
+  if (kind === 'calendar-day') return rows(card.events, validEvent);
+  if (kind === 'briefing') {
+    const sectionsValid = validOptionalArray(card, 'sections', validBriefingSection);
+    const hasSections = rows(card.sections, validBriefingSection);
+    return (hasText(card.lead) || hasSections) && sectionsValid;
+  }
+  if (kind === 'calendar-event')
+    return (
+      validEvent(card) &&
+      (!Object.hasOwn(card, 'calendarLink') || !!link(card.calendarLink)) &&
+      (!Object.hasOwn(card, 'meetingLink') || !!link(card.meetingLink)) &&
+      validOptionalArray(card, 'attendees', hasText)
+    );
+  if (kind === 'email-results') return rows(card.messages, validEmailResult);
+  if (kind === 'email-thread') {
+    const count = card.messageCount;
+    return (
+      rows(card.messages, validEmailThreadMessage) &&
+      (count === undefined ||
+        (Number.isSafeInteger(count) && (count as number) >= recs(card.messages).length))
+    );
+  }
+  if (kind === 'sheet-rows') {
+    const rowsValid = rows(card.rows, validSheetRow);
+    const columns = Array.isArray(card.rows)
+      ? Math.max(0, ...card.rows.filter(Array.isArray).map((row) => row.length))
+      : 0;
+    const totalRows = card.totalRows;
+    return (
+      rowsValid &&
+      columns > 0 &&
+      (totalRows === undefined ||
+        (Number.isSafeInteger(totalRows) && (totalRows as number) >= recs(card.rows).length)) &&
+      (!Object.hasOwn(card, 'link') || !!link(card.link))
+    );
+  }
+  if (kind === 'resource') {
+    const detailsValid = validOptionalArray(card, 'details', validWeatherDetail);
+    const steps = cardStepsOf(card.steps);
+    const stepsValid = validOptionalArray(
+      card,
+      'steps',
+      (step) => !!rec(step) && hasText(rec(step)?.tool),
+    );
+    const resourceType = str(card.resourceType);
+    return (
+      (hasText(card.title) ||
+        hasText(card.name) ||
+        hasText(card.subtitle) ||
+        pairs(card.details).length > 0 ||
+        !!link(card.link) ||
+        steps.length > 0) &&
+      detailsValid &&
+      stepsValid &&
+      (!Object.hasOwn(card, 'link') || !!link(card.link)) &&
+      (!resourceType || ['document', 'spreadsheet'].includes(resourceType))
+    );
+  }
+  if (kind === 'web-search-results') return rows(card.results, validSearchResult);
+  if (kind === 'availability') {
+    const rows = Array.isArray(card.busy) ? card.busy : [];
+    const checked = strs(card.calendarsChecked);
+    return (
+      card.complete === true &&
+      validOptionalArray(card, 'calendarsChecked', hasText) &&
+      (rows.length > 0 || checked.length > 0) &&
+      rows.every((row) => {
+        const slot = rec(row);
+        const start = Date.parse(str(slot?.start));
+        const end = Date.parse(str(slot?.end));
+        return Number.isFinite(start) && Number.isFinite(end) && end > start;
+      })
+    );
+  }
+  if (kind === 'status')
+    return (
+      (hasText(card.title) ||
+        hasText(card.detail) ||
+        pairs(card.details).length > 0 ||
+        !!link(card.link)) &&
+      validOptionalArray(card, 'details', validWeatherDetail) &&
+      (!Object.hasOwn(card, 'link') || !!link(card.link))
+    );
+  if (kind === 'reminder')
+    return hasText(card.title) || hasText(card.nextFires) || hasText(card.schedule);
+  if (kind === 'drive-results') return rows(card.files, validDriveFile);
+  if (kind === 'document-results') return rows(card.passages, validDocumentPassage);
+  if (kind === 'knowledge-graph') {
+    const nodes = new Map(recs(card.nodes).map((node) => [str(node.id), node]));
+    return (
+      rows(card.edges, (edge) => validGraphEdge(edge, nodes)) &&
+      validOptionalArray(
+        card,
+        'nodes',
+        (node) => !!rec(node) && hasText(rec(node)?.id) && hasText(rec(node)?.label),
+      )
+    );
+  }
+  if (kind === 'calendar-conflicts') return rows(card.conflicts, validConflict);
+  if (kind === 'proactive-alert')
+    return (
+      hasText(card.title) &&
+      validOptionalArray(card, 'details', validWeatherDetail) &&
+      (!hasText(card.startsAt) || validDateText(card.startsAt)) &&
+      (!hasText(card.dueAt) || validDateText(card.dueAt))
+    );
+  return false;
+}
+
+function specializedCardHasVisibleContent(card: Raw): boolean {
+  const kind = str(card.kind);
+  if (kind === 'availability') return true;
+  if (kind === 'route') {
+    const destination = rec(card.destination);
+    const steps = Array.isArray(card.steps) ? card.steps.filter(validRouteStep) : [];
+    return (
+      hasText(destination?.label) ||
+      (typeof card.durationSeconds === 'number' && Number.isFinite(card.durationSeconds)) ||
+      (typeof card.distanceMeters === 'number' && Number.isFinite(card.distanceMeters)) ||
+      steps.length > 0 ||
+      /^https:\/\/maps\.apple\.com\//.test(str(card.mapsUrl))
+    );
+  }
+  if (kind === 'weather')
+    return (
+      hasText(card.temperature) ||
+      hasText(card.condition) ||
+      hasValidRow(card.details, validWeatherDetail) ||
+      hasValidRow(card.days, validWeatherDay)
+    );
+  if (kind === 'scoreboard') return hasValidRow(card.games, validScoreGame);
+  if (kind === 'calendar' || kind === 'agenda')
+    return hasValidRow(card.items, (item) => validAgendaItem(item));
+  if (kind === 'calendar-day') return hasValidRow(card.events, validEvent);
+  if (kind === 'briefing')
+    return (
+      hasText(card.lead) ||
+      hasValidRow(card.sections, (section) => {
+        const row = rec(section);
+        return !!row && (hasText(row.title) || hasValidRow(row.items, validBriefingItem));
+      })
+    );
+  if (kind === 'email-results')
+    return hasValidRow(card.messages, validEmailResult) || card.complete === false;
+  if (kind === 'email-thread')
+    return hasText(card.subject) || hasValidRow(card.messages, validEmailThreadMessage);
+  if (kind === 'sheet-rows') return hasValidRow(card.rows, validSheetRow);
+  if (kind === 'resource')
+    return (
+      hasText(card.title) ||
+      hasText(card.name) ||
+      hasText(card.subtitle) ||
+      pairs(card.details).length > 0 ||
+      !!link(card.link)
+    );
+  if (kind === 'web-search-results') return hasValidRow(card.results, validSearchResult);
+  if (kind === 'availability') return true;
+  if (kind === 'status')
+    return (
+      hasText(card.title) ||
+      hasText(card.detail) ||
+      pairs(card.details).length > 0 ||
+      !!link(card.link)
+    );
+  if (kind === 'reminder')
+    return hasText(card.title) || hasText(card.nextFires) || hasText(card.schedule);
+  if (kind === 'drive-results') return hasValidRow(card.files, validDriveFile);
+  if (kind === 'document-results') return hasValidRow(card.passages, validDocumentPassage);
+  if (kind === 'knowledge-graph') {
+    const nodes = new Map(recs(card.nodes).map((node) => [str(node.id), node]));
+    return hasValidRow(card.edges, (edge) => {
+      const row = rec(edge);
+      return !!row && (validGraphEdge(row, nodes) || hasText(row.evidenceQuote));
+    });
+  }
+  if (kind === 'calendar-conflicts') return hasValidRow(card.conflicts, validConflict);
+  if (kind === 'proactive-alert') return hasText(card.title) || pairs(card.details).length > 0;
+  if (kind === 'calendar-event') return validEvent(card);
+  return specializedCardSupported(card);
+}
+
+/** True when every card on the message is fully represented on this surface. */
+export function rendersAllCards(cards: Raw[], context: CardCapabilityContext = {}): boolean {
+  return (
+    cards.length > 0 &&
+    cards.every((card) => {
+      if (str(card.kind) === 'generated-card') return generatedCardCapability(card, context).full;
+      return specializedCardSupported(card);
+    })
+  );
+}
+
+/** True when at least one card can be drawn, including a partial generated v1 card. */
+export function rendersSomeCards(cards: Raw[], context: CardCapabilityContext = {}): boolean {
+  return cards.some((card) =>
+    str(card.kind) === 'generated-card'
+      ? generatedCardCapability(card, context).shell
+      : specializedCardHasVisibleContent(card),
+  );
 }
 
 export function ResponseCards({
   cards,
   timeZone,
+  conversationId,
+  formSessionScope,
+  formDraft,
+  formError,
+  onChangeForm,
+  onReviewForm,
+  onCarryForm,
+  onDiscardForm,
   onSend,
   onRefresh,
 }: {
   cards: Raw[];
   timeZone: string;
+  conversationId?: string;
+  formSessionScope?: string;
+  formDraft?: CardFormDraft | null;
+  formError?: string | null;
+  onChangeForm?: (identity: CardFormIdentity, form: CardForm, values: CardFormValues) => void;
+  onReviewForm?: (identity: CardFormIdentity, form: CardForm, values: CardFormValues) => void;
+  onCarryForm?: (identity: CardFormIdentity, form: CardForm) => void;
+  onDiscardForm?: (identity: CardFormIdentity) => void;
   onSend?: (text: string) => void;
   onRefresh?: RefreshCard;
 }) {
@@ -1955,7 +3140,16 @@ export function ResponseCards({
       events,
     })),
     ...cards.filter((card) => str(card.kind) !== 'calendar-event'),
-  ];
+  ].filter((card) =>
+    str(card.kind) === 'generated-card'
+      ? generatedCardCapability(card, {
+          onSendAvailable: Boolean(onSend),
+          onCardFormReviewAvailable: Boolean(
+            conversationId && formSessionScope && onReviewForm && onChangeForm,
+          ),
+        }).shell
+      : specializedCardHasVisibleContent(card),
+  );
   const preview = displayCards.slice(0, PREVIEW_LIMIT);
   const overflow = displayCards.slice(PREVIEW_LIMIT);
   return (
@@ -1965,6 +3159,14 @@ export function ResponseCards({
           key={str(card.id) || index}
           data={card}
           timeZone={timeZone}
+          conversationId={conversationId}
+          formSessionScope={formSessionScope}
+          formDraft={formDraft}
+          formError={formError}
+          onChangeForm={onChangeForm}
+          onReviewForm={onReviewForm}
+          onCarryForm={onCarryForm}
+          onDiscardForm={onDiscardForm}
           onSend={onSend}
           onRefresh={onRefresh}
         />
@@ -1980,6 +3182,14 @@ export function ResponseCards({
                 key={str(card.id) || index}
                 data={card}
                 timeZone={timeZone}
+                conversationId={conversationId}
+                formSessionScope={formSessionScope}
+                formDraft={formDraft}
+                formError={formError}
+                onChangeForm={onChangeForm}
+                onReviewForm={onReviewForm}
+                onCarryForm={onCarryForm}
+                onDiscardForm={onDiscardForm}
                 onSend={onSend}
                 onRefresh={onRefresh}
               />

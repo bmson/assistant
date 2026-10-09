@@ -7,6 +7,34 @@ import {
 } from './output-verification.js';
 
 describe('self-reflective output verification', () => {
+  it.each(['introduction', 'missing-section', 'truncated'] as const)(
+    'preserves a detailed checked answer after a %s revision',
+    async (kind) => {
+      const draft = `## Background\n${'The source describes a completed January appointment. '.repeat(8)}\n\n## Current work\n${'The owner is developing a calendar integration. '.repeat(8)}`;
+      const revision =
+        kind === 'missing-section'
+          ? `## Background\n${'The source describes a completed January appointment. '.repeat(8)}`
+          : 'The owner has an interesting professional background.';
+      const router = {
+        object: async () => ({
+          ok: true,
+          modelId: 'test',
+          degraded: false,
+          finishReason: kind === 'truncated' ? 'length' : 'stop',
+          object: { decision: 'revise', revisedText: revision, reasons: [] },
+        }),
+      };
+      const result = await verifyFinalOutput(router as never, {
+        taskId: 't',
+        request: 'Give a detailed profile including background and current work.',
+        draft,
+        evidence: [],
+        critical: true,
+      });
+      expect(result.text).toBe(draft);
+      expect(result.revised).toBe(false);
+    },
+  );
   it('carries bounded follow-up context separately from outcome evidence', () => {
     const prompt = buildOutputVerificationPrompt({
       request: 'Yes, please',

@@ -12,8 +12,12 @@ function riskOf(entry: ReturnType<ToolRegistry['get']>, args: unknown): string |
 
 function toolsWith(api: ReturnType<typeof vi.fn>) {
   const registry = new ToolRegistry();
+  const signOpaqueToken = (value: string) => `test.${value}`;
+  const verifyOpaqueToken = (token: string) => {
+    return token.startsWith('test.') ? token.slice('test.'.length) : null;
+  };
   registerCalendarTools(registry, {
-    client: { api } as unknown as GoogleClient,
+    client: { api, signOpaqueToken, verifyOpaqueToken } as unknown as GoogleClient,
     botEmail: 'bot@example.com',
     ownerEmail: 'owner@example.com',
   });
@@ -81,6 +85,69 @@ describe('calendar.list_events', () => {
     expect(result.events.map((e) => e.calendar)).toEqual(['Baldvin', 'Work', 'Assistant']);
     expect(result.calendarsSearched).toEqual(['Assistant', 'Baldvin', 'Work']);
     expect(result).toMatchObject({ complete: true });
+  });
+
+  it('returns the globally earliest future event and preserves other calendars in the cursor', async () => {
+    const byCalendar = {
+      'bot@example.com': [event('later-bot', 'Later bot event', '2026-07-24T17:00:00Z')],
+      'owner@example.com': [
+        event('past-owner', 'Already finished', '2026-07-24T09:00:00Z'),
+        event('first-future', 'First future', '2026-07-24T12:00:00Z'),
+      ],
+      'work@example.com': [event('later-work', 'Later work event', '2026-07-24T13:00:00Z')],
+    };
+    const api = vi.fn(async (url: string) => {
+      if (url.includes('/users/me/calendarList')) return { items: CALENDARS };
+      const parsed = new URL(url, 'https://calendar.test');
+      const id = calendarIdIn(url);
+      const timeMin = Date.parse(parsed.searchParams.get('timeMin') ?? '');
+      const timeMax = Date.parse(parsed.searchParams.get('timeMax') ?? '');
+      const pageSize = Number(parsed.searchParams.get('maxResults'));
+      const items = (byCalendar[id as keyof typeof byCalendar] ?? [])
+        .filter((item) => {
+          const start = Date.parse(item.start.dateTime);
+          return start >= timeMin && start < timeMax;
+        })
+        .sort((a, b) => Date.parse(a.start.dateTime) - Date.parse(b.start.dateTime))
+        .slice(0, pageSize);
+      return { items };
+    });
+    const result = (await toolsWith(api)
+      .get('calendar.list_events')
+      ?.tool.execute(
+        {
+          timeMin: '2026-07-24T10:00:00Z',
+          timeMax: '2026-07-25T00:00:00Z',
+          maxResults: 1,
+        },
+        {} as never,
+      )) as {
+      events: Array<{ eventId: string; start: string }>;
+      complete: boolean;
+      nextPageToken?: string;
+    };
+
+    const eventQueries = api.mock.calls
+      .map(([url]) => String(url))
+      .filter((url) => url.includes('/events'))
+      .map((url) => new URL(url, 'https://calendar.test'));
+    expect(eventQueries).toHaveLength(3);
+    expect(
+      eventQueries.every((url) => url.searchParams.get('timeMin') === '2026-07-24T10:00:00Z'),
+    ).toBe(true);
+    expect(eventQueries.every((url) => url.searchParams.get('maxResults') === '1')).toBe(true);
+    expect(result.events.map(({ eventId, start }) => ({ eventId, start }))).toEqual([
+      { eventId: 'first-future', start: '2026-07-24T12:00:00Z' },
+    ]);
+    expect(result.complete).toBe(false);
+    expect(result.nextPageToken).toMatch(/^test\./);
+    if (!result.nextPageToken) throw new Error('Expected a cursor for unreturned calendars');
+    const cursor = JSON.parse(result.nextPageToken.slice('test.'.length)) as {
+      calendars: Array<{ buffered: Array<{ eventId: string }> }>;
+    };
+    expect(
+      cursor.calendars.flatMap((calendar) => calendar.buffered.map((item) => item.eventId)),
+    ).toEqual(expect.arrayContaining(['later-bot', 'later-work']));
   });
 
   it('addresses each calendar by id rather than the hardcoded primary', async () => {
@@ -196,6 +263,168 @@ describe('calendar.list_events', () => {
     expect(result.events.map((e) => e.eventId)).toEqual(['w1']);
   });
 
+  it('keeps requested, resolved, and searched calendar coverage distinct when some names are missing', async () => {
+    const api = apiFor({ 'work@example.com': [event('w1', 'Standup', '2026-07-24T12:00:00Z')] });
+    const result = (await toolsWith(api)
+      .get('calendar.list_events')
+      ?.tool.execute(
+        {
+          timeMin: '2026-07-24T00:00:00Z',
+          timeMax: '2026-07-25T00:00:00Z',
+          maxResults: 20,
+          calendarIds: ['Work', 'Former team calendar'],
+        },
+        {} as never,
+      )) as {
+      events: Array<{ eventId: string }>;
+      calendarsRequested: string[];
+      calendarsResolved: Array<{ id: string; name: string }>;
+      calendarsSearched: string[];
+      unavailable: Array<{ calendar: string; reason: string }>;
+      complete: boolean;
+    };
+
+    expect(result.events.map((entry) => entry.eventId)).toEqual(['w1']);
+    expect(result.calendarsRequested).toEqual(['Work', 'Former team calendar']);
+    expect(result.calendarsResolved).toEqual([{ id: 'work@example.com', name: 'Work' }]);
+    expect(result.calendarsSearched).toEqual(['Work']);
+    expect(result.unavailable).toEqual([
+      { calendar: 'Former team calendar', reason: 'calendar was not found in the readable roster' },
+    ]);
+    expect(result.complete).toBe(false);
+  });
+
+  it('does not guess when a requested display name matches multiple calendars', async () => {
+    const duplicateName = [
+      { id: 'team-a@example.com', summary: 'Team', accessRole: 'reader' },
+      { id: 'team-b@example.com', summary: 'Team', accessRole: 'reader' },
+    ];
+    const api = apiFor({}, duplicateName);
+    const result = (await toolsWith(api)
+      .get('calendar.list_events')
+      ?.tool.execute(
+        {
+          timeMin: '2026-07-24T00:00:00Z',
+          timeMax: '2026-07-25T00:00:00Z',
+          maxResults: 20,
+          calendarIds: ['Team'],
+        },
+        {} as never,
+      )) as {
+      unavailable: Array<{ calendar: string; reason: string; candidates?: string[] }>;
+      calendarsSearched: string[];
+      complete: boolean;
+    };
+
+    expect(result.unavailable).toEqual([
+      {
+        calendar: 'Team',
+        reason: 'calendar name is ambiguous; select by calendar ID',
+        candidates: ['team-a@example.com', 'team-b@example.com'],
+      },
+    ]);
+    expect(result.calendarsSearched).toEqual([]);
+    expect(api.mock.calls.some(([url]) => String(url).includes('/events'))).toBe(false);
+    expect(result.complete).toBe(false);
+  });
+
+  it('paginates the readable calendar roster and can resolve a calendar on the next page', async () => {
+    const api = vi.fn(async (url: string) => {
+      if (url.includes('/users/me/calendarList')) {
+        const token = new URL(url).searchParams.get('pageToken');
+        return token === 'roster-2'
+          ? { items: [{ id: 'second@example.com', summary: 'Second page', accessRole: 'reader' }] }
+          : {
+              items: [{ id: 'first@example.com', summary: 'First page', accessRole: 'reader' }],
+              nextPageToken: 'roster-2',
+            };
+      }
+      return { items: [event('on-second-page', 'Found', '2026-07-24T09:00:00Z')] };
+    });
+    const registry = toolsWith(api);
+    const firstRosterPage = (await registry
+      .get('calendar.list_calendars')
+      ?.tool.execute({}, {} as never)) as {
+      calendars: Array<{ id: string }>;
+      nextPageToken?: string;
+      complete: boolean;
+    };
+    const secondRosterPage = (await registry
+      .get('calendar.list_calendars')
+      ?.tool.execute({ pageToken: firstRosterPage.nextPageToken }, {} as never)) as {
+      calendars: Array<{ id: string }>;
+      complete: boolean;
+    };
+    const events = (await registry.get('calendar.list_events')?.tool.execute(
+      {
+        timeMin: '2026-07-24T00:00:00Z',
+        timeMax: '2026-07-25T00:00:00Z',
+        maxResults: 20,
+        calendarIds: ['Second page'],
+      },
+      {} as never,
+    )) as { events: Array<{ eventId: string }>; complete: boolean };
+
+    expect(firstRosterPage.calendars.map((calendar) => calendar.id)).toEqual(['first@example.com']);
+    expect(firstRosterPage.nextPageToken).toBe('roster-2');
+    expect(firstRosterPage.complete).toBe(false);
+    expect(secondRosterPage.calendars.map((calendar) => calendar.id)).toEqual([
+      'second@example.com',
+    ]);
+    expect(secondRosterPage.complete).toBe(true);
+    expect(events.events.map((entry) => entry.eventId)).toEqual(['on-second-page']);
+    expect(events.complete).toBe(true);
+  });
+
+  it('continues chronological event pagination with the same filters and authenticated cursor', async () => {
+    const api = vi.fn(async (url: string) => {
+      if (url.includes('/users/me/calendarList')) return { items: [CALENDARS[0]] };
+      const params = new URL(url).searchParams;
+      if (params.get('pageToken') === 'second')
+        return { items: [event('b2', 'Second', '2026-07-24T10:00:00Z')] };
+      return {
+        items: [event('b1', 'First', '2026-07-24T09:00:00Z')],
+        nextPageToken: 'second',
+      };
+    });
+    const tool = toolsWith(api).get('calendar.list_events')?.tool;
+    const first = (await tool?.execute(
+      {
+        timeMin: '2026-07-24T00:00:00Z',
+        timeMax: '2026-07-25T00:00:00Z',
+        maxResults: 1,
+      },
+      {} as never,
+    )) as { events: Array<{ eventId: string }>; nextPageToken: string; complete: boolean };
+    const second = (await tool?.execute(
+      {
+        timeMin: '2026-07-24T00:00:00Z',
+        timeMax: '2026-07-25T00:00:00Z',
+        maxResults: 1,
+        pageToken: first.nextPageToken,
+      },
+      {} as never,
+    )) as { events: Array<{ eventId: string }>; nextPageToken?: string; complete: boolean };
+
+    expect(first.events.map((entry) => entry.eventId)).toEqual(['b1']);
+    expect(first.complete).toBe(false);
+    expect(second.events.map((entry) => entry.eventId)).toEqual(['b2']);
+    expect(second.complete).toBe(true);
+    const eventUrls = api.mock.calls
+      .map(([url]) => String(url))
+      .filter((url) => url.includes('/events'));
+    expect(eventUrls).toHaveLength(2);
+    for (const url of eventUrls) {
+      expect(new URL(url).searchParams.get('timeMin')).toBe('2026-07-24T00:00:00Z');
+      expect(new URL(url).searchParams.get('timeMax')).toBe('2026-07-25T00:00:00Z');
+      expect(new URL(url).searchParams.get('singleEvents')).toBe('true');
+      expect(new URL(url).searchParams.get('orderBy')).toBe('startTime');
+    }
+    const secondEventUrl = eventUrls.at(1);
+    expect(secondEventUrl).toBeDefined();
+    expect(new URL(secondEventUrl ?? '').searchParams.get('pageToken')).toBe('second');
+  });
+
   it('trims the merged list to maxResults after sorting, not per calendar', async () => {
     const api = apiFor({
       'bot@example.com': [event('b1', 'Late', '2026-07-24T23:00:00Z')],
@@ -227,7 +456,7 @@ describe('calendar.list_events', () => {
     });
     const result = (await toolsWith(api)
       .get('calendar.search_events')
-      ?.tool.execute({ query: 'Clay', maxResults: 20 }, {} as never)) as {
+      ?.tool.execute({ query: 'Clay', maxResults: 1 }, {} as never)) as {
       complete: boolean;
       note?: string;
     };
@@ -243,6 +472,37 @@ describe('calendar.list_events', () => {
       confidentialRead: true,
       returnsUntrustedContent: true,
     });
+  });
+});
+
+describe('mail-derived calendar mutation fence', () => {
+  it('does not call Google when a booking lifecycle changed after acceptance', async () => {
+    const api = vi.fn(async () => ({ id: 'should-not-create' }));
+    const registered = toolsWith(api).get('calendar.create_event');
+    const recheck = vi.fn(async () => false);
+
+    await expect(
+      registered?.tool.execute(
+        {
+          summary: 'Berlin spa booking',
+          start: '2026-10-20T14:40:00Z',
+          end: '2026-10-20T16:40:00Z',
+          description: '',
+          location: '',
+          attendees: [],
+        },
+        {
+          bookingOccurrence: {
+            agentId: 'agent-1',
+            bookingKey: 'opaque-key',
+            version: 1,
+          },
+          assertBookingOccurrenceCurrent: recheck,
+        } as never,
+      ),
+    ).rejects.toThrow('booking changed');
+    expect(recheck).toHaveBeenCalledOnce();
+    expect(api).not.toHaveBeenCalled();
   });
 });
 
@@ -552,7 +812,10 @@ describe('calendar.update_event', () => {
   it('refuses an owner-only edit once it sees the event has attendees', async () => {
     // The declared flag bought the autonomous tier; this fetch is what makes
     // the claim true. A wrong claim must fail loudly, not mail the attendees.
-    const api = vi.fn().mockResolvedValueOnce({ attendees: [{ email: 'someone@example.com' }] });
+    const api = vi.fn().mockResolvedValueOnce({
+      etag: 'version-1',
+      attendees: [{ email: 'someone@example.com' }],
+    });
     await expect(
       toolsWith(api)
         .get('calendar.update_event')
@@ -568,7 +831,7 @@ describe('calendar.update_event', () => {
   it('suppresses notifications on a verified owner-only edit', async () => {
     const api = vi
       .fn()
-      .mockResolvedValueOnce({ attendees: [] }) // verification GET
+      .mockResolvedValueOnce({ etag: 'version-1', attendees: [] }) // verification GET
       .mockResolvedValueOnce({ id: 'evt-1' }); // PATCH
     await toolsWith(api)
       .get('calendar.update_event')
@@ -576,14 +839,27 @@ describe('calendar.update_event', () => {
         { eventId: 'evt-1', start: '2026-07-24T16:00:00-07:00', ownerOnly: true },
         {} as never,
       );
-    const [patchUrl] = api.mock.calls[1] as [string];
+    const [patchUrl, patchInit] = api.mock.calls[1] as [string, RequestInit];
     expect(patchUrl).toContain('sendUpdates=none');
+    expect(patchInit.headers).toEqual({ 'If-Match': 'version-1' });
   });
 
   it('PATCHes only the changed fields and merges added attendees onto existing ones', async () => {
     const api = vi
       .fn()
-      .mockResolvedValueOnce({ attendees: [{ email: 'existing@example.com' }] }) // GET existing
+      .mockResolvedValueOnce({
+        etag: 'version-2',
+        attendees: [
+          {
+            email: 'Existing@Example.com',
+            responseStatus: 'tentative',
+            optional: true,
+            comment: 'arriving later',
+            displayName: 'Existing guest',
+          },
+          { email: 'existing@example.com', displayName: 'Existing duplicate row' },
+        ],
+      }) // GET existing
       .mockResolvedValueOnce({
         id: 'evt-1',
         htmlLink: 'https://cal.example/evt-1',
@@ -594,7 +870,7 @@ describe('calendar.update_event', () => {
         {
           eventId: 'evt-1',
           start: '2026-07-24T16:00:00-07:00',
-          addAttendees: ['new@example.com'],
+          addAttendees: ['new@example.com', 'EXISTING@example.com'],
         },
         {} as never,
       );
@@ -605,9 +881,59 @@ describe('calendar.update_event', () => {
     expect(body.start).toEqual({ dateTime: '2026-07-24T16:00:00-07:00' });
     expect(body.summary).toBeUndefined(); // untouched fields aren't sent
     expect(body.attendees).toEqual([
-      { email: 'existing@example.com' },
+      {
+        email: 'Existing@Example.com',
+        responseStatus: 'tentative',
+        optional: true,
+        comment: 'arriving later',
+        displayName: 'Existing guest',
+      },
+      { email: 'existing@example.com', displayName: 'Existing duplicate row' },
       { email: 'new@example.com' },
     ]);
+    expect((patchInit as RequestInit).headers).toEqual({ 'If-Match': 'version-2' });
+  });
+
+  it('returns the canonical event time from a successful patch response', async () => {
+    const api = vi.fn().mockResolvedValueOnce({
+      id: 'evt-1',
+      htmlLink: 'https://cal.example/evt-1',
+      summary: 'Sample Air flight SFO to BER via AMS',
+      description: 'private event description',
+      location: 'private event location',
+      start: { dateTime: '2026-10-09T13:45:00-07:00' },
+      end: { dateTime: '2026-10-10T09:05:00+02:00' },
+    });
+    const result = (await toolsWith(api)
+      .get('calendar.update_event')
+      ?.tool.execute(
+        { eventId: 'evt-1', start: '2026-10-09T13:45:00-07:00' },
+        {} as never,
+      )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      eventId: 'evt-1',
+      updated: true,
+      summary: 'Sample Air flight SFO to BER via AMS',
+      start: '2026-10-09T13:45:00-07:00',
+      end: '2026-10-10T09:05:00+02:00',
+    });
+    expect(result).not.toHaveProperty('description');
+    expect(result).not.toHaveProperty('location');
+    expect(api).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not manufacture a canonical time when the patch response omits it', async () => {
+    const api = vi.fn().mockResolvedValueOnce({ id: 'evt-1', updated: true });
+    const result = (await toolsWith(api)
+      .get('calendar.update_event')
+      ?.tool.execute(
+        { eventId: 'evt-1', start: '2026-10-09T13:45:00-07:00' },
+        {} as never,
+      )) as Record<string, unknown>;
+
+    expect(result.updated).toBe(true);
+    expect(result.start).toBeUndefined();
   });
 
   it('rejects an update with no fields to change', () => {
@@ -626,7 +952,7 @@ describe('calendar.cancel_event', () => {
   it('cancels a private appointment autonomously once verified', async () => {
     const api = vi
       .fn()
-      .mockResolvedValueOnce({ attendees: [] }) // verification GET
+      .mockResolvedValueOnce({ etag: 'version-3', attendees: [] }) // verification GET
       .mockResolvedValueOnce({}); // DELETE
     const entry = toolsWith(api).get('calendar.cancel_event');
     expect(riskOf(entry, { eventId: 'evt-1', ownerOnly: true })).toBe('autonomous');
@@ -635,6 +961,7 @@ describe('calendar.cancel_event', () => {
     const [deleteUrl, init] = api.mock.calls[1] as [string, RequestInit];
     expect(init.method).toBe('DELETE');
     expect(deleteUrl).toContain('sendUpdates=none');
+    expect(init.headers).toEqual({ 'If-Match': 'version-3' });
   });
 
   it('refuses rather than cancelling on someone else’s behalf', async () => {
@@ -647,10 +974,111 @@ describe('calendar.cancel_event', () => {
     // The DELETE never went out.
     expect(api).toHaveBeenCalledTimes(1);
   });
+
+  it('cancellation reconciliation is bound to the frozen event and fresh source marker', async () => {
+    const api = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: 'event-314',
+        etag: 'event-v7',
+        status: 'confirmed',
+        summary: 'Berlin spa',
+        description: 'Booking reference R-314',
+        attendees: [],
+      })
+      .mockResolvedValueOnce({});
+    const current = vi.fn().mockResolvedValue(true);
+    const entry = toolsWith(api).get('calendar.cancel_booking_event');
+    await entry?.tool.execute({ eventId: 'event-314', ownerOnly: true }, {
+      bookingOccurrence: {
+        agentId: 'agent-1',
+        bookingKey: 'booking-314',
+        version: 2,
+        operation: 'cancel_existing',
+        calendarEventId: 'event-314',
+        bookingIdentity: 'R-314',
+      },
+      assertBookingOccurrenceCurrent: current,
+    } as never);
+    expect(current).toHaveBeenCalledTimes(2);
+    const [deleteUrl, init] = api.mock.calls[1] as [string, RequestInit];
+    expect(deleteUrl).toContain('/events/event-314?sendUpdates=none');
+    expect(init.headers).toEqual({ 'If-Match': 'event-v7' });
+  });
+
+  it('requires booking authority before exposing the narrow cancellation tool to tainted work', async () => {
+    const tool = toolsWith(vi.fn()).get('calendar.cancel_booking_event')?.tool;
+    await expect(
+      tool?.prepareSecurity?.({ eventId: 'event-314' } as never, {} as never, 'dispatch'),
+    ).rejects.toThrow(/authority binding/i);
+    await expect(
+      tool?.prepareSecurity?.(
+        { eventId: 'different-event' } as never,
+        {
+          bookingOccurrence: {
+            operation: 'cancel_existing',
+            calendarEventId: 'event-314',
+            bookingIdentity: 'R-314',
+          },
+        } as never,
+        'approved',
+      ),
+    ).rejects.toThrow(/authority binding/i);
+  });
+
+  it('abstains if the frozen event changed or the source occurrence was reinstated', async () => {
+    const api = vi.fn().mockResolvedValueOnce({
+      id: 'event-314',
+      etag: 'event-v8',
+      status: 'confirmed',
+      summary: 'Berlin spa',
+      description: 'Booking reference R-3144',
+      attendees: [],
+    });
+    const entry = toolsWith(api).get('calendar.cancel_booking_event');
+    const context = {
+      bookingOccurrence: {
+        agentId: 'agent-1',
+        bookingKey: 'booking-314',
+        version: 2,
+        operation: 'cancel_existing',
+        calendarEventId: 'event-314',
+        bookingIdentity: 'R-314',
+      },
+      assertBookingOccurrenceCurrent: vi.fn().mockResolvedValue(true),
+    };
+    await expect(
+      entry?.tool.execute({ eventId: 'event-314', ownerOnly: true }, context as never),
+    ).rejects.toThrow(/no longer matches/i);
+    expect(api).toHaveBeenCalledTimes(1);
+
+    const matchingApi = vi.fn().mockResolvedValueOnce({
+      id: 'event-314',
+      etag: 'event-v7',
+      status: 'confirmed',
+      summary: 'Berlin spa',
+      description: 'Booking reference R-314',
+      attendees: [],
+    });
+    const race = {
+      ...context,
+      assertBookingOccurrenceCurrent: vi
+        .fn()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false),
+    };
+    await expect(
+      toolsWith(matchingApi)
+        .get('calendar.cancel_booking_event')
+        ?.tool.execute({ eventId: 'event-314', ownerOnly: true }, race as never),
+    ).rejects.toThrow(/booking changed/i);
+    expect(matchingApi).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('calendar.respond_to_event', () => {
   const invitation = {
+    etag: 'invite-version-1',
     summary: 'Design review',
     htmlLink: 'https://calendar.google.com/evt-9',
     organizer: { email: 'organizer@acme.example' },
@@ -767,6 +1195,7 @@ describe('calendar.respond_to_event', () => {
     const api = vi
       .fn()
       .mockResolvedValueOnce({
+        etag: 'invite-version-owner',
         attendees: [
           { email: 'organizer@acme.example', responseStatus: 'accepted' },
           { email: 'Owner@Example.com', responseStatus: 'needsAction' },
@@ -783,6 +1212,47 @@ describe('calendar.respond_to_event', () => {
     const sent = JSON.parse(init.body) as { attendees: Array<Record<string, unknown>> };
     expect(sent.attendees[1]?.responseStatus).toBe('declined');
     expect(sent.attendees[0]?.responseStatus).toBe('accepted');
+  });
+
+  it('ignores a foreign self row on a writable shared calendar and refuses ambiguous identities', async () => {
+    const foreignSelf = {
+      etag: 'foreign-copy',
+      attendees: [
+        { email: 'calendar-owner@example.com', self: true, responseStatus: 'needsAction' },
+        { email: 'BOT@example.com', responseStatus: 'needsAction' },
+      ],
+    };
+    const api = vi.fn().mockResolvedValueOnce(foreignSelf).mockResolvedValueOnce({ id: 'evt-9' });
+    await toolsWith(api)
+      .get('calendar.respond_to_event')
+      ?.tool.execute(
+        { eventId: 'evt-9', response: 'accepted', calendarId: 'work@example.com', comment: '' },
+        {} as never,
+      );
+    const sent = JSON.parse(String(api.mock.calls[1]?.[1]?.body)) as {
+      attendees: Array<Record<string, unknown>>;
+    };
+    expect(sent.attendees[0]?.responseStatus).toBe('needsAction');
+    expect(sent.attendees[1]?.responseStatus).toBe('accepted');
+    expect(api.mock.calls[1]?.[1]?.headers).toEqual({ 'If-Match': 'foreign-copy' });
+
+    const ambiguous = vi.fn().mockResolvedValueOnce({
+      etag: 'ambiguous-copy',
+      attendees: [
+        { email: 'bot@example.com', responseStatus: 'needsAction' },
+        { email: 'owner@example.com', responseStatus: 'needsAction' },
+        { email: 'calendar-owner@example.com', self: true, responseStatus: 'needsAction' },
+      ],
+    });
+    await expect(
+      toolsWith(ambiguous)
+        .get('calendar.respond_to_event')
+        ?.tool.execute(
+          { eventId: 'evt-9', response: 'accepted', calendarId: 'work@example.com', comment: '' },
+          {} as never,
+        ),
+    ).rejects.toThrow(/guest list/i);
+    expect(ambiguous).toHaveBeenCalledTimes(1);
   });
 
   it('refuses when no guest row is ours instead of adding one', async () => {

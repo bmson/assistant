@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import {
   emptyRealtimeUsage,
+  type RealtimeInterruptionResult,
   type RealtimeSession,
   type RealtimeSessionConfig,
   type RealtimeSessionEvents,
@@ -33,11 +34,25 @@ type ServerEvent = {
   call_id?: string;
   name?: string;
   arguments?: string;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    input_token_details?: { audio_tokens?: number; text_tokens?: number };
+  };
   error?: { message?: string };
   response?: {
     usage?: {
-      input_token_details?: { audio_tokens?: number; text_tokens?: number; cached_tokens?: number };
-      output_token_details?: { audio_tokens?: number; text_tokens?: number };
+      input_token_details?: {
+        audio_tokens?: number;
+        text_tokens?: number;
+        cached_tokens?: number;
+        cached_tokens_details?: { audio_tokens?: number; text_tokens?: number };
+      };
+      output_token_details?: {
+        audio_tokens?: number;
+        text_tokens?: number;
+        reasoning_tokens?: number;
+      };
     };
   };
 };
@@ -175,6 +190,12 @@ async function connectOpenAIRealtime(
         replyStallTimer.unref?.();
         break;
       case 'conversation.item.input_audio_transcription.completed':
+        if (event.usage) {
+          const inputAudio = count(event.usage.input_token_details?.audio_tokens);
+          usage.transcriptionInputAudioTokens += inputAudio || count(event.usage.input_tokens);
+          usage.transcriptionOutputTextTokens += count(event.usage.output_tokens);
+          usage.transcriptionUsageReported = true;
+        }
         if (event.transcript?.trim()) events.transcript('caller', event.transcript.trim());
         break;
       case 'response.output_audio_transcript.done':
@@ -196,11 +217,21 @@ async function connectOpenAIRealtime(
       case 'response.done': {
         const input = event.response?.usage?.input_token_details;
         const output = event.response?.usage?.output_token_details;
+        const cached = count(input?.cached_tokens);
+        const cachedAudio = count(input?.cached_tokens_details?.audio_tokens);
+        const cachedText = count(input?.cached_tokens_details?.text_tokens);
         usage.inputAudioTokens += count(input?.audio_tokens);
         usage.inputTextTokens += count(input?.text_tokens);
-        usage.cachedInputTokens += count(input?.cached_tokens);
+        usage.cachedInputTokens += cached;
+        usage.cachedAudioInputTokens += cachedAudio;
+        usage.cachedTextInputTokens += cachedText;
+        usage.cachedUnclassifiedInputTokens += Math.max(0, cached - cachedAudio - cachedText);
         usage.outputAudioTokens += count(output?.audio_tokens);
         usage.outputTextTokens += count(output?.text_tokens);
+        if (output?.reasoning_tokens !== undefined) {
+          usage.reasoningOutputTokens += count(output.reasoning_tokens);
+          usage.reasoningUsageReported = true;
+        }
         responseActive = false;
         activeTurn = null;
         if (pendingResponse) {
@@ -249,7 +280,7 @@ async function connectOpenAIRealtime(
             create_response: true,
             interrupt_response: true,
           },
-          transcription: { model: options.transcriptionModel ?? 'gpt-4o-mini-transcribe' },
+          transcription: { model: options.transcriptionModel ?? 'gpt-live-transcribe' },
         },
         output: {
           format: { type: 'audio/pcmu' },
@@ -285,8 +316,9 @@ async function connectOpenAIRealtime(
     respond(instructions) {
       requestResponse(instructions);
     },
-    interrupt(unplayedMs) {
-      if (!currentAudioItem || unplayedMs <= 0) return;
+    interrupt(unplayedMs): RealtimeInterruptionResult {
+      if (!currentAudioItem || unplayedMs <= 0 || socket.readyState !== WebSocket.OPEN)
+        return { providerState: 'unknown', spokenOffset: 'unknown' };
       send({
         type: 'conversation.item.truncate',
         item_id: currentAudioItem,
@@ -295,6 +327,9 @@ async function connectOpenAIRealtime(
       });
       currentAudioItem = undefined;
       currentAudioItemMs = 0;
+      // The provider command was sent, but this adapter does not wait for a
+      // server truncation receipt; only the transport offset is estimated.
+      return { providerState: 'requested', spokenOffset: 'estimated' };
     },
     usage: () => ({ ...usage }),
     async close() {

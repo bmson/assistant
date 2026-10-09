@@ -1,4 +1,4 @@
-import { planBrowse, recordBrowserJobResult } from '@assistant/core';
+import { jobCallbackIdempotencyKey, planBrowse, recordBrowserJobResult } from '@assistant/core';
 import {
   type BrowserJobLauncher,
   CloudRunJobLauncher,
@@ -63,6 +63,7 @@ export const browserModule = defineModule<BrowserJobLauncher | undefined>({
                 taskId: body.taskId,
                 token: body.token,
                 result: body.result ?? { ok: false, error: 'job reported no result' },
+                idempotencyKey: jobCallbackIdempotencyKey('browser', body.taskId, body.token),
               });
               if (!outcome.ok) return { status: outcome.status, json: { error: outcome.error } };
               return { status: 200, json: { ok: true } };

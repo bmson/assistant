@@ -92,13 +92,23 @@ function canonicalIndex(
   const fields = array(value.fields, 'Firestore index fields').map(canonicalField);
   if (fields.length < 2) throw new Error('Firestore composite index has too few fields');
   if (trusted) {
-    if (fields.some((field) => field.fieldPath === '__name__'))
-      throw new Error('Trusted index unexpectedly declares __name__');
-    const last = fields.at(-1);
-    fields.push({
-      fieldPath: '__name__',
-      order: last?.order === 'DESCENDING' ? 'DESCENDING' : 'ASCENDING',
-    });
+    const ordinaryFields = fields.filter((field) => field.fieldPath !== '__name__');
+    if (ordinaryFields.length === 1 && ordinaryFields[0]?.order)
+      throw new Error('Trusted composite index duplicates an automatic single-field index');
+    const documentNamePosition = fields.findIndex((field) => field.fieldPath === '__name__');
+    if (documentNamePosition >= 0) {
+      if (documentNamePosition !== fields.length - 1)
+        throw new Error('Trusted index document-name field must be last');
+      const precedingOrder = fields.at(-2)?.order === 'DESCENDING' ? 'DESCENDING' : 'ASCENDING';
+      if (fields.at(-1)?.order !== precedingOrder)
+        throw new Error('Trusted index document-name order must match the preceding field order');
+    } else {
+      const last = fields.at(-1);
+      fields.push({
+        fieldPath: '__name__',
+        order: last?.order === 'DESCENDING' ? 'DESCENDING' : 'ASCENDING',
+      });
+    }
   } else {
     // Firestore lists the implicit document-name field immediately before the
     // terminal vector field. The manifest describes the same index without that

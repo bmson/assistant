@@ -73,7 +73,7 @@ const disabledActions = vi.hoisted(
 );
 vi.mock('@/auth', () => ({
   requireOwner: async () => ({}),
-  isAuthed: async () => true,
+  isAuthed: async () => ({ user: { name: 'Synthetic owner', email: 'owner@example.test' } }),
   authMode: 'passkey',
 }));
 vi.mock('next/navigation', () => ({
@@ -170,6 +170,7 @@ vi.mock('@/app/chat/[id]/chat-client', async () => {
 });
 vi.mock('@/lib/approval-store', () => ({ getApprovalStore: () => ({}) }));
 vi.mock('@/lib/server', () => ({
+  getEmailObligationRepository: () => ({ listEmailObligations: async () => [] }),
   // Page query seams receive an opaque handle; any unexpected actual query fails closed.
   getDb: () =>
     new Proxy(
@@ -186,6 +187,21 @@ vi.mock('@/lib/server', () => ({
   getCallsPorts: async () => ({}),
   getBillingOverview: async () => data().billing,
   getApplication: () => ({
+    listClosedCommitments: async () =>
+      state.empty
+        ? []
+        : [
+            {
+              id: visualId,
+              kind: 'task',
+              title: 'Send the revised draft',
+              details: 'The draft was sent.',
+              nextAction: '',
+              dueAt: null,
+              status: 'resolved',
+              updatedAt: new Date(visualNow),
+            },
+          ],
     getDocuments: async () => ({
       documents: state.empty
         ? []
@@ -231,7 +247,11 @@ vi.mock('@/lib/server', () => ({
             },
           ],
       quarantineBySource: { 'Old work email': 2 },
-      unstartedFiles: state.empty ? [] : [{ name: 'family-notes.txt' }],
+      unstartedFiles: state.empty ? [] : [{ name: 'family-notes.txt', dir: false }],
+      sourcePagination: { consistency: 'live-keyset', hasMore: false, nextCursor: null },
+      filesPagination: { consistency: 'process-snapshot', hasMore: false, nextCursor: null },
+      sourceAvailability: { status: 'available', version: 1 },
+      filesAvailability: { status: 'available', version: 1 },
     }),
     listSkills: async () =>
       state.empty

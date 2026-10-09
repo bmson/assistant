@@ -3,6 +3,7 @@ import { loadConfig } from '@assistant/config';
 import { FirestoreOwnerAuthRepository, type OwnerAuthState } from '@assistant/firestore';
 import { cookies } from 'next/headers';
 import { passkeyOrigin } from '@/auth-mode';
+import { readBoundedJson } from '@/lib/bounded-json';
 import { getFirestoreInstallationStore } from '@/lib/server';
 import { OwnerAuthInputError, OwnerPasskeyService } from './service';
 import {
@@ -141,13 +142,11 @@ export async function ownerAuthRoute(
 }
 
 export async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
-  const text = await request.text();
-  if (text.length > 64 * 1024) throw new OwnerAuthInputError(400, 'body_too_large');
-  try {
-    const value = JSON.parse(text || '{}') as unknown;
-    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('shape');
-    return value as Record<string, unknown>;
-  } catch {
-    throw new OwnerAuthInputError(400, 'body_invalid');
+  const parsed = await readBoundedJson(request);
+  if (!parsed.ok) {
+    throw new OwnerAuthInputError(400, parsed.status === 413 ? 'body_too_large' : 'body_invalid');
   }
+  if (!parsed.value || typeof parsed.value !== 'object' || Array.isArray(parsed.value))
+    throw new OwnerAuthInputError(400, 'body_invalid');
+  return parsed.value as Record<string, unknown>;
 }

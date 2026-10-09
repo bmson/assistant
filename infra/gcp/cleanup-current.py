@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep deployed images and current secret versions; preview unless --apply.
+"""Keep deployed images; retain secret history; preview unless --apply.
 
 Uses gcloud's existing identity. Never reads secret payloads. Run under the same
 production-deploy concurrency group as deployment so builds cannot race cleanup.
@@ -100,7 +100,6 @@ class Cloud:
 
 RUN = "run.googleapis.com"
 ARTIFACTS = "artifactregistry.googleapis.com"
-SECRETS = "secretmanager.googleapis.com"
 CONTAINER_FIELDS = "containers(image,env(valueSource)),volumes(secret)"
 
 
@@ -238,22 +237,17 @@ def referenced_secrets(specs):
 
 
 def plan_secrets(secret, versions, references):
-    # latest is the greatest version number, including disabled/destroyed
-    # versions. Never silently substitute an older version for a broken latest.
+    # A regional Cloud Run inventory cannot prove that an old credential is
+    # unused by another region, an offline decryptor, or a non-Cloud-Run
+    # consumer. Keep all extant history until that dependency set is complete.
     by_number = {v["name"].rsplit("/", 1)[-1]: v for v in versions}
     latest = max(by_number, key=int) if by_number else None
-    enabled = [number for number, v in by_number.items() if v["state"] == "ENABLED"]
-    retained = {max(enabled, key=int)} if enabled else set()
     aliases = {key: str(value) for key, value in secret.get("versionAliases", {}).items()}
-    retained.update(aliases.values())
     for reference in references:
         number = latest if reference == "latest" else aliases.get(reference, reference)
         if number not in by_number or by_number[number]["state"] != "ENABLED":
             raise RuntimeError(f"Current secret reference is unavailable: {secret['name']}:{reference}")
-        retained.add(number)
-    deletions = [v for number, v in by_number.items()
-                 if number not in retained and v["state"] in ("ENABLED", "DISABLED")]
-    return [by_number[number]["name"] for number in sorted(retained, key=int)], deletions
+    return [v["name"] for v in versions if v["state"] != "DESTROYED"], []
 
 
 def delete_image(cloud, name):
@@ -287,24 +281,13 @@ def inventory(cloud, args):
     kept_images, _ = plan_images(images, tags, runtime_images)
     related = image_referrers(cloud, images, kept_images)
     kept_images, delete_images = plan_images(images, tags, runtime_images, related)
-    secrets = cloud.listing(SECRETS, f"v1/projects/{args.project}/secrets", "secrets")
-    refs = referenced_secrets(specs)
-    kept_secrets, delete_secrets = [], []
-    secret_fingerprint = []
-    for secret in secrets:
-        versions = cloud.listing(SECRETS, f"v1/{secret['name']}/versions", "versions")
-        secret_fingerprint.append([secret["name"], secret.get("versionAliases", {}),
-                                   [(v["name"], v["state"], v.get("etag")) for v in versions]])
-        kept, deleted = plan_secrets(secret, versions, refs.get(secret["name"].rsplit("/", 1)[-1], set()))
-        if deleted and secret.get("versionDestroyTtl"):
-            raise RuntimeError(f"Secret has delayed destruction enabled: {secret['name']}")
-        kept_secrets.extend(kept)
-        delete_secrets.extend(deleted)
     return {
         "repository": root, "repositoryBytes": int(repository.get("sizeBytes", 0)),
         "runtimeImages": runtime_images, "keepImages": kept_images, "deleteImages": delete_images,
-        "keepSecrets": kept_secrets, "deleteSecrets": delete_secrets, "deleteRevisions": revisions,
-        "fingerprint": fingerprint, "secretFingerprint": secret_fingerprint,
+        # Deliberately do not enumerate or destroy project-wide Secret Manager
+        # history: this region's Cloud Run inventory cannot prove ownership.
+        "keepSecrets": [], "deleteSecrets": [], "deleteRevisions": revisions,
+        "fingerprint": fingerprint, "secretFingerprint": [],
     }
 
 
@@ -319,14 +302,6 @@ def apply(cloud, args, plan):
     def remove_revision(name):
         result = cloud.request(RUN, f"v2/{name}", method="DELETE")
         cloud.operation(RUN, result)
-
-    def destroy_version(version):
-        cloud.request(SECRETS, f"v1/{version['name']}:destroy", method="POST",
-                      data={"etag": version["etag"]})
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        list(pool.map(destroy_version, plan["deleteSecrets"]))
-    print(f"Destroyed {len(plan['deleteSecrets'])} superseded secret versions", flush=True)
 
     def remove_images():
         # Individual force deletion works for both tagged Docker images and
@@ -351,7 +326,7 @@ def apply(cloud, args, plan):
     after = inventory(cloud, args)
     if after["deleteImages"] or after["deleteSecrets"] or after["deleteRevisions"]:
         raise RuntimeError("Cleanup verification found remaining obsolete versions; rerun to finish")
-    print("Verified: only deployed images, their signatures, and current secret versions remain", flush=True)
+    print("Verified image cleanup; Secret Manager versions were retained", flush=True)
 
 
 def main():

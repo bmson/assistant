@@ -244,6 +244,111 @@ describe.skipIf(!enabled)('Firestore profile memory maintenance', () => {
     }
   });
 
+  it('removes canonical quotes across pages while preserving reviewed assertions and endpoints', async () => {
+    const store = emulatorStore();
+    const repository = new FirestoreProfileMemoryMaintenance(store);
+    const agentId = randomUUID();
+    const memoryId = randomUUID();
+    const retainedMemoryId = randomUUID();
+    const assertionId = randomUUID();
+    const [subjectId, objectId] = [randomUUID(), randomUUID()];
+    try {
+      await seedDeletionFence(store, agentId, memoryId);
+      const batch = store.db.batch();
+      for (const id of [subjectId, objectId])
+        batch.set(store.doc('knowledgeGraphEntities', id), { id, agentId });
+      batch.set(store.doc('knowledgeGraphAssertions', assertionId), {
+        id: assertionId,
+        agentId,
+        subjectEntityId: subjectId,
+        objectEntityId: objectId,
+        reviewStatus: 'rejected',
+        reviewedRevision: 2,
+        reviewedPayloadHash: 'owner-review-hash',
+        lifecycle: 'current',
+        ownerAuthored: true,
+      });
+      batch.set(store.doc('knowledgeGraphRelations', 'forgotten-canonical-edge'), {
+        id: 'forgotten-canonical-edge',
+        agentId,
+        assertionId,
+        sourceMemoryId: memoryId,
+        subjectEntityId: subjectId,
+        objectEntityId: objectId,
+      });
+      for (let index = 0; index < 47; index++) {
+        const id = randomUUID();
+        batch.set(store.doc('knowledgeGraphAssertionEvidence', id), {
+          id,
+          agentId,
+          assertionId,
+          sourceMemoryId: memoryId,
+          evidenceQuote: 'Private forgotten quote',
+        });
+      }
+      const retainedId = randomUUID();
+      batch.set(store.doc('knowledgeGraphAssertionEvidence', retainedId), {
+        id: retainedId,
+        agentId,
+        assertionId,
+        sourceMemoryId: retainedMemoryId,
+        evidenceQuote: 'Retained separate source',
+      });
+      await batch.commit();
+      await repository.removeOrphanedGraphEntities({ agentId, memoryId });
+      await repository.removeOrphanedGraphEntities({ agentId, memoryId });
+      expect(
+        (
+          await store
+            .collection('knowledgeGraphAssertionEvidence')
+            .where('sourceMemoryId', '==', memoryId)
+            .get()
+        ).empty,
+      ).toBe(true);
+      expect(
+        (await store.doc('knowledgeGraphAssertionEvidence', retainedId).get()).get('evidenceQuote'),
+      ).toBe('Retained separate source');
+      expect((await store.doc('knowledgeGraphAssertions', assertionId).get()).data()).toMatchObject(
+        {
+          reviewStatus: 'rejected',
+          reviewedRevision: 2,
+          reviewedPayloadHash: 'owner-review-hash',
+          ownerAuthored: true,
+        },
+      );
+      for (const id of [subjectId, objectId])
+        expect((await store.doc('knowledgeGraphEntities', id).get()).exists).toBe(true);
+    } finally {
+      await disposeStore(store);
+    }
+  });
+
+  it('refuses canonical evidence with foreign ownership before deleting its private quote', async () => {
+    const store = emulatorStore();
+    const memoryId = randomUUID();
+    const evidenceId = randomUUID();
+    try {
+      await seedDeletionFence(store, 'owner', memoryId);
+      await store.doc('knowledgeGraphAssertionEvidence', evidenceId).set({
+        id: evidenceId,
+        agentId: 'foreign',
+        sourceMemoryId: memoryId,
+        evidenceQuote: 'Foreign quote',
+      });
+      await expect(
+        new FirestoreProfileMemoryMaintenance(store).removeOrphanedGraphEntities({
+          agentId: 'owner',
+          memoryId,
+        }),
+      ).rejects.toThrow('another agent');
+      expect(
+        (await store.doc('knowledgeGraphAssertionEvidence', evidenceId).get()).get('evidenceQuote'),
+      ).toBe('Foreign quote');
+    } finally {
+      await disposeStore(store);
+    }
+  });
+
   it('refuses to cascade a source projection containing a foreign relation', async () => {
     const store = emulatorStore();
     const repository = new FirestoreProfileMemoryMaintenance(store);

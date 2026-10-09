@@ -1,15 +1,24 @@
-import type { CommitmentView } from '@assistant/application/commitments';
-import { Check, Clock3, X } from 'lucide-react';
+import type { ClosedCommitmentView, CommitmentView } from '@assistant/application/commitments';
+import { Check, Clock3, RotateCcw, X } from 'lucide-react';
 import {
   correctCommitmentFormAction,
   dismissCommitmentAction,
+  reopenCommitmentAction,
   resolveCommitmentAction,
   snoozeCommitmentAction,
 } from '@/app/profile/actions';
 import { cardShellClass, focusRing, inputClass, microLabelClass } from '@/lib/ui';
 import { SubmitButton } from '@/lib/ui-client';
 
-export function CommitmentsPanel({ rows }: { rows: CommitmentView[] }) {
+export function CommitmentsPanel({
+  rows,
+  closedRows = [],
+  reopenOperationIds = {},
+}: {
+  rows: CommitmentView[];
+  closedRows?: ClosedCommitmentView[];
+  reopenOperationIds?: Record<string, string>;
+}) {
   return (
     <section className={`${cardShellClass} mt-8`}>
       <div className="border-b border-edge px-5 py-4 sm:px-6">
@@ -97,6 +106,41 @@ export function CommitmentsPanel({ rows }: { rows: CommitmentView[] }) {
           ))}
         </div>
       )}
+      {closedRows.length ? (
+        <div className="border-t border-edge">
+          <div className="px-5 py-4 sm:px-6">
+            <h3 className="text-sm font-semibold">Recently closed</h3>
+            <p className="mt-1 text-xs leading-5 text-muted">
+              Reopening starts a new occurrence and keeps the earlier closure in history.
+            </p>
+          </div>
+          <div className="divide-y divide-edge">
+            {closedRows.map((row) => (
+              <div
+                key={row.id}
+                className="flex items-center justify-between gap-3 px-5 py-3 sm:px-6"
+              >
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-strong">{row.title}</p>
+                  <p className="mt-1 text-xs text-muted">{row.status}</p>
+                </div>
+                <form
+                  action={reopenCommitmentAction.bind(
+                    null,
+                    row.id,
+                    row.updatedAt.toISOString(),
+                    reopenOperationIds[row.id] ?? '',
+                  )}
+                >
+                  <SubmitButton pendingLabel="Reopening…">
+                    <RotateCcw aria-hidden="true" /> Reopen
+                  </SubmitButton>
+                </form>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

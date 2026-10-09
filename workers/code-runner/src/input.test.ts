@@ -47,6 +47,56 @@ describe('parseJobInput', () => {
       /storage/,
     );
   });
+
+  it('bounds the source, timeout and staged-input manifest', () => {
+    expect(() =>
+      parseJobInput(JSON.stringify({ ...valid, spec: { ...valid.spec, timeoutSeconds: 601 } })),
+    ).toThrow(/timeout/);
+    expect(() =>
+      parseJobInput(
+        JSON.stringify({
+          ...valid,
+          spec: { ...valid.spec, source: 'x'.repeat(2 * 1024 * 1024 + 1) },
+        }),
+      ),
+    ).toThrow(/source exceeds/);
+    expect(() =>
+      parseJobInput(
+        JSON.stringify({
+          ...valid,
+          spec: {
+            ...valid.spec,
+            inputs: Array.from({ length: 21 }, (_, index) => ({
+              workspacePath: `documents/file-${index}.txt`,
+              as: `file-${index}.txt`,
+            })),
+          },
+        }),
+      ),
+    ).toThrow(/too many/);
+  });
+
+  it('bounds the serialized job envelope before parsing it', () => {
+    expect(() => parseJobInput(`${JSON.stringify(valid)}${' '.repeat(3 * 1024 * 1024)}`)).toThrow(
+      /job input exceeds/,
+    );
+  });
+
+  it.each([
+    'code/../browser/profile.tar.enc',
+    'code/./data.csv',
+    'code\\private.csv',
+    'imports/%2e%2e/private',
+  ])('rejects a namespace-confused staged path: %s', (workspacePath) => {
+    expect(() =>
+      parseJobInput(
+        JSON.stringify({
+          ...valid,
+          spec: { ...valid.spec, inputs: [{ workspacePath, as: 'data.csv' }] },
+        }),
+      ),
+    ).toThrow(/namespace/);
+  });
 });
 
 describe('input staging allowlist', () => {

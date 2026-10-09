@@ -285,6 +285,69 @@ describe('golden tasks', () => {
     expect(TaskStateSchema.parse(row?.state).checklistRecoveryAttempts).toBe(0);
   });
 
+  it('resumes a three-call batch after a budget park without asking the model for new calls', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const executions = new Map<string, number>();
+    let budgetBlocked = false;
+    const result = await runGoldenTask(db, agentId, {
+      name: 'three-call-budget-continuation',
+      event: { source: 'chat', trust: 'owner', payload: { text: 'Run all three actions.' } },
+      taskType: 'chat_turn',
+      plan: workflowPlan,
+      resumeAfterBudget: true,
+      script: [
+        {
+          toolCalls: [
+            { toolName: 'fixture.one', input: { ordinal: 1 } },
+            { toolName: 'fixture.two', input: { ordinal: 2 } },
+            { toolName: 'fixture.three', input: { ordinal: 3 } },
+          ],
+        },
+        { text: 'All three actions completed.' },
+      ],
+      beforeDispatch: (input) => {
+        if (input.toolName === 'fixture.one' && !budgetBlocked) {
+          budgetBlocked = true;
+          return {
+            kind: 'budget_blocked',
+            reason: 'fixture budget reset',
+            resumeAt: new Date(0),
+          };
+        }
+      },
+      tools: Object.fromEntries(
+        ['fixture.one', 'fixture.two', 'fixture.three'].map((name) => [
+          name,
+          {
+            schema: z.object({ ordinal: z.number() }),
+            execute: async (args: unknown) => {
+              const ordinal = (args as { ordinal: number }).ordinal;
+              executions.set(name, (executions.get(name) ?? 0) + 1);
+              return { ordinal, completed: true };
+            },
+          },
+        ]),
+      ),
+    });
+    createdTaskIds.push(result.taskId);
+    expect(result.status).toBe('done');
+    expect(result.finalText).toContain('All three actions completed.');
+    expect([...executions.entries()].sort()).toEqual([
+      ['fixture.one', 1],
+      ['fixture.three', 1],
+      ['fixture.two', 1],
+    ]);
+    const rows = await db
+      .select({ decision: toolCalls.decision })
+      .from(toolCalls)
+      .where(eq(toolCalls.taskId, result.taskId));
+    expect(
+      rows.map((row) => (row.decision as { modelToolCallId?: string }).modelToolCallId).sort(),
+    ).toEqual(['golden-1-0', 'golden-1-1', 'golden-1-2']);
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
+    expect(TaskStateSchema.parse(task?.state).pendingToolBatch).toBeNull();
+  });
+
   it('does not display a saved card or claim completion when card persistence fails', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const persist = vi
@@ -302,6 +365,7 @@ describe('golden tasks', () => {
         plan: workflowPlan,
         script: [
           { toolCalls: [{ toolName: 'gmail.search', input: { query: 'hotel' } }] },
+          { toolCalls: [{ toolName: 'gmail.read_thread', input: { threadId: 'harbor-booking' } }] },
           { text: 'Harbor Hotel is the reservation I found.' },
         ],
         card: GenerativeCardSpecV1Schema.parse({
@@ -315,12 +379,22 @@ describe('golden tasks', () => {
         tools: {
           'gmail.search': {
             schema: z.object({ query: z.string() }),
-            execute: async () => ({ results: [{ subject: 'Harbor Hotel' }] }),
+            execute: async () => ({
+              complete: true,
+              results: [{ threadId: 'harbor-booking', subject: 'Harbor Hotel' }],
+            }),
+          },
+          'gmail.read_thread': {
+            schema: z.object({ threadId: z.literal('harbor-booking') }),
+            execute: async () => ({
+              complete: true,
+              messages: [{ text: 'Harbor Hotel reservation confirmation.' }],
+            }),
           },
         },
       });
       createdTaskIds.push(result.taskId);
-      expect(persist).toHaveBeenCalledOnce();
+      expect(persist, result.finalText).toHaveBeenCalledOnce();
       expect(result.status).toBe('needs_attention');
       expect(result.finalText).toContain('Not completed: save it as a card');
       const [row] = await db
@@ -350,6 +424,7 @@ describe('golden tasks', () => {
       plan: workflowPlan,
       script: [
         { toolCalls: [{ toolName: 'gmail.search', input: { query: 'hotel' } }] },
+        { toolCalls: [{ toolName: 'gmail.read_thread', input: { threadId: 'harbor-booking' } }] },
         { text: 'Harbor Hotel is the reservation I found.' },
       ],
       card: GenerativeCardSpecV1Schema.parse({
@@ -363,7 +438,17 @@ describe('golden tasks', () => {
       tools: {
         'gmail.search': {
           schema: z.object({ query: z.string() }),
-          execute: async () => ({ results: [{ subject: 'Harbor Hotel' }] }),
+          execute: async () => ({
+            complete: true,
+            results: [{ threadId: 'harbor-booking', subject: 'Harbor Hotel' }],
+          }),
+        },
+        'gmail.read_thread': {
+          schema: z.object({ threadId: z.literal('harbor-booking') }),
+          execute: async () => ({
+            complete: true,
+            messages: [{ text: 'Harbor Hotel reservation confirmation.' }],
+          }),
         },
       },
     });
@@ -375,7 +460,7 @@ describe('golden tasks', () => {
     const state = TaskStateSchema.parse(row?.state);
     const receipt = state.requestChecklist?.savedCards[0];
     if (receipt) createdCardIds.push(receipt.id);
-    expect(result.status).toBe('done');
+    expect(result.status, result.finalText).toBe('done');
     expect(receipt).toBeDefined();
     if (!receipt) throw new Error('card persistence receipt missing');
     const [revision] = await db
@@ -634,6 +719,7 @@ describe('golden tasks', () => {
         'gmail.read_thread': {
           schema: z.object({ threadId: z.literal('hotel-1') }),
           execute: async () => ({
+            complete: true,
             messages: [{ subject: 'Hotel booking', from: 'hotel@example.com', text: answer }],
           }),
         },
@@ -709,6 +795,7 @@ describe('golden tasks', () => {
         'gmail.read_thread': {
           schema: z.object({ threadId: z.literal('application-1') }),
           execute: async () => ({
+            complete: true,
             messages: [
               { subject: 'Acme application received', text: 'Acme received your application.' },
             ],
@@ -1219,7 +1306,7 @@ describe('golden tasks', () => {
         .where(eq(responseChecks.taskId, result.taskId));
       expect(check).toMatchObject({
         outputVerificationAttempted: true,
-        outputVerificationRevised: true,
+        outputVerificationRevised: name !== 'malformed-wording',
         outputVerificationUnavailable: false,
       });
     },

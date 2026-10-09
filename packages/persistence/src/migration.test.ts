@@ -4,6 +4,7 @@ import {
   checksum,
   checksumForMigrationVersion,
   checksumV3,
+  compositeMigrationId,
   deserializeMigrationValue,
   type MigrationBundle,
   type MigrationRecord,
@@ -11,9 +12,11 @@ import {
   serializeMigrationTimestamp,
   serializeMigrationValue,
   serializeMigrationValueV3,
+  serializeMigrationVector,
   validateMigrationBundle,
   validateMigrationReferences,
 } from './migration.js';
+import { toolCallReceiptKeyId } from './tool-call-receipts.js';
 
 const agent = (id: string): MigrationRecord => ({
   table: 'agents',
@@ -82,6 +85,46 @@ describe('workspace migration format', () => {
     ).toEqual(new Date('2026-09-19T12:34:56.123Z'));
   });
 
+  it('round-trips only calendar-valid PostgreSQL timestamps at microsecond precision', () => {
+    const invalidInputs = [
+      '2026-02-30 12:34:56.123456+00',
+      '2026-02-29 12:34:56.123456+00',
+      '2026-13-01 12:34:56.123456+00',
+      '2026-04-30 24:00:00.123456+00',
+    ];
+    for (const input of invalidInputs) {
+      expect(() => serializeMigrationTimestamp(input), input).toThrow(
+        `Invalid PostgreSQL migration timestamp: ${input}`,
+      );
+    }
+
+    const leapDay = serializeMigrationTimestamp('2024-02-29 12:34:56.000001+00');
+    expect(leapDay).toEqual({
+      $assistantMigration: ['timestamp', '2024-02-29T12:34:56.000001Z'],
+    });
+    expect(deserializeMigrationValue(leapDay)).toMatchObject({
+      seconds: 1_709_210_096n,
+      nanoseconds: 1_000,
+    });
+    const beforeEpoch = serializeMigrationTimestamp('1969-12-31 23:59:59.999999+00');
+    expect(deserializeMigrationValue(beforeEpoch)).toMatchObject({
+      seconds: -1n,
+      nanoseconds: 999_999_000,
+    });
+
+    for (const payload of [
+      '2026-02-30T12:34:56.123456Z',
+      '2026-02-29T12:34:56.123456Z',
+      '2026-13-01T12:34:56.123456Z',
+      '2026-04-30T24:00:00.123456Z',
+    ]) {
+      expect(
+        () => deserializeMigrationValue({ $assistantMigration: ['timestamp', payload] }),
+        payload,
+      ).toThrow('Malformed migration tag');
+    }
+  });
+
   it('rejects unsupported tables before any database work', () => {
     expect(() => assertSupportedMigrationTables(['agents', 'not_a_real_table'])).toThrow(
       'Unsupported migration tables: not_a_real_table',
@@ -90,8 +133,26 @@ describe('workspace migration format', () => {
 
   it('enumerates the complete PostgreSQL schema without duplicate tables', async () => {
     const { MIGRATION_TABLES } = await import('./migration.js');
-    expect(MIGRATION_TABLES).toHaveLength(69);
-    expect(new Set(MIGRATION_TABLES.map(({ table }) => table))).toHaveProperty('size', 69);
+    expect(MIGRATION_TABLES).toHaveLength(91);
+    expect(new Set(MIGRATION_TABLES.map(({ table }) => table))).toHaveProperty('size', 91);
+    expect(MIGRATION_TABLES.some(({ table }) => table === 'recall_surfaces')).toBe(true);
+    expect(MIGRATION_TABLES.map(({ table }) => table)).toEqual(
+      expect.arrayContaining([
+        'memory_import_lineage',
+        'occasion_import_lineage',
+        'skill_library_revisions',
+        'model_role_revisions',
+        'knowledge_graph_assertions',
+        'knowledge_graph_assertion_evidence',
+        'mission_reports',
+        'notification_outbox',
+        'memory_embedding_refreshes',
+        'email_attachment_custodies',
+        'email_observer_budgets',
+        'email_observer_sources',
+        'email_observer_work',
+      ]),
+    );
   });
 
   it('rejects records outside the selected workspace and missing references', () => {
@@ -110,6 +171,59 @@ describe('workspace migration format', () => {
         'agent-1',
       ),
     ).toThrow('outside source workspace');
+  });
+
+  it('accepts bounded 2048-dimensional Firestore refresh receipts and rejects invalid widths or vectors', () => {
+    const memoryId = 'memory-2048';
+    const receipt = (
+      targetDimensions: number,
+      preparedVector: SerializedValue | null,
+    ): MigrationRecord => ({
+      table: 'memory_embedding_refreshes',
+      collection: 'memoryEmbeddingRefreshes',
+      id: 'refresh-2048',
+      data: {
+        id: 'refresh-2048',
+        agentId: 'owner',
+        memoryId,
+        sourceHash: 'a'.repeat(64),
+        targetSpaceKey: 'b'.repeat(64),
+        targetDimensions,
+        status: 'prepared',
+        preparedVector,
+      },
+      checksum: '',
+    });
+    const memory: MigrationRecord = {
+      table: 'memories',
+      collection: 'memories',
+      id: memoryId,
+      data: { id: memoryId, agentId: 'owner', embeddingSpaceKey: null },
+      checksum: '',
+    };
+    const vector = new Array(2048).fill(0);
+    vector[0] = 0.5;
+    const valid = [agent('owner'), memory, receipt(2048, serializeMigrationVector(vector))];
+
+    expect(() => validateMigrationReferences(valid, 'owner')).not.toThrow();
+    expect(() =>
+      validateMigrationReferences([agent('owner'), memory, receipt(0, null)], 'owner'),
+    ).toThrow('Invalid memory_embedding_refreshes/refresh-2048 receipt');
+    expect(() =>
+      validateMigrationReferences([agent('owner'), memory, receipt(2049, null)], 'owner'),
+    ).toThrow('Invalid memory_embedding_refreshes/refresh-2048 receipt');
+    expect(() =>
+      validateMigrationReferences(
+        [agent('owner'), memory, receipt(2048, serializeMigrationVector([0.5]))],
+        'owner',
+      ),
+    ).toThrow('Invalid memory_embedding_refreshes/refresh-2048 prepared vector');
+    expect(() =>
+      validateMigrationReferences(
+        [agent('owner'), memory, receipt(2048, { $assistantMigration: ['vector', [Number.NaN]] })],
+        'owner',
+      ),
+    ).toThrow('Malformed migration tag');
   });
 });
 
@@ -220,6 +334,89 @@ describe('migration format integrity', () => {
 });
 
 describe('migration required ownership', () => {
+  it('rejects cross-parent card, segment and commitment links even within the same owner', () => {
+    const row = (
+      table: MigrationRecord['table'],
+      collection: MigrationRecord['collection'],
+      id: string,
+      data: MigrationRecord['data'],
+    ): MigrationRecord => ({ table, collection, id, data: { id, ...data }, checksum: '' });
+    const base = [
+      agent('owner'),
+      row('conversations', 'conversations', 'a', { agentId: 'owner' }),
+      row('conversations', 'conversations', 'b', { agentId: 'owner' }),
+      row('messages', 'messages', 'message-a', { conversationId: 'a' }),
+      row('messages', 'messages', 'message-b', { conversationId: 'b' }),
+      row('generated_cards', 'generatedCards', 'card-a', {
+        agentId: 'owner',
+        conversationId: 'a',
+        messageId: 'message-a',
+        currentRevisionId: 'revision-a',
+      }),
+      row('generated_cards', 'generatedCards', 'card-b', {
+        agentId: 'owner',
+        conversationId: 'b',
+        currentRevisionId: 'revision-b',
+      }),
+      row('generated_card_revisions', 'generatedCardRevisions', 'revision-a', { cardId: 'card-a' }),
+      row('generated_card_revisions', 'generatedCardRevisions', 'revision-b', { cardId: 'card-b' }),
+      row('conversation_segments', 'conversationSegments', 'segment', {
+        agentId: 'owner',
+        conversationId: 'a',
+        startMessageId: 'message-a',
+        endMessageId: 'message-a',
+      }),
+      row('commitments', 'commitments', 'commitment', {
+        agentId: 'owner',
+        conversationId: 'a',
+        sourceMessageId: 'message-a',
+      }),
+    ];
+    expect(() => validateMigrationReferences(base, 'owner')).not.toThrow();
+    for (const [id, field, value] of [
+      ['card-a', 'currentRevisionId', 'revision-b'],
+      ['card-a', 'messageId', 'message-b'],
+      ['segment', 'startMessageId', 'message-b'],
+      ['segment', 'endMessageId', 'message-b'],
+      ['commitment', 'sourceMessageId', 'message-b'],
+    ] as const) {
+      const modified = base.map((entry) =>
+        entry.id === id ? { ...entry, data: { ...entry.data, [field]: value } } : entry,
+      );
+      expect(() => validateMigrationReferences(modified, 'owner'), `${id}.${field}`).toThrow(
+        'parent linkage',
+      );
+    }
+  });
+
+  it('requires the owner and mission parent of durable mission report receipts', () => {
+    const report: MigrationRecord = {
+      table: 'mission_reports',
+      collection: 'missionReports',
+      id: 'report',
+      data: { id: 'report', agentId: 'owner', missionId: 'root' },
+      checksum: '',
+    };
+    const root: MigrationRecord = {
+      table: 'tasks',
+      collection: 'tasks',
+      id: 'root',
+      data: { id: 'root', agentId: 'owner' },
+      checksum: '',
+    };
+    expect(() =>
+      validateMigrationReferences([agent('owner'), root, report], 'owner'),
+    ).not.toThrow();
+    expect(() => validateMigrationReferences([agent('owner'), report], 'owner')).toThrow(
+      'reference missionId',
+    );
+    expect(() =>
+      validateMigrationReferences(
+        [agent('owner'), root, { ...report, data: { ...report.data, agentId: 'foreign' } }],
+        'owner',
+      ),
+    ).toThrow('outside source workspace');
+  });
   it('rejects a task with an absent owner instead of importing an unclaimable row', () => {
     const task: MigrationRecord = {
       table: 'tasks',
@@ -231,6 +428,65 @@ describe('migration required ownership', () => {
     expect(() => validateMigrationReferences([agent('owner'), task], 'owner')).toThrow(
       'reference agentId',
     );
+  });
+  it('preserves import lineage only when both its source and owned target are present', () => {
+    const source = {
+      table: 'import_sources' as const,
+      collection: 'importSources' as const,
+      id: 'source-row',
+      data: { id: 'source-row', agentId: 'owner', source: 'archive-2024' },
+      checksum: '',
+    };
+    const memory = {
+      table: 'memories' as const,
+      collection: 'memories' as const,
+      id: 'memory-row',
+      data: { id: 'memory-row', agentId: 'owner' },
+      checksum: '',
+    };
+    const occasion = {
+      table: 'occasions' as const,
+      collection: 'occasions' as const,
+      id: 'occasion-row',
+      data: { id: 'occasion-row', agentId: 'owner', contactId: 'contact-row' },
+      checksum: '',
+    };
+    const contact = {
+      table: 'contacts' as const,
+      collection: 'contacts' as const,
+      id: 'contact-row',
+      data: { id: 'contact-row', agentId: 'owner' },
+      checksum: '',
+    };
+    const memoryData = { source: 'archive-2024', memoryId: 'memory-row' };
+    const occasionData = { source: 'archive-2024', occasionId: 'occasion-row' };
+    const memoryLineage: MigrationRecord = {
+      table: 'memory_import_lineage',
+      collection: 'memoryImportLineage',
+      id: compositeMigrationId('memory_import_lineage', memoryData) ?? '',
+      data: memoryData,
+      checksum: '',
+    };
+    const occasionLineage: MigrationRecord = {
+      table: 'occasion_import_lineage',
+      collection: 'occasionImportLineage',
+      id: compositeMigrationId('occasion_import_lineage', occasionData) ?? '',
+      data: occasionData,
+      checksum: '',
+    };
+    expect(memoryLineage.id).not.toBe(occasionLineage.id);
+    expect(() =>
+      validateMigrationReferences(
+        [agent('owner'), source, memory, contact, occasion, memoryLineage, occasionLineage],
+        'owner',
+      ),
+    ).not.toThrow();
+    expect(() =>
+      validateMigrationReferences([agent('owner'), memory, memoryLineage], 'owner'),
+    ).toThrow('reference source');
+    expect(() =>
+      validateMigrationReferences([agent('owner'), source, occasionLineage], 'owner'),
+    ).toThrow('reference occasionId');
   });
   it('rejects approval links to another task even when both IDs exist', () => {
     const row = (
@@ -249,5 +505,77 @@ describe('migration required ownership', () => {
     expect(() => validateMigrationReferences(rows, 'owner')).toThrow(
       'Inconsistent approval tool linkage',
     );
+  });
+  it('requires compact effect receipts and replay keys to round-trip as one owner-scoped unit', () => {
+    const row = (
+      table: MigrationRecord['table'],
+      collection: MigrationRecord['collection'],
+      id: string,
+      data: MigrationRecord['data'],
+    ): MigrationRecord => ({ table, collection, id, data: { id, ...data }, checksum: '' });
+    const modelHash = 'a'.repeat(64);
+    const idempotencyHash = 'b'.repeat(64);
+    const receipt = row('tool_call_receipts', 'toolCallReceipts', 'receipt', {
+      agentId: 'owner',
+      taskId: 'pruned-task',
+      toolCallId: 'receipt',
+      modelToolCallIdHash: modelHash,
+      idempotencyKeyHash: idempotencyHash,
+      toolName: 'gmail.send',
+      effectOutcome: 'unknown',
+      recordedAt: serializeMigrationTimestamp('2026-10-07 12:00:00+00'),
+    });
+    const modelKeyId = toolCallReceiptKeyId('model_tool_call', modelHash);
+    const idempotencyKeyId = toolCallReceiptKeyId('idempotency', idempotencyHash);
+    const modelKey = row('tool_call_receipt_keys', 'toolCallReceiptKeys', modelKeyId, {
+      agentId: 'owner',
+      taskId: 'pruned-task',
+      receiptId: 'receipt',
+      kind: 'model_tool_call',
+      digest: modelHash,
+    });
+    const idempotencyKey = row('tool_call_receipt_keys', 'toolCallReceiptKeys', idempotencyKeyId, {
+      agentId: 'owner',
+      taskId: 'pruned-task',
+      receiptId: 'receipt',
+      kind: 'idempotency',
+      digest: idempotencyHash,
+    });
+    expect(() =>
+      validateMigrationReferences([agent('owner'), receipt, modelKey, idempotencyKey], 'owner'),
+    ).not.toThrow();
+    expect(() => validateMigrationReferences([agent('owner'), receipt, modelKey], 'owner')).toThrow(
+      'Missing compact tool-call receipt key',
+    );
+    const orphanDigest = 'c'.repeat(64);
+    const orphanKey = row(
+      'tool_call_receipt_keys',
+      'toolCallReceiptKeys',
+      toolCallReceiptKeyId('idempotency', orphanDigest),
+      {
+        agentId: 'owner',
+        taskId: 'pruned-task',
+        receiptId: 'missing',
+        kind: 'idempotency',
+        digest: orphanDigest,
+      },
+    );
+    expect(() =>
+      validateMigrationReferences(
+        [agent('owner'), receipt, modelKey, idempotencyKey, orphanKey],
+        'owner',
+      ),
+    ).toThrow('Invalid compact tool-call receipt key');
+    expect(() =>
+      validateMigrationReferences(
+        [
+          agent('owner'),
+          { ...receipt, data: { ...receipt.data, effectOutcome: 'executed' } },
+          modelKey,
+          idempotencyKey,
+        ],
+        'owner',
+      ),
+    ).toThrow('Invalid compact tool-call receipt');
   });
 });

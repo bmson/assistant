@@ -71,6 +71,34 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       ]);
     });
 
+    it('paginates open proposals without repeating rows or admitting another owner', async () => {
+      const ids = Array.from({ length: 5 }, () => randomUUID()).sort();
+      await Promise.all([
+        ...ids.map((id) => seed(id)),
+        store.doc('improvementProposals', randomUUID()).set({
+          id: randomUUID(),
+          agentId: randomUUID(),
+          status: 'open',
+          kind: 'note',
+          title: 'Foreign',
+          rationale: '',
+          change: {},
+          evidenceIds: [],
+          createdAt: new Date(),
+        }),
+      ]);
+      const collected: string[] = [];
+      let afterId: string | undefined;
+      do {
+        const page = await repository.listOpenPage(agentId, { afterId, limit: 2 });
+        collected.push(...page.items.map((row) => row.id));
+        afterId = page.nextCursor ?? undefined;
+        expect(page.hasMore).toBe(Boolean(afterId));
+      } while (afterId);
+      expect(collected).toEqual(ids);
+      expect(new Set(collected).size).toBe(ids.length);
+    });
+
     it('fails closed on malformed records and active privacy erasure', async () => {
       await seed('wrong-id', {}, 'different-document');
       await expect(repository.listOpen(agentId)).rejects.toThrow(
@@ -318,7 +346,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect((await store.doc('modelRoles', 'draft').get()).get('primaryModel')).toBe('old/model');
     });
 
-    it('rejects owner scans beyond the cap instead of returning a partial top 100', async () => {
+    it('keeps open proposals available after more than 2,000 decided historical rows', async () => {
       for (let offset = 0; offset < 2_001; offset += 500) {
         const batch = store.db.batch();
         for (let index = offset; index < Math.min(offset + 500, 2_001); index++) {
@@ -331,9 +359,47 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         }
         await batch.commit();
       }
+      await seed('still-open', { createdAt: new Date('2026-12-02') });
+      await expect(repository.listOpen(agentId)).resolves.toMatchObject([{ id: 'still-open' }]);
+    });
+
+    it('retains the active-row bound when more than 2,000 proposals are open', async () => {
+      const ids = Array.from({ length: 2_001 }, () => randomUUID()).sort();
+      for (let offset = 0; offset < 2_001; offset += 500) {
+        const batch = store.db.batch();
+        for (let index = offset; index < Math.min(offset + 500, 2_001); index++) {
+          const id = ids[index];
+          if (!id) throw new Error('Missing seeded improvement ID');
+          batch.set(store.doc('improvementProposals', id), {
+            id,
+            agentId,
+            status: 'open',
+            kind: 'note',
+            title: 'An actionable suggestion',
+            rationale: 'Bounded query test',
+            change: {},
+            evidenceIds: [],
+            createdAt: new Date('2026-09-01T00:00:00Z'),
+          });
+        }
+        await batch.commit();
+      }
       await expect(repository.listOpen(agentId)).rejects.toThrow(
         'Owner improvements exceed the mobile workspace scan limit',
       );
+
+      const collected: string[] = [];
+      let afterId: string | undefined;
+      do {
+        const page = await repository.listOpenPage(agentId, {
+          ...(afterId ? { afterId } : {}),
+          limit: 100,
+        });
+        collected.push(...page.items.map((row) => row.id));
+        afterId = page.nextCursor ?? undefined;
+        expect(page.hasMore).toBe(Boolean(afterId));
+      } while (afterId);
+      expect(collected).toEqual(ids);
     });
   },
 );

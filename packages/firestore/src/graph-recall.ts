@@ -6,11 +6,14 @@ import {
   type GraphSnapshotRepository,
   historyLimit,
   type Records,
+  snapshotEmbeddingSpace,
   validateEmbedding,
-  validateSkillEmbeddingSpace,
+  validateEmbeddingSpace,
 } from '@assistant/persistence';
 import type { DocumentSnapshot, Query, Transaction } from '@google-cloud/firestore';
+import { graphSourceEligible } from './graph-source-eligibility.js';
 import { embeddingSpaceKey } from './memory.js';
+import { decodeMemoryRecord } from './memory-record.js';
 import { privacyErasureIsActive } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
@@ -36,11 +39,13 @@ export class FirestoreGraphRecallRepository
   implements GraphRecallRepository, GraphSnapshotRepository
 {
   readonly kind = 'graph-recall-repository' as const;
+  readonly space: EmbeddingSpace;
   constructor(
     readonly store: InstallationStore,
-    readonly space: EmbeddingSpace,
+    space: EmbeddingSpace,
   ) {
-    validateSkillEmbeddingSpace(space);
+    this.space = snapshotEmbeddingSpace(space);
+    validateEmbeddingSpace(this.space);
   }
 
   private async relations(tx: Transaction, queries: Query[]): Promise<DocumentSnapshot[]> {
@@ -67,6 +72,8 @@ export class FirestoreGraphRecallRepository
         !identity(doc, row.id) ||
         row.agentId !== agentId ||
         row.reviewStatus === 'rejected' ||
+        !row.assertion ||
+        row.assertion.modality === 'unverified' ||
         typeof row.evidenceQuote !== 'string' ||
         typeof row.sourceMemoryId !== 'string' ||
         typeof row.subjectEntityId !== 'string' ||
@@ -122,25 +129,23 @@ export class FirestoreGraphRecallRepository
         objectDoc = read('knowledgeGraphEntities', row.objectEntityId);
       if (!memoryDoc?.exists || !sourceDoc?.exists || !subjectDoc?.exists || !objectDoc?.exists)
         return [];
-      const memory = decodeRecord<Records['memories']>(memoryDoc.data());
+      const memory = decodeMemoryRecord(memoryDoc.data());
       const source = decodeRecord<Records['knowledgeGraphSources']>(sourceDoc.data());
       const subject = decodeRecord<Records['knowledgeGraphEntities']>(subjectDoc.data());
       const object = decodeRecord<Records['knowledgeGraphEntities']>(objectDoc.data());
       if (
         !identity(memoryDoc, memory.id) ||
         memory.id !== row.sourceMemoryId ||
-        memory.agentId !== agentId ||
-        memory.category !== 'knowledge' ||
-        memory.quarantined !== false ||
-        memory.supersededById ||
-        (memory.expiresAt && memory.expiresAt <= now) ||
-        !memory.embedding ||
-        memoryDoc.get('embeddingSpace') !== embeddingSpaceKey(this.space) ||
-        source.memoryId !== memory.id ||
-        source.status !== 'ready' ||
-        source.contentHash !== memory.contentHash ||
-        source.extractionVersion < extractionVersion ||
-        tombstones.has(this.store.doc('memoryTombstones', memory.contentHash).path) ||
+        !graphSourceEligible({
+          memory,
+          source,
+          agentId,
+          space: this.space,
+          storedSpace: memoryDoc.get('embeddingSpace'),
+          extractionVersion,
+          now,
+          tombstoned: tombstones.has(this.store.doc('memoryTombstones', memory.contentHash).path),
+        }) ||
         !identity(subjectDoc, subject.id) ||
         !identity(objectDoc, object.id) ||
         subject.id !== row.subjectEntityId ||
@@ -149,16 +154,8 @@ export class FirestoreGraphRecallRepository
         object.agentId !== agentId
       )
         return [];
-      try {
-        validateEmbedding(this.space, memory.embedding);
-      } catch {
-        return [];
-      }
       const score = similarities?.get(memory.id);
-      if (
-        similarities &&
-        (!score || !score.updateTime || !memoryDoc.updateTime?.isEqual(score.updateTime))
-      )
+      if (similarities && (!score?.updateTime || !memoryDoc.updateTime?.isEqual(score.updateTime)))
         return [];
       return [
         {
@@ -166,6 +163,7 @@ export class FirestoreGraphRecallRepository
           subjectEntityId: subject.id,
           subjectLabel: subject.preferredLabel ?? subject.label,
           predicate: row.predicate,
+          assertion: row.assertion,
           objectEntityId: object.id,
           objectLabel: object.preferredLabel ?? object.label,
           sourceMemoryId: memory.id,
@@ -202,6 +200,7 @@ export class FirestoreGraphRecallRepository
       subjectLabel: row.subjectLabel,
       subjectKind: row.detail.subjectKind,
       predicate: row.predicate,
+      assertion: row.assertion,
       objectId: row.objectEntityId,
       objectLabel: row.objectLabel,
       objectKind: row.detail.objectKind,

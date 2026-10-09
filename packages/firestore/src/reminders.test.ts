@@ -132,6 +132,28 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore reminder delive
     ).toBe(false);
     expect((await store.collection('messages').get()).size).toBe(1);
   });
+  it('closes an event-completion schedule atomically with its delivery receipt', async () => {
+    await store.doc('schedules', 'reminder').update({
+      enabled: true,
+      nextRunAt: new Date(now.getTime() + 15 * 60_000),
+      taskTemplate: {
+        reminderKind: 'event_completion',
+        reminderEventDependency: { eventId: 'fixture-event' },
+      },
+    });
+    expect(await deliver()).toBe(true);
+    const row = (await store.doc('schedules', 'reminder').get()).data();
+    expect(row).toMatchObject({
+      enabled: false,
+      nextRunAt: null,
+      taskTemplate: {
+        reminderKind: 'event_completion',
+        reminderDeliveredAt: expect.any(String),
+      },
+    });
+    expect((await store.collection('reminderDeliveries').get()).size).toBe(1);
+    expect((await store.collection('messages').get()).size).toBe(1);
+  });
   it('expired and replaced leases cannot deliver', async () => {
     now = new Date(now.getTime() + 11 * 60_000);
     expect(await deliver()).toBe(false);

@@ -2,13 +2,13 @@ import { type Config, loadConfig, resetConfigForTest } from '@assistant/config';
 import type { Db } from '@assistant/db';
 import type { ExecutionPersistence } from '@assistant/persistence';
 import { ToolRegistry } from '@assistant/tools/registry';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ModuleMeta } from './contract.js';
 import { documentsModule } from './documents/module.js';
 import { calendarModule } from './google/calendar-module.js';
 import { googleModule } from './google/module.js';
 import { installModules } from './install.js';
-import { defineModule, type ModulePlatformContext } from './platform.js';
+import { defineModule, type ModulePlatformContext, type OwnerNotifier } from './platform.js';
 import { remindersModule } from './reminders/module.js';
 import { smsModule } from './sms/module.js';
 import { watchesModule } from './watches/module.js';
@@ -177,11 +177,15 @@ describe('module runtime hooks', () => {
     expect(installed.emailObservers).toEqual([]);
   });
 
-  it('falls back to a no-op owner notifier that resolves silently', async () => {
+  it('reports skipped when no owner notifier is installed', async () => {
     const context = contextFor(loadConfig({ ASSISTANT_MODULES: 'reminders' }));
     const installed = installModules([remindersModule], context);
-    await expect(installed.ownerNotifier.notifyOwner({ text: 'hi' })).resolves.toBeUndefined();
-    await expect(installed.ownerNotifier.notifyApprovals([])).resolves.toBeUndefined();
+    await expect(installed.ownerNotifier.notifyOwner({ text: 'hi' })).resolves.toEqual({
+      legs: [{ channel: 'none', status: 'skipped' }],
+    });
+    await expect(installed.ownerNotifier.notifyApprovals([])).resolves.toEqual({
+      legs: [{ channel: 'none', status: 'skipped' }],
+    });
   });
 
   const hookMeta = (over: Partial<ModuleMeta>): ModuleMeta =>
@@ -244,6 +248,82 @@ describe('module runtime hooks', () => {
     expect(installed.taskHandlerFor('reminder_fire')).toBeDefined();
     await installed.ownerNotifier.notifyOwner({ text: 'ping' });
     expect(notified).toEqual(['ping']);
+  });
+
+  it('reports independent notifier outcomes instead of resolving total failure as success', async () => {
+    const delivered = vi.fn(async () => ({
+      legs: [{ channel: 'push', status: 'delivered' as const }],
+    }));
+    const failing = defineModule({
+      meta: hookMeta({ name: 'sms' }),
+      create: () => ({
+        hooks: {
+          ownerNotifier: {
+            notifyOwner: async () => {
+              throw new Error('provider failed');
+            },
+            notifyApprovals: async () => ({
+              legs: [{ channel: 'sms', status: 'failed' as const }],
+            }),
+          },
+        },
+      }),
+    });
+    const succeeding = defineModule({
+      meta: hookMeta({ name: 'push' }),
+      create: () => ({
+        hooks: { ownerNotifier: { notifyOwner: delivered, notifyApprovals: delivered } },
+      }),
+    });
+    const installed = installModules(
+      [failing, succeeding],
+      contextFor(loadConfig({ ASSISTANT_MODULES: 'all' })),
+    );
+
+    await expect(installed.ownerNotifier.notifyOwner({ text: 'ping' })).resolves.toEqual({
+      legs: [
+        { channel: 'sms', status: 'failed' },
+        { channel: 'push', status: 'delivered' },
+      ],
+    });
+    expect(delivered).toHaveBeenCalledOnce();
+  });
+
+  it('retains partial delivery and reports an all-skipped fanout without success', async () => {
+    const skipped = vi.fn(async () => ({
+      legs: [{ channel: 'push', status: 'skipped' as const }],
+    }));
+    const delivered = vi.fn(async () => ({
+      legs: [{ channel: 'sms', status: 'delivered' as const }],
+    }));
+    const makeNotifier = (name: ModuleMeta['name'], notifyOwner: OwnerNotifier['notifyOwner']) =>
+      defineModule({
+        meta: hookMeta({ name }),
+        create: () => ({ hooks: { ownerNotifier: { notifyOwner, notifyApprovals: skipped } } }),
+      });
+    const context = contextFor(loadConfig({ ASSISTANT_MODULES: 'all' }));
+    const partial = installModules(
+      [makeNotifier('push', skipped), makeNotifier('sms', delivered)],
+      context,
+    );
+    await expect(partial.ownerNotifier.notifyOwner({ text: 'ping' })).resolves.toEqual({
+      legs: [
+        { channel: 'push', status: 'skipped' },
+        { channel: 'sms', status: 'delivered' },
+      ],
+    });
+
+    resetConfigForTest();
+    const allSkipped = installModules(
+      [makeNotifier('push', skipped), makeNotifier('sms', skipped)],
+      contextFor(loadConfig({ ASSISTANT_MODULES: 'all' })),
+    );
+    await expect(allSkipped.ownerNotifier.notifyOwner({ text: 'ping' })).resolves.toEqual({
+      legs: [
+        { channel: 'push', status: 'skipped' },
+        { channel: 'push', status: 'skipped' },
+      ],
+    });
   });
 });
 

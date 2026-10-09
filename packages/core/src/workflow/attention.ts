@@ -1,5 +1,10 @@
 import { type Db, type TaskRow, tasks } from '@assistant/db';
-import type { MaintenanceRepository, TaskRepository } from '@assistant/persistence';
+import {
+  hasEffectiveNotificationDelivery,
+  type MaintenanceRepository,
+  type NotificationDeliveryResult,
+  type TaskRepository,
+} from '@assistant/persistence';
 import { and, inArray, isNull, lte, sql } from 'drizzle-orm';
 import { getOrCreateNotificationsConversation, persistMessage } from '../chat.js';
 import { ownerTaskLabel, sentenceCase } from '../owner-text.js';
@@ -10,7 +15,7 @@ export type OwnerPush = (input: {
   taskId: string;
   conversationId: string | null;
   text: string;
-}) => Promise<void>;
+}) => Promise<NotificationDeliveryResult | void>;
 
 /**
  * The owner-facing line for a task that is waiting on them, built from its own
@@ -92,13 +97,15 @@ export async function renotifyStalledAttention(
       }
       // Background work reports to the log, not to the owner's chat or phone.
       if (notifyOwner && !(task.trust === 'assistant' && !task.conversationId)) {
-        notified =
-          (await notifyOwner({ taskId: task.id, conversationId: task.conversationId, text })
-            .then(() => true)
-            .catch((err) => {
-              console.error('attention owner push failed', { taskId: task.id }, err);
-              return false;
-            })) || notified;
+        const result = await notifyOwner({
+          taskId: task.id,
+          conversationId: task.conversationId,
+          text,
+        }).catch((err) => {
+          console.error('attention owner push failed', { taskId: task.id }, err);
+          return undefined;
+        });
+        notified = hasEffectiveNotificationDelivery(result) || notified;
       }
       // Only stamp if the notice actually reached somewhere the owner sees. A
       // conversation-less task with no working push stays unstamped so a later
@@ -138,13 +145,15 @@ async function renotifyPortable(
       });
       // Background work reports to the log, not to the owner's chat or phone.
       if (notifyOwner && !(task.trust === 'assistant' && !task.conversationId)) {
-        notified =
-          (await notifyOwner({ taskId: task.id, conversationId: task.conversationId, text })
-            .then(() => true)
-            .catch((err) => {
-              console.error('attention owner push failed', { taskId: task.id }, err);
-              return false;
-            })) || notified;
+        const result = await notifyOwner({
+          taskId: task.id,
+          conversationId: task.conversationId,
+          text,
+        }).catch((err) => {
+          console.error('attention owner push failed', { taskId: task.id }, err);
+          return undefined;
+        });
+        notified = hasEffectiveNotificationDelivery(result) || notified;
       }
       if (notified && (await markAttentionNotified(store.tasks, task.id))) renotified += 1;
     } catch (err) {

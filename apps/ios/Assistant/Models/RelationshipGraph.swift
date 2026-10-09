@@ -19,6 +19,47 @@ struct RelationshipGraphEdge: Codable, Identifiable, Hashable, Sendable {
     let presentation: KnowledgePresentation
     let validFrom: String?
     let validUntil: String?
+    /// Optional during a server rollout; older edges keep their source-backed wording.
+    var endpointViews: [KnowledgeAssertionEndpointView]? = nil
+
+    init(
+        id: String,
+        subjectId: String,
+        objectId: String,
+        predicate: String,
+        reviewStatus: String,
+        sourceContent: String,
+        presentation: KnowledgePresentation,
+        validFrom: String?,
+        validUntil: String?,
+        endpointViews: [KnowledgeAssertionEndpointView]? = nil
+    ) {
+        self.id = id
+        self.subjectId = subjectId
+        self.objectId = objectId
+        self.predicate = predicate
+        self.reviewStatus = reviewStatus
+        self.sourceContent = sourceContent
+        self.presentation = presentation
+        self.validFrom = validFrom
+        self.validUntil = validUntil
+        self.endpointViews = endpointViews
+    }
+
+    func displayText(focusedAt entityID: String) -> String {
+        endpointViews?.first(where: { $0.focusEntityId == entityID })?.text
+            ?? presentation.sentence
+    }
+
+    func accessibilityText(focusedAt entityID: String) -> String {
+        endpointViews?.first(where: { $0.focusEntityId == entityID })?.accessibilityText
+            ?? presentation.accessibleLabel
+    }
+
+    func label(focusedAt entityID: String) -> String {
+        endpointViews?.first(where: { $0.focusEntityId == entityID })?.text
+            ?? presentation.label
+    }
 }
 
 struct RelationshipGraphSnapshot: Codable, Sendable {

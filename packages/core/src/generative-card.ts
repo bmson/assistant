@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { GeneratedCardRepository } from '@assistant/persistence';
+import { CardFormSchema } from '@assistant/persistence/card-form';
 import { z } from 'zod';
+import { containsCardSecret, isSensitiveCardFact, publicCardText } from './card-privacy.js';
 import type { ModelRouter } from './model-router/index.js';
 import type { ActionEvidence } from './workflow/response-contract.js';
 
@@ -84,6 +86,7 @@ const LEAF_BLOCKS = [
   }),
   z.object({ type: z.literal('checklist'), factIds: z.array(z.string()).min(1).max(12) }),
   z.object({ type: z.literal('map'), placeFactIds: z.array(z.string()).min(1).max(6) }),
+  CardFormSchema,
 ] as const;
 
 const LeafBlockSchema = z.discriminatedUnion('type', [...LEAF_BLOCKS]);
@@ -386,6 +389,7 @@ export function validateGroundedCard(
   const corpus = normalized(evidenceCorpus);
   const card: GenerativeCardSpecV1 = {
     ...parsed.data,
+    facts: parsed.data.facts.map((fact) => ({ ...fact, sensitive: isSensitiveCardFact(fact) })),
     expiresAt:
       parsed.data.expiresAt && corpus.includes(normalized(parsed.data.expiresAt))
         ? parsed.data.expiresAt
@@ -396,6 +400,25 @@ export function validateGroundedCard(
         : action,
     ),
   };
+  const privateValues = card.facts.filter((fact) => fact.sensitive).map((fact) => fact.value);
+  card.title = publicCardText(card.title, privateValues) ?? 'Saved information';
+  card.subtitle = publicCardText(card.subtitle, privateValues);
+  card.sourceLabel = publicCardText(card.sourceLabel, privateValues) ?? 'Private source';
+  card.accessibilityLabel =
+    publicCardText(card.accessibilityLabel, privateValues) ??
+    'Saved information with private details';
+  card.facts = card.facts.map((fact) => ({
+    ...fact,
+    label: publicCardText(fact.label, privateValues),
+    source: publicCardText(fact.source, privateValues) ?? 'Private source',
+  }));
+  card.blocks = card.blocks.filter((block) =>
+    blockLabels(block).every((label) => publicCardText(label, privateValues) === label),
+  );
+  card.actions = card.actions.map((action) => ({
+    ...action,
+    label: publicCardText(action.label, privateValues) ?? 'Private detail',
+  }));
   const facts = new Map(card.facts.map((fact) => [fact.id, fact]));
   if (new Set(card.facts.map((fact) => fact.id)).size !== card.facts.length) return null;
   if (card.facts.some((fact) => !corpus.includes(normalized(fact.value)))) return null;
@@ -449,9 +472,9 @@ export function validateGroundedCard(
   if (!blocks.length) return null;
   // The same for the phone's own actions: one that cannot work is dropped.
   const actions = card.actions.filter((action) => usableAction(action, facts));
-  return blocks.length === card.blocks.length && actions.length === card.actions.length
-    ? card
-    : { ...card, blocks, actions };
+  // A section can retain its outer slot while its invalid children change.
+  // Equal top-level counts do not mean the original nested tree is safe.
+  return { ...card, blocks, actions };
 }
 
 /**
@@ -524,6 +547,11 @@ function blockFactIds(block: Block): string[] {
       return block.points.flatMap((point) => [point.labelFact, point.valueFact]);
     case 'map':
       return block.placeFactIds;
+    case 'form':
+      return [
+        ...block.warningFactIds,
+        ...block.fields.flatMap((field) => (field.defaultFact ? [field.defaultFact] : [])),
+      ];
     case 'section':
       return block.blocks.flatMap(blockFactIds);
   }
@@ -532,6 +560,15 @@ function blockFactIds(block: Block): string[] {
 /** The composer's own words inside blocks: headings and column labels. */
 function blockLabels(block: Block): string[] {
   if (block.type === 'section') return [block.title, ...block.blocks.flatMap(blockLabels)];
+  if (block.type === 'form')
+    return [
+      block.title,
+      block.submitLabel,
+      ...block.fields.flatMap((field) => [
+        field.label,
+        ...(field.type === 'choice' ? field.options.map((option) => option.label) : []),
+      ]),
+    ];
   if (block.type === 'table') return block.columns;
   return [];
 }
@@ -559,6 +596,11 @@ const ZONED_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[
 function renderableBlock(block: Block, facts: Map<string, FactSpec>): Block[] {
   const value = (id: string | undefined) => (id ? facts.get(id)?.value : undefined);
   switch (block.type) {
+    case 'form':
+      return block.fields.some((field) => field.sensitive) ||
+        blockFactIds(block).some((id) => facts.get(id)?.sensitive)
+        ? []
+        : [block];
     case 'section': {
       const children = block.blocks.flatMap((child) =>
         renderableBlock(child, facts),
@@ -692,7 +734,7 @@ function worthTrying(
   return answerText ? answerLooksCardShaped(answerText) : false;
 }
 
-export async function generateEvidenceCard(input: {
+export async function generateEvidenceCardOutcome(input: {
   router: ModelRouter;
   /** The task paying for the call; absent for work no task owns (mail). */
   taskId?: string;
@@ -709,10 +751,10 @@ export async function generateEvidenceCard(input: {
   answerText?: string;
   /** Refreshes must ground in new reads, never the old card/request text. */
   evidenceOnly?: boolean;
-}): Promise<GeneratedCardPayload | null> {
+}): Promise<GenerateEvidenceCardOutcome> {
   const explicitRequest = input.explicitRequest ?? false;
   if (!worthTrying(input.sourceText, input.evidence, explicitRequest, input.answerText))
-    return null;
+    return { kind: 'no_op' };
   // A single short hotel confirmation already has a coherent, bounded layout.
   // Copy its literal details into a native card without asking a model to
   // rewrite dates, amounts or booking identifiers.
@@ -738,7 +780,7 @@ export async function generateEvidenceCard(input: {
       searchedMail &&
       !threadMessages.some((message) => typeof message.text === 'string' && message.text.trim())
     )
-      return null;
+      return { kind: 'no_op' };
     const confirmations = threadMessages.flatMap((message) =>
       typeof message.text === 'string' &&
       message.text.trim().length <= 500 &&
@@ -747,7 +789,18 @@ export async function generateEvidenceCard(input: {
         : [],
     );
     if (confirmations.length === 1 && confirmations[0]) {
-      const details = confirmations[0];
+      const original = confirmations[0];
+      // Do not promote a complete email body to a public "details" fact.
+      // Retain safe check-in sentences when the confirmation contains secrets.
+      const details = containsCardSecret(original)
+        ? original
+            .split(/(?<=[.!?])\s+|\n+/)
+            .filter(
+              (sentence) => /\bcheck[ -]?in\b/i.test(sentence) && !containsCardSecret(sentence),
+            )
+            .join(' ')
+        : original;
+      if (!details) return { kind: 'no_op' };
       const spec = GenerativeCardSpecV1Schema.parse({
         version: 1,
         title: 'Hotel reservation',
@@ -764,15 +817,20 @@ export async function generateEvidenceCard(input: {
         ],
         blocks: [{ type: 'facts', factIds: ['details'] }],
       });
+      const validated = validateGroundedCard(spec, original);
+      if (!validated) return { kind: 'no_op' };
       return {
-        kind: 'generated-card',
-        id: randomUUID(),
-        revisionId: randomUUID(),
-        spec,
-        sourceFingerprint: createHash('sha256')
-          .update(input.sourceKey ?? `gmail.read_thread\n${details}`)
-          .digest('hex'),
-        grounding: 'evidence',
+        kind: 'card',
+        payload: {
+          kind: 'generated-card',
+          id: randomUUID(),
+          revisionId: randomUUID(),
+          spec: validated,
+          sourceFingerprint: createHash('sha256')
+            .update(input.sourceKey ?? `gmail.read_thread\n${details}`)
+            .digest('hex'),
+          grounding: 'evidence',
+        },
       };
     }
   }
@@ -788,7 +846,12 @@ export async function generateEvidenceCard(input: {
       maxOutputTokens: 2600,
       abortSignal: AbortSignal.timeout(20_000),
     });
-    if (!result.ok || !result.object.cardable || !result.object.card) return null;
+    if (!result.ok) {
+      return result.attempts?.length
+        ? { kind: 'unknown' }
+        : { kind: 'budget_blocked', mode: result.decision.mode };
+    }
+    if (!result.object.cardable || !result.object.card) return { kind: 'no_op' };
     const validationCorpus = input.evidenceOnly
       ? input.evidence
           .filter(usableSource)
@@ -796,7 +859,7 @@ export async function generateEvidenceCard(input: {
           .join('\n')
       : corpus;
     const validated = validateGroundedCard(result.object.card, validationCorpus);
-    if (!validated) return null;
+    if (!validated) return { kind: 'no_op' };
     // A card read out of the reply must not dress itself as a lookup. The
     // model's own labels would name the section it copied from ("ANSWER"), so
     // provenance is stamped here instead: this card is a view of the answer
@@ -829,17 +892,39 @@ export async function generateEvidenceCard(input: {
         ? `${spec.sourceLabel}\n${identityFacts.map((fact) => fact.value).join('\n')}`
         : (input.sourceKey ?? `${spec.sourceLabel}\n${input.sourceText}`);
     return {
-      kind: 'generated-card',
-      id,
-      revisionId: randomUUID(),
-      spec,
-      sourceFingerprint: createHash('sha256').update(stableSource).digest('hex'),
-      grounding: fromMessage ? 'message' : groundedOnAnswer ? 'answer' : 'evidence',
+      kind: 'card',
+      payload: {
+        kind: 'generated-card',
+        id,
+        revisionId: randomUUID(),
+        spec,
+        sourceFingerprint: createHash('sha256').update(stableSource).digest('hex'),
+        grounding: fromMessage ? 'message' : groundedOnAnswer ? 'answer' : 'evidence',
+      },
     };
-  } catch (error) {
-    console.error('generative card compilation failed', error);
-    return null;
+  } catch {
+    // Prompt/provider errors can contain inbound source text; durable callers
+    // record a bounded error code and hold the paid attempt as unknown.
+    return { kind: 'unknown' };
   }
+}
+
+export type GenerateEvidenceCardOutcome =
+  | { kind: 'card'; payload: GeneratedCardPayload }
+  | { kind: 'no_op' }
+  | { kind: 'budget_blocked'; mode: 'park' | 'block' }
+  | { kind: 'unknown' };
+
+/**
+ * Compatibility facade for callers that intentionally collapse non-card
+ * outcomes. Durable observers should use generateEvidenceCardOutcome so a
+ * provider exception is not mistaken for a safe no-op.
+ */
+export async function generateEvidenceCard(
+  input: Parameters<typeof generateEvidenceCardOutcome>[0],
+): Promise<GeneratedCardPayload | null> {
+  const outcome = await generateEvidenceCardOutcome(input);
+  return outcome.kind === 'card' ? outcome.payload : null;
 }
 
 /**
@@ -944,10 +1029,12 @@ export async function persistGeneratedCard(
   input: {
     agentId: string;
     conversationId?: string | null;
+    emailObserverEffectFence?: import('@assistant/persistence').EmailObserverEffectFence;
     payload: GeneratedCardPayload;
     evidence?: ActionEvidence[];
     sourceText?: string;
     refreshCardId?: string;
+    refreshCardRevisionId?: string;
   },
 ): Promise<GeneratedCardPayload> {
   const existing = input.refreshCardId
@@ -961,6 +1048,7 @@ export async function persistGeneratedCard(
     input.refreshCardId &&
     (existing?.card.status !== 'active' ||
       existing.card.dismissedAt ||
+      (input.refreshCardRevisionId && existing.revision.id !== input.refreshCardRevisionId) ||
       !fresh ||
       !validateGroundedCard(
         input.payload.spec,
@@ -1001,7 +1089,11 @@ export async function persistGeneratedCard(
       ? new Date(spec.expiresAt)
       : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
     targetCardId: input.refreshCardId,
+    targetRevisionId: input.refreshCardRevisionId,
     touch: Boolean(input.refreshCardId),
+    ...(input.emailObserverEffectFence
+      ? { emailObserverEffectFence: input.emailObserverEffectFence }
+      : {}),
   });
   return {
     ...input.payload,

@@ -1,3 +1,4 @@
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { dismissOwnerAnomaly, suspendOwnerAnomalyPolicy } from '@/lib/workspace-reviews';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -12,7 +13,9 @@ export async function POST(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid anomaly id' }, { status: 400 });
-  const body = (await request.json().catch(() => null)) as { action?: unknown } | null;
+  const mutationBody = await readMobileMutationBody(request, ['action']);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as { action?: unknown } | null;
   try {
     if (body?.action !== 'dismiss' && body?.action !== 'suspend-policy') {
       return mobileJson({ error: 'action must be dismiss or suspend-policy' }, { status: 400 });

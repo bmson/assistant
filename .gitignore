@@ -18,6 +18,8 @@ gha-creds-*.json
 # local data
 .local-gcs/
 seed-data/voice/*.txt
+seed-data/voice/*.md
+!seed-data/voice/README.md
 
 # OS
 .DS_Store

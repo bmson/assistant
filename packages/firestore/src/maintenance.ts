@@ -1,9 +1,13 @@
+import { createHash } from 'node:crypto';
 import {
   type AgedHistoryCounts,
+  compactToolCallReceipt,
   type EmbeddingSpace,
   type ExpiredDataCounts,
   type MaintenanceRepository,
   type Records,
+  snapshotEmbeddingSpace,
+  toolCallReceiptKeysForReceipt,
   validateEmbedding,
   validateSkillEmbeddingSpace,
 } from '@assistant/persistence';
@@ -18,7 +22,8 @@ import {
 } from '@google-cloud/firestore';
 import { embeddingSpaceKey } from './memory.js';
 import { FirestoreOwnerNoticeRepository } from './owner-notices.js';
-import { decodeRecord, documentKey, type InstallationStore } from './store.js';
+import { assertPrivacyErasureInactiveInTransaction } from './privacy-erasure.js';
+import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 const ATTENTION_CURSOR = 'attention-notices-cursor';
 const EMBEDDING_CURSOR = 'message-embedding-cursor';
@@ -47,6 +52,51 @@ function batchLimit(batch: number, max = 500): number {
 function validDate(value: Date, message: string): Date {
   if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new Error(message);
   return value;
+}
+
+/**
+ * Return the unresolved tool-call IDs named by a task checkpoint, or null when
+ * its execution checkpoint is malformed. A malformed checkpoint retains the
+ * task's receipts: maintenance must not turn corrupt recovery state into a
+ * missing effect result.
+ */
+function unresolvedCheckpointToolCalls(state: unknown): Set<string> | null {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) return null;
+  const checkpoint = state as Record<string, unknown>;
+  const references = new Set<string>();
+  if (
+    'pendingFinal' in checkpoint &&
+    checkpoint.pendingFinal !== null &&
+    (!checkpoint.pendingFinal ||
+      typeof checkpoint.pendingFinal !== 'object' ||
+      Array.isArray(checkpoint.pendingFinal))
+  ) {
+    return null;
+  }
+  if ('pendingJob' in checkpoint && checkpoint.pendingJob !== null) {
+    const pending = checkpoint.pendingJob;
+    if (!pending || typeof pending !== 'object' || Array.isArray(pending)) return null;
+    const id = (pending as Record<string, unknown>).dbToolCallId;
+    if (typeof id !== 'string' || id.length === 0) return null;
+    references.add(id);
+  }
+  if ('pendingToolBatch' in checkpoint && checkpoint.pendingToolBatch !== null) {
+    const batch = checkpoint.pendingToolBatch;
+    if (!batch || typeof batch !== 'object' || Array.isArray(batch)) return null;
+    const calls = (batch as Record<string, unknown>).calls;
+    if (!Array.isArray(calls) || calls.length > 1000) return null;
+    for (const call of calls) {
+      if (!call || typeof call !== 'object' || Array.isArray(call)) return null;
+      const row = call as Record<string, unknown>;
+      if (!['queued', 'awaiting_approval', 'budget', 'job', 'settled'].includes(String(row.status)))
+        return null;
+      if ('dbToolCallId' in row && row.dbToolCallId !== undefined) {
+        if (typeof row.dbToolCallId !== 'string' || row.dbToolCallId.length === 0) return null;
+        if (row.status !== 'settled') references.add(row.dbToolCallId);
+      }
+    }
+  }
+  return references;
 }
 
 function chunks<T>(rows: T[], size = IN_LIMIT): T[][] {
@@ -82,13 +132,15 @@ function readPosition(raw: unknown, message: string): Position | null {
 export class FirestoreMaintenanceRepository implements MaintenanceRepository {
   readonly kind = 'maintenance-repository' as const;
   private readonly notices: FirestoreOwnerNoticeRepository;
+  readonly space: EmbeddingSpace;
 
   constructor(
     readonly store: InstallationStore,
     readonly agentId: string,
-    readonly space: EmbeddingSpace,
+    space: EmbeddingSpace,
   ) {
-    validateSkillEmbeddingSpace(space);
+    this.space = snapshotEmbeddingSpace(space);
+    validateSkillEmbeddingSpace(this.space);
     this.notices = new FirestoreOwnerNoticeRepository(store, agentId);
   }
 
@@ -192,20 +244,28 @@ export class FirestoreMaintenanceRepository implements MaintenanceRepository {
 
   async embedMissingMessages(input: {
     batch: number;
+    embeddingSpaceKey: string;
     embed: (texts: string[]) => Promise<number[][]>;
   }): Promise<number> {
     const batch = batchLimit(input.batch, 100);
     const space = embeddingSpaceKey(this.space);
-    const cursorRef = this.store.doc('coordination', EMBEDDING_CURSOR);
+    if (input.embeddingSpaceKey !== space)
+      throw new Error('Message embedding identity does not match the configured Firestore space');
+    // Progress is isolated per embedding space. A model/revision change starts
+    // its own pass instead of inheriting a cursor that may be beyond older
+    // history. The hash keeps arbitrary provider/model labels out of doc paths.
+    const spaceId = createHash('sha256').update(space).digest('hex').slice(0, 32);
+    const cursorRef = this.store.doc('coordination', `${EMBEDDING_CURSOR}-${spaceId}`);
     const cursorSnapshot = await cursorRef.get();
     const cursor = readPosition(
       cursorSnapshot.exists ? cursorSnapshot.get('cursor') : null,
       'Invalid message embedding cursor',
     );
-    // Walk messages in creation order behind a durable cursor. Each message is
-    // read about once, and new messages always land after the cursor. The
-    // cursor commits only after the vectors are stored, so a failed embedding
-    // call is retried from the same place on the next pass.
+    // Walk messages in creation order behind a durable cursor. A completed
+    // sweep clears its cursor, so a late import inserted behind the cursor is
+    // discovered on the next sweep. Existing vectors from another or unknown
+    // space are left untouched; changing model identity never triggers a
+    // silent paid regeneration.
     const settled = new Date(this.store.now().getTime() - EMBEDDING_SETTLE_MS);
     const base = this.store
       .collection('messages')
@@ -223,16 +283,35 @@ export class FirestoreMaintenanceRepository implements MaintenanceRepository {
       if (
         (row.role === 'user' || row.role === 'assistant') &&
         typeof row.text === 'string' &&
+        !(
+          typeof row.channelMessageId === 'string' &&
+          (row.channelMessageId.startsWith('visual-qa:') ||
+            row.channelMessageId.startsWith('readability-'))
+        ) &&
         // PostgreSQL's length() counts characters, not UTF-16 code units.
         [...row.text].length > 20 &&
-        (row.embedding == null || row.embeddingSpace !== space) &&
+        row.embedding == null &&
         typeof row.id === 'string'
       )
         candidates.push({ ref: doc.ref, id: row.id, text: row.text });
       if (candidates.length >= batch) break;
     }
     const next = position(last);
-    if (!next) return 0;
+    if (!next) {
+      // Clear only the cursor snapshot we observed. A concurrent scan may have
+      // advanced it since the initial read; that owner must finish its pass.
+      await this.store.db.runTransaction(async (tx) => {
+        const current = await tx.get(cursorRef);
+        if (
+          cursorSnapshot.exists &&
+          current.exists &&
+          cursorSnapshot.updateTime &&
+          current.updateTime?.isEqual(cursorSnapshot.updateTime)
+        )
+          tx.delete(cursorRef);
+      });
+      return 0;
+    }
     const vectors = candidates.length ? await input.embed(candidates.map((row) => row.text)) : [];
     if (vectors.length !== candidates.length)
       throw new Error('Embedding count does not match the messages sent');
@@ -248,8 +327,12 @@ export class FirestoreMaintenanceRepository implements MaintenanceRepository {
         const vector = vectors[index];
         if (!snapshot?.exists || !candidate || !vector) return;
         if (snapshot.get('id') !== candidate.id || snapshot.get('text') !== candidate.text) return;
-        if (snapshot.get('embedding') != null && snapshot.get('embeddingSpace') === space) return;
-        tx.update(snapshot.ref, { embedding: FieldValue.vector(vector), embeddingSpace: space });
+        if (snapshot.get('embedding') != null) return;
+        tx.update(snapshot.ref, {
+          embedding: FieldValue.vector(vector),
+          embeddingSpace: space,
+          embeddingSpaceKey: space,
+        });
         stored += 1;
       });
       // A concurrent pass that already moved the cursor keeps its position.
@@ -371,26 +454,40 @@ export class FirestoreMaintenanceRepository implements MaintenanceRepository {
     return this.store.db.runTransaction(async (tx) => {
       const snapshot = await tx.get(ref);
       if (!snapshot.exists) return false;
-      const row = decodeRecord<Records['memories']>(snapshot.data());
-      if (!(row.expiresAt instanceof Date) || row.expiresAt > now || typeof row.id !== 'string')
+      const row = decodeRecord<unknown>(snapshot.data());
+      if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
+      const raw = row as Record<string, unknown>;
+      const id = raw.id;
+      const agentId = raw.agentId;
+      const expiresAt = raw.expiresAt;
+      const contentHash = raw.contentHash;
+      if (
+        typeof id !== 'string' ||
+        documentKey(id) !== snapshot.id ||
+        typeof agentId !== 'string' ||
+        !agentId ||
+        !(expiresAt instanceof Date) ||
+        expiresAt > now
+      )
         return false;
       const relations = await bounded(
         tx,
         this.store
           .collection('knowledgeGraphRelations')
-          .where('agentId', '==', row.agentId)
-          .where('sourceMemoryId', '==', row.id),
+          .where('agentId', '==', agentId)
+          .where('sourceMemoryId', '==', id),
         'Expired memory has more graph relations than one retention transaction removes',
       );
-      const hashRef = row.contentHash
-        ? this.store.doc('memoryContentHashes', row.contentHash)
-        : null;
-      const sourceRef = this.store.doc('knowledgeGraphSources', row.id);
+      const hashRef =
+        typeof contentHash === 'string' && contentHash
+          ? this.store.doc('memoryContentHashes', contentHash)
+          : null;
+      const sourceRef = this.store.doc('knowledgeGraphSources', id);
       const [source, hash] = await tx.getAll(sourceRef, ...(hashRef ? [hashRef] : []));
       tx.delete(ref);
       for (const relation of relations) tx.delete(relation.ref);
       if (source?.exists) tx.delete(sourceRef);
-      if (hash?.exists && hash.get('memoryId') === row.id) tx.delete(hash.ref);
+      if (hash?.exists && hash.get('memoryId') === id) tx.delete(hash.ref);
       return true;
     });
   }
@@ -449,6 +546,7 @@ export class FirestoreMaintenanceRepository implements MaintenanceRepository {
     let deleted = 0;
     for (const chunk of chunks(page)) {
       deleted += await this.store.db.runTransaction(async (tx) => {
+        await assertPrivacyErasureInactiveInTransaction(tx, this.store, this.agentId);
         const snapshots = await tx.getAll(...chunk.map((doc) => doc.ref));
         const rows = snapshots.flatMap((snapshot) => {
           if (!snapshot.exists) return [];
@@ -533,17 +631,164 @@ export class FirestoreMaintenanceRepository implements MaintenanceRepository {
           ...approvals.map((doc) => doc.get('toolCallId')),
           ...costEvents.map((doc) => doc.get('toolCallId')),
         ]);
-        const doomed = rows.filter(({ row }) => !referenced.has(row.id));
+        const purgeableTasks = new Map<string, boolean>();
+        const checkpointReferences = new Map<string, Set<string>>();
+        for (const taskId of new Set(rows.map(({ row }) => row.taskId))) {
+          const pending = [taskId];
+          const visited = new Set<string>();
+          const unresolved = new Set<string>();
+          let purgeable = true;
+          while (pending.length && purgeable) {
+            const id = pending.pop();
+            if (!id || visited.has(id)) continue;
+            visited.add(id);
+            // Bounded scans fail closed; a huge continuation tree retains its
+            // receipts instead of silently truncating the dependency graph.
+            if (visited.size > CASCADE_LIMIT) {
+              purgeable = false;
+              break;
+            }
+            const task = await tx.get(this.store.doc('tasks', id));
+            const updatedAt = task.get('updatedAt');
+            const taskRow = task.exists ? decodeRecord<Records['tasks']>(task.data()) : null;
+            if (
+              !task.exists ||
+              !taskRow ||
+              taskRow.id !== id ||
+              documentKey(taskRow.id) !== task.id ||
+              taskRow.agentId !== this.agentId ||
+              task.get('agentId') !== this.agentId ||
+              !['done', 'failed', 'cancelled'].includes(task.get('status')) ||
+              !(updatedAt instanceof Timestamp) ||
+              updatedAt.toDate() > cutoff
+            ) {
+              purgeable = false;
+              break;
+            }
+            const refs = unresolvedCheckpointToolCalls(taskRow.state);
+            if (!refs) {
+              purgeable = false;
+              break;
+            }
+            for (const ref of refs) unresolved.add(ref);
+            const children = await tx.get(
+              this.store
+                .collection('tasks')
+                .where('parentTaskId', '==', id)
+                .limit(CASCADE_LIMIT + 1),
+            );
+            if (children.size > CASCADE_LIMIT) {
+              purgeable = false;
+              break;
+            }
+            for (const child of children.docs) {
+              const childRow = decodeRecord<Records['tasks']>(child.data());
+              if (
+                !childRow?.id ||
+                documentKey(childRow.id) !== child.id ||
+                childRow.agentId !== this.agentId ||
+                childRow.parentTaskId !== id
+              ) {
+                purgeable = false;
+                break;
+              }
+              pending.push(childRow.id);
+            }
+          }
+          purgeableTasks.set(taskId, purgeable);
+          checkpointReferences.set(taskId, unresolved);
+        }
+        const doomed = rows.filter(
+          ({ row }) =>
+            ['succeeded', 'failed', 'denied'].includes(row.status) &&
+            !referenced.has(row.id) &&
+            !checkpointReferences.get(row.taskId)?.has(row.id) &&
+            purgeableTasks.get(row.taskId),
+        );
         const keyRefs = doomed.flatMap(({ row }) =>
           row.idempotencyKey ? [this.store.doc('toolCallIdempotency', row.idempotencyKey)] : [],
         );
         const keys = keyRefs.length ? await tx.getAll(...keyRefs) : [];
-        const doomedSet = new Set(doomed.map(({ row }) => row.id));
-        for (const { ref } of doomed) tx.delete(ref);
-        // PostgreSQL's unique idempotency key goes with its row; free it here too.
+        const plans = doomed.map(({ row, ref }) => {
+          const receipt = compactToolCallReceipt(row, {
+            agentId: this.agentId,
+            recordedAt: this.store.now(),
+          });
+          return receipt
+            ? { row, ref, receipt, receiptKeys: toolCallReceiptKeysForReceipt(receipt) }
+            : null;
+        });
+        if (plans.some((plan) => !plan)) return 0;
+        const validPlans = plans.filter((plan): plan is NonNullable<typeof plan> => plan !== null);
+        const receiptRefs = validPlans.map(({ receipt }) =>
+          this.store.doc('toolCallReceipts', receipt.id),
+        );
+        const replayKeyRefs = validPlans.flatMap(({ receiptKeys }) =>
+          receiptKeys.map((key) => this.store.doc('toolCallReceiptKeys', key.id)),
+        );
+        const existingReceipts = receiptRefs.length ? await tx.getAll(...receiptRefs) : [];
+        const existingReplayKeys = replayKeyRefs.length ? await tx.getAll(...replayKeyRefs) : [];
+        const doomedSet = new Set(validPlans.map(({ row }) => row.id));
+        const validExistingReceipts = new Map<string, Records['toolCallReceipts']>();
+        const receiptSnapshotsById = new Map(
+          existingReceipts.map((snapshot) => [snapshot.id, snapshot]),
+        );
+        for (const plan of validPlans) {
+          const snapshot = receiptSnapshotsById.get(documentKey(plan.receipt.id));
+          if (!snapshot?.exists) continue;
+          const existing = decodeRecord<Records['toolCallReceipts']>(snapshot.data());
+          if (
+            !existing ||
+            existing.id !== plan.receipt.id ||
+            existing.agentId !== plan.receipt.agentId ||
+            existing.taskId !== plan.receipt.taskId ||
+            existing.toolCallId !== plan.receipt.toolCallId ||
+            existing.modelToolCallIdHash !== plan.receipt.modelToolCallIdHash ||
+            existing.idempotencyKeyHash !== plan.receipt.idempotencyKeyHash ||
+            existing.toolName !== plan.receipt.toolName ||
+            existing.effectOutcome !== plan.receipt.effectOutcome
+          )
+            return 0;
+          validExistingReceipts.set(existing.id, existing);
+        }
+        const replayKeySnapshotsById = new Map(
+          existingReplayKeys.map((snapshot) => [snapshot.id, snapshot]),
+        );
+        for (const plan of validPlans) {
+          for (const expected of plan.receiptKeys) {
+            const snapshot = replayKeySnapshotsById.get(documentKey(expected.id));
+            if (!snapshot?.exists) continue;
+            const existing = decodeRecord<Records['toolCallReceiptKeys']>(snapshot.data());
+            if (
+              !existing ||
+              existing.id !== expected.id ||
+              existing.agentId !== expected.agentId ||
+              existing.taskId !== expected.taskId ||
+              existing.receiptId !== expected.receiptId ||
+              existing.kind !== expected.kind ||
+              existing.digest !== expected.digest
+            )
+              return 0;
+          }
+        }
+        // All reads, ownership checks, and conflict checks complete before the first write.
+        for (const plan of validPlans) {
+          if (!validExistingReceipts.has(plan.receipt.id))
+            tx.create(
+              this.store.doc('toolCallReceipts', plan.receipt.id),
+              encodeRecord(plan.receipt),
+            );
+          for (const key of plan.receiptKeys) {
+            const keySnapshot = replayKeySnapshotsById.get(documentKey(key.id));
+            if (!keySnapshot?.exists)
+              tx.create(this.store.doc('toolCallReceiptKeys', key.id), encodeRecord(key));
+          }
+        }
+        for (const { ref } of validPlans) tx.delete(ref);
+        // Preserve global idempotency exclusion via the digest projection after raw-row deletion.
         for (const key of keys)
           if (key.exists && doomedSet.has(key.get('toolCallId'))) tx.delete(key.ref);
-        return doomed.length;
+        return validPlans.length;
       });
     }
     return deleted;

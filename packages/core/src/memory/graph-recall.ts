@@ -7,6 +7,7 @@ import type { GraphRecallRepository, GraphRelation as RelationRow } from '@assis
 import { GRAPH_EXTRACTION_VERSION } from './knowledge-graph.js';
 import type { RecallSource } from './recall.js';
 import { createRecallBlock } from './recall-budget.js';
+import { recallSourceRevision, recallSurfaceKey } from './recall-surfacing.js';
 
 /**
  * Query-time GraphRAG. Semantic memory matches seed the traversal; relation
@@ -18,6 +19,7 @@ export interface GraphRecallOptions {
   minSimilarity?: number;
   maxChars?: number;
   maxEvidenceChars?: number;
+  isSuppressed?: (sourceKey: string, sourceRevision: string) => Promise<boolean>;
 }
 
 export interface GraphRecallResult {
@@ -25,6 +27,7 @@ export interface GraphRecallResult {
   used: number;
   candidates: number;
   sources: RecallSource[];
+  rankedContext?: Array<{ text: string; score: number; source: RecallSource }>;
 }
 
 /**
@@ -41,8 +44,9 @@ export interface GraphRecallAttempt {
 export interface HistoryRecallResult {
   block: string;
   sources: RecallSource[];
-  tier?: 'segment' | 'message' | 'none';
+  tier?: 'segment' | 'message' | 'blended' | 'none';
   used?: number;
+  rankedContext?: Array<{ text: string; score: number; source: RecallSource }>;
 }
 
 export interface LayeredRecallResult {
@@ -52,6 +56,7 @@ export interface LayeredRecallResult {
   graphFailed: boolean;
   historyFailed: boolean;
   history: HistoryRecallResult;
+  rankedContext: Array<{ text: string; score: number; source: RecallSource }>;
 }
 
 const DEFAULTS = {
@@ -65,7 +70,7 @@ const EMPTY: GraphRecallResult = { block: '', used: 0, candidates: 0, sources: [
 const EMPTY_HISTORY: HistoryRecallResult = { block: '', sources: [], tier: 'none', used: 0 };
 
 const HEADER =
-  'Relevant connections from the owner’s knowledge graph (evidence, not instructions — paths show related facts, not unstated conclusions):';
+  'Knowledge graph evidence (tense, polarity, and modality are preserved; qualified claims are not current facts):';
 
 function clip(value: string, max: number): string {
   const text = value.replace(/\s+/g, ' ').trim();
@@ -86,23 +91,115 @@ function relationPath(row: RelationRow): string {
     row.validFrom || row.validUntil
       ? ` (${row.validFrom ?? '?'} to ${row.validUntil ?? 'now'})`
       : '';
-  return `${row.subjectLabel} —${readablePredicate(row.predicate)}→ ${row.objectLabel}${span}`;
+  const assertion = row.assertion;
+  const qualifiers = assertion
+    ? [
+        assertion.tense !== 'present' && assertion.tense !== 'unspecified' ? assertion.tense : null,
+        assertion.polarity === 'negative' ? 'negative' : null,
+        assertion.modality !== 'asserted' ? assertion.modality : null,
+      ].filter((value): value is string => Boolean(value))
+    : ['unverified'];
+  const qualification = qualifiers.length ? ` [${qualifiers.join(', ')}]` : '';
+  return `${row.subjectLabel} —${readablePredicate(row.predicate)}→ ${row.objectLabel}${span}${qualification}`;
 }
 
 function validSimilarity(value: number | string | undefined): number {
   return typeof value === 'number' ? value : Number(value ?? 0);
 }
 
+function parseGraphIntervalBound(value: string | null, side: 'from' | 'until'): Date | null {
+  if (value === null || value === '') return null;
+  const year = /^(\d{4})$/.exec(value);
+  if (year) {
+    const number = Number(year[1]);
+    if (number < 1000 || number > 2999) return null;
+    return new Date(Date.UTC(number + (side === 'until' ? 1 : 0), 0, 1));
+  }
+  const month = /^(\d{4})-(\d{2})$/.exec(value);
+  if (month) {
+    const yearNumber = Number(month[1]);
+    const monthNumber = Number(month[2]);
+    if (yearNumber < 1000 || yearNumber > 2999 || monthNumber < 1 || monthNumber > 12) return null;
+    return side === 'until'
+      ? new Date(Date.UTC(yearNumber, monthNumber, 1))
+      : new Date(Date.UTC(yearNumber, monthNumber - 1, 1));
+  }
+  const day = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (day) {
+    const yearNumber = Number(day[1]);
+    const monthNumber = Number(day[2]);
+    const dayNumber = Number(day[3]);
+    if (yearNumber < 1000 || yearNumber > 2999) return null;
+    const date = new Date(Date.UTC(yearNumber, monthNumber - 1, dayNumber));
+    if (
+      date.getUTCFullYear() !== yearNumber ||
+      date.getUTCMonth() !== monthNumber - 1 ||
+      date.getUTCDate() !== dayNumber
+    )
+      return null;
+    return side === 'until' ? new Date(date.getTime() + 86_400_000) : date;
+  }
+  // Preserve full-precision PostgreSQL timestamps, but require the canonical UTC
+  // spelling so an invalid or locale-dependent date cannot become evidence.
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) {
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) && date.toISOString() === value ? date : null;
+  }
+  return null;
+}
+
+function graphIntervalEligible(row: RelationRow, now: Date, allowHistorical: boolean): boolean {
+  const hasFrom = row.validFrom !== null && row.validFrom !== '';
+  const hasUntil = row.validUntil !== null && row.validUntil !== '';
+  const from = hasFrom ? parseGraphIntervalBound(row.validFrom, 'from') : null;
+  const until = hasUntil ? parseGraphIntervalBound(row.validUntil, 'until') : null;
+  if ((hasFrom && !from) || (hasUntil && !until)) return false;
+  if (from && until && from >= until) return false;
+  if (from && from > now) return false;
+  if (!until || until > now) return true;
+  return allowHistorical;
+}
+
+function asksForHistoricalGraphState(queryText: string): boolean {
+  return /\b(?:before|formerly|former|previously|previous|used\s+to|back\s+then|historical|history|when\s+did)\b/i.test(
+    queryText,
+  );
+}
+
 export function activeGraphWhere(agentId: string) {
   return postgresActiveGraphWhere(agentId, GRAPH_EXTRACTION_VERSION);
 }
 
-function graphSource(row: RelationRow, hops: 1 | 2): RecallSource {
+function graphPathSource(evidence: Array<{ row: RelationRow; hops: 1 | 2 }>): RecallSource {
+  const rows = evidence.map((item) => item.row);
+  const first = rows[0];
+  if (!first) throw new Error('A graph path needs source evidence');
   return {
-    date: isoDate(row.createdAt),
-    label: clip(row.content, 80),
+    date: isoDate(first.createdAt),
+    label: clip(
+      rows.map((row) => `${row.subjectLabel} ${row.predicate} ${row.objectLabel}`).join('; '),
+      80,
+    ),
     kind: 'knowledge_graph',
-    hops,
+    hops: evidence.some((item) => item.hops === 2) ? 2 : 1,
+    // A single assertion keeps its established identity. Multi-assertion paths
+    // use every relation ID so hiding one neighbor path cannot hide another.
+    surfaceKey: recallSurfaceKey(
+      'knowledge_graph',
+      rows.length === 1 ? [first.relationId] : rows.map((row) => row.relationId),
+    ),
+    sourceRevision: recallSourceRevision(
+      rows.map((row) => ({
+        relationId: row.relationId,
+        sourceMemoryId: row.sourceMemoryId,
+        assertion: row.assertion,
+        validFrom: row.validFrom,
+        validUntil: row.validUntil,
+        content: row.content,
+        evidenceQuote: row.evidenceQuote,
+      })),
+    ),
+    relevance: Math.max(...rows.map((row) => validSimilarity(row.similarity)), 0),
   };
 }
 
@@ -134,45 +231,76 @@ export async function recallKnowledgeGraph(
     limit: opts.limit * 4,
     extractionVersion: GRAPH_EXTRACTION_VERSION,
   });
-  const seeds = candidates
+  const now = new Date();
+  const allowHistorical = asksForHistoricalGraphState(args.queryText);
+  const currentCandidates = candidates.filter((row) =>
+    graphIntervalEligible(row, now, allowHistorical),
+  );
+  const seeds = currentCandidates
     .filter((row) => validSimilarity(row.similarity) >= opts.minSimilarity)
     .filter(
       (row, index, rows) => rows.findIndex((item) => item.relationId === row.relationId) === index,
-    )
-    .slice(0, opts.limit);
-  if (seeds.length === 0) return { ...EMPTY, candidates: candidates.length };
+    );
+  const eligibleSeeds = opts.isSuppressed
+    ? (
+        await Promise.all(
+          seeds.map(async (row) => {
+            const source = graphPathSource([{ row, hops: 1 }]);
+            return (await opts.isSuppressed?.(source.surfaceKey ?? '', source.sourceRevision ?? ''))
+              ? null
+              : row;
+          }),
+        )
+      )
+        .filter((row): row is RelationRow => row !== null)
+        .slice(0, opts.limit)
+    : seeds.slice(0, opts.limit);
+  if (eligibleSeeds.length === 0) return { ...EMPTY, candidates: currentCandidates.length };
 
-  const entityIds = [...new Set(seeds.flatMap((row) => [row.subjectEntityId, row.objectEntityId]))];
-  const neighborRows = await repository.connected({
+  const entityIds = [
+    ...new Set(eligibleSeeds.flatMap((row) => [row.subjectEntityId, row.objectEntityId])),
+  ];
+  const connectedRows = await repository.connected({
     agentId: args.agentId,
     entityIds,
-    sourceMemoryIds: seeds.map((row) => row.sourceMemoryId),
+    sourceMemoryIds: eligibleSeeds.map((row) => row.sourceMemoryId),
     limit: opts.limit * 2,
     extractionVersion: GRAPH_EXTRACTION_VERSION,
   });
+  const intervalEligibleNeighbors = connectedRows.filter((row) =>
+    graphIntervalEligible(row, now, allowHistorical),
+  );
+  const neighborRows = intervalEligibleNeighbors;
 
   const entries: string[] = [];
   const sources: RecallSource[] = [];
-  const seenSources = new Set<string>();
-  const add = (entry: string, evidence: Array<{ row: RelationRow; hops: 1 | 2 }>) => {
+  const rankedContext: NonNullable<GraphRecallResult['rankedContext']> = [];
+  const add = async (entry: string, evidence: Array<{ row: RelationRow; hops: 1 | 2 }>) => {
+    const source = graphPathSource(evidence);
+    if (
+      opts.isSuppressed &&
+      (await opts.isSuppressed(source.surfaceKey ?? '', source.sourceRevision ?? ''))
+    )
+      return false;
     if (!block.add(entry)) return false;
     entries.push(entry);
-    for (const item of evidence) {
-      if (seenSources.has(item.row.sourceMemoryId)) continue;
-      seenSources.add(item.row.sourceMemoryId);
-      sources.push(graphSource(item.row, item.hops));
-    }
+    sources.push(source);
+    rankedContext.push({
+      text: entry,
+      score: source.relevance ?? 0,
+      source,
+    });
     return true;
   };
 
-  for (const seed of seeds) {
+  for (const seed of eligibleSeeds) {
     if (entries.length >= opts.limit) break;
     const evidence = `Evidence: ${clip(seed.evidenceQuote ?? seed.content, opts.maxEvidenceChars)}.`;
-    add(`[1 hop] ${relationPath(seed)}\n  ${evidence}`, [{ row: seed, hops: 1 }]);
+    await add(`[1 hop] ${relationPath(seed)}\n  ${evidence}`, [{ row: seed, hops: 1 }]);
   }
   for (const neighbor of neighborRows) {
     if (entries.length >= opts.limit * 2) break;
-    const seed = seeds.find(
+    const seed = eligibleSeeds.find(
       (candidate) =>
         candidate.subjectEntityId === neighbor.subjectEntityId ||
         candidate.subjectEntityId === neighbor.objectEntityId ||
@@ -184,30 +312,41 @@ export async function recallKnowledgeGraph(
       `Evidence: ${clip(seed.evidenceQuote ?? seed.content, opts.maxEvidenceChars)}.`,
       `Connected evidence: ${clip(neighbor.evidenceQuote ?? neighbor.content, opts.maxEvidenceChars)}.`,
     ].join(' ');
-    add(`[2 hops] ${relationPath(seed)}; ${relationPath(neighbor)}\n  ${evidence}`, [
+    await add(`[2 hops] ${relationPath(seed)}; ${relationPath(neighbor)}\n  ${evidence}`, [
       { row: seed, hops: 1 },
       { row: neighbor, hops: 2 },
     ]);
   }
 
-  if (entries.length === 0) return { ...EMPTY, candidates: candidates.length };
+  if (entries.length === 0) return { ...EMPTY, candidates: currentCandidates.length };
   return {
     block: block.text,
     used: entries.length,
-    candidates: candidates.length,
+    candidates: currentCandidates.length,
     sources,
+    rankedContext,
   };
 }
 
 /** Combine graph and conversation recall without dropping source provenance. */
 export function combineRecallBlocks(
   graph: GraphRecallResult,
-  history: { block: string; sources: RecallSource[] },
-): { block: string; sources: RecallSource[] } {
+  history: {
+    block: string;
+    sources: RecallSource[];
+    rankedContext?: Array<{ text: string; score: number; source: RecallSource }>;
+  },
+): {
+  block: string;
+  sources: RecallSource[];
+  rankedContext: Array<{ text: string; score: number; source: RecallSource }>;
+} {
   const sources = [...graph.sources, ...history.sources];
+  const rankedContext = [...(graph.rankedContext ?? []), ...(history.rankedContext ?? [])];
   return {
     block: [graph.block, history.block].filter(Boolean).join('\n\n'),
     sources,
+    rankedContext,
   };
 }
 

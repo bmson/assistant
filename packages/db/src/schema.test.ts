@@ -17,6 +17,7 @@ const EXPECTED_TABLES = [
   'contacts',
   'models',
   'model_roles',
+  'model_role_revisions',
   'model_calls',
   'budgets',
   'tool_cache',

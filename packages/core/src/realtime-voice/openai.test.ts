@@ -73,7 +73,10 @@ describe('OpenAI Realtime adapter', () => {
       session: {
         instructions: 'Book a table for two.',
         audio: {
-          input: { format: { type: 'audio/pcmu' } },
+          input: {
+            format: { type: 'audio/pcmu' },
+            transcription: { model: 'gpt-live-transcribe' },
+          },
           output: { format: { type: 'audio/pcmu' }, voice: 'marin' },
         },
         tools: [{ type: 'function', name: 'end_call' }],
@@ -139,8 +142,17 @@ describe('OpenAI Realtime adapter', () => {
       inputAudioTokens: 100,
       inputTextTokens: 50,
       cachedInputTokens: 10,
+      cachedAudioInputTokens: 0,
+      cachedTextInputTokens: 0,
+      cachedUnclassifiedInputTokens: 10,
       outputAudioTokens: 200,
       outputTextTokens: 20,
+      reasoningOutputTokens: 0,
+      reasoningUsageReported: false,
+      transcriptionInputAudioTokens: 0,
+      transcriptionOutputTextTokens: 0,
+      transcriptionUsageReported: false,
+      transcriptionInputAudioMilliseconds: 0,
     });
 
     // 360 ms of the second was still unplayed: the caller heard 640 ms.

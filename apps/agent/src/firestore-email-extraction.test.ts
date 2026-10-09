@@ -1,8 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { type ExecutorDeps, executeTask } from '@assistant/core';
 import type { Db } from '@assistant/db';
-import { createFirestoreExecutionPersistence } from '@assistant/firestore';
-import type { ExecutionPersistence } from '@assistant/persistence';
+import {
+  createFirestoreExecutionPersistence,
+  FirestoreProfileOccasionCommandRepository,
+} from '@assistant/firestore';
+import { type ExecutionPersistence, embeddingSpaceIdentityKey } from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { embeddingSpaceKey } from '../../../packages/firestore/src/memory.js';
 import { encodeRecord, type InstallationStore } from '../../../packages/firestore/src/store.js';
@@ -40,6 +43,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           },
         );
       const router = {
+        async embeddingSpace() {
+          return SPACE;
+        },
+        async embeddingSpaceKey() {
+          return embeddingSpaceIdentityKey(SPACE);
+        },
         async object(_role: string, input: { prompt: string }) {
           prompts.push(input.prompt);
           return {
@@ -214,6 +223,53 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect(
         occasions.docs.map((doc) => [doc.get('month'), doc.get('day'), doc.get('quarantined')]),
       ).toEqual([[5, 4, true]]);
+
+      const occasionId = String(occasions.docs[0]?.get('id'));
+      const contactId = String(occasions.docs[0]?.get('contactId'));
+      await new FirestoreProfileOccasionCommandRepository(store, agentId).update(occasionId, {
+        kind: 'birthday',
+        label: 'Birthday',
+        month: 5,
+        day: 5,
+        year: null,
+        leadDays: 7,
+        notes: 'Owner corrected the date',
+      });
+      await expect(
+        persistence.emailExtraction?.saveOccasion({
+          agentId,
+          subject: 'Grace',
+          kind: 'birthday',
+          label: 'Birthday',
+          month: 5,
+          day: 4,
+          year: null,
+          notes: 'Historical email date',
+        }),
+      ).resolves.toBe(false);
+      await persistence.emailExtraction?.saveOccasion({
+        agentId,
+        subject: 'Grace',
+        kind: 'birthday',
+        label: 'Birthday',
+        month: 5,
+        day: 5,
+        year: null,
+        notes: 'Later email detail',
+      });
+      const afterEmailReplay = await store
+        .collection('occasions')
+        .where('contactId', '==', contactId)
+        .get();
+      expect(afterEmailReplay.size).toBe(1);
+      expect(
+        afterEmailReplay.docs.find((doc) => doc.get('id') === occasionId)?.data(),
+      ).toMatchObject({
+        day: 5,
+        notes: 'Owner corrected the date; Later email detail',
+        ownerConfirmed: true,
+      });
+      expect(afterEmailReplay.docs.find((doc) => doc.get('day') === 4)).toBeUndefined();
 
       for (const id of [booking, routine])
         expect((await store.doc('emailIngest', id).get()).get('extractedAt')).toBeTruthy();

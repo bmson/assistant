@@ -41,6 +41,7 @@ final class SpeechListener: ObservableObject {
     private var settled = ""
     private var volatileTail = ""
     private var cancellingEcho = false
+    private var inputTapInstalled = false
     /// Bumped by every start and every stop. `start` does real asynchronous
     /// work — permission, a model download — and a release that arrives during
     /// it must not leave a microphone open behind the owner's back.
@@ -105,7 +106,7 @@ final class SpeechListener: ObservableObject {
 
             results = Task { [weak self] in
                 guard let self else { return }
-                await self.consume(transcriber)
+                await self.consume(transcriber, generation: generation)
             }
             try startEngine(writingTo: continuation, format: format)
             state = .listening
@@ -120,7 +121,7 @@ final class SpeechListener: ObservableObject {
     @discardableResult
     func stop() async -> String {
         generation += 1
-        guard state == .listening || state == .preparing else { return transcript }
+        guard state != .idle || hasAudioResources else { return transcript }
         await teardown()
         state = .idle
         return transcript
@@ -155,9 +156,14 @@ final class SpeechListener: ObservableObject {
         return transcriber
     }
 
-    private func consume(_ transcriber: SpeechTranscriber) async {
+    private var hasAudioResources: Bool {
+        inputTapInstalled || engine.isRunning || input != nil || analyzer != nil || results != nil
+    }
+
+    private func consume(_ transcriber: SpeechTranscriber, generation: Int) async {
         do {
             for try await result in transcriber.results {
+                guard generation == self.generation else { return }
                 let text = String(result.text.characters)
                 if result.isFinal {
                     settled = join(settled, text)
@@ -170,6 +176,9 @@ final class SpeechListener: ObservableObject {
         } catch {
             // A stream that ends badly still leaves the owner whatever was
             // already understood, in the composer, to send or to throw away.
+            guard generation == self.generation else { return }
+            await teardown()
+            guard generation == self.generation else { return }
             state = .unavailable(error.localizedDescription)
         }
     }
@@ -191,7 +200,14 @@ final class SpeechListener: ObservableObject {
         let node = engine.inputNode
         // Must be set before the engine starts, and it changes the input
         // format, so it comes before the format is read.
-        try? node.setVoiceProcessingEnabled(cancellingEcho)
+        if cancellingEcho {
+            // Talk is full duplex only when the operating system confirms
+            // voice processing. Failing open can transcribe the assistant's
+            // own playback as the owner's next request.
+            try node.setVoiceProcessingEnabled(true)
+        } else {
+            try? node.setVoiceProcessingEnabled(false)
+        }
         let inputFormat = node.outputFormat(forBus: 0)
         let converter = AudioFormatConverter(from: inputFormat, to: format)
 
@@ -202,14 +218,18 @@ final class SpeechListener: ObservableObject {
             guard let converted = converter.convert(buffer) else { return }
             continuation.yield(AnalyzerInput(buffer: converted))
         }
+        inputTapInstalled = true
 
         engine.prepare()
         try engine.start()
     }
 
     private func teardown() async {
-        if engine.isRunning {
+        if inputTapInstalled {
             engine.inputNode.removeTap(onBus: 0)
+            inputTapInstalled = false
+        }
+        if engine.isRunning {
             engine.stop()
         }
         input?.finish()

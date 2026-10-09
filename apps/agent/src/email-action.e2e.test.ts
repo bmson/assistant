@@ -1,5 +1,5 @@
 import type { InboundEvent, ModelRouter, StepCallOutcome } from '@assistant/core';
-import { enqueueTask, executeTask, getAgent } from '@assistant/core';
+import { enqueueTask, executeTask, getAgent, TruncatedObjectError } from '@assistant/core';
 import {
   approvals,
   conversations,
@@ -9,10 +9,12 @@ import {
   tasks,
   toolCalls,
 } from '@assistant/db';
+import { finalChannelDelivery, finalChannelDeliveryReport } from '@assistant/persistence';
 import { ToolDispatcher, ToolRegistry } from '@assistant/tools';
 import { eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
+import { approvalNoticeEmail } from './executor-deps.js';
 
 const DATABASE_URL =
   process.env.DATABASE_URL ?? 'postgres://assistant:assistant@localhost:5432/assistant';
@@ -101,6 +103,198 @@ afterAll(async () => {
   await (db as unknown as { $client: { end: () => Promise<void> } }).$client?.end?.();
 });
 
+describe('approval notice with earlier completed work', () => {
+  it('names only the pending send when the same task already has a completed benign write', async () => {
+    if (!dbUp)
+      throw new Error(
+        'PostgreSQL test database is required for this same-task approval regression',
+      );
+    const { task } = await enqueueTask(db, {
+      type: 'adhoc',
+      event: {
+        source: 'internal',
+        agentId,
+        trust: 'owner',
+        payload: { instruction: 'Create the lunch event, then send its details to Jordan.' },
+      },
+    });
+    createdTaskIds.push(task.id);
+
+    const [completedWrite] = await db
+      .insert(toolCalls)
+      .values({
+        taskId: task.id,
+        step: 0,
+        toolName: 'calendar.create_event',
+        args: { summary: 'Lunch' },
+        risk: 'autonomous',
+        status: 'succeeded',
+        result: { eventId: 'synthetic-lunch-event', created: true },
+      })
+      .returning();
+    const [pendingSend] = await db
+      .insert(toolCalls)
+      .values({
+        taskId: task.id,
+        step: 1,
+        toolName: 'gmail.send',
+        args: { to: 'jordan@example.test', subject: 'Lunch details' },
+        risk: 'approval',
+        status: 'awaiting_approval',
+      })
+      .returning();
+    if (!completedWrite || !pendingSend) throw new Error('Expected both durable tool rows');
+    const [pendingApproval] = await db
+      .insert(approvals)
+      .values({
+        taskId: task.id,
+        toolCallId: pendingSend.id,
+        shortCode: 'A7',
+        summary: 'Send lunch details to Jordan',
+        payload: { to: 'jordan@example.test', subject: 'Lunch details' },
+        status: 'pending',
+        expiresAt: new Date(Date.now() + 60 * 60_000),
+      })
+      .returning();
+    if (!pendingApproval) throw new Error('Expected a pending send approval');
+
+    const notice = approvalNoticeEmail([
+      { shortCode: pendingApproval.shortCode, summary: pendingApproval.summary },
+    ]);
+    const sameTaskRows = await db.select().from(toolCalls).where(eq(toolCalls.taskId, task.id));
+    expect(sameTaskRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: completedWrite.id,
+          toolName: 'calendar.create_event',
+          status: 'succeeded',
+          result: { eventId: 'synthetic-lunch-event', created: true },
+        }),
+        expect.objectContaining({
+          id: pendingSend.id,
+          toolName: 'gmail.send',
+          status: 'awaiting_approval',
+        }),
+      ]),
+    );
+    expect(notice).toContain('[A7] Send lunch details to Jordan');
+    expect(notice).not.toContain('calendar.create_event');
+    expect(notice).not.toMatch(/nothing has happened|none of the actions have happened/i);
+  });
+});
+
+describe('planner unavailable outward-action boundary', () => {
+  async function runUnavailablePlan(input: {
+    decision?: { mode: 'park' | 'block'; reason: string };
+    error?: Error;
+  }) {
+    if (!dbUp) {
+      throw new Error('PostgreSQL test database is required for planner-unavailable regressions');
+    }
+    const { task } = await enqueueTask(db, {
+      type: 'adhoc',
+      event: {
+        source: 'internal',
+        agentId,
+        trust: 'owner',
+        payload: { instruction: 'Email my tax report to Alex.' },
+      },
+      maxSteps: 2,
+    });
+    createdTaskIds.push(task.id);
+
+    const plannerRoles: string[] = [];
+    const stepRoles: string[] = [];
+    const dispatched: Array<{ toolName: string; args: Record<string, unknown> }> = [];
+    const router = {
+      async embeddingSpace() {
+        return {
+          provider: 'synthetic',
+          model: 'planner-unavailable',
+          dimensions: 1536,
+          revision: '1',
+        };
+      },
+      async embed(texts: string[]) {
+        return texts.map(() => Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0)));
+      },
+      async object(role: string) {
+        plannerRoles.push(role);
+        if (input.error) throw input.error;
+        if (!input.decision) throw new Error('test requires a decision or planner error');
+        return { ok: false as const, decision: input.decision };
+      },
+      async step(role: string): Promise<StepCallOutcome> {
+        stepRoles.push(role);
+        return {
+          ok: true,
+          modelId: 'synthetic/forbidden-follow-up',
+          degraded: false,
+          text: '',
+          toolCalls: [
+            {
+              toolCallId: `planner-unavailable-guessed-send-${task.id}`,
+              toolName: 'gmail.send',
+              input: {
+                to: 'alex@example.test',
+                subject: 'Tax report',
+                body: 'Attached is your report.',
+              },
+            },
+          ],
+          finishReason: 'tool-calls',
+        };
+      },
+    } as unknown as ModelRouter;
+    const dispatcher = {
+      toolDefs: () => [{ name: 'gmail.send', description: 'Send an email', inputSchema: {} }],
+      resultIsUntrusted: () => false,
+      dispatch: async (dispatchInput: { toolName: string; args: Record<string, unknown> }) => {
+        dispatched.push({ toolName: dispatchInput.toolName, args: dispatchInput.args });
+        return { kind: 'rejected' as const, reason: 'synthetic test boundary' };
+      },
+      executeApproved: async () => ({ kind: 'failed' as const, error: 'No approval exists' }),
+    };
+
+    const outcome = await executeTask({ db, router, dispatcher: dispatcher as never }, task.id);
+    const [stored] = await db
+      .select({ status: tasks.status })
+      .from(tasks)
+      .where(eq(tasks.id, task.id));
+
+    expect(plannerRoles).toContain('plan');
+    expect(stepRoles).toHaveLength(0);
+    expect(dispatched).toEqual([]);
+    return { outcome, storedStatus: stored?.status };
+  }
+
+  it('parks on a daily budget block without entering the model step loop', async () => {
+    const reason = 'daily budget exhausted ($5.00 of $5.00)';
+    const { outcome, storedStatus } = await runUnavailablePlan({
+      decision: { mode: 'block', reason },
+    });
+    expect(outcome).toMatchObject({ outcome: 'parked', detail: reason });
+    expect(storedStatus).toBe('waiting_budget');
+  });
+
+  it('requests owner permission on a task budget park without entering the model step loop', async () => {
+    const reason = 'task budget exhausted ($1.00 of $1.00)';
+    const { outcome, storedStatus } = await runUnavailablePlan({
+      decision: { mode: 'park', reason },
+    });
+    expect(outcome).toMatchObject({ outcome: 'needs_attention', detail: reason });
+    expect(storedStatus).toBe('needs_attention');
+  });
+
+  it('does not enter the model step loop with a truncated structured plan', async () => {
+    const { outcome, storedStatus } = await runUnavailablePlan({
+      error: new TruncatedObjectError('plan'),
+    });
+    expect(outcome.outcome).toBe('needs_attention');
+    expect(storedStatus).toBe('needs_attention');
+  });
+});
+
 describe('email action routing (integration, scripted model)', () => {
   it('runs an actionable email on the reason model with a forced step-0 tool call', async (ctx) => {
     if (!dbUp) return ctx.skip();
@@ -122,6 +316,9 @@ describe('email action routing (integration, scripted model)', () => {
     const step0ToolChoice: Array<string | undefined> = [];
     let step = 0;
     const router = {
+      async embed() {
+        return [Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0))];
+      },
       async object() {
         return { ok: true, modelId: 'fake/model', degraded: false, object: workflowPlan };
       },
@@ -156,7 +353,15 @@ describe('email action routing (integration, scripted model)', () => {
     } as unknown as ModelRouter;
 
     const outcome = await executeTask(
-      { db, router, dispatcher: new ToolDispatcher(db, registry()) },
+      {
+        db,
+        router,
+        dispatcher: new ToolDispatcher(db, registry()),
+        // This E2E checks the routed calendar action. The channel boundary is
+        // explicitly faked so no email provider is contacted by the test.
+        deliverFinal: async (_task, _text, attemptId) =>
+          finalChannelDeliveryReport([finalChannelDelivery('email', 'accepted', attemptId)]),
+      },
       task.id,
     );
 
@@ -172,12 +377,9 @@ describe('email action routing (integration, scripted model)', () => {
     ).toBe(true);
   });
 
-  // Regression: a forwarded (tainted) owner email whose planner returned 'reply'
-  // used to make ZERO tool calls — the model summarized the forward instead of
-  // acting on the instruction inside it. Fix 1 coerces that plan to 'workflow' so
-  // the step is forced to act; the taint defense then parks the outward action
-  // for approval rather than executing it or silently doing nothing.
-  it('forces an approval-gated action on a forwarded owner email the planner tried to only reply to', async (ctx) => {
+  // A forwarded message is source material, not an owner request. It cannot
+  // populate the owner's approval queue from the sender's embedded instructions.
+  it('does not promote a forwarded owner email into an owner-authorized action', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const [conversation] = await db
       .insert(conversations)
@@ -214,6 +416,9 @@ describe('email action routing (integration, scripted model)', () => {
       missingInfo: [],
     };
     const router = {
+      async embed() {
+        return [Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0))];
+      },
       async object() {
         return { ok: true, modelId: 'fake/model', degraded: false, object: replyPlan };
       },
@@ -225,8 +430,7 @@ describe('email action routing (integration, scripted model)', () => {
         step += 1;
         const choice = typeof opts.toolChoice === 'string' ? opts.toolChoice : undefined;
         if (current === 0) step0ToolChoice.push(choice);
-        // Behave like a real model: emit the action only when forced. Without the
-        // fix the plan is 'reply' → toolChoice undefined → prose → zero tools.
+        // A conforming planner treats forwarded material as data.
         if (choice === 'required') {
           return {
             ok: true,
@@ -242,7 +446,7 @@ describe('email action routing (integration, scripted model)', () => {
           ok: true,
           modelId: 'fake/model',
           degraded: false,
-          text: 'Added lunch to your calendar for Friday.',
+          text: 'I can help if you tell me directly what you want done.',
           toolCalls: [],
           finishReason: 'stop',
         };
@@ -250,22 +454,23 @@ describe('email action routing (integration, scripted model)', () => {
     } as unknown as ModelRouter;
 
     const outcome = await executeTask(
-      { db, router, dispatcher: new ToolDispatcher(db, registry({ outwardFacing: true })) },
+      {
+        db,
+        router,
+        dispatcher: new ToolDispatcher(db, registry({ outwardFacing: true })),
+        deliverFinal: async (_task, _text, attemptId) =>
+          finalChannelDeliveryReport([finalChannelDelivery('email', 'accepted', attemptId)]),
+      },
       task.id,
     );
 
-    // Fix 1: the 'reply' plan on a tainted owner email is coerced to 'workflow',
-    // so step 0 is forced to act instead of silently summarizing.
-    expect(step0ToolChoice[0]).toBe('required');
-    // The taint defense holds: an outward action from a forward parks for
-    // approval — never a silent no-op, never an autonomous send.
-    expect(outcome.outcome).toBe('parked');
+    expect(step0ToolChoice[0]).not.toBe('required');
+    expect(outcome.outcome).toBe('done');
     const calls = await db.select().from(toolCalls).where(eq(toolCalls.taskId, task.id));
     const cal = calls.find((c) => c.toolName === 'calendar.create_event');
-    expect(cal).toBeTruthy();
-    expect(cal?.status).toBe('awaiting_approval'); // parked, not autonomously executed
+    expect(cal).toBeUndefined();
     const appr = await db.select().from(approvals).where(eq(approvals.taskId, task.id));
-    expect(appr.length).toBeGreaterThan(0);
+    expect(appr).toHaveLength(0);
   });
 
   // A2: when a forced-action step produces only prose even after its retry (a

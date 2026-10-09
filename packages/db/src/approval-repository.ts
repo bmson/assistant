@@ -20,6 +20,7 @@ import {
 } from '@assistant/persistence';
 import { and, asc, eq, gt, inArray, lte, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
+import { lockPostgresPrivacyObservationFence } from './privacy-erasure-repository.js';
 import { approvalPolicies, approvals, maintenanceCursors, tasks, toolCalls } from './schema.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -139,6 +140,7 @@ export async function getRememberableApproval(
       and(
         eq(approvals.id, approvalId),
         eq(approvals.status, 'pending'),
+        gt(approvals.expiresAt, sql`clock_timestamp()`),
         eq(tasks.agentId, agentId),
         eq(toolCalls.taskId, approvals.taskId),
       ),
@@ -268,41 +270,90 @@ export async function resolveApproval(
     return { ok: false, reason: 'approvalId or shortCode required' };
   }
 
-  const matcher = input.approvalId
-    ? and(eq(approvals.id, input.approvalId), eq(approvals.status, 'pending'))
-    : and(eq(approvals.shortCode, input.shortCode as string), eq(approvals.status, 'pending'));
-
   const resolution = await db.transaction(async (tx) => {
     if (input.policy && input.via === 'web') {
-      const [pending] = await tx
-        .select({ taskId: approvals.taskId, toolCallId: approvals.toolCallId })
-        .from(approvals)
-        .where(matcher)
-        .limit(1);
-      if (!pending) return null;
+      await lockPostgresPrivacyObservationFence(tx as unknown as Db, input.policy.agentId);
+    }
+    const candidates = input.approvalId
+      ? await tx
+          .select({ id: approvals.id, taskId: approvals.taskId, toolCallId: approvals.toolCallId })
+          .from(approvals)
+          .where(eq(approvals.id, input.approvalId))
+          .limit(1)
+      : await tx
+          .select({ id: approvals.id, taskId: approvals.taskId, toolCallId: approvals.toolCallId })
+          .from(approvals)
+          .where(
+            and(
+              eq(approvals.shortCode, input.shortCode as string),
+              eq(approvals.status, 'pending'),
+            ),
+          )
+          .limit(2);
+    if (!input.approvalId && candidates.length > 1) return { ambiguous: true as const };
+    const candidate = candidates[0];
+    if (!candidate) return null;
+
+    // Match task lifecycle and tool-claim paths: task lock first, then the
+    // approval row. The initial lookup only discovers the task ID; all mutable
+    // approval fields are re-read after both locks are held.
+    const [task] = await tx
+      .select({ id: tasks.id, agentId: tasks.agentId })
+      .from(tasks)
+      .where(eq(tasks.id, candidate.taskId))
+      .for('update');
+    if (!task) return null;
+
+    const [pending] = await tx
+      .select()
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.id, candidate.id),
+          eq(approvals.taskId, task.id),
+          eq(approvals.toolCallId, candidate.toolCallId),
+          eq(approvals.status, 'pending'),
+        ),
+      )
+      .for('update');
+    if (!pending) return null;
+
+    // transaction_timestamp()/now() can be older than a deadline reached while
+    // waiting for the task or approval lock. Use the strict wall-clock predicate
+    // in the update below, after both rows are locked, as the authoritative test.
+    if (!(pending.expiresAt instanceof Date) || !Number.isFinite(pending.expiresAt.getTime()))
+      return null;
+
+    if (input.policy && input.via === 'web') {
       const [linked] = await tx
-        .select({ agentId: tasks.agentId, toolName: toolCalls.toolName })
+        .select({ toolName: toolCalls.toolName })
         .from(toolCalls)
-        .innerJoin(tasks, eq(toolCalls.taskId, tasks.id))
-        .where(and(eq(toolCalls.id, pending.toolCallId), eq(toolCalls.taskId, pending.taskId)))
+        .where(and(eq(toolCalls.id, pending.toolCallId), eq(toolCalls.taskId, task.id)))
         .limit(1);
       if (
         !linked ||
-        input.policy.agentId !== linked.agentId ||
+        input.policy.agentId !== task.agentId ||
         input.policy.toolName !== linked.toolName
       ) {
         throw new Error('Approval policy must match the task owner and tool');
       }
     }
+
     const [resolved] = await tx
       .update(approvals)
       .set({
         status: input.decision,
-        resolvedAt: sql`now()`,
+        resolvedAt: sql`clock_timestamp()`,
         resolvedVia: input.via,
         resolutionPayload: input.editedPayload ?? null,
       })
-      .where(matcher)
+      .where(
+        and(
+          eq(approvals.id, pending.id),
+          eq(approvals.status, 'pending'),
+          gt(approvals.expiresAt, sql`clock_timestamp()`),
+        ),
+      )
       .returning();
     if (!resolved) return null;
 
@@ -325,7 +376,7 @@ export async function resolveApproval(
           ],
           // Repeating Always/Never is also an explicit request to reactivate a
           // matching rule that was paused in Settings.
-          set: { enabled: true, updatedAt: sql`now()` },
+          set: { enabled: true, updatedAt: sql`clock_timestamp()` },
         })
         .returning();
       if (policy) {
@@ -336,8 +387,8 @@ export async function resolveApproval(
       }
     }
 
-    // Only the state this approval actually parks may be resumed. A late
-    // response must never resurrect a cancelled/completed task.
+    // The task row is already locked. Only a task still parked on approval may
+    // be woken; a late answer never resurrects a cancelled or completed task.
     const [woken] = await tx
       .update(tasks)
       .set({
@@ -346,7 +397,7 @@ export async function resolveApproval(
         lockedUntil: null,
         queueGeneration: sql`${tasks.queueGeneration} + 1`,
         attempt: 0,
-        updatedAt: sql`now()`,
+        updatedAt: sql`clock_timestamp()`,
       })
       .where(and(eq(tasks.id, resolved.taskId), eq(tasks.status, 'waiting_approval')))
       .returning({ id: tasks.id, queueGeneration: tasks.queueGeneration });
@@ -354,6 +405,9 @@ export async function resolveApproval(
     return { resolved, woken };
   });
 
+  if (resolution && 'ambiguous' in resolution) {
+    return { ok: false, reason: 'ambiguous approval code; use the approval ID' };
+  }
   if (!resolution) {
     return { ok: false, reason: 'no pending approval matched (already resolved or expired?)' };
   }
@@ -376,21 +430,31 @@ export async function expireStaleApprovals(
   const limit = approvalSweepBatch(batch);
   validateApprovalTime(now);
   return db.transaction(async (tx) => {
-    const due = tx
-      .select({ id: approvals.id })
+    const candidates = await tx
+      .select({ id: approvals.id, taskId: approvals.taskId, toolCallId: approvals.toolCallId })
       .from(approvals)
       .where(and(eq(approvals.status, 'pending'), lte(approvals.expiresAt, now)))
       .orderBy(asc(approvals.expiresAt), asc(approvals.id))
       .limit(limit);
-    // Repeat eligibility here so a concurrent decision or expiry extension wins
-    // cleanly: whichever UPDATE acquires the approval row first determines the
-    // terminal outcome, and the loser returns no row for that approval.
+    if (candidates.length === 0) return [];
+
+    // Keep every approval mutation on the same task→approval lock order as an
+    // answer decision. Lock tasks in stable order before touching approval rows.
+    const taskIds = [...new Set(candidates.map((row) => row.taskId))].sort();
+    await tx
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(inArray(tasks.id, taskIds))
+      .orderBy(asc(tasks.id))
+      .for('update');
+
+    const candidateIds = candidates.map((row) => row.id);
     const expired = await tx
       .update(approvals)
       .set({ status: 'expired', resolvedAt: now })
       .where(
         and(
-          inArray(approvals.id, due),
+          inArray(approvals.id, candidateIds),
           eq(approvals.status, 'pending'),
           lte(approvals.expiresAt, now),
         ),
@@ -408,7 +472,7 @@ export async function expireStaleApprovals(
         ),
       );
 
-    const taskIds = [...new Set(expired.map((approval) => approval.taskId))];
+    const expiredTaskIds = [...new Set(expired.map((approval) => approval.taskId))];
     return tx
       .update(tasks)
       .set({
@@ -421,7 +485,7 @@ export async function expireStaleApprovals(
         attentionNotifiedAt: null,
         updatedAt: now,
       })
-      .where(and(inArray(tasks.id, taskIds), eq(tasks.status, 'waiting_approval')))
+      .where(and(inArray(tasks.id, expiredTaskIds), eq(tasks.status, 'waiting_approval')))
       .returning({ taskId: tasks.id, generation: tasks.queueGeneration });
   });
 }
@@ -479,8 +543,8 @@ export async function resumeResolvedApprovals(
   const wakes: ApprovalWake[] = [];
   for (const candidate of candidates) {
     const wake = await db.transaction(async (tx) => {
-      // ResolveApproval updates approval first and then the task. Do not take
-      // approval row locks after this task lock, or the two paths can deadlock.
+      // Resolution and expiry both lock task before approval. This recovery
+      // reader keeps that order by checking approval rows without row locks.
       const [task] = await tx.select().from(tasks).where(eq(tasks.id, candidate.id)).for('update');
       if (task?.status !== 'waiting_approval') return null;
       const ids = parkedApprovalIds(task.state);

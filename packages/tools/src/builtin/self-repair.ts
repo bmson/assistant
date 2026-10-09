@@ -16,8 +16,12 @@ export function registerSelfRepairTools(registry: ToolRegistry, repository: Self
     risk: 'autonomous',
     acceptsUntrustedInput: false,
     execute: async (args, ctx) => {
-      if (ctx.trust !== 'owner' || ctx.tainted)
-        return { recorded: false, reason: 'An untainted owner request is required.' };
+      if (ctx.trust !== 'owner' || !ctx.ownerIntent?.authorizedScopes.includes('feedback_write'))
+        return {
+          recorded: false,
+          reason:
+            'The owner must directly request a feedback report; audit evidence alone is not authorization.',
+        };
       const issue = await reportRepair(repository, ctx.agentId, {
         ...args,
         source: 'feedback',

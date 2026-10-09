@@ -1,6 +1,13 @@
+import { isDeepStrictEqual } from 'node:util';
+import type { EmailObserverEffectFence } from './generated-cards.js';
 import type { Records } from './records.js';
+import { normalizeTaskBudget } from './task-budget.js';
 
 type Task = Records['tasks'];
+export interface EmailObserverTaskCreationFence extends EmailObserverEffectFence {
+  /** Canonical `gmail:<provider message id>` that produced this task. */
+  channelMessageId: string;
+}
 export type TaskCreateInput = Pick<Task, 'agentId' | 'type' | 'trust' | 'trigger'> &
   Partial<
     Pick<
@@ -19,7 +26,10 @@ export type TaskCreateInput = Pick<Task, 'agentId' | 'type' | 'trust' | 'trigger
       | 'nextAction'
       | 'reflectEvery'
     >
-  >;
+  > & {
+    /** Optional source/claim fence for a task created by a durable email observer. */
+    emailObserverTaskFence?: EmailObserverTaskCreationFence;
+  };
 export interface TaskCreateResult {
   task: Task;
   created: boolean;
@@ -42,13 +52,41 @@ export function existingTaskResult(task: Task, input: TaskCreateInput): TaskCrea
   return { task, created: false };
 }
 
+/**
+ * Event IDs are installation-wide. A fenced email replay may reuse an event
+ * only when its complete task-creation projection is unchanged.
+ */
+export function existingFencedTaskResult(task: Task, input: TaskCreateInput): TaskCreateResult {
+  const result = existingTaskResult(task, input);
+  const expected = newTaskRecord(input, task.id, task.createdAt);
+  const fields = [
+    'type',
+    'trust',
+    'trigger',
+    'title',
+    'conversationId',
+    'goalId',
+    'parentTaskId',
+    'externalEventId',
+    'runAfter',
+    'deadline',
+    'maxSteps',
+    'budgetUsdLimit',
+    'plan',
+    'autonomyGrant',
+    'nextAction',
+    'reflectEvery',
+  ] as const;
+  if (fields.some((field) => !isDeepStrictEqual(task[field], expected[field])))
+    throw new Error('Task event does not match its fenced email source');
+  return result;
+}
+
 /** Explicit defaults keep the Firestore record compatible with PostgreSQL/API rows. */
 export function newTaskRecord(input: TaskCreateInput, id: string, now: Date): Task {
-  const budget = Number(input.budgetUsdLimit || '0.50');
-  if (!input.agentId || !input.type || !Number.isFinite(budget) || budget < 0 || budget >= 10_000)
-    throw new Error('Invalid task creation input');
-  const budgetUsdLimit = budget.toFixed(4);
-  if (Number(budgetUsdLimit) >= 10_000) throw new Error('Task budget exceeds database precision');
+  const budgetUsdLimit = normalizeTaskBudget(input.budgetUsdLimit ?? '0.50');
+  if (!input.agentId || !input.type || budgetUsdLimit === null)
+    throw new Error('Invalid task creation input or task budget precision');
   const maxSteps = input.maxSteps ?? 12;
   if (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > 2_147_483_647)
     throw new Error('Invalid task step limit');

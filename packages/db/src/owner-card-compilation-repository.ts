@@ -5,6 +5,10 @@ import {
 } from '@assistant/persistence';
 import { and, eq, gt, isNull, ne, notExists, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
+import {
+  assertPostgresPrivacyObservationFence,
+  lockPostgresPrivacyObservationFence,
+} from './privacy-erasure-repository.js';
 import { contacts, memories, memoryTombstones, ownerCard } from './schema.js';
 
 /** Shared by card compilation and supersession so an older snapshot cannot publish last. */
@@ -19,6 +23,8 @@ export function createPostgresOwnerCardCompilationRepository(
       if (!input.agentId) throw new Error('Owner card compilation requires an agent ID');
       return db.transaction(async (tx) => {
         await tx.execute(sql`select ${OWNER_CARD_ADVISORY_LOCK}`);
+        const txDb = tx as unknown as Db;
+        const observed = await lockPostgresPrivacyObservationFence(txDb, input.agentId);
         const [owner] = await tx
           .select()
           .from(contacts)
@@ -130,6 +136,7 @@ export function createPostgresOwnerCardCompilationRepository(
             pinnedFacts: pinnedByContact.get(person.id) ?? [],
           })),
         });
+        await assertPostgresPrivacyObservationFence(txDb, input.agentId, observed);
         await tx
           .insert(ownerCard)
           .values({ id: 1, content, compiledAt: input.now })

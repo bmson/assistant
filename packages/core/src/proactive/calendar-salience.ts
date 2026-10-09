@@ -156,6 +156,12 @@ export function scoreCalendarEvent(
 
   const attendees = (event.attendees ?? []).map(parseAttendee);
   const mine = attendees.find((attendee) => self.has(attendee.email));
+  if (
+    event.status === 'cancelled' ||
+    event.ownerResponse === 'declined' ||
+    mine?.status === 'declined'
+  )
+    return { event, score: 0, reasons: [] };
   if (mine && (mine.status === 'needsaction' || mine.status === '?' || mine.status === '')) {
     score += WEIGHTS.unanswered;
     reasons.push('you have not replied to the invitation');

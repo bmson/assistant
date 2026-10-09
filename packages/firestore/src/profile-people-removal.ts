@@ -1,6 +1,7 @@
 import type { ProfilePeopleRemovalRepository, Records } from '@assistant/persistence';
 import { normalizeContactAliases } from '@assistant/persistence';
 import type { DocumentSnapshot, Transaction } from '@google-cloud/firestore';
+import { occasionDateKey, occasionDateKeyId } from './occasion-identity.js';
 import { privacyErasureIsActive } from './privacy-erasure.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
@@ -86,7 +87,27 @@ export class FirestoreProfilePeopleRemovalRepository implements ProfilePeopleRem
         this.occasionsOf(tx, contactId),
         this.graphLinksOf(tx, contactId),
       ]);
-      for (const occasion of occasions) tx.delete(occasion.ref);
+      const markers = occasions.length
+        ? await tx.getAll(
+            ...occasions.map((occasion) =>
+              this.store.doc(
+                'occasionDateKeys',
+                occasionDateKeyId(this.configuredAgentId, {
+                  contactId: String(occasion.get('contactId')),
+                  kind: String(occasion.get('kind')),
+                  month: Number(occasion.get('month')),
+                  day: Number(occasion.get('day')),
+                }),
+              ),
+            ),
+          )
+        : [];
+      occasions.forEach((occasion, index) => {
+        const marker = markers[index];
+        tx.delete(occasion.ref);
+        if (marker?.exists && marker.get('occasionId') === occasion.get('id'))
+          tx.delete(marker.ref);
+      });
       this.clearGraphLinks(tx, links);
       tx.delete(this.store.doc('contacts', contactId));
       return { deletedOccasions: occasions.length };
@@ -108,17 +129,72 @@ export class FirestoreProfilePeopleRemovalRepository implements ProfilePeopleRem
         this.occasionsOf(tx, targetId),
         this.graphLinksOf(tx, sourceId),
       ]);
+      const markerRefs = [
+        ...sourceOccasions.map((occasion) =>
+          this.store.doc(
+            'occasionDateKeys',
+            occasionDateKeyId(this.configuredAgentId, {
+              contactId: sourceId,
+              kind: String(occasion.get('kind')),
+              month: Number(occasion.get('month')),
+              day: Number(occasion.get('day')),
+            }),
+          ),
+        ),
+        ...targetOccasions.map((occasion) =>
+          this.store.doc(
+            'occasionDateKeys',
+            occasionDateKeyId(this.configuredAgentId, {
+              contactId: targetId,
+              kind: String(occasion.get('kind')),
+              month: Number(occasion.get('month')),
+              day: Number(occasion.get('day')),
+            }),
+          ),
+        ),
+      ];
+      const markers = markerRefs.length ? await tx.getAll(...markerRefs) : [];
       // One row per (agent, kind, month, day), as saveOccasion and the
       // PostgreSQL dedup index keep it: the target's row wins a collision.
       const key = (doc: DocumentSnapshot) =>
         [doc.get('agentId'), doc.get('kind'), doc.get('month'), doc.get('day')].join('|');
       const taken = new Set(targetOccasions.map(key));
+      const targetByKey = new Map(targetOccasions.map((occasion) => [key(occasion), occasion]));
       const now = this.store.now();
       let movedOccasions = 0;
-      for (const occasion of sourceOccasions) {
-        if (taken.has(key(occasion))) tx.delete(occasion.ref);
-        else {
+      for (const [index, occasion] of sourceOccasions.entries()) {
+        const sourceMarker = markers[index];
+        const identity = {
+          contactId: targetId,
+          kind: String(occasion.get('kind')),
+          month: Number(occasion.get('month')),
+          day: Number(occasion.get('day')),
+        };
+        const targetMarkerIndex =
+          sourceOccasions.length + targetOccasions.findIndex((row) => key(row) === key(occasion));
+        const targetMarker =
+          targetMarkerIndex >= sourceOccasions.length ? markers[targetMarkerIndex] : null;
+        if (sourceMarker?.exists && sourceMarker.get('occasionId') !== occasion.get('id'))
+          throw new Error('Source occasion date marker conflicts with its record');
+        if (taken.has(key(occasion))) {
+          tx.delete(occasion.ref);
+          if (sourceMarker?.exists) tx.delete(sourceMarker.ref);
+        } else {
           tx.update(occasion.ref, encodeRecord({ contactId: targetId, updatedAt: now }));
+          if (targetMarker?.exists) {
+            const targetRow = targetByKey.get(key(occasion));
+            if (!targetRow || targetMarker.get('occasionId') !== targetRow.get('id'))
+              throw new Error('Target occasion date marker conflicts with its record');
+          } else {
+            tx.create(
+              this.store.doc(
+                'occasionDateKeys',
+                occasionDateKeyId(this.configuredAgentId, identity),
+              ),
+              occasionDateKey(this.configuredAgentId, identity, String(occasion.get('id'))),
+            );
+          }
+          if (sourceMarker?.exists) tx.delete(sourceMarker.ref);
           movedOccasions += 1;
         }
       }

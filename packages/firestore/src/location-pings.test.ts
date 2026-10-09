@@ -57,34 +57,55 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore location pings'
     ]);
   });
 
+  it('activates only explicitly opted-in arrival references for five minutes and only for their owner', async () => {
+    const capturedAt = at('2026-09-24T11:59:00.000Z');
+    const observation = await repository.record(agentId, {
+      ...ping(capturedAt.toISOString()),
+      arrivalOptIn: true,
+    });
+    expect(observation.arrivalExpiresAt).toEqual(at('2026-09-24T12:04:00.000Z'));
+    expect(
+      await repository.isArrivalObservationActive(
+        agentId,
+        observation.id,
+        at('2026-09-24T12:00:00Z'),
+      ),
+    ).toBe(true);
+    expect(
+      await repository.isArrivalObservationActive(
+        randomUUID(),
+        observation.id,
+        at('2026-09-24T12:00:00Z'),
+      ),
+    ).toBe(false);
+    expect(
+      await repository.isArrivalObservationActive(
+        agentId,
+        observation.id,
+        at('2026-09-24T12:04:00Z'),
+      ),
+    ).toBe(false);
+
+    const ordinary = await repository.record(agentId, ping(capturedAt.toISOString()));
+    expect(ordinary.arrivalExpiresAt).toBeNull();
+    expect(
+      await repository.isArrivalObservationActive(agentId, ordinary.id, at('2026-09-24T12:00:00Z')),
+    ).toBe(false);
+  });
+
   it('finds only this agent’s arrival tasks inside the cooldown', async () => {
     const task = (id: string, owner: string, eventId: string, createdAt: string) =>
       store
         .doc('tasks', id)
         .set({ id, agentId: owner, externalEventId: eventId, createdAt: at(createdAt) });
-    await task(
-      'old',
-      agentId,
-      `arrival:${agentId}:2026-09-23:64.14,-21.94`,
-      '2026-09-23T08:00:00Z',
-    );
+    await task('old', agentId, `arrival:${agentId}:2026-09-23`, '2026-09-23T08:00:00Z');
     await task('other', agentId, `reminder:${agentId}:x`, '2026-09-24T11:00:00Z');
     const foreign = randomUUID();
-    await task(
-      'foreign',
-      foreign,
-      `arrival:${foreign}:2026-09-24:1.00,1.00`,
-      '2026-09-24T11:00:00Z',
-    );
+    await task('foreign', foreign, `arrival:${foreign}:2026-09-24`, '2026-09-24T11:00:00Z');
 
     const since = at('2026-09-24T00:00:00Z');
     expect(await repository.hasArrivalTaskSince(agentId, since)).toBe(false);
-    await task(
-      'new',
-      agentId,
-      `arrival:${agentId}:2026-09-24:64.14,-21.94`,
-      '2026-09-24T09:00:00Z',
-    );
+    await task('new', agentId, `arrival:${agentId}:2026-09-24`, '2026-09-24T09:00:00Z');
     expect(await repository.hasArrivalTaskSince(agentId, since)).toBe(true);
   });
 

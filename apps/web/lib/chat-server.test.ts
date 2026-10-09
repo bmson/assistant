@@ -68,14 +68,35 @@ describe.skipIf(!localEmulator)('Firestore web chat routes with PostgreSQL offli
       createdAt: now,
       updatedAt: now,
     });
-    // A different, older agent must never become this installation's chat owner.
-    const otherAgentId = randomUUID();
-    await store.doc('agents', otherAgentId).set({
-      id: otherAgentId,
-      name: 'Other assistant',
-      timezone: 'UTC',
-      createdAt: new Date(0),
+    // Forced turns still require an enabled, priced model route before admission.
+    // These local records configure routing without calling a provider.
+    await store.doc('coordination', 'budget-policy').set({
+      dailyLimitMicros: 1_000_000,
+      monthlyLimitMicros: 10_000_000,
+      softPct: 80,
     });
+    const modelId = 'openai/gpt-test';
+    await store.doc('models', modelId).set({
+      id: modelId,
+      label: 'Local route fixture',
+      capabilities: { tools: true },
+      promptCostPerMTok: '1.0000',
+      completionCostPerMTok: '2.0000',
+      latencyClass: 'medium',
+      enabled: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await store.doc('modelRoles', 'draft').set({
+      role: 'draft',
+      primaryModel: modelId,
+      fallbackModel: modelId,
+      params: {},
+      updatedAt: now,
+    });
+    // Foreign records must not leak into the sole owner's workspace. A second
+    // owner row is unsupported and tested separately at the admission boundary.
+    const otherAgentId = randomUUID();
     const foreignTask = taskFixture({
       id: 'foreign-attention-task',
       agentId: otherAgentId,

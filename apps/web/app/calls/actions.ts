@@ -8,6 +8,7 @@ import { getCallsPorts } from '@/lib/server';
 export async function answerCheckinAction(input: {
   callId: string;
   checkinId: string;
+  revision: number;
   answer: string;
 }): Promise<{ error?: string }> {
   await requireOwner();

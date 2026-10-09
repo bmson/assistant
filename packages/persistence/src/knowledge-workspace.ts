@@ -1,9 +1,26 @@
+import type {
+  DerivedKnowledgeView,
+  KnowledgeAssertionEndpointView,
+} from './knowledge-assertions.js';
+
 /** Display projection of one knowledge graph entity. */
 export interface KnowledgeWorkspaceEntity {
   id: string;
   label: string;
   kind: string;
   canonicalKey: string;
+}
+
+/** Minimal canonical meaning needed to build a focus-specific map label. */
+export interface KnowledgeMapAssertionContext {
+  id: string;
+  semanticRevision: number;
+  lifecycle: string;
+  reviewStatus: string;
+  subjectEntityId: string;
+  predicate: string;
+  objectEntityId: string;
+  evidenceCount: number;
 }
 
 /** One active, source-backed edge with its endpoints and source memory joined. */
@@ -24,6 +41,8 @@ export interface KnowledgeMapEdgeRecord {
   evidenceQuote: string | null;
   validFrom: string | null;
   validUntil: string | null;
+  /** Absent for pre-assertion/legacy edges; the UI keeps its generic wording. */
+  assertionContext?: KnowledgeMapAssertionContext | null;
 }
 
 export interface KnowledgeMapEdgeFilter {
@@ -71,6 +90,8 @@ export interface KnowledgeWorkspaceGraphCounts {
 export interface KnowledgeWorkspaceFocus {
   selected: KnowledgeWorkspaceEntity;
   duplicates: Array<{ targetId: string; label: string; kind: string; reason: string }>;
+  derivedRelations?: DerivedKnowledgeView[];
+  derivedCoverage?: 'complete' | 'bounded_incomplete';
   relations: Array<{
     id: string;
     subject: KnowledgeWorkspaceEntity;
@@ -78,6 +99,7 @@ export interface KnowledgeWorkspaceFocus {
     object: KnowledgeWorkspaceEntity;
     reviewStatus: 'unreviewed' | 'confirmed' | 'rejected';
     inRecall: boolean;
+    endpointViews?: KnowledgeAssertionEndpointView[];
     source: { memoryId: string; content: string };
   }>;
 }

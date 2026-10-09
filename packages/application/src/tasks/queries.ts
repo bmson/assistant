@@ -4,11 +4,27 @@ import {
   type RequestChecklist,
   RequestChecklistSchema,
 } from '@assistant/core/workflow/request-checklist-schema';
-import { approvals, type Db, files, messages, modelCalls, tasks, toolCalls } from '@assistant/db';
+import {
+  approvals,
+  type Db,
+  files,
+  messages,
+  modelCalls,
+  notChatAdmissionCancellationSql,
+  tasks,
+  toolCalls,
+} from '@assistant/db';
 import type {
   ActivityTaskRecord,
   TaskActivityDetailRepository,
   TaskActivityRepository,
+} from '@assistant/persistence';
+import {
+  compareTimelineRows,
+  decodeTaskTimelineCursor,
+  encodeTaskTimelineCursor,
+  type TaskTimelineKind,
+  timelineTime,
 } from '@assistant/persistence';
 import { and, asc, count, desc, eq, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { PgColumn } from 'drizzle-orm/pg-core';
@@ -46,7 +62,7 @@ export interface ActivityList {
 }
 
 function activityItem(
-  row: Omit<ActivityTaskRecord, 'agentId' | 'trigger'>,
+  row: Omit<ActivityTaskRecord, 'agentId' | 'conversationId' | 'externalEventId' | 'trigger'>,
   pendingApprovalTaskIds: Set<string>,
 ): ActivityItem {
   const { autonomyGrant, ...task } = row;
@@ -72,8 +88,14 @@ export async function listActivityWithRepository(
   });
   const pending = new Set(pendingApprovalTaskIds);
   return {
-    items: tasks.map(({ agentId: _agentId, trigger: _trigger, ...task }) =>
-      activityItem(task, pending),
+    items: tasks.map(
+      ({
+        agentId: _agentId,
+        conversationId: _conversationId,
+        externalEventId: _externalEventId,
+        trigger: _trigger,
+        ...task
+      }) => activityItem(task, pending),
     ),
     archivedCount,
   };
@@ -105,6 +127,7 @@ export async function listActivity(
       .where(
         and(
           eq(tasks.agentId, agent.id),
+          notChatAdmissionCancellationSql(),
           sql`${tasks.trigger}->'payload'->>'canary' IS DISTINCT FROM 'true'`,
           input.archived ? isNotNull(tasks.archivedAt) : isNull(tasks.archivedAt),
           statuses ? inArray(tasks.status, statuses) : undefined,
@@ -115,7 +138,13 @@ export async function listActivity(
     db
       .select({ value: count() })
       .from(tasks)
-      .where(and(eq(tasks.agentId, agent.id), isNotNull(tasks.archivedAt))),
+      .where(
+        and(
+          eq(tasks.agentId, agent.id),
+          notChatAdmissionCancellationSql(),
+          isNotNull(tasks.archivedAt),
+        ),
+      ),
   ]);
 
   const waitingIds = rows
@@ -284,6 +313,7 @@ export interface TaskDetail {
   actions: TaskAction[];
   /** Older entries exist behind the oldest one on this page. */
   hasMoreTimeline: boolean;
+  nextTimelineCursor?: string | null;
   activeGrant: AutonomyGrant | null;
   stuckWaiting: boolean;
 }
@@ -299,7 +329,7 @@ export interface TaskDetail {
 export async function getTaskDetail(
   db: Db,
   taskId: string,
-  options: { pageSize?: number; before?: Date } = {},
+  options: { pageSize?: number; before?: Date; cursor?: string } = {},
 ): Promise<TaskDetail | null> {
   const agent = await getAgent(db);
   const [task] = await db
@@ -322,7 +352,9 @@ export async function getTaskDetail(
       autonomyGrant: tasks.autonomyGrant,
     })
     .from(tasks)
-    .where(and(eq(tasks.id, taskId), eq(tasks.agentId, agent.id)));
+    .where(
+      and(eq(tasks.id, taskId), eq(tasks.agentId, agent.id), notChatAdmissionCancellationSql()),
+    );
   if (!task) return null;
 
   const pageSize = Math.max(
@@ -330,7 +362,15 @@ export async function getTaskDetail(
     Math.min(500, Math.floor(options.pageSize ?? TASK_TIMELINE_PAGE_SIZE)),
   );
   const before = options.before;
-  const olderThan = (column: PgColumn) => (before ? lt(column, before) : undefined);
+  const cursor = options.cursor ? decodeTaskTimelineCursor(options.cursor) : undefined;
+  const olderThan = (column: PgColumn, id: PgColumn, kind: TaskTimelineKind) =>
+    cursor
+      ? sql`(${column}, ${kind}::text, ${id}::text) < (${cursor.at}::timestamptz, ${cursor.kind}::text, ${cursor.id}::text)`
+      : before
+        ? lt(column, before)
+        : undefined;
+  const preciseTime = (column: PgColumn) =>
+    sql<string>`to_char(${column} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"000Z"')`;
 
   const [rawToolCalls, rawModelCalls, rawApprovals, rawMessages, taskFiles, actionRows] =
     await Promise.all([
@@ -338,6 +378,7 @@ export async function getTaskDetail(
         .select({
           id: toolCalls.id,
           createdAt: toolCalls.createdAt,
+          timelineAt: preciseTime(toolCalls.createdAt),
           finishedAt: toolCalls.finishedAt,
           toolName: toolCalls.toolName,
           step: toolCalls.step,
@@ -348,26 +389,35 @@ export async function getTaskDetail(
           error: toolCalls.error,
         })
         .from(toolCalls)
-        .where(and(eq(toolCalls.taskId, taskId), olderThan(toolCalls.createdAt)))
-        .orderBy(desc(toolCalls.createdAt))
-        .limit(pageSize),
+        .where(
+          and(eq(toolCalls.taskId, taskId), olderThan(toolCalls.createdAt, toolCalls.id, 'tool')),
+        )
+        .orderBy(desc(toolCalls.createdAt), desc(toolCalls.id))
+        .limit(pageSize + 1),
       db
         .select({
           id: modelCalls.id,
           createdAt: modelCalls.createdAt,
+          timelineAt: preciseTime(modelCalls.createdAt),
           role: modelCalls.role,
           model: modelCalls.model,
           costUsd: modelCalls.costUsd,
           latencyMs: modelCalls.latencyMs,
         })
         .from(modelCalls)
-        .where(and(eq(modelCalls.taskId, taskId), olderThan(modelCalls.createdAt)))
-        .orderBy(desc(modelCalls.createdAt))
-        .limit(pageSize),
+        .where(
+          and(
+            eq(modelCalls.taskId, taskId),
+            olderThan(modelCalls.createdAt, modelCalls.id, 'model'),
+          ),
+        )
+        .orderBy(desc(modelCalls.createdAt), desc(modelCalls.id))
+        .limit(pageSize + 1),
       db
         .select({
           id: approvals.id,
           requestedAt: approvals.requestedAt,
+          timelineAt: preciseTime(approvals.requestedAt),
           status: approvals.status,
           summary: approvals.summary,
           shortCode: approvals.shortCode,
@@ -375,20 +425,28 @@ export async function getTaskDetail(
           resolvedAt: approvals.resolvedAt,
         })
         .from(approvals)
-        .where(and(eq(approvals.taskId, taskId), olderThan(approvals.requestedAt)))
-        .orderBy(desc(approvals.requestedAt))
-        .limit(pageSize),
+        .where(
+          and(
+            eq(approvals.taskId, taskId),
+            olderThan(approvals.requestedAt, approvals.id, 'approval'),
+          ),
+        )
+        .orderBy(desc(approvals.requestedAt), desc(approvals.id))
+        .limit(pageSize + 1),
       db
         .select({
           id: messages.id,
           createdAt: messages.createdAt,
+          timelineAt: preciseTime(messages.createdAt),
           role: messages.role,
           text: messages.text,
         })
         .from(messages)
-        .where(and(eq(messages.taskId, taskId), olderThan(messages.createdAt)))
-        .orderBy(desc(messages.createdAt))
-        .limit(pageSize),
+        .where(
+          and(eq(messages.taskId, taskId), olderThan(messages.createdAt, messages.id, 'message')),
+        )
+        .orderBy(desc(messages.createdAt), desc(messages.id))
+        .limit(pageSize + 1),
       db
         .select({ id: files.id, workspacePath: files.workspacePath, bytes: files.bytes })
         .from(files)
@@ -412,19 +470,8 @@ export async function getTaskDetail(
     ]);
 
   // Newest `pageSize` of the union, then back into reading order.
-  const streams = [rawToolCalls, rawModelCalls, rawApprovals, rawMessages];
-  const total = streams.reduce((sum, rows) => sum + rows.length, 0);
-  const hasMoreTimeline = total > pageSize || streams.some((rows) => rows.length === pageSize);
-  const cutoff = [
-    ...rawToolCalls.map((row) => row.createdAt),
-    ...rawModelCalls.map((row) => row.createdAt),
-    ...rawApprovals.map((row) => row.requestedAt),
-    ...rawMessages.map((row) => row.createdAt),
-  ]
-    .sort((a, b) => b.getTime() - a.getTime())
-    .slice(0, pageSize)
-    .at(-1);
-  const onPage = (at: Date) => cutoff === undefined || at.getTime() >= cutoff.getTime();
+  const page = timelinePage(rawToolCalls, rawModelCalls, rawApprovals, rawMessages, pageSize);
+  const { hasMoreTimeline, nextTimelineCursor, onPage } = page;
 
   const decisionOf = (value: unknown) =>
     (value ?? {}) as { riskTier?: unknown; policyId?: unknown };
@@ -436,7 +483,7 @@ export async function getTaskDetail(
     plan: record(plan, MAX_RECORDED_CHARS),
     ...(parsedChecklist.success ? { checklist: { items: parsedChecklist.data.items } } : {}),
   };
-  const taskApprovals = rawApprovals.filter((row) => onPage(row.requestedAt)).reverse();
+  const taskApprovals = rawApprovals.filter((row) => onPage('approval', row.id)).reverse();
   // A parked task whose approval is gone is stuck. The page carries only one
   // page of approvals now, so ask the table rather than the page.
   const stuckWaiting =
@@ -445,7 +492,7 @@ export async function getTaskDetail(
     timezone: agent.timezone,
     task: snapshot,
     toolCalls: rawToolCalls
-      .filter((row) => onPage(row.createdAt))
+      .filter((row) => onPage('tool', row.id))
       .reverse()
       .map((row) => {
         const decision = decisionOf(row.decision);
@@ -463,10 +510,10 @@ export async function getTaskDetail(
           error: record(row.error, MAX_RECORDED_CHARS),
         };
       }),
-    modelCalls: rawModelCalls.filter((row) => onPage(row.createdAt)).reverse(),
+    modelCalls: rawModelCalls.filter((row) => onPage('model', row.id)).reverse(),
     approvals: taskApprovals,
     messages: rawMessages
-      .filter((row) => onPage(row.createdAt))
+      .filter((row) => onPage('message', row.id))
       .reverse()
       .map((row) => ({
         ...row,
@@ -486,6 +533,7 @@ export async function getTaskDetail(
       resultPreview: record(row.result, MAX_PREVIEW_CHARS),
     })),
     hasMoreTimeline,
+    nextTimelineCursor,
     activeGrant: activeAutonomyGrant(task, Date.now()),
     stuckWaiting,
   };
@@ -496,7 +544,7 @@ export async function getTaskDetailWithRepository(
   repository: TaskActivityDetailRepository,
   agentId: string,
   taskId: string,
-  options: { pageSize?: number; before?: Date } = {},
+  options: { pageSize?: number; before?: Date; cursor?: string } = {},
 ): Promise<TaskDetail | null> {
   const pageSize = Math.max(
     1,
@@ -505,24 +553,17 @@ export async function getTaskDetailWithRepository(
   const detail = await repository.getDetail(agentId, taskId, {
     pageSize,
     ...(options.before ? { before: options.before } : {}),
+    ...(options.cursor ? { cursor: decodeTaskTimelineCursor(options.cursor) } : {}),
   });
   if (!detail) return null;
 
-  const streams = [detail.toolCalls, detail.modelCalls, detail.approvals, detail.messages];
-  const totalTimelineRows = streams.reduce((total, rows) => total + rows.length, 0);
-  const hasMoreTimeline =
-    totalTimelineRows > pageSize || streams.some((rows) => rows.length === pageSize);
-  const timestamps = [
-    ...detail.toolCalls.map((row) => row.createdAt),
-    ...detail.modelCalls.map((row) => row.createdAt),
-    ...detail.approvals.map((row) => row.requestedAt),
-    ...detail.messages.map((row) => row.createdAt),
-  ];
-  const cutoff = timestamps
-    .sort((a, b) => b.getTime() - a.getTime())
-    .slice(0, pageSize)
-    .at(-1);
-  const onPage = (at: Date) => cutoff === undefined || at.getTime() >= cutoff.getTime();
+  const { hasMoreTimeline, nextTimelineCursor, onPage } = timelinePage(
+    detail.toolCalls,
+    detail.modelCalls,
+    detail.approvals,
+    detail.messages,
+    pageSize,
+  );
   const { autonomyGrant, plan, state, ...task } = detail.task;
   const stateRecord = state && typeof state === 'object' ? (state as Record<string, unknown>) : {};
   const parsedChecklist = RequestChecklistSchema.safeParse(stateRecord.requestChecklist);
@@ -538,7 +579,7 @@ export async function getTaskDetailWithRepository(
     timezone: detail.timezone,
     task: snapshot,
     toolCalls: detail.toolCalls
-      .filter((row) => onPage(row.createdAt))
+      .filter((row) => onPage('tool', row.id))
       .reverse()
       .map((row) => {
         const decision = decisionOf(row.decision);
@@ -556,10 +597,10 @@ export async function getTaskDetailWithRepository(
           error: record(row.error, MAX_RECORDED_CHARS),
         };
       }),
-    modelCalls: detail.modelCalls.filter((row) => onPage(row.createdAt)).reverse(),
-    approvals: detail.approvals.filter((row) => onPage(row.requestedAt)).reverse(),
+    modelCalls: detail.modelCalls.filter((row) => onPage('model', row.id)).reverse(),
+    approvals: detail.approvals.filter((row) => onPage('approval', row.id)).reverse(),
     messages: detail.messages
-      .filter((row) => onPage(row.createdAt))
+      .filter((row) => onPage('message', row.id))
       .reverse()
       .map((row) => ({
         ...row,
@@ -579,6 +620,7 @@ export async function getTaskDetailWithRepository(
       resultPreview: record(row.result, MAX_PREVIEW_CHARS),
     })),
     hasMoreTimeline,
+    nextTimelineCursor,
     activeGrant: activeAutonomyGrant({ trust: task.trust, autonomyGrant }, Date.now()),
     stuckWaiting: task.status === 'waiting_approval' && !detail.hasPendingApproval,
   };
@@ -592,4 +634,44 @@ async function hasPendingApproval(db: Db, taskId: string): Promise<boolean> {
     .where(and(eq(approvals.taskId, taskId), eq(approvals.status, 'pending')))
     .limit(1);
   return Boolean(row);
+}
+
+function timelinePage(
+  tools: Array<{ id: string; createdAt: Date; timelineAt?: string }>,
+  models: Array<{ id: string; createdAt: Date; timelineAt?: string }>,
+  approvals: Array<{ id: string; requestedAt: Date; timelineAt?: string }>,
+  messages: Array<{ id: string; createdAt: Date; timelineAt?: string }>,
+  pageSize: number,
+) {
+  const rows = [
+    ...tools.map((r) => ({
+      kind: 'tool' as const,
+      id: r.id,
+      at: r.timelineAt ?? timelineTime(r.createdAt),
+    })),
+    ...models.map((r) => ({
+      kind: 'model' as const,
+      id: r.id,
+      at: r.timelineAt ?? timelineTime(r.createdAt),
+    })),
+    ...approvals.map((r) => ({
+      kind: 'approval' as const,
+      id: r.id,
+      at: r.timelineAt ?? timelineTime(r.requestedAt),
+    })),
+    ...messages.map((r) => ({
+      kind: 'message' as const,
+      id: r.id,
+      at: r.timelineAt ?? timelineTime(r.createdAt),
+    })),
+  ].sort(compareTimelineRows);
+  const selected = rows.slice(0, pageSize);
+  const ids = new Set(selected.map((r) => `${r.kind}:${r.id}`));
+  const oldest = selected.at(-1);
+  const hasMoreTimeline = rows.length > pageSize;
+  return {
+    hasMoreTimeline,
+    nextTimelineCursor: hasMoreTimeline && oldest ? encodeTaskTimelineCursor(oldest) : null,
+    onPage: (kind: TaskTimelineKind, id: string) => ids.has(`${kind}:${id}`),
+  };
 }

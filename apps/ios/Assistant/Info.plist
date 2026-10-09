@@ -36,18 +36,17 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Connect to your Assistant server on your local network.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Hold the microphone button to talk instead of typing. Your voice is transcribed on this iPhone, by the system, while you hold the button — the audio is never recorded to a file and never sent anywhere, and the words land in the message field for you to check before you send them.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Speech is recognised on this iPhone, using the language model iOS keeps on the device. Nothing you say is sent to Apple or to your assistant server for transcription.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Your current position is sent to your own assistant server so it can answer nearby questions, like what to eat around you. It is kept only as a short-lived current-location ping and never stored as memory.</string>
-	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Only while "Background arrival nudges" is on: significant moves wake the app so your assistant can notice an arrival (a new city, a neighbourhood at lunchtime) and send one considered tip to your own server. No continuous tracking — a coarse, throttled ping, kept a few days and never stored as memory.</string>
+	<string>When location sharing is on, your current position is sent to your own assistant server for nearby context. The server keeps the short-lived ping for its configured retention period (3 days by default, adjustable by the owner); it is never stored as personal memory. Background location is paused.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
-		<string>location</string>
 	</array>
 	<key>NSSupportsLiveActivities</key>
 	<true/>

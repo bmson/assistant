@@ -91,6 +91,7 @@ describe('Firestore MCP tool composition', () => {
           id: taskId,
           agentId,
           type: 'adhoc',
+          trust: 'owner',
           status: 'running',
         });
         await store.doc('mcpConnections', connectionId).set({
@@ -239,7 +240,7 @@ describe('Firestore MCP tool composition', () => {
         });
         expect(
           await dispatcher.executeApproved(changedAfterApproval.toolCallId, ctx),
-        ).toMatchObject({ kind: 'failed', error: expect.stringContaining('is not ready') });
+        ).toMatchObject({ kind: 'failed', error: expect.stringContaining('security binding') });
         expect(toolCallRequests).toHaveLength(1);
         await store.doc('privacyErasureJobs', agentId).set({ agentId, status: 'active' });
         await expect(

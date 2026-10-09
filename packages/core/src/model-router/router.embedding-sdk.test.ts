@@ -1,4 +1,5 @@
 import type { Db } from '@assistant/db';
+import { embeddingSpaceIdentityKey } from '@assistant/persistence';
 import type { EmbeddingModel } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ModelProvider } from './provider.js';
@@ -8,6 +9,8 @@ const stubs = vi.hoisted(() => ({
   reconcileReservation: vi.fn(async () => {}),
   releaseReservation: vi.fn(async () => {}),
   reserveCost: vi.fn(async () => ({ ok: true as const, reservationId: 'reservation-1' })),
+  beginCostAttempt: vi.fn(async () => true),
+  markCostAttemptUnknown: vi.fn(async () => {}),
 }));
 
 vi.mock('../cost.js', async (importOriginal) => ({
@@ -15,6 +18,8 @@ vi.mock('../cost.js', async (importOriginal) => ({
   reconcileReservation: stubs.reconcileReservation,
   releaseReservation: stubs.releaseReservation,
   reserveCost: stubs.reserveCost,
+  beginCostAttempt: stubs.beginCostAttempt,
+  markCostAttemptUnknown: stubs.markCostAttemptUnknown,
 }));
 
 type EmbedResult = {
@@ -35,6 +40,10 @@ function vector(): number[] {
   return new Array(EMBEDDING_DIMENSIONS).fill(0);
 }
 
+function vectorOfWidth(width: number): number[] {
+  return new Array(width).fill(0.25);
+}
+
 function database(): Db {
   let selectCount = 0;
   return {
@@ -44,7 +53,14 @@ function database(): Db {
           selectCount += 1;
           return selectCount === 1
             ? [{ role: 'embed', primaryModel: 'test/embedding' }]
-            : [{ id: 'test/embedding', promptCostPerMTok: '1' }];
+            : [
+                {
+                  id: 'test/embedding',
+                  promptCostPerMTok: '1',
+                  enabled: true,
+                  capabilities: { embedding: true },
+                },
+              ];
         },
       }),
     }),
@@ -54,9 +70,10 @@ function database(): Db {
   } as unknown as Db;
 }
 
-function provider(model: EmbeddingModel): ModelProvider {
+function provider(model: EmbeddingModel, dimensions?: number): ModelProvider {
   return {
     kind: 'vertex',
+    ...(dimensions === undefined ? {} : { embeddingDimensions: dimensions }),
     assertModelId: vi.fn(),
     chat: vi.fn(),
     textEmbeddingModel: vi.fn(() => model),
@@ -91,8 +108,22 @@ function embeddingModel(
   } as EmbeddingModel;
 }
 
-function router(model: EmbeddingModel): ModelRouter {
-  return new ModelRouter(database(), 'unused', 'off', provider(model));
+function router(
+  model: EmbeddingModel,
+  options: {
+    dimensions?: number;
+    space?: import('@assistant/persistence').EmbeddingSpace;
+    fixedDimensions?: number;
+  } = {},
+): ModelRouter {
+  return new ModelRouter(
+    database(),
+    'unused',
+    'off',
+    provider(model, options.dimensions),
+    options.space,
+    options.fixedDimensions,
+  );
 }
 
 it('rejects a changed embedding role before calling the provider', async () => {
@@ -102,6 +133,81 @@ it('rejects a changed embedding role before calling the provider', async () => {
       expectedModelId: 'vertex/expected-embedding',
     }),
   ).rejects.toThrow('Embedding model does not match');
+  expect(doEmbed).not.toHaveBeenCalled();
+});
+
+it('round trips a configured 768-wide operation under its exact space identity', async () => {
+  const space = {
+    provider: 'openrouter',
+    model: 'test/embedding',
+    dimensions: 768,
+    revision: 'space-r7',
+  };
+  const doEmbed = vi.fn(async () => ({ embeddings: [vectorOfWidth(768)] }));
+  await expect(
+    router(embeddingModel(doEmbed), { space, dimensions: 768 }).embed(['query'], {
+      expectedSpace: space,
+    }),
+  ).resolves.toEqual([vectorOfWidth(768)]);
+  expect(stubs.reserveCost).toHaveBeenCalledOnce();
+  expect(doEmbed).toHaveBeenCalledOnce();
+});
+
+it.each([768, 1536])(
+  'snapshots a %i-wide receipt identity before an in-flight caller mutation',
+  async (dimensions) => {
+    const captured = {
+      provider: 'openrouter',
+      model: 'test/embedding',
+      dimensions,
+      revision: 'space-r7',
+    };
+    const mutable = { ...captured };
+    const started = deferred<void>();
+    const response = deferred<EmbedResult>();
+    const doEmbed = vi.fn(async () => {
+      started.resolve();
+      return response.promise;
+    });
+    const instance = router(embeddingModel(doEmbed), { space: captured, dimensions });
+    const work = instance.embedWithIdentity(['query'], { expectedSpace: mutable });
+    await started.promise;
+    mutable.revision = 'space-r8';
+    mutable.dimensions = dimensions === 768 ? 1536 : 768;
+    response.resolve({ embeddings: [vectorOfWidth(dimensions)] });
+    const receipt = await work;
+    expect(receipt.space).toEqual(captured);
+    expect(receipt.spaceKey).toBe(embeddingSpaceIdentityKey(captured));
+    expect(receipt.embeddings[0]).toHaveLength(dimensions);
+    expect(Object.isFrozen(receipt.space)).toBe(true);
+    expect(doEmbed).toHaveBeenCalledOnce();
+    expect(stubs.reserveCost).toHaveBeenCalledOnce();
+  },
+);
+
+it('rejects a same-width revision mismatch before reservation or provider work', async () => {
+  const configured = {
+    provider: 'openrouter',
+    model: 'test/embedding',
+    dimensions: 768,
+    revision: 'space-r7',
+  };
+  const doEmbed = vi.fn(async () => ({ embeddings: [vectorOfWidth(768)] }));
+  await expect(
+    router(embeddingModel(doEmbed), { space: configured, dimensions: 768 }).embed(['query'], {
+      expectedSpace: { ...configured, revision: 'space-r8' },
+    }),
+  ).rejects.toThrow('Embedding space identity does not match');
+  expect(stubs.reserveCost).not.toHaveBeenCalled();
+  expect(doEmbed).not.toHaveBeenCalled();
+});
+
+it('keeps PostgreSQL embedding operations at 1536 when a provider is fixed at 768', async () => {
+  const doEmbed = vi.fn(async () => ({ embeddings: [vectorOfWidth(768)] }));
+  await expect(
+    router(embeddingModel(doEmbed), { dimensions: 768, fixedDimensions: 1536 }).embed(['query']),
+  ).rejects.toThrow('Embedding dimensions do not match');
+  expect(stubs.reserveCost).not.toHaveBeenCalled();
   expect(doEmbed).not.toHaveBeenCalled();
 });
 

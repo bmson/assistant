@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto';
+import { makeCommunicationReceipt } from '@assistant/core';
+import { estimateSmsSegments, smsUsageReconciliationState } from '@assistant/persistence';
 import { z } from 'zod';
 import type { ToolRegistry } from '../registry.js';
 import type { AssistantTool, ToolFlags } from '../types.js';
 import type { SmsSender } from './client.js';
+import { submitSms } from './sms-accounting.js';
 
 export interface SmsToolDeps {
   sender: SmsSender;
@@ -67,15 +70,49 @@ export function registerSmsTools(registry: ToolRegistry, deps: SmsToolDeps): Too
           .digest('hex');
         return `sms-send-${ctx.taskId}-${digest}`;
       },
-      estimateCost: () => ({
-        source: 'twilio_sms',
-        rateKey: 'twilio_sms',
-        quantity: 1,
-        description: 'outbound SMS',
-      }),
+      estimateCost: (args) => {
+        const sms = estimateSmsSegments(args.body);
+        return {
+          source: 'twilio_sms',
+          rateKey: 'twilio_sms',
+          unit: 'segment',
+          quantity: sms.estimatedSegments,
+          description: `outbound SMS (${sms.estimatedSegments} estimated segment(s))`,
+          evidence: { basis: 'preflight_estimate', provider: 'twilio', sms },
+        };
+      },
+      reconcileCost: (_args, result) => {
+        const sms = (
+          result as { smsAccounting?: import('@assistant/persistence').SmsDeliveryAccounting }
+        )?.smsAccounting;
+        if (!sms) return {};
+        return {
+          ...(sms.billedSegments ? { quantity: sms.billedSegments } : {}),
+          unit: 'segment',
+          ...(sms.providerPriceUsd !== undefined ? { usd: sms.providerPriceUsd } : {}),
+          evidence: {
+            basis: sms.providerPriceUsd !== undefined ? 'provider_reported' : 'preflight_estimate',
+            provider: 'twilio',
+            requestId: sms.providerMessageId,
+            sms,
+            smsUsageReconciliation: smsUsageReconciliationState(sms),
+          },
+        };
+      },
       execute: async (args) => {
-        const result = await deps.sender.send(args.to, args.body);
-        return { sid: result.sid, to: args.to };
+        const result = await submitSms(deps.sender, args.to, args.body);
+        return {
+          sid: result.sid,
+          to: args.to,
+          deliveryStatus: 'accepted',
+          smsAccounting: result.accounting,
+          communicationReceipt: makeCommunicationReceipt({
+            channel: 'sms',
+            provider: 'twilio',
+            providerMessageId: result.sid,
+            args,
+          }),
+        };
       },
     },
     { outwardFacing: true },

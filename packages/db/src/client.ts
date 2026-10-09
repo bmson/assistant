@@ -13,6 +13,8 @@ export interface DbPoolOptions {
   statementTimeoutMs?: number;
   /** Block writes through the application's Drizzle connection during cutover. */
   sourceWritesFenced?: boolean;
+  /** Make every newly opened PostgreSQL session default to read-only mode. */
+  readOnly?: boolean;
 }
 
 /**
@@ -35,7 +37,14 @@ export function createDb(url: string, options: DbPoolOptions = {}) {
     idle_timeout: options.idleTimeoutSeconds ?? 30,
     connect_timeout: options.connectTimeoutSeconds ?? 10,
     onnotice: () => {},
-    ...(statementTimeoutMs > 0 ? { connection: { statement_timeout: statementTimeoutMs } } : {}),
+    ...(statementTimeoutMs > 0 || options.readOnly
+      ? {
+          connection: {
+            ...(statementTimeoutMs > 0 ? { statement_timeout: statementTimeoutMs } : {}),
+            ...(options.readOnly ? { default_transaction_read_only: true } : {}),
+          },
+        }
+      : {}),
   });
   const database = drizzle(client, { schema });
   return options.sourceWritesFenced ? withPostgresSourceWriteFence(database) : database;

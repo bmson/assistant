@@ -22,6 +22,102 @@ const request = {
 };
 
 describe('response cards', () => {
+  it('keeps an unverified flight calendar row out of a reconciled departure answer', () => {
+    const evidence = [
+      {
+        toolName: 'calendar.search_events',
+        status: 'succeeded',
+        result: {
+          events: [
+            {
+              eventId: 'flight',
+              calendarId: 'primary',
+              summary: 'SFO to BER flight (United)',
+              start: '2026-10-09T09:15:00-07:00',
+              end: '2026-10-09T10:15:00-07:00',
+            },
+          ],
+        },
+      },
+    ];
+    expect(calendarResponseCards(evidence, { ...request, answerFocus: 'flight' })).toEqual([]);
+    // The same entry remains visible when the owner asks for their agenda.
+    expect(calendarResponseCards(evidence, request)).toMatchObject([
+      { kind: 'calendar-event', title: 'SFO to BER flight (United)', time: '9:15 AM–10:15 AM' },
+    ]);
+  });
+
+  it('does not pair a successful flight update with an obsolete flight card', () => {
+    const cards = responseCardsForFinal({
+      evidence: [
+        {
+          toolName: 'calendar.search_events',
+          status: 'succeeded',
+          result: {
+            events: [
+              {
+                eventId: 'flight',
+                summary: 'SFO to BER flight',
+                start: '2026-10-09T09:15:00-07:00',
+              },
+              { eventId: 'lunch', summary: 'Lunch', start: '2026-10-09T12:00:00-07:00' },
+            ],
+          },
+        },
+        {
+          toolName: 'calendar.update_event',
+          status: 'succeeded',
+          args: { eventId: 'flight', start: '2026-10-09T13:45:00-07:00' },
+          result: { eventId: 'flight', updated: true, start: '2026-10-09T13:45:00-07:00' },
+        },
+      ],
+    });
+    expect(cards.filter((card) => card.kind === 'calendar-event')).toMatchObject([
+      { title: 'Lunch' },
+    ]);
+    expect(JSON.stringify(cards)).not.toContain('09:15');
+    expect(JSON.stringify(cards)).toContain('13:45');
+  });
+
+  it('uses the returned calendar update time instead of the requested time', () => {
+    const cards = statusResponseCards([
+      {
+        toolName: 'calendar.update_event',
+        status: 'succeeded',
+        args: { eventId: 'flight', start: '2026-10-09T09:15:00-07:00', summary: 'United flight' },
+        result: {
+          eventId: 'flight',
+          updated: true,
+          start: '2026-10-09T13:45:00-07:00',
+          summary: 'KLM flight',
+        },
+      },
+    ]);
+    expect(cards).toMatchObject([
+      {
+        title: 'Calendar event updated',
+        detail: 'KLM flight',
+        details: [{ label: 'Time', value: '2026-10-09T13:45:00-07:00' }],
+      },
+    ]);
+    expect(JSON.stringify(cards)).not.toContain('09:15');
+    expect(JSON.stringify(cards)).not.toContain('United');
+  });
+
+  it('does not present an intended time as confirmed when the update receipt omits it', () => {
+    const cards = statusResponseCards([
+      {
+        toolName: 'calendar.update_event',
+        status: 'succeeded',
+        args: { eventId: 'flight', start: '2026-10-09T09:15:00-07:00' },
+        result: { eventId: 'flight', updated: true },
+      },
+    ]);
+    expect(cards).toMatchObject([{ title: 'Calendar event updated' }]);
+    expect(JSON.stringify(cards)).not.toContain('09:15');
+    expect(cards[0]?.details ?? []).toEqual([]);
+  });
+
   it.each([{ ok: false }, { status: 503 }, { deliveryStatus: 'unknown' }])(
     'does not render failed result bodies as verified cards: %j',
     (failure) => {
@@ -111,7 +207,7 @@ describe('response cards', () => {
       ).toEqual([]);
     },
   );
-  it('merges obvious cross-calendar twins but keeps distinct appointments', () => {
+  it('merges provider-identified cross-calendar twins but keeps distinct appointments', () => {
     const result = calendarResponseCards(
       [
         {
@@ -121,6 +217,7 @@ describe('response cards', () => {
             events: [
               {
                 eventId: 'family',
+                iCalUID: 'playdate@example.com',
                 calendarId: 'family',
                 calendar: 'Family',
                 summary: "Frejya's playdate",
@@ -130,6 +227,7 @@ describe('response cards', () => {
               },
               {
                 eventId: 'work',
+                iCalUID: 'playdate@example.com',
                 calendarId: 'work',
                 calendar: 'Work',
                 summary: "Frejya's playdate",
@@ -154,6 +252,41 @@ describe('response cards', () => {
     );
     expect(result).toHaveLength(2);
     expect(result[0]?.calendars).toEqual(['Family', 'Work']);
+  });
+
+  it('keeps distinct recurring occurrences and prevents a copy from bridging same-calendar rows', () => {
+    const event = {
+      calendarId: 'work',
+      eventId: 'one',
+      calendar: 'Work',
+      iCalUID: 'series',
+      recurringEventId: 'r',
+      originalStartTime: '2026-10-07T09:00:00Z',
+      summary: 'Standup',
+      start: '2026-10-07T09:00:00Z',
+      end: '2026-10-07T10:00:00Z',
+    };
+    const result = calendarResponseCards([
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        result: {
+          events: [
+            event,
+            { ...event, calendarId: 'personal', calendar: 'Personal', eventId: 'copy' },
+            { ...event, eventId: 'two', start: '2026-10-07T09:15:00Z' },
+            {
+              ...event,
+              eventId: 'moved',
+              originalStartTime: '2026-10-08T09:00:00Z',
+              start: '2026-10-07T09:30:00Z',
+            },
+          ],
+        },
+      },
+    ]);
+    expect(result).toHaveLength(3);
+    expect(result.map((card) => card.start)).toContain('2026-10-07T09:30:00Z');
   });
 
   it('builds calendar cards from successful evidence even when wording detection missed', () => {
@@ -1312,6 +1445,18 @@ describe('scoreboardResponseCards', () => {
     expect(
       scoreboardResponseCards([{ ...row([game('1', 'post')]), fromCurrentTask: false }]),
     ).toEqual([]);
+  });
+
+  it('preserves historical date and partial source coverage in the visible title', () => {
+    const [card] = scoreboardResponseCards([
+      row([game('1', 'post')], {
+        explicitDate: true,
+        requestedDate: '2020-02-29',
+        coverage: { complete: false },
+      }),
+    ]);
+    expect(card?.title).toContain('2020-02-29');
+    expect(card?.title).toContain('Partial coverage');
   });
 
   it('titles a team fallback as its last and next game', () => {

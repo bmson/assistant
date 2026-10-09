@@ -1,10 +1,10 @@
 import type { Records } from '@assistant/persistence';
+import { decodeMemoryRecord } from './memory-record.js';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
 const SCAN_LIMIT = 500;
 const TIMELINE_LIMIT = 20;
-type Memory = Records['memories'];
 type Occasion = Records['occasions'];
 
 export interface FirestorePersonEvent {
@@ -86,7 +86,7 @@ export async function getFirestorePersonTemporalDetails(
     throw new Error('Person temporal read scan bound reached');
 
   const events = memoryDocs.docs.flatMap((doc) => {
-    const row = decodeRecord<Memory>(doc.data());
+    const row = decodeMemoryRecord(doc.data());
     if (
       row.id !== doc.get('id') ||
       documentKey(row.id) !== doc.id ||

@@ -201,7 +201,17 @@ describe.skipIf(!localEmulator)('Firestore mobile skill mutations with PostgreSQ
       model: 'fixture',
       dimensions: 1536,
       revision: '1',
-    }).recall({ agentId, embedding: [1, ...new Array(1535).fill(0)], minSimilarity: 0.7 });
+    }).recall({
+      agentId,
+      embedding: [1, ...new Array(1535).fill(0)],
+      embeddingSpaceKey: embeddingSpaceKey({
+        provider: 'vertex',
+        model: 'fixture',
+        dimensions: 1536,
+        revision: '1',
+      }),
+      minSimilarity: 0.7,
+    });
     expect(recall.some((match) => match.skill.id === newSkill?.get('id'))).toBe(true);
     expect((await create('New skill', 'Revised')).status).toBe(201);
     const again = await store.collection('skills').where('agentId', '==', agentId).get();
@@ -209,9 +219,27 @@ describe.skipIf(!localEmulator)('Firestore mobile skill mutations with PostgreSQ
     expect((await newSkill?.ref.get())?.get('steps')).toBe('Revised');
   });
 
+  it('rejects foreign, missing, and malformed edit targets before embedding or changing rows', async () => {
+    const before = (await store.doc('skills', otherSkillId).get()).data();
+    auth.embed.mockClear();
+
+    expect((await edit(otherSkillId, 'Foreign')).status).toBe(409);
+    expect(auth.embed).not.toHaveBeenCalled();
+    expect((await store.doc('skills', otherSkillId).get()).data()).toEqual(before);
+
+    expect((await edit(randomUUID(), 'Missing')).status).toBe(409);
+    expect(auth.embed).not.toHaveBeenCalled();
+    expect((await edit('not-a-uuid', 'Malformed')).status).toBe(400);
+    expect(auth.embed).not.toHaveBeenCalled();
+  });
+
   it('edits only the existing owner skill with a fresh vector and revision', async () => {
     await store.doc('skills', skillId).update({ deprecated: true, ownerAuthored: false });
+    auth.embed.mockClear();
     expect((await edit(skillId, 'Revised skill')).status).toBe(200);
+    expect(auth.embed).toHaveBeenCalledExactlyOnceWith(
+      'Revised skill\nWhen: When\nSteps: Steps\nGotchas: Beware',
+    );
     const skill = await store.doc('skills', skillId).get();
     expect(skill.get('name')).toBe('Revised skill');
     expect(skill.get('embedding').toArray()).toHaveLength(1536);

@@ -1,8 +1,18 @@
-import type { LearnedSkill, SkillContextRepository } from '@assistant/persistence';
+import {
+  embeddingSpaceIdentityKey,
+  type LearnedSkill,
+  type SkillContextRepository,
+} from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import type { ModelRouter } from '../model-router/router.js';
 import { bumpSkillUse, recallSkills, recordSkillOutcome, renderSkillsBlock } from './skills.js';
 
+const SPACE = {
+  provider: 'synthetic',
+  model: 'skill-wrapper-fixture',
+  dimensions: 1536,
+  revision: '1',
+};
 const embedding = [1, ...new Array(1535).fill(0)];
 const learned: LearnedSkill = {
   id: 'skill-id',
@@ -10,6 +20,7 @@ const learned: LearnedSkill = {
   createdAt: new Date('2026-09-10T12:00:00.000Z'),
   updatedAt: new Date('2026-09-10T12:00:00.000Z'),
   agentId: 'owner-id',
+  embeddingSpaceKey: embeddingSpaceIdentityKey(SPACE),
   sourceTaskId: null,
   preconditions: 'after placing an order',
   steps: 'verify the final total',
@@ -34,7 +45,7 @@ function harness() {
     recordOutcome,
   };
   const embed = vi.fn(async () => [embedding]);
-  const router = { embed } as unknown as ModelRouter;
+  const router = { embeddingSpace: async () => SPACE, embed } as unknown as ModelRouter;
   return { repository, recall, bumpUse, recordOutcome, router, embed };
 }
 
@@ -45,10 +56,14 @@ describe('portable learned-skill wrappers', () => {
       taskId: 'task-id',
     });
 
-    expect(embed).toHaveBeenCalledWith(['verify this order'], { taskId: 'task-id' });
+    expect(embed).toHaveBeenCalledWith(['verify this order'], {
+      taskId: 'task-id',
+      expectedSpace: SPACE,
+    });
     expect(recall).toHaveBeenCalledWith({
       agentId: 'owner-id',
       embedding,
+      embeddingSpaceKey: embeddingSpaceIdentityKey(SPACE),
       limit: 4,
       minSimilarity: 0.72,
     });
@@ -74,9 +89,12 @@ describe('portable learned-skill wrappers', () => {
 
   it('rejects an incompatible embedding before querying persistence', async () => {
     const { repository, recall } = harness();
-    const router = { embed: async () => [[1, 0, 0]] } as unknown as ModelRouter;
+    const router = {
+      embeddingSpace: async () => SPACE,
+      embed: async () => [[1, 0, 0]],
+    } as unknown as ModelRouter;
     await expect(recallSkills(repository, router, 'owner-id', 'query')).rejects.toThrow(
-      'learned-skill embedding',
+      'Invalid vector or incompatible embedding space',
     );
     expect(recall).not.toHaveBeenCalled();
   });

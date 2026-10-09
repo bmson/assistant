@@ -1,7 +1,15 @@
 import type { Config } from '@assistant/config';
 import type { ModelRouter } from '@assistant/core';
 import type { Db, TaskRow } from '@assistant/db';
-import type { ExecutionPersistence } from '@assistant/persistence';
+import type {
+  EmailObserverClaim,
+  EmailObserverEffectFence,
+  EmailObserverIdentity,
+  EmailObserverSource,
+  ExecutionPersistence,
+  FinalChannelDeliveryResult,
+  NotificationDeliveryResult,
+} from '@assistant/persistence';
 import type { ToolDispatcher } from '@assistant/tools/dispatcher';
 import type { ToolRegistry } from '@assistant/tools/registry';
 import type { PortableReminderTools } from '@assistant/tools/reminders';
@@ -53,6 +61,8 @@ export type OwnerNoticeUrgency = 'ambient' | 'interrupt';
 export interface OwnerNotifier {
   notifyOwner(input: {
     text: string;
+    /** Stable logical notice identity, reused when the source event is replayed. */
+    deliveryKey?: string;
     taskId?: string;
     /**
      * The dashboard thread that already owns this notice, when one exists.
@@ -62,10 +72,16 @@ export interface OwnerNotifier {
      */
     conversationId?: string | null;
     urgency?: OwnerNoticeUrgency;
-  }): Promise<void>;
+    /** Optional source fence propagated only by durable email-observer notices. */
+    emailObserverEffectFence?: EmailObserverEffectFence;
+    /** Task lineage used for delayed application-confirmation result notices. */
+    applicationConfirmationNoticeFence?: import('@assistant/persistence').ApplicationConfirmationNoticeFence;
+  }): Promise<NotificationDeliveryResult | void>;
   notifyApprovals(
     approvals: ReadonlyArray<{
       taskId: string;
+      /** Stable owner-notice batch identity. */
+      deliveryKey?: string;
       /** See notifyOwner.conversationId. */
       conversationId?: string | null;
       shortCode: string;
@@ -74,12 +90,12 @@ export interface OwnerNotifier {
       /** Concise owner-facing reason the parked task was started. */
       purpose?: string;
     }>,
-  ): Promise<void>;
+  ): Promise<NotificationDeliveryResult | void>;
 }
 
 export const noopOwnerNotifier: OwnerNotifier = {
-  notifyOwner: async () => {},
-  notifyApprovals: async () => {},
+  notifyOwner: async () => ({ legs: [{ channel: 'none', status: 'skipped' }] }),
+  notifyApprovals: async () => ({ legs: [{ channel: 'none', status: 'skipped' }] }),
 };
 
 /** An authenticated inbound email another module may observe (side effects only). */
@@ -94,10 +110,42 @@ export interface InboundEmailEvent {
   now?: Date;
 }
 
-export type InboundEmailObserver = (
+export type EmailObserverPreparation =
+  | { kind: 'prepared'; result: unknown }
+  | { kind: 'no_op' }
+  | { kind: 'budget_blocked'; mode: 'park' | 'block' }
+  | { kind: 'unknown'; errorCode: string };
+
+export type EmailObserverEffect =
+  | { kind: 'complete' }
+  | { kind: 'no_op' }
+  | { kind: 'retryable_failed'; errorCode: string }
+  | { kind: 'unknown'; errorCode: string };
+
+/** A versioned handler installed before the first source admission. */
+export type LegacyInboundEmailObserver = (
   services: ModuleServices,
   event: InboundEmailEvent,
 ) => Promise<void>;
+
+export interface InboundEmailObserver {
+  identity: EmailObserverIdentity;
+  /** Dynamic feature gate checked before claims and again at each effect boundary. */
+  shouldRun?(services: ModuleServices): Promise<boolean> | boolean;
+  /** Called only after the persistence claim and authoritative source re-read. */
+  prepare(
+    services: ModuleServices,
+    source: EmailObserverSource,
+    claim: EmailObserverClaim,
+  ): Promise<EmailObserverPreparation>;
+  /** Must be deterministic/idempotent for a persisted prepared result. */
+  apply(
+    services: ModuleServices,
+    source: EmailObserverSource,
+    claim: EmailObserverClaim,
+    preparedResult: unknown,
+  ): Promise<EmailObserverEffect>;
+}
 
 /**
  * Invocation-time services for module hooks. Built by the composition root
@@ -113,8 +161,16 @@ export interface ModuleServices {
   dispatcher: ToolDispatcher;
   workspace: WorkspaceStore;
   ownerNotifier: OwnerNotifier;
-  emailObservers: readonly InboundEmailObserver[];
+  /** Existing fan-out retained until admission call sites switch to the ledger. */
+  emailObservers: readonly LegacyInboundEmailObserver[];
+  durableEmailObservers: readonly InboundEmailObserver[];
   persistence: ExecutionPersistence;
+  /**
+   * True only when this installation may perform provider-backed operations.
+   * Firestore imports remain fenced until explicit activation. Modules that
+   * do durable ingress work should call this immediately before writes.
+   */
+  operationalReady?: () => Promise<boolean>;
 }
 
 /** The narrow, framework-free request a webhook handler receives. */
@@ -173,8 +229,15 @@ export interface ModuleTaskHandler {
 
 /** An owner-facing delivery channel (email, SMS) composed into the executor. */
 export interface ModuleChannel {
+  /** Stable delivery-leg name used to preserve per-channel outcomes on throws. */
+  name?: string;
   /** Deliver a finished task's final text; must self-guard by conversation channel. */
-  deliverFinal(services: ModuleServices, task: TaskRow, text: string): Promise<void>;
+  deliverFinal(
+    services: ModuleServices,
+    task: TaskRow,
+    text: string,
+    attemptId: string,
+  ): Promise<FinalChannelDeliveryResult>;
   /** Throw when a task of this shape requires this channel but it is unconfigured. */
   assertDeliverable?(task: Pick<TaskRow, 'type' | 'trust'>): void;
   /** In-thread notice when approvals park a task (email today). */
@@ -195,7 +258,8 @@ export interface ModuleHooks {
   taskHandlers?: readonly ModuleTaskHandler[];
   channel?: ModuleChannel;
   ownerNotifier?: OwnerNotifier;
-  emailObservers?: readonly InboundEmailObserver[];
+  emailObservers?: readonly LegacyInboundEmailObserver[];
+  durableEmailObservers?: readonly InboundEmailObserver[];
 }
 
 /**

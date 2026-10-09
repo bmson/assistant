@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { DispatcherPort, InboundEvent, ModelRouter, StepCallOutcome } from '@assistant/core';
 import {
   acceptSuggestion,
@@ -5,6 +6,7 @@ import {
   createSuggestion,
   enqueueTask,
   executeTask,
+  extractOwnerIntent,
   getAgent,
   renotifyStalledAttention,
   resolveApproval,
@@ -17,10 +19,12 @@ import {
   createDb,
   type Db,
   messages,
+  modelCallAudit,
   suggestions,
   tasks,
   toolCalls,
 } from '@assistant/db';
+import { finalChannelDelivery, notificationLeg } from '@assistant/persistence';
 import { ToolDispatcher, ToolRegistry } from '@assistant/tools';
 import type { ModelMessage } from 'ai';
 import { and, eq, inArray, sql } from 'drizzle-orm';
@@ -202,6 +206,189 @@ afterAll(async () => {
 });
 
 describe('executor end-to-end (integration, scripted model)', () => {
+  it('runs an opted-in arrival through deterministic location-free delivery without model or tools', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const observationId = randomUUID();
+    const event: InboundEvent = {
+      source: 'internal',
+      externalEventId: `arrival:${agentId}:${new Date().toISOString().slice(0, 10)}`,
+      agentId,
+      trust: 'assistant',
+      payload: {
+        kind: 'arrival',
+        arrivalObservationId: observationId,
+        arrivalExpiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+        instruction: 'Contains no coordinates or venue name.',
+      },
+    };
+    const { task } = await enqueueTask(db, { event, type: 'adhoc' });
+    createdTaskIds.push(task.id);
+    let modelCalls = 0;
+    let dispatchCalls = 0;
+    let deliveredText = '';
+    const router = {
+      async object() {
+        modelCalls += 1;
+        throw new Error('arrival must not call the model');
+      },
+      async step() {
+        modelCalls += 1;
+        throw new Error('arrival must not call the model');
+      },
+    } as unknown as ModelRouter;
+    const dispatcher: DispatcherPort = {
+      toolDefs: () => [
+        { name: 'maps.lookup', description: 'fake private lookup', inputSchema: z.object({}) },
+      ],
+      resultIsUntrusted: () => true,
+      dispatch: async () => {
+        dispatchCalls += 1;
+        throw new Error('arrival must not dispatch tools');
+      },
+      executeApproved: async () => ({ kind: 'failed', error: 'unused' }),
+    };
+
+    const result = await executeTask(
+      {
+        db,
+        router,
+        dispatcher,
+        isArrivalObservationActive: async (_owner, id) => id === observationId,
+        deliverFinal: async (_task, text, attemptId) => {
+          deliveredText = text;
+          return { legs: [{ channel: 'push', status: 'accepted', attemptId }] };
+        },
+      },
+      task.id,
+    );
+    expect(result.outcome).toBe('done');
+    expect(modelCalls).toBe(0);
+    expect(dispatchCalls).toBe(0);
+    expect(deliveredText).toBe('You’ve arrived. Would you like a hand with anything?');
+    expect(
+      await db.select().from(modelCallAudit).where(eq(modelCallAudit.taskId, task.id)),
+    ).toEqual([]);
+    expect(await db.select().from(toolCalls).where(eq(toolCalls.taskId, task.id))).toEqual([]);
+    const [finished] = await db.select().from(tasks).where(eq(tasks.id, task.id));
+    expect(finished?.externalEventId).toBe(event.externalEventId);
+    expect(finished?.trigger).toMatchObject({ payload: { kind: 'arrival' } });
+    expect(JSON.stringify(finished?.trigger)).not.toContain(observationId);
+    expect(JSON.stringify(finished?.trigger)).not.toContain('arrivalExpiresAt');
+  });
+
+  it('cancels an expired arrival reference before any model or tool work', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60_000).toISOString().slice(0, 10);
+    const dedupeKey = `arrival:${agentId}:${tomorrow}`;
+    const { task } = await enqueueTask(db, {
+      event: {
+        source: 'internal',
+        externalEventId: dedupeKey,
+        agentId,
+        trust: 'assistant',
+        payload: {
+          kind: 'arrival',
+          arrivalObservationId: randomUUID(),
+          arrivalExpiresAt: new Date(Date.now() - 1).toISOString(),
+        },
+      },
+      type: 'adhoc',
+    });
+    createdTaskIds.push(task.id);
+    let modelCalls = 0;
+    const router = {
+      async object() {
+        modelCalls += 1;
+        throw new Error('must not call model');
+      },
+      async step() {
+        modelCalls += 1;
+        throw new Error('must not call model');
+      },
+    } as unknown as ModelRouter;
+    const result = await executeTask(
+      {
+        db,
+        router,
+        dispatcher: new ToolDispatcher(db, new ToolRegistry()),
+        isArrivalObservationActive: async () => false,
+      },
+      task.id,
+    );
+    expect(result.outcome).toBe('cancelled');
+    expect(modelCalls).toBe(0);
+    const [cancelled] = await db.select().from(tasks).where(eq(tasks.id, task.id));
+    expect(cancelled?.externalEventId).toBe(dedupeKey);
+    expect(JSON.stringify(cancelled?.trigger)).not.toContain('arrivalObservationId');
+    expect(JSON.stringify(cancelled?.trigger)).not.toContain('arrivalExpiresAt');
+  });
+
+  it('rechecks an arrival reference before resuming a staged ambiguous delivery', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const observationId = randomUUID();
+    const day = new Date(Date.now() + 2 * 24 * 60 * 60_000).toISOString().slice(0, 10);
+    const event: InboundEvent = {
+      source: 'internal',
+      externalEventId: `arrival:${agentId}:${day}`,
+      agentId,
+      trust: 'assistant',
+      payload: {
+        kind: 'arrival',
+        arrivalObservationId: observationId,
+        arrivalExpiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+      },
+    };
+    const { task } = await enqueueTask(db, { event, type: 'adhoc' });
+    createdTaskIds.push(task.id);
+    let active = true;
+    let modelCalls = 0;
+    let deliveries = 0;
+    const router = {
+      async object() {
+        modelCalls += 1;
+        throw new Error('arrival must not call model');
+      },
+      async step() {
+        modelCalls += 1;
+        throw new Error('arrival must not call model');
+      },
+    } as unknown as ModelRouter;
+    const deps = {
+      db,
+      router,
+      dispatcher: new ToolDispatcher(db, new ToolRegistry()),
+      isArrivalObservationActive: async (_owner: string, id: string) =>
+        active && id === observationId,
+      deliverFinal: async (_task: unknown, _text: string, attemptId: string) => {
+        deliveries += 1;
+        return { legs: [{ channel: 'push', status: 'unknown' as const, attemptId }] };
+      },
+    };
+
+    const first = await executeTask(deps, task.id);
+    expect(first.outcome).toBe('needs_attention');
+    expect(deliveries).toBe(1);
+    const [pending] = await db.select().from(tasks).where(eq(tasks.id, task.id));
+    expect((pending?.state as { pendingFinal?: unknown } | undefined)?.pendingFinal).toBeDefined();
+    expect(pending?.trigger).toMatchObject({ payload: { arrivalObservationId: observationId } });
+
+    active = false;
+    await db
+      .update(tasks)
+      .set({ status: 'pending', lockedUntil: null, leaseToken: null, runAfter: null, attempt: 0 })
+      .where(eq(tasks.id, task.id));
+    const resumed = await executeTask(deps, task.id);
+    expect(resumed.outcome).toBe('cancelled');
+    expect(deliveries).toBe(1);
+    expect(modelCalls).toBe(0);
+    expect(
+      await db.select().from(modelCallAudit).where(eq(modelCallAudit.taskId, task.id)),
+    ).toEqual([]);
+    const [cancelled] = await db.select().from(tasks).where(eq(tasks.id, task.id));
+    expect(cancelled?.trigger).toMatchObject({ payload: { kind: 'arrival' } });
+    expect(JSON.stringify(cancelled?.state)).not.toContain(observationId);
+  });
+
   it('accepts a legacy suggestion, uses its proposal, and delivers the completed result in its chat', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const [conversation] = await db
@@ -410,25 +597,46 @@ describe('executor end-to-end (integration, scripted model)', () => {
       .returning();
     const convId = (conversation as NonNullable<typeof conversation>).id;
     createdConversationIds.push(convId);
-    await db.insert(messages).values({
-      conversationId: convId,
-      role: 'user',
-      origin: 'owner',
-      parts: [{ type: 'text', text: 'please count then send hello world' }],
-      text: 'please count then send hello world',
-      embedding: new Array(1536).fill(0.01),
-    });
+    const ownerText = 'Please count. Send hello world.';
+    expect(extractOwnerIntent({ trust: 'owner', text: ownerText }).authorizedScopes).toContain(
+      'external_send',
+    );
+    const [ownerMessage] = await db
+      .insert(messages)
+      .values({
+        conversationId: convId,
+        role: 'user',
+        origin: 'owner',
+        parts: [{ type: 'text', text: ownerText }],
+        text: ownerText,
+        embedding: new Array(1536).fill(0.01),
+      })
+      .returning({ id: messages.id });
+    if (!ownerMessage?.id) throw new Error('Expected the owner chat message to be persisted');
 
     const { task } = await enqueueTask(db, {
-      event: { ...event(), conversationId: convId },
+      event: {
+        source: 'chat',
+        agentId,
+        conversationId: convId,
+        trust: 'owner',
+        payload: {
+          text: ownerText,
+          triggerMessageId: ownerMessage.id,
+          requestAt: new Date().toISOString(),
+          intentRevision: 1,
+        },
+      },
       type: 'chat_turn',
     });
     createdTaskIds.push(task.id);
 
     const run = await executeTask({ db, router, dispatcher }, task.id);
     expect(run.outcome).toBe('parked');
+    expect(executions[key]).toBe(1);
 
     const [approval] = await db.select().from(approvals).where(eq(approvals.taskId, task.id));
+    expect(approval).toBeDefined();
     const thread = await db
       .select()
       .from(messages)
@@ -564,7 +772,7 @@ describe('executor end-to-end (integration, scripted model)', () => {
       { db, router: crashy, dispatcher, notifyOwner: throwingPush },
       task.id,
     );
-    expect(run.outcome).toBe('dead_letter');
+    expect(run.outcome, JSON.stringify(run)).toBe('dead_letter');
     expect(pushAttempts).toBe(1);
 
     let [row] = await db.select().from(tasks).where(eq(tasks.id, task.id));
@@ -582,6 +790,7 @@ describe('executor end-to-end (integration, scripted model)', () => {
       db,
       async ({ taskId }) => {
         delivered.push(taskId);
+        return notificationLeg('owner', 'delivered');
       },
       { olderThanMinutes: 5 },
     );
@@ -592,7 +801,7 @@ describe('executor end-to-end (integration, scripted model)', () => {
 
     // A second sweep leaves it alone now that it is stamped.
     const again = await renotifyStalledAttention(db, async () => {}, { olderThanMinutes: 5 });
-    void again;
+    expect(again).toBe(0);
     expect(delivered.filter((id) => id === task.id)).toHaveLength(1);
   });
 
@@ -689,22 +898,24 @@ describe('executor end-to-end (integration, scripted model)', () => {
     });
     createdTaskIds.push(task.id);
 
-    const deliverFinal = async () => {
+    const deliverFinal = async (_task: unknown, _text: string, attemptId: string) => {
       deliveries += 1;
-      if (deliveries === 1) throw new Error('provider unavailable');
+      return deliveries === 1
+        ? finalChannelDelivery('dashboard', 'rejected', attemptId, 'provider-rejected')
+        : finalChannelDelivery('dashboard', 'accepted', attemptId);
     };
     const first = await executeTask({ db, router, dispatcher, deliverFinal }, task.id);
-    expect(first.outcome).toBe('failed');
+    expect(first.outcome).toBe('needs_attention');
     let [row] = await db.select().from(tasks).where(eq(tasks.id, task.id));
-    expect(row?.status).toBe('sleeping');
-    expect(row?.attempt).toBe(1);
+    expect(row?.status).toBe('needs_attention');
+    expect(row?.attempt).toBe(0);
     expect(((row?.state ?? {}) as { pendingFinal?: { text?: string } }).pendingFinal?.text).toBe(
       'A stable final response.',
     );
 
     await db
       .update(tasks)
-      .set({ runAfter: new Date(Date.now() - 1_000) })
+      .set({ status: 'pending', runAfter: new Date(Date.now() - 1_000) })
       .where(eq(tasks.id, task.id));
     const second = await executeTask({ db, router, dispatcher, deliverFinal }, task.id);
     expect(second.outcome).toBe('done');
@@ -768,8 +979,10 @@ describe('executor end-to-end (integration, scripted model)', () => {
       task.id,
     );
 
-    expect(result.outcome).toBe('done');
+    expect(result.outcome).toBe('needs_attention');
     expect(deliveries).toBe(0);
+    const [row] = await db.select().from(tasks).where(eq(tasks.id, task.id));
+    expect(row?.status).toBe('needs_attention');
   });
 
   it('a late approval resolution cannot resurrect a cancelled task', async (ctx) => {
@@ -878,8 +1091,9 @@ describe('executor end-to-end (integration, scripted model)', () => {
         db,
         router,
         dispatcher,
-        deliverFinal: async () => {
+        deliverFinal: async (_task, _text, attemptId) => {
           deliveries += 1;
+          return finalChannelDelivery('dashboard', 'accepted', attemptId);
         },
       },
       task.id,
@@ -1004,6 +1218,248 @@ describe('executor end-to-end (integration, scripted model)', () => {
       args: { documentId: '1SLbcTqOwMMQG3QmD7gj755xzOKwQtVyv5cvaPjSwGSs' },
     });
     await db.delete(toolCalls).where(eq(toolCalls.taskId, task.id));
+  });
+
+  it('honors a no-read Google Doc request without reporting an unavailable read', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const documentId = 'NoReadDoc123456';
+    const suppliedUrl = `https://docs.google.com/document/d/${documentId}/edit`;
+    const ownerText = `Do not open this document; explain what a Google Doc URL looks like: ${suppliedUrl}`;
+    const registry = new ToolRegistry();
+    let documentExecutions = 0;
+    registry.register(
+      {
+        name: 'docs.get',
+        description: 'Read a shared Google Doc.',
+        inputSchema: z.object({ documentId: z.string() }),
+        risk: 'autonomous',
+        acceptsUntrustedInput: true,
+        execute: async () => {
+          documentExecutions += 1;
+          return { documentId, title: 'Private document', text: 'must not be read' };
+        },
+      },
+      { confidentialRead: true, returnsUntrustedContent: true },
+    );
+    const dispatcher = new ToolDispatcher(db, registry);
+    const planningRoles: string[] = [];
+    let stepCalls = 0;
+    const router = {
+      async object(role: string) {
+        planningRoles.push(role);
+        return {
+          ok: true,
+          modelId: 'fake/model',
+          degraded: false,
+          object:
+            role === 'classify'
+              ? { trivial: false }
+              : { action: 'reply', reasoning: '', steps: [], missingInfo: [] },
+        };
+      },
+      async step(_role: string, options: { messages?: ModelMessage[] }): Promise<StepCallOutcome> {
+        stepCalls += 1;
+        if (stepCalls === 1) {
+          return {
+            ok: true,
+            modelId: 'fake/model',
+            degraded: false,
+            text: '',
+            toolCalls: [
+              {
+                toolCallId: 'attempt-prohibited-doc-read',
+                toolName: 'docs.get',
+                input: { documentId },
+              },
+            ],
+          };
+        }
+        const transcript = JSON.stringify(options.messages ?? []);
+        expect(transcript).toContain('owner explicitly prohibited reading data from docs');
+        return {
+          ok: true,
+          modelId: 'fake/model',
+          degraded: false,
+          text: 'I will not open the document. A Google Doc URL identifies a document by the ID after /document/d/.',
+          toolCalls: [],
+          finishReason: 'stop',
+        };
+      },
+    } as unknown as ModelRouter;
+
+    const [conversation] = await db
+      .insert(conversations)
+      .values({ agentId, channel: 'chat', trust: 'owner', title: 'no-read-doc-boundary' })
+      .returning();
+    const conversationId = (conversation as NonNullable<typeof conversation>).id;
+    createdConversationIds.push(conversationId);
+    await db.insert(messages).values({
+      conversationId,
+      role: 'user',
+      origin: 'owner',
+      parts: [{ type: 'text', text: ownerText }],
+      text: ownerText,
+    });
+    const { task } = await enqueueTask(db, {
+      event: { ...event(), conversationId },
+      type: 'chat_turn',
+    });
+    createdTaskIds.push(task.id);
+
+    const outcome = await executeTask({ db, router, dispatcher }, task.id);
+    expect(outcome.outcome).toBe('done');
+    expect(planningRoles.filter((role) => role === 'classify')).toHaveLength(1);
+    expect(planningRoles.filter((role) => role === 'plan')).toHaveLength(1);
+    expect(stepCalls).toBe(2);
+    expect(documentExecutions).toBe(0);
+    const [reply] = await db
+      .select()
+      .from(messages)
+      .where(sql`${messages.taskId} = ${task.id} and ${messages.role} = 'assistant'`);
+    expect(reply?.text).toContain('I will not open the document');
+    expect(reply?.text).toContain('identifies a document by the ID');
+    expect(reply?.text).not.toMatch(/temporarily unavailable|couldn't read the shared Google Doc/i);
+    const documentCalls = await db
+      .select()
+      .from(toolCalls)
+      .where(and(eq(toolCalls.taskId, task.id), eq(toolCalls.toolName, 'docs.get')));
+    expect(documentCalls).toEqual([]);
+  });
+
+  it('keeps a denied Google Doc separate from a permitted document in one request', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const documentId = 'NoReadDoc123456';
+    const allowedId = 'AllowedDoc123456';
+    const suppliedUrl = `https://docs.google.com/document/d/${documentId}/edit`;
+    const allowedUrl = `https://docs.google.com/document/d/${allowedId}/edit`;
+    const ownerText = `Do not open this document: ${suppliedUrl}. Open this document: ${allowedUrl}.`;
+    const registry = new ToolRegistry();
+    const documentExecutions: string[] = [];
+    registry.register(
+      {
+        name: 'docs.get',
+        description: 'Read a shared Google Doc.',
+        inputSchema: z.object({ documentId: z.string() }),
+        risk: 'autonomous',
+        acceptsUntrustedInput: true,
+        execute: async (args) => {
+          const requestedId = (args as { documentId: string }).documentId;
+          documentExecutions.push(requestedId);
+          expect(requestedId).toBe(allowedId);
+          return {
+            documentId: requestedId,
+            title: 'Allowed document',
+            text: 'The permitted document says hello.',
+          };
+        },
+      },
+      { confidentialRead: true, returnsUntrustedContent: true },
+    );
+    const dispatcher = new ToolDispatcher(db, registry);
+    const planningRoles: string[] = [];
+    let stepCalls = 0;
+    const router = {
+      async object(role: string) {
+        planningRoles.push(role);
+        return {
+          ok: true,
+          modelId: 'fake/model',
+          degraded: false,
+          object:
+            role === 'classify'
+              ? { trivial: false }
+              : { action: 'reply', reasoning: '', steps: [], missingInfo: [] },
+        };
+      },
+      async step(_role: string, options: { messages?: ModelMessage[] }): Promise<StepCallOutcome> {
+        stepCalls += 1;
+        if (stepCalls === 1) {
+          return {
+            ok: true,
+            modelId: 'fake/model',
+            degraded: false,
+            text: '',
+            toolCalls: [
+              {
+                toolCallId: 'attempt-prohibited-doc-read',
+                toolName: 'docs.get',
+                input: { documentId },
+              },
+            ],
+          };
+        }
+        const transcript = JSON.stringify(options.messages ?? []);
+        expect(transcript).toContain('owner explicitly prohibited reading data from docs');
+        if (stepCalls === 2) {
+          return {
+            ok: true,
+            modelId: 'fake/model',
+            degraded: false,
+            text: '',
+            toolCalls: [
+              {
+                toolCallId: 'read-permitted-document',
+                toolName: 'docs.get',
+                input: { documentId: allowedId },
+              },
+            ],
+          };
+        }
+        expect(transcript).toContain('Allowed document');
+        expect(transcript).toContain('The permitted document says hello.');
+        expect(transcript).not.toContain('must not be read');
+        return {
+          ok: true,
+          modelId: 'fake/model',
+          degraded: false,
+          text: 'I left the first document unopened. The permitted document is titled Allowed document.',
+          toolCalls: [],
+          finishReason: 'stop',
+        };
+      },
+    } as unknown as ModelRouter;
+
+    const [conversation] = await db
+      .insert(conversations)
+      .values({ agentId, channel: 'chat', trust: 'owner', title: 'doc-target-boundary' })
+      .returning();
+    const conversationId = (conversation as NonNullable<typeof conversation>).id;
+    createdConversationIds.push(conversationId);
+    await db.insert(messages).values({
+      conversationId,
+      role: 'user',
+      origin: 'owner',
+      parts: [{ type: 'text', text: ownerText }],
+      text: ownerText,
+    });
+    const { task } = await enqueueTask(db, {
+      event: { ...event(), conversationId },
+      type: 'chat_turn',
+    });
+    createdTaskIds.push(task.id);
+
+    const outcome = await executeTask({ db, router, dispatcher }, task.id);
+    expect(outcome.outcome).toBe('done');
+    expect(planningRoles.filter((role) => role === 'classify')).toHaveLength(1);
+    expect(planningRoles.filter((role) => role === 'plan')).toHaveLength(1);
+    expect(stepCalls).toBe(3);
+    expect(documentExecutions).toEqual([allowedId]);
+    const [reply] = await db
+      .select()
+      .from(messages)
+      .where(sql`${messages.taskId} = ${task.id} and ${messages.role} = 'assistant'`);
+    expect(reply?.text).toContain('first document unopened');
+    expect(reply?.text).toContain('Allowed document');
+    expect(reply?.text).not.toMatch(/temporarily unavailable|couldn't read the shared Google Doc/i);
+    const documentCalls = await db
+      .select()
+      .from(toolCalls)
+      .where(and(eq(toolCalls.taskId, task.id), eq(toolCalls.toolName, 'docs.get')));
+    expect(documentCalls).toHaveLength(1);
+    expect(documentCalls[0]).toMatchObject({
+      args: { documentId: allowedId },
+      status: 'succeeded',
+    });
   });
 
   it('strips a fabricated link from the final answer but keeps a tool-sourced one', async (ctx) => {
@@ -1166,5 +1622,292 @@ describe('executor end-to-end (integration, scripted model)', () => {
     const done = await executeTask({ db, router, dispatcher }, task.id);
     expect(done.outcome).toBe('done');
     expect(order).toEqual(['exec.first', 'exec.second']);
+  });
+
+  it('recovers one omitted future watch after preserving a complete mailbox result', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const request = 'Tell me when Alex sends the interview response.';
+    const [conversation] = await db
+      .insert(conversations)
+      .values({ agentId, channel: 'chat', trust: 'owner', title: 'future-watch-recovery-test' })
+      .returning();
+    if (!conversation) throw new Error('conversation was not created');
+    createdConversationIds.push(conversation.id);
+    await db.insert(messages).values({
+      conversationId: conversation.id,
+      role: 'user',
+      origin: 'owner',
+      text: request,
+      parts: [{ type: 'text', text: request }],
+      embedding: new Array(1536).fill(0.01),
+    });
+    const { task } = await enqueueTask(db, {
+      event: { ...event(), conversationId: conversation.id },
+      type: 'chat_turn',
+    });
+    createdTaskIds.push(task.id);
+
+    let searchCalls = 0;
+    let watchCalls = 0;
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'gmail.search',
+        description: 'Search owner mailbox metadata.',
+        inputSchema: z.object({ query: z.string() }),
+        risk: 'autonomous',
+        acceptsUntrustedInput: true,
+        execute: async () => {
+          searchCalls += 1;
+          return {
+            complete: true,
+            results: [{ from: 'Alex <alex@example.com>', subject: 'Interview response' }],
+          };
+        },
+      },
+      { confidentialRead: true },
+    );
+    registry.register(
+      {
+        name: 'watch.create',
+        description: 'Create a bounded mailbox watch.',
+        inputSchema: z.object({
+          expectedSenderEmails: z.array(z.string()),
+          query: z.string().optional(),
+        }),
+        risk: 'autonomous',
+        acceptsUntrustedInput: true,
+        execute: async (args) => {
+          watchCalls += 1;
+          return {
+            watchId: 'watch-recovery',
+            status: 'active',
+            expiresAt: new Date(Date.now() + 86400_000).toISOString(),
+            expectedSenderEmails: (args as { expectedSenderEmails: string[] }).expectedSenderEmails,
+          };
+        },
+      },
+      { privateWrite: true },
+    );
+    let modelCalls = 0;
+    const router = {
+      async object() {
+        return {
+          ok: true,
+          modelId: 'fake/model',
+          degraded: false,
+          object: {
+            action: 'workflow',
+            reasoning: '',
+            steps: ['search and watch'],
+            missingInfo: [],
+          },
+        };
+      },
+      async step(): Promise<StepCallOutcome> {
+        modelCalls += 1;
+        if (modelCalls === 1) {
+          return {
+            ok: true,
+            modelId: 'fake/model',
+            degraded: false,
+            text: '',
+            toolCalls: [
+              {
+                toolCallId: 'future-watch-search',
+                toolName: 'gmail.search',
+                input: { query: 'Alex interview response' },
+              },
+            ],
+          };
+        }
+        if (modelCalls === 2) {
+          return {
+            ok: true,
+            modelId: 'fake/model',
+            degraded: false,
+            text: "The complete search found one matching message from alex@example.com. I'll notify you if another arrives.",
+            toolCalls: [],
+          };
+        }
+        if (modelCalls === 3) {
+          return {
+            ok: true,
+            modelId: 'fake/model',
+            degraded: false,
+            text: '',
+            toolCalls: [
+              {
+                toolCallId: 'future-watch-create',
+                toolName: 'watch.create',
+                input: { expectedSenderEmails: ['alex@example.com'], query: 'interview response' },
+              },
+            ],
+          };
+        }
+        return {
+          ok: true,
+          modelId: 'fake/model',
+          degraded: false,
+          text: 'The complete search found one matching message from alex@example.com. An active watch is now in place; I will notify you when another arrives.',
+          toolCalls: [],
+        };
+      },
+    } as unknown as ModelRouter;
+
+    const outcome = await executeTask(
+      { db, router, dispatcher: new ToolDispatcher(db, registry) },
+      task.id,
+    );
+    expect(outcome.outcome).toBe('done');
+    expect(modelCalls).toBe(4);
+    expect(searchCalls).toBe(1);
+    expect(watchCalls).toBe(1);
+    const [row] = await db.select().from(tasks).where(eq(tasks.id, task.id));
+    expect(
+      (row?.state as { futureWatchRecoveryAttempts?: number } | undefined)
+        ?.futureWatchRecoveryAttempts,
+    ).toBe(1);
+    const calls = await db.select().from(toolCalls).where(eq(toolCalls.taskId, task.id));
+    expect(calls.filter((call) => call.toolName === 'watch.create')).toHaveLength(1);
+    const transcript = await db
+      .select({ role: messages.role, text: messages.text })
+      .from(messages)
+      .where(eq(messages.conversationId, conversation.id))
+      .orderBy(messages.createdAt);
+    expect(transcript.at(-1)?.text).toContain('complete search found one matching message');
+  });
+
+  it('does not repeat an uncertain watch creation during late recovery', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const request = 'Tell me when Alex sends the interview response.';
+    const [conversation] = await db
+      .insert(conversations)
+      .values({ agentId, channel: 'chat', trust: 'owner', title: 'future-watch-unknown-test' })
+      .returning();
+    if (!conversation) throw new Error('conversation was not created');
+    createdConversationIds.push(conversation.id);
+    await db.insert(messages).values({
+      conversationId: conversation.id,
+      role: 'user',
+      origin: 'owner',
+      text: request,
+      parts: [{ type: 'text', text: request }],
+      embedding: new Array(1536).fill(0.01),
+    });
+    const { task } = await enqueueTask(db, {
+      event: { ...event(), conversationId: conversation.id },
+      type: 'chat_turn',
+    });
+    createdTaskIds.push(task.id);
+
+    let watchCalls = 0;
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'gmail.search',
+        description: 'Search owner mailbox metadata.',
+        inputSchema: z.object({ query: z.string() }),
+        risk: 'autonomous',
+        acceptsUntrustedInput: true,
+        execute: async () => ({
+          complete: true,
+          results: [{ from: 'Alex <alex@example.com>', subject: 'Interview response' }],
+        }),
+      },
+      { confidentialRead: true },
+    );
+    registry.register(
+      {
+        name: 'watch.create',
+        description: 'Create a bounded mailbox watch.',
+        inputSchema: z.object({ expectedSenderEmails: z.array(z.string()) }),
+        risk: 'autonomous',
+        acceptsUntrustedInput: true,
+        execute: async () => {
+          watchCalls += 1;
+          throw new Error('provider timed out after accepting request');
+        },
+      },
+      { privateWrite: true },
+    );
+    let modelCalls = 0;
+    const router = {
+      async object() {
+        return {
+          ok: true,
+          modelId: 'fake/model',
+          degraded: false,
+          object: {
+            action: 'workflow',
+            reasoning: '',
+            steps: ['search and watch'],
+            missingInfo: [],
+          },
+        };
+      },
+      async step(): Promise<StepCallOutcome> {
+        modelCalls += 1;
+        if (modelCalls === 1)
+          return {
+            ok: true,
+            modelId: 'fake/model',
+            degraded: false,
+            text: '',
+            toolCalls: [
+              {
+                toolCallId: 'unknown-watch-search',
+                toolName: 'gmail.search',
+                input: { query: 'Alex interview response' },
+              },
+            ],
+          };
+        if (modelCalls === 2)
+          return {
+            ok: true,
+            modelId: 'fake/model',
+            degraded: false,
+            text: "The complete search found one matching message. I'll notify you if another arrives.",
+            toolCalls: [],
+          };
+        if (modelCalls === 3)
+          return {
+            ok: true,
+            modelId: 'fake/model',
+            degraded: false,
+            text: '',
+            toolCalls: [
+              {
+                toolCallId: 'unknown-watch-create',
+                toolName: 'watch.create',
+                input: { expectedSenderEmails: ['alex@example.com'] },
+              },
+            ],
+          };
+        return {
+          ok: true,
+          modelId: 'fake/model',
+          degraded: false,
+          text: 'I could not confirm whether the watch was created.',
+          toolCalls: [
+            {
+              toolCallId: 'unknown-watch-create-retry',
+              toolName: 'watch.create',
+              input: { expectedSenderEmails: ['alex@example.com'] },
+            },
+          ],
+        };
+      },
+    } as unknown as ModelRouter;
+
+    const outcome = await executeTask(
+      { db, router, dispatcher: new ToolDispatcher(db, registry) },
+      task.id,
+    );
+    expect(outcome.outcome).toBe('needs_attention');
+    expect(watchCalls).toBe(1);
+    expect(modelCalls).toBe(4);
+    const calls = await db.select().from(toolCalls).where(eq(toolCalls.taskId, task.id));
+    expect(calls.filter((call) => call.toolName === 'watch.create')).toHaveLength(1);
   });
 });

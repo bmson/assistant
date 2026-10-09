@@ -8,6 +8,7 @@ import {
   FirestoreScheduleRepository,
 } from '@assistant/firestore';
 import { remindersModule } from '@assistant/modules';
+import { notificationLeg } from '@assistant/persistence';
 import { ToolRegistry } from '@assistant/tools/registry';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InstallationStore } from '../../../packages/firestore/src/store.js';
@@ -60,7 +61,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           getTimezone: async () => TIMEZONE,
         },
       });
-      notifyOwner = vi.fn<NonNullable<ExecutorDeps['notifyOwner']>>(async () => {});
+      notifyOwner = vi.fn<NonNullable<ExecutorDeps['notifyOwner']>>(async () =>
+        notificationLeg('push', 'delivered'),
+      );
       deps = {
         db: unavailable('db') as Db,
         router: unavailable('router') as ExecutorDeps['router'],

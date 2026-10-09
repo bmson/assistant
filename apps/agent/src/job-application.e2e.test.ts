@@ -73,6 +73,23 @@ function event(): InboundEvent {
   };
 }
 
+function stagedResumePath(transcript: string): string {
+  const match = transcript.match(
+    /"workspacePath":"(browser\/attachments\/[a-f0-9]{64}\/[a-f0-9]{64}\/resume\.pdf)"/,
+  );
+  if (!match?.[1]) throw new Error('Drive download receipt did not include the staged resume path');
+  return match[1];
+}
+
+function applicationPlanWithResume(path: string): BrowserPlan {
+  return {
+    ...applicationPlan,
+    steps: applicationPlan.steps.map((step) =>
+      step.action === 'upload' ? { ...step, workspacePath: path } : step,
+    ),
+  };
+}
+
 function router(options: { updateTracker: boolean; finalText: string }): ModelRouter {
   const fake = {
     async object() {
@@ -109,6 +126,7 @@ function router(options: { updateTracker: boolean; finalText: string }): ModelRo
         };
       }
       if (!transcript.includes('"toolName":"browser.execute"')) {
+        const stagedPath = stagedResumePath(transcript);
         return {
           ok: true,
           modelId: 'fake/model',
@@ -118,7 +136,7 @@ function router(options: { updateTracker: boolean; finalText: string }): ModelRo
             {
               toolCallId: 'call_apply',
               toolName: 'browser.execute',
-              input: { plan: applicationPlan },
+              input: { plan: applicationPlanWithResume(stagedPath) },
             },
           ],
         };
@@ -276,19 +294,21 @@ describe('complex job application workflow (integration, scripted model)', () =>
       },
       task.id,
     );
-    expect(first.outcome).toBe('parked');
-    expect(harness.writes).toMatchObject([
-      {
-        path: 'browser/attachments/resume.pdf',
-        contentType: 'application/pdf',
-      },
-    ]);
+    expect(first.outcome, JSON.stringify(first)).toBe('parked');
+    const stagedResume = harness.writes[0];
+    expect(stagedResume).toMatchObject({
+      path: expect.stringMatching(
+        /^browser\/attachments\/[a-f0-9]{64}\/[a-f0-9]{64}\/resume\.pdf$/,
+      ),
+      bytes: Buffer.from('%PDF complex workflow resume'),
+      contentType: 'application/pdf',
+    });
     expect(harness.launches).toHaveLength(0);
 
     const browserApproval = await pendingApproval(task.id);
     expect(browserApproval?.toolName).toBe('browser.execute');
     expect(browserApproval?.approval.summary).toContain('careers.example.test');
-    expect(browserApproval?.approval.summary).toContain('browser/attachments/resume.pdf');
+    expect(browserApproval?.approval.summary).toContain(stagedResume?.path);
     await resolveApproval(db, {
       approvalId: browserApproval?.approval.id,
       decision: 'approved',
@@ -305,7 +325,7 @@ describe('complex job application workflow (integration, scripted model)', () =>
     );
     expect(launched.outcome).toBe('sleeping');
     expect(harness.launches).toHaveLength(1);
-    expect(harness.launches[0]?.plan).toEqual(applicationPlan);
+    expect(harness.launches[0]?.plan).toEqual(applicationPlanWithResume(stagedResume?.path ?? ''));
 
     const callback = await recordBrowserJobResult(db, {
       taskId: task.id,
@@ -326,6 +346,30 @@ describe('complex job application workflow (integration, scripted model)', () =>
       },
     });
     expect(callback.ok).toBe(true);
+
+    expect(
+      (
+        await executeTask(
+          {
+            db,
+            router: router({
+              updateTracker: true,
+              finalText:
+                'I submitted the application after the portal confirmed it, and updated the Google Sheet.',
+            }),
+            dispatcher: harness.dispatcher,
+          },
+          task.id,
+        )
+      ).outcome,
+    ).toBe('parked');
+    const trackerApproval = await pendingApproval(task.id);
+    expect(trackerApproval?.toolName).toBe('sheets.write_rows');
+    await resolveApproval(db, {
+      approvalId: trackerApproval?.approval.id,
+      decision: 'approved',
+      via: 'web',
+    });
 
     const finished = await executeTask(
       {
@@ -460,6 +504,17 @@ describe('complex job application workflow (integration, scripted model)', () =>
       },
     });
 
+    expect(
+      (await executeTask({ db, router: scriptedRouter, dispatcher: harness.dispatcher }, task.id))
+        .outcome,
+    ).toBe('parked');
+    const trackerApproval = await pendingApproval(task.id);
+    expect(trackerApproval?.toolName).toBe('sheets.write_rows');
+    await resolveApproval(db, {
+      approvalId: trackerApproval?.approval.id,
+      decision: 'approved',
+      via: 'web',
+    });
     expect(
       (await executeTask({ db, router: scriptedRouter, dispatcher: harness.dispatcher }, task.id))
         .outcome,

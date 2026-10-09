@@ -12,7 +12,7 @@ import {
 } from '@assistant/db';
 import { inArray, like } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, type TestContext } from 'vitest';
-import { getPersonDossier, listPeopleDirectory } from './people.js';
+import { getPersonDossier, listPeopleDirectory, listPeopleDirectoryPage } from './people.js';
 
 const DATABASE_URL =
   process.env.DATABASE_URL ?? 'postgres://assistant:assistant@localhost:5432/assistant';
@@ -282,6 +282,26 @@ describe('listPeopleDirectory (integration)', () => {
     if (!dbUp) return ctx.skip();
     const people = await listPeopleDirectory(db, { now: NOW });
     expect(people.every((person) => person.trust !== 'owner')).toBe(true);
+  });
+
+  it('continues through owner-scoped people in stable bounded pages', async (ctx: TestContext) => {
+    if (!dbUp) return ctx.skip();
+    const expected = await listPeopleDirectory(db, { now: NOW });
+    const ids: string[] = [];
+    let after: { name: string; id: string } | undefined;
+    do {
+      const page = await listPeopleDirectoryPage(db, {
+        now: NOW,
+        limit: 1,
+        ...(after ? { after } : {}),
+      });
+      ids.push(...page.people.map((person) => person.id));
+      after = page.nextCursor ?? undefined;
+      expect(page.hasMore).toBe(Boolean(after));
+    } while (after);
+    expect(ids).toEqual(expected.map((person) => person.id));
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(expected.every((person) => person.trust !== 'owner')).toBe(true);
   });
 
   it('issues a fixed number of queries however many contacts there are', async (ctx: TestContext) => {

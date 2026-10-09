@@ -120,6 +120,15 @@ enum JSONValue: Codable, Hashable, Sendable {
         if case let .string(value) = self { return value }
         return nil
     }
+
+    /// Converts only finite, exactly representable integral values. Numeric
+    /// JSON is untrusted card content; `Int(Double)` traps outside the range.
+    var integerValue: Int? {
+        guard case let .number(value) = self, value.isFinite,
+              value.rounded(.towardZero) == value,
+              value >= Double(Int.min), value < Double(Int.max) else { return nil }
+        return Int(value)
+    }
 }
 
 enum ChatRole: String, Codable, Sendable {
@@ -395,13 +404,59 @@ struct ChatCardPresentation: Codable, Hashable, Sendable {
     let diagnostics: [String]?
 }
 
-struct MessageRecallSource: Codable, Hashable, Sendable {
+struct MessageRecallSource: Codable, Hashable, Identifiable, Sendable {
     let date: String
     let label: String
     let kind: String?
     let hops: Int?
+    /// Opaque owner-scoped source identity and exact content revision. Older
+    /// replies have neither field and remain readable without gaining controls.
+    let surfaceKey: String?
+    let sourceRevision: String?
 
     var isKnowledgeGraph: Bool { kind == "knowledge_graph" }
+
+    var id: String { surfaceKey ?? "\(kind ?? "unknown"): \(date): \(label)" }
+
+    var hasCurrentLedgerReference: Bool {
+        Self.isDigest(surfaceKey) && Self.isDigest(sourceRevision)
+    }
+
+    var displayGroup: String {
+        switch kind ?? "" {
+        case "chat": "earlier chats"
+        case "knowledge_graph": "knowledge graph"
+        case "decision", "situation_decision": "saved decisions"
+        case "commitment": "commitments"
+        default: "saved context"
+        }
+    }
+
+    private static func isDigest(_ value: String?) -> Bool {
+        guard let value, value.count == 64 else { return false }
+        return value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+}
+
+enum RecallSourceControlOutcome: Equatable {
+    case updated
+    case stale
+    case failed
+    case discarded
+}
+
+struct RecallSourceMutationResponse: Codable, Sendable {
+    let ok: Bool
+    let version: Int
+}
+
+struct RecallSourceStateResponse: Codable, Sendable {
+    let suppressed: Bool
+}
+
+struct RecallSourceMutationBody: Encodable, Sendable {
+    let suppressed: Bool
+    let expectedSourceRevision: String
 }
 
 struct ChatMessage: Codable, Identifiable, Hashable, Sendable {
@@ -945,6 +1000,10 @@ struct ActivityItem: Codable, Identifiable, Sendable {
     let hasPendingApproval: Bool
     let hasActiveAutonomy: Bool?
     let stuckWaiting: Bool?
+    let createdAt: String?
+    let conversationId: String?
+    let source: String?
+    let externalEventId: String?
 
     init(
         id: String,
@@ -959,7 +1018,11 @@ struct ActivityItem: Codable, Identifiable, Sendable {
         archivedAt: String?,
         hasPendingApproval: Bool,
         hasActiveAutonomy: Bool? = nil,
-        stuckWaiting: Bool? = nil
+        stuckWaiting: Bool? = nil,
+        createdAt: String? = nil,
+        conversationId: String? = nil,
+        source: String? = nil,
+        externalEventId: String? = nil
     ) {
         self.id = id
         self.type = type
@@ -974,6 +1037,10 @@ struct ActivityItem: Codable, Identifiable, Sendable {
         self.hasPendingApproval = hasPendingApproval
         self.hasActiveAutonomy = hasActiveAutonomy
         self.stuckWaiting = stuckWaiting
+        self.createdAt = createdAt
+        self.conversationId = conversationId
+        self.source = source
+        self.externalEventId = externalEventId
     }
 
     var displayTitle: String {
@@ -1029,6 +1096,29 @@ struct ActivityItem: Codable, Identifiable, Sendable {
 struct ActivityList: Codable, Sendable {
     let items: [ActivityItem]
     let archivedCount: Int
+    let nextCursor: String?
+    let searchIncomplete: Bool?
+    let scanned: Int?
+    let captureStatus: String?
+
+    init(items: [ActivityItem], archivedCount: Int, nextCursor: String? = nil,
+         searchIncomplete: Bool? = nil, scanned: Int? = nil, captureStatus: String? = nil) {
+        self.items = items
+        self.archivedCount = archivedCount
+        self.nextCursor = nextCursor
+        self.searchIncomplete = searchIncomplete
+        self.scanned = scanned
+        self.captureStatus = captureStatus
+    }
+}
+
+struct ArchiveOldActivityProgress: Codable, Sendable {
+    let operationId: String?
+    let scannedThisBatch: Int
+    let archivedThisBatch: Int
+    let scannedTotal: Int
+    let archivedTotal: Int
+    let complete: Bool
 }
 
 struct GoalRecord: Codable, Identifiable, Sendable {
@@ -1163,9 +1253,11 @@ struct DocumentStats: Codable, Sendable {
 }
 
 struct DocumentsOverview: Codable, Sendable {
-    let documents: [DocumentRecord]
+    var documents: [DocumentRecord]
     let stats: DocumentStats
     let primaryConversationId: String
+    var hasMore: Bool? = nil
+    var pagination: CursorPagination? = nil
 }
 
 struct OverviewResponse: Codable, Sendable {
@@ -1178,18 +1270,82 @@ struct OverviewResponse: Codable, Sendable {
 
 struct WorkspaceResponse: Codable, Sendable {
     let generatedAt: String
-    let chats: WorkspaceChats
+    /// Per-destination read status. Missing metadata means an older server sent
+    /// the original all-or-nothing shape; unknown future states fail closed.
+    let sectionAvailability: [String: WorkspaceSectionAvailability]?
+    var chats: WorkspaceChats
     let memory: WorkspaceMemory
-    let skills: [WorkspaceSkill]
+    var skills: [WorkspaceSkill]
     // Optional so a newer app remains usable while an older server is still
     // rolling out the capabilities projection.
     let capabilities: [WorkspaceCapability]?
     let settings: WorkspaceSettings
     let costs: WorkspaceCosts
-    let anomalies: [WorkspaceAnomaly]
-    let improvements: [WorkspaceImprovement]
+    var anomalies: [WorkspaceAnomaly]
+    var improvements: [WorkspaceImprovement]
+    var sectionPagination: WorkspaceSectionPaginationIndex?
     var repairs: WorkspaceRepairs? = nil
-    let imports: WorkspaceImports?
+    var imports: WorkspaceImports?
+
+    func isSectionAvailable(_ section: String) -> Bool {
+        guard let state = sectionAvailability?[section] else { return true }
+        return state.isAvailable
+    }
+}
+
+struct WorkspaceSectionPaginationIndex: Codable, Sendable {
+    var chats: WorkspaceChatPagination?
+    var skills: WorkspaceSectionPagination?
+    var anomalies: WorkspaceSectionPagination?
+    var improvements: WorkspaceSectionPagination?
+    var importSources: WorkspaceSectionPagination?
+    var importFiles: WorkspaceSectionPagination?
+}
+
+struct WorkspaceChatPagination: Codable, Sendable {
+    var current: WorkspaceSectionPagination
+    var archived: WorkspaceSectionPagination
+}
+
+struct WorkspaceSectionPagination: Codable, Sendable {
+    let endpoint: String
+    let pageSize: Int
+    var consistency: String?
+    var loaded: Int
+    var hasMore: Bool
+    var complete: Bool
+    var nextCursor: String?
+    let archived: Bool?
+}
+
+enum WorkspacePageSection: String, Codable, Sendable {
+    case chats, skills, anomalies, improvements
+    case importSources = "import-sources"
+    case importFiles = "import-files"
+}
+
+struct WorkspaceSectionPage<Item: Codable & Sendable>: Codable, Sendable {
+    let section: String
+    let items: [Item]
+    let pagination: WorkspacePageResponseMetadata
+    let availability: WorkspaceSectionAvailability
+}
+
+struct WorkspacePageResponseMetadata: Codable, Sendable {
+    let version: Int
+    let consistency: String
+    let pageSize: Int
+    let hasMore: Bool
+    let complete: Bool
+    let nextCursor: String?
+}
+
+struct WorkspaceSectionAvailability: Codable, Sendable {
+    let status: String
+    let version: Int
+    let message: String?
+
+    var isAvailable: Bool { status == "available" && version == 1 }
 }
 
 struct SavedCardsResponse: Codable, Sendable {
@@ -1250,8 +1406,10 @@ struct SavedCardRecord: Codable, Identifiable, Sendable {
 }
 
 struct WorkspaceImports: Codable, Sendable {
-    let sources: [WorkspaceImportSource]
-    let unstartedFiles: [WorkspaceImportFile]
+    var sources: [WorkspaceImportSource]
+    var unstartedFiles: [WorkspaceImportFile]
+    let sourceAvailability: WorkspaceSectionAvailability?
+    let filesAvailability: WorkspaceSectionAvailability?
 }
 
 struct WorkspaceImportSource: Codable, Identifiable, Sendable {
@@ -1312,8 +1470,8 @@ struct WorkspaceCapability: Codable, Identifiable, Sendable {
 }
 
 struct WorkspaceChats: Codable, Sendable {
-    let current: [WorkspaceChat]
-    let archived: [WorkspaceChat]
+    var current: [WorkspaceChat]
+    var archived: [WorkspaceChat]
 }
 
 struct WorkspaceChat: Codable, Identifiable, Sendable {
@@ -1440,6 +1598,21 @@ struct PersonSummary: Codable, Identifiable, Sendable {
 struct PersonDirectoryResponse: Codable, Sendable {
     let generatedAt: String
     let people: [PersonSummary]
+    var pagination: CursorPagination? = nil
+}
+
+struct CursorPagination: Codable, Sendable {
+    let version: Int
+    let consistency: String
+    let pageSize: Int
+    let hasMore: Bool
+    let complete: Bool
+    let nextCursor: String?
+
+    var isSupported: Bool {
+        version == 1 && consistency == "live-keyset" && (1...100).contains(pageSize)
+            && hasMore == (nextCursor != nil) && complete == !hasMore
+    }
 }
 
 /// One person↔person connection. `sentence` is composed server-side because
@@ -1669,6 +1842,21 @@ struct KnowledgePresentation: Codable, Hashable, Sendable {
     let accessibleLabel: String
 }
 
+struct KnowledgeAssertionEndpointView: Codable, Hashable, Sendable {
+    let assertionId: String
+    let semanticRevision: Int
+    let focusEntityId: String
+    let relatedEntityId: String
+    let direction: String
+    let subjectEntityId: String
+    let predicate: String
+    let objectEntityId: String
+    let text: String
+    let accessibilityText: String
+    let evidenceCount: Int
+    let reviewStatus: String
+}
+
 struct KnowledgeSource: Codable, Hashable, Sendable {
     let memoryId: String
     let content: String
@@ -1690,6 +1878,18 @@ struct KnowledgeRelation: Codable, Identifiable, Hashable, Sendable {
     let inRecall: Bool?
     let source: KnowledgeSource
     let presentation: KnowledgePresentation
+    /// Optional during rolling deploys. The selected endpoint gets conservative inverse wording.
+    var endpointViews: [KnowledgeAssertionEndpointView]? = nil
+
+    func accessibilityText(focusedAt entityID: String) -> String {
+        endpointViews?.first(where: { $0.focusEntityId == entityID })?.accessibilityText
+            ?? presentation.accessibleLabel
+    }
+
+    func displayText(focusedAt entityID: String) -> String {
+        endpointViews?.first(where: { $0.focusEntityId == entityID })?.text
+            ?? presentation.sentence
+    }
 
     var needsReview: Bool { reviewStatus == "unreviewed" }
 
@@ -2311,6 +2511,9 @@ struct PhoneCallLine: Codable, Sendable, Hashable {
 
 struct PhoneCallCheckin: Codable, Identifiable, Sendable, Hashable {
     let id: String
+    /// Server-issued revision that binds an answer to the delivered question version.
+    /// Older payloads may omit it; the client must not guess a revision.
+    let revision: Int?
     let question: String
     let answer: String?
 }
@@ -2546,6 +2749,26 @@ struct SendReceipt: Sendable {
     let conversationId: String
 }
 
+enum ChatOperationCancellationOutcome: String, Decodable, Sendable {
+    case cancelledBeforeAdmission = "cancelled_before_admission"
+    case cancelled
+    case alreadyCancelled = "already_cancelled"
+    case alreadyTerminal = "already_terminal"
+    case unknown
+}
+
+struct ChatOperationCancellationReceipt: Decodable, Sendable {
+    let ok: Bool
+    let outcome: ChatOperationCancellationOutcome
+    let conversationId: String
+    let clientOperationId: String
+    let taskId: String?
+    let taskStatus: String?
+    let transitioned: Bool?
+    let effectStatus: String?
+    let code: String?
+}
+
 /// Formatters shared across the app, built once.
 ///
 /// Constructing a `DateFormatter` is expensive — it resolves a locale, a
@@ -2674,9 +2897,16 @@ struct WorkspaceRepairIssue: Codable, Identifiable, Sendable {
     let updatedAt: String
     var mergeSha: String? = nil
     var history: [WorkspaceRepairHistory]? = nil
+    var outcome: WorkspaceRepairOutcome? = nil
+    var deploymentConfirmed: Bool? = nil
     var createdAt: String? = nil
 
     var actionRevision: String { "\(status)|\(updatedAt)|\(manualRunRequested == true)" }
+}
+
+struct WorkspaceRepairOutcome: Codable, Sendable {
+    let message: String
+    let nextStep: String
 }
 
 struct WorkspaceRepairHistory: Codable, Sendable {
@@ -2696,12 +2926,12 @@ struct RepairPresentation: Equatable, Sendable {
     let canRequestManualRun: Bool
     let canConfirmFixed: Bool
 
-    init(status: String, manualRunRequested: Bool = false) {
+    init(status: String, manualRunRequested: Bool = false, deploymentConfirmed: Bool = false) {
         isClosed = ["resolved", "dismissed"].contains(status)
         canDismiss = ["reported", "merged", "monitoring", "blocked", "failed"].contains(status)
         canRetry = ["failed", "blocked"].contains(status)
         canRequestManualRun = ["reported", "failed", "blocked"].contains(status) && !manualRunRequested
-        canConfirmFixed = status == "monitoring"
+        canConfirmFixed = status == "monitoring" && deploymentConfirmed
         switch status {
         case "reported":
             title = manualRunRequested ? "Manual run requested" : "Queued"
@@ -2722,8 +2952,8 @@ struct RepairPresentation: Equatable, Sendable {
             title = "Awaiting deployment"
             detail = "The code was merged. Deployment has not yet been observed."
         case "monitoring":
-            title = "Deployed · needs confirmation"
-            detail = "Deployment was detected. Check the original problem before confirming it is fixed."
+            title = deploymentConfirmed ? "Deployed · needs confirmation" : "Deployment evidence unavailable"
+            detail = deploymentConfirmed ? "Deployment was detected. Check the original problem before confirming it is fixed." : "A monitoring status alone does not prove deployment. Review the recorded release evidence."
         case "resolved":
             title = "Confirmed fixed"
             detail = "The owner marked the original problem as fixed."

@@ -4,6 +4,7 @@ import {
   getFirestoreProfileCommands,
   recompileFirestoreProfileCard,
 } from '@/lib/firestore-profile-commands';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getDb } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -11,7 +12,9 @@ export const dynamic = 'force-dynamic';
 
 export async function POST(request: Request): Promise<Response> {
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
-  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+  const mutationBody = await readMobileMutationBody(request, ['aliases', 'name', 'relationship']);
+  if (!mutationBody.ok) return mutationBody.response;
+  const body = mutationBody.value as Record<string, unknown> | null;
   if (!body || Array.isArray(body)) {
     return mobileJson({ error: 'invalid person body' }, { status: 400 });
   }

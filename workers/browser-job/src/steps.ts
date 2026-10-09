@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import path from 'node:path';
+import { immutableArtifactPath } from '@assistant/persistence/artifact-path';
 import type { Page } from 'playwright';
 import type { BrowserStep } from './input.js';
 import type { BlobStore } from './storage.js';
@@ -46,6 +48,7 @@ export interface StepOutput {
   title?: string;
   /** screenshot */
   screenshotPath?: string;
+  screenshotReceipt?: { sha256: string; bytes: number; executionId: string };
   error?: string;
 }
 
@@ -64,7 +67,7 @@ export interface StepRunResult {
 export async function runSteps(
   page: Page,
   steps: BrowserStep[],
-  opts: { taskId: string; workspace: BlobStore },
+  opts: { taskId: string; executionId?: string; workspace: BlobStore },
 ): Promise<StepRunResult> {
   const outputs: StepOutput[] = [];
   const screenshots: string[] = [];
@@ -116,10 +119,22 @@ export async function runSteps(
         }
         case 'screenshot': {
           const buffer = await page.screenshot({ fullPage: false });
-          const shotPath = `browser/shots/${opts.taskId}-${index}-${(step.name ?? 'shot').replace(/[^a-z0-9-]/gi, '_')}.png`;
+          const digest = createHash('sha256').update(buffer).digest('hex');
+          const executionId =
+            opts.executionId ?? createHash('sha256').update(opts.taskId).digest('hex');
+          const shotPath = immutableArtifactPath(
+            'browser/shots/',
+            executionId,
+            digest,
+            `${index}-${step.name ?? 'shot'}.png`,
+          );
           await opts.workspace.put(shotPath, buffer, 'image/png');
           screenshots.push(shotPath);
-          outputs.push({ ...base, screenshotPath: shotPath });
+          outputs.push({
+            ...base,
+            screenshotPath: shotPath,
+            screenshotReceipt: { sha256: digest, bytes: buffer.length, executionId },
+          });
           break;
         }
         case 'scroll': {

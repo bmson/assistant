@@ -9,15 +9,17 @@ export * from './dream.js';
 export * from './executor.js';
 export * from './goal-evidence.js';
 export * from './improve.js';
+export { jobCallbackIdempotencyKey } from './job-callback.js';
 export * from './machine.js';
 export * from './maintenance.js';
 export * from './missions.js';
+export * from './owner-intent.js';
 export * from './planner.js';
 export * from './reminders.js';
 export * from './repair-github.js';
+export { buildRequestChecklist, reconcileRequestChecklist } from './request-checklist.js';
 export * from './response-contract.js';
 export * from './schedules.js';
 export * from './self-maintenance.js';
-
 export * from './self-repair.js';
 export * from './suggestions.js';

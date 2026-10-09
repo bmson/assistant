@@ -57,7 +57,7 @@ struct AssistantAlwaysApproveButton: View {
 /// can change anything, and nothing is written unless they tap Add. The
 /// sheet runs outside the app, so no calendar permission is asked for.
 struct CalendarDraft: Identifiable {
-    let id = UUID()
+    let id: String
     let title: String
     let start: Date
     let end: Date
@@ -66,8 +66,9 @@ struct CalendarDraft: Identifiable {
 
     /// From a card's `add_to_calendar` facts: zoned instants, which the server
     /// has already insisted on. An entry with no end runs an hour.
-    init?(title: String, start: String, end: String?, location: String?) {
+    init?(identity: String = UUID().uuidString, title: String, start: String, end: String?, location: String?) {
         guard let begin = GeneratedCardValue.instant(start) else { return nil }
+        id = identity
         let finish = end.flatMap(GeneratedCardValue.instant)?.date
         self.title = title
         self.start = begin.date

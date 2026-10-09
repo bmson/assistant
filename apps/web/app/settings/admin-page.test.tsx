@@ -15,7 +15,10 @@ vi.mock('@assistant/config', () => ({
   loadConfig: () => ({ GCP_PROJECT: 'fixture' }),
   envFile: '/tmp/nonexistent-admin-fixture',
 }));
-vi.mock('@/lib/mobile-access-token', () => ({ getMobileAccessToken: state.token }));
+vi.mock('@/lib/mobile-access-token', () => ({
+  getMobileAccessToken: state.token,
+  hasMobileTokenRotationCapability: () => true,
+}));
 vi.mock('./mobile-token', () => ({
   MobileTokenPanel: ({ maskedToken, serverUrl }: { maskedToken: string; serverUrl: string }) => (
     <p>

@@ -7,14 +7,23 @@ import { agents, contacts, memories, memoryTombstones, ownerCard } from './schem
 
 export function createPostgresProfileMemoryManagementRepository(
   db: Db,
+  configuredAgentId?: string,
 ): ProfileMemoryManagementRepository {
   const mutate = (run: (tx: Db, agentId: string) => Promise<MemoryMutation>) =>
     db.transaction(async (tx) => {
       await tx.execute(sql`select ${OWNER_CARD_ADVISORY_LOCK}`);
-      const configured = await tx.select({ id: agents.id }).from(agents).limit(2);
-      if (configured.length !== 1 || !configured[0])
+      const configured = configuredAgentId
+        ? await tx
+            .select({ id: agents.id })
+            .from(agents)
+            .where(eq(agents.id, configuredAgentId))
+            .limit(1)
+        : await tx.select({ id: agents.id }).from(agents).limit(2);
+      if (configuredAgentId ? !configured[0] : configured.length !== 1 || !configured[0])
         throw new Error('Memory management requires exactly one configured agent');
-      const result = await run(tx as unknown as Db, configured[0].id);
+      const ownerId = configuredAgentId ?? configured[0]?.id;
+      if (!ownerId) throw new Error('Memory management requires exactly one configured agent');
+      const result = await run(tx as unknown as Db, ownerId);
       if (result.status === 'updated')
         await tx
           .insert(ownerCard)
@@ -68,9 +77,18 @@ export function createPostgresProfileMemoryManagementRepository(
   return {
     kind: 'profile-memory-management-repository',
     async get(memoryId) {
-      const configured = await db.select({ id: agents.id }).from(agents).limit(2);
-      if (configured.length !== 1 || !configured[0]) return null;
-      const row = await owned(db, configured[0].id, memoryId);
+      const configured = configuredAgentId
+        ? await db
+            .select({ id: agents.id })
+            .from(agents)
+            .where(eq(agents.id, configuredAgentId))
+            .limit(1)
+        : await db.select({ id: agents.id }).from(agents).limit(2);
+      if (configuredAgentId ? !configured[0] : configured.length !== 1 || !configured[0])
+        return null;
+      const ownerId = configuredAgentId ?? configured[0]?.id;
+      if (!ownerId) return null;
+      const row = await owned(db, ownerId, memoryId);
       if (row && (await tombstoned(db, row.contentHash))) return null;
       return row ? { id: row.id, agentId: row.agentId, contentHash: row.contentHash } : null;
     },
@@ -138,6 +156,7 @@ export function createPostgresProfileMemoryManagementRepository(
               content: input.content,
               contentHash: input.contentHash,
               embedding: input.embedding,
+              embeddingSpaceKey: input.embeddingSpaceKey ?? null,
               confidence: '1.00',
               ownerConfirmed: true,
               originTrust: 'owner',
@@ -249,6 +268,7 @@ export function createPostgresProfileMemoryManagementRepository(
               content: input.content,
               contentHash: input.contentHash,
               embedding: input.embedding,
+              embeddingSpaceKey: input.embeddingSpaceKey ?? null,
               importance: input.importance,
               confidence: '1.00',
               originTrust: 'owner',

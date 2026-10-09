@@ -2,10 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The poller reaches for real work through these two modules only, so stubbing
 // them is enough to drive the loop without a database or a model.
+const getAgent = vi.hoisted(() => vi.fn(async () => ({ id: 'agent', timezone: 'UTC' })));
+const notifyTask = vi.hoisted(() => vi.fn());
+const expireStaleApprovals = vi.hoisted(() => vi.fn(async () => [] as string[]));
+const emitBudgetNotices = vi.hoisted(() => vi.fn(async () => [] as string[]));
 const findDueTasks = vi.hoisted(() => vi.fn());
 const executeAgentTask = vi.hoisted(() => vi.fn());
 const sweepStep = vi.hoisted(() => vi.fn());
-const firestoreOwnerReady = vi.hoisted(() => vi.fn());
+const firestoreMaintenanceReady = vi.hoisted(() => vi.fn());
 const runDueSchedules = vi.hoisted(() => vi.fn());
 const renotifyStalledApprovals = vi.hoisted(() => vi.fn(async () => 0));
 const notifyApproval = vi.hoisted(() => vi.fn(async () => {}));
@@ -14,14 +18,16 @@ const runFirestoreSweep = vi.hoisted(() => vi.fn(async () => ({ ready: true, rep
 vi.mock('@assistant/core', () => ({
   findDueTasks,
   backfillMessageEmbeddings: sweepStep,
-  emitBudgetNotices: sweepStep,
-  expireStaleApprovals: vi.fn(async () => []),
+  emitBudgetNotices,
+  expireStaleApprovals,
   expireStaleSuggestions: vi.fn(async () => 0),
-  getAgent: vi.fn(async () => ({ id: 'agent', timezone: 'UTC' })),
+  getAgent,
+  getQueueNotifier: () => ({ notify: notifyTask }),
   purgeAgedHistory: sweepStep,
   purgeExpired: sweepStep,
   renotifyStalledApprovals,
   renotifyStalledAttention: vi.fn(async () => 0),
+  repairMissionReports: vi.fn(async () => 0),
   resumeResolvedApprovalTasks: vi.fn(async () => []),
   runDueSchedules,
 }));
@@ -30,15 +36,20 @@ vi.mock('./task-runner.js', () => ({ executeAgentTask }));
 vi.mock('./executor-deps.js', () => ({
   executorDeps: () => ({ notifyApproval, notifyOwner: vi.fn() }),
 }));
-vi.mock('./deps.js', () => ({ agentServices: () => ({}), firestoreOwnerReady }));
+vi.mock('./deps.js', () => ({ agentServices: () => ({}), firestoreMaintenanceReady }));
 
 const { startPoller } = await import('./poller.js');
+const { runPostgresSweep } = await import('./postgres-sweep.js');
 
 /** Just enough of AgentDeps for the loop; everything it touches is mocked. */
 const deps = {
-  config: { PERSISTENCE_DRIVER: 'postgres' },
+  config: { PERSISTENCE_DRIVER: 'postgres' as const },
   db: {},
   router: {},
+  registry: {} as never,
+  dispatcher: {} as never,
+  workspace: {} as never,
+  outOfBandNotifier: {} as never,
   modules: { sweepSteps: [], ticks: [] },
 } as never;
 
@@ -53,16 +64,22 @@ function dueUpTo(...ids: string[]) {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  getAgent.mockReset();
+  getAgent.mockResolvedValue({ id: 'agent', timezone: 'UTC' });
+  emitBudgetNotices.mockClear();
+  expireStaleApprovals.mockClear();
+  notifyTask.mockClear();
+  sweepStep.mockClear();
   findDueTasks.mockReset();
   executeAgentTask.mockReset();
-  firestoreOwnerReady.mockReset();
+  firestoreMaintenanceReady.mockReset();
   runDueSchedules.mockReset();
   renotifyStalledApprovals.mockReset();
   notifyApproval.mockReset();
   runFirestoreSweep.mockClear();
   findDueTasks.mockResolvedValue([]);
   executeAgentTask.mockResolvedValue({ outcome: 'done' });
-  firestoreOwnerReady.mockResolvedValue(true);
+  firestoreMaintenanceReady.mockResolvedValue(true);
   runDueSchedules.mockResolvedValue([]);
 });
 
@@ -72,6 +89,38 @@ afterEach(() => {
 });
 
 describe('startPoller', () => {
+  it('refuses to drain due work or run ticks during a restore rehearsal', () => {
+    const restoredWork = ['task', 'reminder', 'approval', 'schedule'] as const;
+    const providerSend = vi.fn();
+    const maintenance = vi.fn();
+    findDueTasks.mockResolvedValue(
+      restoredWork.map((type, index) => ({ id: `${type}-${index}`, type })),
+    );
+    const rehearsalDeps = {
+      config: {
+        PERSISTENCE_DRIVER: 'postgres',
+        QUEUE_DRIVER: 'inert',
+        RESTORE_REHEARSAL: true,
+      },
+      db: {},
+      router: {},
+      modules: {
+        sweepSteps: [{ name: 'fake-provider-maintenance', run: providerSend }],
+        ticks: [{ name: 'fake-provider-tick', everyTicks: 1, run: maintenance }],
+      },
+    } as never;
+    expect(() => startPoller(rehearsalDeps)).toThrow(
+      'background dispatch is disabled during restore rehearsal',
+    );
+    expect(findDueTasks).not.toHaveBeenCalled();
+    expect(executeAgentTask).not.toHaveBeenCalled();
+    expect(runDueSchedules).not.toHaveBeenCalled();
+    expect(emitBudgetNotices).not.toHaveBeenCalled();
+    expect(notifyApproval).not.toHaveBeenCalled();
+    expect(providerSend).not.toHaveBeenCalled();
+    expect(maintenance).not.toHaveBeenCalled();
+  });
+
   // The finding: the loop awaited each due task in turn, so one slow browser
   // or code step held every other task behind it. Compose sets
   // QUEUE_DRIVER=local, so for a self-hosted install this loop IS the queue.
@@ -124,9 +173,10 @@ describe('startPoller', () => {
   // long task ran nothing expired approvals, fired schedules, or re-notified.
   it('sweeps on schedule even while a task is still running', async () => {
     const releases: Array<() => void> = [];
-    executeAgentTask.mockImplementation(
-      async () => await new Promise<void>((resolve) => releases.push(resolve)),
-    );
+    executeAgentTask.mockImplementation(async () => {
+      await new Promise<void>((resolve) => releases.push(resolve));
+      return { outcome: 'done' };
+    });
     findDueTasks.mockResolvedValueOnce(due('endless')).mockResolvedValue([]);
 
     const stop = startPoller(deps);
@@ -137,11 +187,49 @@ describe('startPoller', () => {
     stop();
   });
 
+  it('continues independent maintenance after an owner read fails and logs the failed step', async () => {
+    getAgent.mockRejectedValueOnce(new Error('Owner read unavailable'));
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stop = startPoller({
+      config: { PERSISTENCE_DRIVER: 'postgres' },
+      db: {},
+      router: {},
+      modules: { sweepSteps: [{ name: 'independent-module', run: sweepStep }], ticks: [] },
+    } as never);
+    await vi.advanceTimersByTimeAsync(62_000);
+    stop();
+    expect(expireStaleApprovals).toHaveBeenCalledTimes(1);
+    // Purge, aged history, embedding backfill and the module still ran.
+    expect(sweepStep).toHaveBeenCalledTimes(4);
+    expect(runDueSchedules).not.toHaveBeenCalled();
+    expect(emitBudgetNotices).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith('maintenance pass incomplete', {
+      failedSteps: ['getAgent'],
+      skippedSteps: ['repairMissionReports', 'runDueSchedules', 'emitBudgetNotices'],
+    });
+  });
+
+  it('returns the same failure receipt to HTTP callers and continues the queue backstop', async () => {
+    getAgent.mockRejectedValueOnce(new Error('Owner read unavailable'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    findDueTasks.mockResolvedValue([{ id: 'ready-task', queueGeneration: 2 }]);
+    const result = await runPostgresSweep(deps, { notifyDueTasks: true });
+    expect(result).toMatchObject({
+      failedSteps: ['getAgent'],
+      skippedSteps: ['repairMissionReports', 'runDueSchedules', 'emitBudgetNotices'],
+      dueTasksNotified: 1,
+    });
+    expect(notifyTask).toHaveBeenCalledWith('ready-task', 2);
+    expect(sweepStep).toHaveBeenCalledTimes(3);
+  });
+
   it('runs the shared Firestore sweep without entering PostgreSQL sweeps', async () => {
     const firestoreDeps = {
       config: { PERSISTENCE_DRIVER: 'firestore', FIRESTORE_AGENT_ID: 'owner-agent' },
       db: {},
       router: {},
+      firestoreTasks: { findDueTasksForAgent: vi.fn(async () => []) },
       modules: { sweepSteps: [{ name: 'sql', run: sweepStep }], ticks: [] },
     } as never;
 
@@ -156,14 +244,15 @@ describe('startPoller', () => {
     stop();
   });
 
-  it('runs only portable module ticks in Firestore mode', async () => {
-    firestoreOwnerReady.mockResolvedValue(false);
+  it('keeps all module ticks fenced while Firestore activation is pending', async () => {
+    firestoreMaintenanceReady.mockResolvedValue(false);
     const sqlTick = vi.fn(async () => {});
     const portableTick = vi.fn(async () => {});
     const firestoreDeps = {
       config: { PERSISTENCE_DRIVER: 'firestore', FIRESTORE_AGENT_ID: 'owner-agent' },
       db: {},
       router: {},
+      firestoreTasks: { findDueTasksForAgent: vi.fn(async () => []) },
       modules: {
         sweepSteps: [],
         ticks: [
@@ -176,8 +265,33 @@ describe('startPoller', () => {
     const stop = startPoller(firestoreDeps);
     await vi.advanceTimersByTimeAsync(4_100);
 
-    expect(portableTick).toHaveBeenCalledTimes(2);
+    expect(portableTick).not.toHaveBeenCalled();
     expect(sqlTick).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it('admits the next portable tick after explicit activation', async () => {
+    let active = false;
+    firestoreMaintenanceReady.mockImplementation(async () => active);
+    const portableTick = vi.fn(async () => {});
+    const firestoreDeps = {
+      config: { PERSISTENCE_DRIVER: 'firestore', FIRESTORE_AGENT_ID: 'owner-agent' },
+      db: {},
+      firestoreTasks: { findDueTasksForAgent: vi.fn(async () => []) },
+      router: {},
+      modules: {
+        sweepSteps: [],
+        ticks: [{ name: 'portable', everyTicks: 1, portable: true, run: portableTick }],
+      },
+    } as never;
+
+    const stop = startPoller(firestoreDeps);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(portableTick).not.toHaveBeenCalled();
+
+    active = true;
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(portableTick).toHaveBeenCalledOnce();
     stop();
   });
 

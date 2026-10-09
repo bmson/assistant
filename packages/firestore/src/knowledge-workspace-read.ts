@@ -1,16 +1,21 @@
-import type {
-  KnowledgeCleanupSource,
-  KnowledgeMapEdgeFilter,
-  KnowledgeMapEdgeRecord,
-  KnowledgeNeighborEdgeRecord,
-  KnowledgeWorkspaceEntity,
-  KnowledgeWorkspaceFocus,
-  KnowledgeWorkspaceReadRepository,
-  KnowledgeWorkspaceSnapshot,
-  Records,
+import {
+  type EmbeddingSpace,
+  type KnowledgeCleanupSource,
+  type KnowledgeMapEdgeFilter,
+  type KnowledgeMapEdgeRecord,
+  type KnowledgeNeighborEdgeRecord,
+  type KnowledgeWorkspaceEntity,
+  type KnowledgeWorkspaceFocus,
+  type KnowledgeWorkspaceReadRepository,
+  type KnowledgeWorkspaceSnapshot,
+  type Records,
+  snapshotEmbeddingSpace,
 } from '@assistant/persistence';
 import { type DocumentSnapshot, FieldPath, type Query } from '@google-cloud/firestore';
+import { graphSourceEligible } from './graph-source-eligibility.js';
 import { assertConfiguredOwner } from './knowledge-graph-read.js';
+import { embeddingSpaceKey } from './memory.js';
+import { decodeMemoryRecord } from './memory-record.js';
 import { getFirestorePersonDetail } from './people-directory.js';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
@@ -20,6 +25,8 @@ const MEMORY_LIMIT = 100_000;
 const SOURCE_LIMIT = 100_000;
 const ENTITY_LIMIT = 50_000;
 const RELATION_LIMIT = 50_000;
+const ASSERTION_LIMIT = 50_000;
+const ASSERTION_EVIDENCE_LIMIT = 100_000;
 /** Incident relations scanned per direction for one neighbourhood before failing explicitly. */
 const NEIGHBOR_SCAN_LIMIT = 5_000;
 const FOCUS_RELATION_LIMIT = 80;
@@ -32,9 +39,8 @@ const CLEANUP_SOURCE_LIMIT = 50;
 const GET_ALL_BATCH = 300;
 
 /**
- * Projections keep vectors and long text out of the scans. Every Firestore
- * memory writer and the migration importer stamp `embeddingSpace` together
- * with the vector, so its presence stands in for `embedding IS NOT NULL`.
+ * Scans omit vectors and long text. Candidate sources get bounded vector
+ * point reads before claiming eligibility; a space marker cannot prove readiness.
  */
 const MEMORY_FIELDS = [
   'id',
@@ -48,6 +54,7 @@ const MEMORY_FIELDS = [
   'lastConsolidatedAt',
   'supersededById',
   'createdAt',
+  'embeddingSpaceKey',
   'embeddingSpace',
 ];
 const ENTITY_FIELDS = [
@@ -71,7 +78,19 @@ const RELATION_FIELDS = [
   'evidenceQuote',
   'validFrom',
   'validUntil',
+  'assertionId',
 ];
+const ASSERTION_FIELDS = [
+  'id',
+  'agentId',
+  'semanticRevision',
+  'lifecycle',
+  'reviewStatus',
+  'subjectEntityId',
+  'predicate',
+  'objectEntityId',
+];
+const ASSERTION_EVIDENCE_FIELDS = ['id', 'agentId', 'assertionId'];
 const SOURCE_FIELDS = [
   'memoryId',
   'status',
@@ -88,12 +107,13 @@ type Memory = Pick<
   | 'quarantined'
   | 'expiresAt'
   | 'contentHash'
+  | 'embeddingSpaceKey'
   | 'subjectContactId'
   | 'ownerConfirmed'
   | 'lastConsolidatedAt'
   | 'supersededById'
   | 'createdAt'
-> & { embeddingSpace?: unknown };
+>;
 type Entity = Pick<
   Records['knowledgeGraphEntities'],
   'id' | 'agentId' | 'label' | 'preferredLabel' | 'kind' | 'canonicalKey' | 'contactId'
@@ -111,6 +131,18 @@ type Relation = Pick<
   | 'evidenceQuote'
   | 'validFrom'
   | 'validUntil'
+  | 'assertionId'
+>;
+type Assertion = Pick<
+  Records['knowledgeGraphAssertions'],
+  | 'id'
+  | 'agentId'
+  | 'semanticRevision'
+  | 'lifecycle'
+  | 'reviewStatus'
+  | 'subjectEntityId'
+  | 'predicate'
+  | 'objectEntityId'
 >;
 type Source = Pick<
   Records['knowledgeGraphSources'],
@@ -201,11 +233,12 @@ function validRelation(doc: DocumentSnapshot, agentId: string): Relation | null 
     evidenceQuote: typeof row.evidenceQuote === 'string' ? row.evidenceQuote : null,
     validFrom: row.validFrom ?? null,
     validUntil: row.validUntil ?? null,
+    assertionId: typeof row.assertionId === 'string' ? row.assertionId : null,
   };
 }
 
 function validMemory(doc: DocumentSnapshot, agentId: string): Memory | null {
-  const row = decodeRecord<Memory>(doc.data());
+  const row = decodeMemoryRecord(doc.data());
   if (typeof row.id !== 'string' || documentKey(row.id) !== doc.id || row.agentId !== agentId)
     return null;
   return row;
@@ -227,7 +260,7 @@ function unexpired(memory: Memory, now: Date): boolean {
   return memory.expiresAt == null || (memory.expiresAt instanceof Date && memory.expiresAt > now);
 }
 
-/** The same recall-eligibility contract as the PostgreSQL `activeKnowledgeGraphWhere`. */
+/** Cheap candidate filter; actual source eligibility is validated below. */
 function activeSource(
   memory: Memory | undefined,
   source: Source | undefined,
@@ -240,8 +273,8 @@ function activeSource(
     memory.category === 'knowledge' &&
     memory.quarantined === false &&
     unexpired(memory, now) &&
-    typeof memory.embeddingSpace === 'string' &&
-    memory.embeddingSpace.length > 0 &&
+    typeof memory.embeddingSpaceKey === 'string' &&
+    memory.embeddingSpaceKey.length > 0 &&
     source.status === 'ready' &&
     source.contentHash === memory.contentHash &&
     Number.isInteger(source.extractionVersion) &&
@@ -271,11 +304,15 @@ async function contentFor(
 /** Owner knowledge workspace reads from bounded projections and batched point reads. */
 export class FirestoreKnowledgeWorkspaceReadRepository implements KnowledgeWorkspaceReadRepository {
   readonly kind = 'knowledge-workspace-read-repository' as const;
+  readonly embeddingSpace?: EmbeddingSpace;
 
   constructor(
     readonly store: InstallationStore,
     readonly configuredAgentId: string,
-  ) {}
+    embeddingSpace?: EmbeddingSpace,
+  ) {
+    this.embeddingSpace = embeddingSpace ? snapshotEmbeddingSpace(embeddingSpace) : undefined;
+  }
 
   async snapshot(input: {
     extractionVersion: number;
@@ -288,6 +325,8 @@ export class FirestoreKnowledgeWorkspaceReadRepository implements KnowledgeWorks
     const memories = new Map<string, Memory>();
     const entities = new Map<string, Entity>();
     const relations: Relation[] = [];
+    const assertions = new Map<string, Assertion>();
+    const assertionEvidenceCounts = new Map<string, number>();
     const endpoints = new Set<string>();
     const sourceDocs: FirebaseFirestore.QueryDocumentSnapshot[] = [];
     const owned = (collection: string, fields: string[]) =>
@@ -312,6 +351,46 @@ export class FirestoreKnowledgeWorkspaceReadRepository implements KnowledgeWorks
         const row = validRelation(doc, agentId);
         if (row) relations.push(row);
       }),
+      scan(
+        owned('knowledgeGraphAssertions', ASSERTION_FIELDS),
+        ASSERTION_LIMIT,
+        'assertion',
+        (doc) => {
+          const row = decodeRecord<Assertion>(doc.data());
+          if (
+            typeof row.id === 'string' &&
+            documentKey(row.id) === doc.id &&
+            row.agentId === agentId &&
+            typeof row.semanticRevision === 'number' &&
+            typeof row.lifecycle === 'string' &&
+            typeof row.reviewStatus === 'string' &&
+            typeof row.subjectEntityId === 'string' &&
+            typeof row.predicate === 'string' &&
+            typeof row.objectEntityId === 'string'
+          )
+            assertions.set(row.id, row);
+        },
+      ),
+      scan(
+        owned('knowledgeGraphAssertionEvidence', ASSERTION_EVIDENCE_FIELDS),
+        ASSERTION_EVIDENCE_LIMIT,
+        'assertion evidence',
+        (doc) => {
+          const row = decodeRecord<{ id?: unknown; agentId?: unknown; assertionId?: unknown }>(
+            doc.data(),
+          );
+          if (
+            typeof row.id === 'string' &&
+            documentKey(row.id) === doc.id &&
+            row.agentId === agentId &&
+            typeof row.assertionId === 'string'
+          )
+            assertionEvidenceCounts.set(
+              row.assertionId,
+              (assertionEvidenceCounts.get(row.assertionId) ?? 0) + 1,
+            );
+        },
+      ),
       // Imported source checkpoints can lack agentId, so sources are scanned
       // within the installation and joined to owner memories by document ID.
       scan(
@@ -366,18 +445,60 @@ export class FirestoreKnowledgeWorkspaceReadRepository implements KnowledgeWorks
       .filter((source) => source.status === 'failed' || source.status === 'quarantined')
       .sort((a, b) => a.memoryId.localeCompare(b.memoryId));
 
-    const isActive = (row: Relation) =>
-      row.reviewStatus !== 'rejected' &&
-      row.evidenceQuote !== null &&
-      entities.has(row.subjectEntityId) &&
-      entities.has(row.objectEntityId) &&
-      activeSource(
-        memories.get(row.sourceMemoryId),
-        sources.get(row.sourceMemoryId),
-        extractionVersion,
-        now,
-      );
-    const active = relations.filter(isActive).sort(newestFirst);
+    const candidates = relations.filter(
+      (row: Relation) =>
+        row.reviewStatus !== 'rejected' &&
+        row.evidenceQuote !== null &&
+        entities.has(row.subjectEntityId) &&
+        entities.has(row.objectEntityId) &&
+        activeSource(
+          memories.get(row.sourceMemoryId),
+          sources.get(row.sourceMemoryId),
+          extractionVersion,
+          now,
+        ) &&
+        !memories.get(row.sourceMemoryId)?.supersededById &&
+        !!this.embeddingSpace &&
+        memories.get(row.sourceMemoryId)?.embeddingSpaceKey ===
+          embeddingSpaceKey(this.embeddingSpace),
+    );
+    // Only candidate source vectors are point-read, in bounded batches. A space
+    // marker alone cannot prove that a vector exists or has valid dimensions.
+    const eligible = new Set<string>();
+    const candidateIds = [...new Set(candidates.map((row) => row.sourceMemoryId))];
+    if (this.embeddingSpace) {
+      for (let offset = 0; offset < candidateIds.length; offset += GET_ALL_BATCH) {
+        const page = candidateIds.slice(offset, offset + GET_ALL_BATCH);
+        const docs = await store.db.getAll(...page.map((id) => store.doc('memories', id)), {
+          fieldMask: [...MEMORY_FIELDS, 'embedding'],
+        });
+        const tombstones = await store.db.getAll(
+          ...page.map((id) => store.doc('memoryTombstones', memories.get(id)?.contentHash ?? id)),
+        );
+        for (const [index, doc] of docs.entries()) {
+          const id = page[index];
+          const source = id ? sources.get(id) : undefined;
+          if (!id || !doc.exists || !source) continue;
+          const memory = decodeMemoryRecord(doc.data());
+          if (
+            memory.id === id &&
+            documentKey(id) === doc.id &&
+            graphSourceEligible({
+              memory,
+              source,
+              agentId,
+              space: this.embeddingSpace,
+              storedSpace: doc.get('embeddingSpace'),
+              extractionVersion,
+              now,
+              tombstoned: tombstones[index]?.exists === true,
+            })
+          )
+            eligible.add(id);
+        }
+      }
+    }
+    const active = candidates.filter((row) => eligible.has(row.sourceMemoryId)).sort(newestFirst);
     const activeIds = new Set(active.map((row) => row.id));
     const activeEntities = new Set(
       active.flatMap((row) => [row.subjectEntityId, row.objectEntityId]),
@@ -475,6 +596,27 @@ export class FirestoreKnowledgeWorkspaceReadRepository implements KnowledgeWorks
             evidenceQuote: row.evidenceQuote,
             validFrom: row.validFrom,
             validUntil: row.validUntil,
+            assertionContext: (() => {
+              const assertion = row.assertionId ? assertions.get(row.assertionId) : undefined;
+              if (
+                !assertion ||
+                assertion.agentId !== agentId ||
+                assertion.subjectEntityId !== row.subjectEntityId ||
+                assertion.predicate !== row.predicate ||
+                assertion.objectEntityId !== row.objectEntityId
+              )
+                return null;
+              return {
+                id: assertion.id,
+                semanticRevision: assertion.semanticRevision,
+                lifecycle: assertion.lifecycle,
+                reviewStatus: assertion.reviewStatus,
+                subjectEntityId: assertion.subjectEntityId,
+                predicate: assertion.predicate,
+                objectEntityId: assertion.objectEntityId,
+                evidenceCount: assertionEvidenceCounts.get(assertion.id) ?? 0,
+              };
+            })(),
           },
         ];
       });

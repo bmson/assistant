@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { FirestoreGraphRecallRepository } from './graph-recall.js';
 import { FirestoreKnowledgeWorkspaceReadRepository } from './knowledge-workspace-read.js';
+import { embeddingSpaceKey } from './memory.js';
 import { disposeStore, emulatorStore } from './test-store.js';
 
 const emulator = /^(?:127\.0\.0\.1|localhost):\d+$/.test(process.env.FIRESTORE_EMULATOR_HOST ?? '');
 const VERSION = 3;
+const space = { provider: 'test', model: 'fixture', dimensions: 1536, revision: '1' };
 
 describe.skipIf(!emulator)('Firestore knowledge workspace reads', () => {
   const store = emulator ? emulatorStore() : (null as never);
@@ -37,9 +40,11 @@ describe.skipIf(!emulator)('Firestore knowledge workspace reads', () => {
     memoryExpired: randomUUID(),
     memoryPending: randomUUID(),
     memoryForeign: randomUUID(),
+    worksAtAssertion: randomUUID(),
+    worksAtEvidence: randomUUID(),
   };
   const repository = emulator
-    ? new FirestoreKnowledgeWorkspaceReadRepository(store, agentId)
+    ? new FirestoreKnowledgeWorkspaceReadRepository(store, agentId, space)
     : (null as never);
 
   function entity(id: string, label: string, kind: string, patch: Record<string, unknown> = {}) {
@@ -65,8 +70,8 @@ describe.skipIf(!emulator)('Firestore knowledge workspace reads', () => {
       category: 'knowledge',
       quarantined: false,
       expiresAt: null,
-      embedding: [0.1],
-      embeddingSpace: 'fixture-space',
+      embedding: Array.from({ length: 1536 }, (_, i) => (i === 0 ? 0.1 : 0)),
+      embeddingSpace: embeddingSpaceKey(space),
       contentHash: `hash-${id}`,
       subjectContactId: null,
       ownerConfirmed: false,
@@ -166,7 +171,7 @@ describe.skipIf(!emulator)('Firestore knowledge workspace reads', () => {
         category: 'knowledge',
         quarantined: true,
         expiresAt: null,
-        embeddingSpace: 'fixture-space',
+        embeddingSpace: embeddingSpaceKey(space),
         contentHash: 'foreign',
         createdAt: now,
       }),
@@ -182,6 +187,22 @@ describe.skipIf(!emulator)('Firestore knowledge workspace reads', () => {
       relation(ids.older, ids.anna, ids.acme, ids.memoryOlder, {
         predicate: 'works_at',
         createdAt: at(10),
+        assertionId: ids.worksAtAssertion,
+      }),
+      store.doc('knowledgeGraphAssertions', ids.worksAtAssertion).set({
+        id: ids.worksAtAssertion,
+        agentId,
+        semanticRevision: 3,
+        lifecycle: 'current',
+        reviewStatus: 'confirmed',
+        subjectEntityId: ids.anna,
+        predicate: 'works_at',
+        objectEntityId: ids.acme,
+      }),
+      store.doc('knowledgeGraphAssertionEvidence', ids.worksAtEvidence).set({
+        id: ids.worksAtEvidence,
+        agentId,
+        assertionId: ids.worksAtAssertion,
       }),
       relation(ids.confirmed, ids.annaJ, ids.acme, ids.memoryConfirmed, {
         predicate: 'works_at',
@@ -270,6 +291,16 @@ describe.skipIf(!emulator)('Firestore knowledge workspace reads', () => {
       subjectContactId: contactId,
       objectLabel: 'Oslo, Norway',
       sourceContent: 'Anna lives in Oslo',
+    });
+    expect(all.rows[1]?.assertionContext).toEqual({
+      id: ids.worksAtAssertion,
+      semanticRevision: 3,
+      lifecycle: 'current',
+      reviewStatus: 'confirmed',
+      subjectEntityId: ids.anna,
+      predicate: 'works_at',
+      objectEntityId: ids.acme,
+      evidenceCount: 1,
     });
     const norway = await snapshot.mapEdges(
       { query: 'NORWAY', kind: '', predicates: [], review: 'all', sourceMemoryId: '' },
@@ -429,6 +460,40 @@ describe.skipIf(!emulator)('Firestore knowledge workspace reads', () => {
       );
     } finally {
       await store.doc('privacyErasureJobs', agentId).delete();
+    }
+  });
+  it.each([
+    ['old embedding space', { embeddingSpace: embeddingSpaceKey({ ...space, revision: 'old' }) }],
+    ['missing vector', { embedding: null }],
+    ['wrong dimensions', { embedding: [0.1, 0.2] }],
+    ['zero vector', { embedding: Array(1536).fill(0) }],
+    ['superseded source', { supersededById: 'replacement' }],
+    ['expired source', { expiresAt: new Date('2020-01-01T00:00:00Z') }],
+    ['tombstoned source', {}],
+  ])('does not label %s searchable when actual traversal rejects it', async (label, patch) => {
+    const ref = store.doc('memories', ids.memoryActive);
+    const saved = (await ref.get()).data();
+    if (!saved) throw new Error('Missing active fixture');
+    const tombstone = store.doc('memoryTombstones', `hash-${ids.memoryActive}`);
+    try {
+      if (Object.keys(patch).length) await ref.update(patch);
+      if (label === 'tombstoned source')
+        await tombstone.set({ contentHash: `hash-${ids.memoryActive}` });
+      const snapshot = await repository.snapshot({ extractionVersion: VERSION, now });
+      const focus = await snapshot.focus(ids.anna);
+      expect(focus?.relations.find((row) => row.id === ids.active)?.inRecall).toBe(false);
+      const runtime = new FirestoreGraphRecallRepository(store, space);
+      const traversed = await runtime.connected({
+        agentId,
+        entityIds: [ids.anna],
+        sourceMemoryIds: [],
+        limit: 20,
+        extractionVersion: VERSION,
+      });
+      expect(traversed.map((row) => row.relationId)).not.toContain(ids.active);
+    } finally {
+      await ref.set(saved);
+      await tombstone.delete();
     }
   });
 });

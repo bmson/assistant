@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import type { ApplicationConfirmationRepository, TaskRepository } from '@assistant/persistence';
+import {
+  type ApplicationConfirmationRepository,
+  applicationExternalEffectArgsDigest,
+  applicationExternalEffectToolIdentity,
+  type TaskRepository,
+} from '@assistant/persistence';
 import { z } from 'zod';
 import type { GoogleClient } from './google/client.js';
 import { buildContentRequests, type DocsDocument, endInsertIndex } from './google/docs.js';
@@ -42,9 +47,20 @@ export const ApplicationDocumentUpdateSchema = z.object({
 
 export type ApplicationDocumentUpdate = z.infer<typeof ApplicationDocumentUpdateSchema>;
 
+const ApplicationActionEffectReceiptSchema = z.object({
+  claimToken: z.string().uuid(),
+  producerPrivacyGeneration: z.string().nullable(),
+  argsDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  taskId: z.string().uuid(),
+  toolCallId: z.string().uuid(),
+  toolName: z.string().max(100),
+  idempotencyKey: z.string().max(300),
+});
+
 export const ApplicationActionOutcomeSchema = z.object({
   status: z.enum(['pending', 'succeeded', 'failed', 'unknown']),
   error: z.string().max(2_000).optional(),
+  effectReceipt: ApplicationActionEffectReceiptSchema.optional(),
 });
 
 export const ApplicationActionStateSchema = z.object({
@@ -55,8 +71,50 @@ export const ApplicationActionStateSchema = z.object({
 export type ApplicationActionState = z.infer<typeof ApplicationActionStateSchema>;
 
 export function parseApplicationActionState(value: unknown): ApplicationActionState {
-  const parsed = ApplicationActionStateSchema.safeParse(value);
-  return parsed.success ? parsed.data : {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const input = value as Record<string, unknown>;
+  const action = (key: 'sheet' | 'document') => {
+    const raw = input[key];
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+    const outcome = raw as Record<string, unknown>;
+    const status = z.enum(['pending', 'succeeded', 'failed', 'unknown']).safeParse(outcome.status);
+    if (!status.success) {
+      return {
+        status: 'unknown' as const,
+        error: 'Stored action state is malformed; automatic retry is suppressed.',
+      };
+    }
+    const receipt = ApplicationActionEffectReceiptSchema.safeParse(outcome.effectReceipt);
+    if (outcome.effectReceipt !== undefined && !receipt.success) {
+      return {
+        status: status.data === 'pending' ? ('unknown' as const) : status.data,
+        error: 'Stored effect receipt is malformed; automatic retry is suppressed.',
+      };
+    }
+    return {
+      status: status.data,
+      ...(typeof outcome.error === 'string' ? { error: outcome.error.slice(0, 2_000) } : {}),
+      ...(receipt.success ? { effectReceipt: receipt.data } : {}),
+    };
+  };
+  const sheet = action('sheet');
+  const document = action('document');
+  return {
+    ...(sheet ? { sheet } : {}),
+    ...(document ? { document } : {}),
+  };
+}
+
+function publicActionState(value: unknown): ApplicationActionState {
+  const state = parseApplicationActionState(value);
+  const project = (action: ApplicationActionState['sheet']) =>
+    action
+      ? { status: action.status, ...(action.error ? { error: action.error } : {}) }
+      : undefined;
+  return {
+    ...(state.sheet ? { sheet: project(state.sheet) } : {}),
+    ...(state.document ? { document: project(state.document) } : {}),
+  };
 }
 
 const confirmationToken = z
@@ -241,7 +299,7 @@ export function registerApplicationTools(
               expiresAt: row.expiresAt.toISOString(),
               trackerTarget: tracker ? `${tracker.sheetName}!${tracker.startCell}` : undefined,
               documentTarget: document?.documentId,
-              actionState: parseApplicationActionState(row.actionState),
+              actionState: publicActionState(row.actionState),
               confirmedAt: row.confirmedAt?.toISOString(),
               lastError: row.lastError,
             };
@@ -325,30 +383,73 @@ export function registerApplicationTools(
           );
         }
 
-        await deps.client.api(
-          `${SHEETS}/${encodeURIComponent(update.spreadsheetId)}/values/${encodeURIComponent(a1Range(update.sheetName, update.startCell))}?valueInputOption=RAW`,
-          {
-            method: 'PUT',
-            body: JSON.stringify({ majorDimension: 'ROWS', values: literalRows(update.rows) }),
-          },
-        );
-
-        const updated = await deps.applications.updateActionState(record.id, {
-          actionState: { ...actionState, sheet: { status: 'succeeded' } },
-          lastError: null,
-          requireStatus: 'confirmation_received',
+        const identity = applicationExternalEffectToolIdentity('sheet', record.id);
+        if (
+          !ctx.execution ||
+          ctx.execution.toolName !== identity.toolName ||
+          !ctx.execution.dbToolCallId ||
+          !ctx.taskLeaseToken
+        )
+          throw new Error('Sheet confirmation requires a persisted executing tool call');
+        const claim = await deps.applications.claimExternalEffect({
+          agentId: ctx.agentId,
+          applicationId: record.id,
+          action: 'sheet',
+          expectedProducerPrivacyGeneration: record.producerPrivacyGeneration ?? null,
+          taskId: ctx.taskId,
+          taskLeaseToken: ctx.taskLeaseToken,
+          toolCallId: ctx.execution.dbToolCallId,
+          toolName: identity.toolName,
+          idempotencyKey: identity.idempotencyKey,
+          argsDigest: applicationExternalEffectArgsDigest('sheet', update),
           now: ctx.now(),
         });
-        if (!updated) throw new Error('application confirmation changed during tracker update');
+        if (claim.status !== 'claimed')
+          throw new Error('Sheet confirmation was blocked before provider dispatch');
+        const claimedUpdate = ApplicationTrackerUpdateSchema.parse(claim.record.trackerUpdate);
+
+        try {
+          await deps.client.api(
+            `${SHEETS}/${encodeURIComponent(claimedUpdate.spreadsheetId)}/values/${encodeURIComponent(a1Range(claimedUpdate.sheetName, claimedUpdate.startCell))}?valueInputOption=RAW`,
+            {
+              method: 'PUT',
+              body: JSON.stringify({
+                majorDimension: 'ROWS',
+                values: literalRows(claimedUpdate.rows),
+              }),
+            },
+          );
+        } catch {
+          return {
+            applicationId: record.id,
+            action: 'sheet',
+            status: 'unknown',
+            effectStatus: 'unknown',
+            retrySuppressed: true,
+            error: 'Google may have accepted the Sheet update; automatic retry is suppressed.',
+          };
+        }
+
+        const settled = await deps.applications.settleExternalEffect({
+          agentId: ctx.agentId,
+          applicationId: record.id,
+          action: 'sheet',
+          claimToken: claim.claimToken,
+          status: 'succeeded',
+          now: ctx.now(),
+        });
+        if (!settled)
+          return {
+            applicationId: record.id,
+            action: 'sheet',
+            status: 'unknown',
+            effectStatus: 'unknown',
+            retrySuppressed: true,
+            error: 'Google accepted the Sheet update, but its receipt could not be settled.',
+          };
 
         return {
           applicationId: record.id,
-          company: record.company,
-          role: record.role,
-          spreadsheetId: update.spreadsheetId,
-          sheetName: update.sheetName,
-          startCell: update.startCell,
-          writtenRows: update.rows.length,
           action: 'sheet',
           status: 'succeeded',
         };
@@ -420,25 +521,76 @@ export function registerApplicationTools(
           leadingNewline: true,
         });
         if (requests.length === 0) throw new Error('approved Google Doc append was empty');
-        await deps.client.api(`${DOCS}/${encodeURIComponent(update.documentId)}:batchUpdate`, {
-          method: 'POST',
-          body: JSON.stringify({ requests }),
-        });
-
-        const updated = await deps.applications.updateActionState(record.id, {
-          actionState: { ...actionState, document: { status: 'succeeded' } },
-          lastError: null,
-          requireStatus: 'confirmation_received',
+        const identity = applicationExternalEffectToolIdentity('document', record.id);
+        if (
+          !ctx.execution ||
+          ctx.execution.toolName !== identity.toolName ||
+          !ctx.execution.dbToolCallId ||
+          !ctx.taskLeaseToken
+        )
+          throw new Error('Doc confirmation requires a persisted executing tool call');
+        const claim = await deps.applications.claimExternalEffect({
+          agentId: ctx.agentId,
+          applicationId: record.id,
+          action: 'document',
+          expectedProducerPrivacyGeneration: record.producerPrivacyGeneration ?? null,
+          taskId: ctx.taskId,
+          taskLeaseToken: ctx.taskLeaseToken,
+          toolCallId: ctx.execution.dbToolCallId,
+          toolName: identity.toolName,
+          idempotencyKey: identity.idempotencyKey,
+          argsDigest: applicationExternalEffectArgsDigest('document', update),
           now: ctx.now(),
         });
-        if (!updated) throw new Error('application confirmation changed during document update');
+        if (claim.status !== 'claimed')
+          throw new Error('Doc confirmation was blocked before provider dispatch');
+        const claimedUpdate = ApplicationDocumentUpdateSchema.parse(claim.record.documentUpdate);
+        const { requests: claimedRequests } = buildContentRequests(
+          claimedUpdate.content,
+          endInsertIndex(document),
+          { leadingNewline: true },
+        );
+        if (claimedRequests.length === 0) throw new Error('approved Google Doc append was empty');
+
+        try {
+          await deps.client.api(
+            `${DOCS}/${encodeURIComponent(claimedUpdate.documentId)}:batchUpdate`,
+            {
+              method: 'POST',
+              body: JSON.stringify({ requests: claimedRequests }),
+            },
+          );
+        } catch {
+          return {
+            applicationId: record.id,
+            action: 'document',
+            status: 'unknown',
+            effectStatus: 'unknown',
+            retrySuppressed: true,
+            error: 'Google may have accepted the Doc update; automatic retry is suppressed.',
+          };
+        }
+
+        const settled = await deps.applications.settleExternalEffect({
+          agentId: ctx.agentId,
+          applicationId: record.id,
+          action: 'document',
+          claimToken: claim.claimToken,
+          status: 'succeeded',
+          now: ctx.now(),
+        });
+        if (!settled)
+          return {
+            applicationId: record.id,
+            action: 'document',
+            status: 'unknown',
+            effectStatus: 'unknown',
+            retrySuppressed: true,
+            error: 'Google accepted the Doc update, but its receipt could not be settled.',
+          };
 
         return {
           applicationId: record.id,
-          company: record.company,
-          role: record.role,
-          documentId: update.documentId,
-          appendedCharacters: update.content.length,
           action: 'document',
           status: 'succeeded',
         };

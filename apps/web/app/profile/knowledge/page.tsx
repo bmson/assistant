@@ -310,7 +310,13 @@ async function loadPostgresWorkspace(
   ]);
   const focus =
     entity && graph.selected?.id === entity
-      ? { selected: graph.selected, duplicates: graph.duplicates, relations: graph.relations }
+      ? {
+          selected: graph.selected,
+          duplicates: graph.duplicates,
+          relations: graph.relations,
+          derivedRelations: graph.derivedRelations ?? [],
+          derivedCoverage: graph.derivedCoverage ?? 'complete',
+        }
       : null;
   return { overview, findings, focus, library, libraryFilters, map };
 }
@@ -856,7 +862,15 @@ export default async function KnowledgePage({
                       className={`${cardShellClass} p-4`}
                     >
                       <p className="text-sm font-semibold text-strong">
-                        {relation.presentation.sentence}
+                        {(
+                          relation as {
+                            endpointViews?: Array<{
+                              focusEntityId: string;
+                              accessibilityText: string;
+                            }>;
+                          }
+                        ).endpointViews?.find((view) => view.focusEntityId === focus.selected.id)
+                          ?.accessibilityText ?? relation.presentation.sentence}
                       </p>
                       <p className="mt-2 text-xs leading-5 text-muted">{relation.source.content}</p>
                       <div className="mt-3 flex gap-2">
@@ -882,6 +896,31 @@ export default async function KnowledgePage({
                     </article>
                   ))}
               </div>
+              {'derivedRelations' in focus && focus.derivedRelations?.length ? (
+                <section className="mt-5" aria-label="Derived connections">
+                  <h4 className="text-sm font-semibold text-strong">Derived connections</h4>
+                  <p className="mt-1 text-xs leading-5 text-muted">
+                    These are derived from current recorded facts. They are not direct claims and
+                    disappear when a supporting fact changes.
+                  </p>
+                  <div className="mt-2 grid gap-2">
+                    {focus.derivedRelations.map((derived) => (
+                      <article key={derived.id} className={`${cardShellClass} p-3`}>
+                        <p className="text-sm font-semibold text-strong">{derived.explanation}</p>
+                        <p className="mt-1 text-xs text-muted">
+                          Based on {derived.premiseAssertionIds.length} recorded relationships ·
+                          rule {derived.ruleId} v{derived.ruleVersion}
+                        </p>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+              {'derivedCoverage' in focus && focus.derivedCoverage === 'bounded_incomplete' ? (
+                <p className="mt-3 text-xs text-muted">
+                  Derived connections are hidden because the premise scan reached its safety limit.
+                </p>
+              ) : null}
             </div>
           ) : null}
         </section>

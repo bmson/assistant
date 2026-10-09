@@ -1,10 +1,11 @@
-/** A message the `chat.segment` job can group: an owner or assistant turn with a stored vector. */
+/** An owner or assistant turn; null vectors are retained as explicit coverage gaps. */
 export interface SegmentableMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
   createdAt: Date;
-  embedding: number[];
+  embedding: number[] | null;
+  embeddingSpaceKey: string | null;
 }
 
 export interface ConversationSegmentInput {
@@ -15,6 +16,7 @@ export interface ConversationSegmentInput {
   summary: string;
   /** Null when the summary could not be embedded; recall then never matches the segment. */
   embedding: number[] | null;
+  embeddingSpaceKey: string | null;
   messageCount: number;
   startedAt: Date;
   endedAt: Date;
@@ -29,13 +31,16 @@ export interface ConversationSegmentationRepository {
   /** The owner's and assistant's own threads, most recently active first. */
   recentConversations(agentId: string, limit: number): Promise<Array<{ id: string }>>;
   /**
-   * Non-empty owner and assistant turns with a vector, oldest first, strictly
-   * after the conversation's latest segment. At most `limit` rows.
+   * Non-empty owner and assistant turns, oldest first, strictly after the
+   * latest segment's stable (timestamp, message ID) boundary. Rows without a
+   * current vector are returned with `embedding: null`, never skipped, so the
+   * caller cannot advance coverage past a repairable gap.
    */
   unsegmentedMessages(
     agentId: string,
     conversationId: string,
     limit: number,
+    embeddingSpaceKey: string,
   ): Promise<SegmentableMessage[]>;
   /**
    * Record a segment unless one already starts at `startMessageId` in this

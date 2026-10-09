@@ -1,18 +1,22 @@
 import type { Db } from '@assistant/db';
 import { createPostgresExecutionJobRepository } from '@assistant/db';
-import type { ExecutionJobRepository } from '@assistant/persistence';
+import type { ExecutionJobRepository, ExecutionPersistence } from '@assistant/persistence';
 import type { ModelMessage } from 'ai';
 import { hashCallbackToken } from '../../browse.js';
 import { isForwardedIngest } from '../../email-provenance.js';
 import type { TaskState, Trust } from '../../events.js';
-import type { ProposedToolCall } from '../../model-router/router.js';
 import type { TaskLease } from '../machine.js';
+import { latestOwnerIntent } from '../owner-intent.js';
 import type { ToolContextLike } from './types.js';
-import { compact, toolResultMessage } from './util.js';
+import { compact } from './util.js';
 
 type BrowserStageSnapshots = Map<
   string,
-  { contextWindow: TaskState['contextWindow']; pendingJob: TaskState['pendingJob'] }
+  {
+    contextWindow: TaskState['contextWindow'];
+    pendingJob: TaskState['pendingJob'];
+    pendingToolBatch: TaskState['pendingToolBatch'];
+  }
 >;
 
 const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
@@ -74,9 +78,8 @@ export function harvestKnownAddresses(
 
 /**
  * Build the tool-execution context handed to the dispatcher. The browser-job
- * staging closures need the LIVE step-loop window and the calls queued after the
- * one that launched a job — both change as the loop runs, so they are read
- * through getters rather than captured by value.
+ * staging closure reads the live step-loop window because it changes as the
+ * batch settles.
  */
 export function createToolContext(args: {
   db: Db;
@@ -84,21 +87,82 @@ export function createToolContext(args: {
   state: TaskState;
   signal: AbortSignal;
   getWindow: () => ModelMessage[];
-  getBrowserStageRemainder: () => ProposedToolCall[];
   browserStageSnapshots: BrowserStageSnapshots;
   executionJobs?: ExecutionJobRepository;
+  requestTimeZone?: string;
+  persistence?: ExecutionPersistence;
 }): ToolContextLike {
   const { db, task, state, browserStageSnapshots } = args;
   const executionJobs = args.executionJobs ?? createPostgresExecutionJobRepository(db);
+  const triggerPayload =
+    task.trigger && typeof task.trigger === 'object' && 'payload' in task.trigger
+      ? (task.trigger as { payload?: Record<string, unknown> }).payload
+      : undefined;
+  const rawBookingOccurrence = triggerPayload?.bookingOccurrence;
+  const bookingOccurrence =
+    rawBookingOccurrence &&
+    typeof rawBookingOccurrence === 'object' &&
+    'agentId' in rawBookingOccurrence &&
+    rawBookingOccurrence.agentId === task.agentId &&
+    'bookingKey' in rawBookingOccurrence &&
+    typeof rawBookingOccurrence.bookingKey === 'string' &&
+    'version' in rawBookingOccurrence &&
+    typeof rawBookingOccurrence.version === 'number' &&
+    Number.isInteger(rawBookingOccurrence.version)
+      ? {
+          agentId: task.agentId,
+          bookingKey: rawBookingOccurrence.bookingKey,
+          version: rawBookingOccurrence.version,
+          ...('operation' in rawBookingOccurrence &&
+          rawBookingOccurrence.operation === 'cancel_existing' &&
+          'calendarEventId' in rawBookingOccurrence &&
+          typeof rawBookingOccurrence.calendarEventId === 'string' &&
+          'bookingIdentity' in rawBookingOccurrence &&
+          typeof rawBookingOccurrence.bookingIdentity === 'string'
+            ? {
+                operation: 'cancel_existing' as const,
+                calendarEventId: rawBookingOccurrence.calendarEventId,
+                bookingIdentity: rawBookingOccurrence.bookingIdentity,
+              }
+            : {}),
+        }
+      : undefined;
   return {
     taskId: task.id,
     agentId: task.agentId,
     conversationId: task.conversationId ?? undefined,
     trust: task.trust as Trust,
     tainted: state.untrustedContext,
+    ownerIntent: latestOwnerIntent(
+      (state.contextWindow ?? []) as unknown as Array<{ role: string; content: unknown }>,
+      {
+        trust: task.trust as Trust,
+        trigger: task.trigger,
+        clarificationContinuation: state.clarificationContinuation,
+      },
+    ),
     knownAddresses: harvestKnownAddresses(state, task.trigger, task.trust as Trust),
     db,
     now: () => new Date(),
+    requestAt: task.createdAt,
+    ...(bookingOccurrence
+      ? {
+          bookingOccurrence,
+          assertBookingOccurrenceCurrent: async () =>
+            (await args.persistence?.emailSync?.isBookingOccurrenceCurrent({
+              agentId: bookingOccurrence.agentId,
+              bookingKey: bookingOccurrence.bookingKey,
+              expectedVersion: bookingOccurrence.version,
+              allowedLifecycle:
+                bookingOccurrence.operation === 'cancel_existing'
+                  ? ['cancelled']
+                  : ['confirmed', 'rescheduled'],
+            })) ?? false,
+        }
+      : {}),
+    ...((state.requestTimeZone ?? args.requestTimeZone)
+      ? { requestTimeZone: state.requestTimeZone ?? args.requestTimeZone }
+      : {}),
     signal: args.signal,
     log: async () => {},
     stageBrowserJob: async (job) => {
@@ -114,24 +178,23 @@ export function createToolContext(args: {
         callbackTokenHash,
         timeoutAt: job.pending.timeoutAt,
       };
-      // The model may have proposed several calls in one assistant message. A
-      // crash after launch cannot leave dangling tool calls in the durable
-      // transcript, so calls after browser.execute are checkpointed as refused
-      // exactly as the live loop will refuse them below.
-      const durableWindow = [
-        ...args.getWindow(),
-        ...args.getBrowserStageRemainder().map((call) =>
-          toolResultMessage(call.toolCallId, call.toolName, {
-            error:
-              'a browser job is already running for this task — wait for its result before making more tool calls',
-          }),
-        ),
-      ];
-      const contextWindow = compact(durableWindow) as unknown as TaskState['contextWindow'];
+      const contextWindow = compact(args.getWindow()) as unknown as TaskState['contextWindow'];
       const snapshot = {
         contextWindow: state.contextWindow,
         pendingJob: state.pendingJob,
+        pendingToolBatch: state.pendingToolBatch,
       };
+      const pendingToolBatch = state.pendingToolBatch
+        ? {
+            ...state.pendingToolBatch,
+            calls: state.pendingToolBatch.calls.map((call) => {
+              if (call.toolCallId === job.modelToolCallId) {
+                return { ...call, status: 'job' as const, dbToolCallId: job.dbToolCallId };
+              }
+              return call;
+            }),
+          }
+        : null;
       // If this is an approved call, remove the approval from the DURABLE
       // recovery checkpoint before launch. Keep the in-memory list untouched so
       // the current loop can continue processing its remaining approvals.
@@ -142,6 +205,7 @@ export function createToolContext(args: {
         ),
         pendingJob,
         contextWindow,
+        pendingToolBatch,
       };
       await executionJobs.stage(
         { taskId: task.id, toolCallId: job.dbToolCallId, pending: stagedSentinel, checkpointState },
@@ -150,6 +214,7 @@ export function createToolContext(args: {
       browserStageSnapshots.set(job.dbToolCallId, snapshot);
       state.pendingJob = pendingJob;
       state.contextWindow = contextWindow;
+      state.pendingToolBatch = pendingToolBatch;
     },
     clearStagedBrowserJob: async (job) => {
       const snapshot = browserStageSnapshots.get(job.dbToolCallId);
@@ -157,6 +222,7 @@ export function createToolContext(args: {
         ...state,
         pendingJob: snapshot?.pendingJob ?? null,
         contextWindow: snapshot?.contextWindow ?? state.contextWindow,
+        pendingToolBatch: snapshot?.pendingToolBatch ?? state.pendingToolBatch,
       };
       await executionJobs.clear(
         {
@@ -172,6 +238,7 @@ export function createToolContext(args: {
       );
       state.pendingJob = checkpointState.pendingJob;
       state.contextWindow = checkpointState.contextWindow;
+      state.pendingToolBatch = checkpointState.pendingToolBatch;
       browserStageSnapshots.delete(job.dbToolCallId);
     },
   };

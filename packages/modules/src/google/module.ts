@@ -13,12 +13,15 @@ import {
   registerSheetsTools,
   registerSlidesTools,
 } from '@assistant/tools/modules/google';
+import { drainEmailObservers } from '../email-observers.js';
 import { defineModule, type ModuleHooks, type ModuleServices } from '../platform.js';
 import {
   applicationConfirmationTaskHandlers,
   applicationPersistence,
   reapExpiredApplicationWatches,
 } from './application-confirmations.js';
+import { googleDurableEmailObservers } from './durable-email-observers.js';
+import { sweepEmailAttachmentCustodyCleanup } from './email-attachment-cleanup.js';
 import { cardFromEmail } from './email-cards.js';
 import { deliverEmailFinal } from './email-channel.js';
 import {
@@ -28,7 +31,7 @@ import {
   syncMailboxWithDistributedLock,
 } from './email-sync.js';
 import { googleMeta } from './meta.js';
-import { gmailSyncEnabled } from './runtime.js';
+import { emailObserverWorkerEnabled, gmailSyncEnabled } from './runtime.js';
 
 /** Mail state and the owner's voice, from the persistence bundle of either driver. */
 function emailPersistence(persistence: ExecutionPersistence) {
@@ -77,6 +80,7 @@ export const googleModule = defineModule<GoogleClient>({
       workspace: services.workspace,
       googleClient: client,
       notifyOwner: services.ownerNotifier.notifyOwner,
+      operationalReady: services.operationalReady,
       observeInboundEmail: async (event) => {
         for (const observe of services.emailObservers) {
           await observe(services, event).catch((err) =>
@@ -84,6 +88,7 @@ export const googleModule = defineModule<GoogleClient>({
           );
         }
       },
+      durableEmailObservers: services.durableEmailObservers,
     });
     const confirmDeps = (services: ModuleServices) => ({
       persistence: applicationPersistence(services.persistence),
@@ -100,6 +105,8 @@ export const googleModule = defineModule<GoogleClient>({
     });
     const sync = (services: ModuleServices) => {
       nextSyncDeps = syncDeps(services);
+      // Observer rows are admitted atomically, but the worker remains paused
+      // until every registered side effect has a fenced/idempotent delivery path.
       return coordinator.sync();
     };
 
@@ -109,6 +116,7 @@ export const googleModule = defineModule<GoogleClient>({
     const hooks: ModuleHooks = {
       // Bookings, tickets, deliveries and appointments in the owner's mail
       // become saved cards as they arrive (email-cards.ts).
+      durableEmailObservers: googleDurableEmailObservers(client),
       emailObservers: [
         async (services, event) => {
           if (!services.config.GENERATIVE_CARDS_ENABLED) return;
@@ -127,12 +135,18 @@ export const googleModule = defineModule<GoogleClient>({
         {
           path: '/gmail/pubsub',
           handler: async (services) => {
+            if (!gmailSyncEnabled(services.config)) {
+              return { status: 200, json: { skipped: true, reason: 'gmail sync disabled' } };
+            }
             // The push payload is only a poke — history.list is the source of
             // truth. Acknowledge only after the durable history cursor
             // advances; Pub/Sub retries a non-2xx, so a crash loses no poke.
             try {
               await sync(services);
             } catch (error) {
+              if (!gmailSyncEnabled(services.config)) {
+                return { status: 200, json: { skipped: true, reason: 'gmail sync disabled' } };
+              }
               console.error('pubsub-triggered sync failed', error);
               return { status: 503, json: { error: 'mailbox sync failed' } };
             }
@@ -144,6 +158,9 @@ export const googleModule = defineModule<GoogleClient>({
         {
           path: '/gmail/watch',
           handler: async (services) => {
+            if (!gmailSyncEnabled(services.config)) {
+              return { status: 200, json: { skipped: true, reason: 'gmail sync disabled' } };
+            }
             if (!services.config.GMAIL_PUBSUB_TOPIC) {
               return {
                 status: 501,
@@ -189,6 +206,37 @@ export const googleModule = defineModule<GoogleClient>({
       ],
       sweepSteps: [
         {
+          name: 'drainEmailObserverWork',
+          reportKey: 'emailObserverWorkClaimed',
+          portable: true,
+          run: async (services) => {
+            if (!emailObserverWorkerEnabled(services.config) || !client.configured()) return 0;
+            const emailSync = services.persistence.emailSync;
+            if (!emailSync) throw new Error('email observer persistence is unavailable');
+            const mailbox = await emailSync.mailbox();
+            const result = await drainEmailObservers(services, mailbox.agentId, {
+              limit: 20,
+              shouldContinue: () =>
+                emailObserverWorkerEnabled(services.config) && client.configured(),
+            });
+            return result.claimed;
+          },
+        },
+        {
+          name: 'sweepEmailAttachmentCustodyCleanup',
+          portable: true,
+          run: async (services) => {
+            const emailSync = services.persistence.emailSync;
+            if (!emailSync) return 0;
+            const mailbox = await emailSync.mailbox();
+            return sweepEmailAttachmentCustodyCleanup(
+              services.persistence.emailAttachmentCustody,
+              services.workspace.emailAttachmentCustody,
+              mailbox.agentId,
+            );
+          },
+        },
+        {
           name: 'reapExpiredApplicationWatches',
           // Preserves the /internal/sweep response key from the hardcoded era.
           reportKey: 'expiredWatches',
@@ -198,16 +246,18 @@ export const googleModule = defineModule<GoogleClient>({
       ],
       taskHandlers: applicationConfirmationTaskHandlers,
       channel: {
+        name: 'email',
         assertDeliverable: (task) => {
           if (task.type === 'email_triage' && task.trust === 'owner' && !client.configured()) {
             throw new Error('email final delivery is not configured');
           }
         },
-        deliverFinal: async (services, task, text) => {
-          await deliverEmailFinal(
+        deliverFinal: async (services, task, text, attemptId) => {
+          return deliverEmailFinal(
             { persistence: emailPersistence(services.persistence), googleClient: client },
             task,
             text,
+            attemptId,
           );
         },
         deliverApprovalNotice: async (services, task, text) => {

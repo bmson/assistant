@@ -110,15 +110,14 @@ describe('getChatUpdates without a task (the idle thread poll)', () => {
     expect(updates?.messages.map((message) => message.id)).toEqual([posted.id]);
     expect(updates?.taskStatus).toBeNull();
     expect(updates?.activity).toEqual([]);
-    // Delivered now; remembered once it is old enough to be safe — see the
-    // late-commit suite below for why the cursor lags.
-    expect(updates?.nextCursor).toBe(encodeMessageCursor(seen));
+    // The cursor follows transaction commit order, independently of its
+    // transaction-start createdAt timestamp.
+    expect(updates?.nextCursor).toBe(encodeMessageCursor(posted));
     expect(
       (
         await getChatUpdates(db, {
           conversationId,
-          cursor: encodeMessageCursor(seen),
-          now: settled(posted),
+          cursor: updates?.nextCursor ?? undefined,
         })
       )?.nextCursor,
     ).toBe(encodeMessageCursor(posted));
@@ -183,87 +182,92 @@ describe('getChatUpdates without a task (the idle thread poll)', () => {
   });
 });
 
-describe('the cursor lags far enough that a late commit cannot be lost', () => {
-  // messages.created_at defaults to Postgres now() — TRANSACTION START time.
-  // A transaction that begins early and commits late lands a row BEHIND a
-  // cursor the poll has already moved past, and a strict keyset comparison
-  // never returns it again: the message exists but only appears on the next
-  // page load, in the middle of the log. Timestamps here are explicit so the
-  // window is exercised rather than raced.
-  const T0 = new Date('2026-08-18T10:00:00.000Z');
-  const at = (seconds: number) => new Date(T0.getTime() + seconds * 1000);
-
-  async function threadWithALateWriter() {
-    const conversationId = await newChat();
-    const seen = await post(conversationId, 'user', 'what is on today?', { createdAt: at(0) });
-    // Committed second, but its transaction started first, so it is stamped
-    // first. The poll below runs in the gap between the two commits.
-    const fast = await post(conversationId, 'assistant', 'Your 3pm moved to 4pm.', {
-      createdAt: at(1),
-    });
-    return { conversationId, seen, fast };
-  }
-
-  it('holds the cursor back while a row is fresh, then still delivers the straggler', async (ctx) => {
+describe('commit-ordered chat cursors', () => {
+  it('does not skip a delayed old-timestamp row after a full-page backlog and >15 seconds', async (ctx) => {
     if (!dbUp) return ctx.skip();
-    const { conversationId, seen, fast } = await threadWithALateWriter();
+    const conversationId = await newChat();
+    const seen = await post(conversationId, 'user', 'cursor baseline');
+    const backlog = [];
+    for (let index = 0; index < 6; index += 1) {
+      backlog.push(await post(conversationId, 'assistant', `backlog ${index.toString()}`));
+    }
 
     const first = await getChatUpdates(db, {
       conversationId,
       cursor: encodeMessageCursor(seen),
-      now: at(2),
+      pageSize: 2,
     });
-    expect(first?.messages.map((message) => message.id)).toEqual([fast.id]);
-    expect(first?.nextCursor).toBe(encodeMessageCursor(seen));
+    expect(first?.messages.map((message) => message.id)).toEqual(
+      backlog.slice(0, 2).map((row) => row.id),
+    );
+    expect(first?.hasMore).toBe(true);
 
-    const slow = await post(conversationId, 'assistant', 'And the answer you asked for.', {
-      createdAt: at(0.5),
+    let beginHeld!: () => void;
+    let releaseHeld!: () => void;
+    const heldStarted = new Promise<void>((resolve) => (beginHeld = resolve));
+    const heldGate = new Promise<void>((resolve) => (releaseHeld = resolve));
+    const lateTimestamp = new Date('2020-01-01T00:00:00.000Z');
+    let delayedId = '';
+    const heldInsert = db.transaction(async (tx) => {
+      const [delayed] = await tx
+        .insert(messages)
+        .values({
+          conversationId,
+          role: 'assistant',
+          origin: 'assistant',
+          parts: [{ type: 'text', text: 'delayed commit' }],
+          text: 'delayed commit',
+          createdAt: lateTimestamp,
+        })
+        .returning();
+      delayedId = delayed?.id ?? '';
+      beginHeld();
+      await heldGate;
     });
-    const second = await getChatUpdates(db, {
+
+    await heldStarted;
+    const delivered = first?.messages.map((message) => message.id) ?? [];
+    let cursor = first?.nextCursor ?? undefined;
+    try {
+      // The transaction remains open past the former 15-second safety window.
+      await new Promise((resolve) => setTimeout(resolve, 15_100));
+      let page = await getChatUpdates(db, { conversationId, cursor, pageSize: 2 });
+      while (page?.hasMore) {
+        delivered.push(...page.messages.map((message) => message.id));
+        cursor = page.nextCursor ?? undefined;
+        page = await getChatUpdates(db, { conversationId, cursor, pageSize: 2 });
+      }
+      delivered.push(...(page?.messages.map((message) => message.id) ?? []));
+      cursor = page?.nextCursor ?? cursor;
+      expect(new Set(delivered).size).toBe(delivered.length);
+      expect(delivered).toEqual(backlog.map((row) => row.id));
+    } finally {
+      releaseHeld();
+    }
+    await heldInsert;
+
+    const afterCommit = await getChatUpdates(db, { conversationId, cursor, pageSize: 2 });
+    expect(afterCommit?.messages).toHaveLength(1);
+    expect(afterCommit?.messages[0]?.id).toBe(delayedId);
+    const replay = await getChatUpdates(db, {
       conversationId,
-      cursor: first?.nextCursor ?? undefined,
-      now: at(3),
+      cursor: afterCommit?.nextCursor ?? undefined,
+      pageSize: 2,
     });
-    expect(second?.messages.map((message) => message.id)).toEqual([slow.id, fast.id]);
-  });
+    expect(replay?.messages).toEqual([]);
+  }, 30_000);
 
-  it('would have lost that straggler had the cursor advanced', async (ctx) => {
-    if (!dbUp) return ctx.skip();
-    // The same thread, polled late enough that the cursor legitimately moves
-    // past `fast`. This is the behaviour the lag exists to postpone: once a row
-    // is old enough that nothing can still be committing behind it, passing it
-    // is safe — and a writer slower than the whole window is out of scope.
-    const { conversationId, seen, fast } = await threadWithALateWriter();
-
-    const first = await getChatUpdates(db, {
-      conversationId,
-      cursor: encodeMessageCursor(seen),
-      now: at(60),
-    });
-    expect(first?.nextCursor).toBe(encodeMessageCursor(fast));
-
-    const slow = await post(conversationId, 'assistant', 'And the answer you asked for.', {
-      createdAt: at(0.5),
-    });
-    const second = await getChatUpdates(db, {
-      conversationId,
-      cursor: first?.nextCursor ?? undefined,
-      now: at(61),
-    });
-    expect(second?.messages.map((message) => message.id)).not.toContain(slow.id);
-  });
-
-  it('never moves the cursor backwards, and never drops it', async (ctx) => {
+  it('replays a legacy timestamp cursor into the append-order stream', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const conversationId = await newChat();
-    const seen = await post(conversationId, 'user', 'only message');
-    const cursor = encodeMessageCursor(seen);
-    // Nothing new at all: the poll must come back with the cursor it was given.
-    // The client loops immediately on a page it has not finished, so a cursor
-    // that could retreat — or vanish — would spin.
-    const updates = await getChatUpdates(db, { conversationId, cursor });
-    expect(updates?.messages).toEqual([]);
-    expect(updates?.nextCursor).toBe(cursor);
+    const legacy = await post(conversationId, 'user', 'legacy client cursor');
+    const later = await post(conversationId, 'assistant', 'new append');
+    const updates = await getChatUpdates(db, {
+      conversationId,
+      cursor: `${legacy.createdAt.toISOString()}|${legacy.id}`,
+    });
+    expect(updates?.messages.map((message) => message.id)).toContain(later.id);
+    expect(updates?.nextCursor).toMatch(/^v2\|\d{20}\|/);
   });
 });
 

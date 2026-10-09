@@ -1,16 +1,24 @@
 import type { Db, TaskRow } from '@assistant/db';
 import type {
+  ApplicationConfirmationNoticeFence,
   DocumentExtractionRepository,
+  EmailThreadHeadReader,
   ExecutionPersistence,
+  FinalChannelDeliveryReport,
+  FinalChannelDeliveryResult,
   ImportJobRepository,
+  NotificationDeliveryResult,
+  ReminderEventDependency,
 } from '@assistant/persistence';
 import type { ZodType } from 'zod';
 import type { StagedJobPending } from '../../code-exec.js';
 import type { Trust } from '../../events.js';
 import type { DocumentProcessorConfig } from '../../memory/document-processor.js';
 import type { WorkspaceReader } from '../../memory/import.js';
+import type { ReminderSportsScoreboardReader } from '../../memory/jobs.js';
 import type { ModelRouter } from '../../model-router/router.js';
-import type { BriefingCalendarReader } from '../briefing.js';
+import type { BriefingCalendarReader, CalendarEventReader } from '../briefing.js';
+import type { OwnerIntent } from '../owner-intent.js';
 
 /** Structural port implemented by @assistant/tools' ToolDispatcher — keeps core free of a package cycle. */
 export interface DispatcherPort {
@@ -30,6 +38,13 @@ export interface DispatcherPort {
   }): Promise<
     | { kind: 'executed'; toolCallId: string; result: unknown; cached: boolean }
     | {
+        kind: 'recorded';
+        toolCallId: string;
+        effectOutcome: 'completed' | 'failed' | 'unknown' | 'not_executed';
+        detailsExpired: true;
+        requestedArgumentsVerified: false;
+      }
+    | {
         kind: 'awaiting_approval';
         toolCallId: string;
         approvalId: string;
@@ -42,8 +57,16 @@ export interface DispatcherPort {
   executeApproved(
     toolCallId: string,
     ctx: ToolContextLike,
+    expectedToolName?: string,
   ): Promise<
     | { kind: 'executed'; result: unknown }
+    | {
+        kind: 'recorded';
+        toolCallId: string;
+        effectOutcome: 'completed' | 'failed' | 'unknown' | 'not_executed';
+        detailsExpired: true;
+        requestedArgumentsVerified: false;
+      }
     | { kind: 'failed'; error: string }
     | { kind: 'budget_blocked'; reason: string; resumeAt: Date }
   >;
@@ -55,10 +78,25 @@ export interface ToolContextLike {
   conversationId?: string;
   trust: Trust;
   tainted: boolean;
+  /** Typed provenance and directly authored scope for this task's latest owner turn. */
+  ownerIntent?: OwnerIntent;
   /** Owner/thread-provided recipients used by the dispatcher's provenance guard. */
   knownAddresses?: { emails: string[]; phones: string[] };
   db: Db;
   now: () => Date;
+  /** Immutable task request clock and owner timezone for relative schedules. */
+  requestAt?: Date;
+  requestTimeZone?: string;
+  verifiedReminderEvent?: ReminderEventDependency;
+  bookingOccurrence?: {
+    agentId: string;
+    bookingKey: string;
+    version: number;
+    operation?: 'cancel_existing';
+    calendarEventId?: string;
+    bookingIdentity?: string;
+  };
+  assertBookingOccurrenceCurrent?: () => Promise<boolean>;
   signal: AbortSignal;
   log: (type: string, payload: unknown) => Promise<void>;
   execution?: { dbToolCallId: string; modelToolCallId: string; toolName: string };
@@ -80,6 +118,8 @@ export interface ExecutorDeps {
   db: Db;
   /** Shared adapters for migrated executor operations; domain helpers still require Db. */
   persistence?: ExecutionPersistence;
+  /** Recheck an opaque arrival observation before effects/final delivery. */
+  isArrivalObservationActive?: (agentId: string, observationId: string) => Promise<boolean>;
   /** Firestore-backed document lifecycle selected by the Firestore agent composition. */
   documentExtractionRepository?: DocumentExtractionRepository;
   /** Firestore-backed import and voice-ingest lifecycle selected by the Firestore agent composition. */
@@ -96,13 +136,24 @@ export interface ExecutorDeps {
    * then has no calendar section.
    */
   calendarReader?: BriefingCalendarReader;
+  calendarEventReader?: CalendarEventReader;
+  emailThreadReader?: EmailThreadHeadReader;
+  /** True only when the active dispatcher exposes the bound cancellation tool. */
+  calendarCancellationEnabled?: boolean;
+  /** Synthetic provider seam for event-completion reminder tests. */
+  reminderSportsScoreboardReader?: ReminderSportsScoreboardReader;
   /**
    * Returns a completion summary when a code job belongs to a module this
    * installation does not have, so the job completes instead of failing.
    */
   jobUnavailable?: (job: string) => string | null;
-  /** Channel delivery for a task's final text (e.g. SMS reply). Errors are retried by the workflow. */
-  deliverFinal?: (task: TaskRow, text: string) => Promise<void>;
+  /** Final-channel result for one persisted attempt. Legacy void adapters fail closed as unknown. */
+  deliverFinal?: (
+    task: TaskRow,
+    text: string,
+    attemptId: string,
+    previous?: FinalChannelDeliveryReport,
+  ) => Promise<FinalChannelDeliveryReport | FinalChannelDeliveryResult | void>;
   /**
    * Owner notification when approvals park a task (e.g. SMS "Reply YES A7").
    *
@@ -132,11 +183,13 @@ export interface ExecutorDeps {
    * dashboard leg can skip mirroring a second copy; the phone legs ignore it.
    */
   notifyOwner?: (input: {
+    deliveryKey?: string;
     taskId?: string;
     conversationId: string | null;
     text: string;
     urgency?: 'ambient' | 'interrupt';
-  }) => Promise<void>;
+    applicationConfirmationNoticeFence?: ApplicationConfirmationNoticeFence;
+  }) => Promise<NotificationDeliveryResult | void>;
 }
 
 export type ExecuteResult = {

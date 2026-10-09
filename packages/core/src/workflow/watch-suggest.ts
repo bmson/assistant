@@ -4,7 +4,11 @@ import {
   createPostgresWatchRepository,
   type Db,
 } from '@assistant/db';
-import type { ExecutionPersistence } from '@assistant/persistence';
+import type {
+  ExecutionPersistence,
+  MessageRepository,
+  WatchRepository,
+} from '@assistant/persistence';
 import { z } from 'zod';
 import { BudgetReservationError, nextDailyReset, nextMonthlyReset } from '../cost.js';
 import { isUnparseableObjectError, type ModelRouter } from '../model-router/router.js';
@@ -23,6 +27,7 @@ import { withSpan } from '../otel.js';
  */
 
 const COMPOSE_TIMEOUT_MS = 30_000;
+const MESSAGE_EFFECT_LEASE_MS = 60_000;
 
 const SuggestDraftSchema = z.object({
   worthSuggesting: z
@@ -65,11 +70,25 @@ export async function runWatchSuggest(
     const context =
       deps.persistence?.executionContext ?? createPostgresExecutionContextRepository(db);
     const agentId = opts.agentId;
-    const suggestContext = await watches.getSuggestionContext({
+    const contextKey = {
       agentId,
       watchId: opts.watchId,
       triggerRef: opts.triggerRef,
-    });
+    };
+    const prepared = await watches.getPreparedSuggestion(contextKey);
+    if (prepared) {
+      if (prepared.suggestion.status !== 'pending')
+        return {
+          suggested: false,
+          summary: 'watch.suggest: prepared suggestion is no longer pending',
+        };
+      await deliverPreparedSuggestion(watches, messages, prepared, opts.taskId);
+      return {
+        suggested: true,
+        summary: `watch.suggest: replayed prepared "${prepared.suggestion.summary.slice(0, 80)}"`,
+      };
+    }
+    const suggestContext = await watches.getSuggestionContext(contextKey);
     if (!suggestContext) return { suggested: false, summary: 'watch.suggest: fire row gone' };
     const { fire, watch } = suggestContext;
     if (watch?.tier !== 'suggest') {
@@ -126,30 +145,85 @@ export async function runWatchSuggest(
       proposedAction: draft.proposedAction.trim(),
     });
     if (!committed) return { suggested: false, summary: 'watch.suggest: proposal vanished' };
-    const { suggestion, conversationId } = committed;
-
-    const text = `One more thing from your "${watch.name}" watch:`;
-    const parts: unknown[] = [
-      { type: 'text', text },
-      {
-        type: 'suggestion',
-        suggestionId: suggestion.id,
-        summary: suggestion.summary,
-        proposedAction: suggestion.proposedAction,
-      },
-    ];
-    await messages.append({
-      conversationId,
-      ...(opts.taskId ? { taskId: opts.taskId } : {}),
-      role: 'assistant',
-      origin: 'assistant',
-      parts,
-      text,
-      channelMessageId: `watch-suggest:${fire.id}`,
-    });
+    const committedPrepared = await watches.getPreparedSuggestion(contextKey);
+    if (!committedPrepared)
+      return {
+        suggested: false,
+        summary: 'watch.suggest: proposal committed; message intent unavailable',
+      };
+    if (committedPrepared.suggestion.status === 'pending')
+      await deliverPreparedSuggestion(watches, messages, committedPrepared, opts.taskId);
     return {
       suggested: true,
-      summary: `watch.suggest: proposed "${suggestion.summary.slice(0, 80)}"`,
+      summary: `watch.suggest: proposed "${committedPrepared.suggestion.summary.slice(0, 80)}"`,
     };
   });
+}
+
+async function deliverPreparedSuggestion(
+  watches: Pick<WatchRepository, 'claimFireEffect' | 'finishFireEffect'>,
+  messages: MessageRepository,
+  prepared: NonNullable<Awaited<ReturnType<WatchRepository['getPreparedSuggestion']>>>,
+  taskId?: string,
+): Promise<void> {
+  const { effect, suggestion } = prepared;
+  if (effect.status === 'delivered' || effect.status === 'skipped') return;
+  const now = new Date();
+  const claimed = await watches.claimFireEffect({
+    agentId: effect.agentId,
+    effectId: effect.id,
+    now,
+    leaseMs: MESSAGE_EFFECT_LEASE_MS,
+  });
+  if (!claimed) return;
+  const payload = effect.payload as Record<string, unknown>;
+  if (
+    typeof payload.conversationId !== 'string' ||
+    typeof payload.text !== 'string' ||
+    typeof payload.channelMessageId !== 'string'
+  ) {
+    await watches.finishFireEffect({
+      agentId: effect.agentId,
+      effectId: effect.id,
+      status: 'failed',
+      result: { reason: 'suggestion message payload is malformed' },
+      now: new Date(),
+    });
+    throw new Error('watch suggestion message payload is malformed');
+  }
+  try {
+    await messages.append({
+      conversationId: payload.conversationId,
+      ...(taskId ? { taskId } : {}),
+      role: 'assistant',
+      origin: 'assistant',
+      parts: [
+        { type: 'text', text: payload.text },
+        {
+          type: 'suggestion',
+          suggestionId: suggestion.id,
+          summary: suggestion.summary,
+          proposedAction: suggestion.proposedAction,
+        },
+      ],
+      text: payload.text,
+      channelMessageId: payload.channelMessageId,
+    });
+    await watches.finishFireEffect({
+      agentId: effect.agentId,
+      effectId: effect.id,
+      status: 'delivered',
+      result: { channelMessageId: payload.channelMessageId },
+      now: new Date(),
+    });
+  } catch (error) {
+    await watches.finishFireEffect({
+      agentId: effect.agentId,
+      effectId: effect.id,
+      status: 'failed',
+      result: { reason: error instanceof Error ? error.message.slice(0, 300) : 'append failed' },
+      now: new Date(),
+    });
+    throw error;
+  }
 }

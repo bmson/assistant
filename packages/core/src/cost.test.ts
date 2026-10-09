@@ -116,10 +116,26 @@ describe('reservations (integration)', () => {
     });
     createdTaskIds.push(task.id);
 
-    // a laughably large estimate cannot be reserved
+    // The shared numeric(10,6) storage range rejects an unrepresentable
+    // estimate before it can create a reservation; this is separate from a
+    // representable estimate being denied by the budget cap below.
+    await expect(
+      reserveCost(db, {
+        source: 'cloud_run_job_sec',
+        estimatedUsd: 999999,
+        taskId: task.id,
+      }),
+    ).rejects.toThrow('USD exceeds the shared numeric(10,6) storage range');
+    const reservationsAfterInvalidEstimate = await db
+      .select({ id: costReservations.id })
+      .from(costReservations)
+      .where(eq(costReservations.taskId, task.id));
+    expect(reservationsAfterInvalidEstimate).toHaveLength(0);
+
+    // A large but representable estimate exercises the daily/monthly cap path.
     const over = await reserveCost(db, {
       source: 'cloud_run_job_sec',
-      estimatedUsd: 999999,
+      estimatedUsd: 9_999,
       taskId: task.id,
     });
     expect(over.ok).toBe(false);
@@ -343,8 +359,19 @@ describe('waiting_budget parking (integration)', () => {
     let blocked = true;
     const fakeRouter = {
       async object() {
-        // planner blocked too — executor proceeds plan-less
-        return { ok: false, decision: { mode: 'block', reason: 'daily budget exhausted (test)' } };
+        // Planning must succeed so this test exercises a blocked step, not the
+        // planner's own fail-closed budget stop.
+        return {
+          ok: true,
+          modelId: 'fake',
+          degraded: false,
+          object: {
+            action: 'reply',
+            reasoning: 'Continue to the step-level budget boundary.',
+            steps: [],
+            missingInfo: [],
+          },
+        };
       },
       async step(): Promise<StepCallOutcome> {
         if (blocked) {
@@ -409,7 +436,19 @@ describe('waiting_budget parking (integration)', () => {
     };
     const fakeRouter = {
       async object() {
-        return { ok: false, decision: { mode: 'block', reason: 'skip planning (test)' } };
+        // Planning must succeed so the dispatcher-level budget behavior below
+        // is the stop condition under test.
+        return {
+          ok: true,
+          modelId: 'fake',
+          degraded: false,
+          object: {
+            action: 'reply',
+            reasoning: 'Continue to the tool-dispatch budget boundary.',
+            steps: [],
+            missingInfo: [],
+          },
+        };
       },
       async step(): Promise<StepCallOutcome> {
         return {

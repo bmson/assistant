@@ -1,11 +1,5 @@
 import { isModuleEnabled, loadConfig } from '@assistant/config';
-import {
-  evaluateCanaryHealth,
-  expireStaleApprovals,
-  expireStaleSuggestions,
-  findDueTasks,
-  resumeResolvedApprovalTasks,
-} from '@assistant/core';
+import { evaluateCanaryHealth } from '@assistant/core';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
@@ -15,7 +9,6 @@ import {
   buildDeps,
   composedModuleMetas,
   firestoreMaintenanceReady,
-  firestoreOwnerReady,
 } from '../deps.js';
 import { oidcAudienceForPath, verifyInternalAuthorization } from '../google-oidc.js';
 
@@ -98,8 +91,8 @@ internal.post('/model-probe/vertex', async (c) => {
 
   try {
     const deps = buildDeps();
-    if (!(await firestoreOwnerReady(deps)))
-      return c.json({ error: 'Firestore agent is unavailable' }, 503);
+    if (!(await firestoreMaintenanceReady(deps)))
+      return c.json({ error: 'Firestore installation is not operationally ready' }, 503);
 
     const outcome = await deps.router.generate('draft', {
       system: 'This is a bounded internal connectivity probe. Reply with exactly PROBE_OK.',
@@ -131,119 +124,8 @@ internal.post('/sweep', async (c) => {
     if (!result.ready) return c.json({ error: result.error }, 503);
     return c.json(result.report);
   }
-  const {
-    backfillMessageEmbeddings,
-    emitBudgetNotices,
-    getAgent,
-    getQueueNotifier,
-    purgeAgedHistory,
-    purgeExpired,
-    renotifyStalledApprovals,
-    renotifyStalledAttention,
-    runDueSchedules,
-  } = await import('@assistant/core');
-  const { executorDeps } = await import('../executor-deps.js');
-  // Each step is independent maintenance; one failing must not starve the rest
-  // (a single bad schedule row used to 500 the whole endpoint and stall every
-  // later reaper). Wrap each in its own guard and report what ran.
-  const step = async <T>(name: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
-    try {
-      return await fn();
-    } catch (err) {
-      console.error(`sweep step failed: ${name}`, err);
-      return fallback;
-    }
-  };
-
-  const woken = await step(
-    'expireStaleApprovals',
-    () => expireStaleApprovals(deps.db),
-    [] as string[],
-  );
-  const expiredSuggestions = await step(
-    'expireStaleSuggestions',
-    () => expireStaleSuggestions(deps.db),
-    0,
-  );
-  const resumedApprovalTasks = await step(
-    'resumeResolvedApprovalTasks',
-    () => resumeResolvedApprovalTasks(deps.db),
-    [] as string[],
-  );
-  const renotifiedApprovals = await step(
-    'renotifyStalledApprovals',
-    () => renotifyStalledApprovals(deps.db, executorDeps(deps).notifyApproval),
-    0,
-  );
-  const renotifiedAttention = await step(
-    'renotifyStalledAttention',
-    () => renotifyStalledAttention(deps.db, executorDeps(deps).notifyOwner),
-    0,
-  );
-  // Guarded like every other step: this one read used to sit outside the
-  // guards, so a single database blip threw the WHOLE sweep — including
-  // purgeExpired below, which is what releases held cost reservations. A
-  // minute-by-minute sweep that dies on a blip turns a transient fault into a
-  // tightening budget.
-  const agent = await step('getAgent', () => getAgent(deps.db), null);
-  const fired = agent
-    ? await step(
-        'runDueSchedules',
-        () => runDueSchedules(deps.db, agent.timezone),
-        [] as Awaited<ReturnType<typeof runDueSchedules>>,
-      )
-    : [];
-  const budgetNotices = agent
-    ? await step('emitBudgetNotices', () => emitBudgetNotices(deps.db, agent.id), [] as string[])
-    : [];
-  // Backstop: re-notify everything due (sleep wake-ups, retries, lost notifications).
-  // Locally the poller executes these itself; in prod Cloud Tasks calls back.
-  const due = await step(
-    'findDueTasks',
-    () => findDueTasks(deps.db, 50),
-    [] as Awaited<ReturnType<typeof findDueTasks>>,
-  );
-  const notifier = getQueueNotifier();
-  for (const task of due) notifier.notify(task.id, task.queueGeneration);
-  const embedded = await step(
-    'backfillMessageEmbeddings',
-    () => backfillMessageEmbeddings(deps.db, deps.router),
-    0,
-  );
-  const purged = await step(
-    'purgeExpired',
-    () => purgeExpired(deps.db),
-    null as Awaited<ReturnType<typeof purgeExpired>> | null,
-  );
-  const aged = await step(
-    'purgeAgedHistory',
-    () => purgeAgedHistory(deps.db),
-    null as Awaited<ReturnType<typeof purgeAgedHistory>> | null,
-  );
-  // Module-declared sweep steps, in composition order, with the same per-step
-  // failure isolation as the platform's own.
-  const moduleSteps: Record<string, number> = {};
-  for (const sweepStep of deps.modules.sweepSteps) {
-    moduleSteps[sweepStep.reportKey ?? sweepStep.name] = await step(
-      sweepStep.name,
-      () => sweepStep.run(agentServices(deps)),
-      0,
-    );
-  }
-  return c.json({
-    expiredApprovalsWoke: woken.length,
-    expiredSuggestions,
-    resumedApprovalTasks: resumedApprovalTasks.length,
-    renotifiedApprovals,
-    renotifiedAttention,
-    schedulesFired: fired.length,
-    dueTasksNotified: due.length,
-    messagesEmbedded: embedded,
-    budgetNotices: budgetNotices.length,
-    ...moduleSteps,
-    purged,
-    aged,
-  });
+  const { runPostgresSweep } = await import('../postgres-sweep.js');
+  return c.json(await runPostgresSweep(deps, { notifyDueTasks: true }));
 });
 
 /**
@@ -262,6 +144,12 @@ for (const meta of composedModuleMetas) {
         return c.json(off.body, off.status as ContentfulStatusCode);
       }
       const deps = buildDeps();
+      if (
+        deps.config.PERSISTENCE_DRIVER === 'firestore' &&
+        !(await firestoreMaintenanceReady(deps))
+      ) {
+        return c.json({ error: 'Firestore installation is not operationally ready' }, 503);
+      }
       const handler = deps.modules.internalHandler(route.path);
       if (!handler) return c.json({ error: `${meta.name} module disabled` }, 404);
       const response = await handler(agentServices(deps));
@@ -278,7 +166,11 @@ internal.post('/canaries/run', async (c) => {
   if (!config.CANARY_ENABLED) {
     return c.json({ error: 'canaries are disabled; set CANARY_ENABLED=true explicitly' }, 503);
   }
-  const result = await runCanaries(buildDeps());
+  const deps = buildDeps();
+  if (deps.config.PERSISTENCE_DRIVER === 'firestore' && !(await firestoreMaintenanceReady(deps))) {
+    return c.json({ error: 'Firestore installation is not operationally ready' }, 503);
+  }
+  const result = await runCanaries(deps);
   return c.json(result);
 });
 

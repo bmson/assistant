@@ -60,11 +60,37 @@ function fromDocument(
   };
 }
 
-/** One owner-indexed scan avoids a composite index and never silently cuts off older rows. */
+/** Reads only actionable rows so dismissed history cannot exhaust the workspace bound. */
 export class FirestoreWorkspaceAnomalyRepository implements WorkspaceAnomalyRepository {
   readonly kind = 'workspace-anomaly-repository' as const;
 
   constructor(readonly store: InstallationStore) {}
+
+  async listOpenPage(agentId: string, input: { afterId?: string; limit: number }) {
+    const limit = boundedPageSize(input.limit);
+    if (!agentId) throw new Error('agent is required');
+    if (input.afterId !== undefined && !/^[0-9a-f-]{36}$/i.test(input.afterId))
+      throw new Error('Invalid anomaly continuation');
+    const fence = await readPrivacyErasureFence(this.store, agentId);
+    let query = this.store
+      .collection('anomalies')
+      .where('agentId', '==', agentId)
+      .where('status', '==', 'open')
+      .orderBy('id', 'asc')
+      .select(...FIELDS);
+    if (input.afterId) query = query.startAfter(input.afterId);
+    const snapshot = await query.limit(limit + 1).get();
+    const page = snapshot.docs
+      .slice(0, limit)
+      .map((doc) => fromDocument(doc.data(), doc.id, agentId))
+      .filter((row): row is WorkspaceAnomalyRecord => row !== null);
+    await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
+    return {
+      items: page,
+      hasMore: snapshot.size > limit,
+      nextCursor: snapshot.size > limit ? (page.at(-1)?.id ?? null) : null,
+    };
+  }
 
   async listOpen(agentId: string): Promise<WorkspaceAnomalyRecord[]> {
     if (!agentId) throw new Error('agent is required');
@@ -72,6 +98,7 @@ export class FirestoreWorkspaceAnomalyRepository implements WorkspaceAnomalyRepo
     const snapshot = await this.store
       .collection('anomalies')
       .where('agentId', '==', agentId)
+      .where('status', '==', 'open')
       .select(...FIELDS)
       .limit(MAX_OWNER_ANOMALIES + 1)
       .get();
@@ -110,6 +137,9 @@ export class FirestoreWorkspaceAnomalyRepository implements WorkspaceAnomalyRepo
     const anomalyRef = this.store.doc('anomalies', anomalyId);
     const erasureRef = this.store.doc('privacyErasureJobs', agentId);
     return this.store.db.runTransaction(async (tx) => {
+      const ownerRef = this.store.doc('agents', agentId);
+      const owner = await tx.get(ownerRef);
+      if (!owner.exists || owner.get('id') !== agentId) return false;
       const [anomaly, erasure] = await tx.getAll(anomalyRef, erasureRef);
       if (erasure?.exists) {
         if (erasure.get('agentId') !== agentId || erasure.get('status') !== 'complete')
@@ -140,9 +170,18 @@ export class FirestoreWorkspaceAnomalyRepository implements WorkspaceAnomalyRepo
       }
 
       const now = this.store.now();
-      if (policy?.exists) tx.update(policy.ref, encodeRecord({ enabled: false, updatedAt: now }));
+      if (policy?.exists) {
+        tx.update(ownerRef, { updatedAt: now });
+        tx.update(policy.ref, encodeRecord({ enabled: false, updatedAt: now }));
+      }
       tx.update(anomaly.ref, encodeRecord({ status, updatedAt: now }));
       return true;
     });
   }
+}
+
+function boundedPageSize(limit: number): number {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+    throw new Error('Workspace page size must be between 1 and 100');
+  return limit;
 }

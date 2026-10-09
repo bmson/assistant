@@ -1,5 +1,11 @@
 import type { SituationPackView } from './situations-schema.js';
 
+/** A rescheduled deadline is a new observation, unlike a retry of the same deadline. */
+export function commitmentDueMomentKey(id: string, dueAt: Date): string {
+  if (!Number.isFinite(dueAt.getTime())) throw new Error('Invalid commitment due occurrence');
+  return `commitment-due:${id}:${dueAt.toISOString()}`;
+}
+
 /** One stored calendar event: what the previous read saw, to diff the next read against. */
 export interface PulseCalendarSnapshot {
   calendarId: string;
@@ -14,12 +20,33 @@ export interface PulseCalendarSnapshot {
 
 export interface PulseMail {
   channelMessageId: string;
+  providerThreadId?: string | null;
+  providerMessageId?: string | null;
+  obligationVersion?: number;
   fromEmail: string;
   fromName: string | null;
   subject: string;
   /** The scorer's category, which decides what the follow-up offers to do. */
   category: string;
   importance: number;
+  obligationStatus?: string;
+  securityIncidentId?: string | null;
+  securityRevision?: number | null;
+  securityDisposition?: string | null;
+  securityDecisionRevision?: number | null;
+}
+
+/** A bounded metadata read of the owner's current Gmail thread; no body or model output. */
+export type EmailThreadHeadReader = (input: {
+  threadId: string;
+  signal: AbortSignal;
+}) => Promise<{ threadId: string; latestMessageId: string; latestReceivedAt: Date } | null>;
+
+export interface PulseEmailSourceFence {
+  channelMessageId: string;
+  threadId: string;
+  providerMessageId: string;
+  obligationVersion: number;
 }
 
 export interface PulseCommitment {
@@ -46,6 +73,10 @@ export interface PulseNoticeInput {
     origin: string;
     expiresAt: Date;
   };
+  /** Optional incident fence; admission shares it with mail arrival/briefing. */
+  securityIncident?: { id: string; revision: number };
+  /** Recheck the current ingested source and owner decision inside admission. */
+  emailSource?: PulseEmailSourceFence;
 }
 
 export type PulseNoticeOutcome =
@@ -56,7 +87,7 @@ export type PulseNoticeOutcome =
       conversationId: string;
       suggestionCreated: boolean;
     }
-  | { status: 'already-said' | 'min-gap' | 'daily-cap' };
+  | { status: 'already-said' | 'min-gap' | 'daily-cap' | 'stale-source' };
 
 /** Shared bounds and preference semantics for both transactional adapters. */
 export function pulseDailyCap(maximum: number, owner: number | null): number {
@@ -70,6 +101,22 @@ export function pulseDailyCap(maximum: number, owner: number | null): number {
 }
 
 export function validatePulseNotice(input: PulseNoticeInput): void {
+  if (input.emailSource) {
+    const source = input.emailSource;
+    if (
+      [source.channelMessageId, source.threadId, source.providerMessageId].some(
+        (value) => typeof value !== 'string' || !value || value.length > 256,
+      ) ||
+      !Number.isSafeInteger(source.obligationVersion) ||
+      source.obligationVersion < 0
+    )
+      throw new Error('Invalid pulse email source fence');
+    const expectedKey = input.securityIncident
+      ? `security-incident:${input.securityIncident.id}:r${input.securityIncident.revision}`
+      : `mail-action:${source.channelMessageId}`;
+    if (input.moment.kind !== 'mail-action' || input.moment.key !== expectedKey)
+      throw new Error('Pulse email source does not match the moment');
+  }
   const dates = [input.now, input.pacing.gapSince, input.pacing.windowSince];
   if (dates.some((date) => !(date instanceof Date) || !Number.isFinite(date.getTime())))
     throw new Error('Pulse admission requires valid timestamps');
@@ -108,6 +155,14 @@ export function validatePulseNotice(input: PulseNoticeInput): void {
     )
       throw new Error('Invalid pulse proposal');
   }
+  if (
+    input.securityIncident &&
+    (!input.securityIncident.id ||
+      input.securityIncident.id.length > 100 ||
+      !Number.isSafeInteger(input.securityIncident.revision) ||
+      input.securityIncident.revision < 1)
+  )
+    throw new Error('Invalid pulse security incident fence');
 }
 
 /** The `pulse.check` job's ledger and reads. Choosing and phrasing a moment stay in core. */
@@ -136,13 +191,13 @@ export interface PulseRepository {
   ): Promise<void>;
   /**
    * Actionable mail at or above `minImportance` ingested inside
-   * `[since, until]` that no finished task has picked up, most important first.
+   * `[since, until]` that no finished task has picked up, not already admitted to the moment ledger, ordered by importance, age and identity.
    */
   actionableMail(
     agentId: string,
-    input: { since: Date; until: Date; minImportance: number; limit: number },
+    input: { since: Date; until: Date; now: Date; minImportance: number; limit: number },
   ): Promise<PulseMail[]>;
-  /** Open commitments due inside `[now, until]` that are not snoozed past `now`. */
+  /** Active obligations due inside `[now, until]`, excluding admitted deadline occurrences, earliest deadline then identity. */
   dueCommitments(
     agentId: string,
     input: { now: Date; until: Date; limit: number },

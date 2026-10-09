@@ -16,7 +16,15 @@ try {
 
 console.log(`Assistant: ${config.ASSISTANT_NAME} <${config.ASSISTANT_EMAIL}>`);
 console.log(`Workspace: workspace/${config.ASSISTANT_WORKSPACE_ID}`);
-console.log(`Runtime: ${config.QUEUE_DRIVER === 'cloudtasks' ? 'Google Cloud' : 'local'}`);
+console.log(
+  `Runtime: ${
+    config.QUEUE_DRIVER === 'cloudtasks'
+      ? 'Google Cloud'
+      : config.QUEUE_DRIVER === 'inert'
+        ? 'inert restore rehearsal'
+        : 'local'
+  }`,
+);
 console.log('Modules:');
 for (const diagnostic of moduleDiagnostics(config)) {
   const marker = !diagnostic.enabled ? '○' : diagnostic.ready ? '✓' : '!';

@@ -6,6 +6,7 @@ import type {
   QuerySnapshot,
   Transaction,
 } from '@google-cloud/firestore';
+import { conversationDocument } from './conversation-document.js';
 import { messageRecord } from './messages.js';
 import { createWakeIntent } from './outbox.js';
 import { privacyErasureIsActive, readPrivacyErasureFence } from './privacy-erasure.js';
@@ -24,6 +25,15 @@ type GoalSettings = Pick<
   | 'mirrorToPrimary'
 >;
 const TERMINAL_TASKS = new Set(['done', 'failed', 'cancelled']);
+const LIVE_TASK_STATUSES = [
+  'pending',
+  'running',
+  'waiting_approval',
+  'waiting_event',
+  'sleeping',
+  'waiting_budget',
+  'needs_attention',
+];
 const AUTOMATION_WELCOME =
   'Automatic goal work is enabled. Use this chat to refine what I should prioritize.';
 const MAX_GOAL_TASKS = 200;
@@ -230,6 +240,10 @@ export class FirestoreGoalMutationRepository {
             name,
             createdAt: now,
             agentId: this.configuredAgentId,
+            seedTemplateKey: null,
+            seedTemplateRevision: null,
+            seedDefinition: null,
+            seedReviewRequired: false,
             lastRunAt: null,
           }),
           cron: automation.cron,
@@ -247,20 +261,23 @@ export class FirestoreGoalMutationRepository {
           updatedAt: now,
         };
       }
-      tx.create(this.store.doc('conversations', conversationId), {
-        id: conversationId,
-        agentId: this.configuredAgentId,
-        createdAt: now,
-        updatedAt: now,
-        channel: 'chat',
-        trust: 'owner',
-        title: `Work: ${goal.title}`.slice(0, 120),
-        metadata: { goalId },
-        archivedAt: null,
-        modelOverride: null,
-        isPrimary: false,
-        lastReadAt: null,
-      });
+      tx.create(
+        this.store.doc('conversations', conversationId),
+        conversationDocument({
+          id: conversationId,
+          agentId: this.configuredAgentId,
+          createdAt: now,
+          updatedAt: now,
+          channel: 'chat',
+          trust: 'owner',
+          title: `Work: ${goal.title}`.slice(0, 120),
+          metadata: { goalId },
+          archivedAt: null,
+          modelOverride: null,
+          isPrimary: false,
+          lastReadAt: null,
+        }),
+      );
       if (input) tx.create(goalRef, encodeRecord(goal));
       if (options.openingTask) {
         tx.create(this.store.doc('tasks', taskId), encodeRecord(task));
@@ -433,6 +450,8 @@ export class FirestoreGoalMutationRepository {
               this.store
                 .collection('tasks')
                 .where('goalId', '==', id)
+                .where('agentId', '==', this.configuredAgentId)
+                .where('status', 'in', LIVE_TASK_STATUSES)
                 .limit(MAX_GOAL_TASKS + 1),
             )
           : null;
@@ -474,6 +493,8 @@ export class FirestoreGoalMutationRepository {
         this.store
           .collection('tasks')
           .where('goalId', '==', id)
+          .where('agentId', '==', this.configuredAgentId)
+          .where('status', 'in', LIVE_TASK_STATUSES)
           .limit(MAX_GOAL_TASKS + 1),
       );
       if (taskPage.size > MAX_GOAL_TASKS) throw new Error('Too much goal work to archive safely');

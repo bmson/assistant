@@ -35,7 +35,7 @@ export const LEDGER_WIRING: Record<SpendSource, string> = {
   embedding:
     'ModelRouter.meter() — provider-reported cost or explicit estimate from the configured model rates',
   twilio_sms:
-    'ToolDispatcher exact-cost reservation for sms.send; SMS channel delivery reservations for replies/approval notices',
+    'Encoding-aware segment reservations for sms.send and every SMS channel delivery; provider usage reconciled when available',
   twilio_voice_min: 'reserved for Phase 9 voice calls (rate seeded, no caller yet)',
   cloud_run_job_sec:
     'ToolDispatcher reservation on browser.execute launch; executor reconciles at job settle',
@@ -47,7 +47,7 @@ export const LEDGER_WIRING: Record<SpendSource, string> = {
 /** Fallbacks when the rate_table row is missing (also the seed values). */
 export const DEFAULT_RATES: Record<string, { unit: string; unitPriceUsd: number }> = {
   embedding_mtok: { unit: 'mtok', unitPriceUsd: 0.02 },
-  twilio_sms: { unit: 'message', unitPriceUsd: 0.0079 },
+  twilio_sms: { unit: 'segment', unitPriceUsd: 0.0079 },
   twilio_voice_min: { unit: 'minute', unitPriceUsd: 0.014 },
   cloud_run_job_sec: { unit: 'second', unitPriceUsd: 0.00006 },
   storage_gb_month: { unit: 'gb-month', unitPriceUsd: 0.023 },

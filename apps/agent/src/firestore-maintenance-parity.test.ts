@@ -89,6 +89,14 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST || !DATABASE_URL)(
         trust: 'owner',
         status: 'done',
         trigger: {},
+        // A missing execution state is malformed recovery metadata, so the
+        // Firestore retention path correctly preserves its tool-call receipts.
+        state: {},
+        // Tool-call retention deliberately requires the parent task to be
+        // terminal and itself older than the history cutoff. Keep the fixture
+        // on the safe aged side of both conditions instead of relaxing the
+        // production retention guard to make this row eligible.
+        updatedAt: ago(31),
       });
       const suggestion = (key: keyof typeof ids.suggestions, status: string, expiresAt: Date) =>
         seed('suggestions', suggestions, {

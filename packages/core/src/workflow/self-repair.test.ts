@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import {
   type RepairIssue,
+  repairClaimCandidate,
   repairTransition,
   type SelfRepairRepository,
 } from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
-import type { ModelRouter } from '../model-router/router.js';
+import { isProviderTransientError } from '../model-router/provider.js';
+import { ModelFallbackAttemptError, type ModelRouter } from '../model-router/router.js';
 import { RepairDispatchRejected } from './repair-github.js';
 import {
   isRepairFeedback,
@@ -45,6 +47,39 @@ describe('owner correction detection', () => {
     expect(isRepairFeedback(text)).toBe(false),
   );
 });
+
+describe('provider error classification', () => {
+  it('finds retryable SDK errors beyond empty wrapper slots and sibling branches', () => {
+    const retryable = Object.assign(new Error('temporary'), {
+      name: 'AI_APICallError',
+      statusCode: '503',
+    });
+    const wrapper = Object.assign(new Error('wrapped'), {
+      lastError: undefined,
+      cause: undefined as unknown,
+      errors: [undefined, { cause: retryable }],
+    }) as Error & { cause?: unknown; errors: unknown[] };
+    wrapper.cause = wrapper;
+    expect(isProviderTransientError(wrapper)).toBe(true);
+  });
+
+  it('keeps authentication failures out of transient fallback recovery', () => {
+    const wrapper = Object.assign(new Error('wrapped'), {
+      errors: [
+        Object.assign(new Error('temporarily unavailable'), {
+          name: 'AI_APICallError',
+          statusCode: 503,
+        }),
+        Object.assign(new Error('invalid API key'), {
+          name: 'AI_APICallError',
+          statusCode: '401',
+        }),
+      ],
+    });
+    expect(isProviderTransientError(wrapper)).toBe(false);
+    expect(isProviderTransientError(new Error('unrelated tool timed out'))).toBe(false);
+  });
+});
 function fixture(status: RepairIssue['status'] = 'reported'): RepairIssue {
   return {
     id: randomUUID(),
@@ -68,10 +103,28 @@ function setup(issue = fixture()) {
     report: vi.fn(async () => issue),
     list: vi.fn(async () => [...rows.values()]),
     failures: vi.fn(async () => []),
-    claim: vi.fn(async () => {
-      const row = rows.get(issue.id);
-      if (row?.status !== 'reported') return null;
-      const next = repairTransition(row, 'investigating', {}, now);
+    modelAccounting: vi.fn(async () => ({
+      observedModelCalls: 0,
+      knownCostUsd: null,
+      unresolvedReservations: 0,
+      complete: false,
+    })),
+    claim: vi.fn(async (_agentId, at, dailyLimit, taskId) => {
+      const row = repairClaimCandidate([...rows.values()], at, dailyLimit);
+      if (!row) return null;
+      const next = repairTransition(
+        row,
+        'investigating',
+        {
+          investigationStartedAt: at.toISOString(),
+          investigationTaskIds: taskId
+            ? [...new Set([...(row.data.investigationTaskIds ?? []), taskId])]
+            : row.data.investigationTaskIds,
+          nextEligibleAt: undefined,
+          ownerActionRequired: undefined,
+        },
+        at,
+      );
       rows.set(row.id, next);
       return next;
     }),
@@ -115,6 +168,73 @@ function setup(issue = fixture()) {
   return { deps, rows, issue, object };
 }
 describe('issue-to-PR flow', () => {
+  it('does not invoke a second fallback after the router reports both failed attempts', async () => {
+    const { deps, object, rows, issue } = setup();
+    const primaryFailure = Object.assign(new Error('model retired'), {
+      name: 'AI_APICallError',
+      statusCode: 410,
+    });
+    const fallbackFailure = Object.assign(new Error('provider unavailable'), {
+      name: 'AI_APICallError',
+      statusCode: 503,
+    });
+    object.mockRejectedValueOnce(
+      new ModelFallbackAttemptError({
+        role: 'reason',
+        primaryModelId: 'test/primary',
+        fallbackModelId: 'test/fallback',
+        primaryElapsedMs: 5,
+        elapsedMs: 7,
+        failureKind: 'provider_capability',
+        fallbackFailureKind: 'transient_provider',
+        requestProfile: { method: 'object', role: 'reason', schema: true },
+        primaryFailure,
+        fallbackFailure,
+      }),
+    );
+
+    await runRepairCycle(deps, 'owner', 'task', now);
+    expect(object).toHaveBeenCalledOnce();
+    expect(deps.router.route).not.toHaveBeenCalled();
+    expect(rows.get(issue.id)?.status).toBe('reported');
+    expect(rows.get(issue.id)?.data.nextEligibleAt).toBe(
+      new Date(now.getTime() + 60_000).toISOString(),
+    );
+    expect(rows.get(issue.id)?.data.routerAttempts?.[0]).toMatchObject({
+      classification: 'transient',
+      primaryModelId: 'test/primary',
+      fallbackModelId: 'test/fallback',
+      providerAttempts: 2,
+      knownCostUsd: null,
+      accountingComplete: false,
+    });
+    expect(JSON.stringify(rows.get(issue.id)?.data.routerAttempts)).not.toContain('model retired');
+  });
+
+  it('lets ModelRouter own transient recovery and preserves fallback route metadata', async () => {
+    const { deps, object, rows, issue } = setup();
+    object.mockResolvedValueOnce({
+      ok: true,
+      modelId: 'test/fallback',
+      degraded: true,
+      object: {
+        category: 'bug',
+        diagnosis: 'A completion guard loses the reminder',
+        targetPaths: ['packages/core/src/chat.ts'],
+        reproduction: 'Create a synthetic one-time reminder and advance the clock',
+        acceptance: 'Deliver exactly once',
+      },
+    } as never);
+
+    await runRepairCycle(deps, 'owner', 'task', now);
+    expect(object).toHaveBeenCalledOnce();
+    expect(object.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({ fallbackOnTransientProviderError: true }),
+    );
+    expect(deps.router.route).not.toHaveBeenCalled();
+    expect(rows.get(issue.id)?.status).toBe('fixing');
+  });
+
   it('dispatches a requested feature with a missing-behavior acceptance test', async () => {
     const { deps, object, rows, issue } = setup();
     object.mockResolvedValueOnce({
@@ -276,7 +396,7 @@ describe('issue-to-PR flow', () => {
     expect(prompt.runtime).toEqual(deps.diagnostics);
   });
   it.each([410, 429])(
-    'uses one distinct configured fallback when triage provider returns %s',
+    'delegates triage fallback for provider status %s to ModelRouter',
     async (statusCode) => {
       const { deps, object, rows, issue } = setup();
       const terminal = Object.assign(new Error('Upstream rate limit'), {
@@ -286,10 +406,12 @@ describe('issue-to-PR flow', () => {
       object.mockRejectedValueOnce(
         Object.assign(new Error('Retry exhausted'), { name: 'AI_RetryError', lastError: terminal }),
       );
-      expect(await runRepairCycle(deps, 'owner', 'task', now)).toBe(1);
-      expect(object).toHaveBeenCalledTimes(2);
-      expect(object.mock.calls[1]?.[1]).toMatchObject({ forceFallback: true });
-      expect(rows.get(issue.id)?.status).toBe('fixing');
+      expect(await runRepairCycle(deps, 'owner', 'task', now)).toBe(0);
+      expect(object).toHaveBeenCalledOnce();
+      expect(object.mock.calls[0]?.[1]).toMatchObject({
+        fallbackOnTransientProviderError: true,
+      });
+      expect(rows.get(issue.id)?.status).toBe(statusCode === 410 ? 'blocked' : 'reported');
     },
   );
   it.each(['placeholder', 'invented paths', 'wildcard paths'])(
@@ -317,15 +439,20 @@ describe('issue-to-PR flow', () => {
       expect(rows.get(issue.id)?.status).toBe('fixing');
     },
   );
-  it('bounds primary triage and uses a fresh deadline for timeout fallback', async () => {
-    const { deps, object } = setup();
+  it('bounds triage and delegates timeout fallback to ModelRouter', async () => {
+    const { deps, object, rows, issue } = setup();
     const deadline = vi.spyOn(AbortSignal, 'timeout');
     object.mockRejectedValueOnce(
       Object.assign(new Error('Deadline exceeded'), { name: 'TimeoutError' }),
     );
     try {
-      expect(await runRepairCycle(deps, 'owner', 'task', now)).toBe(1);
-      expect(deadline.mock.calls).toEqual([[60000], [60000]]);
+      expect(await runRepairCycle(deps, 'owner', 'task', now)).toBe(0);
+      expect(deadline.mock.calls).toEqual([[60000]]);
+      expect(object).toHaveBeenCalledOnce();
+      expect(object.mock.calls[0]?.[1]).toMatchObject({
+        fallbackOnTransientProviderError: true,
+      });
+      expect(rows.get(issue.id)?.status).toBe('reported');
     } finally {
       deadline.mockRestore();
     }
@@ -360,16 +487,91 @@ describe('issue-to-PR flow', () => {
     );
     await runRepairCycle(deps, 'owner', 'task', now);
     expect(object).toHaveBeenCalledOnce();
-    expect(rows.get(issue.id)?.status).toBe('failed');
+    expect(rows.get(issue.id)?.status).toBe('reported');
   });
   it('does not use a provider fallback for invalid credentials', async () => {
-    const { deps, object } = setup();
+    const { deps, object, rows, issue } = setup();
     object.mockRejectedValueOnce(
       Object.assign(new Error('Bad credentials'), { name: 'AI_APICallError', statusCode: 401 }),
     );
     await runRepairCycle(deps, 'owner', 'task', now);
     expect(object).toHaveBeenCalledOnce();
     expect(deps.worker?.dispatch).not.toHaveBeenCalled();
+    expect(rows.get(issue.id)?.status).toBe('blocked');
+    expect(rows.get(issue.id)?.data.ownerActionRequired).toContain('credentials');
+    expect(JSON.stringify(rows.get(issue.id)?.data.routerAttempts)).not.toContain(
+      'Bad credentials',
+    );
+  });
+  it('resumes transient investigation after backoff, then blocks after the bounded retry cap', async () => {
+    const { deps, object, rows, issue } = setup();
+    const temporary = Object.assign(new Error('temporary upstream failure'), {
+      name: 'AI_APICallError',
+      statusCode: 503,
+    });
+    object.mockRejectedValue(temporary);
+    const times = [0, 60_000, 6 * 60_000, 21 * 60_000].map(
+      (offset) => new Date(now.getTime() + offset),
+    );
+    for (const at of times) {
+      await runRepairCycle(deps, 'owner', 'task', at);
+      if (at !== times[times.length - 1]) {
+        const current = rows.get(issue.id);
+        expect(current?.status).toBe('reported');
+        expect(Date.parse(current?.data.nextEligibleAt ?? '')).toBeGreaterThan(at.getTime());
+      }
+    }
+    const exhausted = rows.get(issue.id);
+    expect(exhausted?.status).toBe('blocked');
+    expect(exhausted?.data.preDispatchRetryCount).toBe(4);
+    expect(exhausted?.data.routerAttempts).toHaveLength(4);
+    expect(exhausted?.data.ownerActionRequired).toContain('retries are exhausted');
+    expect(deps.worker?.dispatch).not.toHaveBeenCalled();
+  });
+  it('accumulates only persisted model-call costs across distinct investigation jobs', async () => {
+    const { deps, object, rows, issue } = setup();
+    vi.mocked(deps.repository.modelAccounting).mockImplementation(async (_owner, taskIds) => {
+      const task = taskIds[0];
+      return task === 'task-a'
+        ? {
+            observedModelCalls: 1,
+            knownCostUsd: '0.010000',
+            unresolvedReservations: 0,
+            complete: true,
+          }
+        : {
+            observedModelCalls: 1,
+            knownCostUsd: '0.020000',
+            unresolvedReservations: 0,
+            complete: true,
+          };
+    });
+    object.mockRejectedValueOnce(
+      Object.assign(new Error('Temporary'), { name: 'AI_APICallError', statusCode: 503 }),
+    );
+    const at = now;
+    await runRepairCycle(deps, 'owner', 'task-a', at);
+    object.mockResolvedValueOnce({
+      ok: true,
+      modelId: 'test/model',
+      degraded: false,
+      object: {
+        category: 'bug',
+        diagnosis: 'The synthetic retry works now',
+        targetPaths: ['packages/core/src/chat.ts'],
+        reproduction: 'Repeat the fixture after recovery',
+        acceptance: 'The fixture completes once',
+      },
+    } as never);
+    await runRepairCycle(deps, 'owner', 'task-b', new Date(at.getTime() + 60_000));
+    expect(rows.get(issue.id)?.status).toBe('fixing');
+    expect(rows.get(issue.id)?.data.modelAccounting).toEqual({
+      observedModelCalls: 2,
+      knownCostUsd: '0.030000',
+      unresolvedReservations: 0,
+      complete: true,
+    });
+    expect(rows.get(issue.id)?.data.accountedInvestigationTaskIds).toEqual(['task-a', 'task-b']);
   });
   it('retries failed notifications next tick without rerunning the investigation', async () => {
     const { deps, object, rows, issue } = setup();
@@ -449,7 +651,8 @@ describe('issue-to-PR flow', () => {
   it('fences expired investigations', async () => {
     const { deps, rows, issue } = setup(fixture('investigating'));
     await runRepairCycle(deps, 'owner', 'task', new Date(now.getTime() + 31 * 60000));
-    expect(rows.get(issue.id)?.status).toBe('failed');
+    expect(rows.get(issue.id)?.status).toBe('blocked');
+    expect(rows.get(issue.id)?.data.ownerActionRequired).toContain('Review the provider usage');
     expect(deps.worker?.dispatch).not.toHaveBeenCalled();
   });
 });
@@ -458,6 +661,11 @@ describe('repair patch fence', () => {
     '../../etc/passwd',
     '/tmp/file',
     'apps/web/auth.ts',
+    'packages/firestore/src/owner-auth.ts',
+    'packages/firestore/src/owner-auth.test.ts',
+    'apps/web/lib/owner-auth/runtime.ts',
+    'packages/firestore/src/nested/owner-auth.ts',
+    'apps/web/lib/account-passkey.ts',
     'apps/web/.env.local',
     'packages/core/src/workflow/executor/step-loop.ts',
     'packages/core/src/workflow/self-repair.ts',
@@ -513,3 +721,24 @@ it('persists hosted dispatch identity and cleans up terminal sessions without re
   expect(deps.worker.cleanup).toHaveBeenCalledOnce();
   expect(deps.worker.dispatch).toHaveBeenCalledOnce();
 });
+
+it.each(['investigating', 'fixing', 'testing', 'pr_open', 'merged', 'monitoring'] as const)(
+  'notifies a failed %s stage with deterministic next step and no raw provider error',
+  async (priorStatus) => {
+    const base = fixture(priorStatus);
+    const failure = repairTransition(
+      base,
+      'failed',
+      { lastError: 'RAW_PROVIDER_HTTP_429 secret=PRIVATE' },
+      now,
+    );
+    const { deps } = setup(failure);
+    await runRepairCycle(deps, 'owner', 'task', now);
+    expect(deps.notify).toHaveBeenCalledOnce();
+    const copy = (deps.notify as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
+    expect(copy).toContain('did not complete');
+    expect(copy).not.toContain('RAW_PROVIDER');
+    expect(copy).not.toContain('PRIVATE');
+    expect(copy).not.toContain('is fixed');
+  },
+);

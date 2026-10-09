@@ -11,6 +11,7 @@ import {
 import type {
   ApplicationChatMessage,
   ApplicationChatPersistence,
+  ChatTurnCancellationResult,
   GeneratedCardRepository,
 } from '@assistant/persistence';
 import type { UIMessage } from 'ai';
@@ -24,25 +25,6 @@ export const SETTLED_TASK_STATUSES = new Set([
   'waiting_approval',
 ]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/**
- * How far behind the present the poll cursor is allowed to advance.
- *
- * `messages.created_at` defaults to Postgres `now()`, which is TRANSACTION
- * START time, while the cursor can only advance over rows that have already
- * committed. A transaction that starts early and commits late — finishTask
- * wraps the terminal transition and the assistant reply together — therefore
- * lands a row whose timestamp is BEHIND a cursor the poll already moved past,
- * and the keyset comparison in listMessages will never return it again. The
- * message exists in the database and appears mid-log on the next page load:
- * exactly the "it vanished, then came back in the wrong place" report.
- *
- * So the cursor deliberately lags: rows are delivered the moment they are
- * visible, but the cursor only advances over rows old enough that nothing can
- * still commit behind them. Anything newer is re-delivered on the next tick
- * and the client's id-keyed merge absorbs the repeat.
- */
-const CURSOR_SETTLE_MS = 15_000;
 
 /** Cap on how many on-screen decision cards one poll may re-read. */
 const MAX_REFRESH_IDS = 10;
@@ -369,7 +351,11 @@ function toUiMessages(rows: PersistedMessage[]): UIMessage[] {
       // `taskId` rides along so hydration can resolve an approval summary
       // written before the part carried its own approval ids — see
       // hydrateChatApprovals. The client reads only `createdAt`.
-      metadata: { createdAt: row.createdAt.toISOString(), taskId: row.taskId ?? undefined },
+      metadata: {
+        createdAt: row.createdAt.toISOString(),
+        taskId: row.taskId ?? undefined,
+        channelMessageId: row.channelMessageId ?? undefined,
+      },
     }));
 }
 
@@ -602,6 +588,19 @@ export async function hydrateChatApprovals(
   }));
 }
 
+export async function cancelChatTurn(
+  store: ChatStore,
+  input: { conversationId: string; clientOperationId: string },
+): Promise<ChatTurnCancellationResult> {
+  const persistence = chatPersistence(store);
+  const agent = await persistence.resolveAgent();
+  return persistence.cancelChatTurn({
+    agentId: agent.id,
+    conversationId: input.conversationId,
+    clientOperationId: input.clientOperationId,
+  });
+}
+
 export async function createChatConversation(store: ChatStore): Promise<string> {
   const persistence = chatPersistence(store);
   const agent = await persistence.resolveAgent();
@@ -664,6 +663,19 @@ export async function unhideChatMessage(
     throw new Error('chat not found');
   }
   return persistence.setMessageHidden(agent.id, conversationId, messageId, false);
+}
+
+export async function acknowledgeChatMessageDelivery(
+  store: ChatStore,
+  conversationId: string,
+  messageId: string,
+  clientId: string,
+): Promise<boolean> {
+  if (!UUID_RE.test(clientId)) return false;
+  const persistence = chatPersistence(store);
+  const agent = await persistence.resolveAgent();
+  if (!(await persistence.getConversation(agent.id, conversationId))) return false;
+  return persistence.acknowledgeMessageDelivery(agent.id, conversationId, messageId, clientId);
 }
 
 export async function archiveInactiveChats(store: ChatStore, olderThanDays = 30): Promise<number> {
@@ -767,7 +779,7 @@ export async function getChatConversationView(
     // sits in front of whatever is still committing behind it, and the open
     // page never sees those at all. A chat whose every message is that fresh
     // starts with no cursor and picks one up on its first tick.
-    cursor: advanceCursor(messageRows, undefined, false, input.now ?? new Date()),
+    cursor: advanceCursor(messageRows, undefined),
     asyncTurn:
       requestedTaskStatus && requestedTaskId && requestedCursor && input.cursor
         ? { taskId: requestedTaskId, cursor: input.cursor }
@@ -825,10 +837,11 @@ export async function getChatUpdates(
   const pageSize = input.pageSize ?? 50;
   const messagePage = await persistence.listMessages(agent.id, input.conversationId, {
     ...(cursor ? { after: cursor } : {}),
+    ...(!cursor ? { fromStart: true } : {}),
     limit: pageSize,
   });
   if (!messagePage) return null;
-  const hasMore = Boolean(cursor && messagePage.hasMore);
+  const hasMore = messagePage.hasMore;
   const page = messagePage.messages;
   const { visible, superseded } = await collapsePageWithTaskHistory(
     persistence,
@@ -848,7 +861,7 @@ export async function getChatUpdates(
         ),
       )
     : [];
-  const nextCursor = advanceCursor(page, cursor, hasMore, input.now ?? new Date());
+  const nextCursor = advanceCursor(page, cursor);
   const taskId = input.taskId;
   const activity =
     taskId && taskStatus && !SETTLED_TASK_STATUSES.has(taskStatus)
@@ -867,17 +880,20 @@ export async function getChatUpdates(
  */
 function advanceCursor(
   page: ApplicationChatMessage[],
-  cursor: { createdAt: Date; id: string } | undefined,
-  hasMore: boolean,
-  now: Date,
+  cursor: { createdAt: Date; id: string; appendSequence?: string } | undefined,
 ): string | null {
   const fallback = cursor ? encodeMessageCursor(cursor) : null;
   if (page.length === 0) return fallback;
-  if (hasMore) return encodeMessageCursor(page[page.length - 1] as (typeof page)[number]);
-  const settledBefore = now.getTime() - CURSOR_SETTLE_MS;
-  for (let index = page.length - 1; index >= 0; index -= 1) {
-    const row = page[index] as (typeof page)[number];
-    if (row.createdAt.getTime() <= settledBefore) return encodeMessageCursor(row);
-  }
-  return fallback;
+  const latestAppend = page
+    .filter((row) => typeof row.appendSequence === 'string')
+    .reduce<ApplicationChatMessage | undefined>(
+      (latest, row) =>
+        !latest ||
+        (row.appendSequence ?? '') > (latest.appendSequence ?? '') ||
+        ((row.appendSequence ?? '') === (latest.appendSequence ?? '') && row.id > latest.id)
+          ? row
+          : latest,
+      undefined,
+    );
+  return latestAppend ? encodeMessageCursor(latestAppend) : fallback;
 }

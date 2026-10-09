@@ -1,11 +1,33 @@
-import { conversations, createDb, type Db, goals, schedules, tasks } from '@assistant/db';
+import {
+  conversations,
+  createDb,
+  createPostgresMessageRepository,
+  createPostgresMissionRepository,
+  type Db,
+  goals,
+  messages,
+  missionReports,
+  schedules,
+  tasks,
+} from '@assistant/db';
 import { eq, inArray, like } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { getAgent } from '../chat.js';
 import type { Plan } from '../events.js';
 import type { ModelRouter } from '../model-router/router.js';
 import { claimTask, enqueueTask, taskState } from './machine.js';
-import { parseIntervalMs, type Reflection, startMission, wakeMission } from './missions.js';
+import {
+  missionCadenceLabel,
+  nextMissionWakeAt,
+  parseIntervalMs,
+  type Reflection,
+  repairMissionReports,
+  requestedMissionFrequencyPerDay,
+  startMission,
+  startMissionWithReceipt,
+  validateMissionCadence,
+  wakeMission,
+} from './missions.js';
 import {
   ensureGoalAutomation,
   goalAutomationCadence,
@@ -40,6 +62,190 @@ const basePlan: Plan = {
   missingInfo: [],
 };
 
+describe('mission admission boundaries', () => {
+  const createTask = vi.fn();
+  const store = { kind: 'task-lease-repository', createTask } as never;
+  const plan: Plan = { ...basePlan };
+
+  it.each([
+    {
+      name: 'a mission root',
+      source: { type: 'mission', trust: 'owner', state: {} },
+    },
+    {
+      name: 'a mission session child',
+      source: {
+        type: 'adhoc',
+        trust: 'owner',
+        state: {},
+        parentTaskId: 'mission-1',
+        trigger: {
+          source: 'mission_wake',
+          payload: { missionId: 'mission-1', instruction: 'continue' },
+        },
+      },
+    },
+    {
+      name: 'an externally trusted task',
+      source: { type: 'adhoc', trust: 'unknown', state: {} },
+    },
+    {
+      name: 'a tainted task',
+      source: { type: 'adhoc', trust: 'owner', state: { untrustedContext: true } },
+    },
+  ])('rejects root creation from $name before enqueue', async ({ source }) => {
+    createTask.mockClear();
+    await expect(
+      startMission(
+        store,
+        { id: 'source-1', agentId: 'agent-1', ...source } as never,
+        plan,
+        'Do a mission',
+      ),
+    ).rejects.toThrow();
+    expect(createTask).not.toHaveBeenCalled();
+  });
+
+  it('rejects an empty saved mission instruction', async () => {
+    createTask.mockClear();
+    await expect(
+      startMission(
+        store,
+        {
+          id: 'source-1',
+          agentId: 'agent-1',
+          type: 'chat_turn',
+          trust: 'owner',
+          state: {},
+        } as never,
+        plan,
+        '  ',
+      ),
+    ).rejects.toThrow(/saved instruction/);
+    expect(createTask).not.toHaveBeenCalled();
+  });
+
+  it('rejects mission creation from any persisted descendant, even without the session marker', async () => {
+    const create = vi.fn();
+    const repository = {
+      getTask: vi.fn(async () => ({
+        id: 'mission-parent',
+        type: 'mission',
+        parentTaskId: null,
+      })),
+      createTask: create,
+    } as never;
+    await expect(
+      startMission(
+        repository,
+        {
+          id: 'unmarked-grandchild',
+          agentId: 'agent-1',
+          type: 'adhoc',
+          trust: 'owner',
+          state: {},
+          parentTaskId: 'mission-parent',
+          trigger: { source: 'internal', payload: {} },
+        } as never,
+        plan,
+        'Do more work',
+      ),
+    ).rejects.toThrow(/cannot create another root mission/i);
+    expect(create).not.toHaveBeenCalled();
+  });
+});
+
+describe('mission cadence', () => {
+  it('validates an explicit twice-daily local schedule against the owner request', () => {
+    const cadence = validateMissionCadence(
+      {
+        kind: 'local_times',
+        timezone: 'America/Los_Angeles',
+        times: ['08:00', '20:00'],
+      },
+      'America/Los_Angeles',
+      'Check this twice daily at 08:00 and 20:00 in America/Los_Angeles.',
+    );
+    expect(requestedMissionFrequencyPerDay('Check twice daily.')).toBe(2);
+    expect(missionCadenceLabel(cadence)).toContain('America/Los_Angeles');
+    expect(() =>
+      validateMissionCadence(
+        { kind: 'interval', everyMinutes: 24 * 60 },
+        'America/Los_Angeles',
+        'Check this twice daily in America/Los_Angeles.',
+      ),
+    ).toThrow(/does not match the requested frequency/);
+  });
+
+  it('uses fixed elapsed intervals and skips missed interval occurrences after a delayed wake', () => {
+    const createdAt = new Date('2026-03-07T18:00:00Z');
+    const mission = {
+      createdAt,
+      trigger: {
+        payload: { cadence: { kind: 'interval', everyMinutes: 12 * 60 } },
+      },
+    } as never;
+    const delayedStart = new Date('2026-03-09T20:00:00Z');
+    expect(nextMissionWakeAt(mission, delayedStart)).toEqual(new Date('2026-03-10T06:00:00Z'));
+  });
+
+  it('keeps wall-clock times in the named timezone across spring DST and skips missed runs', () => {
+    const mission = {
+      createdAt: new Date('2026-03-01T00:00:00Z'),
+      trigger: {
+        payload: {
+          cadence: {
+            kind: 'local_times',
+            timezone: 'America/Los_Angeles',
+            times: ['08:00', '20:00'],
+          },
+        },
+      },
+    } as never;
+    const beforeSpringRun = new Date('2026-03-08T07:30:00Z');
+    expect(nextMissionWakeAt(mission, beforeSpringRun)).toEqual(new Date('2026-03-08T15:00:00Z'));
+    const afterBothLocalRuns = new Date('2026-03-09T05:00:00Z');
+    expect(nextMissionWakeAt(mission, afterBothLocalRuns)).toEqual(
+      new Date('2026-03-09T15:00:00Z'),
+    );
+  });
+
+  it('skips a nonexistent spring time and does not repeat an ambiguous fall time', () => {
+    const createdAt = new Date('2026-01-01T00:00:00Z');
+    const mission = {
+      createdAt,
+      trigger: {
+        payload: {
+          cadence: {
+            kind: 'local_times',
+            timezone: 'America/Los_Angeles',
+            times: ['02:30'],
+          },
+        },
+      },
+    } as never;
+    expect(nextMissionWakeAt(mission, new Date('2026-03-08T09:00:00Z'))).toEqual(
+      new Date('2026-03-09T09:30:00Z'),
+    );
+
+    const fallMission = {
+      createdAt,
+      trigger: {
+        payload: {
+          cadence: {
+            kind: 'local_times',
+            timezone: 'America/Los_Angeles',
+            times: ['01:30'],
+          },
+        },
+      },
+    } as never;
+    expect(nextMissionWakeAt(fallMission, new Date('2026-11-01T08:45:00Z'))).toEqual(
+      new Date('2026-11-02T09:30:00Z'),
+    );
+  });
+});
+
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   try {
@@ -55,7 +261,21 @@ beforeAll(async () => {
 afterAll(async () => {
   if (dbUp) {
     if (cleanupTaskIds.length) {
-      await db.delete(tasks).where(inArray(tasks.parentTaskId, cleanupTaskIds));
+      let parents = [...new Set(cleanupTaskIds)];
+      const descendantLevels: string[][] = [];
+      for (let depth = 0; depth < 32 && parents.length > 0; depth += 1) {
+        const children = await db
+          .select({ id: tasks.id })
+          .from(tasks)
+          .where(inArray(tasks.parentTaskId, parents));
+        parents = children.map(({ id }) => id);
+        if (parents.length > 0) descendantLevels.push(parents);
+      }
+      const allTaskIds = [...cleanupTaskIds, ...descendantLevels.flat()];
+      await db.delete(messages).where(inArray(messages.taskId, allTaskIds));
+      await db.delete(missionReports).where(inArray(missionReports.missionId, cleanupTaskIds));
+      for (const level of descendantLevels.reverse())
+        await db.delete(tasks).where(inArray(tasks.id, level));
       await db.delete(tasks).where(inArray(tasks.id, cleanupTaskIds));
     }
     if (cleanupScheduleIds.length) {
@@ -70,10 +290,11 @@ afterAll(async () => {
   await (db as unknown as { $client: { end: () => Promise<void> } }).$client?.end?.();
 });
 
-async function makeSourceTask() {
+async function makeSourceTask(goalId?: string) {
   const { task } = await enqueueTask(db, {
     event: { source: 'internal', agentId, trust: 'owner', payload: {} },
     type: 'adhoc',
+    goalId,
   });
   cleanupTaskIds.push(task.id);
   return task;
@@ -86,17 +307,47 @@ describe('missions (integration, scripted model)', () => {
     const mission = await startMission(
       db,
       source,
-      { ...basePlan, budgetSuggestionUsd: 50 }, // over the cap
+      {
+        ...basePlan,
+        budgetSuggestionUsd: 50, // over the cap
+        cadence: {
+          kind: 'local_times',
+          timezone: agentTimezone,
+          times: ['08:00', '20:00'],
+        },
+      },
       'Watch mortgage rates for 3 months',
+      {
+        timezone: agentTimezone,
+        ownerRequestText: `Check rates twice daily at 08:00 and 20:00 in ${agentTimezone}.`,
+      },
     );
     cleanupTaskIds.push(mission.id);
 
     expect(mission.type).toBe('mission');
+    expect(mission.trigger).toMatchObject({
+      payload: {
+        instruction: 'Watch mortgage rates for 3 months',
+        cadence: { kind: 'local_times', timezone: agentTimezone, times: ['08:00', '20:00'] },
+        cadenceLabel: expect.stringContaining(agentTimezone),
+      },
+    });
     expect(Number(mission.budgetUsdLimit)).toBeLessThanOrEqual(5); // capped
     expect(mission.deadline).toBeTruthy();
     const [row] = await db.select().from(tasks).where(eq(tasks.id, mission.id));
     expect(row?.reflectEvery).toBeTruthy();
     expect(row?.nextAction).toBe('check rates');
+  });
+
+  it('distinguishes a newly created mission from an unchanged replay', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const source = await makeSourceTask();
+    const first = await startMissionWithReceipt(db, source, basePlan, 'Replay-safe mission');
+    cleanupTaskIds.push(first.mission.id);
+    const replay = await startMissionWithReceipt(db, source, basePlan, 'Replay-safe mission');
+    expect(first.created).toBe(true);
+    expect(replay.created).toBe(false);
+    expect(replay.mission.id).toBe(first.mission.id);
   });
 
   it('a wake spawns a fresh session child seeded from mission state, then sleeps the mission', async (ctx) => {
@@ -128,6 +379,38 @@ describe('missions (integration, scripted model)', () => {
     expect(after?.status).toBe('sleeping');
     expect(after?.runAfter?.getTime()).toBeGreaterThan(Date.now());
     expect(taskState(after as NonNullable<typeof after>).step).toBe(1);
+  });
+
+  it('retains goal identity from source task through mission wake session', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const [goal] = await db
+      .insert(goals)
+      .values({ agentId, title: `test-mission-goal-${Date.now()}` })
+      .returning();
+    if (!goal) throw new Error('goal fixture was not created');
+    cleanupGoalIds.push(goal.id);
+    const source = await makeSourceTask(goal.id);
+    const mission = await startMission(db, source, basePlan, 'Continue this goal-scoped mission');
+    cleanupTaskIds.push(mission.id);
+    expect(mission.goalId).toBe(goal.id);
+
+    const claimed = await claimTask(db, mission.id);
+    expect(claimed).not.toBeNull();
+    const wake = await wakeMission(
+      { db, router: reflectingRouter({ decision: 'continue', reasoning: '' }) },
+      claimed as NonNullable<typeof claimed>,
+      await getAgent(db),
+    );
+    expect(wake.action).toBe('sessioned');
+    if (wake.action !== 'sessioned') return;
+    const [session] = await db.select().from(tasks).where(eq(tasks.id, wake.sessionTaskId));
+    expect(session?.parentTaskId).toBe(mission.id);
+    expect(session?.goalId).toBe(goal.id);
+    const payload = (session?.trigger as { payload?: { instruction?: string } } | undefined)
+      ?.payload;
+    expect(payload?.instruction).toContain(`mission ${mission.id}`);
+    expect(payload?.instruction).toContain(`goal ${goal.id}`);
+    expect(payload?.instruction).toContain('Continue this goal-scoped mission');
   });
 
   it('a session child stuck in needs_attention escalates the mission instead of stalling', async (ctx) => {
@@ -192,6 +475,71 @@ describe('missions (integration, scripted model)', () => {
     expect(children).toHaveLength(0);
   });
 
+  it('charges nested descendants to the original mission budget before another wake', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const agent = await getAgent(db);
+    const source = await makeSourceTask();
+    const mission = await startMission(db, source, basePlan, 'Keep effort within the root budget');
+    cleanupTaskIds.push(mission.id);
+    const { task: child } = await enqueueTask(db, {
+      event: { source: 'internal', agentId, trust: 'owner', payload: {} },
+      type: 'adhoc',
+      parentTaskId: mission.id,
+      budgetUsdLimit: '0.25',
+    });
+    const { task: grandchild } = await enqueueTask(db, {
+      event: { source: 'internal', agentId, trust: 'owner', payload: {} },
+      type: 'scheduled',
+      parentTaskId: child.id,
+      budgetUsdLimit: '0.25',
+    });
+    await db
+      .update(tasks)
+      .set({ spentUsd: Number(mission.budgetUsdLimit).toFixed(4) })
+      .where(eq(tasks.id, grandchild.id));
+
+    const claimed = await claimTask(db, mission.id);
+    expect(claimed).not.toBeNull();
+    const wake = await wakeMission(
+      { db, router: reflectingRouter({ decision: 'continue', reasoning: '' }) },
+      claimed as NonNullable<typeof claimed>,
+      agent,
+    );
+
+    expect(wake).toMatchObject({ action: 'reflected', decision: 'escalate' });
+    const [after] = await db.select().from(tasks).where(eq(tasks.id, mission.id));
+    expect(after?.status).toBe('needs_attention');
+    const children = await db.select().from(tasks).where(eq(tasks.parentTaskId, mission.id));
+    expect(children).toHaveLength(1);
+  });
+
+  it('limits each session child to the remaining authorized root budget', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const agent = await getAgent(db);
+    const source = await makeSourceTask();
+    const mission = await startMission(
+      db,
+      source,
+      { ...basePlan, budgetSuggestionUsd: 0.3 },
+      'Use only the remaining root budget',
+    );
+    cleanupTaskIds.push(mission.id);
+    await db.update(tasks).set({ spentUsd: '0.2000' }).where(eq(tasks.id, mission.id));
+
+    const claimed = await claimTask(db, mission.id);
+    expect(claimed).not.toBeNull();
+    const wake = await wakeMission(
+      { db, router: reflectingRouter({ decision: 'continue', reasoning: '' }) },
+      claimed as NonNullable<typeof claimed>,
+      agent,
+    );
+
+    expect(wake.action).toBe('sessioned');
+    if (wake.action !== 'sessioned') return;
+    const [child] = await db.select().from(tasks).where(eq(tasks.id, wake.sessionTaskId));
+    expect(Number(child?.budgetUsdLimit)).toBeCloseTo(0.1, 4);
+  });
+
   it('deadline reached → final report and done', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const source = await makeSourceTask();
@@ -213,6 +561,125 @@ describe('missions (integration, scripted model)', () => {
     expect(wake.action).toBe('deadline_reached');
     const [after] = await db.select().from(tasks).where(eq(tasks.id, mission.id));
     expect(after?.status).toBe('done');
+    const [report] = await db
+      .select()
+      .from(missionReports)
+      .where(eq(missionReports.missionId, mission.id));
+    expect(report?.chatStatus).toBe('delivered');
+    expect(report?.conversationId).toBeNull();
+    expect(
+      await db
+        .select()
+        .from(messages)
+        .where(eq(messages.channelMessageId, report?.id ?? '')),
+    ).toHaveLength(1);
+  });
+
+  it('recovers an append accepted before its receipt and retries only the failed owner leg', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const [conversation] = await db
+      .insert(conversations)
+      .values({
+        agentId,
+        channel: 'chat',
+        trust: 'owner',
+        title: `mission-report-${Date.now()}`,
+      })
+      .returning();
+    if (!conversation) throw new Error('Missing mission report conversation');
+    cleanupConversationIds.push(conversation.id);
+    const { task: source } = await enqueueTask(db, {
+      event: {
+        source: 'internal',
+        agentId,
+        conversationId: conversation.id,
+        trust: 'owner',
+        payload: {},
+      },
+      type: 'adhoc',
+    });
+    cleanupTaskIds.push(source.id);
+    const mission = await startMission(db, source, basePlan, 'Recover mission report');
+    cleanupTaskIds.push(mission.id);
+    await db
+      .update(tasks)
+      .set({ deadline: new Date(Date.now() - 1_000) })
+      .where(eq(tasks.id, mission.id));
+    const claimed = await claimTask(db, mission.id);
+    expect(claimed).not.toBeNull();
+    const realMessages = createPostgresMessageRepository(db);
+    const lostReceiptMessages = {
+      kind: 'message-repository' as const,
+      append: vi.fn(async (input: Parameters<typeof realMessages.append>[0]) => {
+        await realMessages.append(input);
+        throw new Error('worker stopped after append commit');
+      }),
+    };
+    const repository = createPostgresMissionRepository(db);
+    const ownerFailed = vi.fn(async () => ({
+      legs: [{ channel: 'push', status: 'failed' as const }],
+    }));
+    const deps = {
+      db,
+      router: reflectingRouter({ decision: 'continue', reasoning: '' }),
+      persistence: { missions: repository, messages: lostReceiptMessages },
+      notifyOwner: ownerFailed,
+    } as never;
+    const wake = await wakeMission(
+      deps,
+      claimed as NonNullable<typeof claimed>,
+      await getAgent(db),
+    );
+    expect(wake.action).toBe('deadline_reached');
+    const [report] = await db
+      .select()
+      .from(missionReports)
+      .where(eq(missionReports.missionId, mission.id));
+    expect(report).toMatchObject({ chatStatus: 'failed', ownerStatus: 'failed' });
+    if (!report) throw new Error('Mission report intent was not committed with terminal state');
+
+    await db
+      .update(missionReports)
+      .set({ nextAttemptAt: new Date(Date.now() - 1_000) })
+      .where(eq(missionReports.id, report.id));
+    const ownerDelivered = vi.fn(async () => ({
+      legs: [{ channel: 'push', status: 'delivered' as const }],
+    }));
+    let beginAppend!: () => void;
+    let finishAppend!: () => void;
+    const appendBegan = new Promise<void>((resolve) => (beginAppend = resolve));
+    const appendGate = new Promise<void>((resolve) => (finishAppend = resolve));
+    const slowMessages = {
+      kind: 'message-repository' as const,
+      append: vi.fn(async (input: Parameters<typeof realMessages.append>[0]) => {
+        beginAppend();
+        await appendGate;
+        return realMessages.append(input);
+      }),
+    };
+    const repairDeps = {
+      db,
+      agentId,
+      router: reflectingRouter({ decision: 'continue', reasoning: '' }),
+      persistence: { missions: repository, messages: slowMessages },
+      notifyOwner: ownerDelivered,
+    } as never;
+    const firstRepair = repairMissionReports(repairDeps, 1);
+    await appendBegan;
+    const concurrentRepair = repairMissionReports(repairDeps, 1);
+    finishAppend();
+    await Promise.all([firstRepair, concurrentRepair]);
+    const [repaired] = await db
+      .select()
+      .from(missionReports)
+      .where(eq(missionReports.id, report.id));
+    expect(repaired).toMatchObject({ chatStatus: 'delivered', ownerStatus: 'delivered' });
+    expect(ownerFailed).toHaveBeenCalledTimes(1);
+    expect(ownerDelivered).toHaveBeenCalledTimes(1);
+    expect(slowMessages.append).toHaveBeenCalledTimes(1);
+    expect(
+      await db.select().from(messages).where(eq(messages.channelMessageId, report.id)),
+    ).toHaveLength(1);
   });
 
   it('reflection due → applies the decision (escalate → needs_attention; abandon → cancelled)', async (ctx) => {

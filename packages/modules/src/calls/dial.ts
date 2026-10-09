@@ -13,8 +13,13 @@ import {
   type ResolvedVoiceModel,
   realtimeEstimatePerMinuteUsd,
 } from '@assistant/core/realtime-voice';
-import type { CallSessionRepository, CostRepository } from '@assistant/persistence';
+import type {
+  CallSessionRepository,
+  CallVoiceRouteSnapshot,
+  CostRepository,
+} from '@assistant/persistence';
 import {
+  AmbiguousTwilioDeliveryError,
   isAmbiguousTwilioDeliveryError,
   outboundCallTwiml,
   type StartCallInput,
@@ -29,7 +34,11 @@ export interface DialDeps {
   /** The owner the call belongs to. */
   ownerId(): Promise<string>;
   /** The configured voice model (throws with an owner-readable reason when none). */
-  voiceModel(): Promise<{ id: string; resolved: ResolvedVoiceModel }>;
+  voiceModel(): Promise<{
+    id: string;
+    resolved: ResolvedVoiceModel;
+    route: CallVoiceRouteSnapshot;
+  }>;
 }
 
 export class CallRefusedError extends Error {
@@ -57,13 +66,6 @@ export async function startCall(
   if (!deps.dialer.configured())
     throw new CallRefusedError('Phone calls are not set up yet (run pnpm setup:phone).');
   const agentId = await deps.ownerId();
-  if ((await deps.calls.activeCount(agentId)) > 0)
-    throw new CallRefusedError('Another call is still in progress; try again when it ends.');
-  const since = new Date(input.ctx.now().getTime() - 24 * 60 * 60_000);
-  if ((await deps.calls.countSince(agentId, since)) >= deps.config.CALL_DAILY_LIMIT)
-    throw new CallRefusedError(
-      `The daily limit of ${deps.config.CALL_DAILY_LIMIT} calls has been reached (CALL_DAILY_LIMIT).`,
-    );
   const voice = await deps.voiceModel();
   const brief = input.brief;
   const minutes = Math.min(brief.maxMinutes, deps.config.CALL_MAX_MINUTES);
@@ -83,27 +85,52 @@ export async function startCall(
 
   const streamToken = randomBytes(24).toString('hex');
   try {
-    await deps.calls.create({
-      id: input.callId,
-      agentId,
-      taskId: input.ctx.taskId,
-      toolCallId: input.ctx.execution.dbToolCallId,
-      status: 'dialing',
-      to: brief.to,
-      contactName: brief.contactName ?? null,
-      brief: { ...brief, maxMinutes: minutes },
-      voiceModel: voice.id,
-      maxMinutes: minutes,
-      streamTokenHash: hashCallbackToken(streamToken),
-      callbackToken: input.callbackToken,
-      reservationId: reservation.reservationId,
-    });
+    const admission = await deps.calls.admit(
+      {
+        id: input.callId,
+        agentId,
+        taskId: input.ctx.taskId,
+        toolCallId: input.ctx.execution.dbToolCallId,
+        status: 'dialing',
+        to: brief.to,
+        contactName: brief.contactName ?? null,
+        brief: { ...brief, maxMinutes: minutes },
+        voiceModel: voice.id,
+        voiceRoute: voice.route,
+        lineRate,
+        maxMinutes: minutes,
+        streamTokenHash: hashCallbackToken(streamToken),
+        callbackToken: input.callbackToken,
+        reservationId: reservation.reservationId,
+      },
+      { now: input.ctx.now(), dailyLimit: deps.config.CALL_DAILY_LIMIT },
+    );
+    if (admission.kind === 'active_limit')
+      throw new CallRefusedError('Another call is still in progress; try again when it ends.');
+    if (admission.kind === 'daily_limit')
+      throw new CallRefusedError(
+        `The daily limit of ${deps.config.CALL_DAILY_LIMIT} calls has been reached (CALL_DAILY_LIMIT).`,
+      );
+    if (admission.kind === 'existing') {
+      if (admission.call.twilioCallSid) {
+        await releaseReservation(deps.costs, reservation.reservationId);
+        return { callSid: admission.call.twilioCallSid };
+      }
+      if (admission.call.capacityReleasedAt)
+        throw new CallRefusedError(
+          'The prior call attempt was refused; start a new request to try again.',
+        );
+      throw new AmbiguousTwilioDeliveryError(
+        'The existing call admission may already have dialed; waiting for its outcome.',
+      );
+    }
   } catch (error) {
     await releaseReservation(deps.costs, reservation.reservationId).catch(() => {});
     throw error;
   }
 
   const statusUrl = new URL('/webhooks/twilio/voice-status', deps.config.PUBLIC_URL).toString();
+  let acceptedCallSid: string | undefined;
   try {
     const { sid } = await deps.dialer.placeCall({
       to: brief.to,
@@ -118,13 +145,20 @@ export async function startCall(
       // The disclosure plays before the minutes start counting for the model.
       timeLimitSeconds: minutes * 60 + 20,
     });
+    acceptedCallSid = sid;
     await deps.calls.update(input.callId, { twilioCallSid: sid });
     return { callSid: sid };
   } catch (error) {
+    if (acceptedCallSid)
+      throw new AmbiguousTwilioDeliveryError(
+        'The provider accepted the call but its receipt could not be saved; waiting for its outcome.',
+        error,
+      );
     if (!isAmbiguousTwilioDeliveryError(error)) {
       await deps.calls
         .finish(input.callId, { status: 'failed', error: String(error), endedAt: new Date() })
         .catch(() => {});
+      await deps.calls.releaseAdmission(input.callId, input.ctx.now()).catch(() => {});
       await releaseReservation(deps.costs, reservation.reservationId).catch(() => {});
     }
     throw error;

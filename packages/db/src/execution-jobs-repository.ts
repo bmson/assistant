@@ -8,7 +8,7 @@ import {
 } from '@assistant/persistence';
 import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
-import { approvals, files, tasks, toolCalls } from './schema.js';
+import { approvals, executionJobCallbackReceipts, files, tasks, toolCalls } from './schema.js';
 import { activeLease } from './task-lease-repository.js';
 
 const PENDING_KINDS = new Set([
@@ -211,9 +211,37 @@ export function createPostgresExecutionJobRepository(db: Db): ExecutionJobReposi
           .from(tasks)
           .where(eq(tasks.id, input.taskId))
           .for('update');
+        if (input.idempotencyKey) {
+          if (!input.tokenHash || !input.payloadDigest)
+            throw new Error('idempotent callback identity is incomplete');
+          const [receipt] = await tx
+            .select()
+            .from(executionJobCallbackReceipts)
+            .where(eq(executionJobCallbackReceipts.idempotencyKey, input.idempotencyKey));
+          if (receipt) {
+            if (
+              receipt.taskId !== input.taskId ||
+              receipt.tokenHash !== input.tokenHash ||
+              receipt.payloadDigest !== input.payloadDigest
+            )
+              return {
+                ok: false,
+                status: 409,
+                error: 'callback identity was already used for different content',
+              };
+            return {
+              ok: true,
+              taskId: receipt.taskId,
+              queueGeneration: receipt.queueGeneration,
+              replayed: true,
+            };
+          }
+        }
         const decision = decide(task ?? null);
         if (!decision.accept) return { ok: false, status: decision.status, error: decision.error };
         if (!task) throw new Error('execution job callback accepted a missing task');
+        if (!EXECUTION_JOB_CALLBACK_STATES.includes(task.status))
+          return { ok: false, status: 409, error: 'task is no longer waiting for this callback' };
 
         await tx
           .update(toolCalls)
@@ -242,9 +270,17 @@ export function createPostgresExecutionJobRepository(db: Db): ExecutionJobReposi
             and(eq(tasks.id, task.id), inArray(tasks.status, [...EXECUTION_JOB_CALLBACK_STATES])),
           )
           .returning({ id: tasks.id, queueGeneration: tasks.queueGeneration });
-        return woken
-          ? { ok: true, taskId: task.id, queueGeneration: woken.queueGeneration }
-          : { ok: false, status: 409, error: 'task is no longer waiting for this callback' };
+        if (!woken)
+          return { ok: false, status: 409, error: 'task is no longer waiting for this callback' };
+        if (input.idempotencyKey && input.tokenHash && input.payloadDigest)
+          await tx.insert(executionJobCallbackReceipts).values({
+            idempotencyKey: input.idempotencyKey,
+            taskId: task.id,
+            tokenHash: input.tokenHash,
+            payloadDigest: input.payloadDigest,
+            queueGeneration: woken.queueGeneration,
+          });
+        return { ok: true, taskId: task.id, queueGeneration: woken.queueGeneration };
       });
     },
   };

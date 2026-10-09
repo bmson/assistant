@@ -1,7 +1,7 @@
-import type { EmbeddingSpace } from './embedding.js';
+import { type EmbeddingSpace, validateEmbeddingSpace } from './embedding.js';
 import type { Records } from './records.js';
 
-/** Learned-skill vectors share the application's configured 1536-dimension space. */
+/** PostgreSQL's learned-skill vector column is physically fixed at 1536 dimensions. */
 export const SKILL_EMBEDDING_DIMENSIONS = 1536;
 export const DEFAULT_SKILL_RECALL_LIMIT = 4;
 export const MAX_SKILL_RECALL_LIMIT = 100;
@@ -35,6 +35,7 @@ export interface SkillContextMatch {
 export interface SkillRecallInput {
   agentId: string;
   embedding: number[];
+  embeddingSpaceKey: string;
   limit?: number;
   minSimilarity?: number;
 }
@@ -71,21 +72,27 @@ export function skillRecallBounds(input: Pick<SkillRecallInput, 'limit' | 'minSi
   return { limit, minSimilarity };
 }
 
-export function validateSkillEmbedding(embedding: number[]): void {
+export function validateSkillEmbedding(
+  embedding: number[],
+  dimensions = SKILL_EMBEDDING_DIMENSIONS,
+): void {
   if (
-    embedding.length !== SKILL_EMBEDDING_DIMENSIONS ||
-    !embedding.every(Number.isFinite) ||
+    !Number.isInteger(dimensions) ||
+    dimensions < 1 ||
+    dimensions > 2048 ||
+    !Array.isArray(embedding) ||
+    embedding.length !== dimensions ||
+    !Array.from(embedding).every(Number.isFinite) ||
     !embedding.some((value) => value !== 0)
   )
     throw new Error('Invalid learned-skill embedding');
 }
 
+/** Firestore learned-skill vectors follow any valid configured space width. */
 export function validateSkillEmbeddingSpace(space: EmbeddingSpace): void {
-  if (
-    !space.provider ||
-    !space.model ||
-    !space.revision ||
-    space.dimensions !== SKILL_EMBEDDING_DIMENSIONS
-  )
+  try {
+    validateEmbeddingSpace(space);
+  } catch {
     throw new Error('Invalid learned-skill embedding space');
+  }
 }

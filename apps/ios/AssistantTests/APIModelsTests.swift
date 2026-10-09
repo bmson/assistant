@@ -4,6 +4,83 @@ import CoreLocation
 @testable import Assistant
 
 extension APIModelsTests {
+    func testCallCheckinDecodesExactRevisionAndLeavesLegacyRevisionUnknown() throws {
+        let current = try JSONDecoder().decode(PhoneCallCheckin.self, from: Data(#"{"id":"c1","revision":3,"question":"Proceed?","answer":null}"#.utf8))
+        let legacy = try JSONDecoder().decode(PhoneCallCheckin.self, from: Data(#"{"id":"c2","question":"Proceed?","answer":null}"#.utf8))
+        XCTAssertEqual(current.revision, 3)
+        XCTAssertNil(legacy.revision)
+    }
+
+    func testArchiveOldActivityProgressExposesDurableContinuation() throws {
+        let progress = try JSONDecoder().decode(
+            ArchiveOldActivityProgress.self,
+            from: Data(#"{"ok":true,"operationId":"123e4567-e89b-12d3-a456-426614174000","scannedThisBatch":250,"archivedThisBatch":241,"scannedTotal":500,"archivedTotal":481,"complete":false}"#.utf8)
+        )
+        XCTAssertEqual(progress.operationId, "123e4567-e89b-12d3-a456-426614174000")
+        XCTAssertEqual(progress.archivedTotal, 481)
+        XCTAssertFalse(progress.complete)
+    }
+
+    func testWorkspaceSectionAvailabilityRequiresKnownAvailableVersion() throws {
+        let available = try JSONDecoder().decode(
+            WorkspaceSectionAvailability.self,
+            from: Data(#"{"status":"available","version":1}"#.utf8)
+        )
+        let unavailable = try JSONDecoder().decode(
+            WorkspaceSectionAvailability.self,
+            from: Data(#"{"status":"unavailable","version":1,"message":"Retry"}"#.utf8)
+        )
+        let future = try JSONDecoder().decode(
+            WorkspaceSectionAvailability.self,
+            from: Data(#"{"status":"available","version":2}"#.utf8)
+        )
+        XCTAssertTrue(available.isAvailable)
+        XCTAssertFalse(unavailable.isAvailable)
+        XCTAssertFalse(future.isAvailable)
+    }
+
+    func testWorkspaceSectionPageDecodesLiveCursorAndAvailability() throws {
+        let page = try JSONDecoder().decode(
+            WorkspaceSectionPage<JSONValue>.self,
+            from: Data(#"{"section":"skills","items":["skill-a"],"pagination":{"version":1,"consistency":"live-keyset","pageSize":50,"hasMore":true,"complete":false,"nextCursor":"opaque"},"availability":{"status":"available","version":1}}"#.utf8)
+        )
+        XCTAssertEqual(page.section, "skills")
+        XCTAssertEqual(page.pagination.pageSize, 50)
+        XCTAssertTrue(page.pagination.hasMore)
+        XCTAssertFalse(page.pagination.complete)
+        XCTAssertEqual(page.pagination.nextCursor, "opaque")
+        XCTAssertTrue(page.availability.isAvailable)
+    }
+
+    func testWorkspacePaginationIndexKeepsCurrentAndArchivedChatCursorsSeparate() throws {
+        let index = try JSONDecoder().decode(
+            WorkspaceSectionPaginationIndex.self,
+            from: Data(#"{"chats":{"current":{"endpoint":"/current","pageSize":50,"loaded":50,"hasMore":true,"complete":false,"nextCursor":"current-cursor","archived":false},"archived":{"endpoint":"/archived","pageSize":50,"loaded":12,"hasMore":false,"complete":true,"nextCursor":null,"archived":true}},"skills":{"endpoint":"/skills","pageSize":50,"loaded":50,"hasMore":true,"complete":false,"nextCursor":"skills-cursor","archived":null}}"#.utf8)
+        )
+        XCTAssertEqual(index.chats?.current.nextCursor, "current-cursor")
+        XCTAssertEqual(index.chats?.archived.nextCursor, nil)
+        XCTAssertEqual(index.skills?.loaded, 50)
+    }
+
+    func testDocumentAndPeoplePaginationMetadataIsOptionalButMustBeConsistent() throws {
+        let legacy = try JSONDecoder().decode(
+            DocumentsOverview.self,
+            from: Data(#"{"documents":[],"stats":{"total":0,"ready":0,"pending":0,"chunks":0},"primaryConversationId":"primary"}"#.utf8)
+        )
+        XCTAssertNil(legacy.pagination)
+
+        let valid = try JSONDecoder().decode(
+            CursorPagination.self,
+            from: Data(#"{"version":1,"consistency":"live-keyset","pageSize":50,"hasMore":true,"complete":false,"nextCursor":"opaque"}"#.utf8)
+        )
+        XCTAssertTrue(valid.isSupported)
+        let malformed = try JSONDecoder().decode(
+            CursorPagination.self,
+            from: Data(#"{"version":1,"consistency":"live-keyset","pageSize":50,"hasMore":true,"complete":true,"nextCursor":null}"#.utf8)
+        )
+        XCTAssertFalse(malformed.isSupported)
+    }
+
     func testDecisionReceiptsSeparatePermissionFromExecution() {
         let approved = DecisionReceiptPresentation(part: .init(type: "approval", status: "approved"))
         XCTAssertEqual(approved.title, "Approved")
@@ -116,7 +193,8 @@ extension APIModelsTests {
         XCTAssertEqual(RepairPresentation(status: "testing").title, "Testing")
         XCTAssertEqual(RepairPresentation(status: "merged").title, "Awaiting deployment")
         XCTAssertFalse(RepairPresentation(status: "merged").canConfirmFixed)
-        let deployed = RepairPresentation(status: "monitoring")
+        XCTAssertFalse(RepairPresentation(status: "monitoring").canConfirmFixed)
+        let deployed = RepairPresentation(status: "monitoring", deploymentConfirmed: true)
         XCTAssertEqual(deployed.title, "Deployed · needs confirmation")
         XCTAssertTrue(deployed.canConfirmFixed)
         XCTAssertFalse(deployed.isClosed)
@@ -265,7 +343,7 @@ final class APIModelsTests: XCTestCase {
             title: card.title, subtitle: "", sourceLabel: card.sourceLabel, icon: card.icon,
             accessibilityLabel: card.accessibilityLabel, facts: card.facts,
             blocks: [timeline, .init(id: "note1", type: "note", values: [:]), .init(id: "note2", type: "note", values: [:])],
-            actions: [], steps: [])
+            actions: [], form: nil, steps: [])
         let split = long.blockSections
         XCTAssertEqual(split.preview.map(\.id), ["timeline", "note1"])
         XCTAssertEqual(split.details.map(\.id), ["timeline-continued", "note2"])
@@ -1217,13 +1295,23 @@ final class APIModelsTests: XCTestCase {
         let data = """
         {"id":"reply-1","role":"assistant","parts":[
           {"type":"text","text":"Here is the answer."},
-          {"type":"recall","sources":[{"date":"2026-08-24","label":"Works at Acme","kind":"knowledge_graph","hops":2}]}
+          {"type":"recall","sources":[
+            {"date":"2026-08-24","label":"Works at Acme","kind":"knowledge_graph","hops":2,"surfaceKey":"\(String(repeating: "a", count: 64))","sourceRevision":"\(String(repeating: "b", count: 64))"},
+            {"date":"2026-08-25","label":"Chose Portland","kind":"situation_decision","hops":1,"surfaceKey":"\(String(repeating: "c", count: 64))","sourceRevision":"\(String(repeating: "d", count: 64))"},
+            {"date":"2026-08-26","label":"Find a venue","kind":"commitment","hops":1,"surfaceKey":"\(String(repeating: "e", count: 64))","sourceRevision":"\(String(repeating: "f", count: 64))"},
+            {"date":"2026-08-27","label":"Future source","kind":"new_kind","hops":1}
+          ]}
         ]}
         """.data(using: .utf8)!
         let message = try JSONDecoder().decode(ChatMessage.self, from: data)
-        XCTAssertEqual(message.recallSources.count, 1)
+        XCTAssertEqual(message.recallSources.count, 4)
         XCTAssertTrue(message.recallSources[0].isKnowledgeGraph)
         XCTAssertEqual(message.recallSources[0].hops, 2)
+        XCTAssertTrue(message.recallSources[0].hasCurrentLedgerReference)
+        XCTAssertEqual(message.recallSources[1].displayGroup, "saved decisions")
+        XCTAssertEqual(message.recallSources[2].displayGroup, "commitments")
+        XCTAssertEqual(message.recallSources[3].displayGroup, "saved context")
+        XCTAssertFalse(message.recallSources[3].hasCurrentLedgerReference)
     }
 
     func testResponseCardsUseStructuredPartsBeforeTextFallback() {
@@ -1321,6 +1409,142 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(section.children.first?.values["factIds"]?.arrayStrings, ["gate", "seat"])
     }
 
+    func testNativeGeneratedCardCatalogAcceptsEverySharedBlockRule() {
+        let facts: [JSONValue] = [
+            generatedFact("name", "Concert", label: "Name"),
+            generatedFact("name2", "Festival", label: "Other"),
+            generatedFact("number", "12", label: "Count"),
+            generatedFact("number2", "18", label: "Total"),
+            generatedFact("percent", "75%", label: "Progress"),
+            generatedFact("date", "2026-10-07T12:00:00Z", label: "Date"),
+            generatedFact("url", "https://example.com/photo.png", label: "Image"),
+            generatedFact("place", "Central Park", label: "Place"),
+        ]
+        let validBlocks: [[String: JSONValue]] = [
+            ["type": .string("hero"), "titleFact": .string("name"), "subtitleFact": .string("name2")],
+            ["type": .string("facts"), "factIds": .array([.string("name")])],
+            ["type": .string("timeline"), "factIds": .array([.string("name")])],
+            ["type": .string("score"), "leftLabelFact": .string("name"), "leftValueFact": .string("number"), "rightLabelFact": .string("name2"), "rightValueFact": .string("number2"), "statusFact": .string("percent")],
+            ["type": .string("code"), "valueFact": .string("name"), "format": .string("text")],
+            ["type": .string("image"), "urlFact": .string("url"), "altFact": .string("name")],
+            ["type": .string("note"), "factId": .string("name")],
+            ["type": .string("metrics"), "factIds": .array([.string("number"), .string("number2")])],
+            ["type": .string("journey"), "mode": .string("train"), "fromFact": .string("name"), "toFact": .string("name2")],
+            ["type": .string("progress"), "valueFact": .string("percent")],
+            ["type": .string("stages"), "factIds": .array([.string("name"), .string("name2")]), "currentFact": .string("name")],
+            ["type": .string("countdown"), "dateFact": .string("date")],
+            ["type": .string("table"), "columns": .array([.string("First"), .string("Second")]), "rows": .array([.array([.string("name"), .string("name2")])])],
+            ["type": .string("chart"), "kind": .string("bar"), "points": .array([.object(["labelFact": .string("name"), "valueFact": .string("number")]), .object(["labelFact": .string("name2"), "valueFact": .string("number2")])])],
+            ["type": .string("checklist"), "factIds": .array([.string("name")])],
+            ["type": .string("map"), "placeFactIds": .array([.string("place")])],
+        ]
+        for block in validBlocks {
+            XCTAssertTrue(nativeCardIsComplete(blocks: [.object(block)], facts: facts), "\(block["type"]?.string ?? "?") should follow the shared registry")
+        }
+        XCTAssertTrue(nativeCardIsComplete(blocks: [
+            .object(["type": .string("section"), "title": .string("Details"), "blocks": .array([
+                .object(["type": .string("note"), "factId": .string("name")]),
+                .object(["type": .string("facts"), "factIds": .array([.string("name2")])]),
+            ])]),
+        ], facts: facts))
+    }
+
+    func testNativeGeneratedCardCatalogRejectsMalformedShapesAndPrivateComputedValues() {
+        let facts: [JSONValue] = [
+            generatedFact("a", "12", label: "A"),
+            generatedFact("b", "18", label: "B"),
+            generatedFact("private", "64.1, -21.9", label: "Private coordinates", sensitive: true),
+            generatedFact("date", "2026-10-07T12:00:00Z", label: "Date"),
+            generatedFact("wall-clock", "7:00 PM", label: "Unzoned time"),
+            generatedFact("image", "https://user:secret@example.com/image.png", label: "Image"),
+        ]
+        let badBlocks: [[String: JSONValue]] = [
+            ["type": .string("hero"), "titleFact": .string("missing")],
+            ["type": .string("hero"), "titleFact": .string("a"), "subtitleFact": .string("missing")],
+            ["type": .string("code"), "valueFact": .string("a"), "format": .string("qr-code")],
+            ["type": .string("journey"), "mode": .string("spaceship"), "fromFact": .string("a"), "toFact": .string("b")],
+            ["type": .string("facts"), "factIds": .array((0..<9).map { .string($0 == 0 ? "a" : "b") })],
+            ["type": .string("table"), "columns": .array([.string("A"), .string("B")]), "rows": .array([.array([.string("a")])])],
+            ["type": .string("table"), "columns": .array([.string("A"), .string("B")]), "rows": .array([.array([.string("a"), .string("missing")])])],
+            ["type": .string("table"), "columns": .array(Array(repeating: .string("Column"), count: 5)), "rows": .array([.array(Array(repeating: .string("a"), count: 5))])],
+            ["type": .string("table"), "columns": .array([.string("A"), .string("B")]), "rows": .array([])],
+            ["type": .string("chart"), "kind": .string("pie"), "points": .array([.object(["labelFact": .string("a"), "valueFact": .string("a")]), .object(["labelFact": .string("b"), "valueFact": .string("b")])])],
+            ["type": .string("chart"), "kind": .string("bar"), "points": .array([.object(["labelFact": .string("a"), "valueFact": .string("date")]), .object(["labelFact": .string("b"), "valueFact": .string("b")])])],
+            ["type": .string("chart"), "kind": .string("bar"), "points": .array([.object(["labelFact": .string("a"), "valueFact": .string("private")]), .object(["labelFact": .string("b"), "valueFact": .string("b")])])],
+            ["type": .string("chart"), "kind": .string("bar"), "points": .array(Array(repeating: .object(["labelFact": .string("a"), "valueFact": .string("b")]), count: 13))],
+            ["type": .string("metrics"), "factIds": .array([.string("a"), .string("b"), .string("private"), .string("date"), .string("image")])],
+            ["type": .string("map"), "placeFactIds": .array([.string("private")])],
+            ["type": .string("map"), "placeFactIds": .array(Array(repeating: .string("a"), count: 7))],
+            ["type": .string("progress"), "valueFact": .string("private")],
+            ["type": .string("progress"), "valueFact": .string("a")],
+            ["type": .string("countdown"), "dateFact": .string("wall-clock")],
+            ["type": .string("image"), "urlFact": .string("image")],
+            ["type": .string("section"), "title": .string(String(repeating: "x", count: 61)), "blocks": .array([.object(["type": .string("note"), "factId": .string("a")])])],
+            ["type": .string("section"), "title": .string("Too many"), "blocks": .array(Array(repeating: .object(["type": .string("note"), "factId": .string("a")]), count: 7))],
+            ["type": .string("section"), "title": .string("Nested"), "blocks": .array([.object(["type": .string("section"), "title": .string("Child"), "blocks": .array([.object(["type": .string("note"), "factId": .string("a")])])])])],
+        ]
+        for block in badBlocks {
+            XCTAssertFalse(nativeCardIsComplete(blocks: [.object(block)], facts: facts), "malformed \(block["type"]?.string ?? "?") must keep the answer prose")
+        }
+        XCTAssertFalse(nativeCardIsComplete(blocks: [.object(["type": .string("facts"), "factIds": .array([.string("unknown")])])], facts: facts))
+        XCTAssertFalse(nativeCardIsComplete(blocks: [.object(["type": .string("toString")])], facts: facts))
+        XCTAssertFalse(nativeCardIsComplete(blocks: [.string("malformed block")], facts: facts))
+        XCTAssertFalse(nativeCardIsComplete(blocks: [.object(["type": .string("note"), "factId": .string("a")])], facts: facts + [generatedFact("a", "duplicate", label: "Duplicate")]))
+        XCTAssertFalse(nativeCardIsComplete(blocks: [.object(["type": .string("note"), "factId": .string("a")])], facts: facts, extraSpec: ["title": .string(String(repeating: "t", count: 101))]))
+        XCTAssertFalse(nativeCardIsComplete(blocks: [.object(["type": .string("note"), "factId": .string("a")])], facts: facts, extraSpec: ["actions": .array([.object(["id": .string("bad id"), "type": .string("copy_value"), "label": .string("Copy"), "factId": .string("a")])])]))
+        XCTAssertFalse(nativeCardIsComplete(blocks: [.object(["type": .string("note"), "factId": .string("a")])], facts: facts, extraSpec: ["actions": .array([.object(["id": .string("action"), "type": .string("add_to_calendar"), "label": .string("Add"), "startFact": .string("missing")])])]))
+        XCTAssertFalse(nativeCardIsComplete(blocks: [.object(["type": .string("note"), "factId": .string("a")])], facts: facts, extraSpec: ["actions": .array(Array(repeating: .object(["id": .string("action"), "type": .string("refresh"), "label": .string("Refresh")]), count: 7))]))
+    }
+
+    func testMalformedWireBlockCannotDisappearBeforeNativeCompletenessDecision() {
+        let spec: [String: JSONValue] = [
+            "version": .number(1),
+            "title": .string("Card title"),
+            "sourceLabel": .string("Calendar"),
+            "accessibilityLabel": .string("Calendar card"),
+            "facts": .array([generatedFact("event", "Review", label: "Event")]),
+            "blocks": .array([
+                .object(["type": .string("hero"), "titleFact": .string("event")]),
+                .string("malformed sibling"),
+            ]),
+        ]
+        let part = MessagePart(type: "data-card", data: .object([
+            "kind": .string("generated-card"), "id": .string("card"), "spec": .object(spec),
+        ]))
+        guard case let .generated(card)? = MessageResponseCard(part: part) else {
+            return XCTFail("The malformed sibling must not prevent safe decoding of the card itself")
+        }
+        XCTAssertEqual(card.blocks.count, 1, "The presentation model may omit an unrenderable item")
+        XCTAssertFalse(card.hasCompleteNativeComposition, "Admission must inspect the original wire spec")
+        XCTAssertFalse(MessageResponseCard.replacesProse([.generated(card)]))
+    }
+
+    func testNativeGeneratedCardSpecChecksCoreCountAndFactBounds() {
+        let oneBlock: [JSONValue] = [.object(["type": .string("note"), "factId": .string("event")])]
+        let fact = generatedFact("event", "Review", label: "Event")
+        XCTAssertFalse(nativeCardIsComplete(blocks: Array(repeating: oneBlock[0], count: 13), facts: [fact]))
+        XCTAssertFalse(nativeCardIsComplete(blocks: oneBlock, facts: Array(repeating: fact, count: 41)))
+        XCTAssertFalse(nativeCardIsComplete(blocks: oneBlock, facts: [.object(["id": .string("bad id"), "value": .string("Review"), "label": .string("Event"), "source": .string("Fixture source")])]))
+        XCTAssertFalse(nativeCardIsComplete(blocks: oneBlock, facts: [.object(["id": .string("event"), "value": .string(String(repeating: "x", count: 501)), "label": .string("Event"), "source": .string("Fixture source")])]))
+    }
+
+    private func generatedFact(_ id: String, _ value: String, label: String, sensitive: Bool = false) -> JSONValue {
+        .object([
+            "id": .string(id), "value": .string(value), "label": .string(label),
+            "source": .string("Fixture source"), "sensitive": .bool(sensitive),
+        ])
+    }
+
+    private func nativeCardIsComplete(blocks: [JSONValue], facts: [JSONValue], extraSpec: [String: JSONValue] = [:]) -> Bool {
+        var spec: [String: JSONValue] = [
+            "version": .number(1), "title": .string("Fixture card"),
+            "sourceLabel": .string("Fixture source"), "accessibilityLabel": .string("Fixture card"),
+            "facts": .array(facts), "blocks": .array(blocks),
+        ]
+        spec.merge(extraSpec) { _, new in new }
+        return NativeGeneratedCardCatalog.supportsComplete(spec: spec)
+    }
+
     func testGeneratedCardValuesReadOnlyWhatTheServerAdmits() {
         XCTAssertEqual(GeneratedCardValue.number("1,190 USD"), 1190)
         XCTAssertEqual(GeneratedCardValue.number("$38.50"), 38.5)
@@ -1345,11 +1569,13 @@ final class APIModelsTests: XCTestCase {
 
     func testCardActionsOpenACalendarDraftAndShareWithoutSecrets() {
         let draft = CalendarDraft(
+            identity: "card-1:add-calendar",
             title: "FI614 to New York",
             start: "2026-10-02T17:05:00+00:00",
             end: "2026-10-02T18:35:00-04:00",
             location: "Reykjavik (KEF)"
         )
+        XCTAssertEqual(draft?.id, "card-1:add-calendar")
         XCTAssertEqual(draft?.timeZone.secondsFromGMT(), 0)
         XCTAssertEqual(draft.map { $0.end.timeIntervalSince($0.start) }, 5.5 * 3600)
         XCTAssertNil(CalendarDraft(title: "x", start: "16:40", end: nil, location: nil))
@@ -1869,6 +2095,52 @@ final class APIModelsTests: XCTestCase {
         // A build that sends no grounding is a lookup card, the older contract.
         XCTAssertFalse(card(grounding: nil).summarizesAnswer)
         XCTAssertFalse(MessageResponseCard.replacesProse([]))
+    }
+
+    func testUnknownOrMalformedNativeCompositionPreservesCompleteReplyText() {
+        func card(blocks: [JSONValue]) -> MessageResponseCard {
+            let part = MessagePart(type: "data-card", data: .object([
+                "kind": .string("generated-card"),
+                "id": .string("card-compat"),
+                "grounding": .string("evidence"),
+                "spec": .object([
+                    "version": .number(1),
+                    "title": .string("Trip overview"),
+                    "sourceLabel": .string("Calendar and booking"),
+                    "facts": .array([
+                        .object(["id": .string("place"), "label": .string("Venue"), "value": .string("Bernal Intermediate")]),
+                    ]),
+                    "blocks": .array(blocks),
+                ]),
+            ]))
+            guard let card = MessageResponseCard(part: part) else {
+                XCTFail("Expected the generated card to remain available as a safe partial view")
+                return .duration(title: "", duration: "", detail: nil, confidence: nil)
+            }
+            return card
+        }
+
+        let unknown = card(blocks: [
+            .object(["type": .string("future_component"), "secret": .string("not rendered")]),
+        ])
+        XCTAssertFalse(MessageResponseCard.replacesProse([unknown]))
+
+        let unresolvedReference = card(blocks: [
+            .object(["type": .string("facts"), "factIds": .array([.string("missing")])]),
+        ])
+        XCTAssertFalse(MessageResponseCard.replacesProse([unresolvedReference]))
+
+        let mixedSection = card(blocks: [
+            .object([
+                "type": .string("section"),
+                "title": .string("Today"),
+                "blocks": .array([
+                    .object(["type": .string("facts"), "factIds": .array([.string("place")])]),
+                    .object(["type": .string("future_component")]),
+                ]),
+            ]),
+        ])
+        XCTAssertFalse(MessageResponseCard.replacesProse([mixedSection]))
     }
 
     func testRuntimeCorrectionDoesNotAnswerAnUnrelatedLatestQuestion() {
@@ -2917,6 +3189,48 @@ enum RelationshipGraphFixture {
 }
 
 extension APIModelsTests {
+    func testRelationshipMapUsesFocusSpecificAssertionWordingAndLegacyFallback() throws {
+        let forward = KnowledgeAssertionEndpointView(
+            assertionId: "assertion-1", semanticRevision: 3,
+            focusEntityId: "parent", relatedEntityId: "child", direction: "forward",
+            subjectEntityId: "parent", predicate: "parent_of", objectEntityId: "child",
+            text: "Parent is the parent of Child", accessibilityText: "Parent is the parent of Child",
+            evidenceCount: 2, reviewStatus: "confirmed"
+        )
+        let inverse = KnowledgeAssertionEndpointView(
+            assertionId: "assertion-1", semanticRevision: 3,
+            focusEntityId: "child", relatedEntityId: "parent", direction: "inverse",
+            subjectEntityId: "parent", predicate: "parent_of", objectEntityId: "child",
+            text: "Child is the child of Parent", accessibilityText: "Child is the child of Parent",
+            evidenceCount: 2, reviewStatus: "confirmed"
+        )
+        let presentation = KnowledgePresentation(
+            sentence: "Parent is the parent of Child", label: "Parent", accessibleLabel: "Parent is the parent of Child"
+        )
+        let edge = RelationshipGraphEdge(
+            id: "edge-1", subjectId: "parent", objectId: "child", predicate: "parent_of",
+            reviewStatus: "confirmed", sourceContent: "Parent is the parent of Child",
+            presentation: presentation, validFrom: nil, validUntil: nil,
+            endpointViews: [forward, inverse]
+        )
+
+        XCTAssertEqual(edge.displayText(focusedAt: "parent"), "Parent is the parent of Child")
+        XCTAssertEqual(edge.displayText(focusedAt: "child"), "Child is the child of Parent")
+        XCTAssertEqual(edge.accessibilityText(focusedAt: "child"), "Child is the child of Parent")
+        XCTAssertEqual(edge.label(focusedAt: "child"), "Child is the child of Parent")
+        XCTAssertEqual(edge.displayText(focusedAt: "unrelated"), presentation.sentence)
+
+        let oldPayload = """
+        {"id":"old-edge","subjectId":"parent","objectId":"child","predicate":"parent_of",
+         "reviewStatus":"confirmed","sourceContent":"Parent is the parent of Child",
+         "presentation":{"sentence":"Parent is the parent of Child","label":"Parent",
+         "accessibleLabel":"Parent is the parent of Child"},"validFrom":null,"validUntil":null}
+        """.data(using: .utf8)!
+        let oldEdge = try JSONDecoder().decode(RelationshipGraphEdge.self, from: oldPayload)
+        XCTAssertNil(oldEdge.endpointViews)
+        XCTAssertEqual(oldEdge.displayText(focusedAt: "child"), "Parent is the parent of Child")
+    }
+
     func testForceGraphUsesTopologyRatherThanDuplicateSourceWeights() {
         let a = RelationshipGraphFixture.edge("a", from: "node-0", to: "node-1")
         let b = RelationshipGraphFixture.edge("b", from: "node-0", to: "node-1")
@@ -3409,6 +3723,153 @@ extension APIModelsTests {
 }
 
 extension APIModelsTests {
+    func testUntrustedCardIntegersAreExactlyRepresentableOrNil() {
+        XCTAssertEqual(JSONValue.number(12).integerValue, 12)
+        XCTAssertEqual(JSONValue.number(Double(Int.min)).integerValue, Int.min)
+        XCTAssertNil(JSONValue.number(1e30).integerValue)
+        XCTAssertNil(JSONValue.number(-1e30).integerValue)
+        XCTAssertNil(JSONValue.number(Double(Int.max)).integerValue)
+        XCTAssertNil(JSONValue.number(12.5).integerValue)
+        XCTAssertNil(JSONValue.number(.infinity).integerValue)
+        XCTAssertNil(JSONValue.number(.nan).integerValue)
+    }
+
+    func testDuplicateKnowledgeCardNodeIDsAreDroppedWithoutTrapping() {
+        let part = MessagePart(type: "data-card", data: .object([
+            "kind": .string("knowledge-graph"),
+            "nodes": .array([
+                .object(["id": .string("same"), "label": .string("First")]),
+                .object(["id": .string("same"), "label": .string("Second")]),
+            ]),
+            "edges": .array([]),
+        ]))
+        XCTAssertNil(MessageResponseCard(part: part))
+    }
+
+    func testOutOfRangeCardMeasurementsAndSheetIntegersDegradeSafely() throws {
+        let weather = MessagePart(type: "data-card", data: .object([
+            "kind": .string("weather"), "location": .string("Somewhere"),
+            "temperature": .string("unknown"), "condition": .string("unknown"),
+            "forecast": .object([
+                "days": .array([.object([
+                    "weekday": .string("Today"), "lowC": .number(1e30), "highC": .number(1e30),
+                    "precipPct": .number(1e30),
+                ])]),
+                "current": .object([
+                    "windKmh": .number(1e30), "humidity": .number(1e30), "precipPct": .number(1e30),
+                ]),
+            ]),
+        ]))
+        guard case let .weather(_, _, _, _, _, forecast)? = MessageResponseCard(part: weather) else {
+            return XCTFail("Expected weather card")
+        }
+        XCTAssertTrue(forecast.days.isEmpty)
+        XCTAssertEqual(forecast.current?.windKmh, nil)
+        XCTAssertEqual(forecast.current?.humidity, nil)
+        XCTAssertEqual(forecast.current?.precipPct, nil)
+
+        let sheet = MessagePart(type: "data-card", data: .object([
+            "kind": .string("sheet-rows"), "rows": .array([.array([.number(1e30)])]),
+        ]))
+        guard case let .sheetRows(_, _, rows, _, _)? = MessageResponseCard(part: sheet) else {
+            return XCTFail("Expected sheet rows card")
+        }
+        XCTAssertEqual(rows.first?.first, String(1e30))
+    }
+
+    func testAvailabilityRequiresExplicitCompletenessAndNamedCalendarCoverage() {
+        func decoded(
+            complete: JSONValue?,
+            calendars: [JSONValue],
+            busy: JSONValue? = .array([])
+        ) -> (Bool, [String])? {
+            var fields: [String: JSONValue] = [
+                "kind": .string("availability"),
+                "calendarsChecked": .array(calendars),
+            ]
+            if let complete { fields["complete"] = complete }
+            if let busy { fields["busy"] = busy }
+            let part = MessagePart(type: "data-card", data: .object(fields))
+            guard case let .availability(_, _, _, _, checked, isComplete, _)? = MessageResponseCard(part: part) else {
+                return nil
+            }
+            return (isComplete, checked)
+        }
+
+        let missing = decoded(complete: nil, calendars: [.string("Work")])
+        XCTAssertFalse(missing?.0 ?? true)
+        let missingBusy = decoded(complete: .bool(true), calendars: [.string("Work")], busy: nil)
+        XCTAssertFalse(missingBusy?.0 ?? true)
+        let calendarSets: [[JSONValue]] = [[], [.string("Work")], [.string("Work"), .string("Family")]]
+        for calendars in calendarSets {
+            let incomplete = decoded(complete: .bool(false), calendars: calendars, busy: .array([]))
+            XCTAssertFalse(incomplete?.0 ?? true)
+        }
+        let empty = decoded(complete: .bool(true), calendars: [])
+        XCTAssertFalse(empty?.0 ?? true)
+        let blankNames = decoded(complete: .bool(true), calendars: [.string("  "), .string("\n")])
+        XCTAssertEqual(blankNames?.1, [])
+        XCTAssertFalse(blankNames?.0 ?? true)
+        let checked = decoded(complete: .bool(true), calendars: [.string(" Work ")])
+        XCTAssertEqual(checked?.1, ["Work"])
+        XCTAssertTrue(checked?.0 ?? false)
+    }
+
+    func testAvailabilityRejectsMalformedBusyArraysAndIntervalsAsIncomplete() {
+        func decode(busy: JSONValue) -> (Int, Bool)? {
+            let part = MessagePart(type: "data-card", data: .object([
+                "kind": .string("availability"),
+                "calendarsChecked": .array([.string("Work")]),
+                "complete": .bool(true),
+                "busy": busy,
+            ]))
+            guard case let .availability(_, _, _, rows, _, complete, _)? = MessageResponseCard(part: part) else {
+                return nil
+            }
+            return (rows.count, complete)
+        }
+
+        let valid = JSONValue.object([
+            "start": .string("2026-10-07T09:00:00Z"),
+            "end": .string("2026-10-07T10:00:00Z"),
+            "calendar": .string("Work"),
+        ])
+        let malformed = JSONValue.object([
+            "start": .string("not-a-date"),
+            "end": .string("2026-10-07T10:00:00Z"),
+        ])
+        let reversed = JSONValue.object([
+            "start": .string("2026-10-07T11:00:00Z"),
+            "end": .string("2026-10-07T10:00:00Z"),
+        ])
+        let zeroDuration = JSONValue.object([
+            "start": .string("2026-10-07T10:00:00Z"),
+            "end": .string("2026-10-07T10:00:00Z"),
+        ])
+
+        let validResult = decode(busy: .array([valid]))
+        XCTAssertEqual(validResult?.0, 1)
+        XCTAssertEqual(validResult?.1, true)
+        let mixedResult = decode(busy: .array([valid, malformed]))
+        XCTAssertEqual(mixedResult?.0, 1)
+        XCTAssertEqual(mixedResult?.1, false)
+        let reversedResult = decode(busy: .array([reversed]))
+        XCTAssertEqual(reversedResult?.0, 0)
+        XCTAssertEqual(reversedResult?.1, false)
+        let stringResult = decode(busy: .string("empty"))
+        XCTAssertEqual(stringResult?.0, 0)
+        XCTAssertEqual(stringResult?.1, false)
+        let objectResult = decode(busy: .object([:]))
+        XCTAssertEqual(objectResult?.0, 0)
+        XCTAssertEqual(objectResult?.1, false)
+        let allMalformed = decode(busy: .array([malformed, reversed, zeroDuration]))
+        XCTAssertEqual(allMalformed?.0, 0)
+        XCTAssertEqual(allMalformed?.1, false)
+        let emptyResult = decode(busy: .array([]))
+        XCTAssertEqual(emptyResult?.0, 0)
+        XCTAssertEqual(emptyResult?.1, true)
+    }
+
     func testRepairManualRunFieldDecodesWithOlderServerCompatibility() throws {
         let old = Data(#"{"id":"issue","title":"Synthetic failure","summary":"Reproduce","status":"reported","diagnosis":"","lastError":"","updatedAt":"2026-10-01T00:00:00Z"}"#.utf8)
         XCTAssertNil(try JSONDecoder().decode(WorkspaceRepairIssue.self, from: old).manualRunRequested)

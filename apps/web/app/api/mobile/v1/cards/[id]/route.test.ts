@@ -26,12 +26,12 @@ vi.mock('@/mobile-auth', () => ({
 import { POST } from './route';
 
 const id = '33333333-3333-4333-8333-333333333333';
-const post = (action: unknown = 'refresh', cardId = id) =>
+const post = (action: unknown = 'refresh', cardId = id, extra: Record<string, unknown> = {}) =>
   POST(
     new Request(`https://example.test/api/mobile/v1/cards/${cardId}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ action, ...extra }),
     }),
     { params: Promise.resolve({ id: cardId }) },
   );
@@ -56,7 +56,14 @@ describe('saved card refresh transport', () => {
     const response = await post();
     expect(response.status).toBe(202);
     expect(await response.json()).toEqual(result);
-    expect(mocks.refresh).toHaveBeenCalledWith(mocks.refreshRepository, 'owner-agent', id);
+    expect(mocks.refresh).toHaveBeenCalledWith(
+      mocks.refreshRepository,
+      'owner-agent',
+      id,
+      undefined,
+      undefined,
+      undefined,
+    );
     expect(mocks.dismiss).not.toHaveBeenCalled();
   });
 
@@ -73,7 +80,28 @@ describe('saved card refresh transport', () => {
   it('rejects malformed IDs and unsupported actions without queueing work', async () => {
     expect((await post('refresh', 'invalid')).status).toBe(400);
     expect((await post('send')).status).toBe(400);
+    expect((await post('refresh', id, { operationId: 'invalid' })).status).toBe(400);
+    expect((await post('refresh', id, { expectedRevisionId: 5 })).status).toBe(400);
     expect(mocks.refresh).not.toHaveBeenCalled();
+  });
+
+  it('binds refresh to the viewed immutable revision and idempotency operation', async () => {
+    mocks.refresh.mockResolvedValue({
+      ok: true,
+      taskId: 'refresh-task',
+      refreshState: 'refreshing',
+    });
+    const operationId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const response = await post('refresh', id, { expectedRevisionId: 'revision-7', operationId });
+    expect(response.status).toBe(202);
+    expect(mocks.refresh).toHaveBeenCalledWith(
+      mocks.refreshRepository,
+      'owner-agent',
+      id,
+      undefined,
+      operationId,
+      'revision-7',
+    );
   });
 
   it('preserves dismissal behavior', async () => {

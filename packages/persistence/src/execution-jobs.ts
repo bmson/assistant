@@ -32,6 +32,10 @@ export const EXECUTION_JOB_CALLBACK_STATES: readonly string[] = [
 
 export interface ExecutionJobCallbackInput {
   taskId: string;
+  /** Optional durable deduplication identity for callbacks with a replayable outbox. */
+  idempotencyKey?: string;
+  tokenHash?: string;
+  payloadDigest?: string;
   /** Replaces the hashed pending sentinel on the launching tool call. */
   result: Record<string, unknown>;
   /** Workspace artifacts the job wrote, inventoried with the result. */
@@ -43,7 +47,7 @@ export type ExecutionJobCallbackDecision =
   | { accept: false; status: 403 | 404 | 409; error: string };
 
 export type ExecutionJobCallbackOutcome =
-  | { ok: true; taskId: string; queueGeneration: number }
+  | { ok: true; taskId: string; queueGeneration: number; replayed?: boolean }
   | { ok: false; status: 403 | 404 | 409; error: string };
 
 export interface ExecutionJobRepository {

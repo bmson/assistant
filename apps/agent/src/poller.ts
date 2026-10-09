@@ -1,20 +1,7 @@
-import {
-  backfillMessageEmbeddings,
-  emitBudgetNotices,
-  expireStaleApprovals,
-  expireStaleSuggestions,
-  findDueTasks,
-  getAgent,
-  purgeAgedHistory,
-  purgeExpired,
-  renotifyStalledApprovals,
-  renotifyStalledAttention,
-  resumeResolvedApprovalTasks,
-  runDueSchedules,
-} from '@assistant/core';
-import { type AgentDeps, agentServices, firestoreOwnerReady } from './deps.js';
-import { executorDeps } from './executor-deps.js';
+import { findDueTasks } from '@assistant/core';
+import { type AgentDeps, agentServices, firestoreMaintenanceReady } from './deps.js';
 import { runFirestoreSweep } from './firestore-sweep.js';
+import { runPostgresSweep } from './postgres-sweep.js';
 import { executeAgentTask } from './task-runner.js';
 
 const POLL_INTERVAL_MS = 2000;
@@ -40,6 +27,8 @@ const MAX_CONCURRENT_TASKS = 3;
  * instead and the sweeper runs on Cloud Scheduler.
  */
 export function startPoller(deps: AgentDeps): () => void {
+  if (deps.config.RESTORE_REHEARSAL || deps.config.QUEUE_DRIVER === 'inert')
+    throw new Error('background dispatch is disabled during restore rehearsal');
   // Two independent guards. Maintenance is not allowed to queue behind task
   // execution, which is what made a long task look like a stalled assistant:
   // the approval it was parked on could not expire, schedules did not fire,
@@ -56,62 +45,17 @@ export function startPoller(deps: AgentDeps): () => void {
   const sweep = async () => {
     if (sweeping) return;
     sweeping = true;
-    // Each maintenance step is independent; guard each so one failure can't
-    // starve the rest (mirrors the prod /internal/sweep resilience).
-    const runStep = async (name: string, fn: () => Promise<unknown>) => {
-      try {
-        await fn();
-      } catch (err) {
-        console.error(`sweep step failed: ${name}`, err);
-      }
-    };
     try {
       if (deps.config.PERSISTENCE_DRIVER === 'firestore') {
-        // The same repository-only pass as /internal/sweep. Invoking the SQL
-        // maintenance below would hit the Firestore mode's PostgreSQL tripwire.
         await runFirestoreSweep(deps);
         return;
       }
-      await runStep('expireStaleApprovals', async () => {
-        const woken = await expireStaleApprovals(deps.db);
-        if (woken.length) console.log(`sweep: expired approvals woke ${woken.length} task(s)`);
-      });
-      await runStep('expireStaleSuggestions', async () => {
-        const expired = await expireStaleSuggestions(deps.db);
-        if (expired) console.log(`sweep: expired ${expired} unanswered suggestion(s)`);
-      });
-      await runStep('resumeResolvedApprovalTasks', async () => {
-        const resumed = await resumeResolvedApprovalTasks(deps.db);
-        if (resumed.length)
-          console.log(`sweep: resumed ${resumed.length} stranded approval task(s)`);
-      });
-      await runStep('renotifyStalledApprovals', async () => {
-        const renotified = await renotifyStalledApprovals(
-          deps.db,
-          executorDeps(deps).notifyApproval,
-        );
-        if (renotified) console.log(`sweep: re-notified ${renotified} silent approval(s)`);
-      });
-      await runStep('renotifyStalledAttention', async () => {
-        const renotified = await renotifyStalledAttention(deps.db, executorDeps(deps).notifyOwner);
-        if (renotified) console.log(`sweep: re-notified ${renotified} stalled task(s)`);
-      });
-      const agent = await getAgent(deps.db);
-      await runStep('runDueSchedules', async () => {
-        const fired = await runDueSchedules(deps.db, agent.timezone);
-        for (const f of fired)
-          console.log(`schedule fired: ${f.schedule} → ${f.taskId.slice(0, 8)}`);
-      });
-      await runStep('purgeExpired', () => purgeExpired(deps.db));
-      await runStep('purgeAgedHistory', () => purgeAgedHistory(deps.db));
-      await runStep('backfillMessageEmbeddings', () =>
-        backfillMessageEmbeddings(deps.db, deps.router),
-      );
-      await runStep('emitBudgetNotices', () => emitBudgetNotices(deps.db, agent.id));
-      // Module-declared sweep steps, with the same per-step failure isolation.
-      for (const sweepStep of deps.modules.sweepSteps) {
-        await runStep(sweepStep.name, () => sweepStep.run(agentServices(deps)));
-      }
+      const report = await runPostgresSweep(deps);
+      if (report.failedSteps.length || report.skippedSteps.length)
+        console.warn('maintenance pass incomplete', {
+          failedSteps: report.failedSteps,
+          skippedSteps: report.skippedSteps,
+        });
     } catch (err) {
       console.error('sweep error', err);
     } finally {
@@ -140,7 +84,7 @@ export function startPoller(deps: AgentDeps): () => void {
       if (deps.config.PERSISTENCE_DRIVER === 'firestore') {
         const tasks = deps.firestoreTasks;
         if (!tasks) throw new Error('Firestore execution persistence is unavailable');
-        if (!(await firestoreOwnerReady(deps))) return;
+        if (!(await firestoreMaintenanceReady(deps))) return;
         due = await tasks.findDueTasksForAgent(deps.config.FIRESTORE_AGENT_ID, capacity);
       } else {
         due = (await findDueTasks(deps.db, capacity)).slice(0, capacity);
@@ -185,7 +129,10 @@ export function startPoller(deps: AgentDeps): () => void {
       if (tick % moduleTick.everyTicks === 0 && !activeTicks.has(moduleTick)) {
         activeTicks.add(moduleTick);
         void Promise.resolve()
-          .then(() => moduleTick.run(agentServices(deps)))
+          .then(async () => {
+            if (firestore && !(await firestoreMaintenanceReady(deps))) return;
+            await moduleTick.run(agentServices(deps));
+          })
           .catch((err) => console.error(`${moduleTick.name} error`, err))
           .finally(() => activeTicks.delete(moduleTick));
       }

@@ -1,13 +1,108 @@
 import type { OwnerContextRepository } from '@assistant/persistence';
-import { and, desc, eq, gte, lt, lte, or } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
-import { agents, ambientSnapshots, commitments, locationPings, ownerCard } from './schema.js';
+import {
+  agents,
+  ambientSnapshots,
+  commitments,
+  conversations,
+  locationPings,
+  messages,
+  ownerCard,
+} from './schema.js';
 
 function boundedCommitmentLimit(limit: number): number {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 120) {
+    throw new Error('Owner context commitment limit must be between 1 and 120');
+  }
+  return limit;
+}
+
+function boundedOpenCommitmentLimit(limit: number): number {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 60) {
     throw new Error('Owner context commitment limit must be between 1 and 60');
   }
   return limit;
+}
+
+type CommitmentVisibility = 'open' | 'resolvable' | 'closed';
+
+/** Shared owner-visible commitment filter for chat, resolution and closed-loop views. */
+export async function listEligibleOwnerCommitments(
+  db: Db,
+  input: { agentId: string; limit: number; visibility: CommitmentVisibility; now?: Date },
+) {
+  const visibility =
+    input.visibility === 'closed'
+      ? inArray(commitments.status, ['resolved', 'dismissed'])
+      : input.visibility === 'resolvable'
+        ? and(
+            isNull(commitments.resolvedAt),
+            inArray(commitments.status, ['open', 'snoozed', 'stale']),
+          )
+        : and(
+            isNull(commitments.resolvedAt),
+            or(
+              inArray(commitments.status, ['open', 'stale']),
+              and(
+                eq(commitments.status, 'snoozed'),
+                lte(commitments.snoozedUntil, input.now ?? new Date()),
+              ),
+            ),
+          );
+  const validSourceFreeRow = or(
+    isNull(commitments.sourceOccurrenceKey),
+    and(
+      isNotNull(commitments.reopenedFromId),
+      isNotNull(commitments.reopenOperationId),
+      sql`${commitments.sourceOccurrenceKey} = concat('manual-reopen:v1:', ${commitments.agentId}, ':', ${commitments.reopenOperationId})`,
+    ),
+  );
+  const ordinarySourceMessage = sql`(
+    ${messages.channelMessageId} is null or (
+      ${messages.channelMessageId} not like 'visual-qa:%' and
+      ${messages.channelMessageId} not like 'readability-%'
+    )
+  )`;
+  const eligibleSource = or(
+    and(isNull(commitments.sourceMessageId), validSourceFreeRow),
+    and(
+      isNotNull(commitments.sourceMessageId),
+      isNotNull(messages.id),
+      eq(messages.role, 'user'),
+      isNull(messages.hiddenAt),
+      ordinarySourceMessage,
+    ),
+  );
+  const rows = await db
+    .select({ commitment: commitments })
+    .from(commitments)
+    .innerJoin(
+      conversations,
+      and(
+        eq(conversations.id, commitments.conversationId),
+        eq(conversations.agentId, commitments.agentId),
+      ),
+    )
+    .leftJoin(
+      messages,
+      and(
+        eq(messages.id, commitments.sourceMessageId),
+        eq(messages.conversationId, commitments.conversationId),
+      ),
+    )
+    .where(
+      and(
+        eq(commitments.agentId, input.agentId),
+        visibility,
+        sql`jsonb_typeof(${conversations.metadata}) = 'object'`,
+        sql`jsonb_typeof(${conversations.metadata}->'visualQaRunId') is null`,
+        eligibleSource,
+      ),
+    )
+    .orderBy(desc(commitments.updatedAt))
+    .limit(boundedCommitmentLimit(input.limit));
+  return rows.map(({ commitment }) => commitment);
 }
 
 export function createPostgresOwnerContextRepository(db: Db): OwnerContextRepository {
@@ -60,20 +155,12 @@ export function createPostgresOwnerContextRepository(db: Db): OwnerContextReposi
     },
 
     async listOpenCommitments({ agentId, now, limit }) {
-      return db
-        .select()
-        .from(commitments)
-        .where(
-          and(
-            eq(commitments.agentId, agentId),
-            or(
-              eq(commitments.status, 'open'),
-              and(eq(commitments.status, 'snoozed'), lt(commitments.snoozedUntil, now)),
-            ),
-          ),
-        )
-        .orderBy(desc(commitments.updatedAt))
-        .limit(boundedCommitmentLimit(limit));
+      return listEligibleOwnerCommitments(db, {
+        agentId,
+        now,
+        limit: boundedOpenCommitmentLimit(limit),
+        visibility: 'open',
+      });
     },
   };
 }

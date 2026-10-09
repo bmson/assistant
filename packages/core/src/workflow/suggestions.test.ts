@@ -1,4 +1,13 @@
-import { conversations, createDb, type Db, messages, suggestions, tasks } from '@assistant/db';
+import {
+  conversations,
+  createDb,
+  type Db,
+  emailBookingOccurrences,
+  messages,
+  suggestions,
+  tasks,
+} from '@assistant/db';
+import { emailBookingKey } from '@assistant/persistence';
 import { eq, inArray, like } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getAgent } from '../chat.js';
@@ -56,6 +65,7 @@ afterAll(async () => {
       .from(suggestions)
       .where(like(suggestions.sourceRef, `${MARKER}%`));
     await db.delete(suggestions).where(like(suggestions.sourceRef, `${MARKER}%`));
+    await db.delete(emailBookingOccurrences).where(eq(emailBookingOccurrences.agentId, agentId));
     const taskIds = rows.map((r) => r.acceptedTaskId).filter((id): id is string => Boolean(id));
     if (taskIds.length) await db.delete(tasks).where(inArray(tasks.id, taskIds));
     if (createdConversations.length) {
@@ -284,5 +294,147 @@ describe('suggestions', () => {
     expect(after?.status).toBe('expired');
     // An expired proposal is not a live question any more.
     expect((await acceptSuggestion(db, row.id)).ok).toBe(false);
+  });
+
+  it('refuses acceptance when the linked booking changed and emits the revision on current acceptance', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const bookingKey = emailBookingKey(agentId, `${MARKER}-R-314`);
+    const now = new Date();
+    await db.insert(emailBookingOccurrences).values({
+      agentId,
+      bookingKey,
+      lifecycle: 'confirmed',
+      dates: [],
+      sourceChannelMessageId: `gmail:${MARKER}-booking-confirmed`,
+      sourceReceivedAt: now,
+      sourceAuthenticated: true,
+      version: 1,
+    });
+    const current = await createSuggestion(db, {
+      agentId,
+      summary: `${MARKER} confirm booking`,
+      proposedAction: `${MARKER} Create the booking event after checking the calendar.`,
+      sourceRef: `${MARKER}-booking-current`,
+      origin: 'briefing',
+      bookingKey,
+      bookingVersion: 1,
+      now,
+    });
+    if (!current) throw new Error('current booking suggestion was not created');
+    created.push(current.id);
+    const accepted = await acceptSuggestion(db, current.id, { now });
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) throw new Error('current booking suggestion was rejected');
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, accepted.taskId));
+    expect(task?.trigger).toMatchObject({
+      payload: { bookingOccurrence: { agentId, bookingKey, version: 1 } },
+    });
+
+    const stale = await createSuggestion(db, {
+      agentId,
+      summary: `${MARKER} stale booking`,
+      proposedAction: `${MARKER} Create the cancelled booking event.`,
+      sourceRef: `${MARKER}-booking-stale`,
+      origin: 'briefing',
+      bookingKey,
+      bookingVersion: 1,
+      now,
+    });
+    if (!stale) throw new Error('stale booking suggestion was not created');
+    created.push(stale.id);
+    await db
+      .update(emailBookingOccurrences)
+      .set({ lifecycle: 'cancelled', version: 2, updatedAt: new Date(now.getTime() + 1000) })
+      .where(eq(emailBookingOccurrences.bookingKey, bookingKey));
+    const rejected = await acceptSuggestion(db, stale.id, { now: new Date(now.getTime() + 2000) });
+    expect(rejected).toMatchObject({ ok: false });
+    const [retired] = await db.select().from(suggestions).where(eq(suggestions.id, stale.id));
+    expect(retired?.status).toBe('superseded');
+    expect(
+      await db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.externalEventId, `suggestion:${stale.id}`)),
+    ).toHaveLength(0);
+  });
+
+  it('accepts a cancellation only at the current cancelled revision and binds the exact provider event', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const bookingKey = emailBookingKey(agentId, `${MARKER}-R-CANCEL`);
+    const now = new Date();
+    await db.insert(emailBookingOccurrences).values({
+      agentId,
+      bookingKey,
+      lifecycle: 'cancelled',
+      dates: [],
+      sourceChannelMessageId: `gmail:${MARKER}-booking-cancelled`,
+      sourceReceivedAt: now,
+      sourceAuthenticated: true,
+      version: 4,
+    });
+    const cancellation = await createSuggestion(db, {
+      agentId,
+      summary: `${MARKER} remove cancelled event?`,
+      proposedAction: 'Cancel only exact existing provider event.',
+      sourceRef: `${MARKER}-cancel-binding-current`,
+      origin: 'briefing',
+      bookingKey,
+      bookingVersion: 4,
+      bookingCancellation: {
+        calendarEventId: 'provider-event-314',
+        bookingIdentity: `${MARKER}-R-CANCEL`,
+      },
+      now,
+    });
+    if (!cancellation) throw new Error('cancellation suggestion was not created');
+    created.push(cancellation.id);
+    const accepted = await acceptSuggestion(db, cancellation.id, { now });
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) throw new Error('current cancellation suggestion was rejected');
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, accepted.taskId));
+    expect(task?.trigger).toMatchObject({
+      payload: {
+        bookingOccurrence: {
+          agentId,
+          bookingKey,
+          version: 4,
+          operation: 'cancel_existing',
+          calendarEventId: 'provider-event-314',
+          bookingIdentity: `${MARKER}-R-CANCEL`,
+        },
+      },
+    });
+
+    const reinstatedKey = emailBookingKey(agentId, `${MARKER}-R-REINSTATED`);
+    await db.insert(emailBookingOccurrences).values({
+      agentId,
+      bookingKey: reinstatedKey,
+      lifecycle: 'confirmed',
+      dates: [],
+      sourceChannelMessageId: `gmail:${MARKER}-booking-reinstated`,
+      sourceReceivedAt: now,
+      sourceAuthenticated: true,
+      version: 5,
+    });
+    const stale = await createSuggestion(db, {
+      agentId,
+      summary: `${MARKER} stale cancellation`,
+      proposedAction: 'Cancel only exact existing provider event.',
+      sourceRef: `${MARKER}-cancel-binding-stale`,
+      origin: 'briefing',
+      bookingKey: reinstatedKey,
+      bookingVersion: 4,
+      bookingCancellation: {
+        calendarEventId: 'provider-event-old',
+        bookingIdentity: `${MARKER}-R-REINSTATED`,
+      },
+      now,
+    });
+    if (!stale) throw new Error('stale cancellation suggestion was not created');
+    created.push(stale.id);
+    const refused = await acceptSuggestion(db, stale.id, { now: new Date(now.getTime() + 1) });
+    expect(refused).toMatchObject({ ok: false });
+    const [retired] = await db.select().from(suggestions).where(eq(suggestions.id, stale.id));
+    expect(retired?.status).toBe('superseded');
   });
 });

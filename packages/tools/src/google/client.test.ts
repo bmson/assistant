@@ -33,6 +33,24 @@ function clientWith(
 }
 
 describe('GoogleClient resilience', () => {
+  it('encrypts opaque cursors and rejects tampered or differently configured tokens', () => {
+    const client = clientWith(vi.fn());
+    const token = client.signOpaqueToken('cursor payload with calendar event details');
+    const [version, nonce, ciphertext, tag] = token.split('.');
+    const tampered = `${version}.${nonce}.${ciphertext}.${tag?.[0] === 'a' ? 'b' : 'a'}${tag?.slice(1)}`;
+
+    expect(token).not.toContain('cursor payload');
+    expect(client.verifyOpaqueToken(token)).toBe('cursor payload with calendar event details');
+    expect(client.verifyOpaqueToken(tampered)).toBeNull();
+    expect(
+      new GoogleClient({
+        clientId: 'different-client',
+        clientSecret: 'client-secret',
+        refreshToken: 'refresh-token',
+      }).verifyOpaqueToken(token),
+    ).toBeNull();
+  });
+
   it('retries safe reads on network errors, 429, and transient 5xx with bounded delays', async () => {
     const sleep = vi.fn(async (_ms: number) => {});
     const fetchMock = vi
@@ -132,7 +150,7 @@ describe('GoogleClient resilience', () => {
     expect(sentHeaders[3]?.get('authorization')).toBe('Bearer new-token');
   });
 
-  it('aborts each attempt at the configured timeout', async () => {
+  it('bounds the whole request at the configured timeout', async () => {
     const fetchMock = vi
       .fn<typeof globalThis.fetch>()
       .mockResolvedValueOnce(tokenResponse())
@@ -145,7 +163,27 @@ describe('GoogleClient resilience', () => {
       });
     const client = clientWith(fetchMock, { maxRetries: 0, timeoutMs: 5 });
 
-    await expect(client.api(API_URL)).rejects.toThrow('timed out after 5ms');
+    await expect(client.api(API_URL)).rejects.toThrow(/timeout|timed out/i);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry a mutation after headers arrive and its body stalls', async () => {
+    const stalled = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"id":'));
+        },
+      }),
+      { status: 200 },
+    );
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(stalled);
+    const client = clientWith(fetchMock, { timeoutMs: 10, maxRetries: 3 });
+    await expect(client.api(API_URL, { method: 'POST', body: '{}' })).rejects.toBeInstanceOf(
+      AmbiguousGoogleMutationError,
+    );
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 

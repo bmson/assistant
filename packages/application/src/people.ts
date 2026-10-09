@@ -472,13 +472,62 @@ export async function listPeopleDirectory(
 ): Promise<PersonSummary[]> {
   const now = opts.now ?? new Date();
   const agent = await getAgent(db);
-
   const people = await db
     .select()
     .from(contacts)
     .where(ne(contacts.trust, 'owner'))
-    .orderBy(contacts.name)
+    .orderBy(contacts.name, contacts.id)
     .limit(DIRECTORY_LIMIT);
+  return summarizePeopleDirectory(db, agent.id, people, now);
+}
+
+/** One bounded, resumable directory page for the configured owner. */
+export async function listPeopleDirectoryPage(
+  db: Db,
+  input: { now?: Date; limit: number; after?: { name: string; id: string } },
+): Promise<{
+  people: PersonSummary[];
+  hasMore: boolean;
+  nextCursor: { name: string; id: string } | null;
+}> {
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100)
+    throw new Error('People page size must be between 1 and 100');
+  const now = input.now ?? new Date();
+  const agent = await getAgent(db);
+  const after = input.after;
+  const rows = await db
+    .select()
+    .from(contacts)
+    .where(
+      and(
+        ne(contacts.trust, 'owner'),
+        after
+          ? or(
+              gt(contacts.name, after.name),
+              and(eq(contacts.name, after.name), gt(contacts.id, after.id)),
+            )
+          : undefined,
+      ),
+    )
+    .orderBy(contacts.name, contacts.id)
+    .limit(input.limit + 1);
+  const selected = rows.slice(0, input.limit);
+  const people = await summarizePeopleDirectory(db, agent.id, selected, now);
+  const tail = selected.at(-1);
+  const hasMore = rows.length > input.limit;
+  return {
+    people,
+    hasMore,
+    nextCursor: hasMore && tail ? { name: tail.name, id: tail.id } : null,
+  };
+}
+
+async function summarizePeopleDirectory(
+  db: Db,
+  agentId: string,
+  people: Array<typeof contacts.$inferSelect>,
+  now: Date,
+): Promise<PersonSummary[]> {
   if (people.length === 0) return [];
   const ids = people.map((person) => person.id);
 
@@ -507,12 +556,12 @@ export async function listPeopleDirectory(
       .from(occasionsTable)
       .where(
         and(
-          eq(occasionsTable.agentId, agent.id),
+          eq(occasionsTable.agentId, agentId),
           inArray(occasionsTable.contactId, ids),
           eq(occasionsTable.quarantined, false),
         ),
       ),
-    listDirectoryEdges(db, agent.id, ids),
+    listDirectoryEdges(db, agentId, ids),
   ]);
 
   const factCounts = new Map(factRows.map((row) => [row.contactId, Number(row.value)]));

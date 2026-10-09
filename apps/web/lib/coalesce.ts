@@ -3,7 +3,8 @@ const inFlight = new Map<string, Promise<unknown>>();
 /**
  * Share one computation between callers that ask for the same thing at the same
  * time. Nothing is remembered once it settles — the next caller computes afresh —
- * so this can never serve stale data, only avoid doing identical work twice.
+ * so settled results are not cached. Do not use this for refreshes that must
+ * observe a mutation: a new caller could otherwise join an older in-flight read.
  *
  * The phone refreshes the overview on foreground, after a decision, when a page
  * opens and on pull-to-refresh, and those overlap. Each used to run its own copy

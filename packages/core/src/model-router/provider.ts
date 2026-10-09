@@ -22,23 +22,45 @@ export type ModelProviderKind = 'openrouter' | 'vertex' | 'openai' | 'openai_com
  */
 export type ReasoningMode = 'enabled' | 'disabled' | 'unsupported';
 
+/** The semantic shape the caller requires from the serialized provider request. */
+export interface ProviderRequestProfile {
+  tools: 'none' | 'optional' | 'required';
+  toolChoice?: 'auto' | 'none' | 'required' | { type: 'tool'; toolName: string };
+  output: 'text' | 'json' | 'json_schema';
+  streaming: boolean;
+  reasoning: ReasoningMode;
+  privacy: 'deny';
+  /** Hard upstream ceiling in USD per million tokens. */
+  maxPrice: { prompt: number; completion: number; request?: number };
+}
+
 export interface ProviderUsage {
   inputTokens?: number;
   outputTokens?: number;
+  reasoningTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheWriteInputTokens?: number;
   /** Provider-reported USD, when authoritative usage includes it. */
   costUsd?: number;
   generationId?: string;
+  /** Provider endpoint label when the upstream reports one. */
+  endpointName?: string;
 }
 
 export interface ModelProvider {
   readonly kind: ModelProviderKind;
+  /** Width returned by this provider's configured embedding space, when fixed. */
+  readonly embeddingDimensions?: number;
   /** Reject model IDs belonging to another provider before constructing a request. */
   assertModelId(modelId: string): void;
   /**
    * `interactive` marks a call somebody is waiting on, so a provider that can
    * choose between upstreams can prefer a fast one.
    */
-  chat(modelId: string, options?: { interactive?: boolean }): LanguageModel;
+  chat(
+    modelId: string,
+    options?: { interactive?: boolean; requestProfile?: ProviderRequestProfile },
+  ): LanguageModel;
   textEmbeddingModel(modelId: string): EmbeddingModel;
   /** Only true when this model is verified to allow reasoning to be disabled. */
   canDisableReasoning?(modelId: string): boolean;
@@ -48,6 +70,94 @@ export interface ModelProvider {
   /** Provider-specific cache hints for the message boundary, if supported. */
   cacheHint(): Record<string, JSONValue> | undefined;
   normalizeUsage(event: unknown): ProviderUsage;
+}
+
+export interface ProviderErrorNode {
+  value: Record<string, unknown>;
+  depth: number;
+}
+
+/**
+ * Walk SDK error wrappers without letting empty fields consume the traversal
+ * budget. Only object nodes are visited; array containers are flattened but
+ * do not count as errors. Limits and identity tracking keep hostile/cyclic
+ * provider payloads bounded.
+ */
+export function providerErrorNodes(
+  error: unknown,
+  limits: { maxNodes?: number; maxDepth?: number } = {},
+): ProviderErrorNode[] {
+  const requestedMaxNodes = limits.maxNodes;
+  const requestedMaxDepth = limits.maxDepth;
+  const maxNodes =
+    typeof requestedMaxNodes === 'number' && Number.isFinite(requestedMaxNodes)
+      ? Math.max(1, Math.min(32, Math.floor(requestedMaxNodes)))
+      : 32;
+  const maxDepth =
+    typeof requestedMaxDepth === 'number' && Number.isFinite(requestedMaxDepth)
+      ? Math.max(0, Math.min(8, Math.floor(requestedMaxDepth)))
+      : 8;
+  const seen = new WeakSet<object>();
+  const nodes: ProviderErrorNode[] = [];
+  const pending: Array<{ value: unknown; depth: number }> = [{ value: error, depth: 0 }];
+  while (pending.length > 0 && nodes.length < maxNodes) {
+    const next = pending.shift();
+    if (!next) break;
+    if (Array.isArray(next.value)) {
+      if (seen.has(next.value)) continue;
+      seen.add(next.value);
+      if (next.depth > maxDepth) continue;
+      for (const value of next.value.slice(0, maxNodes)) pending.push({ value, depth: next.depth });
+      continue;
+    }
+    if (!next.value || typeof next.value !== 'object' || next.depth > maxDepth) continue;
+    if (seen.has(next.value)) continue;
+    seen.add(next.value);
+    const value = next.value as Record<string, unknown>;
+    nodes.push({ value, depth: next.depth });
+    if (next.depth === maxDepth) continue;
+    pending.push(
+      { value: value.lastError, depth: next.depth + 1 },
+      { value: value.cause, depth: next.depth + 1 },
+      { value: value.errors, depth: next.depth + 1 },
+    );
+  }
+  return nodes;
+}
+
+export function providerStatusCode(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isInteger(value)) return value;
+  if (typeof value === 'string' && /^\d{3}$/.test(value)) return Number(value);
+  return undefined;
+}
+
+export function isProviderApiError(value: Record<string, unknown>): boolean {
+  return value.name === 'AI_APICallError' || value.constructor?.name === 'APICallError';
+}
+
+export function isProviderAuthDenial(error: unknown): boolean {
+  return providerErrorNodes(error).some(({ value }) => {
+    if (!isProviderApiError(value)) return false;
+    const status = providerStatusCode(value.statusCode ?? value.status);
+    const message = typeof value.message === 'string' ? value.message : '';
+    return (
+      status === 401 ||
+      status === 403 ||
+      /unauthorized|forbidden|invalid api key|authentication failed/i.test(message)
+    );
+  });
+}
+
+/** Retryable provider transport failures, excluding authorization/configuration denials. */
+export function isProviderTransientError(error: unknown): boolean {
+  const nodes = providerErrorNodes(error);
+  if (isProviderAuthDenial(error)) return false;
+  return nodes.some(({ value }) => {
+    if (value.name === 'TimeoutError') return true;
+    if (!isProviderApiError(value)) return false;
+    const status = providerStatusCode(value.statusCode ?? value.status);
+    return status === 429 || (status !== undefined && status >= 500 && status <= 599);
+  });
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -89,6 +199,25 @@ function nonemptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+function nestedUsageTokenCounts(
+  event: unknown,
+): Pick<ProviderUsage, 'reasoningTokens' | 'cacheReadInputTokens' | 'cacheWriteInputTokens'> {
+  const usage = record(record(event)?.usage);
+  const input = record(usage?.inputTokenDetails);
+  const output = record(usage?.outputTokenDetails);
+  return {
+    ...(finiteNonnegativeInteger(output?.reasoning) !== undefined
+      ? { reasoningTokens: finiteNonnegativeInteger(output?.reasoning) }
+      : {}),
+    ...(finiteNonnegativeInteger(input?.cacheRead) !== undefined
+      ? { cacheReadInputTokens: finiteNonnegativeInteger(input?.cacheRead) }
+      : {}),
+    ...(finiteNonnegativeInteger(input?.cacheWrite) !== undefined
+      ? { cacheWriteInputTokens: finiteNonnegativeInteger(input?.cacheWrite) }
+      : {}),
+  };
+}
+
 /** Normalize OpenRouter's provider metadata without making absent cost look free. */
 export function normalizeOpenRouterUsage(event: unknown): ProviderUsage {
   const root = record(event);
@@ -100,11 +229,22 @@ export function normalizeOpenRouterUsage(event: unknown): ProviderUsage {
     ['openrouter'],
   );
   const response = record(root?.response);
+  const openrouterRoot = record(record(root?.providerMetadata)?.openrouter);
+  const finalOpenrouterRoot = record(record(record(finalStep?.providerMetadata)?.openrouter));
   return {
     inputTokens: finiteNonnegativeInteger(usage?.inputTokens),
     outputTokens: finiteNonnegativeInteger(usage?.outputTokens),
+    ...nestedUsageTokenCounts(event),
     costUsd: finiteNonnegative(providerMetadata?.cost),
     generationId: nonemptyString(response?.id),
+    endpointName: nonemptyString(
+      openrouterRoot?.provider_name ??
+        openrouterRoot?.providerName ??
+        providerMetadata?.provider_name ??
+        providerMetadata?.providerName ??
+        finalOpenrouterRoot?.provider_name ??
+        finalOpenrouterRoot?.providerName,
+    ),
   };
 }
 
@@ -122,6 +262,7 @@ export function normalizeVertexUsage(event: unknown): ProviderUsage {
   return {
     inputTokens: finiteNonnegativeInteger(usage?.inputTokens),
     outputTokens: finiteNonnegativeInteger(usage?.outputTokens),
+    ...nestedUsageTokenCounts(event),
     costUsd: finiteNonnegative(providerMetadata?.costUsd ?? providerMetadata?.cost),
     generationId: nonemptyString(response?.id),
   };
@@ -176,6 +317,7 @@ export function createOpenRouterModelProvider(
     canDisableReasoning: (modelId) => OPENROUTER_OPTIONAL_REASONING.has(modelId),
     chat(modelId, callOptions) {
       assertOpenRouterModelId(modelId);
+      const profile = callOptions?.requestProfile;
       return provider.chat(modelId, {
         provider: {
           // require_parameters: OpenRouter must only route to providers that
@@ -187,8 +329,15 @@ export function createOpenRouterModelProvider(
           // all healthy and avoids the tail when they are not. Only for calls
           // someone is waiting on — background work would rather have the
           // cheapest upstream than the quickest.
-          ...(callOptions?.interactive ? { sort: 'latency' as const } : {}),
-          ...(options.maxPrice ? { max_price: options.maxPrice } : {}),
+          // Latency sorting is safe only when the request carries a hard price cap.
+          ...(callOptions?.interactive && profile?.maxPrice ? { sort: 'latency' as const } : {}),
+          data_collection: 'deny' as const,
+          zdr: true,
+          ...(profile?.maxPrice
+            ? { max_price: profile.maxPrice }
+            : options.maxPrice
+              ? { max_price: options.maxPrice }
+              : {}),
         },
       });
     },
@@ -288,6 +437,7 @@ export function createVertexModelProvider(options: VertexModelProviderOptions): 
   });
   return {
     kind: 'vertex',
+    embeddingDimensions: options.embeddingDimensions ?? 1_536,
     assertModelId: assertVertexModelId,
     // Preserve the Vertex adapter's existing thinkingBudget=0 behavior.
     canDisableReasoning: () => true,
@@ -340,6 +490,7 @@ function normalizeCommonUsage(event: unknown): ProviderUsage {
   return {
     inputTokens: finiteNonnegativeInteger(usage?.inputTokens),
     outputTokens: finiteNonnegativeInteger(usage?.outputTokens),
+    ...nestedUsageTokenCounts(event),
     generationId: nonemptyString(response?.id),
   };
 }
@@ -355,6 +506,7 @@ export function createOpenAIModelProvider(apiKey: string): ModelProvider {
   const provider = createOpenAI({ apiKey });
   return {
     kind: 'openai',
+    embeddingDimensions: 1_536,
     assertModelId: (modelId) => void openAIModelId(modelId),
     chat: (modelId) => provider.chat(openAIModelId(modelId)),
     textEmbeddingModel: (modelId) => provider.embeddingModel(openAIModelId(modelId)),

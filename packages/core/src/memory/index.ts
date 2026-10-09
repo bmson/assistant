@@ -4,6 +4,7 @@ export * from './consolidation.js';
 export * from './document-processor.js';
 export * from './documents.js';
 export * from './email-extraction.js';
+export * from './embedding-refresh.js';
 export * from './extraction.js';
 export * from './graph-recall.js';
 export * from './health.js';

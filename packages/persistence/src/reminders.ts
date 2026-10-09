@@ -3,9 +3,25 @@ import type { Records } from './records.js';
 
 export const REMINDER_SCHEDULE_PREFIX = 'reminder:';
 
+/** Provider evidence that names one sports fixture without trusting model fields. */
+export interface ReminderEventDependency {
+  provider: 'sports';
+  eventId: string;
+  league: string;
+  startsAt: string;
+  eventDate: string;
+  timezone: string;
+  homeTeamId: string;
+  awayTeamId: string;
+  homeTeam: string;
+  awayTeam: string;
+  verifiedAt: string;
+}
+
 export interface ReminderScheduleTemplate {
   reminderText?: string;
-  reminderKind?: 'once' | 'recurring';
+  reminderKind?: 'once' | 'recurring' | 'event_completion';
+  reminderEventDependency?: ReminderEventDependency;
   reminderCancelledAt?: string;
   reminderDeliveredAt?: string;
   [key: string]: unknown;

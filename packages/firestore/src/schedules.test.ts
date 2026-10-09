@@ -77,6 +77,10 @@ function scheduleRow(input: {
     enabled: true,
     cron: '* * * * *',
     taskTemplate: { type: 'scheduled', instruction: 'existing' },
+    seedTemplateKey: null,
+    seedTemplateRevision: null,
+    seedDefinition: null,
+    seedReviewRequired: false,
     lastRunAt: null,
     nextRunAt: new Date(input.now.getTime() + 60_000),
   };

@@ -1,6 +1,15 @@
 import { type AssistantModule, isModuleEnabled } from '@assistant/config';
 import {
+  type NotificationDeliveryResult,
+  type NotificationLegResult,
+  notificationDeliveryKey,
+  notificationLeg,
+  notificationLegEntry,
+} from '@assistant/persistence';
+import { validateEmailObserverRegistry } from './email-observers.js';
+import {
   type InboundEmailObserver,
+  type LegacyInboundEmailObserver,
   type ModuleChannel,
   type ModuleDefinition,
   type ModuleInternalHandler,
@@ -61,7 +70,8 @@ export interface InstalledModuleSet {
   /** Fans out to every installed notifier; a no-op when none is installed. */
   readonly ownerNotifier: OwnerNotifier;
   /** Inbound-email observers of installed modules, in composition order. */
-  readonly emailObservers: readonly InboundEmailObserver[];
+  readonly emailObservers: readonly LegacyInboundEmailObserver[];
+  readonly durableEmailObservers: readonly InboundEmailObserver[];
 }
 
 /**
@@ -86,8 +96,9 @@ export function installModules(
   const sweepSteps: ModuleSweepStep[] = [];
   const ticks: ModuleTick[] = [];
   const channels: ModuleChannel[] = [];
-  const notifiers: OwnerNotifier[] = [];
-  const emailObservers: InboundEmailObserver[] = [];
+  const notifiers: Array<{ module: string; notifier: OwnerNotifier }> = [];
+  const emailObservers: LegacyInboundEmailObserver[] = [];
+  const durableEmailObservers: InboundEmailObserver[] = [];
 
   // Composition mistakes must fail at boot, not surface later as a silent 404
   // on a production webhook or a task kind nobody claims.
@@ -125,8 +136,10 @@ export function installModules(
     sweepSteps.push(...(hooks.sweepSteps ?? []));
     ticks.push(...(hooks.ticks ?? []));
     if (hooks.channel) channels.push(hooks.channel);
-    if (hooks.ownerNotifier) notifiers.push(hooks.ownerNotifier);
+    if (hooks.ownerNotifier)
+      notifiers.push({ module: definition.meta.name, notifier: hooks.ownerNotifier });
     emailObservers.push(...(hooks.emailObservers ?? []));
+    durableEmailObservers.push(...(hooks.durableEmailObservers ?? []));
 
     // The meta declares routes as plain data for deployment and docs; the
     // runtime provides the handlers. They must agree exactly — a declared
@@ -173,6 +186,8 @@ export function installModules(
   const exportsOf = <Exports>(definition: ModuleDefinition<Exports>) =>
     exports.get(definition as ModuleDefinition<unknown>) as Exports | undefined;
 
+  validateEmailObserverRegistry(durableEmailObservers);
+
   return {
     installed,
     exportsOf,
@@ -212,19 +227,63 @@ export function installModules(
       notifiers.length === 0
         ? noopOwnerNotifier
         : {
-            notifyOwner: async (input) => {
-              for (const notifier of notifiers)
-                await notifier
-                  .notifyOwner(input)
-                  .catch((err) => console.error('owner notification leg failed', err));
-            },
-            notifyApprovals: async (approvals) => {
-              for (const notifier of notifiers)
-                await notifier
-                  .notifyApprovals(approvals)
-                  .catch((err) => console.error('approval notification leg failed', err));
-            },
+            notifyOwner: notifyOwnerModules,
+            notifyApprovals: notifyApprovalModules,
           },
     emailObservers,
+    durableEmailObservers,
   };
+
+  async function notifyOwnerModules(
+    input: Parameters<OwnerNotifier['notifyOwner']>[0],
+  ): Promise<NotificationDeliveryResult> {
+    input = {
+      ...input,
+      deliveryKey:
+        input.deliveryKey ??
+        notificationDeliveryKey(
+          'module-owner-notice',
+          input.taskId ?? 'no-task',
+          input.conversationId ?? 'no-conversation',
+          input.text,
+        ),
+    };
+    const legs: NotificationLegResult[] = [];
+    for (const { module, notifier } of notifiers) {
+      try {
+        const result = await notifier.notifyOwner(input);
+        legs.push(
+          ...(result?.legs ?? [notificationLegEntry(module, 'skipped', 'legacy-no-result')]),
+        );
+      } catch {
+        console.error(`notifyOwner failed in ${module}`);
+        legs.push(notificationLegEntry(module, 'failed'));
+      }
+    }
+    return { legs };
+  }
+
+  async function notifyApprovalModules(
+    approvals: Parameters<OwnerNotifier['notifyApprovals']>[0],
+  ): Promise<NotificationDeliveryResult> {
+    approvals = approvals.map((approval) => ({
+      ...approval,
+      deliveryKey:
+        approval.deliveryKey ??
+        notificationDeliveryKey('module-approval-notice', approval.taskId, approval.shortCode),
+    }));
+    const legs: NotificationLegResult[] = [];
+    for (const { module, notifier } of notifiers) {
+      try {
+        const result = await notifier.notifyApprovals(approvals);
+        legs.push(
+          ...(result?.legs ?? [notificationLegEntry(module, 'skipped', 'legacy-no-result')]),
+        );
+      } catch {
+        console.error(`notifyApprovals failed in ${module}`);
+        legs.push(notificationLegEntry(module, 'failed'));
+      }
+    }
+    return { legs };
+  }
 }

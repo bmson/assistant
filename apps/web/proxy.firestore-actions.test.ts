@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@assistant/config', () => ({
-  loadConfig: () => ({ PERSISTENCE_DRIVER: 'firestore' }),
+const runtimeConfig = vi.hoisted(() => ({
+  PERSISTENCE_DRIVER: 'firestore',
+  RESTORE_REHEARSAL: false,
 }));
+vi.mock('@assistant/config', () => ({ loadConfig: () => runtimeConfig }));
 
 import { proxy } from './proxy.js';
 
@@ -12,6 +14,10 @@ const status = (path: string, method: string) =>
   proxy(new NextRequest(`http://localhost${path}`, { method })).status;
 
 describe('Firestore mobile and web ingress', () => {
+  beforeEach(() => {
+    runtimeConfig.RESTORE_REHEARSAL = false;
+  });
+
   it('passes repair reads, reports, and decisions to authenticated handlers', () => {
     for (const method of ['GET', 'POST'])
       expect(status('/api/mobile/v1/repairs', method)).toBe(200);
@@ -59,6 +65,23 @@ describe('Firestore mobile and web ingress', () => {
     }
     expect(status(path, 'PATCH')).toBe(503);
     expect(status('/api/mobile/v1/knowledge/relations/not-a-uuid', 'GET')).toBe(503);
+  });
+
+  it('keeps cancellation unavailable during restore rehearsal', () => {
+    runtimeConfig.RESTORE_REHEARSAL = true;
+    expect(status('/api/chat/cancel', 'POST')).toBe(503);
+    expect(status('/api/mobile/v1/chat/cancel', 'POST')).toBe(503);
+    runtimeConfig.RESTORE_REHEARSAL = false;
+  });
+
+  it('passes only exact chat cancellation POST routes and preserves forms POST', () => {
+    for (const path of ['/api/chat/cancel', '/api/mobile/v1/chat/cancel']) {
+      expect(status(path, 'POST')).toBe(200);
+      for (const method of ['GET', 'PUT', 'DELETE']) expect(status(path, method)).toBe(503);
+      expect(status(`${path}/extra`, 'POST')).toBe(503);
+    }
+    expect(status('/api/mobile/v1/chat/forms', 'POST')).toBe(200);
+    expect(status('/api/mobile/v1/chat/forms', 'GET')).toBe(503);
   });
 
   it('passes passkey owner-auth pages and endpoints', () => {

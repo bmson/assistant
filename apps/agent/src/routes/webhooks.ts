@@ -13,7 +13,12 @@ import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { recordCanaryBrowserResult } from '../canaries.js';
-import { agentServices, buildDeps, composedModuleMetas } from '../deps.js';
+import {
+  agentServices,
+  buildDeps,
+  composedModuleMetas,
+  firestoreMaintenanceReady,
+} from '../deps.js';
 import { verifyGoogleServiceAccountToken } from '../google-oidc.js';
 
 /**
@@ -58,18 +63,20 @@ webhooks.post('/location', async (c) => {
   if (!locationPingFresh(parsed.data)) return c.json({ error: 'stale ping' }, 409);
 
   const deps = buildDeps();
+  if (deps.config.PERSISTENCE_DRIVER === 'firestore' && !(await firestoreMaintenanceReady(deps))) {
+    return c.json({ error: 'Firestore installation is not operationally ready' }, 503);
+  }
   const agent = await getAgent(deps.db);
-  await recordLocationPing(deps.db, agent.id, parsed.data);
-  // Same arrival hook as the app's own ingest: a Shortcut ping is the same
-  // evidence, so it earns the same one-considered-nudge look. Best-effort —
-  // the ping is the payload, the nudge a bonus.
-  await maybeEnqueueArrivalNudge(deps.db, agent, {
-    lat: parsed.data.lat,
-    lng: parsed.data.lng,
-    label: parsed.data.label,
-    accuracyM: parsed.data.accuracyM,
-    capturedAt: new Date(parsed.data.capturedAt ?? Date.now()),
-  }).catch((err) => console.error('location: arrival hook failed', err));
+  const observation = await recordLocationPing(deps.db, agent.id, parsed.data);
+  if (parsed.data.arrivalOptIn) {
+    await maybeEnqueueArrivalNudge(deps.db, agent, {
+      observationId: observation.id,
+      lat: parsed.data.lat,
+      lng: parsed.data.lng,
+      accuracyM: parsed.data.accuracyM,
+      capturedAt: new Date(parsed.data.capturedAt ?? Date.now()),
+    }).catch((err) => console.error('location: arrival hook failed', err));
+  }
   return c.json({ ok: true });
 });
 
@@ -90,7 +97,11 @@ webhooks.post('/canaries/browser', async (c) => {
   ) {
     return c.json({ error: 'bad request' }, 400);
   }
-  const outcome = await recordCanaryBrowserResult(buildDeps().db, {
+  const deps = buildDeps();
+  if (deps.config.PERSISTENCE_DRIVER === 'firestore' && !(await firestoreMaintenanceReady(deps))) {
+    return c.json({ error: 'Firestore installation is not operationally ready' }, 503);
+  }
+  const outcome = await recordCanaryBrowserResult(deps.db, {
     runId: body.taskId,
     token: body.token,
     result: body.result as Record<string, unknown>,
@@ -148,6 +159,12 @@ for (const meta of composedModuleMetas) {
       // token in the body is the credential, exactly as the hardcoded routes did.
 
       const deps = buildDeps();
+      if (
+        deps.config.PERSISTENCE_DRIVER === 'firestore' &&
+        !(await firestoreMaintenanceReady(deps))
+      ) {
+        return c.json({ error: 'Firestore installation is not operationally ready' }, 503);
+      }
       const handler = deps.modules.webhookHandler(route.path);
       if (!handler) return c.json({ error: `${meta.name} module disabled` }, 404);
       const request: ModuleWebhookRequest = {

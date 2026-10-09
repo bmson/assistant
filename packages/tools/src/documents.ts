@@ -6,7 +6,7 @@ import type { ToolRegistry } from './registry.js';
 
 export interface DocumentToolDeps {
   /** Embedding closure (injected by the app — avoids a core↔tools cycle). */
-  embed: (texts: string[]) => Promise<number[][]>;
+  embed: (texts: string[]) => Promise<{ embeddings: number[][]; embeddingSpaceKey: string }>;
   /** Passage search; without it the tool searches through the task's SQL client. */
   search?: DocumentSearchRepository;
 }
@@ -29,11 +29,13 @@ export function registerDocumentTools(
       risk: 'autonomous',
       acceptsUntrustedInput: true,
       execute: async (args, ctx) => {
-        const [embedding] = await deps.embed([args.query]);
+        const { embeddings, embeddingSpaceKey } = await deps.embed([args.query]);
+        const embedding = embeddings[0];
         if (!embedding) return { passages: [] };
         const hits = await searchDocumentChunks(deps.search ?? ctx.db, {
           agentId: ctx.agentId,
           embedding,
+          embeddingSpaceKey,
           limit: args.limit,
         });
         return {

@@ -1,5 +1,8 @@
+import type { DocumentExtractionMetadata } from './document-extraction-metadata.js';
 /** Portable record shapes. PostgreSQL compatibility is checked by records.test.ts.
  * These types are owned by persistence: change them intentionally, not on every SQL migration. */
+import type { KnowledgeGraphAssertion } from './knowledge-graph-sync.js';
+
 export interface Records {
   selfRepairIssues: {
     id: string;
@@ -69,6 +72,10 @@ export interface Records {
     /** The approved brief: goal, context, mayAgreeTo, mustNot, language, onVoicemail. */
     brief: unknown;
     voiceModel: string;
+    /** Frozen provider/model/endpoint/rates snapshot; null means legacy or invalid. */
+    voiceRoute: unknown | null;
+    /** Frozen telephony line rate used by this call's reservation. */
+    lineRate: unknown;
     maxMinutes: number;
     twilioCallSid: string | null;
     /** sha256 of the one-shot media-stream token; null once the stream has connected. */
@@ -83,6 +90,8 @@ export interface Records {
     durationSeconds: number | null;
     /** [{ role: 'caller' | 'assistant' | 'system', text, at }] */
     transcript: unknown;
+    /** Ordered transcript append cursor and durable out-of-order batch receipts. */
+    transcriptState: unknown;
     /** Facts the assistant noted during the call. */
     notes: unknown;
     /** [{ id, question, askedAt, answer, answeredAt, via }] */
@@ -92,6 +101,9 @@ export interface Records {
     summary: string | null;
     costUsd: string | null;
     error: string | null;
+    /** Durable terminal result and metering work, replayed independently of call completion. */
+    finishDelivery: unknown;
+    capacityReleasedAt: Date | null;
   };
   mcpConnections: {
     id: string;
@@ -140,6 +152,7 @@ export interface Records {
     isPrimary: boolean;
     metadata: unknown;
     lastReadAt: Date | null;
+    messageSequence: number;
   };
   channelBindings: {
     id: string;
@@ -159,8 +172,13 @@ export interface Records {
     text: string;
     origin: string;
     channelMessageId: string | null;
+    clientId: string | null;
+    clientDeliveredAt: Date | null;
+    clientDeliveredBy: string | null;
     embedding: number[] | null;
+    embeddingSpaceKey: string | null;
     hiddenAt: Date | null;
+    appendSequence: string;
   };
   generatedCards: {
     id: string;
@@ -194,6 +212,11 @@ export interface Records {
     conversationId: string;
     sourceMessageId: string | null;
     sourceTaskId: string | null;
+    /** Stable owner evidence identity retained after closure to prevent replay. */
+    sourceOccurrenceKey: string | null;
+    /** A manual owner reopen is a new occurrence linked to the closed source row. */
+    reopenedFromId: string | null;
+    reopenOperationId: string | null;
     kind: string;
     details: string;
     dueAt: Date | null;
@@ -210,6 +233,7 @@ export interface Records {
     agentId: string;
     conversationId: string;
     embedding: number[] | null;
+    embeddingSpaceKey: string | null;
     startMessageId: string;
     endMessageId: string;
     summary: string;
@@ -252,6 +276,28 @@ export interface Records {
     parentTaskId: string | null;
     attentionNotifiedAt: Date | null;
   };
+  missionReports: {
+    id: string;
+    agentId: string;
+    missionId: string;
+    goalId: string | null;
+    conversationId: string | null;
+    outcome: string;
+    text: string;
+    chatStatus: 'pending' | 'delivered' | 'skipped' | 'failed';
+    ownerStatus: 'pending' | 'delivered' | 'skipped' | 'failed' | 'unknown';
+    mirrorStatus: 'pending' | 'delivered' | 'skipped' | 'failed';
+    claimToken: string | null;
+    lockedUntil: Date | null;
+    nextAttemptAt: Date;
+    attempts: number;
+    createdAt: Date;
+    updatedAt: Date;
+    chatDeliveredAt: Date | null;
+    ownerDeliveredAt: Date | null;
+    mirrorDeliveredAt: Date | null;
+    lastError: string | null;
+  };
   toolCalls: {
     id: string;
     createdAt: Date;
@@ -268,6 +314,25 @@ export interface Records {
     approvalId: string | null;
     decision: unknown;
     finishedAt: Date | null;
+  };
+  toolCallReceipts: {
+    id: string;
+    agentId: string;
+    taskId: string;
+    toolCallId: string;
+    modelToolCallIdHash: string | null;
+    idempotencyKeyHash: string | null;
+    toolName: string;
+    effectOutcome: import('./tool-call-receipts.js').ToolCallEffectOutcome;
+    recordedAt: Date;
+  };
+  toolCallReceiptKeys: {
+    id: string;
+    agentId: string;
+    taskId: string;
+    receiptId: string;
+    kind: import('./tool-call-receipts.js').ToolCallReceiptKeyKind;
+    digest: string;
   };
   approvals: {
     id: string;
@@ -306,6 +371,8 @@ export interface Records {
     confirmationMessageId: string | null;
     confirmationFrom: string | null;
     confirmedAt: Date | null;
+    /** Owner privacy generation captured when its internal application task was committed. */
+    producerPrivacyGeneration: string | null;
   };
   approvalPolicies: {
     id: string;
@@ -356,6 +423,7 @@ export interface Records {
     updatedAt: Date;
     agentId: string;
     embedding: number[] | null;
+    embeddingSpaceKey: string | null;
     sourceTaskId: string | null;
     preconditions: string;
     steps: string;
@@ -367,6 +435,11 @@ export interface Records {
     failureCount: number;
     lastVerifiedAt: Date | null;
     deprecated: boolean;
+  };
+  skillLibraryRevisions: {
+    agentId: string;
+    revision: number;
+    updatedAt: Date;
   };
   improvementProposals: {
     id: string;
@@ -404,8 +477,27 @@ export interface Records {
     ownerConfirmed: boolean;
     pinned: boolean;
     source: string | null;
+    /** Exact provider/model/width revision used for this stored vector; null is unknown. */
+    embeddingSpaceKey: string | null;
     lastAccessedAt: Date | null;
     lastConsolidatedAt: Date | null;
+  };
+  memoryEmbeddingRefreshes: {
+    id: string;
+    agentId: string;
+    memoryId: string;
+    sourceHash: string;
+    targetSpaceKey: string;
+    targetDimensions: number;
+    observedSpaceKey: string | null;
+    status: string;
+    preparedVector: number[] | null;
+    privacyGeneration: string | null;
+    claimToken: string | null;
+    leaseUntil: Date | null;
+    unknownReason: string | null;
+    createdAt: Date;
+    updatedAt: Date;
   };
   memoryTombstones: { id: string; createdAt: Date; contentHash: string; reason: string };
   ownerCard: { id: number; content: string; compiledAt: Date };
@@ -461,12 +553,57 @@ export interface Records {
     validUntil: string | null;
     subjectEntityId: string;
     predicate: string;
+    assertion: KnowledgeGraphAssertion;
+    assertionId: string | null;
     objectEntityId: string;
     sourceMemoryId: string;
     evidenceQuote: string | null;
     ordinal: number;
     reviewStatus: string;
     reviewedAt: Date | null;
+    correctedByRelationId: string | null;
+    correctionSourceContentHash: string | null;
+    correctionDisposition: string | null;
+  };
+  knowledgeGraphAssertions: {
+    id: string;
+    agentId: string;
+    semanticKey: string;
+    subjectEntityId: string;
+    predicate: string;
+    objectEntityId: string;
+    assertion: KnowledgeGraphAssertion;
+    qualifiers: Record<string, string | number | boolean | null>;
+    validFrom: string | null;
+    validUntil: string | null;
+    semanticRevision: number;
+    evidenceRevision: number;
+    lifecycle: string;
+    reviewStatus: string;
+    reviewedRevision: number | null;
+    reviewedPayloadHash: string | null;
+    ownerAuthored: boolean;
+    supersededById: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+  };
+  knowledgeGraphAssertionEvidence: {
+    id: string;
+    agentId: string;
+    assertionId: string;
+    sourceMemoryId: string;
+    sourceFingerprint: string;
+    sourceContentHash: string;
+    evidenceQuote: string;
+    sourceAuthor: string;
+    sourceTrust: string;
+    independent: boolean;
+    spanStart: number | null;
+    spanEnd: number | null;
+    extractionVersion: number;
+    evidenceRevision: number;
+    observedAt: Date;
+    createdAt: Date;
   };
   occasions: {
     id: string;
@@ -502,6 +639,18 @@ export interface Records {
     itemsProcessed: number;
     memoriesSaved: number;
     memoriesQuarantined: number;
+    parseDiagnostics: import('./import-jobs.js').ImportArchiveDiagnostics | null;
+  };
+  memoryImportLineage: {
+    source: string;
+    memoryId: string;
+    sourceUnitProvenance: import('./import-jobs.js').ImportUnitProvenance[];
+    createdAt: Date;
+  };
+  occasionImportLineage: {
+    source: string;
+    occasionId: string;
+    createdAt: Date;
   };
   models: {
     id: string;
@@ -536,6 +685,16 @@ export interface Records {
     fallbackModel: string;
     params: unknown;
   };
+  modelRoleRevisions: {
+    id: string;
+    role: string;
+    beforeState: unknown | null;
+    afterState: unknown | null;
+    source: string;
+    baselineKnown: boolean;
+    requiresOwnerReview: boolean;
+    createdAt: Date;
+  };
   modelCalls: {
     id: string;
     createdAt: Date;
@@ -548,6 +707,8 @@ export interface Records {
     latencyMs: number | null;
     finishReason: string | null;
     openrouterGenerationId: string | null;
+    runtimeRevision: string | null;
+    runtimeReleaseSha: string | null;
   };
   /** What a model was asked and what it answered. Written only when capture is on. */
   modelCallAudit: {
@@ -581,6 +742,15 @@ export interface Records {
     unitPriceUsd: string | null;
     usd: string;
     reservationId: string | null;
+    idempotencyKey: string | null;
+  };
+  executionJobCallbackReceipts: {
+    idempotencyKey: string;
+    taskId: string;
+    tokenHash: string;
+    payloadDigest: string;
+    queueGeneration: number;
+    createdAt: Date;
   };
   costReservations: {
     id: string;
@@ -592,6 +762,9 @@ export interface Records {
     estimatedUsd: string;
     actualUsd: string | null;
     reconciledAt: Date | null;
+    attemptStartedAt: Date | null;
+    attemptMetadata: unknown | null;
+    unknownReason: string | null;
   };
   rateTable: { updatedAt: Date; unit: string; unitPriceUsd: string; key: string };
   budgets: {
@@ -614,6 +787,7 @@ export interface Records {
     createdAt: Date;
     text: string;
     embedding: number[] | null;
+    embeddingSpaceKey: string | null;
     register: string;
     context: string;
   };
@@ -631,6 +805,9 @@ export interface Records {
     lastHistoryId: bigint | null;
     cursor: unknown;
     watchExpiration: Date | null;
+    leaseHolder: string | null;
+    leaseGeneration: number;
+    leaseExpiresAt: Date | null;
   };
   emailIngest: {
     id: string;
@@ -647,10 +824,179 @@ export interface Records {
     subject: string;
     contentTrust: string;
     authenticated: boolean;
+    ingestMode: string;
+    hasExternalOrUnknown: boolean;
+    observerRegistrySnapshot: Array<{ key: string; version: number; workClass: string }> | null;
+    observerRegistryHash: string | null;
+    admittedSourceKind: string | null;
+    admittedSourceId: string | null;
+    directRouting: 'application_confirmation' | 'email_triage' | 'needs_attention' | null;
+    directRecoveryReason:
+      | 'provider_message_missing'
+      | 'provider_access_denied'
+      | 'provider_temporarily_unavailable'
+      | 'checkpoint_inconsistent'
+      | null;
+    emailContentProvenance: {
+      version: 1;
+      mode: 'direct' | 'forwarded';
+      authenticated: boolean;
+      sourceLength: number;
+      storedLength: number;
+      sourceHash: string;
+      bodyHash: string;
+      messageHash: string;
+      prefixLength: number;
+      hasExternalOrUnknown: boolean;
+      spans: Array<{ start: number; end: number; author: 'sender' | 'external' | 'unknown' }>;
+      parts: Array<{
+        path: string;
+        mimeType: string;
+        quoteMarkup: boolean;
+        replyHeaders: boolean;
+        bodyQuoteStart?: number;
+      }>;
+    } | null;
+    classificationStatus: string;
+    classificationClaimToken: string | null;
+    preparedClassification: { automated: boolean } | null;
+    scoreOutcome: string;
     actionable: boolean;
     dates: unknown;
+    mailbox: string;
+    providerMessageId: string | null;
+    sourceMessageId: string | null;
+    providerThreadId: string | null;
+    providerReceivedAt: Date | null;
+    securityEvidence: {
+      providerIncidentRef?: string;
+      eventType?: string;
+      affectedAccount?: string;
+      eventAt?: string;
+      device?: string;
+      location?: string;
+      recoveryCopyOf?: string;
+      evidenceQuote?: string;
+    } | null;
+    securityIncidentId: string | null;
+    obligationStatus: string;
+    obligationVersion: number;
+    obligationDecision: string | null;
+    obligationDecisionAt: Date | null;
+    obligationSnoozedUntil: Date | null;
+    pipelineStage: string;
+    scoreStatus: string;
+    scoreClaimToken: string | null;
+    cardCandidate: boolean;
+    nextStep: string | null;
+    messagePersisted: boolean;
+    triageTaskId: string | null;
     triaged: boolean;
     extractedAt: Date | null;
+    preparedExtraction: unknown | null;
+  };
+  emailObserverSources: {
+    id: string;
+    createdAt: Date;
+    updatedAt: Date;
+    agentId: string;
+    sourceKey: string;
+    channelMessageId: string;
+    body: string;
+    privacyGeneration: string | null;
+  };
+  emailObserverWork: {
+    id: string;
+    createdAt: Date;
+    updatedAt: Date;
+    agentId: string;
+    sourceKey: string;
+    channelMessageId: string;
+    sourceKind: 'message' | 'automated_source';
+    observerKey: string;
+    observerVersion: number;
+    workClass: 'idempotent_db' | 'paid_ambiguous' | 'external_provider';
+    status:
+      | 'pending'
+      | 'claimed'
+      | 'prepared'
+      | 'complete'
+      | 'no_op'
+      | 'retryable_failed'
+      | 'unknown'
+      | 'skipped_erased'
+      | 'skipped_budget';
+    attemptCount: number;
+    claimToken: string | null;
+    claimGeneration: number;
+    leaseExpiresAt: Date | null;
+    privacyGeneration: string | null;
+    budgetKey: string | null;
+    budgetWindowStart: Date | null;
+    budgetReserved: boolean;
+    preparedResult: unknown | null;
+    deliveryKey: string | null;
+    lastErrorCode: string | null;
+    claimedAt: Date | null;
+    completedAt: Date | null;
+  };
+  emailObserverBudgets: {
+    id: string;
+    createdAt: Date;
+    updatedAt: Date;
+    agentId: string;
+    observerKey: string;
+    utcWindowStart: Date;
+    utcWindowEnd: Date;
+    reservedCount: number;
+    limit: number;
+  };
+  emailBookingOccurrences: {
+    id: string;
+    createdAt: Date;
+    updatedAt: Date;
+    agentId: string;
+    bookingKey: string;
+    lifecycle: string;
+    dates: unknown;
+    sourceChannelMessageId: string;
+    sourceReceivedAt: Date;
+    sourceAuthenticated: boolean;
+    version: number;
+  };
+  securityIncidents: {
+    id: string;
+    agentId: string;
+    incidentKey: string;
+    confidence: string;
+    revision: number;
+    disposition: string;
+    decisionRevision: number | null;
+    decisionReason: string | null;
+    materialChangeReason: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+  };
+  securityIncidentSources: {
+    id: string;
+    agentId: string;
+    incidentId: string;
+    channelMessageId: string;
+    sourceMessageId: string | null;
+    mailboxHash: string;
+    evidenceFingerprint: string;
+    observedAt: Date;
+    createdAt: Date;
+  };
+  securityIncidentAttention: {
+    id: string;
+    agentId: string;
+    incidentId: string;
+    revision: number;
+    producer: string;
+    deliveryStatus: string;
+    createdAt: Date;
+    updatedAt: Date;
   };
   suggestions: {
     id: string;
@@ -661,6 +1007,9 @@ export interface Records {
     expiresAt: Date;
     conversationId: string | null;
     origin: string;
+    bookingKey: string | null;
+    bookingVersion: number | null;
+    bookingCancellation: { calendarEventId: string; bookingIdentity: string } | null;
     snoozedUntil: Date | null;
     summary: string;
     proposedAction: string;
@@ -676,6 +1025,10 @@ export interface Records {
     enabled: boolean;
     cron: string;
     taskTemplate: unknown;
+    seedTemplateKey: string | null;
+    seedTemplateRevision: number | null;
+    seedDefinition: unknown | null;
+    seedReviewRequired: boolean;
     lastRunAt: Date | null;
     nextRunAt: Date | null;
   };
@@ -707,6 +1060,22 @@ export interface Records {
     triggerRef: string;
     excerpt: string;
   };
+  watchFireEffects: {
+    id: string;
+    agentId: string;
+    watchId: string;
+    fireId: string;
+    kind: string;
+    status: string;
+    idempotencyKey: string;
+    payload: unknown;
+    attempts: number;
+    claimedAt: Date | null;
+    leaseUntil: Date | null;
+    result: unknown;
+    createdAt: Date;
+    updatedAt: Date;
+  };
   notificationPrefs: {
     createdAt: Date;
     updatedAt: Date;
@@ -723,6 +1092,32 @@ export interface Records {
     reason: string | null;
     urgency: string;
     delivered: boolean;
+  };
+  notificationOutbox: {
+    id: string;
+    agentId: string;
+    deliveryKey: string;
+    legKey: string;
+    adapter: string;
+    status: string;
+    destination: unknown | null;
+    payload: unknown | null;
+    attempts: number;
+    retryable: boolean;
+    availableAt: Date;
+    leaseToken: string | null;
+    leaseUntil: Date | null;
+    providerMessageId: string | null;
+    result: unknown;
+    /** Non-secret producer association; never persist the observer claim token. */
+    producerWorkId?: string | null;
+    producerTaskId?: string | null;
+    producerApplicationId?: string | null;
+    producerConfirmationMessageId?: string | null;
+    producerPrivacyGeneration?: string | null;
+    finishedAt: Date | null;
+    createdAt: Date;
+    updatedAt: Date;
   };
   proactiveMoments: {
     id: string;
@@ -757,6 +1152,34 @@ export interface Records {
     browserCallbackTokenHash: string | null;
     browserResult: unknown;
   };
+  emailAttachmentCustodies: {
+    id: string;
+    agentId: string;
+    observerWorkId: string | null;
+    claimToken: string | null;
+    claimGeneration: number;
+    privacyGeneration: string | null;
+    channelMessageId: string | null;
+    providerMessageId: string | null;
+    providerAttachmentId: string | null;
+    manifestDigest: string | null;
+    attachmentOrdinal: number;
+    workspacePath: string;
+    filename: string | null;
+    mime: string | null;
+    advertisedBytes: number;
+    actualBytes: number | null;
+    sha256: string | null;
+    markerGeneration: string | null;
+    objectGeneration: string | null;
+    status: string;
+    fileId: string | null;
+    documentId: string | null;
+    duplicateDocumentId: string | null;
+    leaseExpiresAt: Date | null;
+    createdAt: Date;
+    updatedAt: Date;
+  };
   files: {
     id: string;
     createdAt: Date;
@@ -766,6 +1189,8 @@ export interface Records {
     mime: string;
     bytes: number;
     sha256: string | null;
+    objectGeneration: string | null;
+    emailAttachmentCustodyId: string | null;
   };
   documents: {
     id: string;
@@ -788,6 +1213,7 @@ export interface Records {
     processorStartedAt: Date | null;
     processorAttempts: number;
     processedTextPath: string | null;
+    extractionMetadata: DocumentExtractionMetadata | null;
   };
   documentChunks: {
     id: string;
@@ -795,6 +1221,7 @@ export interface Records {
     agentId: string;
     text: string;
     embedding: number[] | null;
+    embeddingSpaceKey: string | null;
     charCount: number;
     documentId: string;
     chunkIndex: number;
@@ -810,6 +1237,7 @@ export interface Records {
     accuracyM: number | null;
     timeZone: string | null;
     capturedAt: Date;
+    arrivalExpiresAt: Date | null;
   };
   ambientSnapshots: {
     id: string;
@@ -889,6 +1317,20 @@ export interface Records {
     messageId: string;
     sourceCount: number;
     verdict: string;
+  };
+  /** Content-free owner history of source identities disclosed by assistant replies. */
+  recallSurfaces: {
+    id: string;
+    agentId: string;
+    sourceKey: string;
+    sourceRevision: string | null;
+    kind: string;
+    firstSurfacedAt: Date;
+    lastSurfacedAt: Date;
+    lastMessageId: string | null;
+    surfaceCount: number;
+    suppressedAt: Date | null;
+    version: number;
   };
 }
 export type RecordOf<K extends keyof Records> = Records[K];

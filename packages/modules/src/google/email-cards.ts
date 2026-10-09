@@ -2,16 +2,22 @@ import {
   cardShapeSignals,
   type GeneratedCardPayload,
   type GenerativeCardSpecV1,
+  GenerativeCardSpecV1Schema,
   generateEvidenceCard,
+  generateEvidenceCardOutcome,
   persistGeneratedCard,
 } from '@assistant/core/generative-card';
 import type { ModelRouter } from '@assistant/core/model-router';
 import type { ActionEvidence } from '@assistant/core/workflow/response-contract';
 import type {
+  EmailObserverClaim,
+  EmailObserverSource,
   GeneratedCardRepository,
   NotificationsConversationRepository,
 } from '@assistant/persistence';
-import type { InboundEmailEvent } from '../platform.js';
+import { notificationDeliveryKey } from '@assistant/persistence';
+import { z } from 'zod';
+import type { InboundEmailEvent, OwnerNotifier } from '../platform.js';
 
 /**
  * The things in the owner's mail worth going back to — a hotel reservation,
@@ -35,7 +41,7 @@ export interface EmailCardDeps {
   router: ModelRouter;
   generatedCards: GeneratedCardRepository;
   notifications: NotificationsConversationRepository;
-  notifyOwner: (input: { text: string; urgency?: 'ambient' | 'interrupt' }) => Promise<void>;
+  notifyOwner: OwnerNotifier['notifyOwner'];
 }
 
 /** Words a booking, a ticket or a delivery says about itself. */
@@ -74,6 +80,121 @@ export function withoutSenderLinks(spec: GenerativeCardSpecV1): GenerativeCardSp
   });
   if (!blocks.length) return null;
   return { ...spec, blocks, actions: spec.actions.filter((action) => action.type !== 'open_url') };
+}
+
+const PreparedEmailCardSchema = z.object({
+  kind: z.literal('generated-card'),
+  id: z.string().uuid(),
+  revisionId: z.string().uuid(),
+  spec: GenerativeCardSpecV1Schema,
+  sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  grounding: z.enum(['evidence', 'answer', 'message']),
+});
+
+export type EmailCardPreparation =
+  | { kind: 'prepared'; result: unknown }
+  | { kind: 'no_op' }
+  | { kind: 'budget_blocked'; mode: 'park' | 'block' }
+  | { kind: 'unknown'; errorCode: string };
+
+function sourceEvent(source: EmailObserverSource): InboundEmailEvent {
+  return {
+    agentId: source.agentId,
+    messageId: source.messageId ?? source.sourceId.replace(/^gmail:/, ''),
+    from: source.from,
+    subject: source.subject,
+    body: source.body,
+    authenticated: source.authenticated,
+  };
+}
+
+function cardEvidence(source: EmailObserverSource): ActionEvidence[] {
+  return [
+    {
+      toolName: 'email.inbound',
+      status: 'succeeded',
+      args: { messageId: source.messageId ?? source.sourceId },
+      result: { from: source.from, subject: source.subject, text: source.body.slice(0, 12_000) },
+    } as ActionEvidence,
+  ];
+}
+
+export async function prepareEmailCard(
+  deps: Pick<EmailCardDeps, 'router'>,
+  source: EmailObserverSource,
+): Promise<EmailCardPreparation> {
+  if (!mayBeCardWorthy(source.subject, source.body)) return { kind: 'no_op' };
+  const composed = await generateEvidenceCardOutcome({
+    router: deps.router,
+    sourceText: `An email the owner received from ${source.from}: ${source.subject}`,
+    evidence: cardEvidence(source),
+    sourceKey: source.sourceId,
+  });
+  // Keep an ambiguous model/provider outcome explicit so the durable runner
+  // can retain the paid-attempt fence instead of treating it as a no-op.
+  if (composed.kind === 'unknown')
+    return { kind: 'unknown', errorCode: 'email_card_effect_unknown' };
+  if (composed.kind !== 'card') return composed;
+  const spec = withoutSenderLinks(composed.payload.spec);
+  if (!spec) return { kind: 'no_op' };
+  const verifiedSpec =
+    source.sourceVerification === 'forwarded_unverified'
+      ? {
+          ...spec,
+          sourceLabel: 'Forwarded email (unverified)',
+          facts: spec.facts.map((fact) => ({ ...fact, source: 'Forwarded email (unverified)' })),
+        }
+      : spec;
+  return { kind: 'prepared', result: { ...composed.payload, spec: verifiedSpec } };
+}
+
+export async function applyPreparedEmailCard(
+  deps: EmailCardDeps,
+  source: EmailObserverSource,
+  claim: EmailObserverClaim,
+  preparedResult: unknown,
+): Promise<'complete' | 'no_op' | 'unknown'> {
+  const parsed = PreparedEmailCardSchema.safeParse(preparedResult);
+  if (!parsed.success) return 'unknown';
+  const composed = parsed.data as GeneratedCardPayload;
+  const spec = withoutSenderLinks(composed.spec as GenerativeCardSpecV1);
+  if (!spec) return 'no_op';
+  const evidence = cardEvidence(source);
+  const effectFence = {
+    id: claim.id,
+    agentId: claim.agentId,
+    claimToken: claim.claimToken,
+    claimGeneration: claim.claimGeneration,
+    expectedPrivacyGeneration: claim.privacyGeneration,
+  };
+  const conversationId = await deps.notifications.getOrCreate(source.agentId, effectFence);
+  const saved = await persistGeneratedCard(deps.generatedCards, {
+    agentId: source.agentId,
+    conversationId,
+    payload: { ...composed, spec },
+    evidence,
+    sourceText: `Email: ${source.subject}`.slice(0, 2000),
+    emailObserverEffectFence: effectFence,
+  });
+  if (saved.id === composed.id) {
+    const deliveryKey = notificationDeliveryKey(
+      'email-observer',
+      source.agentId,
+      source.sourceId,
+      'google.email-card',
+      '1',
+    );
+    const delivery = await deps.notifyOwner({
+      text: `Saved “${saved.spec.title}” from your email to your Cards page.`,
+      urgency: 'ambient',
+      deliveryKey,
+      emailObserverEffectFence: effectFence,
+    });
+    if (!delivery) return 'unknown';
+    const statuses = delivery.legs.map((leg) => leg.status);
+    if (statuses.some((status) => status === 'unknown' || status === 'failed')) return 'unknown';
+  }
+  return 'complete';
 }
 
 export async function cardFromEmail(

@@ -1,15 +1,20 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  addLedgerMicros,
   addMicros,
   type CostEventInput,
   type CostRepository,
   type CostTotals,
+  ledgerUsdToMicros,
+  MAX_LEDGER_USD_MICROS,
   microsToUsd,
   nextUtcDailyReset,
   nextUtcMonthlyReset,
   type ReservationActual,
   type ReserveCostInput,
   type ReserveOutcome,
+  storedLedgerUsdToMicros,
+  storedTaskBudgetToMicros,
   usdToMicros,
 } from '@assistant/persistence';
 import type { DocumentSnapshot, Transaction } from '@google-cloud/firestore';
@@ -108,7 +113,7 @@ export class FirestoreCostRepository implements CostRepository {
   }
 
   async reserve(input: ReserveCostInput): Promise<ReserveOutcome> {
-    const amount = usdToMicros(input.estimatedUsd);
+    const amount = ledgerUsdToMicros(input.estimatedUsd);
     if (amount <= 0) throw new Error('Cost estimate must be at least one microdollar');
     const id = input.operationId ?? randomUUID();
     const ref = this.store.doc('costReservations', id);
@@ -160,8 +165,15 @@ export class FirestoreCostRepository implements CostRepository {
         const [task, taskHolds] = await tx.getAll(refs.task, refs.taskHolds);
         if (!task?.exists || !taskHolds) throw new Error('Reservation task does not exist');
         taskHeld = integer(taskHolds, 'heldMicros');
-        const spent = usdToMicros(Number(task.get('spentUsd') ?? 0));
-        const limit = usdToMicros(Number(task.get('budgetUsdLimit')));
+        const spent = storedLedgerUsdToMicros(task.get('spentUsd') ?? '0');
+        const limit = storedTaskBudgetToMicros(task.get('budgetUsdLimit'));
+        if (taskHeld > MAX_LEDGER_USD_MICROS - spent - amount) {
+          return {
+            ok: false,
+            reason: 'task ledger storage capacity cannot cover this reservation',
+            resumeAt: nextUtcDailyReset(now),
+          };
+        }
         if (addMicros(spent, taskHeld, amount) > Math.floor(limit * factor)) {
           return {
             ok: false,
@@ -188,6 +200,53 @@ export class FirestoreCostRepository implements CostRepository {
     });
   }
 
+  async beginAttempt(
+    reservationId: string,
+    metadata: import('@assistant/persistence').CostAttemptMetadata,
+  ): Promise<boolean> {
+    const ref = this.store.doc('costReservations', reservationId);
+    return this.store.db.runTransaction(async (tx) => {
+      const reservation = await tx.get(ref);
+      if (!reservation.exists || reservation.get('status') !== 'held') return false;
+      tx.update(ref, {
+        status: 'dispatching',
+        attemptStartedAt: this.store.now(),
+        attemptMetadata: metadata,
+      });
+      return true;
+    });
+  }
+
+  async markAttemptUnknown(
+    reservationId: string,
+    reason: string,
+    providerReceipt?: { requestId?: string; endpoint?: string },
+  ): Promise<void> {
+    const ref = this.store.doc('costReservations', reservationId);
+    await withEmulatorTransactionRetry(() =>
+      this.store.db.runTransaction(async (tx) => {
+        const reservation = await tx.get(ref);
+        if (
+          !reservation.exists ||
+          !['dispatching', 'unknown'].includes(String(reservation.get('status')))
+        )
+          return;
+        tx.update(ref, {
+          status: 'unknown',
+          unknownReason: reason.slice(0, 500),
+          ...(providerReceipt
+            ? {
+                attemptMetadata: {
+                  ...((reservation.get('attemptMetadata') as object) ?? {}),
+                  ...providerReceipt,
+                },
+              }
+            : {}),
+        });
+      }),
+    );
+  }
+
   private async settle(
     tx: Transaction,
     reservationId: string | null,
@@ -199,7 +258,14 @@ export class FirestoreCostRepository implements CostRepository {
     const now = this.store.now();
     const reservationRef = reservationId ? this.store.doc('costReservations', reservationId) : null;
     const reservation = reservationRef ? await tx.get(reservationRef) : null;
-    if (reservationRef && (!reservation?.exists || reservation.get('status') !== 'held'))
+    const reservationStatus = reservation?.get('status');
+    if (
+      reservationRef &&
+      (!reservation?.exists ||
+        (actual === null
+          ? reservationStatus !== 'held'
+          : !['held', 'dispatching', 'unknown'].includes(String(reservationStatus))))
+    )
       return false;
     if (staleBefore && reservation) {
       const created = decodeRecord<Date>(reservation.get('createdAt'));
@@ -217,10 +283,14 @@ export class FirestoreCostRepository implements CostRepository {
       eventRef,
     );
     if (!holds || !daily || !monthly || !event) throw new Error('Incomplete ledger snapshot');
-    if (event.exists) throw new Error('Ledger event already exists without a settled reservation');
+    if (event.exists) {
+      if (direct?.idempotencyKey && event.get('idempotencyKey') === direct.idempotencyKey)
+        return false;
+      throw new Error('Ledger event already exists without a settled reservation');
+    }
     const writesEvent = actual !== null || direct !== undefined;
-    const amount = usdToMicros(actual?.usd ?? direct?.usd ?? 0);
-    const estimated = reservation ? usdToMicros(Number(reservation.get('estimatedUsd'))) : 0;
+    const amount = ledgerUsdToMicros(actual?.usd ?? direct?.usd ?? 0);
+    const estimated = reservation ? storedLedgerUsdToMicros(reservation.get('estimatedUsd')) : 0;
     const held = integer(holds, 'heldMicros');
     if (held < estimated) throw new Error('Budget hold underflow');
     const shouldAddTaskSpend = writesEvent && Boolean(reservation || direct?.addToTaskSpend);
@@ -231,7 +301,7 @@ export class FirestoreCostRepository implements CostRepository {
       if (!taskHolds || (!task?.exists && shouldAddTaskSpend))
         throw new Error('Ledger task does not exist');
       taskHeld = integer(taskHolds, 'heldMicros');
-      taskSpent = usdToMicros(Number(task?.get('spentUsd') ?? 0));
+      taskSpent = storedLedgerUsdToMicros(task?.get('spentUsd') ?? '0');
       if (taskHeld < estimated) throw new Error('Task hold underflow');
     }
     // All reads are complete before any writes: Firestore may rerun this callback.
@@ -252,7 +322,7 @@ export class FirestoreCostRepository implements CostRepository {
       tx.set(refs.monthly, { spentMicros: addMicros(integer(monthly, 'spentMicros'), amount) });
       if (shouldAddTaskSpend && refs.task) {
         tx.update(refs.task, {
-          spentUsd: microsToUsd(addMicros(taskSpent, amount)).toFixed(6),
+          spentUsd: microsToUsd(addLedgerMicros(taskSpent, amount)).toFixed(6),
           updatedAt: now,
         });
       }
@@ -271,6 +341,7 @@ export class FirestoreCostRepository implements CostRepository {
           unit: details?.unit ?? null,
           unitPriceUsd: details?.unitPriceUsd?.toFixed(8) ?? null,
           description: details?.description ?? reservation?.get('description') ?? '',
+          ...(direct?.idempotencyKey ? { idempotencyKey: direct.idempotencyKey } : {}),
           createdAt: now,
         }),
       );
@@ -280,12 +351,19 @@ export class FirestoreCostRepository implements CostRepository {
 
   async record(input: CostEventInput): Promise<void> {
     if (input.reservationId) throw new Error('Use reconcile to settle a reservation');
-    const id = randomUUID();
+    const digest = input.idempotencyKey
+      ? createHash('sha256').update(input.idempotencyKey).digest('hex').slice(0, 32)
+      : null;
+    const id = (
+      digest
+        ? `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20)}`
+        : randomUUID()
+    ) as ReturnType<typeof randomUUID>;
     await this.store.db.runTransaction((tx) => this.settle(tx, null, null, input, id));
   }
 
   async reconcile(reservationId: string, actual: ReservationActual): Promise<void> {
-    usdToMicros(actual.usd);
+    ledgerUsdToMicros(actual.usd);
     const id = randomUUID();
     // Guarded by the reservation's held status, so a retry after a commit is a no-op.
     await withEmulatorTransactionRetry(() =>
@@ -319,6 +397,18 @@ export class FirestoreCostRepository implements CostRepository {
       .get();
     let released = 0;
     for (const doc of stale.docs) {
+      const pendingCalls = await this.store
+        .collection('callSessions')
+        .where('reservationId', '==', doc.get('id'))
+        .limit(10)
+        .get();
+      if (
+        pendingCalls.docs.some((call) => {
+          const delivery = call.get('finishDelivery') as { costs?: { done?: unknown } } | undefined;
+          return delivery?.costs?.done === false;
+        })
+      )
+        continue;
       if (
         await withEmulatorTransactionRetry(() =>
           this.store.db.runTransaction((tx) =>
@@ -327,6 +417,29 @@ export class FirestoreCostRepository implements CostRepository {
         )
       )
         released++;
+    }
+    const staleDispatches = await this.store
+      .collection('costReservations')
+      .where('status', '==', 'dispatching')
+      .where('attemptStartedAt', '<', cutoff)
+      .orderBy('attemptStartedAt')
+      .limit(batch)
+      .get();
+    for (const doc of staleDispatches.docs) {
+      const id = String(doc.get('id') ?? doc.id);
+      const ref = this.store.doc('costReservations', id);
+      const transitioned = await withEmulatorTransactionRetry(() =>
+        this.store.db.runTransaction(async (tx) => {
+          const current = await tx.get(ref);
+          if (!current.exists || current.get('status') !== 'dispatching') return false;
+          tx.update(ref, {
+            status: 'unknown',
+            unknownReason: 'provider dispatch exceeded reconciliation window',
+          });
+          return true;
+        }),
+      );
+      if (transitioned) released++;
     }
     return released;
   }

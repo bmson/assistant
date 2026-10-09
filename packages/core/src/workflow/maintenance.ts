@@ -3,11 +3,16 @@ import {
   conversationSegments,
   costEvents,
   type Db,
+  lockPostgresPrivacyObservationFence,
+  lockPostgresToolCallReceiptKeys,
   memories,
   messages,
   modelCallAudit,
   modelCalls,
+  tasks,
   toolCache,
+  toolCallReceiptKeys,
+  toolCallReceipts,
   toolCalls,
 } from '@assistant/db';
 import type {
@@ -15,6 +20,11 @@ import type {
   CostRepository,
   MaintenanceRepository,
   RecallMetricsRepository,
+} from '@assistant/persistence';
+import {
+  compactToolCallReceipt,
+  embeddingSpaceIdentityKey,
+  toolCallReceiptKeysForReceipt,
 } from '@assistant/persistence';
 import { and, eq, inArray, isNotNull, isNull, lt, lte, notExists, or, sql } from 'drizzle-orm';
 import { loadConfig } from '../config.js';
@@ -32,13 +42,20 @@ import { purgeStaleDreamNotes } from './dream.js';
  */
 export async function backfillMessageEmbeddings(
   store: Db | MaintenanceRepository,
-  router: Pick<ModelRouter, 'embed'>,
+  router: Pick<ModelRouter, 'embed' | 'embeddingSpace'>,
   batch = 20,
 ): Promise<number> {
+  const space = await router.embeddingSpace();
+  const spaceKey = embeddingSpaceIdentityKey(space);
   if ('kind' in store && store.kind === 'maintenance-repository')
     return (store as MaintenanceRepository).embedMissingMessages({
       batch,
-      embed: (texts) => router.embed(texts.map((text) => text.slice(0, 4000))),
+      embeddingSpaceKey: spaceKey,
+      embed: (texts) =>
+        router.embed(
+          texts.map((text) => text.slice(0, 4000)),
+          { expectedSpace: space },
+        ),
     });
   const db = store as Db;
   const rows = await db
@@ -49,18 +66,27 @@ export async function backfillMessageEmbeddings(
         isNull(messages.embedding),
         or(eq(messages.role, 'user'), eq(messages.role, 'assistant')),
         sql`length(${messages.text}) > 20`,
+        sql`(${messages.channelMessageId} is null or (${messages.channelMessageId} not like 'visual-qa:%' and ${messages.channelMessageId} not like 'readability-%'))`,
       ),
     )
     .orderBy(sql`${messages.createdAt} desc`)
     .limit(batch);
   if (rows.length === 0) return 0;
 
-  const embeddings = await router.embed(rows.map((r) => r.text.slice(0, 4000)));
+  const embeddings = await router.embed(
+    rows.map((r) => r.text.slice(0, 4000)),
+    {
+      expectedSpace: space,
+    },
+  );
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     const embedding = embeddings[i];
     if (!row || !embedding) continue;
-    await db.update(messages).set({ embedding }).where(eq(messages.id, row.id));
+    await db
+      .update(messages)
+      .set({ embedding, embeddingSpaceKey: spaceKey })
+      .where(eq(messages.id, row.id));
   }
   return rows.length;
 }
@@ -252,6 +278,151 @@ export async function purgeAgedHistory(
       .where(
         and(
           lte(toolCalls.createdAt, cutoff),
+          inArray(toolCalls.status, ['succeeded', 'failed', 'denied']),
+          // Execution receipts are not ordinary history. A parked or recently
+          // settled task must retain its result/idempotency rows for recovery.
+          sql`exists (
+            select 1 from ${tasks} as retention_task
+            where retention_task.id = ${toolCalls.taskId}
+              and retention_task.status in ('done', 'failed', 'cancelled')
+              and retention_task.updated_at <= ${cutoff}
+              and jsonb_typeof(retention_task.state) = 'object'
+              and (
+                not (retention_task.state ? 'pendingFinal')
+                or retention_task.state->'pendingFinal' = 'null'::jsonb
+                or jsonb_typeof(retention_task.state->'pendingFinal') = 'object'
+              )
+              and (
+                not (retention_task.state ? 'pendingJob')
+                or retention_task.state->'pendingJob' = 'null'::jsonb
+                or coalesce((
+                  jsonb_typeof(retention_task.state->'pendingJob') = 'object'
+                  and jsonb_typeof(retention_task.state->'pendingJob'->'dbToolCallId') = 'string'
+                  and retention_task.state->'pendingJob'->>'dbToolCallId' <> ''
+                  and retention_task.state->'pendingJob'->>'dbToolCallId' <> ${toolCalls.id}::text
+                ), false)
+              )
+              and (
+                not (retention_task.state ? 'pendingToolBatch')
+                or retention_task.state->'pendingToolBatch' = 'null'::jsonb
+                or coalesce((
+                  jsonb_typeof(retention_task.state->'pendingToolBatch') = 'object'
+                  and jsonb_typeof(retention_task.state->'pendingToolBatch'->'calls') = 'array'
+                  and case
+                    when jsonb_typeof(retention_task.state->'pendingToolBatch'->'calls') = 'array'
+                    then jsonb_array_length(retention_task.state->'pendingToolBatch'->'calls') <= 1000
+                    else false
+                  end
+                  and not exists (
+                    select 1
+                    from jsonb_array_elements(
+                      case
+                        when jsonb_typeof(retention_task.state->'pendingToolBatch'->'calls') = 'array'
+                        then retention_task.state->'pendingToolBatch'->'calls'
+                        else '[]'::jsonb
+                      end
+                    ) as checkpoint_call(value)
+                    where jsonb_typeof(checkpoint_call.value) is distinct from 'object'
+                      or checkpoint_call.value->>'status' is null
+                      or checkpoint_call.value->>'status' not in ('queued', 'awaiting_approval', 'budget', 'job', 'settled')
+                      or (
+                        checkpoint_call.value ? 'dbToolCallId'
+                        and (
+                          jsonb_typeof(checkpoint_call.value->'dbToolCallId') is distinct from 'string'
+                          or checkpoint_call.value->>'dbToolCallId' = ''
+                        )
+                      )
+                  )
+                  and not exists (
+                    select 1
+                    from jsonb_array_elements(
+                      case
+                        when jsonb_typeof(retention_task.state->'pendingToolBatch'->'calls') = 'array'
+                        then retention_task.state->'pendingToolBatch'->'calls'
+                        else '[]'::jsonb
+                      end
+                    ) as checkpoint_call(value)
+                    where checkpoint_call.value->>'status' <> 'settled'
+                      and checkpoint_call.value->>'dbToolCallId' = ${toolCalls.id}::text
+                  )
+                ), false)
+              )
+          )`,
+          sql`not exists (
+            with recursive receipt_dependents as (
+              select id, parent_task_id, agent_id, status, updated_at, state from ${tasks} where parent_task_id = ${toolCalls.taskId}
+              union
+              select child.id, child.parent_task_id, child.agent_id, child.status, child.updated_at, child.state from ${tasks} as child
+              join receipt_dependents as parent on child.parent_task_id = parent.id
+            )
+            select 1 from receipt_dependents
+            where agent_id is distinct from (
+                select root_task.agent_id from ${tasks} as root_task where root_task.id = ${toolCalls.taskId}
+              )
+              or status not in ('done', 'failed', 'cancelled')
+              or updated_at > ${cutoff}
+              or jsonb_typeof(state) is distinct from 'object'
+              or (
+                state ? 'pendingFinal'
+                and state->'pendingFinal' <> 'null'::jsonb
+                and jsonb_typeof(state->'pendingFinal') is distinct from 'object'
+              )
+              or (
+                state ? 'pendingJob'
+                and state->'pendingJob' <> 'null'::jsonb
+                and not coalesce((
+                  jsonb_typeof(state->'pendingJob') = 'object'
+                  and jsonb_typeof(state->'pendingJob'->'dbToolCallId') = 'string'
+                  and state->'pendingJob'->>'dbToolCallId' <> ''
+                  and state->'pendingJob'->>'dbToolCallId' <> ${toolCalls.id}::text
+                ), false)
+              )
+              or (
+                state ? 'pendingToolBatch'
+                and state->'pendingToolBatch' <> 'null'::jsonb
+                and not coalesce((
+                  jsonb_typeof(state->'pendingToolBatch') = 'object'
+                  and jsonb_typeof(state->'pendingToolBatch'->'calls') = 'array'
+                  and case
+                    when jsonb_typeof(state->'pendingToolBatch'->'calls') = 'array'
+                    then jsonb_array_length(state->'pendingToolBatch'->'calls') <= 1000
+                    else false
+                  end
+                  and not exists (
+                    select 1
+                    from jsonb_array_elements(
+                      case
+                        when jsonb_typeof(state->'pendingToolBatch'->'calls') = 'array'
+                        then state->'pendingToolBatch'->'calls'
+                        else '[]'::jsonb
+                      end
+                    ) as checkpoint_call(value)
+                    where jsonb_typeof(checkpoint_call.value) is distinct from 'object'
+                      or checkpoint_call.value->>'status' is null
+                      or checkpoint_call.value->>'status' not in ('queued', 'awaiting_approval', 'budget', 'job', 'settled')
+                      or (
+                        checkpoint_call.value ? 'dbToolCallId'
+                        and (
+                          jsonb_typeof(checkpoint_call.value->'dbToolCallId') is distinct from 'string'
+                          or checkpoint_call.value->>'dbToolCallId' = ''
+                        )
+                      )
+                  )
+                  and not exists (
+                    select 1
+                    from jsonb_array_elements(
+                      case
+                        when jsonb_typeof(state->'pendingToolBatch'->'calls') = 'array'
+                        then state->'pendingToolBatch'->'calls'
+                        else '[]'::jsonb
+                      end
+                    ) as checkpoint_call(value)
+                    where checkpoint_call.value->>'status' <> 'settled'
+                      and checkpoint_call.value->>'dbToolCallId' = ${toolCalls.id}::text
+                  )
+                ), false)
+              )
+          )`,
           notExists(
             db
               .select({ one: sql`1` })
@@ -267,24 +438,118 @@ export async function purgeAgedHistory(
         ),
       )
       .limit(batch);
+    const agedToolCallCandidates = await db
+      .select({ id: toolCalls.id, taskId: tasks.id, agentId: tasks.agentId })
+      .from(toolCalls)
+      .innerJoin(tasks, eq(tasks.id, toolCalls.taskId))
+      .where(inArray(toolCalls.id, agedToolCalls))
+      .limit(batch);
+    let compactedToolCalls = 0;
+    const receiptRecordedAt = new Date();
+    for (const candidate of agedToolCallCandidates) {
+      const compacted = await db.transaction(async (tx) => {
+        // Owner erasure serializes before the task/call locks and invalidates this writer.
+        await lockPostgresPrivacyObservationFence(tx as unknown as Db, candidate.agentId);
+        const [task] = await tx
+          .select({ id: tasks.id, agentId: tasks.agentId })
+          .from(tasks)
+          .where(and(eq(tasks.id, candidate.taskId), eq(tasks.agentId, candidate.agentId)))
+          .for('update')
+          .limit(1);
+        if (!task) return 0;
+        const [current] = await tx
+          .select({ toolCall: toolCalls, taskAgentId: tasks.agentId })
+          .from(toolCalls)
+          .innerJoin(tasks, eq(tasks.id, toolCalls.taskId))
+          .where(and(eq(toolCalls.id, candidate.id), eq(tasks.agentId, candidate.agentId)))
+          .for('update')
+          .limit(1);
+        if (!current || current.taskAgentId !== candidate.agentId) return 0;
+        const [stillEligible] = await tx
+          .select({ id: toolCalls.id })
+          .from(toolCalls)
+          .where(and(eq(toolCalls.id, candidate.id), inArray(toolCalls.id, agedToolCalls)))
+          .limit(1);
+        if (!stillEligible) return 0;
+        const receipt = compactToolCallReceipt(current.toolCall, {
+          agentId: candidate.agentId,
+          recordedAt: receiptRecordedAt,
+        });
+        if (!receipt) return 0;
+        const keys = toolCallReceiptKeysForReceipt(receipt);
+        await lockPostgresToolCallReceiptKeys(tx as unknown as Db, keys);
+        for (const key of keys) {
+          const [existing] = await tx
+            .select()
+            .from(toolCallReceiptKeys)
+            .where(eq(toolCallReceiptKeys.id, key.id))
+            .limit(1);
+          if (
+            existing &&
+            (existing.agentId !== key.agentId ||
+              existing.taskId !== key.taskId ||
+              existing.receiptId !== key.receiptId ||
+              existing.kind !== key.kind ||
+              existing.digest !== key.digest)
+          )
+            return 0;
+        }
+        await tx.insert(toolCallReceipts).values(receipt).onConflictDoNothing();
+        const [savedReceipt] = await tx
+          .select()
+          .from(toolCallReceipts)
+          .where(eq(toolCallReceipts.id, receipt.id))
+          .limit(1);
+        if (
+          !savedReceipt ||
+          savedReceipt.agentId !== receipt.agentId ||
+          savedReceipt.taskId !== receipt.taskId ||
+          savedReceipt.toolCallId !== receipt.toolCallId ||
+          savedReceipt.modelToolCallIdHash !== receipt.modelToolCallIdHash ||
+          savedReceipt.idempotencyKeyHash !== receipt.idempotencyKeyHash ||
+          savedReceipt.toolName !== receipt.toolName ||
+          savedReceipt.effectOutcome !== receipt.effectOutcome
+        )
+          return 0;
+        if (keys.length) await tx.insert(toolCallReceiptKeys).values(keys).onConflictDoNothing();
+        for (const key of keys) {
+          const [savedKey] = await tx
+            .select()
+            .from(toolCallReceiptKeys)
+            .where(eq(toolCallReceiptKeys.id, key.id))
+            .limit(1);
+          if (
+            !savedKey ||
+            savedKey.agentId !== key.agentId ||
+            savedKey.taskId !== key.taskId ||
+            savedKey.receiptId !== key.receiptId ||
+            savedKey.kind !== key.kind ||
+            savedKey.digest !== key.digest
+          )
+            return 0;
+        }
+        const deleted = await tx
+          .delete(toolCalls)
+          .where(and(eq(toolCalls.id, current.toolCall.id), eq(toolCalls.taskId, receipt.taskId)))
+          .returning({ id: toolCalls.id });
+        return deleted.length === 1 ? 1 : 0;
+      });
+      compactedToolCalls += compacted;
+    }
     const agedModelCalls = db
       .select({ id: modelCalls.id })
       .from(modelCalls)
       .where(lte(modelCalls.createdAt, cutoff))
       .limit(batch);
-    const [deletedMessages, deletedToolCalls, deletedModelCalls] = await Promise.all([
+    const [deletedMessages, deletedModelCalls] = await Promise.all([
       db.delete(messages).where(inArray(messages.id, agedMessages)).returning({ id: messages.id }),
-      db
-        .delete(toolCalls)
-        .where(inArray(toolCalls.id, agedToolCalls))
-        .returning({ id: toolCalls.id }),
       db
         .delete(modelCalls)
         .where(inArray(modelCalls.id, agedModelCalls))
         .returning({ id: modelCalls.id }),
     ]);
     counts.messages = deletedMessages.length;
-    counts.toolCalls = deletedToolCalls.length;
+    counts.toolCalls = compactedToolCalls;
     counts.modelCalls = deletedModelCalls.length;
   }
 

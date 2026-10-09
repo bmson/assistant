@@ -58,6 +58,13 @@ export const PREDICATE_VOCABULARY: readonly PredicateSpec[] = [
   { id: 'grandson_of', group: 'family', ...PERSON_TO_PERSON, inverse: 'grandparent_of' },
   { id: 'granddaughter_of', group: 'family', ...PERSON_TO_PERSON, inverse: 'grandparent_of' },
   { id: 'spouse_of', group: 'family', ...PERSON_TO_PERSON, symmetric: true, temporal: true },
+  {
+    id: 'former_spouse_of',
+    group: 'family',
+    ...PERSON_TO_PERSON,
+    symmetric: true,
+    temporal: true,
+  },
   { id: 'partner_of', group: 'family', ...PERSON_TO_PERSON, symmetric: true, temporal: true },
   { id: 'uncle_of', group: 'family', ...PERSON_TO_PERSON, inverse: 'nephew_of' },
   { id: 'aunt_of', group: 'family', ...PERSON_TO_PERSON, inverse: 'niece_of' },
@@ -216,6 +223,14 @@ export function predicateSpec(id: string): PredicateSpec | undefined {
  */
 const PREDICATE_SYNONYMS: Readonly<Record<string, string>> = {
   // Work
+  was_employed_by: 'worked_at',
+  were_employed_by: 'worked_at',
+  formerly_employed_by: 'worked_at',
+  previously_employed_by: 'worked_at',
+  was_employed_at: 'worked_at',
+  were_employed_at: 'worked_at',
+  was_married: 'former_spouse_of',
+  were_married: 'former_spouse_of',
   employed_by: 'works_at',
   employed_at: 'works_at',
   employee_of: 'works_at',
@@ -235,16 +250,24 @@ const PREDICATE_SYNONYMS: Readonly<Record<string, string>> = {
   based_at: 'based_in',
   located_in: 'based_in',
   // Family
+  was_married_to: 'former_spouse_of',
+  were_married_to: 'former_spouse_of',
+  formerly_married_to: 'former_spouse_of',
+  previously_married_to: 'former_spouse_of',
   married_to: 'spouse_of',
   wife_of: 'spouse_of',
   husband_of: 'spouse_of',
+  // Short literal relation spans when a date is the object.
+  starts: 'starts_on',
+  ends: 'ends_on',
+  happens: 'happens_on',
 };
 
 /**
  * Prefixes a model tends to keep from the source wording ("is married to",
  * "was born in") that carry no meaning the predicate does not already.
  */
-const DROPPED_PREFIXES = ['is_', 'was_', 'are_', 'were_', 'has_', 'have_', 'a_', 'an_', 'the_'];
+const DROPPED_PREFIXES = ['is_', 'are_', 'has_', 'have_', 'a_', 'an_', 'the_'];
 
 function lookup(candidate: string): string | undefined {
   if (BY_ID.has(candidate)) return candidate;
@@ -265,8 +288,12 @@ export function canonicalPredicate(value: string): { id: string; known: boolean 
   if (!cleaned) return { id: value, known: false };
 
   const attempts = [cleaned];
-  for (const prefix of DROPPED_PREFIXES) {
-    if (cleaned.startsWith(prefix)) attempts.push(cleaned.slice(prefix.length));
+  let stripped = cleaned;
+  for (let count = 0; count < 4; count += 1) {
+    const prefix = DROPPED_PREFIXES.find((candidate) => stripped.startsWith(candidate));
+    if (!prefix) break;
+    stripped = stripped.slice(prefix.length);
+    attempts.push(stripped);
   }
   // Verb agreement is the other common drift: a source that says "work at"
   // rather than "works at" should not open a second predicate.

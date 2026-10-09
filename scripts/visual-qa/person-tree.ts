@@ -1,5 +1,6 @@
 /** Isolated fixtures and browser interaction regression checks. Start local web on 3107 first.
- * DATABASE_URL=postgres://assistant:assistant@localhost:5432/assistant_test pnpm tsx scripts/visual-qa/knowledge-graph.ts
+ * DATABASE_URL=<allocated URL> ASSISTANT_TEST_TARGET_TOKEN=<token> pnpm tsx scripts/visual-qa/person-tree.ts
+ * Cleanup: pnpm visual-qa:cleanup <printed-run-id> with the same allocated target.
  */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -17,14 +18,23 @@ import {
 } from '@assistant/db';
 import { eq } from 'drizzle-orm';
 import { chromium } from 'playwright';
+import {
+  assertAllocatedTestDatabaseOwnership,
+  assertAllocatedTestTargetMarker,
+} from '../test-target.js';
+import { markVisualQaRun, newVisualQaRunId, writeVisualQaManifest } from './fixture-runs.js';
 
-const databaseUrl = process.env.DATABASE_URL ?? '';
-const parsed = new URL(databaseUrl);
-if (!['localhost', '127.0.0.1'].includes(parsed.hostname) || !parsed.pathname.endsWith('_test'))
-  throw new Error('QA requires a local _test database.');
-const db = createDb(databaseUrl);
+const target = assertAllocatedTestTargetMarker({
+  databaseUrl: process.env.DATABASE_URL,
+  testDatabaseUrl: process.env.TEST_DATABASE_URL,
+  token: process.env.ASSISTANT_TEST_TARGET_TOKEN,
+  kind: process.env.ASSISTANT_TEST_TARGET_KIND === 'restore' ? 'restore' : 'standard',
+});
+const db = createDb(target.databaseUrl);
+await assertAllocatedTestDatabaseOwnership(db, target);
 const agent = await getAgent(db);
-const marker = randomUUID();
+const runId = newVisualQaRunId();
+const marker = `visual-qa:${runId}:person-tree`;
 const fixture = [
   ['Alex Rivera', 'person'],
   ['Robin Rivera', 'person'],
@@ -33,49 +43,6 @@ const fixture = [
   ['School fundraiser', 'project'],
   ['Maya Chen', 'person'],
 ];
-const nodes = fixture.map(([label, kind]) => ({
-  id: randomUUID(),
-  agentId: agent.id,
-  label: label as string,
-  kind: kind as string,
-  canonicalKey: `${kind}:graph-qa-${marker}-${label}`,
-}));
-const people = await db
-  .insert(contacts)
-  .values([
-    { name: 'Alex Rivera', trust: 'known', relationship: 'Friend' },
-    { name: 'Robin Rivera', trust: 'known', relationship: 'Friend' },
-  ])
-  .returning();
-const alexContact = people[0];
-const robinContact = people[1];
-if (!alexContact || !robinContact) throw new Error('Missing people');
-await db.insert(knowledgeGraphEntities).values(
-  nodes.map((node, i) => ({
-    ...node,
-    contactId: i === 0 ? alexContact.id : i === 1 ? robinContact.id : null,
-    canonicalKey:
-      i === 0
-        ? `contact:${alexContact.id}`
-        : i === 1
-          ? `contact:${robinContact.id}`
-          : node.canonicalKey,
-  })),
-);
-await db.insert(occasions).values({
-  agentId: agent.id,
-  contactId: alexContact.id,
-  kind: 'birthday',
-  month: 3,
-  day: 18,
-  year: 1985,
-  leadDays: 14,
-  notes: 'Gift ideas',
-  ownerConfirmed: true,
-});
-const alex = nodes[0];
-const robin = nodes[1];
-if (!alex || !robin) throw new Error('Missing fixture');
 const facts: Array<[number, string, number, string, 'confirmed' | 'unreviewed']> = [
   [0, 'parent_of', 1, 'Alex Rivera is the parent of Robin Rivera.', 'confirmed'],
   [0, 'parent_of', 1, 'Family notes: Alex Rivera is the parent of Robin Rivera.', 'unreviewed'],
@@ -85,47 +52,128 @@ const facts: Array<[number, string, number, string, 'confirmed' | 'unreviewed']>
   [5, 'works_at', 2, 'Maya Chen works at Northstar Robotics.', 'unreviewed'],
   [5, 'organizes', 4, 'Maya Chen organizes the School fundraiser.', 'confirmed'],
 ];
-for (const [index, [from, predicate, to, content, reviewStatus]] of facts.entries()) {
-  const subject = nodes[from];
-  const object = nodes[to];
-  if (!subject || !object) throw new Error('Missing endpoint');
-  const memoryId = randomUUID();
-  const contentHash = randomUUID();
-  await db.insert(memories).values({
-    id: memoryId,
+const contactIds = [randomUUID(), randomUUID()];
+const entityIds = fixture.map(() => randomUUID());
+const occasionIds = [randomUUID()];
+const entityCanonicalKeys = fixture.map(([label, kind], index) =>
+  index < 2 ? `contact:${contactIds[index]}` : `${kind}:graph-qa-${runId}-${label}`,
+);
+const memoryIds = facts.map(() => randomUUID());
+const memoryContentHashes = facts.map((_, index) => `${marker}:memory:${index}`);
+const relationIds = facts.map(() => randomUUID());
+const relationFingerprints = facts.map((_, index) => `${marker}:relation:${index}`);
+const manifest = await writeVisualQaManifest({
+  fixtureKind: 'person-tree',
+  runId,
+  targetDatabaseName: target.databaseName,
+  targetToken: target.token,
+  agentId: agent.id,
+  ids: {
+    contactIds,
+    entityIds,
+    memoryIds,
+    memoryContentHashes,
+    relationIds,
+    occasionIds,
+  },
+  provenance: {
+    marker,
+    contactNotes: marker,
+    entityCanonicalKeys,
+    relationFingerprintPrefix: `${marker}:relation:`,
+  },
+});
+const nodes = fixture.map(([label, kind], index) => ({
+  id: entityIds[index] as string,
+  agentId: agent.id,
+  label: label as string,
+  kind: kind as string,
+  canonicalKey: entityCanonicalKeys[index] as string,
+  contactId: index < 2 ? (contactIds[index] ?? null) : null,
+}));
+const alex = nodes[0];
+const robin = nodes[1];
+const alexContactId = contactIds[0];
+if (!alex || !robin || !alexContactId || !contactIds[1]) throw new Error('Missing fixture');
+await db.transaction(async (tx) => {
+  await tx.insert(contacts).values([
+    {
+      id: contactIds[0] as string,
+      name: 'Alex Rivera',
+      trust: 'known',
+      relationship: 'Friend',
+      notes: marker,
+    },
+    {
+      id: contactIds[1] as string,
+      name: 'Robin Rivera',
+      trust: 'known',
+      relationship: 'Friend',
+      notes: marker,
+    },
+  ]);
+  await tx.insert(knowledgeGraphEntities).values(nodes);
+  await tx.insert(occasions).values({
+    id: occasionIds[0],
     agentId: agent.id,
-    category: 'knowledge',
-    kind: 'fact',
-    content,
-    contentHash,
-    embedding: Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0)),
+    contactId: alexContactId,
+    kind: 'birthday',
+    month: 3,
+    day: 18,
+    year: 1985,
+    leadDays: 14,
+    notes: 'Gift ideas',
+    ownerConfirmed: true,
   });
-  await db.insert(knowledgeGraphSources).values({
-    memoryId,
-    contentHash,
-    status: 'ready',
-    extractionVersion: GRAPH_EXTRACTION_VERSION,
-  });
-  await db.insert(knowledgeGraphRelations).values({
-    agentId: agent.id,
-    subjectEntityId: subject.id,
-    objectEntityId: object.id,
-    predicate,
-    sourceMemoryId: memoryId,
-    evidenceQuote: content,
-    sourceFingerprint: `${marker}-${index}`,
-    ordinal: 0,
-    confidence: '0.9',
-    reviewStatus,
-  });
-}
+  for (const [index, [from, predicate, to, content, reviewStatus]] of facts.entries()) {
+    const subject = nodes[from];
+    const object = nodes[to];
+    const memoryId = memoryIds[index];
+    const contentHash = memoryContentHashes[index];
+    const relationId = relationIds[index];
+    const fingerprint = relationFingerprints[index];
+    if (!subject || !object || !memoryId || !contentHash || !relationId || !fingerprint)
+      throw new Error('Incomplete person tree fixture manifest');
+    await tx.insert(memories).values({
+      id: memoryId,
+      agentId: agent.id,
+      category: 'knowledge',
+      kind: 'fact',
+      content,
+      contentHash,
+      originTrust: 'assistant',
+      quarantined: true,
+      embedding: Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0)),
+    });
+    await tx.insert(knowledgeGraphSources).values({
+      memoryId,
+      contentHash,
+      status: 'ready',
+      extractionVersion: GRAPH_EXTRACTION_VERSION,
+    });
+    await tx.insert(knowledgeGraphRelations).values({
+      id: relationId,
+      agentId: agent.id,
+      subjectEntityId: subject.id,
+      objectEntityId: object.id,
+      predicate,
+      sourceMemoryId: memoryId,
+      evidenceQuote: content,
+      sourceFingerprint: fingerprint,
+      ordinal: 0,
+      confidence: '0.9',
+      reviewStatus,
+    });
+  }
+});
+await markVisualQaRun(manifest, 'seeded');
 
 mkdirSync('/tmp/assistant-people-qa', { recursive: true });
 const browser = await chromium.launch({ channel: 'chrome' });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
 const errors: string[] = [];
 page.on('pageerror', (error) => errors.push(error.message));
-const personURL = `http://127.0.0.1:3107/people/${alexContact.id}`;
+const personURL = `http://127.0.0.1:3107/people/${alexContactId}`;
 try {
   await page.goto(personURL);
   const dates = page.locator('#important-dates');
@@ -223,8 +271,11 @@ try {
   await page.getByRole('button', { name: 'Tree', exact: true }).click();
   await page.getByRole('button', { name: 'Expand Robin Rivera', exact: true }).waitFor();
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ passed: true, personURL, screenshots: '/tmp/assistant-people-qa' }));
+  console.log(
+    JSON.stringify({ passed: true, runId, personURL, screenshots: '/tmp/assistant-people-qa' }),
+  );
 } finally {
   await browser.close();
+  await db.$client.end({ timeout: 5 });
 }
-process.exit(0);
+await markVisualQaRun(manifest, 'complete');

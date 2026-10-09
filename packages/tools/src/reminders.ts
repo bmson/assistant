@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   cancelNamedReminder,
   getAgent,
@@ -6,14 +6,47 @@ import {
   nextRun,
   reminderScheduleIsActive,
   reminderScheduleTemplate,
+  scheduleRepository,
   upsertSchedule,
 } from '@assistant/core';
-import type { ReminderRepository, ScheduleRepository } from '@assistant/persistence';
+import type {
+  ReminderRepository,
+  ScheduleRecord,
+  ScheduleRepository,
+} from '@assistant/persistence';
 import { z } from 'zod';
 import type { ToolRegistry } from './registry.js';
 import type { AssistantTool, ToolFlags } from './types.js';
 
 const REMINDER_PREFIX = 'reminder:';
+function intentHash(value: unknown): string {
+  const canonical = JSON.stringify(value, (_key, row) =>
+    row && typeof row === 'object' && !Array.isArray(row)
+      ? Object.fromEntries(Object.entries(row).sort(([a], [b]) => a.localeCompare(b)))
+      : row,
+  );
+  return createHash('sha256').update(canonical).digest('hex');
+}
+function reminderReceipt(row: ScheduleRecord, expectedIntent: string) {
+  const template = reminderScheduleTemplate(row.taskTemplate);
+  if (template.reminderIntentHash !== expectedIntent)
+    throw new Error('Reminder operation already has different input');
+  const active = reminderScheduleIsActive(row);
+  return {
+    reminderId: row.id,
+    created: true,
+    enabled: active,
+    kind: template.reminderKind,
+    ...(template.reminderKind === 'recurring' || template.reminderKind === 'event_completion'
+      ? { cron: row.cron }
+      : {}),
+    nextFires: active ? (row.nextRunAt?.toISOString() ?? null) : null,
+    firstFires: template.reminderFirstFiresAt,
+    timezone: template.timezone,
+    text: template.reminderText,
+  };
+}
+
 /** A valid placeholder cron for a one-time row; nextRunAt remains authoritative. */
 function cronForInstant(at: Date, timezone: string): string {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -81,10 +114,20 @@ export function registerReminderTools(
         .min(1)
         .max(7 * 24 * 60)
         .optional(),
+      /** Exact fixture ID copied from a successful current-task sports.scores result. */
+      afterEventId: z.string().min(1).max(40).optional(),
     })
     .superRefine((args, refinement) => {
       const oneTimeInputs = Number(Boolean(args.at)) + Number(Boolean(args.inMinutes));
       const recurringInputs = Number(Boolean(args.cron)) + Number(Boolean(args.time));
+      if (args.afterEventId) {
+        if (oneTimeInputs + recurringInputs > 0)
+          refinement.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'event-completion reminders cannot also set a fixed or recurring schedule',
+          });
+        return;
+      }
       if (oneTimeInputs + recurringInputs > 1) {
         refinement.addIssue({
           code: z.ZodIssueCode.custom,
@@ -103,27 +146,74 @@ export function registerReminderTools(
     {
       name: 'reminder.create',
       description:
-        'Create a reminder. Ordinary requests such as "remind me tomorrow at 9" fire ONCE: pass an ISO 8601 instant with offset in at, or inMinutes for "in 10 minutes" so the server resolves the delay against the owner clock. Only when the owner explicitly asks to repeat should you pass a 5-field cron, or time ("HH:MM", owner timezone) with optional weekdays (0=Sun..6=Sat; omit only for explicitly daily reminders). Open-ended work is a goal, not a reminder.',
+        'Create a reminder. Ordinary requests such as "remind me tomorrow at 9" fire ONCE: pass an ISO 8601 instant with offset in at, or inMinutes for "in 10 minutes" so the server resolves the delay against the original owner request clock. Only when the owner explicitly asks to repeat should you pass a 5-field cron, or time ("HH:MM", owner timezone) with optional weekdays (0=Sun..6=Sat; omit only for explicitly daily reminders). Do not also call task.schedule for an ordinary reminder. If a reminder depends on an event actually finishing, do not guess its scheduled end; ask whether that fixed time is acceptable. Open-ended work is a goal, not a reminder.',
       inputSchema: createSchema,
       risk: 'autonomous',
       acceptsUntrustedInput: false,
       execute: async (args, ctx) => {
-        const timezone = portable
-          ? await portable.getTimezone(ctx.agentId)
-          : (await getAgent(ctx.db)).timezone;
+        const hash = intentHash(args);
+        const identity = ctx.execution
+          ? intentHash([ctx.agentId, ctx.taskId, ctx.execution.dbToolCallId, 'reminder.create'])
+          : randomUUID();
+        const name = `${REMINDER_PREFIX}${identity}`;
+        const existing = await scheduleRepository(portable?.schedules ?? ctx.db).getByName(
+          ctx.agentId,
+          name,
+        );
+        if (existing) return reminderReceipt(existing, hash);
+        const timezone =
+          ctx.requestTimeZone ??
+          (portable ? await portable.getTimezone(ctx.agentId) : (await getAgent(ctx.db)).timezone);
+        if (args.afterEventId) {
+          const dependency = ctx.verifiedReminderEvent;
+          if (!dependency || dependency.eventId !== args.afterEventId)
+            throw new Error(
+              'The requested fixture is not bound to a successful current-task sports result.',
+            );
+          const startsAt = Date.parse(dependency.startsAt);
+          if (!Number.isFinite(startsAt)) throw new Error('The fixture start time is invalid.');
+          const firstCheck = new Date(Math.max(ctx.now().getTime(), startsAt));
+          const cron = '*/15 * * * *';
+          const row = await upsertSchedule(portable?.schedules ?? ctx.db, {
+            agentId: ctx.agentId,
+            name,
+            cron,
+            timezone,
+            nextRunAt: firstCheck,
+            taskTemplate: {
+              type: 'scheduled',
+              job: 'reminder.notify',
+              maxSteps: 3,
+              budgetUsdLimit: '0.05',
+              reminderIntentHash: hash,
+              reminderFirstFiresAt: firstCheck.toISOString(),
+              reminderKind: 'event_completion',
+              reminderText: args.text,
+              reminderEventDependency: dependency,
+              timezone,
+              instruction: `Wait for the verified game ${dependency.homeTeam} vs ${dependency.awayTeam} to finish, then notify the owner: ${args.text}`,
+              ...(ctx.conversationId ? { conversationId: ctx.conversationId } : {}),
+            },
+          });
+          return reminderReceipt(row, hash);
+        }
         const relativeFiresAt = args.inMinutes
-          ? new Date(ctx.now().getTime() + args.inMinutes * 60 * 1000)
+          ? new Date((ctx.requestAt ?? ctx.now()).getTime() + args.inMinutes * 60 * 1000)
           : undefined;
         const oneTimeAt = args.at ? new Date(args.at) : relativeFiresAt;
         if (oneTimeAt) {
           const firesAt = oneTimeAt;
           if (firesAt.getTime() <= ctx.now().getTime()) {
-            throw new Error('one-time reminder must be in the future');
+            throw new Error(
+              args.inMinutes
+                ? 'request-relative reminder time has already passed; ask the owner to confirm a new time'
+                : 'one-time reminder must be in the future',
+            );
           }
           const cron = cronForInstant(firesAt, timezone);
           const row = await upsertSchedule(portable?.schedules ?? ctx.db, {
             agentId: ctx.agentId,
-            name: `${REMINDER_PREFIX}${randomUUID()}`,
+            name,
             cron,
             timezone,
             nextRunAt: firesAt,
@@ -132,6 +222,8 @@ export function registerReminderTools(
               job: 'reminder.notify',
               maxSteps: 3,
               budgetUsdLimit: '0.05',
+              reminderIntentHash: hash,
+              reminderFirstFiresAt: firesAt.toISOString(),
               reminderKind: 'once',
               reminderText: args.text,
               timezone,
@@ -139,20 +231,14 @@ export function registerReminderTools(
               ...(ctx.conversationId ? { conversationId: ctx.conversationId } : {}),
             },
           });
-          return {
-            reminderId: row.id,
-            kind: 'once' as const,
-            nextFires: firesAt.toISOString(),
-            timezone,
-            text: args.text,
-          };
+          return reminderReceipt(row, hash);
         }
         const cron = args.cron ?? cronFromTime(args.time as string, args.weekdays);
         // Validate the cron by computing its next run; nextRun throws if invalid.
         const next = nextRun(cron, timezone);
         const row = await upsertSchedule(portable?.schedules ?? ctx.db, {
           agentId: ctx.agentId,
-          name: `${REMINDER_PREFIX}${randomUUID()}`,
+          name,
           cron,
           timezone,
           taskTemplate: {
@@ -160,6 +246,8 @@ export function registerReminderTools(
             job: 'reminder.notify',
             maxSteps: 3,
             budgetUsdLimit: '0.05',
+            reminderIntentHash: hash,
+            reminderFirstFiresAt: next.toISOString(),
             reminderKind: 'recurring',
             timezone,
             reminderText: args.text,
@@ -168,14 +256,7 @@ export function registerReminderTools(
             ...(ctx.conversationId ? { conversationId: ctx.conversationId } : {}),
           },
         });
-        return {
-          reminderId: row.id,
-          kind: 'recurring' as const,
-          cron,
-          nextFires: next.toISOString(),
-          timezone,
-          text: args.text,
-        };
+        return reminderReceipt(row, hash);
       },
     },
     { privateWrite: true },

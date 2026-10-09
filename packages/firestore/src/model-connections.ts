@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   isRoutableModel,
   type ModelCatalogRepository,
@@ -9,6 +10,20 @@ import {
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 type Row = Records['modelConnections'];
+
+function modelRoleState(row: { primaryModel: string; fallbackModel: string; params: unknown }) {
+  return { primaryModel: row.primaryModel, fallbackModel: row.fallbackModel, params: row.params };
+}
+
+function sameState(left: unknown, right: unknown): boolean {
+  const stable = (value: unknown): string =>
+    JSON.stringify(value, (_key, item) =>
+      item && typeof item === 'object' && !Array.isArray(item)
+        ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b)))
+        : item,
+    );
+  return stable(left) === stable(right);
+}
 
 function validRow(id: string, docId: string, value: unknown): Row | null {
   const row = decodeRecord<Row>(value);
@@ -125,6 +140,91 @@ export class FirestoreModelCatalogRepository implements ModelCatalogRepository {
       .sort((left, right) => left.role.localeCompare(right.role));
   }
 
+  async listRoleRevisions(role?: string): Promise<Records['modelRoleRevisions'][]> {
+    const collection = this.store.collection('modelRoleRevisions');
+    const page = role ? await collection.where('role', '==', role).get() : await collection.get();
+    return page.docs
+      .flatMap((doc) => {
+        const row = decodeRecord<Records['modelRoleRevisions']>(doc.data());
+        return typeof row?.id === 'string' &&
+          documentKey(row.id) === doc.id &&
+          typeof row.role === 'string'
+          ? [row]
+          : [];
+      })
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
+  }
+
+  async rollbackRoleRevision(revisionId: string): Promise<boolean> {
+    const revisionRef = this.store.doc('modelRoleRevisions', revisionId);
+    return this.store.db.runTransaction(async (tx) => {
+      const revisionSnapshot = await tx.get(revisionRef);
+      if (!revisionSnapshot.exists) return false;
+      const revision = decodeRecord<Records['modelRoleRevisions']>(revisionSnapshot.data());
+      if (revision.id !== revisionId || !revision.baselineKnown) return false;
+      const roleRef = this.store.doc('modelRoles', revision.role);
+      const roleSnapshot = await tx.get(roleRef);
+      const current = roleSnapshot.exists
+        ? decodeRecord<Records['modelRoles']>(roleSnapshot.data())
+        : null;
+      if (
+        !current ||
+        current.role !== revision.role ||
+        !sameState(modelRoleState(current), revision.afterState)
+      )
+        return false;
+      if (revision.beforeState === null) {
+        if (revision.role !== 'voice') return false;
+        tx.delete(roleRef);
+        const rollback: Records['modelRoleRevisions'] = {
+          id: randomUUID(),
+          role: revision.role,
+          beforeState: modelRoleState(current),
+          afterState: null,
+          source: `rollback:${revisionId}`,
+          baselineKnown: true,
+          requiresOwnerReview: false,
+          createdAt: this.store.now(),
+        };
+        tx.create(this.store.doc('modelRoleRevisions', rollback.id), encodeRecord(rollback));
+        return true;
+      }
+      const before = revision.beforeState as Partial<Records['modelRoles']>;
+      if (typeof before.primaryModel !== 'string' || typeof before.fallbackModel !== 'string')
+        return false;
+      const modelRefs = [...new Set([before.primaryModel, before.fallbackModel])].map((id) =>
+        this.store.doc('models', id),
+      );
+      const modelSnapshots = await tx.getAll(...modelRefs);
+      for (const [index, snapshot] of modelSnapshots.entries()) {
+        const model = snapshot.exists ? decodeRecord<Records['models']>(snapshot.data()) : null;
+        if (
+          model?.id !== [...new Set([before.primaryModel, before.fallbackModel])][index] ||
+          !isRoutableModel(model)
+        )
+          return false;
+      }
+      const restored = {
+        primaryModel: before.primaryModel,
+        fallbackModel: before.fallbackModel,
+        params: before.params ?? {},
+      };
+      tx.set(roleRef, encodeRecord({ ...current, ...restored, updatedAt: this.store.now() }));
+      const rollback: Records['modelRoleRevisions'] = {
+        id: randomUUID(),
+        role: revision.role,
+        beforeState: modelRoleState(current),
+        afterState: restored,
+        source: `rollback:${revisionId}`,
+        baselineKnown: true,
+        requiresOwnerReview: false,
+        createdAt: this.store.now(),
+      };
+      tx.create(this.store.doc('modelRoleRevisions', rollback.id), encodeRecord(rollback));
+      return true;
+    });
+  }
+
   async upsertModel(input: ModelCatalogWrite): Promise<void> {
     const ref = this.store.doc('models', input.id);
     await this.store.db.runTransaction(async (tx) => {
@@ -164,6 +264,24 @@ export class FirestoreModelCatalogRepository implements ModelCatalogRepository {
           updatedAt: this.store.now(),
         }),
       );
+      const after = {
+        primaryModel: modelId,
+        fallbackModel: modelId,
+        params: existing?.params ?? {},
+      };
+      if (!existing || !sameState(modelRoleState(existing), after)) {
+        const revision: Records['modelRoleRevisions'] = {
+          id: randomUUID(),
+          role: 'voice',
+          beforeState: existing ? modelRoleState(existing) : null,
+          afterState: after,
+          source: 'owner-settings',
+          baselineKnown: true,
+          requiresOwnerReview: false,
+          createdAt: this.store.now(),
+        };
+        tx.create(this.store.doc('modelRoleRevisions', revision.id), encodeRecord(revision));
+      }
     });
   }
 
@@ -195,6 +313,24 @@ export class FirestoreModelCatalogRepository implements ModelCatalogRepository {
             updatedAt: this.store.now(),
           }),
         );
+        const after = {
+          primaryModel: assignment.primaryModel,
+          fallbackModel: assignment.fallbackModel,
+          params: row.params,
+        };
+        if (!sameState(modelRoleState(row), after)) {
+          const revision: Records['modelRoleRevisions'] = {
+            id: randomUUID(),
+            role: assignment.role,
+            beforeState: modelRoleState(row),
+            afterState: after,
+            source: 'owner-settings',
+            baselineKnown: true,
+            requiresOwnerReview: false,
+            createdAt: this.store.now(),
+          };
+          tx.create(this.store.doc('modelRoleRevisions', revision.id), encodeRecord(revision));
+        }
       });
     });
   }

@@ -1,15 +1,13 @@
-import {
-  archiveOldActivity,
-  archiveOldActivityWithRepository,
-  listActivityWithRepository,
-} from '@assistant/application/tasks';
+import { archiveOldActivity, archiveOldActivityWithRepository } from '@assistant/application/tasks';
 import { loadConfig } from '@assistant/config';
 import {
   createInstallationStore,
   FirestoreTaskActivityCommandRepository,
-  FirestoreTaskActivityRepository,
 } from '@assistant/firestore';
-import { getApplication, getDb } from '@/lib/server';
+import { TaskDiscoveryInputError } from '@assistant/persistence';
+import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
+import { getDb } from '@/lib/server';
+import { discoverTaskActivity } from '@/lib/task-activity';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
 export const dynamic = 'force-dynamic';
@@ -17,33 +15,46 @@ export const dynamic = 'force-dynamic';
 /** Archived activity is intentionally a separate, on-demand mobile read. */
 export async function GET(request: Request): Promise<Response> {
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
-  const archived = new URL(request.url).searchParams.get('archived') === 'true';
-  const config = loadConfig();
-  if (config.PERSISTENCE_DRIVER === 'firestore') {
-    const store = createInstallationStore({
-      projectId: config.GCP_PROJECT,
-      installationId: config.ASSISTANT_WORKSPACE_ID,
-      databaseId: config.FIRESTORE_DATABASE_ID,
-    });
-    try {
+  const params = new URL(request.url).searchParams;
+  try {
+    return mobileJson(
+      await discoverTaskActivity({
+        archived: params.get('archived') === 'true',
+        filter: (params.get('filter') ?? 'all') as
+          | 'all'
+          | 'needs-you'
+          | 'working'
+          | 'scheduled'
+          | 'completed',
+        limit: 50,
+        q: params.get('q') ?? undefined,
+        cursor: params.get('cursor') ?? undefined,
+        type: params.get('type') ?? undefined,
+        trust: params.get('trust') ?? undefined,
+        source: params.get('source') ?? undefined,
+        from: params.get('from') ?? undefined,
+        until: params.get('until') ?? undefined,
+      }),
+    );
+  } catch (error) {
+    if (error instanceof TaskDiscoveryInputError)
       return mobileJson(
-        await listActivityWithRepository(
-          new FirestoreTaskActivityRepository(store),
-          config.FIRESTORE_AGENT_ID,
-          { archived, filter: 'all', limit: 50 },
-        ),
+        { error: 'Invalid activity discovery request. Refresh the search and try again.' },
+        { status: 400 },
       );
-    } finally {
-      await store.db.terminate();
-    }
+    throw error;
   }
-  return mobileJson(await getApplication().listActivity({ archived, filter: 'all', limit: 50 }));
 }
 
 export async function POST(request: Request): Promise<Response> {
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
+  const mutationBody = await readMobileMutationBody(request, ['action', 'operationId']);
+  if (!mutationBody.ok) return mutationBody.response;
   const config = loadConfig();
-  const body = (await request.json().catch(() => null)) as { action?: unknown } | null;
+  const body = mutationBody.value as {
+    action?: unknown;
+    operationId?: unknown;
+  } | null;
   if (config.PERSISTENCE_DRIVER === 'firestore' && body?.action !== 'archive-old') {
     return mobileJson(
       { error: 'Activity editing is unavailable in Firestore mode.' },
@@ -53,6 +64,15 @@ export async function POST(request: Request): Promise<Response> {
   if (body?.action !== 'archive-old') {
     return mobileJson({ error: 'action must be archive-old' }, { status: 400 });
   }
+  if (
+    body.operationId !== undefined &&
+    (typeof body.operationId !== 'string' || !/^[0-9a-f-]{36}$/i.test(body.operationId))
+  ) {
+    return mobileJson(
+      { error: 'operationId must be a valid archive operation identifier' },
+      { status: 400 },
+    );
+  }
   if (config.PERSISTENCE_DRIVER === 'firestore') {
     const store = createInstallationStore({
       projectId: config.GCP_PROJECT,
@@ -60,15 +80,17 @@ export async function POST(request: Request): Promise<Response> {
       databaseId: config.FIRESTORE_DATABASE_ID,
     });
     try {
-      await archiveOldActivityWithRepository(
+      const progress = await archiveOldActivityWithRepository(
         new FirestoreTaskActivityCommandRepository(store),
         config.FIRESTORE_AGENT_ID,
+        30,
+        body.operationId as string | undefined,
       );
-      return mobileJson({ ok: true });
+      return mobileJson({ ok: true, ...progress });
     } finally {
       await store.db.terminate();
     }
   }
-  await archiveOldActivity(getDb());
-  return mobileJson({ ok: true });
+  const progress = await archiveOldActivity(getDb());
+  return mobileJson({ ok: true, ...progress });
 }

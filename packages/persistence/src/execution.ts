@@ -5,6 +5,10 @@ import type { ApprovalRepository } from './approvals.js';
 import type { AssistantHealthRepository } from './assistant-health.js';
 import type { AuditInvestigationRepository } from './audit-investigation.js';
 import type { BriefingRepository } from './briefing.js';
+import type {
+  ConversationSearchRepository,
+  SituationDecisionContextRepository,
+} from './builtin-tools.js';
 import type { CallSessionRepository } from './call-sessions.js';
 import type { CardRefreshRepository } from './card-refresh.js';
 import type { CommitmentMaintenanceRepository } from './commitment-maintenance.js';
@@ -18,6 +22,7 @@ import type {
   DocumentSearchRepository,
 } from './document-catalog.js';
 import type { DreamRepository } from './dream.js';
+import type { EmailAttachmentCustodyRepository } from './email-attachment-custody.js';
 import type { EmailExtractionRepository } from './email-extraction.js';
 import type { EmailSyncRepository } from './email-sync.js';
 import type { ExecutionContextRepository } from './execution-context.js';
@@ -41,6 +46,7 @@ import type {
   ModelConnectionRepository,
   ModelRoutingRepository,
 } from './model-routing.js';
+import type { NotificationOutboxRepository } from './notification-outbox.js';
 import type {
   NotificationsConversationRepository,
   OwnerNoticeRepository,
@@ -50,6 +56,7 @@ import type { OwnerCardCompilationRepository } from './owner-card-compilation.js
 import type { AmbientSnapshotRepository, OwnerContextRepository } from './owner-context.js';
 import type { PulseRepository } from './pulse.js';
 import type { RecallMetricsRepository } from './recall-metrics.js';
+import type { RecallSurfacingRepository } from './recall-surfacing.js';
 import type { ReminderDeliveryRepository } from './reminders.js';
 import type { SelfImprovementRepository } from './self-improvement.js';
 import type { SelfMaintenanceRepository } from './self-maintenance.js';
@@ -76,6 +83,10 @@ export interface ExecutionPersistence {
   readonly executionJobs: ExecutionJobRepository;
   readonly executionEvidence: ExecutionEvidenceRepository;
   readonly ownerContext: OwnerContextRepository;
+  /** Bounded owner-confirmed situation choices for chat context before planning. */
+  readonly situationDecisionContext?: SituationDecisionContextRepository;
+  /** Owner-scoped local refresh for persisted conversations.search results on resume. */
+  readonly conversationSearch?: ConversationSearchRepository;
   readonly ownerCardCompilation: OwnerCardCompilationRepository;
   readonly skills: SkillContextRepository;
   readonly history: HistoryRecallRepository;
@@ -90,8 +101,12 @@ export interface ExecutionPersistence {
   readonly generatedCards: GeneratedCardRepository;
   readonly cardRefresh: CardRefreshRepository;
   readonly recallMetrics: RecallMetricsRepository;
+  /** Source-identity ledger and owner controls for historical context surfaced in replies. */
+  readonly recallSurfacing?: RecallSurfacingRepository;
   readonly watches: WatchRepository;
   readonly notifications: NotificationsConversationRepository;
+  /** Durable per-destination owner notification intents and receipts. */
+  readonly notificationOutbox: NotificationOutboxRepository;
   readonly goals: GoalRuntimeRepository;
   readonly missions: MissionRepository;
   /** Present where the health monitor job has a portable adapter. */
@@ -128,6 +143,8 @@ export interface ExecutionPersistence {
   readonly applications?: ApplicationConfirmationRepository;
   /** Present where Gmail sync keeps its state portably. */
   readonly emailSync?: EmailSyncRepository;
+  /** Present only when the driver atomically fences attachment custody and erasure. */
+  readonly emailAttachmentCustody?: EmailAttachmentCustodyRepository;
   /** Present where documents are catalogued portably (uploads, email attachments). */
   readonly documentCatalog?: DocumentCatalogRepository;
   /** Present where document passages are searched portably. */

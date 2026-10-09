@@ -1,15 +1,22 @@
-import { lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { JobStorageConfig } from './input.js';
+import { readBoundedRegularFile, readBoundedResponse } from './safe-file.js';
 
 const MAX_BLOB_BYTES = 25 * 1024 * 1024;
 const METADATA_TIMEOUT_MS = 5_000;
 const STORAGE_TIMEOUT_MS = 60_000;
 
+async function responseError(res: Response, signal?: AbortSignal): Promise<string> {
+  return readBoundedResponse(res, 2_048, signal)
+    .then((body) => body.toString('utf8'))
+    .catch(() => 'response body omitted');
+}
+
 /** Binary blob store: local FS in dev, GCS JSON API (metadata-server token) in prod. */
 export interface BlobStore {
-  put(relPath: string, data: Buffer, contentType: string): Promise<void>;
-  get(relPath: string): Promise<Buffer>;
+  put(relPath: string, data: Buffer, contentType: string, signal?: AbortSignal): Promise<void>;
+  get(relPath: string, signal?: AbortSignal): Promise<Buffer>;
 }
 
 function safeRel(rel: string): string {
@@ -49,11 +56,9 @@ class LocalBlobStore implements BlobStore {
     await writeFile(target, data);
   }
 
-  async get(rel: string): Promise<Buffer> {
-    const root = await this.canonicalRoot();
-    const target = path.join(root, safeRel(rel));
-    this.assertInside(root, await realpath(path.dirname(target)));
-    return readFile(target);
+  async get(rel: string, signal?: AbortSignal): Promise<Buffer> {
+    await this.canonicalRoot();
+    return readBoundedRegularFile(this.root, safeRel(rel), MAX_BLOB_BYTES, signal);
   }
 }
 
@@ -63,46 +68,61 @@ class GcsBlobStore implements BlobStore {
     private prefix: string,
   ) {}
 
-  private async token(): Promise<string> {
+  private async token(signal?: AbortSignal): Promise<string> {
     const res = await fetch(
       'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token',
       {
         headers: { 'Metadata-Flavor': 'Google' },
-        signal: AbortSignal.timeout(METADATA_TIMEOUT_MS),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(METADATA_TIMEOUT_MS)])
+          : AbortSignal.timeout(METADATA_TIMEOUT_MS),
       },
     );
     if (!res.ok) throw new Error(`metadata token fetch failed: ${res.status}`);
-    return ((await res.json()) as { access_token: string }).access_token;
+    const body = await readBoundedResponse(res, 16 * 1024, signal);
+    const parsed = JSON.parse(body.toString('utf8')) as { access_token?: unknown };
+    if (typeof parsed.access_token !== 'string' || !parsed.access_token)
+      throw new Error('metadata token response is invalid');
+    return parsed.access_token;
   }
 
   private object(rel: string): string {
     return `${this.prefix}/${safeRel(rel)}`.replace(/^\/+/, '');
   }
 
-  async put(rel: string, data: Buffer, contentType: string): Promise<void> {
+  async put(rel: string, data: Buffer, contentType: string, signal?: AbortSignal): Promise<void> {
     if (data.length > MAX_BLOB_BYTES) throw new Error(`blob exceeds ${MAX_BLOB_BYTES} bytes`);
     const res = await fetch(
       `https://storage.googleapis.com/upload/storage/v1/b/${this.bucket}/o?uploadType=media&name=${encodeURIComponent(this.object(rel))}`,
       {
         method: 'POST',
-        headers: { authorization: `Bearer ${await this.token()}`, 'content-type': contentType },
+        headers: {
+          authorization: `Bearer ${await this.token(signal)}`,
+          'content-type': contentType,
+        },
         body: new Uint8Array(data),
-        signal: AbortSignal.timeout(STORAGE_TIMEOUT_MS),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(STORAGE_TIMEOUT_MS)])
+          : AbortSignal.timeout(STORAGE_TIMEOUT_MS),
       },
     );
-    if (!res.ok) throw new Error(`gcs put failed: ${res.status} ${await res.text()}`);
+    if (!res.ok)
+      throw new Error(`gcs put failed: ${res.status} ${await responseError(res, signal)}`);
   }
 
-  async get(rel: string): Promise<Buffer> {
+  async get(rel: string, signal?: AbortSignal): Promise<Buffer> {
     const res = await fetch(
       `https://storage.googleapis.com/storage/v1/b/${this.bucket}/o/${encodeURIComponent(this.object(rel))}?alt=media`,
       {
-        headers: { authorization: `Bearer ${await this.token()}` },
-        signal: AbortSignal.timeout(STORAGE_TIMEOUT_MS),
+        headers: { authorization: `Bearer ${await this.token(signal)}` },
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(STORAGE_TIMEOUT_MS)])
+          : AbortSignal.timeout(STORAGE_TIMEOUT_MS),
       },
     );
-    if (!res.ok) throw new Error(`gcs get failed: ${res.status} ${await res.text()}`);
-    return Buffer.from(await res.arrayBuffer());
+    if (!res.ok)
+      throw new Error(`gcs get failed: ${res.status} ${await responseError(res, signal)}`);
+    return readBoundedResponse(res, MAX_BLOB_BYTES, signal);
   }
 }
 

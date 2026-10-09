@@ -44,18 +44,19 @@ describe('voiceImportSourceTag / isVoiceImportSource', () => {
 });
 
 describe('ownerAuthoredMatcher', () => {
-  const isOwner = ownerAuthoredMatcher({ emails: ['bmson@bmson.com'], names: ['Baldvin'] });
-  it('matches the owner by email substring or a whole-word name', () => {
+  const isOwner = ownerAuthoredMatcher({ emails: ['bmson@bmson.com'] });
+  it('matches the exact RFC mailbox identity, independent of display name', () => {
     expect(isOwner('Baldvin <bmson@bmson.com>')).toBe(true);
-    expect(isOwner('baldvin smith <b@other.com>')).toBe(true);
+    expect(isOwner('"Baldvin <bmson@bmson.com>" <attacker@other.com>')).toBe(false);
+    expect(isOwner('Baldvin <b@other.com>')).toBe(false);
   });
-  it('does not match a third party who merely mentions the owner in an address', () => {
+  it('does not match a third party who merely mentions the owner in a display name', () => {
     expect(isOwner('Alice <alice@example.com>')).toBe(false);
-    expect(isOwner('Baldvinsson Co <team@corp.com>')).toBe(false); // not a whole word
+    expect(isOwner('Baldvin <team@corp.com>')).toBe(false);
   });
 });
 
-const OWNER_MATCHER = ownerAuthoredMatcher({ emails: ['bmson@bmson.com'], names: ['Baldvin'] });
+const OWNER_MATCHER = ownerAuthoredMatcher({ emails: ['bmson@bmson.com'] });
 
 const MBOX = [
   'From bmson@bmson.com Fri Jul 04 12:00:00 2026',
@@ -98,58 +99,99 @@ const MBOX = [
 ].join('\n');
 
 describe('extractOwnerSamples', () => {
-  it('keeps only the owner’s own, non-quoting messages from an mbox', () => {
-    const samples = extractOwnerSamples('mbox', MBOX, OWNER_MATCHER);
+  it('keeps only the owner mailbox-authored, non-quoting messages from an mbox', async () => {
+    const samples = (
+      await extractOwnerSamples('mbox', MBOX, OWNER_MATCHER, { ownerConfirmedArchive: true })
+    ).samples;
     expect(samples).toEqual([
       'Hey — lunch on Friday at noon works great, see you at Loki. Bring the signed contract please.',
       "Sounds perfect — I'll book the table for 8pm on Saturday for the four of us then.",
     ]);
   });
 
-  it('drops received mail and keeps the owner’s side of a json chat export', () => {
+  it('drops received mail and keeps only the owner mailbox side of a JSON chat export', async () => {
     const json = JSON.stringify([
       {
-        from: 'Baldvin',
+        from: 'Baldvin <bmson@bmson.com>',
         text: 'Running five minutes late — grab us a table near the window please.',
       },
       {
-        from: 'Alice',
+        from: 'Alice <alice@example.com>',
         text: 'No worries at all, I already grabbed the corner booth by the window.',
       },
       {
-        from: 'Baldvin',
+        from: 'Baldvin <bmson@bmson.com>',
         text: "On second thought, let's just meet at the office lobby at nine tomorrow.",
       },
     ]);
-    const samples = extractOwnerSamples('json', json, OWNER_MATCHER);
+    const samples = (
+      await extractOwnerSamples('json', json, OWNER_MATCHER, { ownerConfirmedArchive: true })
+    ).samples;
     expect(samples).toEqual([
       'Running five minutes late — grab us a table near the window please.',
       "On second thought, let's just meet at the office lobby at nine tomorrow.",
     ]);
   });
 
-  it('treats an author-less text corpus as the owner’s, but skips a quoted block', () => {
+  it('accepts raw text only in explicit owner-confirmed mode and skips quoted blocks', async () => {
     const clean =
       'I think we should ship the beta this week and gather feedback from the first cohort.';
-    expect(extractOwnerSamples('text', clean, OWNER_MATCHER)).toEqual([clean]);
+    expect((await extractOwnerSamples('text', clean, OWNER_MATCHER)).samples).toEqual([]);
+    expect(
+      (await extractOwnerSamples('text', clean, OWNER_MATCHER, { ownerConfirmedRawText: true }))
+        .samples,
+    ).toEqual([clean]);
 
     const quoted =
       'My reply about the schedule here.\n\n> someone quoted this whole line in the middle.';
-    expect(extractOwnerSamples('text', quoted, OWNER_MATCHER)).toEqual([]);
+    expect(
+      (await extractOwnerSamples('text', quoted, OWNER_MATCHER, { ownerConfirmedRawText: true }))
+        .samples,
+    ).toEqual([]);
   });
 
-  it('dedupes identical messages within one archive', () => {
+  it('dedupes identical messages within one archive', async () => {
     const dupes = JSON.stringify([
       {
-        from: 'Baldvin',
+        from: 'Baldvin <bmson@bmson.com>',
         text: 'Thanks so much for handling that for me today, I really appreciate it.',
       },
       {
-        from: 'Baldvin',
+        from: 'Baldvin <bmson@bmson.com>',
         text: 'Thanks so much for handling that for me today, I really appreciate it.',
       },
     ]);
-    expect(extractOwnerSamples('json', dupes, OWNER_MATCHER)).toHaveLength(1);
+    expect(
+      (await extractOwnerSamples('json', dupes, OWNER_MATCHER, { ownerConfirmedArchive: true }))
+        .samples,
+    ).toHaveLength(1);
+  });
+
+  it('rejects same-name third-party mailbox and nested HTML quote content', async () => {
+    const mailbox = JSON.stringify([
+      {
+        from: 'Baldvin Person <attacker@example.com>',
+        text: 'This message is long enough to look like the owner wrote this sentence.',
+      },
+    ]);
+    expect(
+      (await extractOwnerSamples('json', mailbox, OWNER_MATCHER, { ownerConfirmedArchive: true }))
+        .samples,
+    ).toEqual([]);
+    const nested = [
+      'From owner@example.com Tue Jan 02 10:00:00 2024',
+      'From: Owner <bmson@bmson.com>',
+      'Date: Tue, 02 Jan 2024 10:00:00 +0000',
+      'Subject: reply',
+      'Content-Type: text/html; charset=UTF-8',
+      '',
+      '<p>New owner-authored words should be retained without the quoted material.</p><blockquote><p>Third-party material</p><blockquote>Nested forwarded words.</blockquote></blockquote>',
+      '',
+    ].join('\r\n');
+    expect(
+      (await extractOwnerSamples('mbox', nested, OWNER_MATCHER, { ownerConfirmedArchive: true }))
+        .samples,
+    ).toEqual(['New owner-authored words should be retained without the quoted material.']);
   });
 });
 
@@ -169,6 +211,14 @@ describe('voice ingest job (integration)', () => {
   const createdTaskIds: string[] = [];
 
   const fakeRouter = {
+    async embeddingSpace() {
+      return {
+        provider: 'synthetic',
+        model: 'voice-ingest-fixture',
+        dimensions: 1536,
+        revision: '1',
+      };
+    },
     async embed(texts: string[]) {
       return texts.map(() => new Array(1536).fill(0.01));
     },

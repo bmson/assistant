@@ -32,7 +32,13 @@ struct MemoryView: View {
 
     var body: some View {
         AssistantSettingsList {
-            if let memory = model.workspace?.memory {
+            if model.workspace?.isSectionAvailable("memory") == false {
+                Section {
+                    WorkspaceAvailabilityNotice(title: "Memory")
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
+            } else if let memory = model.workspace?.memory {
                 content(memory)
             } else {
                 ProgressView()
@@ -47,7 +53,7 @@ struct MemoryView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Add memory", systemImage: "plus") { showingCreateMemory = true }
-                    .disabled(model.workspace?.memory.ownerContactId == nil)
+                    .disabled(model.workspace?.isSectionAvailable("memory") == false || model.workspace?.memory.ownerContactId == nil)
             }
         }
         .refreshable {
@@ -62,7 +68,8 @@ struct MemoryView: View {
             NavigationStack { RelationshipGraphScreen(initialGraph: graph) }
         }
         .sheet(isPresented: $showingCreateMemory) {
-            if let ownerContactId = model.workspace?.memory.ownerContactId {
+            if model.workspace?.isSectionAvailable("memory") != false,
+               let ownerContactId = model.workspace?.memory.ownerContactId {
                 NavigationStack { MemoryEditor(ownerContactId: ownerContactId, fact: nil) }
             }
         }
@@ -600,6 +607,9 @@ struct WritingVoiceScreen: View {
     @State private var importing = false
     @State private var editing = false
     @State private var inFlight = false
+    @State private var importTask: Task<Void, Never>?
+    @State private var importID: UUID?
+    @State private var importStage: String?
     @State private var confirmingClear = false
     @State private var response: VoiceProfileResponse?
     @State private var loaded = false
@@ -615,6 +625,13 @@ struct WritingVoiceScreen: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 8)
+                if importStage == "reading" {
+                    ProgressView("Checking and reading sample…")
+                        .accessibilityIdentifier("voice-import-reading")
+                } else if importStage == "uploading" {
+                    ProgressView("Uploading sample…")
+                        .accessibilityIdentifier("voice-import-uploading")
+                }
 
                 if let stats {
                     voiceCard
@@ -632,6 +649,7 @@ struct WritingVoiceScreen: View {
         .navigationTitle("Writing voice")
         .assistantSubmenuChrome()
         .toolbarBackground(.visible, for: .navigationBar)
+        .onDisappear { cancelImport() }
         .toolbar {
             if let stats, stats.total > 0 {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -761,7 +779,7 @@ struct WritingVoiceScreen: View {
             }
             .buttonStyle(AssistantActionButtonStyle(kind: .primary))
             .disabled(inFlight)
-            Text("Text or JSON files, up to 25 MB.")
+            Text("Mbox, text, or JSON files, up to 25 MB. Archives use only your configured email address; plain text is treated as writing you confirm is yours. Quoted and forwarded text is excluded.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .assistantCard(in: colorScheme)
@@ -785,24 +803,58 @@ struct WritingVoiceScreen: View {
     }
 
     private func upload(_ url: URL) {
+        cancelImport(showStatus: false)
+        let requestID = UUID()
+        let submittedRegister = register
+        importID = requestID
+        importStage = "reading"
         inFlight = true
-        Task {
-            let accessed = url.startAccessingSecurityScopedResource()
-            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+        importTask = Task { @MainActor in
             do {
-                let data = try Data(contentsOf: url)
-                guard data.count <= 25 * 1024 * 1024 else {
-                    model.errorMessage = "Writing sample uploads must be 25 MB or smaller."
-                    inFlight = false
-                    return
-                }
-                if await model.uploadImport(data: data, name: url.lastPathComponent, voice: true, register: register) {
+                let data = try await AssistantBoundedFileReader.read(from: url)
+                guard !Task.isCancelled, importID == requestID else { return }
+                importStage = "uploading"
+                let confirmed = await model.uploadImport(
+                    data: data,
+                    name: url.lastPathComponent,
+                    voice: true,
+                    register: submittedRegister
+                )
+                guard importID == requestID else { return }
+                if confirmed {
                     await refresh()
+                } else {
+                    model.errorMessage = "The sample upload status could not be confirmed. Check writing samples before retrying."
                 }
+                finishImport(requestID)
             } catch {
-                model.reportError(error)
+                guard importID == requestID else { return }
+                if !(error is CancellationError) { model.errorMessage = error.localizedDescription }
+                finishImport(requestID)
             }
-            inFlight = false
+        }
+    }
+
+    private func finishImport(_ requestID: UUID) {
+        guard importID == requestID else { return }
+        importTask = nil
+        importID = nil
+        importStage = nil
+        inFlight = false
+    }
+
+    private func cancelImport(showStatus: Bool = true) {
+        guard importID != nil else { return }
+        let wasUploading = importStage == "uploading"
+        importID = nil
+        importTask?.cancel()
+        importTask = nil
+        importStage = nil
+        inFlight = false
+        if showStatus {
+            model.errorMessage = wasUploading
+                ? "The screen closed while the sample upload was running. Its status is unknown; check writing samples before retrying."
+                : "The sample file read was cancelled before upload. Nothing was sent."
         }
     }
 }

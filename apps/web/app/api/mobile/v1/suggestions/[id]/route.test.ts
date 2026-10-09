@@ -66,7 +66,11 @@ describe('native suggestion answers', () => {
   ])('rejects %s', async (_label, body) => {
     const response = await post(SUGGESTION_ID, body);
     expect(response.status).toBe(400);
-    expect(await errorOf(response)).toBe('decision must be accepted, dismissed, or snoozed');
+    expect(await errorOf(response)).toBe(
+      typeof body === 'string'
+        ? 'Request body must be valid JSON.'
+        : 'decision must be accepted, dismissed, or snoozed',
+    );
     expect(mocks.decide).not.toHaveBeenCalled();
     expect(mocks.snooze).not.toHaveBeenCalled();
   });

@@ -12,6 +12,10 @@ mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/dispatch"
 export GCP_PROJECT="test-project"
 export GCP_REGION="test-region"
 export STUB_CALLS="$TEST_ROOT/calls"
+export STUB_WEB_PAUSED_FILE="$TEST_ROOT/web-paused"
+export STUB_JOB_IMAGE_FILE="$TEST_ROOT/browser-image"
+printf 'registry/old-browser' >"$STUB_JOB_IMAGE_FILE"
+printf 'false' >"$STUB_WEB_PAUSED_FILE"
 
 # ── stubs ────────────────────────────────────────────────────────────────────
 cat >"$TEST_ROOT/bin/gcloud" <<'STUB'
@@ -21,7 +25,7 @@ printf 'gcloud %s\n' "$*" >>"$STUB_CALLS"
 args="$*"
 
 service_json() {
-  local driver="$1" extra="${2:-}" env='[]'
+  local driver="$1" extra="${2:-}" env='[]' tag="${IMAGE_TAG:-abc123}"
   local names="AGENT_URL BROWSER_JOB_NAME CLOUD_TASKS_QUEUE CODE_JOB_NAME FIRESTORE_AGENT_ID FIRESTORE_EMBEDDING_SPACE GCP_LOCATION GCP_PROJECT GMAIL_PUBSUB_TOPIC GMAIL_PUSH_SERVICE_ACCOUNT INTERNAL_AUTH_MODE INTERNAL_OIDC_AUDIENCE INTERNAL_OIDC_SERVICE_ACCOUNT OWNER_EMAIL PROCESSOR_DRIVER PROCESSOR_JOB_NAME PUBLIC_URL QUEUE_DRIVER WORKSPACE_BUCKET"
   env="["
   for name in $names; do env="${env}{\"name\":\"${name}\",\"value\":\"x\"},"; done
@@ -30,10 +34,19 @@ service_json() {
   if [[ -n "$driver" ]]; then env="${env},{\"name\":\"PERSISTENCE_DRIVER\",\"value\":\"${driver}\"}"; fi
   if [[ -n "$extra" ]]; then env="${env},${extra}"; fi
   env="${env}]"
-  printf '{"metadata":{"name":"svc"},"status":{"url":"https://svc.example"},"spec":{"template":{"spec":{"containers":[{"env":%s}]}}}}\n' "$env"
+  if [[ "${STUB_RELEASE_METADATA:-present}" != "missing" ]]; then
+  env="${env%]},{\"name\":\"ASSISTANT_RELEASE_API_CONTRACT\",\"value\":\"1\"},{\"name\":\"ASSISTANT_RELEASE_WEB_API_MIN\",\"value\":\"1\"},{\"name\":\"ASSISTANT_RELEASE_WEB_API_MAX\",\"value\":\"1\"},{\"name\":\"ASSISTANT_RELEASE_AGENT_API_MIN\",\"value\":\"1\"},{\"name\":\"ASSISTANT_RELEASE_AGENT_API_MAX\",\"value\":\"1\"},{\"name\":\"ASSISTANT_RELEASE_SCHEMA_DRIVER\",\"value\":\"firestore\"},{\"name\":\"ASSISTANT_RELEASE_SCHEMA_MIN\",\"value\":\"1\"},{\"name\":\"ASSISTANT_RELEASE_SCHEMA_MAX\",\"value\":\"1\"}]"
+  fi
+  printf '{"metadata":{"name":"svc"},"status":{"url":"https://%s.example","traffic":[{"revisionName":"%s-old","percent":100},{"revisionName":"%s-candidate","tag":"candidate-%s","url":"https://candidate-%s-%s.example","percent":0},{"revisionName":"%s-resume","tag":"resume-%s","url":"https://resume-%s-%s.example","percent":0}]},"spec":{"template":{"spec":{"containers":[{"env":%s}]}}}}\n' \
+    "${SERVICE_NAME:-assistant-agent}" "${SERVICE_NAME:-assistant-agent}" "${SERVICE_NAME:-assistant-agent}" "$tag" "$tag" "${SERVICE_NAME:-assistant-agent}" "${SERVICE_NAME:-assistant-agent}" "$tag" "$tag" "${SERVICE_NAME:-assistant-agent}" "$env"
 }
 
 case "$args" in
+  *'builds submit'*) ;;
+  *'artifacts docker images describe'*)
+    image="${*:5:1}"
+    if [[ "$image" == */agent:* || "$image" == */agent@* ]]; then component=a; elif [[ "$image" == */web:* || "$image" == */web@* ]]; then component=b; else component=c; fi
+    printf 'sha256:%064d\n' 0 | sed "s/0/${component}/g" ;;
   *'run services describe assistant-agent'*'value(metadata.name)'*)
     if [[ "${STUB_AGENT_DESCRIBE:-ok}" == "missing" ]]; then echo 'ERROR: Service [assistant-agent] could not be found.' >&2; exit 1; fi
     if [[ "${STUB_AGENT_DESCRIBE:-ok}" == "denied" ]]; then echo 'ERROR: PERMISSION_DENIED' >&2; exit 1; fi
@@ -42,9 +55,20 @@ case "$args" in
     echo 'AGENT_URL;BROWSER_JOB_NAME;CLOUD_TASKS_QUEUE;CODE_JOB_NAME;FIRESTORE_AGENT_ID;FIRESTORE_DATABASE_ID;FIRESTORE_EMBEDDING_SPACE;GCP_LOCATION;GCP_PROJECT;GMAIL_PUBSUB_TOPIC;GMAIL_PUSH_SERVICE_ACCOUNT;INTERNAL_AUTH_MODE;INTERNAL_OIDC_AUDIENCE;INTERNAL_OIDC_SERVICE_ACCOUNT;OWNER_EMAIL;PERSISTENCE_DRIVER;PROCESSOR_DRIVER;PROCESSOR_JOB_NAME;PUBLIC_URL;QUEUE_DRIVER;WORKSPACE_BUCKET' ;;
   *'run services describe'*'value(status.url)'*) echo 'https://svc.example' ;;
   *'run services describe assistant-agent'*'--format=json'*)
-    service_json "${STUB_AGENT_DRIVER-firestore}" "${STUB_AGENT_EXTRA_ENV:-}" ;;
+    SERVICE_NAME=assistant-agent service_json "${STUB_AGENT_DRIVER-firestore}" "${STUB_AGENT_EXTRA_ENV:-}" ;;
   *'run services describe assistant-web'*'--format=json'*)
-    service_json "${STUB_WEB_DRIVER-firestore}" ;;
+    SERVICE_NAME=assistant-web service_json "${STUB_WEB_DRIVER-firestore}" ;;
+  *'run revisions describe'*'--format=json'*)
+    revision="${*:4:1}"
+    if [[ "$revision" == *agent* ]]; then SERVICE_NAME=assistant-agent; driver="${STUB_AGENT_DRIVER-firestore}"; else SERVICE_NAME=assistant-web; driver="${STUB_WEB_DRIVER-firestore}"; fi
+    service_json "$driver" | node -e 'let s="";process.stdin.on("data",x=>s+=x).on("end",()=>{const x=JSON.parse(s);const env=x.spec.template.spec.containers[0].env;process.stdout.write(JSON.stringify({spec:{timeoutSeconds:300,containers:[{env}]}}))})' ;;
+  *'run services update assistant-web'*)
+    if [[ "$args" == *'ASSISTANT_RELEASE_WRITES_PAUSED='* ]]; then
+      value="${args#*ASSISTANT_RELEASE_WRITES_PAUSED=}"
+      value="${value%%,*}"
+      printf '%s' "${value%% *}" >"$STUB_WEB_PAUSED_FILE"
+    fi
+    ;;
   *'firestore databases describe'*)
     if [[ "${STUB_PITR:-on}" == "on" ]]; then
       echo '{"pointInTimeRecoveryEnablement":"POINT_IN_TIME_RECOVERY_ENABLED","earliestVersionTime":"2026-09-17T00:00:00Z","versionRetentionPeriod":"604800s"}'
@@ -57,14 +81,21 @@ case "$args" in
   *'scheduler jobs describe'*) echo 'name: job' ;;
   *'scheduler jobs update'*) ;;
   *'run services update'*) ;;
+  *'run services update-traffic'*) ;;
   *'run jobs describe assistant-browser'*'--format=json'*)
+    image="$(cat "$STUB_JOB_IMAGE_FILE")"
     extra=''
     if [[ "${STUB_JOB_DB:-0}" == "1" ]]; then
       extra=',{"name":"DATABASE_URL","valueFrom":{"secretKeyRef":{"name":"database-url","key":"latest"}}}'
     fi
-    printf '{"spec":{"template":{"spec":{"template":{"spec":{"containers":[{"env":[{"name":"X","value":"y"}%s]}]}}}}}}\n' "$extra" ;;
+    printf '{"spec":{"template":{"template":{"spec":{"containers":[{"image":"%s","env":[{"name":"X","value":"y"}%s]}]}}}}}\n' "$image" "$extra" ;;
   *'run jobs describe assistant-browser'*) ;;
-  *'run jobs update'*) ;;
+  *'run jobs update'*)
+    while (($#)); do
+      if [[ "$1" == "--image" && $# -gt 1 ]]; then shift; printf '%s' "$1" >"$STUB_JOB_IMAGE_FILE"; fi
+      shift
+    done
+    ;;
   *)
     echo "unexpected gcloud call: $args" >&2
     exit 99 ;;
@@ -80,9 +111,18 @@ STUB
 cat >"$TEST_ROOT/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 printf 'curl %s\n' "$*" >>"$STUB_CALLS"
-printf '{"ok":true,"service":"web","sha":"%s"}' "$IMAGE_TAG"
+url="${*: -1}"
+case "$url" in
+  */ready|*/api/ready) printf '{"ready":true}' ;;
+  */api/release-probe) printf '{"ready":true,"writesPaused":"%s"}' "$(cat "$STUB_WEB_PAUSED_FILE")" ;;
+  *) printf '{"ok":true,"service":"web","sha":"%s"}' "$IMAGE_TAG" ;;
+esac
 STUB
-chmod +x "$TEST_ROOT/bin/gcloud" "$TEST_ROOT/bin/pnpm" "$TEST_ROOT/bin/curl"
+cat >"$TEST_ROOT/bin/sleep" <<'STUB'
+#!/usr/bin/env bash
+printf 'sleep %s\n' "$*" >>"$STUB_CALLS"
+STUB
+chmod +x "$TEST_ROOT/bin/gcloud" "$TEST_ROOT/bin/pnpm" "$TEST_ROOT/bin/curl" "$TEST_ROOT/bin/sleep"
 export PATH="$TEST_ROOT/bin:$PATH"
 
 fail() {
@@ -90,10 +130,27 @@ fail() {
   exit 1
 }
 
+bash "$ROOT/release-staged-services.test.sh" || fail "staged service promotion protocol tests failed"
+bash "$ROOT/release-legacy-bootstrap.test.sh" || fail "pinned legacy bootstrap helper contract failed"
+
+workflow="$ROOT/../../.github/workflows/deploy.yml"
+env_example="$ROOT/../../.env.example"
+grep -Fq 'RELEASE_EMAIL_OBSERVER_WORKER_ENABLED: ${{ vars.RELEASE_EMAIL_OBSERVER_WORKER_ENABLED }}' "$workflow" ||
+  fail "production release must forward the optional repository worker variable"
+grep -Fxq 'EMAIL_OBSERVER_WORKER_ENABLED=false' <(grep '^EMAIL_OBSERVER_WORKER_ENABLED=' "$env_example") ||
+  fail "the default worker setting in .env.example must remain false"
+if grep -Fq "RELEASE_EMAIL_OBSERVER_WORKER_ENABLED: \${{ vars.RELEASE_EMAIL_OBSERVER_WORKER_ENABLED || 'true' }}" "$workflow"; then
+  fail "production release must not silently default the worker to true"
+fi
+bash "$ROOT/verify-release-source-workflow.test.sh" ||
+  fail "the manual exact-source gate must use trusted verifier source before checking out the requested SHA"
+
 reset() {
   : >"$STUB_CALLS"
+  printf 'false' >"$STUB_WEB_PAUSED_FILE"
   unset STUB_AGENT_DRIVER STUB_WEB_DRIVER STUB_AGENT_EXTRA_ENV STUB_PITR STUB_BACKUP_AGE_HOURS \
-    STUB_INDEX_STATUS STUB_JOB_DB STUB_AGENT_DESCRIBE RELEASE_PERSISTENCE_DRIVER
+    STUB_INDEX_STATUS STUB_JOB_DB STUB_AGENT_DESCRIBE STUB_RELEASE_METADATA RELEASE_PERSISTENCE_DRIVER \
+    RELEASE_EMAIL_OBSERVER_WORKER_ENABLED
 }
 
 # ── release.sh selects the path from the live services ──────────────────────
@@ -166,6 +223,13 @@ reset
 export STUB_AGENT_DESCRIBE=denied
 if guard >/dev/null; then fail "deploy.sh guard must not treat a permission error as a fresh project"; fi
 grep -q 'refuse_firestore_installation || exit 1' "$ROOT/deploy.sh" || fail "deploy.sh does not call the guard"
+grep -Fq 'SELF_URL="https://assistant-agent-${PROJECT_NUMBER}.${REGION}.run.app"' "$ROOT/deploy.sh" ||
+  fail "legacy deploy must compute the agent URL before first service creation"
+grep -Fq 'SELF_URL_ENV="|AGENT_URL=${SELF_URL}|PUBLIC_URL=${SELF_URL}|INTERNAL_OIDC_AUDIENCE=${SELF_URL}"' "$ROOT/deploy.sh" ||
+  fail "first agent revision must receive its service URL and OIDC audience"
+if grep -Fq 'SELF_URL="$(gcloud run services describe' "$ROOT/deploy.sh"; then
+  fail "first-install service URL must not depend on describing a nonexistent service"
+fi
 
 # ── release-firestore.sh ─────────────────────────────────────────────────────
 export IMAGE_TAG="abc123" SKIP_IMAGE_BUILD=true RELEASE_HEALTH_INTERVAL_SECONDS=0 RELEASE_HEALTH_ATTEMPTS=2
@@ -174,6 +238,18 @@ export ASSISTANT_MODULES="google,browser"
 firestore_release() {
   bash "$ROOT/release-firestore.sh" 2>&1
 }
+
+reset
+export RELEASE_EMAIL_OBSERVER_WORKER_ENABLED='true,EXTRA=1'
+if out="$(firestore_release)"; then fail "invalid worker override must stop before Firestore release"; fi
+grep -q 'must be exactly true or false' <<<"$out" || fail "invalid worker override needs a clear error: $out"
+[[ ! -s "$STUB_CALLS" ]] || fail "invalid worker override must fail before release mutations"
+reset
+if out="$(GCP_PROJECT=test-project RELEASE_EMAIL_OBSERVER_WORKER_ENABLED=1 bash "$ROOT/release-postgres.sh" 2>&1)"; then
+  fail "invalid worker override must stop before PostgreSQL release"
+fi
+grep -q 'must be exactly true or false' <<<"$out" || fail "invalid worker override needs a clear PostgreSQL error: $out"
+[[ ! -s "$STUB_CALLS" ]] || fail "invalid worker override must fail before PostgreSQL release mutations"
 
 assert_no_database_calls() {
   if grep -Eiq 'database-url|DATABASE_URL|assistant-migrate|assistant-backup|secrets|neon|pg_dump' "$STUB_CALLS"; then
@@ -193,6 +269,22 @@ grep -q 'run services update assistant-agent' "$STUB_CALLS" || fail "agent not r
 grep -q 'run services update assistant-web' "$STUB_CALLS" || fail "web not rolled out"
 grep -q 'run jobs update assistant-browser' "$STUB_CALLS" || fail "browser job not rolled out"
 assert_no_database_calls
+
+reset
+export STUB_RELEASE_METADATA=missing
+if out="$(firestore_release)"; then fail "Firestore release must fail closed without live API/schema declarations"; fi
+if ! grep -Eiq 'do not declare|does not declare|compatib' <<<"$out"; then fail "missing compatibility explanation: $out"; fi
+if grep -Eq 'builds submit|firestore:indexes verify|run services update|run services update-traffic|run jobs update' "$STUB_CALLS"; then
+  fail "missing compatibility metadata must stop before build/index/revision mutations"
+fi
+
+reset
+export IMAGE_TAG=abc123
+out="$(bash "$ROOT/release-fast.sh" web 2>&1)" || fail "fast Firestore web release should use live compatibility metadata: $out"
+grep -q 'assistant-web abc123 is live' <<<"$out" || fail "fast release did not prove the serving SHA: $out"
+grep -q 'run services update assistant-web' "$STUB_CALLS" || fail "fast release did not stage a web candidate"
+grep -q -- '--no-traffic' "$STUB_CALLS" || fail "fast release skipped no-traffic staging"
+grep -Eiq 'assistant-migrate|assistant-backup|database-url|pg_dump' "$STUB_CALLS" && fail "fast web release invoked a database operation"
 
 reset
 export STUB_AGENT_EXTRA_ENV='{"name":"DATABASE_URL","valueFrom":{"secretKeyRef":{"name":"database-url","key":"latest"}}}'

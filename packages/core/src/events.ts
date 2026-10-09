@@ -9,6 +9,39 @@ import {
 export const TrustSchema = z.enum(['owner', 'known', 'unknown', 'assistant']);
 export type Trust = z.infer<typeof TrustSchema>;
 
+export const OwnerIntentScopeSchema = z.enum([
+  'external_read',
+  'private_read',
+  'external_send',
+  'workspace_write',
+  'personal_write',
+  'watch_create',
+  'private_write',
+  'memory_write',
+  'feedback_write',
+]);
+export type ClarificationScope = z.infer<typeof OwnerIntentScopeSchema>;
+
+/** A clarification continuation is sourced from an owned prior task checkpoint. */
+export const ClarificationContinuationSchema = z.object({
+  sourceTaskId: z.string().min(1).max(128),
+  ownerAuthoredText: z.string().max(8_000),
+  question: z.string().min(1).max(2_000),
+  authorizedScopes: z.array(OwnerIntentScopeSchema).max(9),
+  tainted: z.boolean(),
+  answerStatus: z.enum(['answer', 'refusal', 'deferred', 'uncertain', 'unrelated']),
+});
+export type ClarificationContinuation = z.infer<typeof ClarificationContinuationSchema>;
+
+export const ClarificationPromptSchema = z.object({
+  version: z.literal(1),
+  question: z.string().min(1).max(2_000),
+  ownerAuthoredText: z.string().max(8_000),
+  authorizedScopes: z.array(OwnerIntentScopeSchema).max(9),
+  tainted: z.boolean(),
+});
+export type ClarificationPrompt = z.infer<typeof ClarificationPromptSchema>;
+
 export const EventSourceSchema = z.enum([
   'chat',
   'sms',
@@ -60,6 +93,49 @@ export function wasTriagedActionable(trigger: unknown): boolean {
 }
 
 /** Planner output — the planner decides, it never executes. */
+function isTimezone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export const MissionCadenceSchema = z
+  .union([
+    z.object({
+      kind: z.literal('interval'),
+      /** Fixed elapsed-time interval. Delayed wakes skip missed intervals. */
+      everyMinutes: z.number().int().min(15).max(10_080),
+    }),
+    z.object({
+      kind: z.literal('local_times'),
+      /** IANA timezone used for daylight-saving and wall-clock calculations. */
+      timezone: z.string().min(1).max(100).refine(isTimezone, 'must be a valid IANA timezone'),
+      /** Local HH:mm times, once each on each selected day. */
+      times: z
+        .array(z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/))
+        .min(1)
+        .max(8),
+      /** Sunday=0 through Saturday=6; omitted means every day. */
+      daysOfWeek: z.array(z.number().int().min(0).max(6)).min(1).max(7).optional(),
+    }),
+  ])
+  .superRefine((cadence, context) => {
+    if (cadence.kind === 'local_times') {
+      if (new Set(cadence.times).size !== cadence.times.length)
+        context.addIssue({ code: 'custom', path: ['times'], message: 'times must be unique' });
+      if (cadence.daysOfWeek && new Set(cadence.daysOfWeek).size !== cadence.daysOfWeek.length)
+        context.addIssue({
+          code: 'custom',
+          path: ['daysOfWeek'],
+          message: 'daysOfWeek must be unique',
+        });
+    }
+  });
+export type MissionCadence = z.infer<typeof MissionCadenceSchema>;
+
 export const PlanSchema = z.object({
   action: z.enum(['reply', 'workflow', 'mission', 'schedule', 'clarify']),
   reasoning: z.string().default(''),
@@ -69,6 +145,8 @@ export const PlanSchema = z.object({
   goalId: z.string().uuid().optional(),
   deadline: z.string().optional(),
   budgetSuggestionUsd: z.number().optional(),
+  /** Durable cadence for an ongoing mission; absence retains the daily interval default. */
+  cadence: MissionCadenceSchema.optional(),
 });
 export type Plan = z.infer<typeof PlanSchema>;
 
@@ -104,6 +182,23 @@ export const PendingJobSchema = z.object({
 });
 export type PendingJob = z.infer<typeof PendingJobSchema>;
 
+/** Ordered continuation for one model-emitted tool batch. */
+export const PendingToolBatchCallSchema = z.object({
+  toolCallId: z.string().min(1),
+  toolName: z.string().min(1),
+  input: z.record(z.string(), z.unknown()),
+  status: z.enum(['queued', 'awaiting_approval', 'budget', 'job', 'settled']).default('queued'),
+  dbToolCallId: z.string().optional(),
+  approvalId: z.string().optional(),
+});
+export const PendingToolBatchSchema = z.object({
+  step: z.number().int().nonnegative(),
+  modelId: z.string().default('unknown'),
+  calls: z.array(PendingToolBatchCallSchema).min(1),
+});
+export type PendingToolBatchCall = z.infer<typeof PendingToolBatchCallSchema>;
+export type PendingToolBatch = z.infer<typeof PendingToolBatchSchema>;
+
 /**
  * A final response is checkpointed before channel delivery. If the provider
  * fails (or the process crashes), a retry delivers this exact text instead of
@@ -111,6 +206,7 @@ export type PendingJob = z.infer<typeof PendingJobSchema>;
  * replies.
  */
 export const PendingFinalSchema = z.object({
+  completionKind: z.literal('successful_silent').optional(),
   text: z.string(),
   progress: z.string(),
   // 'needs_attention' is terminal-for-now rather than terminal: an unattended
@@ -118,8 +214,27 @@ export const PendingFinalSchema = z.object({
   // and the Tasks page can re-queue it once they have acted.
   terminalStatus: z.enum(['done', 'failed', 'needs_attention']),
   outcome: z.enum(['done', 'clarify', 'failed', 'needs_attention']),
-  /** Persisted before channel send; retries never duplicate an ambiguous accepted delivery. */
+  /** Legacy at-most-once marker; new records use finalDelivery. */
   deliveryAttempted: z.boolean().optional(),
+  deliveryAttempts: z.number().int().min(0).optional(),
+  /** Durable typed receipt for the external final-answer channel attempt. */
+  finalDelivery: z
+    .object({
+      legs: z
+        .array(
+          z.object({
+            channel: z.string().min(1).max(80),
+            status: z.enum(['not_applicable', 'accepted', 'rejected', 'unknown']),
+            attemptId: z.string().min(1).max(256),
+            reason: z.string().max(200).optional(),
+          }),
+        )
+        .min(1)
+        .max(8),
+    })
+    .optional(),
+  /** True when the task is parked only because the last channel delivery was rejected/unknown. */
+  deliveryNeedsAttention: z.boolean().optional(),
   /** Response-contract verdict, persisted to response_checks at finalize. */
   contractBlocked: z.boolean().optional(),
   contractUnsupportedCount: z.number().int().optional(),
@@ -147,16 +262,36 @@ export type PendingFinal = z.infer<typeof PendingFinalSchema>;
 const RecallSourceSchema = z.object({
   date: z.string(),
   label: z.string(),
-  kind: z.enum(['chat', 'knowledge_graph']).optional(),
+  kind: z.enum(['chat', 'knowledge_graph', 'decision', 'commitment']).optional(),
   hops: z.union([z.literal(1), z.literal(2)]).optional(),
+  surfaceKey: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+  sourceRevision: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+  relevance: z.number().min(0).max(1).optional(),
+  evidence: z
+    .object({
+      representation: z.enum(['summary_with_excerpt', 'message_excerpts']),
+      sourceMessageIds: z.array(z.string().min(1)).max(100),
+      renderedUtf8Bytes: z.number().int().nonnegative(),
+    })
+    .optional(),
 });
 
 export const TaskStateSchema = z.object({
   phase: z.string().default('start'),
   step: z.number().int().default(0),
+  /** Owner timezone captured on the first leased run for relative schedule resolution. */
+  requestTimeZone: z.string().min(1).max(100).optional(),
   completedToolCallIds: z.array(z.string()).default([]),
   /** One model step can propose several approval-gated calls — all park together. */
   pendingApprovals: z.array(PendingApprovalSchema).default([]),
+  /** Model-emitted calls are checkpointed in order before any dispatch begins. */
+  pendingToolBatch: PendingToolBatchSchema.nullish(),
   /** An in-flight browser job this task is waiting on. */
   pendingJob: PendingJobSchema.nullish(),
   /** Durable final-channel delivery checkpoint. */
@@ -166,10 +301,33 @@ export const TaskStateSchema = z.object({
   /** Earlier discussions auto-recall drew on this turn, for the chat UI affordance (Phase 4). */
   recall: z.array(RecallSourceSchema).nullish(),
   plannerState: z.record(z.string(), z.unknown()).default({}),
+  /** Provenance-backed answer to the immediately preceding unresolved clarification. */
+  clarificationContinuation: ClarificationContinuationSchema.optional(),
   scratchpad: z.string().default(''),
+  /** Stable receipt for one completed skill-reflection decision on this task. */
+  skillReflectionReceipt: z
+    .object({
+      status: z.enum([
+        'created',
+        'revised',
+        'no_skill',
+        'superseded',
+        'owner_authored',
+        'capacity',
+        'already_processed',
+        'ineligible',
+      ]),
+      author: z.literal('reflection'),
+      skillId: z.string().nullish(),
+      libraryRevision: z.string(),
+      recordedAt: z.string(),
+    })
+    .optional(),
   /** Owner-requested compound outcomes; status comes only from durable receipts. */
   requestChecklist: RequestChecklistSchema.optional(),
   checklistRecoveryAttempts: z.number().int().min(0).max(1).default(0),
+  /** One persisted, target-grounded attempt to recover a missing future watch. */
+  futureWatchRecoveryAttempts: z.number().int().min(0).max(1).default(0),
   contextWindow: z.array(z.record(z.string(), z.unknown())).default([]),
   /**
    * High-water mark (ISO) for owner messages already folded into the window.

@@ -23,7 +23,11 @@ export const RequestChecklistSchema = z.object({
           'calendar',
         ]),
         targetTerms: z.array(z.string()).max(8),
-        status: z.enum(['pending', 'completed', 'blocked', 'awaiting_approval']),
+        status: z.enum(['pending', 'completed', 'blocked', 'awaiting_approval', 'cancelled']),
+        /** Only populated from an authenticated owner message by the runtime. */
+        ownerCancellation: z
+          .object({ messageId: z.string().min(1), requestSpan: z.string().min(1).max(500) })
+          .optional(),
         evidence: z.array(z.object({ id: z.string(), toolName: z.string() })),
         detail: z.string().optional(),
       }),

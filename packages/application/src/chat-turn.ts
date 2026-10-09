@@ -1,4 +1,5 @@
-import { type Config, modelProviderConfigProblems } from '@assistant/config';
+import { createHash, randomUUID } from 'node:crypto';
+import type { Config } from '@assistant/config';
 import {
   assistantMessageParts,
   BACKGROUND_NOTICE_MARKER,
@@ -14,17 +15,24 @@ import {
   stripCueTags,
 } from '@assistant/core/chat-cues';
 import { conversationMessageTexts } from '@assistant/core/conversation-context';
-import { TRIAGED_ACTIONABLE } from '@assistant/core/events';
 import { getAmbientBlock } from '@assistant/core/memory/ambient';
 import { listOpenCommitments, renderOpenCommitments } from '@assistant/core/memory/commitments';
 import { getOwnerCard } from '@assistant/core/memory/consolidation';
+import { assembleDiscussionFrame } from '@assistant/core/memory/discussion-frame';
+import { fuseOwnerContext } from '@assistant/core/memory/fused-owner-context';
 import { recallKnowledgeGraph, recallWithGraphFallback } from '@assistant/core/memory/graph-recall';
 import { type RecallSource, recallRelevantContext } from '@assistant/core/memory/recall';
 import { recordRecallMetric } from '@assistant/core/memory/recall-metrics';
+import {
+  explicitlyAsksAboutPriorSituationDecision,
+  readSituationDecisionContext,
+  renderSituationDecisionContext,
+} from '@assistant/core/memory/situation-context';
 import type { ModelRouter, StreamOutcome } from '@assistant/core/model-router';
+import { getQueueNotifier } from '@assistant/core/queue';
 import { isSituationRequest } from '@assistant/core/situations-schema';
 import { buildAutonomyGrant } from '@assistant/core/workflow/autonomy';
-import { enqueueTask } from '@assistant/core/workflow/machine';
+import { explicitlyOptsOutOfRecall } from '@assistant/core/workflow/owner-intent';
 import { detectPersonalReadRequest } from '@assistant/core/workflow/read-intent';
 import {
   clearGoalBlockedOnOwnerReply,
@@ -39,9 +47,11 @@ import {
 import type {
   ApplicationChatMessage,
   ApplicationChatPersistence,
+  ChatTurnAdmissionResult,
   ExecutionPersistence,
   TaskLease,
 } from '@assistant/persistence';
+import { chatAdmissionPayload, embeddingSpaceIdentityKey } from '@assistant/persistence';
 import {
   convertToModelMessages,
   createUIMessageStream,
@@ -54,6 +64,7 @@ import { budgetReplyTarget, isApprovalReply } from './chat-budget-reply.js';
 import { pumpWithCues, type StreamChunk } from './chat-cue-stream.js';
 import { guardDraft } from './chat-guard.js';
 import { looksLikeActionRequest } from './chat-triage.js';
+import { readBoundedJson } from './http-body.js';
 
 const MAX_REQUEST_BYTES = 32 * 1024;
 const MAX_USER_MESSAGE_BYTES = 16 * 1024;
@@ -68,6 +79,8 @@ export interface ChatTurnDependencies {
   router: ModelRouter;
   chat?: ApplicationChatPersistence;
   persistence?: ExecutionPersistence;
+  /** A worker-owned lease used to resume an admitted turn after a crashed request. */
+  resumeTask?: TaskLease;
 }
 
 function hasBackgroundPart(parts: unknown): boolean {
@@ -124,6 +137,7 @@ async function finishApplicationChatTask(
     progress?: string;
     responseText?: string;
     recall?: RecallSource[];
+    privacyObservationGeneration?: string | null;
     cues?: Cue[];
     offCourse?: boolean;
     failureNotice?: { text: string; reason: TurnFailureReason };
@@ -136,6 +150,7 @@ async function finishApplicationChatTask(
       taskId: task.id,
       role: 'assistant' as const,
       origin: 'assistant' as const,
+      channelMessageId: `chat-reply:${task.id}`,
       parts: assistantMessageParts(outcome.responseText, outcome.recall, {
         cues: outcome.cues,
         offCourse: outcome.offCourse,
@@ -160,6 +175,7 @@ async function finishApplicationChatTask(
     task,
     status: outcome.status,
     progress: outcome.progress,
+    privacyObservationGeneration: outcome.privacyObservationGeneration,
     messages,
   });
 }
@@ -177,33 +193,6 @@ function encodeRecallHeader(sources: RecallSource[]): string {
     ...(s.hops ? { hops: s.hops } : {}),
   }));
   return encodeURIComponent(JSON.stringify(trimmed));
-}
-
-async function readBoundedBody(
-  req: Request,
-  maxBytes: number,
-): Promise<{ ok: true; text: string } | { ok: false }> {
-  if (!req.body) return { ok: true, text: '' };
-  const reader = req.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel().catch(() => undefined);
-      return { ok: false };
-    }
-    chunks.push(value);
-  }
-  const body = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return { ok: true, text: new TextDecoder().decode(body) };
 }
 
 function textOf(message: UIMessage): string {
@@ -361,47 +350,14 @@ export async function handleChatTurn(
     if (!dependencies.db) throw new Error('Chat persistence is not configured');
     return dependencies.db;
   };
-  const providerProblems = modelProviderConfigProblems(config);
-  if (providerProblems.length > 0) {
-    return Response.json(
-      {
-        error: `The model provider is not configured on this server: ${providerProblems.join('; ')}`,
-        code: 'not_configured',
-      },
-      { status: 503 },
-    );
-  }
-
-  const declaredLength = Number(req.headers.get('content-length') ?? 0);
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BYTES) {
-    return Response.json(
-      { error: 'That message is too large to send — trim it and try again.', code: 'too_large' },
-      { status: 413 },
-    );
-  }
-  const requestBody = await readBoundedBody(req, MAX_REQUEST_BYTES).catch(() => null);
-  if (!requestBody) {
-    return Response.json(
-      { error: 'The request could not be read — try sending again.', code: 'bad_request' },
-      { status: 400 },
-    );
-  }
+  const requestBody = await readBoundedJson(req, MAX_REQUEST_BYTES);
   if (!requestBody.ok) {
     return Response.json(
-      { error: 'That message is too large to send — trim it and try again.', code: 'too_large' },
-      { status: 413 },
+      { error: requestBody.error, code: requestBody.status === 413 ? 'too_large' : 'bad_request' },
+      { status: requestBody.status },
     );
   }
-  const rawBody = requestBody.text;
-  let parsedBody: unknown;
-  try {
-    parsedBody = JSON.parse(rawBody) as unknown;
-  } catch {
-    return Response.json(
-      { error: 'The request was malformed — try sending again.', code: 'bad_request' },
-      { status: 400 },
-    );
-  }
+  const parsedBody = requestBody.value;
   if (!parsedBody || typeof parsedBody !== 'object' || Array.isArray(parsedBody)) {
     return Response.json(
       { error: 'The request was malformed — try sending again.', code: 'bad_request' },
@@ -411,6 +367,8 @@ export async function handleChatTurn(
   const body = parsedBody as {
     messages?: UIMessage[];
     conversationId?: string;
+    clientOperationId?: string;
+    clientId?: string;
     autonomous?: boolean;
     force?: boolean;
     spoken?: boolean;
@@ -451,6 +409,29 @@ export async function handleChatTurn(
       { status: 400 },
     );
   }
+  const clientOperationId =
+    body.clientOperationId ??
+    (userMessage.id && UUID_RE.test(userMessage.id) ? userMessage.id : randomUUID());
+  if (!UUID_RE.test(clientOperationId)) {
+    return Response.json(
+      {
+        error: 'The request is missing a valid send ID — refresh and try again.',
+        code: 'bad_request',
+      },
+      { status: 400 },
+    );
+  }
+  const nativeClientId =
+    new URL(req.url).pathname === '/api/mobile/v1/chat' ? body.clientId : undefined;
+  if (
+    nativeClientId !== undefined &&
+    (typeof nativeClientId !== 'string' || !UUID_RE.test(nativeClientId))
+  ) {
+    return Response.json(
+      { error: 'The native client identity is malformed.', code: 'bad_request' },
+      { status: 400 },
+    );
+  }
 
   const userText = textOf(userMessage).trim();
   if (!userText) {
@@ -481,29 +462,125 @@ export async function handleChatTurn(
       { status: 404 },
     );
   }
+  // Resolve the effective draft route before creating a conversation or admitting
+  // this owner request. `route()` applies saved connections, role policy, model
+  // overrides, and budget selection without making a provider request. A budget
+  // park/block is still a normal route outcome; executor admission keeps its
+  // existing budget semantics.
+  try {
+    await router.route('draft', {
+      taskId: dependencies.resumeTask?.id,
+      modelOverride: existingConversation?.modelOverride ?? undefined,
+      modelOverrideResolved: true,
+    });
+  } catch {
+    return Response.json(
+      {
+        error:
+          'The selected model route could not be verified. Check AI providers in Settings, then retry.',
+        code: 'not_configured',
+      },
+      { status: 503 },
+    );
+  }
+
   const conversation = existingConversation ?? (await chat.createConversation(agent.id));
 
-  // Replying is an explicit choice to resume an archived chat. Preserve the
-  // history, but make it visible again instead of creating a duplicate thread.
+  const requestHash = createHash('sha256')
+    .update(JSON.stringify([userText, autonomousRequested, forceRequested, spokenRequested]))
+    .digest('hex');
+  const resumeAdmission = dependencies.resumeTask
+    ? chatAdmissionPayload(dependencies.resumeTask)
+    : null;
+  let admission: ChatTurnAdmissionResult;
+  if (dependencies.resumeTask) {
+    const task = dependencies.resumeTask;
+    if (
+      !resumeAdmission ||
+      task.agentId !== agent.id ||
+      task.conversationId !== conversation.id ||
+      resumeAdmission.clientOperationId !== clientOperationId ||
+      resumeAdmission.requestHash !== requestHash
+    )
+      throw new Error('Worker admission lease does not match its triggering owner request');
+    const rows = await chat.listMessagesByIds(agent.id, conversation.id, [
+      resumeAdmission.triggerMessageId,
+    ]);
+    const message = rows?.find((row) => row.role === 'user' && row.taskId === task.id);
+    if (!message) throw new Error('Worker admission is missing its triggering owner message');
+    admission = { kind: 'admitted', created: true, task, message, lease: task };
+  } else {
+    try {
+      admission = await chat.admitChatTurn({
+        agentId: agent.id,
+        conversationId: conversation.id,
+        clientOperationId,
+        ...(nativeClientId ? { clientId: nativeClientId } : {}),
+        requestHash,
+        text: userText,
+        autonomous: autonomousRequested,
+        force: forceRequested,
+        spoken: spokenRequested,
+        goalId: goalIdFromConversation(conversation.metadata),
+        ...(autonomousRequested
+          ? { autonomyGrant: buildAutonomyGrant({ grantedVia: 'composer', nowMs: Date.now() }) }
+          : {}),
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.includes('already used for a different request')
+      ) {
+        return Response.json(
+          {
+            error: 'This send ID belongs to a different message. Send it again as a new message.',
+            code: 'operation_conflict',
+          },
+          { status: 409 },
+        );
+      }
+      throw error;
+    }
+  }
+  if (admission.kind === 'cancelled_before_admission') {
+    return Response.json(
+      {
+        ok: false,
+        outcome: 'cancelled_before_admission',
+        reason: 'cancelled_before_admission',
+        code: 'chat_turn_cancelled_before_admission',
+        effectStatus: 'not_started',
+        conversationId: conversation.id,
+        clientOperationId,
+        taskId: null,
+      },
+      { status: 409, headers: { 'cache-control': 'no-store' } },
+    );
+  }
+
+  // A persisted admission is the point at which the owner message exists. Only
+  // then may a send restore an archived conversation or assign its first title.
   if (conversation.archivedAt) {
     await chat.restoreConversation(agent.id, conversation.id);
     conversation.archivedAt = null;
   }
-
   if (!conversation.title) {
     await chat.setConversationTitleIfEmpty(agent.id, conversation.id, userText.slice(0, 60));
     conversation.title = userText.slice(0, 60);
   }
 
-  const persistedUser = await chat.appendOwned(agent.id, {
-    conversationId: conversation.id,
-    role: 'user',
-    origin: 'owner',
-    parts: [{ type: 'text', text: userText }],
-    text: userText,
-  });
-  if (!persistedUser) throw new Error('failed to persist chat message');
+  const persistedUser = admission.message;
+  const admittedTask = admission.lease;
   const messageCursor = encodeMessageCursor(persistedUser);
+  if (!admission.created) {
+    return acceptedStreamResponse(admission.task.id, {
+      'x-conversation-id': conversation.id,
+      'x-async-task': admission.task.id,
+      'x-message-cursor': messageCursor,
+      'x-owner-message-id': persistedUser.id,
+    });
+  }
+  if (!admittedTask) throw new Error('New chat admission did not return its lease');
   const refreshCardId = savedCardRefreshId(userText);
   const cardRefresh = dependencies.db ?? dependencies.persistence?.cardRefresh;
   if (refreshCardId && cardRefresh) {
@@ -512,21 +589,49 @@ export async function handleChatTurn(
       agent.id,
       refreshCardId,
       conversation.id,
+      clientOperationId,
     );
-    if (!result.ok) return Response.json({ error: result.error }, { status: result.status });
-    return acceptedStreamResponse(result.taskId, {
+    if (!result.ok) {
+      await finishApplicationChatTask(chat, agent.id, admittedTask, {
+        status: 'failed',
+        progress: result.error,
+        failureNotice: { text: result.error, reason: 'model' },
+      });
+      return Response.json({ error: result.error }, { status: result.status });
+    }
+    await finishApplicationChatTask(chat, agent.id, admittedTask, {
+      status: 'done',
+      responseText:
+        'I started refreshing that saved card. I’ll update it after checking its sources.',
+    });
+    return acceptedStreamResponse(admittedTask.id, {
       'x-conversation-id': conversation.id,
-      'x-async-task': result.taskId,
+      'x-async-task': admittedTask.id,
       'x-message-cursor': messageCursor,
+      'x-owner-message-id': persistedUser.id,
     });
   }
+  // Capture the durable erase generation before reading history or any other
+  // private context. The completion transaction rechecks it before publishing
+  // text or recall provenance, so a stream delayed across erasure cannot
+  // reintroduce the pre-erasure observation.
+  const privacyObservationGeneration = await chat.privacyObservationGeneration(agent.id);
   const historyPage = await chat.listMessages(agent.id, conversation.id, {
     limit: MODEL_HISTORY_LIMIT,
   });
   if (!historyPage) throw new Error('chat not found');
-  const historyRows = historyPage.messages;
+  const pageRows = historyPage.messages;
+  const triggerIndex = pageRows.findIndex((row) => row.id === persistedUser.id);
+  // A later request may be admitted after this request commits its trigger but
+  // before it loads context. Keep this turn's context anchored at its own
+  // durable user message so a retry/concurrent send cannot absorb newer input.
+  const historyRows = triggerIndex >= 0 ? pageRows.slice(0, triggerIndex + 1) : [persistedUser];
   const noticeRows = await applicationBackgroundNoticeIds(chat, agent.id, historyRows);
   const modelHistory = boundedModelHistory(historyRows, noticeRows);
+  // Only actually rendered messages are covered by the prompt. Earlier rows
+  // omitted by its byte cap remain eligible for historical retrieval.
+  const firstRenderedAt =
+    historyRows.find((row) => row.id === modelHistory[0]?.id)?.createdAt ?? persistedUser.createdAt;
   if (config.SELF_REPAIR_ENABLED && isRepairFeedback(userText)) {
     const original = [...historyRows]
       .reverse()
@@ -546,11 +651,7 @@ export async function handleChatTurn(
     }
   }
   if (isApprovalReply(userText)) {
-    const replyTask = await chat.createDirectChatTask({
-      agentId: agent.id,
-      conversationId: conversation.id,
-      title: userText,
-    });
+    const replyTask = admittedTask;
 
     const previous = historyRows.slice(0, -1).at(-1);
     const target =
@@ -571,6 +672,7 @@ export async function handleChatTurn(
       'x-conversation-id': conversation.id,
       'x-async-task': replyTask.id,
       'x-message-cursor': messageCursor,
+      'x-owner-message-id': persistedUser.id,
     });
   }
 
@@ -583,6 +685,8 @@ export async function handleChatTurn(
   // to the executor (see TRIAGED_ACTIONABLE), because only a real ruling is
   // worth letting the planner skip its own version of this question.
   let ruledOnAction = false;
+  const resumedConversationalReply =
+    resumeAdmission?.phase === 'streaming' && resumeAdmission.triageOutcome === 'conversational';
   // A deterministic gate first: a clear imperative ("add lunch Friday noon")
   // must reach the tools path even when the cheap classify model misreads it as
   // conversation. Failed-action follow-ups also return to the executor when
@@ -593,7 +697,9 @@ export async function handleChatTurn(
   const priorAssistantText = [...modelHistory.slice(0, -1)]
     .reverse()
     .find((message) => message.role === 'assistant' && !noticeRows.has(message.id));
-  if (
+  if (resumedConversationalReply) {
+    needsAction = false;
+  } else if (
     autonomousRequested ||
     forceRequested ||
     isSituationRequest(userText) ||
@@ -659,29 +765,18 @@ export async function handleChatTurn(
       // question had the goal blocked, so the waiting marker comes down now.
       const goalId = goalIdFromConversation(conversation.metadata);
       if (goalId) await chat.clearGoalBlockedOnOwnerReply(agent.id, goalId);
-      const { task } = await enqueueTask(dependencies.persistence?.tasks ?? requireDb(), {
-        event: {
-          source: 'chat',
-          agentId: agent.id,
-          conversationId: conversation.id,
-          trust: 'owner',
-          payload: { text: userText, ...(ruledOnAction ? { [TRIAGED_ACTIONABLE]: true } : {}) },
-        },
-        type: 'chat_turn',
-        goalId,
-        ...(autonomousRequested
-          ? {
-              autonomyGrant: buildAutonomyGrant({
-                grantedVia: 'composer',
-                nowMs: Date.now(),
-              }),
-            }
-          : {}),
+      const queued = await chat.queueAdmittedChatTurn({
+        agentId: agent.id,
+        task: admittedTask,
+        triagedActionable: ruledOnAction,
       });
-      return acceptedStreamResponse(task.id, {
+      if (!queued) throw new Error('Chat admission lease was lost before queueing');
+      getQueueNotifier().notify(queued.id, queued.queueGeneration);
+      return acceptedStreamResponse(admittedTask.id, {
         'x-conversation-id': conversation.id,
-        'x-async-task': task.id,
+        'x-async-task': admittedTask.id,
         'x-message-cursor': messageCursor,
+        'x-owner-message-id': persistedUser.id,
       });
     } catch (error) {
       console.error('chat action task could not be queued', error);
@@ -699,51 +794,140 @@ export async function handleChatTurn(
   // Long-running-chat auto-recall (Phase 1): reach back into the owner's own
   // earlier discussion that is relevant to this turn but has scrolled out of
   // the live window. Best-effort — a recall failure must never fail the chat.
-  const recallPromise = (async (): Promise<{ block?: string; sources: RecallSource[] }> => {
-    if (!config.CHAT_RECALL_ENABLED) return { sources: [] };
-    try {
-      const layered = await recallWithGraphFallback({
-        graph: config.GRAPH_RAG_ENABLED
-          ? async () => {
-              const [queryEmbedding] = await router.embed([userText]);
-              return {
-                graph: await recallKnowledgeGraph(dependencies.persistence?.graph ?? requireDb(), {
-                  agentId: agent.id,
-                  queryText: userText,
-                  queryEmbedding,
-                }),
-                queryEmbedding,
-              };
-            }
-          : undefined,
-        history: (queryEmbedding, graph) =>
-          recallRelevantContext(
-            dependencies.persistence?.history ?? requireDb(),
-            {
-              agentId: agent.id,
-              queryText: userText,
-              embed: (values, embedOpts) => router.embed(values, embedOpts ?? {}),
-              exclude: {
-                conversationId: conversation.id,
-                sinceCreatedAt: historyRows[0]?.createdAt ?? persistedUser.createdAt,
-              },
-            },
-            {
-              ...(graph.used > 0 ? { maxChars: 1200 } : {}),
-              queryEmbedding,
-            },
-          ),
-        onGraphError: (err) => {
-          // GraphRAG is additive. Existing vector recall must still answer when
-          // graph storage, extraction, or its query embedding is unavailable.
-          console.error('knowledge graph recall failed — falling back to chat recall', err);
-        },
-        onHistoryError: (err) => {
-          console.error(
-            'chat history recall failed — continuing with graph evidence if available',
-            err,
+  const directGoalId = goalIdFromConversation(conversation.metadata);
+  if (directGoalId) await chat.clearGoalBlockedOnOwnerReply(agent.id, directGoalId);
+  if (
+    !(await chat.markChatTurnStreaming({
+      agentId: agent.id,
+      task: admittedTask,
+      triageOutcome: 'conversational',
+    }))
+  ) {
+    throw new Error('Chat admission lease was lost before streaming');
+  }
+
+  const noHistoricalContext = explicitlyOptsOutOfRecall(userText);
+  const recallPromise = (async (): Promise<{
+    block?: string;
+    sources: RecallSource[];
+    situationDecisions?: string;
+  }> => {
+    if (!config.CHAT_RECALL_ENABLED || noHistoricalContext) return { sources: [] };
+    const frame = assembleDiscussionFrame({
+      currentText: userText,
+      turns: modelHistory
+        .filter((message) => !noticeRows.has(message.id))
+        .map((message) => ({
+          id: message.id,
+          role: message.role,
+          text: message.parts
+            .filter((part) => part.type === 'text')
+            .map((part) => part.text)
+            .join('\n'),
+          representation: 'rendered' as const,
+        })),
+    });
+    if (!frame.available) return { sources: [] };
+    const queryText = frame.queryText;
+    const embeddingSpace = await router.embeddingSpace();
+    const embeddingSpaceKey = embeddingSpaceIdentityKey(embeddingSpace);
+    const isSuppressed = dependencies.persistence?.recallSurfacing
+      ? async (sourceKey: string, sourceRevision: string) => {
+          const suppressed = await dependencies.persistence?.recallSurfacing?.suppressed(
+            agent.id,
+            [sourceKey],
+            { [sourceKey]: sourceRevision },
           );
-        },
+          return suppressed?.has(sourceKey) ?? true;
+        }
+      : undefined;
+    try {
+      const [layered, situationRead] = await Promise.all([
+        recallWithGraphFallback({
+          graph: config.GRAPH_RAG_ENABLED
+            ? async () => {
+                const [queryEmbedding] = await router.embed([queryText], {
+                  expectedSpace: embeddingSpace,
+                });
+                return {
+                  graph: await recallKnowledgeGraph(
+                    dependencies.persistence?.graph ?? requireDb(),
+                    {
+                      agentId: agent.id,
+                      queryText,
+                      queryEmbedding,
+                    },
+                    { isSuppressed, limit: 8 },
+                  ),
+                  queryEmbedding,
+                };
+              }
+            : undefined,
+          history: (queryEmbedding, graph) =>
+            recallRelevantContext(
+              dependencies.persistence?.history ?? requireDb(),
+              {
+                agentId: agent.id,
+                queryText,
+                embed: (values, embedOpts) =>
+                  router.embed(values, {
+                    ...(embedOpts ?? {}),
+                    expectedSpace: embeddingSpace,
+                  }),
+                exclude: {
+                  conversationId: conversation.id,
+                  sinceCreatedAt: firstRenderedAt,
+                },
+              },
+              {
+                limit: 12,
+                ...(graph.used > 0 ? { maxChars: 1200 } : {}),
+                queryEmbedding,
+                embeddingSpaceKey,
+                isSuppressed,
+              },
+            ),
+          onGraphError: (err) => {
+            // GraphRAG is additive. Existing vector recall must still answer when
+            // graph storage, extraction, or its query embedding is unavailable.
+            console.error('knowledge graph recall failed — falling back to chat recall', err);
+          },
+          onHistoryError: (err) => {
+            console.error(
+              'chat history recall failed — continuing with graph evidence if available',
+              err,
+            );
+          },
+        }),
+        readSituationDecisionContext({
+          db: dependencies.db,
+          persistence: dependencies.persistence,
+          agentId: agent.id,
+          discussionFrame: queryText,
+        }),
+      ]);
+      const situationDecisions = renderSituationDecisionContext(situationRead.decisions);
+      const explicitLookupNotice =
+        explicitlyAsksAboutPriorSituationDecision(userText) && !situationDecisions
+          ? situationRead.status === 'unavailable'
+            ? 'The owner explicitly asked about an earlier situation-pack decision, but that private decision lookup was unavailable. Do not invent or guess the remembered choice; state the lookup limitation briefly.'
+            : 'The owner explicitly asked about an earlier situation-pack decision, and no matching confirmed choice was found in the active packs. This does not prove the owner never stated it; answer from the current conversation or ask one focused question.'
+          : undefined;
+      const openCommitments = await listOpenCommitments(
+        dependencies.persistence?.ownerContext ?? requireDb(),
+        { agentId: agent.id, query: queryText, limit: 40 },
+      ).catch((err) => {
+        console.error('open commitment context failed — continuing with other evidence', err);
+        return [];
+      });
+      const fused = await fuseOwnerContext({
+        queryText,
+        rankedContext: layered.rankedContext,
+        decisions: situationRead.decisions,
+        commitments: openCommitments,
+        isSuppressed,
+        limit: 8,
+        maxBytes: 2600,
       });
       void recordRecallMetric(dependencies.persistence?.recallMetrics ?? requireDb(), {
         agentId: agent.id,
@@ -756,39 +940,44 @@ export async function handleChatTurn(
         historyFailed: layered.historyFailed,
         historyTier: layered.history.tier ?? 'none',
         historyUsed: layered.history.used ?? layered.history.sources.length,
-        sourceCount: layered.sources.length,
+        sourceCount: fused.sources.length,
       }).catch((err) => console.error('chat recall metric failed', err));
-      return { block: layered.block || undefined, sources: layered.sources };
+      return {
+        block: fused.block || undefined,
+        sources: fused.sources,
+        situationDecisions: explicitLookupNotice,
+      };
     } catch (err) {
       console.error('chat recall failed — continuing without it', err);
       return { sources: [] };
     }
   })();
 
-  const taskPromise = chatTurnTask(chat, {
-    agentId: agent.id,
-    conversationId: conversation.id,
-    title: userText,
-    metadata: conversation.metadata,
-  });
+  const taskPromise = Promise.resolve(admittedTask);
   // Context reads are independent. Only evidence needs the newly created task ID.
   const [recall, openLoops, task, evidence, ambientBlock, ownerCard] = await Promise.all([
     recallPromise,
-    openLoopContext(dependencies.persistence?.ownerContext ?? requireDb(), agent.id, userText),
+    Promise.resolve(undefined),
     taskPromise,
     taskPromise.then((created) =>
       chat.listConversationEvidence(agent.id, conversation.id, created.id),
     ),
-    getAmbientBlock(dependencies.persistence?.ownerContext ?? requireDb(), agent.id).catch(
-      (err) => {
-        console.error('ambient context failed — continuing without it', err);
-        return undefined;
-      },
-    ),
-    getOwnerCard(dependencies.persistence?.ownerContext ?? requireDb(), agent.id).catch((err) => {
-      console.error('owner context failed — continuing without it', err);
-      return undefined;
-    }),
+    noHistoricalContext
+      ? Promise.resolve(undefined)
+      : getAmbientBlock(dependencies.persistence?.ownerContext ?? requireDb(), agent.id).catch(
+          (err) => {
+            console.error('ambient context failed — continuing without it', err);
+            return undefined;
+          },
+        ),
+    noHistoricalContext
+      ? Promise.resolve(undefined)
+      : getOwnerCard(dependencies.persistence?.ownerContext ?? requireDb(), agent.id).catch(
+          (err) => {
+            console.error('owner context failed — continuing without it', err);
+            return undefined;
+          },
+        ),
   ]);
   const recallBlock = recall.block;
   const recallSources = recall.sources;
@@ -840,6 +1029,7 @@ export async function handleChatTurn(
         buildSystemPrompt(agent, {
           ownerCard,
           recall: recallBlock,
+          situationDecisions: recall.situationDecisions,
           openLoops,
           ambient: ambientBlock,
           channel: 'dashboard-chat',
@@ -853,7 +1043,7 @@ export async function handleChatTurn(
         // Strip the companion cue tags BEFORE the guard, for the same reason
         // the pump strips them below: the contract's prose matchers must see
         // clean text, and the persisted reply must be byte-identical to the
-        // streamed one (retireProvisionalReplies dedupes on exact text).
+        // streamed one through its durable channel receipt.
         const stripped = stripCueTags(text);
         // An empty completion is a failed turn, not a blank bubble.
         if (stripped.text.trim() === '') {
@@ -871,7 +1061,7 @@ export async function handleChatTurn(
             taskId: task.id,
           });
         }
-        await finishApplicationChatTask(chat, agent.id, task, {
+        const completed = await finishApplicationChatTask(chat, agent.id, task, {
           status: 'done',
           // Persist the contract-owned replacement, never the unsupported
           // draft. The stream pump below sends the client this same text, so
@@ -879,9 +1069,11 @@ export async function handleChatTurn(
           // retireProvisionalReplies matches on to retire the local copy.
           responseText: guarded.text,
           recall: recallSources,
+          privacyObservationGeneration,
           cues: guarded.corrected ? undefined : stripped.cues,
           offCourse: guarded.corrected,
         });
+        if (!completed) throw new Error('Chat completion was fenced before publication');
       },
       onError: async (error) => {
         await finishApplicationChatTask(chat, agent.id, task, {
@@ -943,7 +1135,12 @@ export async function handleChatTurn(
       const parts = okOutcome.toUIMessageStream({ sendFinish: false });
       await pumpWithCues(
         parts as unknown as AsyncIterable<StreamChunk>,
-        (chunk) => writer.write(chunk as Parameters<typeof writer.write>[0]),
+        (chunk) =>
+          writer.write(
+            (chunk.type === 'start'
+              ? { ...chunk, messageMetadata: { channelMessageId: `chat-reply:${task.id}` } }
+              : chunk) as Parameters<typeof writer.write>[0],
+          ),
         createCueScanner(),
       );
       const guarded = guardOnce(stripCueTags(await okOutcome.text).text);
@@ -960,9 +1157,50 @@ export async function handleChatTurn(
       'x-model-degraded': String(outcome.degraded),
       'x-conversation-id': conversation.id,
       'x-message-cursor': messageCursor,
+      'x-owner-message-id': persistedUser.id,
       // Live transparency for this streaming turn; the persisted `recall`
       // message part carries the same provenance across reloads.
       ...(recallSources.length > 0 ? { 'x-recall': encodeRecallHeader(recallSources) } : {}),
     },
   });
+}
+
+/** Resume a request whose admission lease expired before its HTTP response completed. */
+export async function resumeAdmittedChatTask(
+  task: TaskLease,
+  dependencies: Omit<ChatTurnDependencies, 'resumeTask'>,
+): Promise<number> {
+  const admission = chatAdmissionPayload(task);
+  const trigger = task.trigger as { payload?: Record<string, unknown> } | null;
+  const text = trigger?.payload?.text;
+  if (
+    !admission ||
+    task.type !== 'chat_turn' ||
+    task.trust !== 'owner' ||
+    !task.conversationId ||
+    typeof text !== 'string' ||
+    !text.trim()
+  )
+    throw new Error('Task is not a resumable owner chat admission');
+  const request = new Request('http://localhost/api/chat', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      conversationId: task.conversationId,
+      clientOperationId: admission.clientOperationId,
+      autonomous: trigger?.payload?.autonomous === true,
+      force: trigger?.payload?.force === true,
+      spoken: trigger?.payload?.spoken === true,
+      messages: [
+        {
+          id: admission.triggerMessageId,
+          role: 'user',
+          parts: [{ type: 'text', text }],
+        },
+      ],
+    }),
+  });
+  const response = await handleChatTurn(request, { ...dependencies, resumeTask: task });
+  await response.arrayBuffer();
+  return response.status;
 }

@@ -15,10 +15,41 @@
 # the same way; release-postgres.sh is deleted when PostgreSQL is retired.
 set -euo pipefail
 
+# shellcheck source=infra/gcp/release-staged-services.sh
+source "$(dirname "${BASH_SOURCE[0]}")/release-staged-services.sh"
+release_validate_worker_override || exit $?
+
 PROJECT="${GCP_PROJECT:?Set GCP_PROJECT to the Google Cloud project id}"
 REGION="${GCP_REGION:-us-west1}"
 REPO="${ARTIFACT_REPOSITORY:-assistant}"
 TAG="${IMAGE_TAG:-$(git rev-parse --short=12 HEAD)}"
+RELEASE_COMPONENTS="${RELEASE_COMPONENTS:-agent,web}"
+export RELEASE_PERSISTENCE_DRIVER=firestore
+case "$RELEASE_COMPONENTS" in
+  full|agent,web|web,agent) RELEASE_COMPONENTS=agent,web ;;
+  web)
+    if [[ "${RELEASE_SCHEMA_UNCHANGED:-false}" != true ]]; then
+      echo 'web-only release requires RELEASE_SCHEMA_UNCHANGED=true' >&2
+      exit 2
+    fi
+    ;;
+  *) echo 'RELEASE_COMPONENTS must be agent,web (default) or web' >&2; exit 2 ;;
+esac
+export RELEASE_COMPONENTS
+ASSISTANT_RELEASE_WRITES_PAUSED=false
+if [[ "$RELEASE_COMPONENTS" == agent,web ]]; then ASSISTANT_RELEASE_WRITES_PAUSED=true; fi
+export ASSISTANT_RELEASE_WRITES_PAUSED
+# Fail closed before any backup/index/build/revision mutation unless the live
+# pair and selected candidate declare compatible API and Firestore schema ranges.
+echo "Checking live/new schema and API compatibility before Firestore release mutations"
+if ! release_preflight_compatibility "$RELEASE_COMPONENTS"; then
+  # This exception admits only the exact pinned 68e Firestore pair and only
+  # for a full release whose first new web revision is maintenance-paused.
+  # The helper never relabels historical API/schema metadata.
+  # shellcheck source=infra/gcp/release-legacy-bootstrap.sh
+  source "$(dirname "${BASH_SOURCE[0]}")/release-legacy-bootstrap.sh"
+  release_preflight_legacy_firestore_bootstrap agent,web "$RELEASE_AGENT_API" "$RELEASE_WEB_API" "$RELEASE_SCHEMA_VERSION" || exit 1
+fi
 # A daily backup schedule leaves at most ~24h between recovery points.
 BACKUP_MAX_AGE_HOURS="${FIRESTORE_BACKUP_MAX_AGE_HOURS:-26}"
 
@@ -32,9 +63,6 @@ if [[ ! "$BACKUP_MAX_AGE_HOURS" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 IMAGE_ROOT="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}"
-BROWSER_SERVICE_ACCOUNT="assistant-browser@${PROJECT}.iam.gserviceaccount.com"
-CODE_SERVICE_ACCOUNT="assistant-code@${PROJECT}.iam.gserviceaccount.com"
-PROCESSOR_SERVICE_ACCOUNT="assistant-processor@${PROJECT}.iam.gserviceaccount.com"
 INTERNAL_INVOKER_SERVICE_ACCOUNT="assistant-internal-invoker@${PROJECT}.iam.gserviceaccount.com"
 
 # ── release bookkeeping ──────────────────────────────────────────────────────
@@ -94,7 +122,7 @@ verify_database_free_template() {
     const fs = require("node:fs");
     const [kind, name, requireFirestore] = process.argv.slice(1);
     const value = JSON.parse(fs.readFileSync(0, "utf8"));
-    const spec = kind === "service" ? value.spec?.template?.spec : value.spec?.template?.spec?.template?.spec;
+    const spec = kind === "service" ? value.spec?.template?.spec : value.spec?.template?.template?.spec;
     const env = spec?.containers?.[0]?.env ?? [];
     const databaseEnv = /^(DATABASE_URL|PROD_DATABASE_URL|MIGRATION_DATABASE_URL|PG[A-Z_]*|POSTGRES_[A-Z_]+|NEON_[A-Z_]+)$/; // retirement-scan: forbids
     const databaseSecret = /^database-url($|-)|neon|postgres/i; // retirement-scan: forbids
@@ -189,10 +217,10 @@ echo "── Verifying Firestore indexes match this release"
 pnpm -s firestore:indexes verify --project="$PROJECT" --database="$FIRESTORE_DATABASE_ID"
 
 # Images are built only after every gate passed, so a blocked release costs no build.
+RELEASE_MODULES="${ASSISTANT_MODULES:-$(agent_env_value ASSISTANT_MODULES)}"
+RELEASE_MODULES="${RELEASE_MODULES:-all}"
 if [[ "${SKIP_IMAGE_BUILD:-false}" != "true" ]]; then
   echo "Building release ${TAG} with Cloud Build"
-  RELEASE_MODULES="${ASSISTANT_MODULES:-$(agent_env_value ASSISTANT_MODULES)}"
-  RELEASE_MODULES="${RELEASE_MODULES:-all}"
   gcloud builds submit . \
     --project "$PROJECT" \
     --config infra/gcp/cloudbuild-firestore.yaml \
@@ -360,34 +388,20 @@ verify_released_templates() {
 
 # ── rollout ──────────────────────────────────────────────────────────────────
 if step "Verifying agent configuration" verify_agent_configuration; then
-  step "Rolling out agent" roll_out_service assistant-agent "${IMAGE_ROOT}/agent:${TAG}" || true
+  step "Staging, verifying, and promoting compatible services" release_staged_services || true
 else
-  record_failure "Rolling out agent (skipped — configuration unverified)"
+  record_failure "Service promotion skipped — agent configuration unverified"
 fi
 
-step "Rolling out web" roll_out_service assistant-web "${IMAGE_ROOT}/web:${TAG}" || true
-
-AGENT_URL="$(gcloud run services describe assistant-agent --project "$PROJECT" --region "$REGION" --format='value(status.url)' 2>/dev/null || true)"
-if [[ -n "$AGENT_URL" ]]; then
-  step "Refreshing internal scheduler OIDC" refresh_scheduler_oidc "$AGENT_URL" || true
-else
-  record_failure "Refreshing internal scheduler OIDC (could not resolve the agent URL)"
+if [[ "$RELEASE_COMPONENTS" == agent,web ]]; then
+  AGENT_URL="$(gcloud run services describe assistant-agent --project "$PROJECT" --region "$REGION" --format='value(status.url)' 2>/dev/null || true)"
+  if [[ -n "$AGENT_URL" ]]; then
+    step "Refreshing internal scheduler OIDC" refresh_scheduler_oidc "$AGENT_URL" || true
+  else
+    record_failure "Refreshing internal scheduler OIDC (could not resolve the agent URL)"
+  fi
 fi
 
-if configured_module_enabled "$RELEASE_MODULES" browser; then
-  step "Rolling out browser job" \
-    roll_out_job assistant-browser "${IMAGE_ROOT}/browser:${TAG}" "$BROWSER_SERVICE_ACCOUNT" optional || true
-fi
-if configured_module_enabled "$RELEASE_MODULES" code; then
-  step "Rolling out code job" \
-    roll_out_job assistant-code "${IMAGE_ROOT}/code:${TAG}" "$CODE_SERVICE_ACCOUNT" optional || true
-fi
-if configured_module_enabled "$RELEASE_MODULES" documents; then
-  step "Rolling out document processor job" \
-    roll_out_job assistant-processor "${IMAGE_ROOT}/processor:${TAG}" "$PROCESSOR_SERVICE_ACCOUNT" optional || true
-fi
-
-step "Verifying assistant-web serves ${TAG}" verify_web_serving_release || true
 step "Verifying released templates stay database-free" verify_released_templates || true
 
 if (( FAILURE_COUNT )); then

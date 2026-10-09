@@ -61,7 +61,24 @@ describe('buildSystemPrompt forwarding rule (D3)', () => {
   });
 
   it('records the prompt version bump', () => {
-    expect(PROMPT_VERSION).toBeGreaterThanOrEqual(12);
+    expect(PROMPT_VERSION).toBeGreaterThanOrEqual(42);
+  });
+
+  it('uses the pinned task clock for relative dates across retries', () => {
+    const retryClock = new Date('2026-10-07T06:30:00.000Z');
+    const firstAttempt = buildSystemPrompt(agent, { now: retryClock });
+    const laterAttempt = buildSystemPrompt(agent, { now: retryClock });
+    expect(firstAttempt).toBe(laterAttempt);
+    expect(firstAttempt).toContain('Tuesday, October 6, 2026 at 11:30 PM');
+  });
+
+  it('separates durable reminders from deferred agent work and event completion', () => {
+    const prompt = buildSystemPrompt(agent, {});
+    expect(prompt).toMatch(
+      /ordinary reminder is created with reminder\.create.*do not add task\.schedule/i,
+    );
+    expect(prompt).toMatch(/scheduled end time is not proof of actual completion/i);
+    expect(prompt).toMatch(/ask whether a fixed time is acceptable/i);
   });
 
   it('carries a persona/voice block that bans AI filler (v13)', () => {

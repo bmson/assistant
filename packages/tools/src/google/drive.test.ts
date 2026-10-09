@@ -53,15 +53,53 @@ describe('Drive attachment tools', () => {
       'https://www.googleapis.com/drive/v3/files/doc_1234567890/export?mimeType=application%2Fpdf',
     );
     expect(writeBytes).toHaveBeenCalledWith(
-      'browser/attachments/Baldvin_r_sum_.pdf',
+      expect.stringMatching(
+        /^browser\/attachments\/[a-f0-9]{64}\/[a-f0-9]{64}\/Baldvin_r_sum_\.pdf$/,
+      ),
       Buffer.from('%PDF'),
       'application/pdf',
     );
     expect(result).toMatchObject({
-      workspacePath: 'browser/attachments/Baldvin_r_sum_.pdf',
+      workspacePath: expect.stringMatching(
+        /^browser\/attachments\/[a-f0-9]{64}\/[a-f0-9]{64}\/Baldvin_r_sum_\.pdf$/,
+      ),
       exportedAsPdf: true,
       bytes: 4,
     });
+  });
+
+  it('preserves immutable staging receipts for changed bytes, colliding names and replays', async () => {
+    let body = Buffer.from('first');
+    const stored = new Map<string, Buffer>();
+    const registry = registerDriveTools(new ToolRegistry(), {
+      client: {
+        api: vi.fn(async () => ({
+          id: 'file_1234567890',
+          name: 'same.pdf',
+          mimeType: 'application/pdf',
+        })),
+        apiBytes: vi.fn(async () => ({ body, contentType: 'application/pdf' })),
+      } as never,
+      workspace: {
+        writeBytes: async (key: string, bytes: Buffer) => {
+          stored.set(key, bytes);
+          return { bytes: bytes.length };
+        },
+      } as never,
+    });
+    const execute = () =>
+      tool(registry, 'drive.download').execute(
+        { fileId: 'file_1234567890', workspacePath: 'browser/attachments/requested.pdf' },
+        context,
+      ) as Promise<{ workspacePath: string; sha256: string }>;
+    const first = await execute();
+    body = Buffer.from('second');
+    const second = await execute();
+    expect(first.workspacePath).not.toBe(second.workspacePath);
+    expect(stored.get(first.workspacePath)?.toString()).toBe('first');
+    expect(stored.get(second.workspacePath)?.toString()).toBe('second');
+    expect(await execute()).toEqual(second);
+    expect(stored.size).toBe(2);
   });
 
   it('sanitizes generated attachment names and preserves safe extensions', () => {
@@ -140,6 +178,42 @@ describe('Drive read + ingest (Phase 24)', () => {
     await expect(
       tool(binaryRegistry, 'drive.read').execute({ fileId: 'img_1234567890' }, context),
     ).rejects.toThrow(/not readable as text/);
+  });
+
+  it('continues text exports at their exact UTF-16 boundary and reports the revision', async () => {
+    const text = `${'a'.repeat(100)}DECISIVE text tail`;
+    const registry = registerDriveTools(new ToolRegistry(), {
+      client: {
+        api: vi.fn(async () => ({
+          id: 'doc_1234567890',
+          name: 'Project brief',
+          mimeType: 'application/vnd.google-apps.document',
+          headRevisionId: 'revision-9',
+        })),
+        apiBytes: vi.fn(async () => ({ body: Buffer.from(text), contentType: 'text/plain' })),
+      } as never,
+      workspace: { writeBytes: vi.fn() } as never,
+    });
+    const first = (await tool(registry, 'drive.read').execute(
+      { fileId: 'doc_1234567890', maxChars: 100 },
+      context,
+    )) as {
+      text: string;
+      complete: boolean;
+      receipt: {
+        source: { revision: string };
+        continuation: { input: Record<string, unknown> } | null;
+      };
+    };
+    expect(first.text).toHaveLength(100);
+    expect(first.complete).toBe(false);
+    expect(first.receipt.source.revision).toBe('revision-9');
+    const second = (await tool(registry, 'drive.read').execute(
+      first.receipt.continuation?.input as never,
+      context,
+    )) as { text: string; complete: boolean };
+    expect(second.text).toBe('DECISIVE text tail');
+    expect(second.complete).toBe(true);
   });
 
   it('registers drive.ingest only when a db is provided', () => {
@@ -230,5 +304,49 @@ describe('drive.ingest → document library (integration)', () => {
     expect(doc?.trust).toBe('known');
     expect(doc?.extractor).toBe('text');
     expect(store.size).toBe(1);
+  });
+  it('exports a native spreadsheet as an immutable all-tab workbook for processing', async (test) => {
+    if (!dbUp) return test.skip();
+    const bytes = Buffer.from('workbook fixture bytes');
+    const apiBytes = vi.fn(async () => ({
+      body: bytes,
+      contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    }));
+    const writeBytes = vi.fn(async () => ({ bytes: bytes.length }));
+    const registry = registerDriveTools(new ToolRegistry(), {
+      client: {
+        api: vi.fn(async () => ({
+          id: 'xtestdrive0001',
+          name: 'XTESTDRIVE multi tab',
+          mimeType: 'application/vnd.google-apps.spreadsheet',
+        })),
+        apiBytes,
+      } as never,
+      workspace: { writeBytes } as never,
+      catalog: db,
+    });
+    const result = (await tool(registry, 'drive.ingest').execute(
+      { fileId: 'xtestdrive0001' },
+      { ...context, agentId },
+    )) as { documentId: string; stagedWorkspacePath: string };
+    expect(apiBytes).toHaveBeenCalledWith(
+      'https://www.googleapis.com/drive/v3/files/xtestdrive0001/export?mimeType=application%2Fvnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    expect(result.stagedWorkspacePath).toMatch(
+      /documents\/drive\/[a-f0-9]{64}\/[a-f0-9]{64}\/.*\.xlsx$/,
+    );
+    expect(writeBytes).toHaveBeenCalledWith(
+      result.stagedWorkspacePath,
+      bytes,
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    const [document] = await db.select().from(documents).where(eq(documents.id, result.documentId));
+    expect(document).toMatchObject({
+      source: 'drive',
+      sourceRef: 'xtestdrive0001',
+      trust: 'known',
+      extractor: 'pending_processor',
+      status: 'pending',
+    });
   });
 });

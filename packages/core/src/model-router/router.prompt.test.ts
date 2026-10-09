@@ -20,6 +20,8 @@ import { z } from 'zod';
 const stubs = vi.hoisted(() => ({
   releaseReservation: vi.fn(async () => {}),
   reserveCost: vi.fn(async () => ({ ok: true as const, reservationId: 'reservation-1' })),
+  beginCostAttempt: vi.fn(async () => true),
+  markCostAttemptUnknown: vi.fn(async () => {}),
 }));
 
 vi.mock('@openrouter/ai-sdk-provider', () => ({
@@ -30,6 +32,8 @@ vi.mock('../cost.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../cost.js')>()),
   reserveCost: stubs.reserveCost,
   releaseReservation: stubs.releaseReservation,
+  beginCostAttempt: stubs.beginCostAttempt,
+  markCostAttemptUnknown: stubs.markCostAttemptUnknown,
 }));
 
 import { ModelRouter } from './router.js';
@@ -156,7 +160,7 @@ describe('system prompt inside messages passes SDK prompt validation', () => {
   });
 });
 
-it('uses one cache breakpoint for an eight-result tool batch', async () => {
+it('withholds cache breakpoints for an eight-result tool batch without scoped cache policy', async () => {
   const model = new MockLanguageModelV3({ doGenerate: generateResult('saved') });
   const router = makeRouter(model);
   await router.step('reason', {
@@ -191,8 +195,5 @@ it('uses one cache breakpoint for an eight-result tool batch', async () => {
   if (toolMessage?.role !== 'tool') throw new Error('missing tool message');
   expect(
     toolMessage.content.filter((part) => part.providerOptions?.openrouter?.cacheControl),
-  ).toHaveLength(1);
-  expect(toolMessage.content.at(-1)?.providerOptions?.openrouter?.cacheControl).toEqual({
-    type: 'ephemeral',
-  });
+  ).toHaveLength(0);
 });

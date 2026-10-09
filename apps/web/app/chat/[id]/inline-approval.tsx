@@ -78,12 +78,12 @@ export function ApprovalRow({
 
   return (
     <div className="py-2">
-      <div className="flex items-start justify-between gap-3">
-        <p className="min-w-0 break-words text-sm font-medium [overflow-wrap:anywhere]">
+      <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
+        <p className="min-w-0 flex-[1_1_12rem] break-words text-sm font-medium [overflow-wrap:anywhere]">
           {part.summary}
         </p>
         <span
-          className="inline-flex shrink-0 items-center gap-1 rounded-full bg-sunken px-2 py-1 font-mono text-xs font-medium text-muted"
+          className="ml-auto inline-flex max-w-full min-w-0 shrink items-center gap-1 rounded-full bg-sunken px-2 py-1 font-mono text-xs font-medium text-muted whitespace-normal [overflow-wrap:anywhere]"
           title="Reference code used for this same request in chat, notifications, and activity."
         >
           Ref {part.shortCode}
@@ -92,7 +92,7 @@ export function ApprovalRow({
       </div>
       {part.details && part.details.length > 0 ? (
         <details open={detailsOpenByDefault} className="mt-2 border-y border-edge py-2.5">
-          <summary className="disclosure flex items-center gap-2 cursor-pointer font-mono text-xs font-medium tracking-[0.08em] text-muted uppercase select-none">
+          <summary className="disclosure flex items-center gap-2 cursor-pointer text-xs leading-5 font-medium text-muted select-none">
             Exact details
           </summary>
           <dl className="mt-2 flex max-h-64 flex-col gap-2 overscroll-contain overflow-y-auto">

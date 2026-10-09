@@ -10,6 +10,10 @@ export interface MemorySaveInput {
   content: string;
   contentHash: string;
   embedding: number[];
+  /** Exact immutable identity of the space that produced this vector. */
+  embeddingSpaceKey: string;
+  /** Generation observed before asynchronous embedding/source preparation. */
+  observedPrivacyGeneration?: string | null;
   category: 'knowledge' | 'experience';
   kind: 'fact' | 'preference' | 'person' | 'project' | 'episode';
   importance: number;
@@ -32,12 +36,16 @@ export interface MemorySaveResult {
   quarantined: boolean;
 }
 
+export type MemoryContentHashState = 'new' | 'duplicate' | 'tombstoned';
+
 export interface MemoryRecallInput {
   agentId: string;
   embedding: number[];
   query: string;
   limit: number;
   now?: Date;
+  /** Exact immutable identity required for any semantic comparison. */
+  embeddingSpaceKey: string;
 }
 
 export interface MemoryRecallResult {
@@ -48,6 +56,9 @@ export interface MemoryRecallResult {
 export interface MemoryToolRepository {
   readonly kind: 'memory-tool-repository';
   readonly embeddingSpace?: EmbeddingSpace;
+  observationGeneration(agentId: string): Promise<string | null>;
+  /** Read-only optimization; save remains authoritative if state changes afterward. */
+  screenContentHash(agentId: string, contentHash: string): Promise<MemoryContentHashState>;
   save(input: MemorySaveInput): Promise<MemorySaveResult>;
   recall(input: MemoryRecallInput): Promise<MemoryRecallResult>;
 }

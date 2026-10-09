@@ -2,16 +2,19 @@ import type {
   DocumentCatalogOverview,
   DocumentCatalogReadRepository,
   DocumentCatalogView,
+  DocumentChunkPage,
+  DocumentChunkPageOptions,
   DocumentChunkView,
 } from '@assistant/persistence';
-import { FieldPath } from '@google-cloud/firestore';
+import { buildDocumentChunkPage, normalizeDocumentChunkPageOptions } from '@assistant/persistence';
+import { AggregateField, FieldPath } from '@google-cloud/firestore';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
 const DOCUMENT_PAGE_SIZE = 200;
 const MAX_DOCUMENTS = 5_000;
 const DOCUMENT_LIST_LIMIT = 200;
-const MAX_DETAIL_CHUNKS = 1_000;
+const DOCUMENT_PAGE_LIMIT = 100;
 
 export type FirestoreDocumentView = DocumentCatalogView;
 export type FirestoreDocumentChunkView = DocumentChunkView;
@@ -134,12 +137,117 @@ export class FirestoreDocumentReadRepository implements DocumentCatalogReadRepos
     };
   }
 
+  /** Reads one bounded owner page without scanning the full catalog. */
+  async listPage(
+    agentId: string,
+    input: { limit: number; after?: { id: string; createdAt: Date } },
+  ) {
+    if (!agentId || agentId !== this.configuredAgentId)
+      throw new Error('Document read is outside the configured installation');
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > DOCUMENT_PAGE_LIMIT)
+      throw new Error('Document page size must be between 1 and 100');
+    if (
+      input.after &&
+      (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.after.id) ||
+        !(input.after.createdAt instanceof Date) ||
+        !Number.isFinite(input.after.createdAt.getTime()))
+    )
+      throw new Error('Invalid document continuation');
+    await assertConfiguredOwner(this.store, agentId);
+    const fence = await readPrivacyErasureFence(this.store, agentId);
+    const ownedDocuments = this.store.collection('documents').where('agentId', '==', agentId);
+    let query = ownedDocuments.orderBy('createdAt', 'desc').orderBy(FieldPath.documentId(), 'desc');
+    if (input.after) query = query.startAfter(input.after.createdAt, documentKey(input.after.id));
+    const [page, totals, ready, pending, extracting, primarySnapshot] = await Promise.all([
+      query.limit(input.limit + 1).get(),
+      ownedDocuments
+        .aggregate({ total: AggregateField.count(), chunks: AggregateField.sum('chunkCount') })
+        .get(),
+      ownedDocuments.where('status', '==', 'ready').count().get(),
+      ownedDocuments.where('status', '==', 'pending').count().get(),
+      ownedDocuments.where('status', '==', 'extracting').count().get(),
+      this.store
+        .collection('conversations')
+        .where('agentId', '==', agentId)
+        .where('isPrimary', '==', true)
+        .limit(2)
+        .get(),
+    ]);
+    if (primarySnapshot.size > 1)
+      throw new Error('Documents found multiple primary conversations for the configured agent');
+    const primaryDoc = primarySnapshot.docs[0];
+    let primaryConversationId: string | null = null;
+    if (primaryDoc) {
+      const primary = decodeRecord<{
+        id: string;
+        agentId: string;
+        channel: string;
+        isPrimary: boolean;
+      }>(primaryDoc.data());
+      if (
+        primaryDoc.id !== documentKey(primary.id) ||
+        primary.agentId !== agentId ||
+        primary.channel !== 'chat' ||
+        primary.isPrimary !== true
+      )
+        throw new Error('Documents found an invalid primary conversation for the configured agent');
+      primaryConversationId = primary.id;
+    }
+    const selected = page.docs.slice(0, input.limit).map((snapshot) => {
+      const row = owned<DocumentRow>(snapshot, agentId);
+      if (!row || !(row.createdAt instanceof Date) || !Number.isFinite(row.createdAt.getTime()))
+        throw new Error('Documents contains a row with invalid owner, identity, or date');
+      return row;
+    });
+    const fileSnapshots = selected.length
+      ? await this.store.db.getAll(...selected.map((row) => this.store.doc('files', row.fileId)))
+      : [];
+    const fileMap = new Map<string, FileRow>();
+    for (const snapshot of fileSnapshots) {
+      if (!snapshot.exists) continue;
+      const file = decodeRecord<FileRow>(snapshot.data());
+      if (file.agentId === agentId && documentKey(file.id) === snapshot.id)
+        fileMap.set(file.id, file);
+    }
+    const documents = selected.map((row) => {
+      const file = fileMap.get(row.fileId);
+      if (!file)
+        throw new Error(`Documents could not verify file ownership for document ${row.id}`);
+      const { agentId: _agentId, fileId: _fileId, ...view } = row;
+      return {
+        ...view,
+        bytes: file.bytes ?? 0,
+        error: typeof row.error === 'string' ? row.error : null,
+      };
+    });
+    await assertConfiguredOwner(this.store, agentId);
+    await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
+    const tail = selected.at(-1);
+    return {
+      documents,
+      stats: {
+        total: totals.data().total,
+        ready: ready.data().count,
+        pending: pending.data().count + extracting.data().count,
+        chunks: totals.data().chunks,
+      },
+      primaryConversationId,
+      hasMore: page.size > input.limit,
+      nextCursor:
+        page.size > input.limit && tail ? { id: tail.id, createdAt: tail.createdAt } : null,
+    };
+  }
+
   async get(
     agentId: string,
     id: string,
-  ): Promise<{ document: FirestoreDocumentView; chunks: FirestoreDocumentChunkView[] } | null> {
+    options: DocumentChunkPageOptions = {},
+  ): Promise<DocumentChunkPage | null> {
     if (!agentId || agentId !== this.configuredAgentId)
       throw new Error('Document read is outside the configured installation');
+    const pageOptions = normalizeDocumentChunkPageOptions(options);
+    const startIndex =
+      typeof pageOptions.cursor === 'number' ? pageOptions.cursor : pageOptions.cursor.chunkIndex;
     await assertConfiguredOwner(this.store, agentId);
     const fence = await readPrivacyErasureFence(this.store, agentId);
     const snapshot = await this.store.doc('documents', id).get();
@@ -157,28 +265,26 @@ export class FirestoreDocumentReadRepository implements DocumentCatalogReadRepos
         .collection('documentChunks')
         .where('agentId', '==', agentId)
         .where('documentId', '==', id)
-        .limit(MAX_DETAIL_CHUNKS + 1)
+        .where('chunkIndex', '>=', startIndex)
+        .orderBy('chunkIndex')
+        .limit(pageOptions.limit + 1)
         .get(),
     ]);
-    if (chunkSnapshot.size > MAX_DETAIL_CHUNKS)
-      throw new Error('Document detail exceeds the bounded chunk limit');
     const file = fileSnapshot.exists ? decodeRecord<FileRow>(fileSnapshot.data()) : null;
     if (!file || file.agentId !== agentId || file.id !== row.fileId)
       throw new Error(`Documents could not verify file ownership for document ${row.id}`);
-    const chunks = chunkSnapshot.docs
-      .flatMap((doc) => {
-        const chunk = owned<ChunkRow>(doc, agentId);
-        if (!chunk || chunk.documentId !== id)
-          throw new Error('Document detail contains a chunk with invalid owner or identity');
-        return [
-          {
-            chunkIndex: chunk.chunkIndex,
-            text: chunk.text,
-            charCount: chunk.charCount,
-          },
-        ];
-      })
-      .sort((a, b) => a.chunkIndex - b.chunkIndex);
+    const chunks = chunkSnapshot.docs.flatMap((doc) => {
+      const chunk = owned<ChunkRow>(doc, agentId);
+      if (!chunk || chunk.documentId !== id)
+        throw new Error('Document detail contains a chunk with invalid owner or identity');
+      return [
+        {
+          chunkIndex: chunk.chunkIndex,
+          text: chunk.text,
+          charCount: chunk.charCount,
+        },
+      ];
+    });
     await assertConfiguredOwner(this.store, agentId);
     await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
     const {
@@ -190,7 +296,7 @@ export class FirestoreDocumentReadRepository implements DocumentCatalogReadRepos
       bytes: file.bytes ?? 0,
       error: typeof row.error === 'string' ? row.error : null,
     };
-    return { document, chunks };
+    return buildDocumentChunkPage(document, chunks, pageOptions);
   }
 
   private async readOwnerDocuments(agentId: string): Promise<DocumentRow[]> {

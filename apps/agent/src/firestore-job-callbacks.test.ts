@@ -11,6 +11,7 @@ import {
 import type { Db } from '@assistant/db';
 import { createFirestoreExecutionPersistence } from '@assistant/firestore';
 import { browserModule, codeModule, installModules, type ModuleServices } from '@assistant/modules';
+import { finalChannelDelivery } from '@assistant/persistence';
 import {
   type CodeJobLaunchInput,
   registerCodeTools,
@@ -123,8 +124,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           persistence.approvals,
           persistence.approvalPolicies,
         ),
-        deliverFinal: async (_task, text) => {
+        deliverFinal: async (_task, text, attemptId) => {
           delivered.push(text);
+          return finalChannelDelivery('dashboard', 'accepted', attemptId);
         },
       };
     }
@@ -179,6 +181,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         workspace: unavailable('workspace') as never,
         ownerNotifier: unavailable('notifier') as never,
         emailObservers: [],
+        durableEmailObservers: [],
         persistence,
       };
       callback = async (path, body) => {
@@ -269,20 +272,53 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
 
       const outputPath = `code/${taskId}/answer.txt`;
       const result = { ok: true, exitCode: 0, stdout: '4\n', stderr: '', outputs: [outputPath] };
-      expect(await callback('/code/callback', { taskId, token, result })).toEqual({
+      const beforeCallback = await store.collection('outbox').where('taskId', '==', taskId).get();
+      const concurrentCallbacks = await Promise.all([
+        callback('/code/callback', { taskId, token, result }),
+        callback('/code/callback', { taskId, token, result }),
+      ]);
+      expect(concurrentCallbacks).toEqual([
+        { status: 200, json: { ok: true } },
+        { status: 200, json: { ok: true } },
+      ]);
+      expect(concurrentCallbacks[0]).toEqual({
         status: 200,
         json: { ok: true },
       });
       const woken = await readDoc('tasks', taskId);
       expect(woken).toMatchObject({ status: 'pending', leaseToken: null });
       const outbox = await store.collection('outbox').where('taskId', '==', taskId).get();
-      expect(outbox.docs.map((doc) => doc.get('generation'))).toContain(woken.queueGeneration);
+      expect(outbox.size).toBe(beforeCallback.size + 1);
+      expect(
+        outbox.docs.filter((doc) => doc.get('generation') === woken.queueGeneration),
+      ).toHaveLength(1);
+      const receipts = await store
+        .collection('executionJobCallbackReceipts')
+        .where('taskId', '==', taskId)
+        .get();
+      expect(receipts.size).toBe(1);
+      expect(receipts.docs[0]?.get('tokenHash')).toBe(hashCallbackToken(token));
+      expect(receipts.docs[0]?.id).not.toContain(token);
       const files = await store.collection('files').where('taskId', '==', taskId).get();
       expect(files.docs.map((doc) => [doc.get('workspacePath'), doc.get('mime')])).toEqual([
         [outputPath, 'text/plain'],
       ]);
 
-      // A duplicate delivery of the same callback is refused and changes nothing.
+      // A lost HTTP response may be retried byte-for-byte; it returns the
+      // original accepted outcome without another artifact, receipt, or wake.
+      expect(await callback('/code/callback', { taskId, token, result })).toEqual({
+        status: 200,
+        json: { ok: true },
+      });
+      expect((await readDoc('tasks', taskId)).queueGeneration).toBe(woken.queueGeneration);
+      expect((await store.collection('outbox').where('taskId', '==', taskId).get()).size).toBe(
+        outbox.size,
+      );
+      expect((await store.collection('files').where('taskId', '==', taskId).get()).size).toBe(1);
+      expect(
+        (await store.collection('executionJobCallbackReceipts').where('taskId', '==', taskId).get())
+          .size,
+      ).toBe(1);
       expect(
         await callback('/code/callback', { taskId, token, result: { ok: false, error: 'replay' } }),
       ).toMatchObject({ status: 409 });
@@ -299,12 +335,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         .get();
       expect(events.docs.map((doc) => doc.get('toolCallId'))).toEqual([staged?.id]);
       expect((await persistence.costs.totals()).heldUsd).toBe(0);
-      // Once settled, a late callback is rejected.
+      // The accepted receipt remains replayable even after task completion.
       expect(await callback('/code/callback', { taskId, token, result })).toMatchObject({
-        status: 409,
+        status: 200,
+        json: { ok: true },
       });
       expect(sqlAccesses).toEqual([]);
-    });
+    }, 30_000);
 
     it('refuses a wrong sentinel token without touching the task', async () => {
       const executor = deps(computeSpec);
@@ -427,19 +464,42 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect(
         await callback('/browser/callback', { taskId, token: 'forged', result }),
       ).toMatchObject({ status: 403 });
+      const beforeCallback = await store.collection('outbox').where('taskId', '==', taskId).get();
       expect(await callback('/browser/callback', { taskId, token, result })).toEqual({
         status: 200,
         json: { ok: true },
       });
       expect((await readDoc('toolCalls', toolCallId)).result).toEqual(result);
+      const acceptedTask = await readDoc('tasks', taskId);
+      const outbox = await store.collection('outbox').where('taskId', '==', taskId).get();
+      expect(outbox.size).toBe(beforeCallback.size + 1);
+      expect(
+        outbox.docs.filter((doc) => doc.get('generation') === acceptedTask.queueGeneration),
+      ).toHaveLength(1);
       const files = await store.collection('files').where('taskId', '==', taskId).get();
       expect(files.docs.map((doc) => [doc.get('workspacePath'), doc.get('mime')]).sort()).toEqual([
         ['shots/1.png', 'image/png'],
         ['traces/run.zip', 'application/zip'],
       ]);
-      expect(await callback('/browser/callback', { taskId, token, result })).toMatchObject({
-        status: 409,
+      expect(await callback('/browser/callback', { taskId, token, result })).toEqual({
+        status: 200,
+        json: { ok: true },
       });
+      expect(
+        await callback('/browser/callback', {
+          taskId,
+          token,
+          result: { ok: true, screenshots: ['shots/different.png'] },
+        }),
+      ).toMatchObject({ status: 409 });
+      expect((await store.collection('files').where('taskId', '==', taskId).get()).size).toBe(2);
+      expect((await store.collection('outbox').where('taskId', '==', taskId).get()).size).toBe(
+        outbox.size,
+      );
+      expect(
+        (await store.collection('executionJobCallbackReceipts').where('taskId', '==', taskId).get())
+          .size,
+      ).toBe(1);
       expect(sqlAccesses).toEqual([]);
     });
   },

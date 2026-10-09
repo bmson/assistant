@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   decodeXmlEntities,
   extractTagContents,
+  normalize,
   parserFor,
   stripRtf,
   xmlText,
@@ -57,5 +58,8 @@ describe('document-processor text helpers', () => {
     expect(parserFor('application/octet-stream', 'doc.pdf')).toBe('pdf');
     // Audio/video remain out of scope.
     expect(parserFor('audio/mpeg', 'voice.mp3')).toBe('unsupported');
+  });
+  it('rejects oversized extracted text instead of returning a silent prefix', () => {
+    expect(() => normalize('x'.repeat(8 * 1024 * 1024 + 1))).toThrow('no truncated text');
   });
 });

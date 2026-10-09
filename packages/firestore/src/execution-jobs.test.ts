@@ -25,6 +25,24 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore execution job r
 
   afterEach(async () => disposeStore(store));
 
+  function callbackInput(taskId: string, payloadDigest = 'c'.repeat(64)) {
+    return {
+      taskId,
+      result: { ok: true, output: 'callback result' },
+      files: [{ workspacePath: 'callback.txt', mime: 'text/plain' }],
+      idempotencyKey: `job-callback:${taskId}`,
+      tokenHash: 'a'.repeat(64),
+      payloadDigest,
+    };
+  }
+
+  function acceptToolCall(toolCallId: string) {
+    return (task: Record<string, unknown> | null) =>
+      task
+        ? { accept: true as const, toolCallId }
+        : { accept: false as const, status: 404 as const, error: 'missing task' };
+  }
+
   async function seed(
     input: { taskId?: string; toolId?: string; token?: string; result?: unknown } = {},
   ) {
@@ -259,6 +277,77 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore execution job r
       (await store.doc('tasks', seeded.taskId).get()).data(),
     );
     expect(task.state).toEqual({ before: true });
+  });
+
+  it('records one callback receipt and rejects conflicting replay content', async () => {
+    const seeded = await seed({ result: SENTINEL });
+    await store.doc('tasks', seeded.taskId).update({ queueGeneration: 0 });
+    const input = callbackInput(seeded.taskId);
+    const first = await repository.recordCallback(input, acceptToolCall(seeded.toolId));
+    expect(first).toMatchObject({ ok: true, taskId: seeded.taskId, queueGeneration: 1 });
+
+    const replay = await repository.recordCallback(input, () => {
+      throw new Error('a callback receipt must replay before consumed-state validation');
+    });
+    expect(replay).toMatchObject({ ok: true, replayed: true, queueGeneration: 1 });
+    const conflict = await repository.recordCallback(
+      callbackInput(seeded.taskId, 'd'.repeat(64)),
+      acceptToolCall(seeded.toolId),
+    );
+    expect(conflict).toMatchObject({ ok: false, status: 409 });
+
+    const tool = decodeRecord<Record<string, unknown>>(
+      (await store.doc('toolCalls', seeded.toolId).get()).data(),
+    );
+    expect(tool.result).toEqual(input.result);
+    expect((await store.collection('files').where('taskId', '==', seeded.taskId).get()).size).toBe(
+      1,
+    );
+    expect(
+      (
+        await store
+          .collection('executionJobCallbackReceipts')
+          .where('taskId', '==', seeded.taskId)
+          .get()
+      ).size,
+    ).toBe(1);
+  });
+
+  it('rejects a late callback for a terminal task without changing its result or files', async () => {
+    const seeded = await seed({ result: SENTINEL });
+    await store.doc('tasks', seeded.taskId).update({ queueGeneration: 0 });
+    const timeoutResult = { ok: false, error: 'timed out' };
+    await store.doc('tasks', seeded.taskId).update({ status: 'needs_attention' });
+    await store.doc('toolCalls', seeded.toolId).update({
+      status: 'failed',
+      result: timeoutResult,
+    });
+
+    const outcome = await repository.recordCallback(
+      callbackInput(seeded.taskId),
+      acceptToolCall(seeded.toolId),
+    );
+
+    expect(outcome).toMatchObject({ ok: false, status: 409 });
+    const task = decodeRecord<Record<string, unknown>>(
+      (await store.doc('tasks', seeded.taskId).get()).data(),
+    );
+    const tool = decodeRecord<Record<string, unknown>>(
+      (await store.doc('toolCalls', seeded.toolId).get()).data(),
+    );
+    expect(task.status).toBe('needs_attention');
+    expect(tool).toMatchObject({ status: 'failed', result: timeoutResult });
+    expect((await store.collection('files').where('taskId', '==', seeded.taskId).get()).size).toBe(
+      0,
+    );
+    expect(
+      (
+        await store
+          .collection('executionJobCallbackReceipts')
+          .where('taskId', '==', seeded.taskId)
+          .get()
+      ).size,
+    ).toBe(0);
   });
 
   it('uses the store clock to distinguish pending from timed out and returns reservation metadata', async () => {

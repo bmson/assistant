@@ -24,6 +24,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore approval polici
     options: { id?: string; toolName?: string; enabled?: boolean } = {},
   ) {
     const id = options.id ?? randomUUID();
+    await store.doc('agents', agentId).set({ id: agentId });
     await store.doc('approvalPolicies', id).set({
       id,
       agentId,
@@ -44,6 +45,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore approval polici
     const taskId = randomUUID();
     const toolCallId = randomUUID();
     const approvalId = randomUUID();
+    await store.doc('agents', agentId).set({ id: agentId });
     await store.doc('tasks', taskId).set({
       id: taskId,
       agentId,

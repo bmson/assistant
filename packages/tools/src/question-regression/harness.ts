@@ -505,14 +505,33 @@ function replayRegistry(
       () => {
         if (fixture.mailbox !== 'hotel')
           throw new Error('No captured thread exists for this mailbox snapshot');
+        const threadId = 'hotel-1';
+        const text =
+          'Harbor Hotel, Sunnyvale. Check-in September 5, 2026 at 4:00 PM. Check-out September 6 at 11:00 AM. Total $105.85.';
+        const messages = [
+          {
+            subject: 'Harbor Hotel booking QA-BOOKING-123',
+            from: 'hotel@example.org',
+            text,
+            sourceLength: text.length,
+            truncated: false,
+          },
+        ];
         return {
-          messages: [
-            {
-              subject: 'Harbor Hotel booking QA-BOOKING-123',
-              from: 'hotel@example.org',
-              text: 'Harbor Hotel, Sunnyvale. Check-in September 5, 2026 at 4:00 PM. Check-out September 6 at 11:00 AM. Total $105.85.',
-            },
-          ],
+          threadId,
+          messages,
+          coverage: { requested: 20, discovered: 1, returned: 1, unavailable: 0, complete: true },
+          complete: true,
+          hasMore: false,
+          receipt: {
+            version: 1,
+            source: { kind: 'gmail-thread', id: threadId },
+            requested: { start: 0, offset: 0, limit: 20, scope: 'thread-messages' },
+            covered: { start: 0, offset: 0, end: 1, count: 1, total: 1, unavailable: 0 },
+            complete: true,
+            losses: [],
+            continuation: null,
+          },
         };
       },
       { confidentialRead: true, returnsUntrustedContent: true },

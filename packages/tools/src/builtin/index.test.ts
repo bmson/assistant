@@ -1,5 +1,9 @@
 import { agents, createDb, type Db, goals } from '@assistant/db';
-import type { MemoryToolRepository } from '@assistant/persistence';
+import {
+  type EmbeddingSpace,
+  embeddingSpaceIdentityKey,
+  type MemoryToolRepository,
+} from '@assistant/persistence';
 import { inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ToolRegistry } from '../registry.js';
@@ -31,6 +35,9 @@ describe('builtin trust capabilities', () => {
     const supersede = vi.fn(async () => ({ superseded: ['old-fact'] }));
     const memory: MemoryToolRepository = {
       kind: 'memory-tool-repository',
+      embeddingSpace: { provider: 'test', model: 'memory', dimensions: 3, revision: '1' },
+      observationGeneration: async () => null,
+      screenContentHash: async () => 'new',
       save: async () => ({
         id: 'new-fact',
         saved: scenario.saved,
@@ -84,6 +91,45 @@ describe('builtin trust capabilities', () => {
     }
   });
 
+  it('keeps the authoritative save result when a tombstone appears after preflight', async () => {
+    const embed = vi.fn(async () => [[1, 0, 0]]);
+    const save = vi.fn(async (input: { quarantined: boolean }) => ({
+      saved: false,
+      duplicate: false,
+      tombstoned: true,
+      quarantined: input.quarantined,
+    }));
+    const memory: MemoryToolRepository = {
+      kind: 'memory-tool-repository',
+      embeddingSpace: { provider: 'test', model: 'memory', dimensions: 3, revision: '1' },
+      observationGeneration: async () => null,
+      screenContentHash: async () => 'new',
+      save,
+      recall: async () => ({ memories: [], candidateLimitReached: false }),
+    };
+    const registry = registerPortableMemoryTools(new ToolRegistry(), { embed, memory });
+    const tool = registry.get('memory.save')?.tool;
+    if (!tool) throw new Error('Missing memory.save');
+    const result = await tool.execute(
+      {
+        content: 'A fact forgotten after preflight',
+        category: 'knowledge',
+        kind: 'fact',
+        subject: '',
+        importance: 3,
+        confidence: 0.9,
+      },
+      {
+        agentId: 'agent',
+        trust: 'owner',
+        now: () => new Date('2026-10-07T12:00:00Z'),
+      } as ToolContext,
+    );
+    expect(embed).toHaveBeenCalledTimes(1);
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ saved: false, tombstoned: true });
+  });
+
   it('does not expose owner-private reads or workspace writes to unknown tasks', () => {
     const registry = registerBuiltinTools(new ToolRegistry(), {
       embed: async () => [],
@@ -126,8 +172,17 @@ describe('builtin trust capabilities', () => {
 
   it('routes memory save and recall through the injected portable repository', async () => {
     const calls: { save?: Record<string, unknown>; recall?: Record<string, unknown> } = {};
+    const embeddingSpace: EmbeddingSpace = {
+      provider: 'test',
+      model: 'memory',
+      dimensions: 3,
+      revision: '1',
+    };
     const memory: MemoryToolRepository = {
       kind: 'memory-tool-repository',
+      embeddingSpace,
+      observationGeneration: async () => null,
+      screenContentHash: async () => 'new',
       save: async (input) => {
         calls.save = input as unknown as Record<string, unknown>;
         return { saved: true, duplicate: false, tombstoned: false, quarantined: input.quarantined };
@@ -161,6 +216,7 @@ describe('builtin trust capabilities', () => {
               ownerConfirmed: false,
               pinned: false,
               source: null,
+              embeddingSpaceKey: null,
               lastAccessedAt: input.now ?? null,
               lastConsolidatedAt: null,
               similarity: 0.9,
@@ -169,8 +225,9 @@ describe('builtin trust capabilities', () => {
         };
       },
     };
+    const embed = vi.fn(async () => [[1, 2, 3]]);
     const registry = registerBuiltinTools(new ToolRegistry(), {
-      embed: async () => [[1, 2, 3]],
+      embed,
       memory,
       workspace: {} as Parameters<typeof registerBuiltinTools>[1]['workspace'],
     });
@@ -199,20 +256,70 @@ describe('builtin trust capabilities', () => {
       },
       ctx,
     );
+    expect(embed).toHaveBeenCalledTimes(1);
     expect(calls.save).toMatchObject({
       agentId: 'agent-1',
       sourceTaskId: 'task-1',
       originTrust: 'known',
       quarantined: true,
+      embeddingSpaceKey: embeddingSpaceIdentityKey(embeddingSpace),
     });
     const expiresAt = calls.save?.expiresAt;
     if (!(expiresAt instanceof Date)) throw new Error('Missing memory expiry');
     expect(expiresAt.getTime()).toBe(now.getTime() + 90 * 24 * 3600 * 1000);
     const recalled = await recallTool.execute({ query: 'fact', limit: 1 }, ctx);
-    expect(calls.recall).toMatchObject({ agentId: 'agent-1', query: 'fact', limit: 1, now });
+    expect(embed).toHaveBeenCalledTimes(2);
+    expect(calls.recall).toMatchObject({
+      agentId: 'agent-1',
+      query: 'fact',
+      limit: 1,
+      now,
+      embeddingSpaceKey: embeddingSpaceIdentityKey(embeddingSpace),
+    });
     expect(recalled).toMatchObject({
       memories: [{ content: 'A recalled fact', unconfirmed: true }],
     });
+  });
+
+  it.each([
+    { state: 'duplicate' as const, result: { duplicate: true } },
+    { state: 'tombstoned' as const, result: { duplicate: false, tombstoned: true } },
+  ])('skips embedding for a preflight $state content hash', async ({ state, result }) => {
+    const embed = vi.fn(async () => [[1, 0, 0]]);
+    const save = vi.fn(async () => ({
+      saved: true,
+      duplicate: false,
+      tombstoned: false,
+      quarantined: false,
+    }));
+    const memory: MemoryToolRepository = {
+      kind: 'memory-tool-repository',
+      observationGeneration: async () => null,
+      screenContentHash: async () => state,
+      save,
+      recall: async () => ({ memories: [], candidateLimitReached: false }),
+    };
+    const registry = registerPortableMemoryTools(new ToolRegistry(), { embed, memory });
+    const tool = registry.get('memory.save')?.tool;
+    if (!tool) throw new Error('Missing memory.save');
+    const output = await tool.execute(
+      {
+        content: `Known ${state} fact`,
+        category: 'knowledge',
+        kind: 'fact',
+        subject: '',
+        importance: 3,
+        confidence: 0.9,
+      },
+      {
+        agentId: 'agent',
+        trust: 'owner',
+        now: () => new Date('2026-10-07T12:00:00Z'),
+      } as ToolContext,
+    );
+    expect(embed).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+    expect(output).toMatchObject({ saved: false, ...result, quarantined: false });
   });
 });
 

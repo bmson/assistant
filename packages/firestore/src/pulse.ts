@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
+  commitmentDueMomentKey,
+  commitmentIsActive,
   type PulseCalendarSnapshot,
   type PulseCommitment,
   type PulseMail,
@@ -9,6 +11,7 @@ import {
   pulseDailyCap,
   type Records,
   type SuggestionRecord,
+  securityIncidentId,
   validatePulseNotice,
 } from '@assistant/persistence';
 import type { SituationPackView } from '@assistant/persistence/situations';
@@ -28,9 +31,9 @@ const SNAPSHOT_LIMIT = 2_000;
 /** Moments of one kind the pulse has ever said; one per change, far below this. */
 const MOMENT_KEY_LIMIT = 5_000;
 /** Recent actionable mail read before the finished-task check. */
-const MAIL_SCAN = 100;
+const CANDIDATE_PAGE = 100;
+const CANDIDATE_SCAN_BOUND = 10_000;
 /** Soon-due open loops read before snoozes are dropped. */
-const COMMITMENT_SCAN = 100;
 
 function snapshotKey(calendarId: string, eventId: string): string {
   return JSON.stringify([calendarId, eventId]);
@@ -215,80 +218,179 @@ export class FirestorePulseRepository implements PulseRepository {
     await writer.close();
   }
 
+  private async momentAlreadyAdmitted(agentId: string, key: string): Promise<boolean> {
+    // Query also finds imported ledger rows with their original random identity.
+    const prior = await this.store
+      .collection('proactiveMoments')
+      .where('agentId', '==', agentId)
+      .where('momentKey', '==', key)
+      .limit(1)
+      .get();
+    return !prior.empty;
+  }
+
   async actionableMail(
     agentId: string,
-    input: { since: Date; until: Date; minImportance: number; limit: number },
+    input: { since: Date; until: Date; now: Date; minImportance: number; limit: number },
   ): Promise<PulseMail[]> {
-    const snapshot = await this.store
+    const base = this.store
       .collection('emailIngest')
       .where('agentId', '==', agentId)
       .where('actionable', '==', true)
       .where('createdAt', '>=', input.since)
-      .orderBy('createdAt', 'desc')
-      .limit(MAIL_SCAN)
-      .get();
-    const candidates = snapshot.docs
-      .flatMap((doc) => {
-        const row = decodeRecord<Records['emailIngest']>(doc.data());
-        return typeof row.id === 'string' &&
-          documentKey(row.id) === doc.id &&
-          row.agentId === agentId &&
-          Number(row.importance) >= input.minImportance &&
-          row.createdAt <= input.until
-          ? [row]
-          : [];
-      })
-      .sort((a, b) => b.importance - a.importance);
+      .where('createdAt', '<=', input.until)
+      .where('importance', '>=', input.minImportance)
+      .orderBy('importance', 'desc')
+      .orderBy('createdAt', 'asc')
+      .orderBy('id', 'asc');
     const rows: PulseMail[] = [];
-    for (const row of candidates) {
-      if (rows.length >= input.limit) break;
-      // Nothing has picked it up: no triage task ran to completion on it.
-      const handled = await this.store
-        .collection('tasks')
-        .where('externalEventId', '==', row.channelMessageId)
-        .where('status', '==', 'done')
-        .limit(1)
-        .get();
-      if (!handled.empty) continue;
-      rows.push({
-        channelMessageId: row.channelMessageId,
-        fromEmail: row.fromEmail,
-        fromName: row.fromName ?? null,
-        subject: row.subject,
-        category: row.category,
-        importance: row.importance,
-      });
+    const latestByThread = new Map<string, Records['emailIngest'] | null>();
+    const seenIncidents = new Set<string>();
+    let cursor: QueryDocumentSnapshot | undefined;
+    let scanned = 0;
+    for (;;) {
+      let query = base.limit(CANDIDATE_PAGE);
+      if (cursor) query = query.startAfter(cursor);
+      const page = await query.get();
+      for (const doc of page.docs) {
+        const row = decodeRecord<Records['emailIngest']>(doc.data());
+        if (typeof row.id !== 'string' || documentKey(row.id) !== doc.id || row.agentId !== agentId)
+          continue;
+        if (row.pipelineStage != null && row.pipelineStage !== 'complete') continue;
+        if (!row.providerThreadId) continue;
+        if (row.obligationStatus === 'resolved' || row.obligationStatus === 'superseded') continue;
+        if (
+          row.obligationStatus === 'snoozed' &&
+          row.obligationSnoozedUntil &&
+          row.obligationSnoozedUntil > input.now
+        )
+          continue;
+        let latest = latestByThread.get(row.providerThreadId);
+        if (latest === undefined) {
+          const thread = await this.store
+            .collection('emailIngest')
+            .where('agentId', '==', agentId)
+            .where('providerThreadId', '==', row.providerThreadId)
+            .limit(10_001)
+            .get();
+          if (thread.size > 10_000) throw new Error('Pulse email thread scan exceeded bound');
+          latest =
+            thread.docs
+              .map((candidate) => decodeRecord<Records['emailIngest']>(candidate.data()))
+              .filter((candidate) => candidate.agentId === agentId)
+              .sort((a, b) => {
+                const at = a.providerReceivedAt?.getTime() ?? a.createdAt.getTime();
+                const bt = b.providerReceivedAt?.getTime() ?? b.createdAt.getTime();
+                return at === bt
+                  ? String(a.providerMessageId ?? a.channelMessageId).localeCompare(
+                      String(b.providerMessageId ?? b.channelMessageId),
+                    )
+                  : at - bt;
+              })
+              .at(-1) ?? null;
+          latestByThread.set(row.providerThreadId, latest);
+        }
+        if (!latest || latest.channelMessageId !== row.channelMessageId) continue;
+        let security: Pick<
+          PulseMail,
+          | 'securityIncidentId'
+          | 'securityRevision'
+          | 'securityDisposition'
+          | 'securityDecisionRevision'
+        > = {};
+        let momentKey = `mail-action:${row.channelMessageId}`;
+        if (row.securityIncidentId) {
+          const incidentSnapshot = await this.store
+            .doc('securityIncidents', row.securityIncidentId)
+            .get();
+          if (!incidentSnapshot.exists) continue;
+          const incident = decodeRecord<Records['securityIncidents']>(incidentSnapshot.data());
+          if (incident.id !== row.securityIncidentId || incident.agentId !== agentId) continue;
+          if (
+            incident.decisionRevision === incident.revision &&
+            (incident.disposition === 'expected' || incident.disposition === 'dismissed')
+          )
+            continue;
+          if (seenIncidents.has(incident.id)) continue;
+          const attentionId = securityIncidentId(
+            agentId,
+            `attention:${incident.id}:${incident.revision}`,
+          );
+          if ((await this.store.doc('securityIncidentAttention', attentionId).get()).exists)
+            continue;
+          security = {
+            securityIncidentId: incident.id,
+            securityRevision: incident.revision,
+            securityDisposition: incident.disposition,
+            securityDecisionRevision: incident.decisionRevision,
+          };
+          momentKey = `security-incident:${incident.id}:r${incident.revision}`;
+        }
+        if (await this.momentAlreadyAdmitted(agentId, momentKey)) continue;
+        if (row.securityIncidentId) seenIncidents.add(row.securityIncidentId);
+        rows.push({
+          channelMessageId: row.channelMessageId,
+          providerThreadId: row.providerThreadId,
+          providerMessageId: row.providerMessageId ?? null,
+          obligationVersion: row.obligationVersion ?? 0,
+          fromEmail: row.fromEmail,
+          fromName: row.fromName ?? null,
+          subject: row.subject,
+          category: row.category,
+          importance: row.importance,
+          obligationStatus: row.obligationStatus ?? 'unknown',
+          ...security,
+        });
+        if (rows.length >= input.limit) return rows;
+      }
+      scanned += page.size;
+      if (page.size < CANDIDATE_PAGE) return rows;
+      if (scanned >= CANDIDATE_SCAN_BOUND)
+        throw new Error('Pulse mail candidate scan exceeded its bound');
+      cursor = page.docs.at(-1);
     }
-    return rows;
   }
 
   async dueCommitments(
     agentId: string,
     input: { now: Date; until: Date; limit: number },
   ): Promise<PulseCommitment[]> {
-    const snapshot = await this.store
+    const base = this.store
       .collection('commitments')
       .where('agentId', '==', agentId)
-      .where('status', '==', 'open')
+      .where('status', 'in', ['open', 'stale', 'snoozed'])
       .where('dueAt', '>=', input.now)
       .where('dueAt', '<=', input.until)
       .orderBy('dueAt', 'asc')
-      .limit(COMMITMENT_SCAN)
-      .get();
-    return snapshot.docs
-      .flatMap((doc) => {
+      .orderBy('id', 'asc');
+    const rows: PulseCommitment[] = [];
+    let cursor: QueryDocumentSnapshot | undefined;
+    let scanned = 0;
+    for (;;) {
+      let query = base.limit(CANDIDATE_PAGE);
+      if (cursor) query = query.startAfter(cursor);
+      const page = await query.get();
+      for (const doc of page.docs) {
         const row = decodeRecord<Records['commitments']>(doc.data());
         if (
           typeof row.id !== 'string' ||
           documentKey(row.id) !== doc.id ||
           row.agentId !== agentId ||
           !(row.dueAt instanceof Date) ||
-          (row.snoozedUntil instanceof Date && row.snoozedUntil > input.now)
+          !commitmentIsActive(row, input.now)
         )
-          return [];
-        return [{ id: row.id, title: row.title, nextAction: row.nextAction, dueAt: row.dueAt }];
-      })
-      .slice(0, input.limit);
+          continue;
+        if (await this.momentAlreadyAdmitted(agentId, commitmentDueMomentKey(row.id, row.dueAt)))
+          continue;
+        rows.push({ id: row.id, title: row.title, nextAction: row.nextAction, dueAt: row.dueAt });
+        if (rows.length >= input.limit) return rows;
+      }
+      scanned += page.size;
+      if (page.size < CANDIDATE_PAGE) return rows;
+      if (scanned >= CANDIDATE_SCAN_BOUND)
+        throw new Error('Pulse commitment candidate scan exceeded its bound');
+      cursor = page.docs.at(-1);
+    }
   }
 
   async observationFence(agentId: string): Promise<string | null> {
@@ -329,6 +431,51 @@ export class FirestorePulseRepository implements PulseRepository {
       }
       // Imported ledger-only claims are inert: their notice history is unknown.
       if (byId.exists || !byKey.empty) return { status: 'already-said' };
+      if (input.emailSource) {
+        const source = input.emailSource;
+        const thread = await tx.get(
+          this.store
+            .collection('emailIngest')
+            .where('agentId', '==', input.agentId)
+            .where('providerThreadId', '==', source.threadId)
+            .limit(10_001),
+        );
+        if (thread.size > 10_000) return { status: 'stale-source' };
+        const rows = thread.docs
+          .map((doc) => {
+            const row = decodeRecord<Records['emailIngest']>(doc.data());
+            if (
+              row.agentId !== input.agentId ||
+              row.providerThreadId !== source.threadId ||
+              typeof row.id !== 'string' ||
+              documentKey(row.id) !== doc.id
+            )
+              throw new Error('Pulse email source identity mismatch');
+            return row;
+          })
+          .sort(
+            (a, b) =>
+              (b.providerReceivedAt?.getTime() ?? b.createdAt.getTime()) -
+                (a.providerReceivedAt?.getTime() ?? a.createdAt.getTime()) ||
+              (b.providerMessageId ?? b.channelMessageId).localeCompare(
+                a.providerMessageId ?? a.channelMessageId,
+              ),
+          );
+        const current = rows[0];
+        if (
+          !current ||
+          current.channelMessageId !== source.channelMessageId ||
+          current.providerMessageId !== source.providerMessageId ||
+          (current.obligationVersion ?? 0) !== source.obligationVersion ||
+          !current.actionable ||
+          (current.pipelineStage != null && current.pipelineStage !== 'complete') ||
+          !['unknown', 'open', 'snoozed'].includes(current.obligationStatus ?? 'unknown') ||
+          (current.obligationStatus === 'snoozed' &&
+            current.obligationSnoozedUntil &&
+            current.obligationSnoozedUntil > input.now)
+        )
+          return { status: 'stale-source' };
+      }
       const prefs = await tx.get(this.store.doc('notificationPrefs', input.agentId));
       if (prefs.exists && prefs.get('agentId') !== input.agentId)
         throw new Error('Notification preferences belong to another owner');
@@ -358,6 +505,30 @@ export class FirestorePulseRepository implements PulseRepository {
       const existingMessage = await tx.get(messageRef);
       if (existingMessage.exists)
         throw new Error('Pulse notice exists without its admission ledger');
+      let securityAttentionRef: ReturnType<InstallationStore['doc']> | null = null;
+      if (input.securityIncident) {
+        const incidentRef = this.store.doc('securityIncidents', input.securityIncident.id);
+        const attentionId = securityIncidentId(
+          input.agentId,
+          `attention:${input.securityIncident.id}:${input.securityIncident.revision}`,
+        );
+        securityAttentionRef = this.store.doc('securityIncidentAttention', attentionId);
+        const [incidentSnapshot, attentionSnapshot] = await Promise.all([
+          tx.get(incidentRef),
+          tx.get(securityAttentionRef),
+        ]);
+        if (attentionSnapshot.exists) return { status: 'already-said' };
+        if (!incidentSnapshot.exists) return { status: 'already-said' };
+        const incident = decodeRecord<Records['securityIncidents']>(incidentSnapshot.data());
+        if (
+          incident.id !== input.securityIncident.id ||
+          incident.agentId !== input.agentId ||
+          incident.revision !== input.securityIncident.revision ||
+          (incident.decisionRevision === incident.revision &&
+            (incident.disposition === 'expected' || incident.disposition === 'dismissed'))
+        )
+          return { status: 'already-said' };
+      }
       let suggestion: SuggestionRecord | null = null;
       if (input.suggestion) {
         const proposal = input.suggestion;
@@ -387,6 +558,9 @@ export class FirestorePulseRepository implements PulseRepository {
             proposedAction: proposal.proposedAction,
             sourceRef: proposal.sourceRef,
             origin: proposal.origin,
+            bookingKey: null,
+            bookingVersion: null,
+            bookingCancellation: null,
             status: 'pending',
             expiresAt: proposal.expiresAt,
             snoozedUntil: null,
@@ -410,6 +584,21 @@ export class FirestorePulseRepository implements PulseRepository {
         momentId: id,
         updatedAt: input.now,
       });
+      if (securityAttentionRef) {
+        tx.create(
+          securityAttentionRef,
+          encodeRecord({
+            id: securityAttentionRef.id,
+            agentId: input.agentId,
+            incidentId: input.securityIncident?.id,
+            revision: input.securityIncident?.revision,
+            producer: 'pulse',
+            deliveryStatus: 'accepted',
+            createdAt: input.now,
+            updatedAt: input.now,
+          }),
+        );
+      }
       tx.create(ref, encodeRecord(row));
       if (suggestion)
         tx.create(this.store.doc('suggestions', suggestion.id), encodeRecord(suggestion));

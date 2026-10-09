@@ -1,5 +1,61 @@
 import type { Records } from './records.js';
 
+/** Optional atomic write fence for a card effect produced by a durable email observer. */
+export interface EmailObserverEffectFence {
+  id: string;
+  agentId: string;
+  claimToken: string;
+  claimGeneration: number;
+  expectedPrivacyGeneration: string | null;
+}
+
+/** Outbox-leg identity carried into a dashboard message append transaction. */
+export interface NotificationOutboxAppendFence {
+  agentId: string;
+  legId: string;
+  leaseToken: string;
+  producerWorkId: string | null;
+  producerTaskId?: string | null;
+  producerApplicationId?: string | null;
+  producerConfirmationMessageId?: string | null;
+  producerPrivacyGeneration: string | null;
+}
+
+export class EmailObserverEffectFenceRejectedError extends Error {
+  readonly code = 'email-observer-effect-fence-rejected';
+  constructor() {
+    super('Email observer effect fence is no longer current');
+    this.name = 'EmailObserverEffectFenceRejectedError';
+  }
+}
+
+/** Validate that the original prepared observer claim is still live at a dependent DB write. */
+export function matchesPreparedEmailObserverClaim(
+  row: {
+    id: string;
+    agentId: string;
+    status: string;
+    claimToken: string | null;
+    claimGeneration: number;
+    privacyGeneration: string | null;
+    leaseExpiresAt: Date | null;
+  } | null,
+  fence: EmailObserverEffectFence,
+  now: Date,
+): boolean {
+  return Boolean(
+    row &&
+      row.id === fence.id &&
+      row.agentId === fence.agentId &&
+      row.status === 'prepared' &&
+      row.claimToken === fence.claimToken &&
+      row.claimGeneration === fence.claimGeneration &&
+      row.privacyGeneration === fence.expectedPrivacyGeneration &&
+      row.leaseExpiresAt &&
+      row.leaseExpiresAt.getTime() > now.getTime(),
+  );
+}
+
 export interface GeneratedCardPersistInput {
   agentId: string;
   conversationId?: string | null;
@@ -10,7 +66,10 @@ export interface GeneratedCardPersistInput {
   spec: unknown;
   expiresAt: Date | null;
   targetCardId?: string;
+  /** Reject a delayed refresh result if the user viewed a superseded revision. */
+  targetRevisionId?: string;
   touch?: boolean;
+  emailObserverEffectFence?: EmailObserverEffectFence;
 }
 
 export interface GeneratedCardPersistResult {

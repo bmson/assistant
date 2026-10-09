@@ -1,3 +1,4 @@
+import { readBoundedJson } from '@assistant/application/http-body';
 import {
   changeOwnerPack,
   listPackSources,
@@ -37,32 +38,32 @@ export async function POST(request: Request) {
   if (config.PERSISTENCE_DRIVER === 'firestore') {
     const problems = validateAgentPersistenceConfig(config);
     if (problems.length) return mobileJson({ error: problems.join('; ') }, { status: 503 });
-    const text = await request.text();
-    if (text.length > 32_000)
-      return mobileJson({ ok: false, error: 'Pack command is too large.' }, { status: 413 });
-    let input: unknown;
-    try {
-      input = JSON.parse(text);
-    } catch {
-      return mobileJson({ ok: false, error: 'Invalid JSON.' }, { status: 400 });
-    }
+  }
+  const agent = await getAgentIdentity();
+  if (
+    !agent.id ||
+    (config.PERSISTENCE_DRIVER === 'firestore' && agent.id !== config.FIRESTORE_AGENT_ID)
+  )
+    return mobileJson({ ok: false, error: 'Owner unavailable.' }, { status: 404 });
+
+  const parsed = await readBoundedJson(request, 32_000, 10_000);
+  if (!parsed.ok) {
+    return mobileJson(
+      {
+        ok: false,
+        error: parsed.status === 413 ? 'Pack command is too large.' : parsed.error,
+      },
+      { status: parsed.status },
+    );
+  }
+  const input = parsed.value;
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
     const repository = new FirestoreSituationPackMutationRepository(
       getFirestoreInstallationStore(),
-      config.FIRESTORE_AGENT_ID,
+      agent.id,
     );
     const result = await repository.command(input, { ownerConfirmed: true });
     return mobileJson(result, { status: result.ok ? 200 : 409 });
-  }
-  const agent = await getAgentIdentity();
-  if (!agent.id) return mobileJson({ ok: false, error: 'Owner unavailable.' }, { status: 404 });
-  const text = await request.text();
-  if (text.length > 32_000)
-    return mobileJson({ ok: false, error: 'Pack command is too large.' }, { status: 413 });
-  let input: unknown;
-  try {
-    input = JSON.parse(text);
-  } catch {
-    return mobileJson({ ok: false, error: 'Invalid JSON.' }, { status: 400 });
   }
   const result = await changeOwnerPack(getDb(), agent.id, input);
   return mobileJson(result, { status: result.ok ? 200 : 409 });

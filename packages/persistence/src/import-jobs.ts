@@ -25,15 +25,42 @@ export type ImportRunCursor = {
 };
 
 /** `tasks.state.plannerState.voiceIngest`: the resumable voice-sample checkpoint. */
-export type VoiceIngestCursor = { index: number; saved: number; duplicates: number };
+export type VoiceIngestCursor = {
+  index: number;
+  saved: number;
+  duplicates: number;
+  embeddingSpaceKey?: string;
+};
 
 export type ImportProgress = { progress: string; progressPercent: number };
+
+/** Durable parser receipt; rejected inputs are represented by bounded offsets and issue codes. */
+export type ImportArchiveDiagnostics = {
+  format: 'mbox' | 'json' | 'text';
+  supported: string[];
+  acceptedUnits: number;
+  rejectedUnits: number;
+  partial: boolean;
+  issues: Array<{ offset: number; code: string; message: string }>;
+};
+
+/** A hash-linked source unit supplied to the model for one imported memory. */
+export type ImportUnitProvenance = {
+  sourceOffset: number;
+  unitOffset: number;
+  observedAt: string | null;
+  authorEmail: string | null;
+  header: string;
+  hasQuotedContent: boolean;
+  unitTextHash: string;
+};
 
 /** One distilled fact from an import window, embedded in the configured space. */
 export type ImportFactWrite = {
   content: string;
   contentHash: string;
   embedding: number[];
+  embeddingSpaceKey: string;
   kind: string;
   domain: string | null;
   importance: number;
@@ -41,6 +68,8 @@ export type ImportFactWrite = {
   quarantined: boolean;
   subjectContactId: string | null;
   validFrom: Date | null;
+  /** All exact parsed units in the distillation window, not an asserted single source. */
+  sourceUnitProvenance: ImportUnitProvenance[];
 };
 
 export type ImportOccasionWrite = {
@@ -54,7 +83,7 @@ export type ImportOccasionWrite = {
   quarantined: boolean;
 };
 
-export type VoiceSampleWrite = { text: string; embedding: number[] };
+export type VoiceSampleWrite = { text: string; embedding: number[]; embeddingSpaceKey: string };
 
 /**
  * Persistence boundary for the `import.run` and `voice.ingest` code jobs.
@@ -71,10 +100,16 @@ export interface ImportJobRepository {
   /** Serializes archive parsing across instances; false while another task holds it. */
   claimSnapshotSlot(fence: ImportJobFence, ttlMs: number): Promise<boolean>;
   releaseSnapshotSlot(fence: ImportJobFence): Promise<void>;
+  /** Record each parsed snapshot asset before publishing it to the private workspace. */
+  registerSnapshotAsset(fence: ImportJobFence, workspacePath: string): Promise<boolean>;
   /** Marks the source running with its total and records the task checkpoint. */
   begin(
     fence: ImportJobFence,
-    input: { itemsTotal: number; state: unknown } & ImportProgress,
+    input: {
+      itemsTotal: number;
+      state: unknown;
+      parseDiagnostics?: ImportArchiveDiagnostics | null;
+    } & ImportProgress,
   ): Promise<boolean>;
   /** Resolve (creating unknown people as needed) the contact for each subject. */
   resolveSubjects(
@@ -96,7 +131,11 @@ export interface ImportJobRepository {
   ): Promise<ImportRunCursor | null>;
   ownerIdentity(fence: ImportJobFence): Promise<{ emails: string[]; names: string[] } | null>;
   /** The subset of `texts` already present in the owner's writing-sample corpus. */
-  existingSampleTexts(fence: ImportJobFence, texts: string[]): Promise<Set<string>>;
+  existingSampleTexts(
+    fence: ImportJobFence,
+    texts: string[],
+    embeddingSpaceKey: string,
+  ): Promise<Set<string>>;
   /** Commit voice samples `[index, nextIndex)` and the advanced cursor atomically. */
   commitVoiceBatch(
     fence: ImportJobFence,
@@ -125,6 +164,8 @@ export type ImportStartInput = {
   budgetUsdLimit: string;
 };
 
+export type ImportDeletionAsset = { id: string; workspacePath: string };
+
 /**
  * Owner import-source commands. Purge and delete remove the source's memories
  * together with their graph facts and invalidate the compiled owner card;
@@ -136,7 +177,10 @@ export interface ImportCommandRepository {
   purge(source: string): Promise<{ agentId: string; purged: number }>;
   remove(
     source: string,
-  ): Promise<{ agentId: string; purgedMemories: number; workspacePath: string }>;
+  ): Promise<{ agentId: string; purgedMemories: number; cleanupReady: boolean }>;
+  pendingDeletionAssets(source: string): Promise<ImportDeletionAsset[]>;
+  assetDeleted(source: string, id: string, workspacePath: string): Promise<void>;
+  completeDeletion(source: string): Promise<void>;
   review(
     source: string,
     verdict: 'approve' | 'reject',

@@ -17,6 +17,7 @@ import type {
   ExecutionPersistence,
   ExtractedMemoryFact,
 } from '@assistant/persistence';
+import { embeddingSpaceIdentityKey } from '@assistant/persistence';
 import { and, desc, eq, gte, inArray, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { BudgetReservationError, nextDailyReset, nextMonthlyReset } from '../cost.js';
@@ -172,13 +173,19 @@ export async function runDream(
       const facts: ExtractedMemoryFact[] = [];
       for (const h of dream.hypotheses) {
         const content = h.claim.trim();
-        const [embedding] = await router.embed([content], { taskId: opts.taskId });
+        const space = await router.embeddingSpace();
+        const embeddingSpaceKey = embeddingSpaceIdentityKey(space);
+        const [embedding] = await router.embed([content], {
+          taskId: opts.taskId,
+          expectedSpace: space,
+        });
         await deps.heartbeat?.();
         if (!embedding) continue;
         facts.push({
           content,
           contentHash: createHash('sha256').update(`dream:${content}`).digest('hex'),
           embedding,
+          embeddingSpaceKey,
           category: 'knowledge',
           kind: 'preference',
           importance: 2,
@@ -209,7 +216,12 @@ export async function runDream(
         const content = h.claim.trim();
         const contentHash = createHash('sha256').update(`dream:${content}`).digest('hex');
         if (await isTombstoned(db, contentHash)) continue;
-        const [embedding] = await router.embed([content], { taskId: opts.taskId });
+        const space = await router.embeddingSpace();
+        const embeddingSpaceKey = embeddingSpaceIdentityKey(space);
+        const [embedding] = await router.embed([content], {
+          taskId: opts.taskId,
+          expectedSpace: space,
+        });
         await deps.heartbeat?.();
         const subject = h.subject ? await resolveSubjectContact(db, { subject: h.subject }) : null;
         const [saved] = await db
@@ -221,6 +233,7 @@ export async function runDream(
             content,
             contentHash,
             embedding,
+            embeddingSpaceKey,
             importance: 2,
             confidence: String(Math.min(h.confidence, MAX_HYPOTHESIS_CONFIDENCE)),
             originTrust: 'assistant',

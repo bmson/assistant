@@ -25,6 +25,8 @@ final class SpeechPlayer: ObservableObject {
     private let synthesizer = AVSpeechSynthesizer()
     private let observer = SpeechQueueObserver()
     private var sessionIsActive = false
+    private var queueGeneration = 0
+    private var utteranceGenerations: [ObjectIdentifier: Int] = [:]
 
     /// Resolving a voice walks every voice installed on the phone. The answer
     /// changes only when the owner picks a different one or installs one, and a
@@ -33,8 +35,8 @@ final class SpeechPlayer: ObservableObject {
 
     private init() {
         synthesizer.delegate = observer
-        observer.onQueueDrained = { [weak self] in
-            Task { @MainActor [weak self] in self?.queueDidDrain() }
+        observer.onQueueDrained = { [weak self] utteranceID in
+            Task { @MainActor [weak self] in self?.queueDidDrain(after: utteranceID) }
         }
     }
 
@@ -54,6 +56,7 @@ final class SpeechPlayer: ObservableObject {
     func enqueue(_ passages: [String], for messageID: String) {
         let phrases = passages.compactMap(SpeechProsody.phrase(from:))
         guard !phrases.isEmpty else { return }
+        if let current = speakingMessageID, current != messageID { queueGeneration += 1 }
         activateSession()
         speakingMessageID = messageID
         // A passage landing behind speech already in progress gets the beat
@@ -62,7 +65,9 @@ final class SpeechPlayer: ObservableObject {
         // heard as the app being slow, not as phrasing.
         var follows = synthesizer.isSpeaking || synthesizer.isPaused
         for phrase in phrases {
-            synthesizer.speak(utterance(for: phrase, follows: follows))
+            let next = utterance(for: phrase, follows: follows)
+            utteranceGenerations[ObjectIdentifier(next)] = queueGeneration
+            synthesizer.speak(next)
             follows = true
         }
     }
@@ -80,6 +85,7 @@ final class SpeechPlayer: ObservableObject {
     }
 
     func stop() {
+        queueGeneration += 1
         if synthesizer.isSpeaking || synthesizer.isPaused {
             synthesizer.stopSpeaking(at: .immediate)
         }
@@ -94,7 +100,11 @@ final class SpeechPlayer: ObservableObject {
         stop()
     }
 
-    private func queueDidDrain() {
+    private func queueDidDrain(after utteranceID: ObjectIdentifier) {
+        let callbackGeneration = utteranceGenerations.removeValue(forKey: utteranceID)
+        guard callbackGeneration == queueGeneration,
+              !synthesizer.isSpeaking, !synthesizer.isPaused else { return }
+        utteranceGenerations = utteranceGenerations.filter { $0.value == queueGeneration }
         speakingMessageID = nil
         deactivateSession()
     }
@@ -342,7 +352,7 @@ enum SpeechVoices {
 /// back on, so the delegate is its own object and hops to the main actor rather
 /// than making `SpeechPlayer` pretend to be reachable from anywhere.
 private final class SpeechQueueObserver: NSObject, AVSpeechSynthesizerDelegate {
-    var onQueueDrained: (@Sendable () -> Void)?
+    var onQueueDrained: (@Sendable (ObjectIdentifier) -> Void)?
 
     func speechSynthesizer(
         _ synthesizer: AVSpeechSynthesizer,
@@ -351,14 +361,14 @@ private final class SpeechQueueObserver: NSObject, AVSpeechSynthesizerDelegate {
         // More passages may already be queued behind this one; the reply is
         // only over when nothing is left to say.
         guard !synthesizer.isSpeaking else { return }
-        onQueueDrained?()
+        onQueueDrained?(ObjectIdentifier(utterance))
     }
 
     func speechSynthesizer(
         _ synthesizer: AVSpeechSynthesizer,
         didCancel utterance: AVSpeechUtterance
     ) {
-        onQueueDrained?()
+        onQueueDrained?(ObjectIdentifier(utterance))
     }
 }
 

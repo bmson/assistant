@@ -86,7 +86,7 @@ describe.skipIf(!localEmulator)(
     });
 
     it('atomically updates live daily/monthly policy and default task cap', async () => {
-      expect((await patch({ taskDefault: '2.257', daily: '3.5', monthly: '20' })).status).toBe(200);
+      expect((await patch({ taskDefault: '2.25', daily: '3.5', monthly: '20' })).status).toBe(200);
       const policy = await store.doc('coordination', 'budget-policy').get();
       const task = await store.doc('budgets', 'task_default').get();
       expect(policy.data()).toMatchObject({
@@ -94,7 +94,7 @@ describe.skipIf(!localEmulator)(
         monthlyLimitMicros: 20_000_000,
         softPct: 80,
       });
-      expect(task.get('limitUsd')).toBe('2.26');
+      expect(task.get('limitUsd')).toBe('2.25');
       expect(policy.get('updatedAt')).toBeDefined();
       expect(task.get('updatedAt')).toBeDefined();
       await store.doc('coordination', 'budget-holds').set({ heldMicros: 0 });
@@ -104,15 +104,27 @@ describe.skipIf(!localEmulator)(
       });
     });
 
-    it('preserves the PostgreSQL skip semantics for blank, invalid, and excessive caps', async () => {
-      expect(
-        (await patch({ taskDefault: '', daily: 'not a number', monthly: '20000' })).status,
-      ).toBe(200);
+    it('rejects malformed caps and never reports a skipped update as success', async () => {
+      expect((await patch({ taskDefault: '12garbage' })).status).toBe(400);
+      expect((await patch({ taskDefault: '0.001' })).status).toBe(400);
+      expect((await patch({ taskDefault: 2 })).status).toBe(400);
+      expect((await patch({ taskDefault: '20000' })).status).toBe(400);
+      expect((await patch({ taskDefault: '', daily: '', monthly: '' })).status).toBe(400);
       expect((await store.doc('coordination', 'budget-policy').get()).data()).toMatchObject({
         dailyLimitMicros: 1_000_000,
         monthlyLimitMicros: 10_000_000,
       });
 
+      expect((await store.doc('budgets', 'task_default').get()).get('limitUsd')).toBe('0.50');
+    });
+
+    it('applies zero as an explicit hard stop and leaves omitted fields unchanged', async () => {
+      const response = await patch({ daily: '0' });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ ok: true, appliedCaps: { daily: '0.00' } });
+      expect((await store.doc('coordination', 'budget-policy').get()).get('dailyLimitMicros')).toBe(
+        0,
+      );
       expect((await store.doc('budgets', 'task_default').get()).get('limitUsd')).toBe('0.50');
     });
 

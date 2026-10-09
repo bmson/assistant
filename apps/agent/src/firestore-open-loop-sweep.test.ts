@@ -104,7 +104,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore open-loop sweep
     throw new Error('missing task repository');
   }
 
-  it('retires each kind on its own window, overdue loops, and expired snoozes only', async () => {
+  it('preserves obligations and wakes expired snoozes without SQL or model work', async () => {
     await seed([
       { key: 'fresh-question', kind: 'question', idleDays: 10 },
       { key: 'cold-question', kind: 'question', idleDays: 31 },
@@ -132,28 +132,50 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore open-loop sweep
       { key: 'resolved', kind: 'question', idleDays: 200, status: 'resolved' },
       { key: 'dismissed', kind: 'question', idleDays: 200, status: 'dismissed' },
       { key: 'foreign', kind: 'question', idleDays: 200, agent: randomUUID() },
+      {
+        key: 'future-promise',
+        kind: 'promise',
+        idleDays: 200,
+        dueAt: new Date(now.getTime() + 180 * DAY),
+      },
     ]);
 
-    expect(await runSweep()).toBe('open loops: 6 retired as stale');
+    expect(await runSweep()).toBe('open loops: 1 snooze(s) woken, 0 legacy obligation(s) restored');
     expect(await statuses()).toEqual({
       'fresh-question': 'open',
-      'cold-question': 'stale',
-      waiting: 'stale',
+      'cold-question': 'open',
+      waiting: 'open',
       'promise-inside-window': 'open',
-      'cold-promise': 'stale',
+      'cold-promise': 'open',
       'decision-inside-window': 'open',
-      'cold-decision': 'stale',
+      'cold-decision': 'open',
       'just-overdue': 'open',
-      'long-overdue': 'stale',
+      'long-overdue': 'open',
       'snoozed-until-tomorrow': 'snoozed',
-      'snooze-expired': 'stale',
+      'snooze-expired': 'open',
       resolved: 'resolved',
       dismissed: 'dismissed',
       foreign: 'open',
+      'future-promise': 'open',
     });
-    // A second run finds nothing more to retire.
-    expect(await runSweep()).toBe('open loops: 0 retired as stale');
+    // A second run does not change already woken obligations.
+    expect(await runSweep()).toBe('open loops: 0 snooze(s) woken, 0 legacy obligation(s) restored');
     expect(sqlAccesses).toEqual([]);
+  });
+
+  it('restores legacy age-retired obligations and preserves closed states', async () => {
+    await seed([
+      { key: 'legacy', kind: 'promise', idleDays: 200, status: 'stale' },
+      { key: 'resolved', kind: 'promise', idleDays: 200, status: 'resolved' },
+      { key: 'dismissed', kind: 'promise', idleDays: 200, status: 'dismissed' },
+    ]);
+    expect(await runSweep()).toBe('open loops: 0 snooze(s) woken, 1 legacy obligation(s) restored');
+    expect(await statuses()).toEqual({
+      legacy: 'open',
+      resolved: 'resolved',
+      dismissed: 'dismissed',
+    });
+    expect(await runSweep()).toBe('open loops: 0 snooze(s) woken, 0 legacy obligation(s) restored');
   });
 
   it('pages through more loops than a single query returns', async () => {
@@ -162,9 +184,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore open-loop sweep
         key: `cold-${index}`,
         kind: 'question',
         idleDays: 40,
+        status: 'snoozed',
+        snoozedUntil: daysAgo(1),
       })),
     );
-    expect(await runSweep()).toBe('open loops: 205 retired as stale');
+    expect(await runSweep()).toBe(
+      'open loops: 205 snooze(s) woken, 0 legacy obligation(s) restored',
+    );
     expect(sqlAccesses).toEqual([]);
   }, 60_000);
 });

@@ -5,6 +5,8 @@ import { createDb } from './client.js';
 import { createPostgresProfileMemoryMaintenance } from './profile-memory-maintenance-repository.js';
 import {
   agents,
+  knowledgeGraphAssertionEvidence,
+  knowledgeGraphAssertions,
   knowledgeGraphEntities,
   knowledgeGraphEntityAliases,
   knowledgeGraphRelations,
@@ -221,6 +223,88 @@ describe('PostgreSQL profile memory maintenance', () => {
         .from(knowledgeGraphEntityAliases)
         .where(eq(knowledgeGraphEntityAliases.entityId, entity('orphan').id)),
     ).toHaveLength(0);
+  });
+
+  it('removes forgotten evidence without cascading canonical owner review through endpoints', async () => {
+    const [memory] = await db
+      .insert(memories)
+      .values({
+        agentId,
+        category: 'knowledge',
+        kind: 'fact',
+        content: 'Forgotten canonical quote',
+        contentHash: randomUUID(),
+      })
+      .returning();
+    if (!memory) throw new Error('Missing canonical memory');
+    const endpoints = await db
+      .insert(knowledgeGraphEntities)
+      .values([
+        {
+          agentId,
+          canonicalKey: `person:${randomUUID()}`,
+          label: 'Reviewed person',
+          kind: 'person',
+        },
+        { agentId, canonicalKey: `place:${randomUUID()}`, label: 'Reviewed place', kind: 'place' },
+      ])
+      .returning();
+    const [subject, object] = endpoints;
+    if (!subject || !object) throw new Error('Missing canonical endpoints');
+    const assertionId = randomUUID();
+    await db.insert(knowledgeGraphAssertions).values({
+      id: assertionId,
+      agentId,
+      semanticKey: randomUUID(),
+      subjectEntityId: subject.id,
+      objectEntityId: object.id,
+      predicate: 'lives_in',
+      assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
+      reviewStatus: 'confirmed',
+      ownerAuthored: true,
+      reviewedRevision: 1,
+      reviewedPayloadHash: 'owner-review-hash',
+    });
+    await db.insert(knowledgeGraphAssertionEvidence).values({
+      id: randomUUID(),
+      agentId,
+      assertionId,
+      sourceMemoryId: memory.id,
+      sourceFingerprint: randomUUID(),
+      sourceContentHash: memory.contentHash,
+      evidenceQuote: memory.content,
+      extractionVersion: 4,
+      observedAt: now,
+    });
+    await db.delete(memories).where(eq(memories.id, memory.id));
+    await repository.removeOrphanedGraphEntities({ agentId, memoryId: memory.id });
+    await repository.removeOrphanedGraphEntities({ agentId, memoryId: memory.id });
+    expect(
+      await db
+        .select()
+        .from(knowledgeGraphAssertionEvidence)
+        .where(eq(knowledgeGraphAssertionEvidence.assertionId, assertionId)),
+    ).toHaveLength(0);
+    expect(
+      (
+        await db
+          .select()
+          .from(knowledgeGraphAssertions)
+          .where(eq(knowledgeGraphAssertions.id, assertionId))
+      )[0],
+    ).toMatchObject({
+      reviewStatus: 'confirmed',
+      ownerAuthored: true,
+      reviewedRevision: 1,
+      reviewedPayloadHash: 'owner-review-hash',
+    });
+    for (const endpoint of endpoints)
+      expect(
+        await db
+          .select()
+          .from(knowledgeGraphEntities)
+          .where(eq(knowledgeGraphEntities.id, endpoint.id)),
+      ).toHaveLength(1);
   });
 
   it('refuses a hostile agent and memory pairing', async () => {

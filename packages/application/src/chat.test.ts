@@ -19,8 +19,13 @@ function row(id: string, text: string, parts: unknown[], createdAt: string): Mes
     text,
     origin: 'assistant',
     channelMessageId: null,
+    clientId: null,
+    clientDeliveredAt: null,
+    clientDeliveredBy: null,
     embedding: null,
+    embeddingSpaceKey: null,
     hiddenAt: null,
+    appendSequence: '00000000000000000001',
     createdAt: new Date(createdAt),
   };
 }

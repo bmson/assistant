@@ -6,7 +6,12 @@ import type {
   GeneratedCardRepository,
   Records,
 } from '@assistant/persistence';
-import { privacyErasureIsActive } from './privacy-erasure.js';
+import { emailObserverPreparedCardMatches } from '@assistant/persistence';
+import { Filter } from '@google-cloud/firestore';
+import {
+  assertPrivacyErasureGenerationInTransaction,
+  privacyErasureIsActive,
+} from './privacy-erasure.js';
 import { decodeRecord, encodeRecord, type InstallationStore } from './store.js';
 
 type Card = Records['generatedCards'];
@@ -96,6 +101,36 @@ export class FirestoreGeneratedCardRepository implements GeneratedCardRepository
       )
         throw new Error('Conversation does not belong to this agent');
 
+      let effectWork: Records['emailObserverWork'] | null = null;
+      if (input.emailObserverEffectFence) {
+        const fence = input.emailObserverEffectFence;
+        if (fence.agentId !== input.agentId)
+          throw new Error('Email observer card effect owner mismatch');
+        await assertPrivacyErasureGenerationInTransaction(
+          tx,
+          this.store,
+          fence.agentId,
+          fence.expectedPrivacyGeneration,
+        );
+        const workSnapshot = await tx.get(this.store.doc('emailObserverWork', fence.id));
+        if (workSnapshot.exists)
+          effectWork = decodeRecord<Records['emailObserverWork']>(workSnapshot.data());
+        const effectNow = this.store.now();
+        if (
+          !effectWork ||
+          effectWork.agentId !== fence.agentId ||
+          effectWork.claimToken !== fence.claimToken ||
+          effectWork.claimGeneration !== fence.claimGeneration ||
+          effectWork.privacyGeneration !== fence.expectedPrivacyGeneration ||
+          effectWork.status !== 'prepared' ||
+          !effectWork.leaseExpiresAt ||
+          effectWork.leaseExpiresAt <= effectNow ||
+          effectWork.observerKey !== 'google.email-card' ||
+          !emailObserverPreparedCardMatches(effectWork.preparedResult, input)
+        )
+          throw new Error('Email observer card effect claim is no longer current');
+      }
+
       const keyCardId = keySnapshot.exists ? String(keySnapshot.get('cardId') ?? '') : '';
       const matchedCard = targetSnapshot?.exists
         ? decodeCard(targetSnapshot.data())
@@ -116,8 +151,17 @@ export class FirestoreGeneratedCardRepository implements GeneratedCardRepository
         throw new Error('Generated card source belongs to another agent');
       if (input.targetCardId && (card?.status !== 'active' || card.dismissedAt))
         throw new Error('Generated card refresh target is unavailable');
+      if (input.targetRevisionId && card?.currentRevisionId !== input.targetRevisionId)
+        throw new Error('Generated card refresh revision is stale');
 
       const now = this.store.now();
+      if (
+        input.emailObserverEffectFence &&
+        (!effectWork?.leaseExpiresAt ||
+          effectWork.leaseExpiresAt <= now ||
+          effectWork.status !== 'prepared')
+      )
+        throw new Error('Email observer card effect claim expired before card write');
       if (!card) {
         const sameId = await tx.get(cardRef);
         const sameRevision = await tx.get(revisionRef);
@@ -246,6 +290,12 @@ export class FirestoreGeneratedCardRepository implements GeneratedCardRepository
             .collection('generatedCards')
             .where('agentId', '==', agentId)
             .where('status', '==', 'active')
+            .where(
+              Filter.or(
+                Filter.where('expiresAt', '==', null),
+                Filter.where('expiresAt', '>=', now),
+              ),
+            )
             .limit(MAX_LISTED_CARDS + 1)
             .get()
         ).docs;

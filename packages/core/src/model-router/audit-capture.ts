@@ -1,4 +1,5 @@
 import type { ModelMessage } from 'ai';
+import { sanitizeAuditUrls, scrubAuditCredentials } from '../audit-redaction.js';
 
 /**
  * Turning a model call into a reviewable record.
@@ -25,8 +26,6 @@ export const AUDIT_FIELD_CAP = 16_000;
 export type AuditCaptureMode = 'off' | 'redacted' | 'full';
 
 const EMAIL = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
-/** Keep scheme and host — which service was read is the useful part — drop the rest. */
-const URL_PATH = /\b(https?:\/\/[^\s/]+)(\/[^\s)>\]"']*)/gi;
 /**
  * A phone-shaped run: optional country prefix then digits, allowing the spaces,
  * dashes and parens people actually write them with. Bounded on both sides so
@@ -54,9 +53,8 @@ const PHONE_MIN_DIGITS = 9;
  * remain.
  */
 export function redactAuditText(text: string): string {
-  return text
+  return sanitizeAuditUrls(String(scrubAuditCredentials(text)), true)
     .replace(EMAIL, '[email]')
-    .replace(URL_PATH, '$1/[path]')
     .replace(LONG_DIGITS, '[number]')
     .replace(PHONE, (match) => {
       // Without this, `2026-09-07` reads as a phone number and the dates that
@@ -74,7 +72,8 @@ export function captureField(
   mode: Exclude<AuditCaptureMode, 'off'>,
 ): { text: string | undefined; truncated: boolean } {
   if (text === undefined) return { text: undefined, truncated: false };
-  const scrubbed = mode === 'redacted' ? redactAuditText(text) : text;
+  const scrubbed =
+    mode === 'redacted' ? redactAuditText(text) : String(scrubAuditCredentials(text));
   if (scrubbed.length <= AUDIT_FIELD_CAP) return { text: scrubbed, truncated: false };
   return { text: scrubbed.slice(0, AUDIT_FIELD_CAP), truncated: true };
 }

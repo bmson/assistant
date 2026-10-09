@@ -95,7 +95,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       await chunk(lease, 'Old model vector', axis(1, 1), { ...SPACE, revision: '2' });
 
       const registry = registerDocumentTools(new ToolRegistry(), {
-        embed: async () => [axis(1, 1)],
+        embed: async () => ({
+          embeddings: [axis(1, 1)],
+          embeddingSpaceKey: embeddingSpaceKey(SPACE),
+        }),
         ...(persistence.documentSearch ? { search: persistence.documentSearch } : {}),
       });
       const tool = registry.get('documents.search')?.tool;
@@ -110,6 +113,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       const only = await persistence.documentSearch?.search({
         agentId,
         embedding: axis(1, 1),
+        embeddingSpaceKey: embeddingSpaceKey(SPACE),
         limit: 5,
         documentId: insurance,
         minSimilarity: 0.7,
@@ -119,6 +123,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         persistence.documentSearch?.search({
           agentId: randomUUID(),
           embedding: axis(1, 1),
+          embeddingSpaceKey: embeddingSpaceKey(SPACE),
           limit: 5,
           minSimilarity: 0.7,
         }),
@@ -148,6 +153,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       const first = (await ingest?.execute({ fileId: 'drive-1' }, ctx())) as {
         documentId: string;
         duplicate: boolean;
+        stagedWorkspacePath: string;
       };
       expect(first.duplicate).toBe(false);
       const row = (await store.doc('documents', first.documentId).get()).data();
@@ -165,9 +171,19 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         'documents.extract',
       ]);
 
-      const again = (await ingest?.execute({ fileId: 'drive-1' }, ctx())) as { duplicate: boolean };
+      const again = (await ingest?.execute({ fileId: 'drive-1' }, ctx())) as {
+        duplicate: boolean;
+        stagedWorkspacePath: string;
+      };
       expect(again.duplicate).toBe(true);
-      expect(deletes).toHaveLength(1);
+      expect(again.stagedWorkspacePath).toBe(first.stagedWorkspacePath);
+      expect(writes).toEqual([first.stagedWorkspacePath, first.stagedWorkspacePath]);
+      expect(deletes).toEqual([]);
+      const stillOneExtraction = await store
+        .collection('tasks')
+        .where('trigger.payload.documentId', '==', first.documentId)
+        .get();
+      expect(stillOneExtraction.size).toBe(1);
     });
   },
 );

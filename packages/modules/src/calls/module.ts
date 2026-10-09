@@ -1,17 +1,14 @@
 import { getAgent } from '@assistant/core';
-import { resolveVoiceModel, VoiceModelUnavailableError } from '@assistant/core/realtime-voice';
-import {
-  ACTIVE_CALL_STATUSES,
-  type CallSessionRepository,
-  type ExecutionPersistence,
-} from '@assistant/persistence';
+import { VoiceModelUnavailableError } from '@assistant/core/realtime-voice';
+import { ACTIVE_CALL_STATUSES, type CallSessionRepository } from '@assistant/persistence';
 import { registerCallTools, TwilioVoiceClient } from '@assistant/tools/calls';
 import { defineModule, type ModuleServices } from '../platform.js';
 import { handleMediaStream, type MediaSocket } from './bridge.js';
 import { CallRefusedError, staleCallCutoff, startCall } from './dial.js';
-import { finishCall } from './finish.js';
+import { deliverCallFinish, finishCall } from './finish.js';
 import { callsMeta } from './meta.js';
 import { handleCallStatus, handleInboundCall } from './status.js';
+import { resolveSessionVoiceRoute, selectVoiceRoute } from './voice-route.js';
 
 /** What the agent's HTTP server hands a Twilio media-stream WebSocket to. */
 export interface CallBridge {
@@ -26,19 +23,6 @@ function repository<T extends object>(value: T | undefined, name: string): T {
       throw new Error(`calls: persistence has no ${name} repository (${String(property)})`);
     },
   });
-}
-
-async function voiceModel(persistence: ExecutionPersistence, config: ModuleServices['config']) {
-  const role = await persistence.modelRouting.role('voice');
-  if (!role)
-    throw new VoiceModelUnavailableError(
-      'No voice model is set up. Choose one in Settings → AI providers.',
-    );
-  const [model, connections] = await Promise.all([
-    persistence.modelRouting.model(role.primaryModel),
-    persistence.modelConnections?.list() ?? Promise.resolve([]),
-  ]);
-  return { id: role.primaryModel, resolved: resolveVoiceModel({ model, connections, config }) };
 }
 
 export const callsModule = defineModule<CallBridge>({
@@ -58,6 +42,7 @@ export const callsModule = defineModule<CallBridge>({
       calls,
       costs: persistence.costs,
       jobs: persistence.executionJobs,
+      dialer,
     };
     const callUrl = (callId: string) =>
       config.WEB_URL ? new URL(`/calls/${callId}`, config.WEB_URL).toString() : 'the Calls page';
@@ -74,7 +59,7 @@ export const callsModule = defineModule<CallBridge>({
               costs: persistence.costs,
               dialer,
               ownerId,
-              voiceModel: () => voiceModel(persistence, config),
+              voiceModel: () => selectVoiceRoute(persistence, config),
             },
             input,
           ).catch((error) => {
@@ -93,9 +78,10 @@ export const callsModule = defineModule<CallBridge>({
         handleMediaStream(socket, {
           ...finishDeps,
           dialer,
-          resolveVoice: async () => (await voiceModel(persistence, config)).resolved,
-          notifyOwner: (input) =>
-            services.ownerNotifier.notifyOwner({ ...input, urgency: 'interrupt' }),
+          resolveVoice: async (session) => resolveSessionVoiceRoute(session, persistence, config),
+          notifyOwner: async (input) => {
+            await services.ownerNotifier.notifyOwner({ ...input, urgency: 'interrupt' });
+          },
           callUrl,
           ownerName: config.OWNER_NAME,
           assistantName: config.ASSISTANT_NAME,
@@ -113,7 +99,9 @@ export const callsModule = defineModule<CallBridge>({
             handler: async (services, request) =>
               handleInboundCall(
                 {
-                  notifyOwner: (input) => services.ownerNotifier.notifyOwner(input),
+                  notifyOwner: async (input) => {
+                    await services.ownerNotifier.notifyOwner(input);
+                  },
                   ownerName: config.OWNER_NAME,
                 },
                 await request.form(),
@@ -125,13 +113,27 @@ export const callsModule = defineModule<CallBridge>({
               handleCallStatus(
                 {
                   ...finishDeps,
-                  notifyOwner: (input) => services.ownerNotifier.notifyOwner(input),
+                  notifyOwner: async (input) => {
+                    await services.ownerNotifier.notifyOwner(input);
+                  },
                 },
                 await request.form(),
               ),
           },
         ],
         sweepSteps: [
+          {
+            name: 'call_finish_delivery',
+            portable: true,
+            run: async () => {
+              const agentId = await ownerId();
+              let delivered = 0;
+              for (const call of await calls.listPendingFinishDelivery(agentId, 100)) {
+                if (await deliverCallFinish(finishDeps, call)) delivered += 1;
+              }
+              return delivered;
+            },
+          },
           {
             name: 'stale_calls',
             portable: true,

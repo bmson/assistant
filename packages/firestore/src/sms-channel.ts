@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Records, SmsChannelRepository } from '@assistant/persistence';
+import { conversationDocument } from './conversation-document.js';
 import { assertPrivacyErasureInactiveInTransaction } from './privacy-erasure.js';
+import { claimFirestoreSmsUsage, settleFirestoreSmsUsage } from './sms-usage-reconciliation.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 const HOUR_MS = 3_600_000;
@@ -65,6 +67,14 @@ export class FirestoreSmsChannelRepository implements SmsChannelRepository {
       if (existing) {
         const conversationId = existing.get('conversationId');
         if (typeof conversationId !== 'string') throw new Error('SMS binding is malformed');
+        const conversation = await tx.get(this.store.doc('conversations', conversationId));
+        if (
+          !conversation.exists ||
+          conversation.get('id') !== conversationId ||
+          conversation.get('agentId') !== agentId ||
+          conversation.get('channel') !== 'sms'
+        )
+          throw new Error('SMS binding is missing or outside the owner scope');
         return conversationId;
       }
       const now = this.store.now();
@@ -79,12 +89,13 @@ export class FirestoreSmsChannelRepository implements SmsChannelRepository {
         archivedAt: null,
         modelOverride: null,
         lastReadAt: null,
+        messageSequence: 0,
         createdAt: now,
         updatedAt: now,
       };
       tx.create(
         this.store.doc('conversations', conversation.id),
-        encodeRecord({ ...conversation, archived: false }),
+        conversationDocument(conversation),
       );
       const binding: Records['channelBindings'] = {
         id: bindingIdFor('sms', peer),
@@ -132,5 +143,16 @@ export class FirestoreSmsChannelRepository implements SmsChannelRepository {
     const toolCall = await this.store.doc('toolCalls', toolCallId).get();
     const toolName = toolCall.exists ? toolCall.get('toolName') : null;
     return typeof toolName === 'string' ? toolName : null;
+  }
+
+  claimSmsUsageReconciliation(now: Date, limit: number) {
+    return claimFirestoreSmsUsage(this.store, now, limit);
+  }
+
+  settleSmsUsageReconciliation(
+    claim: Parameters<SmsChannelRepository['settleSmsUsageReconciliation']>[0],
+    outcome: Parameters<SmsChannelRepository['settleSmsUsageReconciliation']>[1],
+  ) {
+    return settleFirestoreSmsUsage(this.store, claim, outcome);
   }
 }

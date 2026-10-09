@@ -24,6 +24,7 @@ function ping(input: Partial<OwnerLocationPing> = {}): OwnerLocationPing {
     timeZone: 'Atlantic/Reykjavik',
     capturedAt: new Date(NOW.getTime() - 5 * 60_000),
     createdAt: NOW,
+    arrivalExpiresAt: null,
     ...input,
   };
 }
@@ -36,6 +37,7 @@ function commitment(input: Partial<OwnerCommitment> & Pick<OwnerCommitment, 'id'
     conversationId: 'conversation',
     sourceMessageId: null,
     sourceTaskId: null,
+    sourceOccurrenceKey: null,
     kind: 'promise',
     title,
     details: '',
@@ -47,6 +49,8 @@ function commitment(input: Partial<OwnerCommitment> & Pick<OwnerCommitment, 'id'
     resolution: null,
     confidence: '0.90',
     contentHash: input.id,
+    reopenedFromId: null,
+    reopenOperationId: null,
     createdAt: NOW,
     updatedAt: NOW,
     ...fields,

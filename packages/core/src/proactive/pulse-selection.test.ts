@@ -180,6 +180,30 @@ describe('calendar changes survive pulse pacing', () => {
     expect(update.seen.map((row) => row.eventId)).toEqual(['b']);
   });
 
+  it('retains an unverified baseline after its notice is acknowledged', () => {
+    const previous = [calendarEvent('unknown')].map(
+      (event) => toSnapshotRow(event) as PulseCalendarSnapshot,
+    );
+    const changes = diffCalendarEvents(
+      [],
+      previous.map((row) => ({ ...row, attendeeResponseHash: {} })),
+      now,
+      true,
+    );
+    const moments = calendarChangeMoments(changes, 'UTC');
+    expect(moments[0]).toMatchObject({ kind: 'calendar-unverified' });
+    expect(moments[0]?.suggestion).toBeUndefined();
+    expect(moments[0]?.text).toContain('could not confirm');
+    const update = calendarSnapshotForDelivery({
+      events: [],
+      previous,
+      changes,
+      acknowledgedKeys: new Set(moments.map((m) => m.key)),
+      timeZone: 'UTC',
+    });
+    expect(update).toEqual({ cancelled: [], seen: previous });
+  });
+
   function pulseFixture() {
     let snapshot = [calendarEvent('a'), calendarEvent('b')].map(
       (event) => toSnapshotRow(event) as PulseCalendarSnapshot,
@@ -217,6 +241,7 @@ describe('calendar changes survive pulse pacing', () => {
     const deps: PulseDeps = {
       db: {} as Db,
       calendarReader: async () => ({ events: [], complete: true }),
+      calendarEventReader: async ({ eventId }) => calendarEvent(eventId, { status: 'cancelled' }),
       persistence: {
         executionContext: {
           getAgent: async () => ({

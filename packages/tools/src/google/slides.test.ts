@@ -27,6 +27,28 @@ describe('Google Slides tools', () => {
     );
   });
 
+  it('inserts created slides in order but leaves append position to the provider', () => {
+    const created = buildSlideRequests(
+      [
+        { title: 'One', body: '' },
+        { title: 'Two', body: '' },
+      ],
+      { deleteSlideId: 'default-slide', insertionIndex: 0 },
+    ).filter((request) => 'createSlide' in request);
+    expect(
+      created.map((request) => (request.createSlide as { insertionIndex: number }).insertionIndex),
+    ).toEqual([0, 1]);
+
+    const appended = buildSlideRequests([
+      { title: 'Three', body: '' },
+      { title: 'Four', body: '' },
+    ]).filter((request) => 'createSlide' in request);
+    expect(appended).toHaveLength(2);
+    expect(
+      appended.every((request) => !('insertionIndex' in (request.createSlide as object))),
+    ).toBe(true);
+  });
+
   it('creates, fills, and shares a presentation', async () => {
     const api = vi
       .fn()
@@ -62,6 +84,29 @@ describe('Google Slides tools', () => {
     );
     expect(registry.toolsForTask('owner').map((tool) => tool.name)).toEqual(
       expect.arrayContaining(['slides.create', 'slides.append']),
+    );
+  });
+
+  it('appends a batch at the presentation tail and keeps retries under one operation key', async () => {
+    const api = vi.fn().mockResolvedValue({});
+    const tool = toolsWith(api).get('slides.append')?.tool;
+    const args = {
+      presentationId: 'SLIDES-123_abc',
+      slides: [{ title: 'Third' }, { title: 'Fourth' }],
+    };
+    await tool?.execute(args, {} as never);
+
+    const request = JSON.parse(api.mock.calls[0]?.[1]?.body as string) as {
+      requests: Array<Record<string, unknown>>;
+    };
+    const created = request.requests.filter((item) => 'createSlide' in item);
+    expect(created).toHaveLength(2);
+    expect(created.every((item) => !('insertionIndex' in (item.createSlide as object)))).toBe(true);
+    expect(tool?.idempotencyKey?.(args, { taskId: 'task-1' } as never)).toBe(
+      tool?.idempotencyKey?.(args, { taskId: 'task-1' } as never),
+    );
+    expect(tool?.idempotencyKey?.(args, { taskId: 'task-1' } as never)).not.toBe(
+      tool?.idempotencyKey?.(args, { taskId: 'task-2' } as never),
     );
   });
 });

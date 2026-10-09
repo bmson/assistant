@@ -1,4 +1,4 @@
-import { recordCodeJobResult } from '@assistant/core';
+import { jobCallbackIdempotencyKey, recordCodeJobResult } from '@assistant/core';
 import {
   CloudRunCodeJobLauncher,
   type CodeJobLauncher,
@@ -53,6 +53,7 @@ export const codeModule = defineModule<CodeJobLauncher>({
                 taskId: body.taskId,
                 token: body.token,
                 result: body.result ?? { ok: false, error: 'job reported no result' },
+                idempotencyKey: jobCallbackIdempotencyKey('code', body.taskId, body.token),
               });
               if (!outcome.ok) return { status: outcome.status, json: { error: outcome.error } };
               return { status: 200, json: { ok: true } };

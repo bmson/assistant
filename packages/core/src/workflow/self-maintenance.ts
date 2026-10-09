@@ -70,7 +70,8 @@ const PROTECTED_FILES = new Set([
 
 /** Substrings/patterns that mark a path as security-sensitive regardless of exact name. */
 const PROTECTED_PATTERNS = [
-  /(^|\/)auth(\.|\/|-)/i,
+  /(^|[/-])auth(\.|\/|-)/i,
+  /(?:^|[/-])(?:passkeys?|device[-/]keys?)(?:[./-]|$)/i,
   /credential/i,
   /secret/i,
   /(^|\/)\.env/i,

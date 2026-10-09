@@ -34,8 +34,50 @@ export class PostgresCardRefreshRepository implements CardRefreshRepository {
         )
         .for('update');
       if (!card) return { ok: false, error: 'Card not found.', status: 404 };
+      if (input.expectedRevisionId && input.expectedRevisionId !== card.currentRevisionId)
+        return {
+          ok: false,
+          status: 409,
+          error: 'This card changed. Reload it before starting another refresh.',
+        };
+      const externalEventId = input.operationId
+        ? `saved-card-refresh:${input.agentId}:${card.id}:${input.operationId}`
+        : undefined;
+      if (externalEventId && input.expectedRevisionId) {
+        const [priorOperation] = await tx
+          .select({
+            id: tasks.id,
+            agentId: tasks.agentId,
+            queueGeneration: tasks.queueGeneration,
+            trigger: tasks.trigger,
+          })
+          .from(tasks)
+          .where(eq(tasks.externalEventId, externalEventId));
+        if (priorOperation) {
+          const payload = (priorOperation.trigger as { payload?: Record<string, unknown> } | null)
+            ?.payload;
+          if (
+            priorOperation.agentId !== input.agentId ||
+            payload?.refreshCardId !== card.id ||
+            payload?.refreshCardRevisionId !== input.expectedRevisionId
+          )
+            return {
+              ok: false,
+              status: 409,
+              error: 'This card changed. Reload it before starting another refresh.',
+            };
+          return {
+            ok: true,
+            taskId: priorOperation.id,
+            queueGeneration: priorOperation.queueGeneration,
+            created: false,
+            dispatch: 'notify',
+            refreshState: 'refreshing',
+          };
+        }
+      }
       const [active] = await tx
-        .select({ id: tasks.id, queueGeneration: tasks.queueGeneration })
+        .select({ id: tasks.id, queueGeneration: tasks.queueGeneration, trigger: tasks.trigger })
         .from(tasks)
         .where(
           and(
@@ -46,6 +88,23 @@ export class PostgresCardRefreshRepository implements CardRefreshRepository {
         )
         .orderBy(desc(tasks.createdAt))
         .limit(1);
+      if (
+        active &&
+        input.expectedRevisionId &&
+        (active.trigger as { payload?: Record<string, unknown> } | null)?.payload
+          ?.refreshCardRevisionId !== input.expectedRevisionId
+      )
+        return {
+          ok: false,
+          status: 409,
+          error: 'This card changed. Reload it before starting another refresh.',
+        };
+      if (active && externalEventId && input.expectedRevisionId)
+        return {
+          ok: false,
+          status: 409,
+          error: 'A refresh is already running. Check its status before trying again.',
+        };
       if (active)
         return {
           ok: true,
@@ -131,6 +190,7 @@ export class PostgresCardRefreshRepository implements CardRefreshRepository {
         type: 'adhoc',
         title: formatted.title,
         trust: 'owner',
+        ...(externalEventId ? { externalEventId } : {}),
         trigger: {
           source: 'internal',
           agentId: input.agentId,
@@ -139,6 +199,9 @@ export class PostgresCardRefreshRepository implements CardRefreshRepository {
           payload: {
             instruction: formatted.instruction,
             refreshCardId: card.id,
+            ...(input.expectedRevisionId
+              ? { refreshCardRevisionId: input.expectedRevisionId }
+              : {}),
             taintedOrigin: true,
           },
         },

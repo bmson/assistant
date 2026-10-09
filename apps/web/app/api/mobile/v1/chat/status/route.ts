@@ -1,3 +1,4 @@
+import { projectMobileCardCapabilities } from '@/lib/mobile-card-capabilities';
 import { getChatApplication } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -55,6 +56,6 @@ export async function GET(request: Request): Promise<Response> {
     signal: request.signal,
   });
   return status
-    ? mobileJson(status)
+    ? mobileJson(projectMobileCardCapabilities(status, request))
     : mobileJson({ error: 'conversation not found' }, { status: 404 });
 }

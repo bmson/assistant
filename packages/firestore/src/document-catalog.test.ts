@@ -34,6 +34,8 @@ describe.skipIf(!emulator)('Firestore document catalog records', () => {
         mime: 'text/plain',
         bytes: 12,
         sha256: hash,
+        objectGeneration: null,
+        emailAttachmentCustodyId: null,
       },
       document: {
         id,
@@ -56,6 +58,7 @@ describe.skipIf(!emulator)('Firestore document catalog records', () => {
         processorStartedAt: null,
         processorAttempts: 0,
         processedTextPath: null,
+        extractionMetadata: null,
       },
     };
   }

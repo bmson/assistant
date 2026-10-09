@@ -9,14 +9,20 @@ import type {
   TaskOutcome,
   TaskRepository,
 } from '@assistant/persistence';
-import { newTaskRecord } from '@assistant/persistence';
+import {
+  missionTaskTerminalReport,
+  newTaskRecord,
+  normalizeTaskBudget,
+  redactTerminalArrivalTask,
+} from '@assistant/persistence';
 import { Filter } from '@google-cloud/firestore';
 import { createWakeIntent } from './outbox.js';
-import { decodeRecord, encodeRecord } from './store.js';
+import { decodeRecord, documentKey, encodeRecord } from './store.js';
 import { createTask } from './task-creation.js';
 import { FirestoreTaskLeaseRepository } from './tasks.js';
 
 const TERMINAL = new Set(['done', 'failed', 'cancelled']);
+const MAX_ATTEMPTS = 8;
 const WAKEABLE = new Set([
   'waiting_approval',
   'waiting_event',
@@ -225,23 +231,89 @@ export class FirestoreTaskRepository
   async completeTask(task: TaskLease | string, outcome: TaskOutcome) {
     if (typeof task === 'string' && outcome.status !== 'cancelled')
       throw new Error('Administrative completion requires cancellation');
-    return Boolean(
-      await this.change(
-        typeof task === 'string' ? task : task.id,
-        (row) =>
-          TERMINAL.has(row.status)
-            ? null
-            : {
-                status: outcome.status,
-                progress: outcome.progress ?? row.progress,
-                lockedUntil: null,
-                leaseToken: null,
-                runAfter: null,
-                attempt: 0,
-              },
-        typeof task === 'string' ? undefined : task,
-      ),
-    );
+    const id = typeof task === 'string' ? task : task.id;
+    return this.store.db.runTransaction(async (tx) => {
+      const taskRef = this.store.doc('tasks', id);
+      const snapshot = await tx.get(taskRef);
+      if (!snapshot.exists) return false;
+      const row = decodeRecord<Task>(snapshot.data());
+      const now = this.store.now();
+      if (
+        row.id !== id ||
+        documentKey(row.id) !== snapshot.id ||
+        TERMINAL.has(row.status) ||
+        (typeof task !== 'string' &&
+          (row.agentId !== task.agentId ||
+            row.status !== 'running' ||
+            !task.leaseToken ||
+            row.leaseToken !== task.leaseToken ||
+            !row.lockedUntil ||
+            row.lockedUntil <= now))
+      )
+        return false;
+
+      const isMission = row.type === 'mission';
+      const shouldReport =
+        isMission ||
+        (row.type === 'adhoc' && Boolean(row.parentTaskId) && outcome.status !== 'done');
+      const missionRef = isMission
+        ? taskRef
+        : shouldReport && row.parentTaskId
+          ? this.store.doc('tasks', row.parentTaskId)
+          : null;
+      const missionSnapshot = missionRef ? await tx.get(missionRef) : null;
+      const mission = missionSnapshot?.exists ? decodeRecord<Task>(missionSnapshot.data()) : null;
+      const eligibleMission =
+        mission?.type === 'mission' && mission.agentId === row.agentId ? mission : null;
+      const report =
+        shouldReport && eligibleMission
+          ? missionTaskTerminalReport({
+              mission: eligibleMission,
+              task: { id: row.id },
+              status: outcome.status,
+              now,
+            })
+          : null;
+      const reportRef = report ? this.store.doc('missionReports', report.id) : null;
+      const priorReport = reportRef ? await tx.get(reportRef) : null;
+      const arrivalRedaction = redactTerminalArrivalTask(
+        row.trigger,
+        row.agentId,
+        row.externalEventId,
+      );
+
+      tx.update(
+        taskRef,
+        encodeRecord({
+          status: outcome.status,
+          progress: outcome.progress ?? row.progress,
+          lockedUntil: null,
+          leaseToken: null,
+          runAfter: null,
+          attempt: 0,
+          updatedAt: now,
+          ...(arrivalRedaction ?? {}),
+        }),
+      );
+      if (missionRef && eligibleMission && !isMission && !TERMINAL.has(eligibleMission.status)) {
+        tx.update(
+          missionRef,
+          encodeRecord({
+            status: 'needs_attention',
+            progress:
+              'A mission work session ended and needs review before the mission can continue.',
+            lockedUntil: null,
+            leaseToken: null,
+            runAfter: null,
+            attempt: 0,
+            attentionNotifiedAt: null,
+            updatedAt: now,
+          }),
+        );
+      }
+      if (report && reportRef && !priorReport?.exists) tx.create(reportRef, encodeRecord(report));
+      return true;
+    });
   }
   async markTaskNeedsAttention(task: TaskLease, progress: string) {
     return Boolean(
@@ -289,36 +361,100 @@ export class FirestoreTaskRepository
     task: TaskLease,
     error: string,
   ): Promise<'retry' | 'dead_letter' | 'lost_lease'> {
-    const result = await this.change(
-      task.id,
-      (row, now) => {
-        const attempt = row.attempt + 1;
-        return {
+    return this.store.db.runTransaction(async (tx) => {
+      const taskRef = this.store.doc('tasks', task.id);
+      const snapshot = await tx.get(taskRef);
+      if (!snapshot.exists) return 'lost_lease';
+      const row = decodeRecord<Task>(snapshot.data());
+      const now = this.store.now();
+      if (
+        row.id !== task.id ||
+        documentKey(row.id) !== snapshot.id ||
+        row.agentId !== task.agentId ||
+        row.status !== 'running' ||
+        !task.leaseToken ||
+        row.leaseToken !== task.leaseToken ||
+        !row.lockedUntil ||
+        row.lockedUntil <= now
+      )
+        return 'lost_lease';
+
+      const attempt = row.attempt + 1;
+      const deadLetter = attempt >= MAX_ATTEMPTS;
+      const runAfter = deadLetter
+        ? null
+        : new Date(now.getTime() + Math.min(300, 5 * 2 ** row.attempt) * 1000);
+      const missionRef =
+        row.type === 'mission'
+          ? taskRef
+          : row.type === 'adhoc' && row.parentTaskId
+            ? this.store.doc('tasks', row.parentTaskId)
+            : null;
+      const missionSnapshot = deadLetter && missionRef ? await tx.get(missionRef) : null;
+      const mission = missionSnapshot?.exists ? decodeRecord<Task>(missionSnapshot.data()) : null;
+      const eligibleMission =
+        mission?.type === 'mission' && mission.agentId === row.agentId ? mission : null;
+      const report =
+        deadLetter && eligibleMission
+          ? missionTaskTerminalReport({
+              mission: eligibleMission,
+              task: { id: row.id },
+              status: 'needs_attention',
+              attempt,
+              now,
+            })
+          : null;
+      const reportRef = report ? this.store.doc('missionReports', report.id) : null;
+      const priorReport = reportRef ? await tx.get(reportRef) : null;
+
+      tx.update(
+        taskRef,
+        encodeRecord({
           attempt,
-          status: attempt >= 8 ? 'needs_attention' : 'sleeping',
+          status: deadLetter ? 'needs_attention' : 'sleeping',
           progress: `attempt ${attempt} failed: ${error.slice(0, 500)}`,
-          runAfter:
-            attempt >= 8
-              ? null
-              : new Date(now.getTime() + Math.min(300, 5 * 2 ** row.attempt) * 1000),
+          runAfter,
           lockedUntil: null,
           leaseToken: null,
           attentionNotifiedAt: null,
           queueGeneration: row.queueGeneration + 1,
-        };
-      },
-      task,
-    );
-    return !result ? 'lost_lease' : result.status === 'needs_attention' ? 'dead_letter' : 'retry';
+          updatedAt: now,
+        }),
+      );
+      if (runAfter)
+        createWakeIntent(tx, this.store, {
+          taskId: row.id,
+          generation: row.queueGeneration + 1,
+          availableAt: runAfter,
+        });
+      if (
+        deadLetter &&
+        missionRef &&
+        eligibleMission &&
+        row.type !== 'mission' &&
+        !TERMINAL.has(eligibleMission.status)
+      ) {
+        tx.update(
+          missionRef,
+          encodeRecord({
+            status: 'needs_attention',
+            progress:
+              'A mission work session exhausted its retries and needs review before the mission can continue.',
+            lockedUntil: null,
+            leaseToken: null,
+            runAfter: null,
+            attempt: 0,
+            attentionNotifiedAt: null,
+            updatedAt: now,
+          }),
+        );
+      }
+      if (report && reportRef && !priorReport?.exists) tx.create(reportRef, encodeRecord(report));
+      return deadLetter ? 'dead_letter' : 'retry';
+    });
   }
   async wakeTask(taskId: string, budgetIncrease?: TaskBudgetIncrease) {
-    if (
-      budgetIncrease &&
-      (!Number.isFinite(budgetIncrease.limit) ||
-        budgetIncrease.limit < 0.01 ||
-        budgetIncrease.limit > 10_000)
-    )
-      return null;
+    if (budgetIncrease && normalizeTaskBudget(budgetIncrease.limit, 0.01) === null) return null;
     const result = await this.change(taskId, (row) => {
       if (!WAKEABLE.has(row.status)) return null;
       if (

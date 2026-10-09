@@ -57,6 +57,7 @@ struct PeopleView: View {
                         description: "Add someone here, or mention them in a conversation.")
                     Button("Add person", systemImage: "plus") { showsPersonCreator = true }
                 }
+                peopleLoadMore
             } else {
                 if !comingUp.isEmpty && query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Section {
@@ -99,6 +100,7 @@ struct PeopleView: View {
                         }
                     }
                 }
+                peopleLoadMore
             }
         }
         .navigationTitle("People")
@@ -163,6 +165,42 @@ struct PeopleView: View {
         .padding(.vertical, 4)
         .frame(minHeight: 56)
         .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private var peopleLoadMore: some View {
+        if let pagination = model.peoplePagination, pagination.isSupported, pagination.hasMore {
+            Section {
+                VStack(spacing: 8) {
+                    Button {
+                        Task { _ = await model.loadMorePeople() }
+                    } label: {
+                        if model.peoplePageLoading {
+                            ProgressView("Loading more people")
+                                .frame(maxWidth: .infinity)
+                        } else {
+                            Label("Load more · \(model.people.count) loaded", systemImage: "arrow.down.circle")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .buttonStyle(AssistantActionButtonStyle(kind: .secondary, fillsWidth: true))
+                    .disabled(model.peoplePageLoading)
+                    .accessibilityHint("Loads the next \(pagination.pageSize) people. More are not loaded until requested.")
+                    if let message = model.peoplePageError {
+                        Text(message)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+        } else if let message = model.peoplePageError {
+            Section {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }
 

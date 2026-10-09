@@ -17,6 +17,10 @@ function vector(x: number, y = 0): number[] {
   return [x, y, ...new Array(1534).fill(0)];
 }
 
+function vector768(x: number): number[] {
+  return [x, ...new Array(767).fill(0)];
+}
+
 function skill(
   id: string,
   patch: Partial<Omit<Records['skills'], 'embedding'>> & { embedding?: number[] } = {},
@@ -28,6 +32,7 @@ function skill(
     createdAt: now,
     updatedAt: now,
     agentId: 'owner',
+    embeddingSpaceKey: embeddingSpaceKey(space),
     embedding: vector(1),
     sourceTaskId: null,
     preconditions: '',
@@ -76,15 +81,29 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore learned-skill c
       seed(skill('e-foreign', { agentId: 'foreign' })),
     ]);
 
-    const limited = await repository.recall({ agentId: 'owner', embedding: vector(1), limit: 1 });
+    const limited = await repository.recall({
+      agentId: 'owner',
+      embedding: vector(1),
+      embeddingSpaceKey: embeddingSpaceKey(space),
+      limit: 1,
+    });
     expect(limited).toHaveLength(1);
     expect(limited[0]).toMatchObject({ skill: { id: 'a-first', agentId: 'owner' }, similarity: 1 });
     expect(limited[0]?.skill).not.toHaveProperty('embedding');
 
-    const all = await repository.recall({ agentId: 'owner', embedding: vector(1), limit: 10 });
+    const all = await repository.recall({
+      agentId: 'owner',
+      embedding: vector(1),
+      embeddingSpaceKey: embeddingSpaceKey(space),
+      limit: 10,
+    });
     expect(all.map((match) => match.skill.id)).toEqual(['a-first', 'b-second']);
     await expect(
-      repository.recall({ agentId: 'owner', embedding: vector(1).slice(1) }),
+      repository.recall({
+        agentId: 'owner',
+        embedding: vector(1).slice(1),
+        embeddingSpaceKey: embeddingSpaceKey(space),
+      }),
     ).rejects.toThrow('embedding space');
   });
 
@@ -116,9 +135,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore learned-skill c
       deprecated: false,
     });
     expect(
-      (await repository.recall({ agentId: 'owner', embedding: vector(1) })).map(
-        (match) => match.skill.id,
-      ),
+      (
+        await repository.recall({
+          agentId: 'owner',
+          embedding: vector(1),
+          embeddingSpaceKey: embeddingSpaceKey(space),
+        })
+      ).map((match) => match.skill.id),
     ).not.toContain('failed');
   });
 
@@ -142,7 +165,11 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore learned-skill c
       return original(updateFunction as never, options as never);
     }) as typeof store.db.runTransaction;
     try {
-      const recalled = await repository.recall({ agentId: 'owner', embedding: vector(1) });
+      const recalled = await repository.recall({
+        agentId: 'owner',
+        embedding: vector(1),
+        embeddingSpaceKey: embeddingSpaceKey(space),
+      });
       expect(recalled.map((match) => match.skill.id)).not.toContain('revised');
       expect(recalled.map((match) => match.skill.id)).not.toContain('wrong-row-id');
     } finally {
@@ -162,12 +189,55 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore learned-skill c
     });
   });
 
-  it('requires the configured 1536-dimension embedding space', () => {
+  it('recalls in the immutable configured 768-dimensional space', async () => {
+    const configuredSpace: EmbeddingSpace = { ...space, dimensions: 768 };
+    const capturedKey = embeddingSpaceKey(configuredSpace);
+    const smallRepository = new FirestoreSkillContextRepository(store, configuredSpace);
+    configuredSpace.provider = 'mutated-provider';
+    configuredSpace.model = 'mutated-model';
+    configuredSpace.dimensions = 1536;
+    configuredSpace.revision = 'mutated-revision';
+
+    const embedding = vector768(1);
+    const row = skill('configured-768', {
+      embedding,
+      embeddingSpaceKey: capturedKey,
+    });
+    await store.doc('skills', row.id).set(
+      encodeRecord({
+        ...row,
+        embedding: FieldValue.vector(embedding),
+        embeddingSpace: capturedKey,
+      }),
+    );
+
+    const matches = await smallRepository.recall({
+      agentId: 'owner',
+      embedding,
+      embeddingSpaceKey: capturedKey,
+    });
+    expect(matches.map((match) => match.skill.id)).toEqual(['configured-768']);
+    const foreignSpace: EmbeddingSpace = {
+      provider: 'mutated-provider',
+      model: 'mutated-model',
+      dimensions: 1536,
+      revision: 'mutated-revision',
+    };
+    await expect(
+      smallRepository.recall({
+        agentId: 'owner',
+        embedding,
+        embeddingSpaceKey: embeddingSpaceKey(foreignSpace),
+      }),
+    ).rejects.toThrow('does not match the configured space');
+  });
+
+  it('rejects an invalid configured embedding width', () => {
     expect(
       () =>
         new FirestoreSkillContextRepository(store, {
           ...space,
-          dimensions: 3,
+          dimensions: 0,
         }),
     ).toThrow('embedding space');
   });

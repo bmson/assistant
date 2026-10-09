@@ -5,6 +5,11 @@ import type {
   ModelRoutingRepository,
   Records,
 } from '@assistant/persistence';
+import {
+  microsToUsd,
+  storedLedgerUsdToMicros,
+  storedTaskBudgetToMicros,
+} from '@assistant/persistence';
 import type { Transaction } from '@google-cloud/firestore';
 import { FirestoreCostRepository } from './costs.js';
 import { decodeRecord, encodeRecord, type InstallationStore } from './store.js';
@@ -32,18 +37,12 @@ export class FirestoreModelRoutingRepository implements ModelRoutingRepository {
 
   async taskBudget(taskId: string) {
     const row = await this.task(taskId);
-    if (
-      typeof row.budgetUsdLimit !== 'string' ||
-      typeof row.spentUsd !== 'string' ||
-      !row.budgetUsdLimit.trim() ||
-      !row.spentUsd.trim() ||
-      !Number.isFinite(Number(row.budgetUsdLimit)) ||
-      !Number.isFinite(Number(row.spentUsd)) ||
-      Number(row.budgetUsdLimit) < 0 ||
-      Number(row.spentUsd) < 0
-    )
-      throw new Error('Invalid task budget');
-    return { limit: row.budgetUsdLimit, spent: row.spentUsd };
+    const limitMicros = storedTaskBudgetToMicros(row.budgetUsdLimit);
+    const spentMicros = storedLedgerUsdToMicros(row.spentUsd);
+    return {
+      limit: (limitMicros / 1_000_000).toFixed(4),
+      spent: (spentMicros / 1_000_000).toFixed(6),
+    };
   }
 
   async conversationOverride(taskId: string): Promise<string | null> {
@@ -73,6 +72,7 @@ export class FirestoreModelRoutingRepository implements ModelRoutingRepository {
   }
 
   async recordCall(input: ModelCallWrite): Promise<string> {
+    const costUsd = microsToUsd(storedLedgerUsdToMicros(input.costUsd)).toFixed(6);
     const id = randomUUID();
     await this.store.db.runTransaction(async (tx) => {
       if (input.taskId) await this.task(input.taskId, tx);
@@ -80,11 +80,14 @@ export class FirestoreModelRoutingRepository implements ModelRoutingRepository {
         this.store.doc('modelCalls', id),
         encodeRecord({
           ...input,
+          costUsd,
           agentId: this.agentId,
           taskId: input.taskId ?? null,
           latencyMs: input.latencyMs ?? null,
           finishReason: input.finishReason ?? null,
           openrouterGenerationId: input.openrouterGenerationId ?? null,
+          runtimeRevision: input.runtimeRevision ?? null,
+          runtimeReleaseSha: input.runtimeReleaseSha ?? null,
           id,
           createdAt: this.store.now(),
         }),

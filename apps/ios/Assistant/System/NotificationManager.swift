@@ -39,14 +39,17 @@ final class NotificationManager: NSObject, ObservableObject, UNUserNotificationC
 
     /// Wired up by AppModel: handles Approve/Deny actions taken directly on a
     /// notification without opening the app into the Approvals sheet first.
-    var approvalDecisionHandler: (@MainActor (String, String) async -> Void)?
+    var approvalDecisionHandler: (@MainActor (String, String, String) async -> Bool)?
 
     /// Wired up by AppModel: uploads the APNs device token to the owner's
     /// server so proactive notices reach the phone when the app is closed.
-    var deviceTokenHandler: (@MainActor (String) async throws -> Void)?
+    var deviceTokenHandler: (@MainActor (String, String) async throws -> Void)?
 
-    private let center = UNUserNotificationCenter.current()
-    private let uploadedTokenKey = "assistant.push-token-uploaded"
+    private let center: UNUserNotificationCenter
+    private let defaults: UserDefaults
+    private let uploadedTokenKey = "assistant.push-token-uploaded-scope"
+    private var registrationScope: String?
+    private var latestToken: String?
 
     // These raw identifiers do not touch manager state. Marking them
     // nonisolated lets UserNotifications delegate callbacks compare them
@@ -56,7 +59,9 @@ final class NotificationManager: NSObject, ObservableObject, UNUserNotificationC
     nonisolated static let approveAction = "ASSISTANT_APPROVE"
     nonisolated static let denyAction = "ASSISTANT_DENY"
 
-    private override init() {
+    init(center: UNUserNotificationCenter = .current(), defaults: UserDefaults = .standard) {
+        self.center = center
+        self.defaults = defaults
         super.init()
         center.delegate = self
         registerCategories()
@@ -97,16 +102,35 @@ final class NotificationManager: NSObject, ObservableObject, UNUserNotificationC
     /// the next registration callback (e.g. tomorrow's launch).
     func handleDeviceToken(_ data: Data) {
         let token = data.map { String(format: "%02x", $0) }.joined()
-        guard token != UserDefaults.standard.string(forKey: uploadedTokenKey) else { return }
-        Task { @MainActor in
-            guard let handler = deviceTokenHandler else { return }
+        latestToken = token
+        uploadTokenIfNeeded()
+    }
+
+    /// Token registration belongs to a server and authenticated owner. A
+    /// token already sent to one pairing must be sent again after switching.
+    func setRegistrationScope(_ scope: String?) {
+        guard registrationScope != scope else { return }
+        registrationScope = scope
+        uploadTokenIfNeeded()
+    }
+
+    private func uploadTokenIfNeeded() {
+        guard let token = latestToken, let scope = registrationScope,
+              defaults.string(forKey: uploadedTokenKey) != Self.uploadMarker(token: token, scope: scope) else { return }
+        Task { @MainActor [weak self] in
+            guard let self, let handler = self.deviceTokenHandler else { return }
             do {
-                try await handler(token)
-                UserDefaults.standard.set(token, forKey: uploadedTokenKey)
+                try await handler(token, scope)
+                guard self.registrationScope == scope, self.latestToken == token else { return }
+                self.defaults.set(Self.uploadMarker(token: token, scope: scope), forKey: self.uploadedTokenKey)
             } catch {
-                // Retry on the next registration callback.
+                // Retry when either the token or authenticated scope is seen again.
             }
         }
+    }
+
+    private static func uploadMarker(token: String, scope: String) -> String {
+        "\(scope)|\(token)"
     }
 
     @discardableResult
@@ -223,11 +247,13 @@ final class NotificationManager: NSObject, ObservableObject, UNUserNotificationC
         // navigation entirely — the handler refreshes the model behind them.
         if response.actionIdentifier == Self.approveAction
             || response.actionIdentifier == Self.denyAction,
-            let approvalId = userInfo["approvalId"] as? String {
+            let approvalId = userInfo["approvalId"] as? String,
+            let destination = AssistantNotificationDestination(userInfo: userInfo),
+            let ownerID = destination.agentID,
+            destination.route == .approvals {
             let decision = response.actionIdentifier == Self.approveAction ? "approved" : "denied"
             if let handler = await MainActor.run(body: { self.approvalDecisionHandler }) {
-                await handler(approvalId, decision)
-                return
+                if await handler(approvalId, decision, ownerID) { return }
             }
         }
 

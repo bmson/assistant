@@ -1,9 +1,19 @@
-import type { Records } from '@assistant/persistence';
+import {
+  deriveSharedParentViews,
+  type EmbeddingSpace,
+  knowledgeAssertionEndpointView,
+  type Records,
+  snapshotEmbeddingSpace,
+} from '@assistant/persistence';
+import { graphSourceEligible } from './graph-source-eligibility.js';
+import { decodeMemoryRecord } from './memory-record.js';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
 type Entity = Records['knowledgeGraphEntities'];
 type Relation = Records['knowledgeGraphRelations'];
+type Assertion = Records['knowledgeGraphAssertions'];
+type AssertionEvidence = Records['knowledgeGraphAssertionEvidence'];
 type Memory = Records['memories'];
 type Source = Records['knowledgeGraphSources'];
 /** Firestore adds owner attribution to its installation ledger documents. */
@@ -34,6 +44,7 @@ async function byAgent<T extends { id: string; agentId: string }>(
   store: InstallationStore,
   collection: string,
   agentId: string,
+  decode: (value: unknown) => T = (value) => decodeRecord<T>(value),
 ): Promise<T[]> {
   const rows: T[] = [];
   let cursor: FirebaseFirestore.QueryDocumentSnapshot | undefined;
@@ -42,7 +53,7 @@ async function byAgent<T extends { id: string; agentId: string }>(
     if (cursor) query = query.startAfter(cursor);
     const page = await query.get();
     for (const doc of page.docs) {
-      const row = decodeRecord<T>(doc.data());
+      const row = decode(doc.data());
       if (row.agentId === agentId && typeof row.id === 'string' && documentKey(row.id) === doc.id)
         rows.push(row);
     }
@@ -94,24 +105,34 @@ function validEntity(row: Entity): boolean {
 
 function active(
   row: Relation,
+  assertion: Assertion | undefined,
   memory: Memory | undefined,
   source: Source | undefined,
   extractionVersion: number,
   now: Date,
+  space: EmbeddingSpace | undefined,
+  tombstoned: boolean,
 ): boolean {
   return (
     !!memory &&
+    (row.assertionId == null ||
+      (assertion?.agentId === row.agentId &&
+        assertion.lifecycle === 'current' &&
+        assertion.reviewStatus !== 'rejected')) &&
     !!source &&
+    !!space &&
     row.reviewStatus !== 'rejected' &&
-    memory.category === 'knowledge' &&
-    memory.quarantined === false &&
-    (memory.expiresAt === null || (memory.expiresAt instanceof Date && memory.expiresAt > now)) &&
-    memory.embedding !== null &&
-    memory.embedding !== undefined &&
-    source.status === 'ready' &&
-    source.contentHash === memory.contentHash &&
-    source.extractionVersion >= extractionVersion &&
-    row.evidenceQuote !== null
+    typeof row.evidenceQuote === 'string' &&
+    graphSourceEligible({
+      memory,
+      source,
+      agentId: row.agentId,
+      space,
+      storedSpace: memory.embeddingSpaceKey,
+      extractionVersion,
+      now,
+      tombstoned,
+    })
   );
 }
 
@@ -121,6 +142,8 @@ function relationView(
   object: Entity,
   memory: Memory,
   inRecall: boolean,
+  assertion?: Assertion,
+  evidenceCount = 0,
 ) {
   return {
     id: row.id,
@@ -143,6 +166,28 @@ function relationView(
       ownerConfirmed: memory.ownerConfirmed,
       originTrust: memory.originTrust,
     },
+    endpointViews:
+      assertion?.lifecycle === 'current'
+        ? [subject, object].flatMap((focus) => {
+            const view = knowledgeAssertionEndpointView({
+              assertionId: assertion.id,
+              semanticRevision: assertion.semanticRevision,
+              subjectEntityId: row.subjectEntityId,
+              subjectLabel: entityView(subject).label,
+              predicate: row.predicate,
+              objectEntityId: row.objectEntityId,
+              objectLabel: entityView(object).label,
+              evidenceQuote: row.evidenceQuote ?? memory.content,
+              evidenceCount,
+              reviewStatus:
+                assertion.reviewStatus === 'confirmed' || assertion.reviewStatus === 'rejected'
+                  ? assertion.reviewStatus
+                  : 'unreviewed',
+              focusEntityId: focus.id,
+            });
+            return view ? [view] : [];
+          })
+        : [],
   };
 }
 
@@ -167,17 +212,41 @@ export async function getFirestoreKnowledgeGraphOverview(
   } = {},
   now: Date = store.now(),
   batchLimit = 25,
+  embeddingSpace?: EmbeddingSpace,
 ) {
+  embeddingSpace = embeddingSpace ? snapshotEmbeddingSpace(embeddingSpace) : undefined;
   await assertConfiguredOwner(store, agentId);
   const fence = await readPrivacyErasureFence(store, agentId);
-  const [entityRows, relationRows, memoryRows] = await Promise.all([
+  const [entityRows, relationRows, memoryRows, assertionRows, evidenceRows] = await Promise.all([
     byAgent<Entity>(store, 'knowledgeGraphEntities', agentId),
     byAgent<Relation>(store, 'knowledgeGraphRelations', agentId),
-    byAgent<Memory>(store, 'memories', agentId),
+    byAgent<Memory>(store, 'memories', agentId, decodeMemoryRecord),
+    byAgent<Assertion>(store, 'knowledgeGraphAssertions', agentId),
+    byAgent<AssertionEvidence>(store, 'knowledgeGraphAssertionEvidence', agentId),
   ]);
   const sources = await sourcesFor(store, memoryRows);
+  const tombstoned = new Set<string>();
+  const hashes = [
+    ...new Set(
+      memoryRows
+        .map((row) => row.contentHash)
+        .filter((hash) => typeof hash === 'string' && hash.length > 0),
+    ),
+  ];
+  for (let offset = 0; offset < hashes.length; offset += 200) {
+    const page = hashes.slice(offset, offset + 200);
+    const docs = await store.db.getAll(...page.map((hash) => store.doc('memoryTombstones', hash)));
+    for (const [index, doc] of docs.entries()) {
+      const hash = page[index];
+      if (doc.exists && hash) tombstoned.add(hash);
+    }
+  }
   const entities = new Map(entityRows.filter(validEntity).map((row) => [row.id, row]));
   const memories = new Map(memoryRows.map((row) => [row.id, row]));
+  const assertions = new Map(assertionRows.map((row) => [row.id, row]));
+  const evidenceCounts = new Map<string, number>();
+  for (const evidence of evidenceRows)
+    evidenceCounts.set(evidence.assertionId, (evidenceCounts.get(evidence.assertionId) ?? 0) + 1);
   const joined = relationRows.filter(
     (row) =>
       entities.has(row.subjectEntityId) &&
@@ -188,14 +257,20 @@ export async function getFirestoreKnowledgeGraphOverview(
   const activeRows = joined.filter((row) =>
     active(
       row,
+      row.assertionId ? assertions.get(row.assertionId) : undefined,
       memories.get(row.sourceMemoryId),
       sources.get(row.sourceMemoryId),
       extractionVersion,
       now,
+      embeddingSpace,
+      tombstoned.has(memories.get(row.sourceMemoryId)?.contentHash ?? ''),
     ),
   );
   const activeEntityIds = new Set(
     activeRows.flatMap((row) => [row.subjectEntityId, row.objectEntityId]),
+  );
+  const activeAssertionIds = new Set(
+    activeRows.flatMap((row) => (row.assertionId ? [row.assertionId] : [])),
   );
   const sorted = [...entities.values()].sort(
     (a, b) =>
@@ -326,9 +401,41 @@ export async function getFirestoreKnowledgeGraphOverview(
         const object = entities.get(row.objectEntityId);
         const memory = memories.get(row.sourceMemoryId);
         return subject && object && memory
-          ? [relationView(row, subject, object, memory, activeIncident.has(row.id))]
+          ? [
+              relationView(
+                row,
+                subject,
+                object,
+                memory,
+                activeIncident.has(row.id),
+                row.assertionId ? assertions.get(row.assertionId) : undefined,
+                evidenceCounts.get(row.assertionId ?? '') ?? 0,
+              ),
+            ]
           : [];
       }),
+    derivedRelations: deriveSharedParentViews(
+      assertionRows
+        .filter(
+          (row) =>
+            activeAssertionIds.has(row.id) &&
+            row.lifecycle === 'current' &&
+            (row.reviewStatus === 'confirmed' || row.reviewStatus === 'unreviewed'),
+        )
+        .map((row) => ({
+          id: row.id,
+          semanticRevision: row.semanticRevision,
+          subjectEntityId: row.subjectEntityId,
+          predicate: row.predicate,
+          objectEntityId: row.objectEntityId,
+          assertion: row.assertion,
+          lifecycle: 'current' as const,
+          reviewStatus:
+            row.reviewStatus === 'confirmed' ? ('confirmed' as const) : ('unreviewed' as const),
+        })),
+      new Map(entityRows.map((row) => [row.id, entityView(row).label])),
+    ).filter((row) => row.subjectEntityId === selected?.id || row.objectEntityId === selected?.id),
+    derivedCoverage: 'complete' as const,
     selectedRelationTotal: incident.length,
     selectedActiveRelationTotal: activeIncident.size,
     duplicates,
@@ -344,12 +451,29 @@ export async function getFirestoreKnowledgeGraphReviewQueue(
   agentId: string,
   extractionVersion: number,
   now: Date = store.now(),
+  embeddingSpace?: EmbeddingSpace,
 ) {
+  embeddingSpace = embeddingSpace ? snapshotEmbeddingSpace(embeddingSpace) : undefined;
   await assertConfiguredOwner(store, agentId);
   const fence = await readPrivacyErasureFence(store, agentId);
-  const relations = await byAgent<Relation>(store, 'knowledgeGraphRelations', agentId);
+  const [relations, assertionRows, evidenceRows] = await Promise.all([
+    byAgent<Relation>(store, 'knowledgeGraphRelations', agentId),
+    byAgent<Assertion>(store, 'knowledgeGraphAssertions', agentId),
+    byAgent<AssertionEvidence>(store, 'knowledgeGraphAssertionEvidence', agentId),
+  ]);
+  const assertions = new Map(assertionRows.map((row) => [row.id, row]));
+  const evidenceCounts = new Map<string, number>();
+  for (const evidence of evidenceRows)
+    evidenceCounts.set(evidence.assertionId, (evidenceCounts.get(evidence.assertionId) ?? 0) + 1);
   const pending = relations
-    .filter((row) => row.reviewStatus === 'unreviewed' && row.createdAt instanceof Date)
+    .filter(
+      (row) =>
+        row.reviewStatus === 'unreviewed' &&
+        row.createdAt instanceof Date &&
+        (row.assertionId == null ||
+          (assertions.get(row.assertionId)?.lifecycle === 'current' &&
+            assertions.get(row.assertionId)?.reviewStatus === 'unreviewed')),
+    )
     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
     .slice(0, 50);
   const ids = [
@@ -375,7 +499,7 @@ export async function getFirestoreKnowledgeGraphReviewQueue(
         entities.set(item.id, row);
     }
     if (item.memory.exists) {
-      const row = decodeRecord<Memory>(item.memory.data());
+      const row = decodeMemoryRecord(item.memory.data());
       if (row.id === item.id && row.agentId === agentId) memories.set(item.id, row);
     }
     if (item.source.exists) {
@@ -383,10 +507,19 @@ export async function getFirestoreKnowledgeGraphReviewQueue(
       if (row.memoryId === item.id) sources.set(item.id, row);
     }
   }
+  const tombstoned = new Set<string>();
+  for (const memory of memories.values()) {
+    if (
+      typeof memory.contentHash === 'string' &&
+      (await store.doc('memoryTombstones', memory.contentHash).get()).exists
+    )
+      tombstoned.add(memory.id);
+  }
   const result = pending.flatMap((row) => {
     const subject = entities.get(row.subjectEntityId);
     const object = entities.get(row.objectEntityId);
     const memory = memories.get(row.sourceMemoryId);
+    const assertion = row.assertionId ? assertions.get(row.assertionId) : undefined;
     return subject && object && memory
       ? [
           relationView(
@@ -394,7 +527,18 @@ export async function getFirestoreKnowledgeGraphReviewQueue(
             subject,
             object,
             memory,
-            active(row, memory, sources.get(memory.id), extractionVersion, now),
+            active(
+              row,
+              assertion,
+              memory,
+              sources.get(memory.id),
+              extractionVersion,
+              now,
+              embeddingSpace,
+              tombstoned.has(memory.id),
+            ),
+            assertion,
+            evidenceCounts.get(assertion?.id ?? '') ?? 0,
           ),
         ]
       : [];
@@ -411,7 +555,9 @@ export async function getFirestoreKnowledgeGraphRelation(
   extractionVersion: number,
   relationId: string,
   now: Date = store.now(),
+  embeddingSpace?: EmbeddingSpace,
 ) {
+  embeddingSpace = embeddingSpace ? snapshotEmbeddingSpace(embeddingSpace) : undefined;
   await assertConfiguredOwner(store, agentId);
   const fence = await readPrivacyErasureFence(store, agentId);
   const relationDoc = await store.doc('knowledgeGraphRelations', relationId).get();
@@ -423,16 +569,26 @@ export async function getFirestoreKnowledgeGraphRelation(
     relation.agentId !== agentId
   )
     return null;
-  const [subjectDoc, objectDoc, memoryDoc, sourceDoc] = await store.db.getAll(
+  const [subjectDoc, objectDoc, memoryDoc, sourceDoc, assertionDoc] = await store.db.getAll(
     store.doc('knowledgeGraphEntities', relation.subjectEntityId),
     store.doc('knowledgeGraphEntities', relation.objectEntityId),
     store.doc('memories', relation.sourceMemoryId),
     store.doc('knowledgeGraphSources', relation.sourceMemoryId),
+    ...(relation.assertionId ? [store.doc('knowledgeGraphAssertions', relation.assertionId)] : []),
   );
   const subject = subjectDoc?.exists ? decodeRecord<Entity>(subjectDoc.data()) : null;
   const object = objectDoc?.exists ? decodeRecord<Entity>(objectDoc.data()) : null;
-  const memory = memoryDoc?.exists ? decodeRecord<Memory>(memoryDoc.data()) : null;
+  const memory = memoryDoc?.exists ? decodeMemoryRecord(memoryDoc.data()) : null;
   const source = sourceDoc?.exists ? decodeRecord<Source>(sourceDoc.data()) : null;
+  const assertion = assertionDoc?.exists ? decodeRecord<Assertion>(assertionDoc.data()) : undefined;
+  const assertionEvidence = relation.assertionId
+    ? await store
+        .collection('knowledgeGraphAssertionEvidence')
+        .where('agentId', '==', agentId)
+        .where('assertionId', '==', relation.assertionId)
+        .count()
+        .get()
+    : null;
   const ownedSource =
     source?.memoryId === relation.sourceMemoryId &&
     sourceDoc?.id === documentKey(relation.sourceMemoryId)
@@ -453,13 +609,28 @@ export async function getFirestoreKnowledgeGraphRelation(
     memoryDoc?.id === documentKey(memory.id) &&
     validEntity(subject) &&
     validEntity(object);
+  const tombstoned =
+    !!memory &&
+    typeof memory.contentHash === 'string' &&
+    (await store.doc('memoryTombstones', memory.contentHash).get()).exists;
   const result = valid
     ? relationView(
         relation,
         subject,
         object,
         memory,
-        active(relation, memory, ownedSource, extractionVersion, now),
+        active(
+          relation,
+          assertion,
+          memory,
+          ownedSource,
+          extractionVersion,
+          now,
+          embeddingSpace,
+          tombstoned,
+        ),
+        assertion,
+        assertionEvidence?.data().count ?? 0,
       )
     : null;
   await assertPrivacyErasureFenceUnchanged(store, agentId, fence);

@@ -1,5 +1,6 @@
 import { loadConfig } from '@assistant/config';
 import {
+  createPostgresConversationSearchRepository,
   createPostgresExecutionEvidenceRepository,
   createPostgresGeneratedCardRepository,
   createPostgresNotificationsConversationRepository,
@@ -13,6 +14,7 @@ import type {
   NotificationsConversationRepository,
   SkillContextRepository,
 } from '@assistant/persistence';
+import { finalChannelDelivery, finalChannelDeliveryReport } from '@assistant/persistence';
 import type { ModelMessage } from 'ai';
 import { assistantMessageParts, PROMPT_VERSION, persistMessage } from '../../chat.js';
 import { type Cue, stripCueTags } from '../../chat-cues.js';
@@ -55,20 +57,23 @@ import {
 import { verifyFinalOutput } from '../output-verification.js';
 import { PLANNER_VERSION } from '../planner.js';
 import { detectPersonalReadRequest, type PersonalReadRequest } from '../read-intent.js';
-import { requestChecklistSummary } from '../request-checklist.js';
+import { requestChecklistHasUnfinished, requestChecklistSummary } from '../request-checklist.js';
 import { responseCardsForFinal } from '../response-cards.js';
 import {
   type ActionEvidence,
   enforceResponseContract,
   verifiedReadResponse,
 } from '../response-contract.js';
+import { createSuggestion } from '../suggestions.js';
 import { refreshRequestChecklist } from './checklist.js';
 import { isUnattendedGoalSession, KNOWN_SENDER_REPLY_KIND } from './context-helpers.js';
+import { refreshConversationSearchEvidence } from './conversation-search-refresh.js';
 import {
   notifyOwnerAndConversation,
   notifyOwnerOfDeliveredAnswer,
   recordGoalBlocked,
 } from './notices.js';
+import { authorizesSilentCompletion } from './silent-completion.js';
 import { type ExecuteResult, type ExecutorDeps, LOST_LEASE } from './types.js';
 import { compact, latestUserText } from './util.js';
 
@@ -181,6 +186,38 @@ export async function finalizePendingResponse(
   checkpointState?: TaskState,
 ): Promise<ExecuteResult> {
   if (!(await renewTaskLease(deps.persistence?.tasks ?? deps.db, task))) return LOST_LEASE;
+  if (pending.completionKind === 'successful_silent') {
+    if (
+      !authorizesSilentCompletion(task) ||
+      pending.text.trim() ||
+      pending.terminalStatus !== 'done' ||
+      pending.outcome !== 'done'
+    ) {
+      throw new Error('Successful silent completion is not authorized for this task');
+    }
+    const state = checkpointState ?? taskState(task);
+    if (
+      state.pendingJob ||
+      state.pendingToolBatch?.calls.some((call) => call.status !== 'settled') ||
+      state.pendingApprovals.length ||
+      requestChecklistHasUnfinished(state.requestChecklist)
+    )
+      throw new Error('Successful silent completion has unfinished obligations');
+    const completed = await completeTask(deps.persistence?.tasks ?? deps.db, task, {
+      status: 'done',
+      progress: pending.progress,
+    });
+    if (!completed) return LOST_LEASE;
+    await recordQualitySignals(
+      executionEvidence(deps),
+      deps.db,
+      task,
+      state,
+      pending,
+      deps.persistence?.skills,
+    ).catch((error) => console.error('quality signal record failed', error));
+    return { outcome: 'done', detail: pending.progress.slice(0, 200) };
+  }
   const recallSources = (checkpointState ?? taskState(task)).recall ?? undefined;
   const evidence = executionEvidence(deps);
   const conversationDelivered = await persistFinalConversationOnce(
@@ -197,26 +234,147 @@ export async function finalizePendingResponse(
   );
 
   // Check cancellation/reclaim immediately before the external side effect.
-  if (deps.deliverFinal && !pending.deliveryAttempted) {
-    // Fence the provider call at-most-once. If the process disappears after
-    // provider acceptance but before task completion, the retry assumes this
-    // ambiguous attempt may have delivered instead of sending a duplicate.
+  const state = checkpointState ?? taskState(task);
+  const requiredChannel =
+    task.trust === 'owner' && task.type === 'email_triage'
+      ? 'email'
+      : task.trust === 'owner' && task.type === 'sms_turn'
+        ? 'sms'
+        : null;
+  // A legacy checkpoint with only deliveryAttempted=true is ambiguous. Do not
+  // replay it: the old marker was written before provider dispatch.
+  if (!pending.finalDelivery && pending.deliveryAttempted) {
+    pending.finalDelivery = {
+      legs: [
+        finalChannelDelivery(
+          requiredChannel ?? 'channel',
+          'unknown',
+          `${task.id}:final:legacy`,
+          'legacy-attempt-outcome-unknown',
+        ),
+      ],
+    };
+  }
+  const previous = pending.finalDelivery;
+  const shouldAttempt =
+    !previous ||
+    (!previous.legs.some((leg) => leg.status === 'unknown') &&
+      previous.legs.some((leg) => leg.status === 'rejected'));
+  if (shouldAttempt) {
+    const attempts = (pending.deliveryAttempts ?? 0) + 1;
+    const attemptId = `${task.id}:final:${attempts}`;
+    pending.deliveryAttempts = attempts;
     pending.deliveryAttempted = true;
-    const state = checkpointState ?? taskState(task);
+    // Record the in-flight provider boundary as unknown before calling it. A
+    // process crash at this point cannot be distinguished from acceptance, so
+    // recovery preserves ambiguity instead of accidentally sending twice.
+    pending.finalDelivery = finalChannelDeliveryReport(
+      previous
+        ? previous.legs.map((leg) =>
+            leg.status === 'rejected'
+              ? finalChannelDelivery(leg.channel, 'unknown', attemptId, 'provider-attempt-started')
+              : leg,
+          )
+        : [
+            finalChannelDelivery(
+              requiredChannel ?? 'channel',
+              'unknown',
+              attemptId,
+              'provider-attempt-started',
+            ),
+          ],
+    );
     state.pendingFinal = pending;
     if (!(await checkpointTask(deps.persistence?.tasks ?? deps.db, task, state))) return LOST_LEASE;
     if (!(await renewTaskLease(deps.persistence?.tasks ?? deps.db, task))) return LOST_LEASE;
-    try {
-      await deps.deliverFinal(task, pending.text);
-    } catch (error) {
-      // A definitive provider rejection is retryable. Ambiguous transport
-      // failures are normalized by channel adapters and do not throw.
-      pending.deliveryAttempted = false;
-      state.pendingFinal = pending;
-      if (!(await checkpointTask(deps.persistence?.tasks ?? deps.db, task, state)))
-        return LOST_LEASE;
-      throw error;
+
+    if (deps.deliverFinal) {
+      const inFlight = pending.finalDelivery;
+      try {
+        const result = await deps.deliverFinal(task, pending.text, attemptId, previous);
+        if (result) {
+          const returned = 'legs' in result ? result.legs : [result];
+          const legs = (inFlight?.legs ?? []).filter(
+            (leg) => !(leg.channel === 'channel' && leg.reason === 'provider-attempt-started'),
+          );
+          for (const leg of returned) {
+            const indexed = legs.findIndex((candidate) => candidate.channel === leg.channel);
+            const normalized = { ...leg, attemptId };
+            if (indexed >= 0) legs[indexed] = normalized;
+            else legs.push(normalized);
+          }
+          pending.finalDelivery = finalChannelDeliveryReport(legs);
+        }
+      } catch (error) {
+        // A thrown adapter may have failed after the provider accepted the
+        // request. Keep the attempt ambiguous and do not retry automatically.
+        console.error('final channel delivery outcome is unknown', error);
+        pending.finalDelivery = finalChannelDeliveryReport(
+          (
+            inFlight?.legs ?? [
+              finalChannelDelivery(requiredChannel ?? 'channel', 'unknown', attemptId),
+            ]
+          ).map((leg) =>
+            leg.status === 'unknown'
+              ? { ...leg, reason: 'adapter-threw-after-attempt-started' }
+              : leg,
+          ),
+        );
+      }
+    } else {
+      pending.finalDelivery = finalChannelDeliveryReport([
+        requiredChannel
+          ? finalChannelDelivery(requiredChannel, 'rejected', attemptId, 'required-channel-missing')
+          : finalChannelDelivery('dashboard', 'not_applicable', attemptId, 'dashboard-only'),
+      ]);
     }
+    if (requiredChannel) {
+      const delivery = pending.finalDelivery;
+      const requiredLeg = delivery?.legs.find((leg) => leg.channel === requiredChannel);
+      if (!requiredLeg || requiredLeg.status === 'not_applicable') {
+        pending.finalDelivery = finalChannelDeliveryReport([
+          ...(delivery?.legs.filter((leg) => leg.channel !== requiredChannel) ?? []),
+          finalChannelDelivery(
+            requiredChannel,
+            'rejected',
+            attemptId,
+            'required-channel-not-applicable',
+          ),
+        ]);
+      }
+    }
+    state.pendingFinal = pending;
+    if (!(await checkpointTask(deps.persistence?.tasks ?? deps.db, task, state))) return LOST_LEASE;
+  }
+
+  const failedLegs =
+    pending.finalDelivery?.legs.filter(
+      (leg) => leg.status === 'rejected' || leg.status === 'unknown',
+    ) ?? [];
+  if (failedLegs.length > 0) {
+    const status = failedLegs.some((leg) => leg.status === 'unknown') ? 'unknown' : 'rejected';
+    const label = [
+      ...new Set(
+        failedLegs.map((leg) =>
+          leg.channel === 'sms' ? 'SMS' : leg.channel === 'email' ? 'email' : leg.channel,
+        ),
+      ),
+    ].join(' and ');
+    pending.terminalStatus = 'needs_attention';
+    pending.outcome = 'needs_attention';
+    pending.deliveryNeedsAttention = true;
+    pending.progress =
+      status === 'unknown'
+        ? `Final ${label} delivery outcome is unknown; I did not retry it automatically.`
+        : `Final ${label} delivery was rejected or lacked a valid target; the response is saved on the dashboard.`;
+    state.pendingFinal = pending;
+    if (!(await checkpointTask(deps.persistence?.tasks ?? deps.db, task, state))) return LOST_LEASE;
+  } else if (pending.deliveryNeedsAttention) {
+    pending.terminalStatus = 'done';
+    pending.outcome = 'done';
+    pending.deliveryNeedsAttention = false;
+    state.pendingFinal = pending;
+    if (!(await checkpointTask(deps.persistence?.tasks ?? deps.db, task, state))) return LOST_LEASE;
   }
 
   // The final text is delivered first either way; only the resting state of
@@ -276,12 +434,25 @@ export async function stageFinalResponse(
   pending: PendingFinal,
 ): Promise<ExecuteResult> {
   await refreshRequestChecklist(executionEvidence(deps), task, state);
-  if (state.requestChecklist?.items.some((item) => item.status !== 'completed')) {
+  const checklist = state.requestChecklist;
+  if (checklist && requestChecklistHasUnfinished(checklist)) {
     // A partial success is not the whole request. This is also applied to
     // non-model terminal paths, and checkpointed before channel delivery.
     const draft = pending.text;
-    const clarification = pending.outcome === 'clarify' ? `${draft.trimEnd()}\n\n` : '';
-    pending.text = `${clarification}This request is not fully completed.\n\n${requestChecklistSummary(state.requestChecklist)}`;
+    // A checked answer may contain useful completed siblings of a pending
+    // outcome. Keep them; the checklist qualifies overall completion. Raw
+    // terminal receipts still use the conservative replacement below.
+    const qualifiedDraft = draft
+      .replace(
+        /(?:^|(?<=[.!?])\s+|\n)(?:all\s+(?:done|complete|completed)|(?:the\s+)?requested\s+(?:steps|outcomes)\s+are\s+(?:done|complete|completed)|done)[.!]?\s*/gi,
+        '',
+      )
+      .trim();
+    const answer =
+      qualifiedDraft && (pending.outcome === 'clarify' || pending.contractBlocked === false)
+        ? `${qualifiedDraft}\n\n`
+        : '';
+    pending.text = `${answer}This request is not fully completed.\n\n${requestChecklistSummary(checklist)}`;
     const last = window.at(-1);
     if (last?.role === 'assistant' && last.content === draft) last.content = pending.text;
     pending.progress = 'Some requested outcomes remain unverified.';
@@ -385,14 +556,27 @@ export async function stageModelFinalResponse(
   const strippedFinal = stripCueTags(pending.text);
   pending.text = strippedFinal.text;
   const evidenceRepository = executionEvidence(deps);
-  const rows = await evidenceRepository.taskEvidence({ agentId: task.agentId, taskId: task.id });
-  const priorRows = task.conversationId
+  const rawRows = await evidenceRepository.taskEvidence({ agentId: task.agentId, taskId: task.id });
+  const rawPriorRows = task.conversationId
     ? await evidenceRepository.conversationEvidence({
         agentId: task.agentId,
         conversationId: task.conversationId,
         excludeTaskId: task.id,
       })
     : [];
+  // The deterministic contract and optional verifier also consume durable
+  // evidence, so refresh conversation-search payloads there without changing
+  // the immutable tool/effect ledger. A stale read_result chunk linked to an
+  // invalid search is represented as unavailable for this verification only.
+  const safeEvidence = await refreshConversationSearchEvidence([...rawPriorRows, ...rawRows], {
+    agentId: task.agentId,
+    ...(task.conversationId ? { currentConversationId: task.conversationId } : {}),
+    repository:
+      deps.persistence?.conversationSearch ?? createPostgresConversationSearchRepository(deps.db),
+  });
+  const safeById = new Map(safeEvidence.rows.map((row) => [row.id, row]));
+  const rows = rawRows.map((row) => safeById.get(row.id) ?? row);
+  const priorRows = rawPriorRows.map((row) => safeById.get(row.id) ?? row);
   const evidence: ActionEvidence[] = [...actionEvidence(priorRows, false), ...actionEvidence(rows)];
   // owner.notify already persisted this scheduled reminder. Reuse its exact
   // delivered text so a paraphrase or "Done" cannot create a second message.
@@ -589,16 +773,27 @@ export async function stageModelFinalResponse(
   const ownerRequest = latestUserText(window) ?? '';
   const cardRequested = requestedCardIntent(ownerRequest);
   const answerCardPreferred = prefersAnswerCard(ownerRequest);
-  const trigger = task.trigger as { payload?: { refreshCardId?: unknown } } | null;
+  const trigger = task.trigger as {
+    payload?: { refreshCardId?: unknown; refreshCardRevisionId?: unknown };
+  } | null;
   const refreshCardId =
     task.trust === 'owner' && typeof trigger?.payload?.refreshCardId === 'string'
       ? trigger.payload.refreshCardId
       : undefined;
+  const refreshCardRevisionId =
+    task.trust === 'owner' && typeof trigger?.payload?.refreshCardRevisionId === 'string'
+      ? trigger.payload.refreshCardRevisionId
+      : undefined;
   const generatedCardsRepository =
     deps.persistence?.generatedCards ?? createPostgresGeneratedCardRepository(deps.db);
-  const refreshTarget = refreshCardId
+  const loadedRefreshTarget = refreshCardId
     ? await generatedCardsRepository.get(task.agentId, refreshCardId)
     : undefined;
+  const refreshTarget =
+    loadedRefreshTarget &&
+    (!refreshCardRevisionId || loadedRefreshTarget.revision.id === refreshCardRevisionId)
+      ? loadedRefreshTarget
+      : undefined;
   const provenance = cardRuntimeProvenance(refreshTarget?.revision.spec);
   const refreshEvidence = provenance ? revalidatedCardEvidence(provenance.sources, evidence) : null;
   let generatedCard: GeneratedCardPayload | undefined;
@@ -686,6 +881,7 @@ export async function stageModelFinalResponse(
             evidence: refreshCardId ? (refreshEvidence ?? []) : evidence,
             sourceText,
             refreshCardId,
+            refreshCardRevisionId,
           }).catch((error) => {
             console.error('generated card persistence failed', error);
             return undefined;
@@ -826,18 +1022,13 @@ export async function stageModelFinalResponse(
  * D9 — close the known-sender email dead-end.
  *
  * A KNOWN contact (an authenticated, non-owner sender) whose email_triage task
- * ends in a plain answer or a clarify question gets NOTHING back: deliverEmailFinal
- * auto-sends only to the owner, so the drafted reply lands solely in the dashboard
- * and the sender's thread goes silent. When the triage model itself took no
- * outbound action (no gmail.send / gmail.create_draft row), deterministically
- * enqueue an assistant-trust adhoc child that PROPOSES exactly that reply via
- * gmail.send. Because gmail.send is risk:'approval', the owner sees the approval
- * card and approves or denies — nothing is ever auto-sent to a third party. The
- * child is stamped taintedOrigin (S1): the draft derives from the sender's own
- * message, so the child runs tainted and every outward call stays gated.
+ * ends in prose gets an inert suggestion. The only path to work is the owner's
+ * acceptance of that saved proposal; acceptance creates a tainted owner task
+ * with a proposal-bound external_send intent. gmail.send still follows the
+ * ordinary exact-argument approval flow.
  *
  * Unknown senders are unchanged (dashboard only). Idempotent on externalEventId:
- * a finalization retry never enqueues a duplicate child.
+ * a finalization retry never creates a duplicate proposal.
  */
 export async function maybeEnqueueKnownSenderReply(
   deps: ExecutorDeps,
@@ -862,7 +1053,6 @@ export async function maybeEnqueueKnownSenderReply(
   // to send; leave the answer in the dashboard as before.
   if (!to || !threadId) return;
   const subject = asStr(payload.subject);
-  const rfcMessageId = asStr(payload.rfcMessageId);
 
   // If the triage model already drafted or sent a reply of its own, a reply path
   // exists — do not propose a second one. (gmail.send parks for approval before
@@ -876,48 +1066,22 @@ export async function maybeEnqueueKnownSenderReply(
     return;
 
   const replySubject = /^re:/i.test(subject) ? subject : `Re: ${subject || '(no subject)'}`;
-  const instruction = [
-    `A known contact (${to}) emailed you, and this reply has been drafted for them.`,
-    `Send it now by calling gmail.send exactly once with to: ["${to}"], subject: ${JSON.stringify(
-      replySubject,
-    )}, threadId: "${threadId}", and body set to the draft below VERBATIM.`,
-    'Do not rewrite, shorten, translate, or add to the draft, and do not call any other tool. gmail.send always requires the owner to approve the exact message before anything is sent.',
-    '',
-    'Draft to send:',
+  const proposal = [
+    `Reply to ${to} in the existing email thread.`,
+    `Recipient: ${to}`,
+    `Subject: ${replySubject}`,
+    `Thread ID: ${threadId}`,
+    'Send the following message exactly as written after the owner approves the exact email:',
     reply,
   ].join('\n');
 
-  await enqueueTask(deps.persistence?.tasks ?? deps.db, {
-    event: {
-      source: 'internal',
-      externalEventId: `known-sender-reply:${task.id}`,
-      agentId: task.agentId,
-      conversationId,
-      trust: 'assistant',
-      payload: {
-        kind: KNOWN_SENDER_REPLY_KIND,
-        to,
-        threadId,
-        subject: replySubject,
-        rfcMessageId,
-        draft: reply,
-        instruction,
-        // External provenance carried forward so the child runs tainted and any
-        // outward call it makes stays approval-gated.
-        taintedOrigin: true,
-      },
-    },
-    type: 'adhoc',
-    parentTaskId: task.id,
-    // Fixed next action: send the drafted reply. A pre-set plan skips planning so
-    // the executor forces the tool call on step 0 (mustAct) rather than leaving
-    // it to the planner.
-    plan: {
-      action: 'workflow',
-      reasoning: 'Propose the drafted reply to the known sender for owner approval',
-      steps: ['Send the drafted reply via gmail.send (owner-approved)'],
-      missingInfo: [],
-    },
-    maxSteps: 4,
+  await createSuggestion(deps.persistence?.suggestions ?? deps.db, {
+    agentId: task.agentId,
+    conversationId,
+    summary: `Review a drafted reply to ${to}`,
+    proposedAction: proposal,
+    sourceRef: `known-sender-reply:${task.id}`,
+    origin: KNOWN_SENDER_REPLY_KIND,
+    ttlDays: 7,
   });
 }

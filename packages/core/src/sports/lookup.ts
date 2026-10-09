@@ -29,6 +29,18 @@ export interface SportsLookupResult {
   games: ScoreboardGame[];
   /** Why these games: today's slate, or a team's last and next when it has none today. */
   selection?: 'today' | 'last-and-next';
+  requestedDate?: string;
+  explicitDate?: boolean;
+  coverage?: {
+    complete: boolean;
+    rosterLeagues: string[];
+    unavailableRosters: string[];
+    scoreboardLeagues: string[];
+    unavailableScoreboards: string[];
+    omittedCandidates: number;
+    omittedGames: number;
+  };
+  evidenceNote?: string;
   candidates?: SportsCandidate[];
   /** No covered team or league matched; a web search is the fallback. */
   unsupported?: boolean;
@@ -120,7 +132,29 @@ export async function lookupScores(input: {
 }): Promise<SportsLookupResult> {
   const now = input.now ?? new Date();
   const date = input.date ?? ownerToday(input.timeZone, now);
-  const base = { timeZone: input.timeZone, date, fetchedAt: now.toISOString() };
+  if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+    !Number.isFinite(Date.parse(`${date}T00:00:00Z`)) ||
+    new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) !== date
+  )
+    throw new Error('Sports date must be a valid civil date.');
+  const coverage = {
+    complete: true,
+    rosterLeagues: [] as string[],
+    unavailableRosters: [] as string[],
+    scoreboardLeagues: [] as string[],
+    unavailableScoreboards: [] as string[],
+    omittedCandidates: 0,
+    omittedGames: 0,
+  };
+  const base = {
+    timeZone: input.timeZone,
+    date,
+    requestedDate: date,
+    explicitDate: Boolean(input.date),
+    fetchedAt: now.toISOString(),
+    coverage,
+  };
   const shared = {
     timeZone: input.timeZone,
     fetchImpl: input.fetchImpl,
@@ -132,8 +166,21 @@ export async function lookupScores(input: {
 
   if (!team) {
     if (!named) return { ...base, games: [], error: 'Name a team or a league.' };
-    const games = await fetchScoreboard({ league: named, date, ...shared });
-    return { ...base, games: games.slice(0, MAX_GAMES), selection: 'today' };
+    try {
+      const games = await fetchScoreboard({ league: named, date, ...shared });
+      coverage.scoreboardLeagues.push(named.key);
+      coverage.omittedGames = Math.max(0, games.length - MAX_GAMES);
+      coverage.complete = !coverage.omittedGames;
+      return { ...base, games: games.slice(0, MAX_GAMES), selection: 'today' };
+    } catch {
+      coverage.complete = false;
+      coverage.unavailableScoreboards.push(named.key);
+      return {
+        ...base,
+        games: [],
+        error: 'The requested date scoreboard is unavailable; no scoped negative is established.',
+      };
+    }
   }
 
   const leagues: readonly League[] = named ? [named] : LEAGUES;
@@ -142,23 +189,42 @@ export async function lookupScores(input: {
       fetchTeams({ league, fetchImpl: input.fetchImpl, signal: input.signal }),
     ),
   );
-  const matches = rosters
+  rosters.forEach((roster, index) => {
+    const key = leagues[index]?.key ?? 'unknown';
+    (roster.status === 'fulfilled' ? coverage.rosterLeagues : coverage.unavailableRosters).push(
+      key,
+    );
+  });
+  coverage.complete = coverage.unavailableRosters.length === 0;
+  const allMatches = rosters
     .flatMap((roster) => (roster.status === 'fulfilled' ? roster.value : []))
-    .filter((candidate) => teamMatches(candidate, team))
-    .slice(0, MAX_CANDIDATES);
+    .filter((candidate) => teamMatches(candidate, team));
+  const matches = allMatches.slice(0, MAX_CANDIDATES);
+  coverage.omittedCandidates = allMatches.length - matches.length;
+  if (coverage.omittedCandidates) coverage.complete = false;
   if (!matches.length) {
     return {
       ...base,
       games: [],
-      unsupported: true,
-      error: `No team in the covered leagues matched "${team.slice(0, 60)}".`,
+      unsupported: coverage.complete,
+      error: coverage.complete
+        ? `No team in the covered leagues matched "${team.slice(0, 60)}".`
+        : 'Some team rosters are unavailable; an unsupported team is not established.',
     };
   }
 
   const todays = await Promise.all(
     matches.map(async (match) => {
       const league = leagueByKey(match.league) as League;
-      const games = await fetchScoreboard({ league, date, ...shared }).catch(() => []);
+      let games: ScoreboardGame[];
+      try {
+        games = await fetchScoreboard({ league, date, ...shared });
+        coverage.scoreboardLeagues.push(league.key);
+      } catch {
+        coverage.unavailableScoreboards.push(league.key);
+        coverage.complete = false;
+        return [];
+      }
       return games.filter((game) => involves(game, match));
     }),
   );
@@ -177,6 +243,15 @@ export async function lookupScores(input: {
     };
   }
 
+  if (input.date || coverage.unavailableScoreboards.length)
+    return {
+      ...base,
+      games: [],
+      selection: 'today',
+      evidenceNote: coverage.unavailableScoreboards.length
+        ? 'The requested date scoreboard was unavailable. No unrelated current-season result was substituted.'
+        : 'No matching game was found in the inspected requested-date scoreboard. Current last/next fixtures were not substituted for that date.',
+    };
   const [match] = matches as [Team];
   const league = leagueByKey(match.league) as League;
   const season = await fetchTeamSchedule({ league, teamId: match.id, ...shared });
@@ -185,5 +260,10 @@ export async function lookupScores(input: {
     (game) => game.state === 'pre' && Date.parse(game.startsAt) > now.getTime(),
   );
   const games = [last, next].filter((game): game is ScoreboardGame => !!game);
-  return { ...base, games, selection: 'last-and-next' };
+  return {
+    ...base,
+    games,
+    selection: 'last-and-next',
+    evidenceNote: 'These are current-season last/next fixtures, not games on the requested day.',
+  };
 }

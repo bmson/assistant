@@ -159,19 +159,28 @@ export interface ConnectedModelProviderOptions {
  * Providers built from the owner's stored connections, falling back to the
  * environment. The list is re-read at most once per `ttlMs`, so a key saved in
  * Settings reaches the agent within seconds, without a redeploy. A failed
- * re-read keeps the last good list: a transient database error must not take
- * every model call down with it.
+ * re-read cannot extend the authority of the last policy snapshot; cold or
+ * expired snapshots fail closed until storage recovers.
  */
 export function createConnectedModelProviders(
   config: ProviderConfig,
   loadConnections: () => Promise<ModelConnectionRecord[]>,
   options: ConnectedModelProviderOptions = {},
 ): ModelProviderSet {
-  const ttlMs = options.ttlMs ?? 30_000;
+  const configuredTtl = options.ttlMs ?? 30_000;
+  const ttlMs = Number.isFinite(configuredTtl)
+    ? Math.max(1, Math.min(30_000, configuredTtl))
+    : 30_000;
   const now = options.now ?? Date.now;
   let connections = new Map<string, ModelConnectionRecord>();
   let loadedAt: number | undefined;
   let inflight: Promise<void> | undefined;
+  let retryAfter = 0;
+  const fresh = () =>
+    loadedAt !== undefined &&
+    Number.isFinite(now()) &&
+    now() >= loadedAt &&
+    now() - loadedAt < ttlMs;
   // Adapters are cheap but not free (Vertex resolves ADC lazily per instance);
   // reuse one per connection version.
   const built = new Map<string, { version: string; provider: ModelProvider }>();
@@ -181,24 +190,32 @@ export function createConnectedModelProviders(
     try {
       const rows = await loadConnections();
       connections = new Map(rows.map((row) => [row.id, row]));
-      loadedAt = now();
-    } catch (error) {
-      console.error('model connections could not be loaded; keeping the previous list', error);
-      // Retry sooner than a full TTL, but not on every call.
-      loadedAt = now() - ttlMs + Math.min(ttlMs, 5_000);
+      const loadedTime = now();
+      if (!Number.isFinite(loadedTime)) throw new Error('Invalid connection policy clock');
+      loadedAt = loadedTime;
+      retryAfter = 0;
+    } catch {
+      retryAfter = now() + Math.min(ttlMs, 5_000);
+      throw new Error('Model connection policy is unavailable; provider calls are paused');
     }
   };
 
   return {
     kind: 'model-provider-set',
     async refresh() {
-      if (loadedAt !== undefined && now() - loadedAt < ttlMs) return;
+      if (fresh()) return;
+      if (now() < retryAfter)
+        throw new Error('Model connection policy is unavailable; provider calls are paused');
       inflight ??= load().finally(() => {
         inflight = undefined;
       });
       await inflight;
     },
     resolve(modelId) {
+      if (!fresh())
+        throw new Error(
+          'Model connection policy is unavailable or expired; refresh before provider calls',
+        );
       const connectionId = connectionIdForModel(modelId);
       const stored = connections.get(connectionId);
       let provider: ModelProvider | null;

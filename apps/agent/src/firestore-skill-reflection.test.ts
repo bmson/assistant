@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { type ExecutorDeps, executeTask } from '@assistant/core';
 import type { Db } from '@assistant/db';
 import { createFirestoreExecutionPersistence } from '@assistant/firestore';
-import type { ExecutionPersistence } from '@assistant/persistence';
+import { type ExecutionPersistence, embeddingSpaceIdentityKey } from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { encodeRecord, type InstallationStore } from '../../../packages/firestore/src/store.js';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
@@ -47,6 +47,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         );
       persistence = createFirestoreExecutionPersistence(store, agentId, SPACE);
       const router = {
+        async embeddingSpace() {
+          return SPACE;
+        },
+        async embeddingSpaceKey() {
+          return embeddingSpaceIdentityKey(SPACE);
+        },
         async object(_role: string, input: { prompt: string }) {
           prompts.push(input.prompt);
           const goal = /^Goal: (.*)$/m.exec(input.prompt)?.[1] ?? '';
@@ -190,9 +196,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       });
       expect(typeof saved[0]?.embeddingSpace).toBe('string');
 
-      // The ferry task already taught its skill, so the next night skips it.
+      // The durable task receipt makes the next night skip it, even when a
+      // reflection was recorded without creating a skill.
       prompts = [];
-      expect(await runJob()).toBe('skill reflection: 0 skill(s) drafted from 1 reviewed task(s)');
+      expect(await runJob()).toBe('skill reflection: 0 skill(s) drafted from 0 reviewed task(s)');
       expect(prompts.some((prompt) => prompt.includes('Book the ferry'))).toBe(false);
     });
 

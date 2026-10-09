@@ -5,9 +5,17 @@ import type {
   GeneratedCardRepository,
   Records,
 } from '@assistant/persistence';
+import { emailObserverPreparedCardMatches } from '@assistant/persistence';
 import { and, desc, eq, gte, inArray, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
-import { conversations, generatedCardRevisions, generatedCards, tasks } from './schema.js';
+import { lockPostgresPrivacyObservationFence } from './privacy-erasure-repository.js';
+import {
+  conversations,
+  emailObserverWork,
+  generatedCardRevisions,
+  generatedCards,
+  tasks,
+} from './schema.js';
 
 function validateInput(input: GeneratedCardPersistInput): void {
   if (
@@ -52,6 +60,37 @@ export function createPostgresGeneratedCardRepository(db: Db): GeneratedCardRepo
     async createOrRevise(input): Promise<GeneratedCardPersistResult> {
       validateInput(input);
       return db.transaction(async (tx) => {
+        if (input.emailObserverEffectFence) {
+          const fence = input.emailObserverEffectFence;
+          if (fence.agentId !== input.agentId)
+            throw new Error('Email observer card effect owner mismatch');
+          const txDb = tx as unknown as Db;
+          const privacyGeneration = await lockPostgresPrivacyObservationFence(txDb, fence.agentId);
+          if (privacyGeneration !== fence.expectedPrivacyGeneration)
+            throw new Error('Email observer card effect privacy generation changed');
+          const [work] = await tx
+            .select()
+            .from(emailObserverWork)
+            .where(
+              and(eq(emailObserverWork.id, fence.id), eq(emailObserverWork.agentId, fence.agentId)),
+            )
+            .for('update')
+            .limit(1);
+          const effectNow = await databaseNow(txDb);
+          if (
+            !work ||
+            work.agentId !== fence.agentId ||
+            work.claimToken !== fence.claimToken ||
+            work.claimGeneration !== fence.claimGeneration ||
+            work.privacyGeneration !== fence.expectedPrivacyGeneration ||
+            work.status !== 'prepared' ||
+            !work.leaseExpiresAt ||
+            work.leaseExpiresAt <= effectNow ||
+            work.observerKey !== 'google.email-card' ||
+            !emailObserverPreparedCardMatches(work.preparedResult, input)
+          )
+            throw new Error('Email observer card effect claim is no longer current');
+        }
         if (input.conversationId) {
           const [conversation] = await tx
             .select({ id: conversations.id })
@@ -80,8 +119,41 @@ export function createPostgresGeneratedCardRepository(db: Db): GeneratedCardRepo
           .for('update');
 
         const now = await databaseNow(tx as unknown as Db);
+        if (input.emailObserverEffectFence) {
+          const fence = input.emailObserverEffectFence;
+          const [work] = await tx
+            .select({
+              status: emailObserverWork.status,
+              claimToken: emailObserverWork.claimToken,
+              claimGeneration: emailObserverWork.claimGeneration,
+              leaseExpiresAt: emailObserverWork.leaseExpiresAt,
+              privacyGeneration: emailObserverWork.privacyGeneration,
+              observerKey: emailObserverWork.observerKey,
+              preparedResult: emailObserverWork.preparedResult,
+            })
+            .from(emailObserverWork)
+            .where(
+              and(eq(emailObserverWork.id, fence.id), eq(emailObserverWork.agentId, fence.agentId)),
+            )
+            .for('update')
+            .limit(1);
+          if (
+            !work ||
+            work.status !== 'prepared' ||
+            work.claimToken !== fence.claimToken ||
+            work.claimGeneration !== fence.claimGeneration ||
+            work.privacyGeneration !== fence.expectedPrivacyGeneration ||
+            !work.leaseExpiresAt ||
+            work.leaseExpiresAt <= now ||
+            work.observerKey !== 'google.email-card' ||
+            !emailObserverPreparedCardMatches(work.preparedResult, input)
+          )
+            throw new Error('Email observer card effect claim expired before card write');
+        }
         if (input.targetCardId && (card?.status !== 'active' || card.dismissedAt))
           throw new Error('Generated card refresh target is unavailable');
+        if (input.targetRevisionId && card?.currentRevisionId !== input.targetRevisionId)
+          throw new Error('Generated card refresh revision is stale');
         if (!card) {
           const [sameId] = await tx
             .select({ id: generatedCards.id })

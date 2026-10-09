@@ -3,6 +3,7 @@ import { getMemoryHealth } from '@assistant/core/memory/health';
 import { removeOrphanedKnowledgeGraphEntities } from '@assistant/core/memory/knowledge-graph';
 import {
   type Db,
+  knowledgeGraphAssertions,
   knowledgeGraphEntities,
   knowledgeGraphRelations,
   knowledgeGraphSources,
@@ -217,12 +218,34 @@ export async function getKnowledgeMapSnapshot(
         evidenceQuote: knowledgeGraphRelations.evidenceQuote,
         validFrom: knowledgeGraphRelations.validFrom,
         validUntil: knowledgeGraphRelations.validUntil,
+        assertionContext: {
+          id: knowledgeGraphAssertions.id,
+          semanticRevision: knowledgeGraphAssertions.semanticRevision,
+          lifecycle: knowledgeGraphAssertions.lifecycle,
+          reviewStatus: knowledgeGraphAssertions.reviewStatus,
+          subjectEntityId: knowledgeGraphAssertions.subjectEntityId,
+          predicate: knowledgeGraphAssertions.predicate,
+          objectEntityId: knowledgeGraphAssertions.objectEntityId,
+          evidenceCount: sql<number>`(
+            SELECT count(*)::int
+            FROM knowledge_graph_assertion_evidence AS evidence
+            WHERE evidence.agent_id = ${agent.id}
+              AND evidence.assertion_id = ${knowledgeGraphAssertions.id}
+          )`,
+        },
       })
       .from(knowledgeGraphRelations)
       .innerJoin(subject, eq(subject.id, knowledgeGraphRelations.subjectEntityId))
       .innerJoin(object, eq(object.id, knowledgeGraphRelations.objectEntityId))
       .innerJoin(memories, eq(memories.id, knowledgeGraphRelations.sourceMemoryId))
       .innerJoin(knowledgeGraphSources, eq(knowledgeGraphSources.memoryId, memories.id))
+      .leftJoin(
+        knowledgeGraphAssertions,
+        and(
+          eq(knowledgeGraphAssertions.id, knowledgeGraphRelations.assertionId),
+          eq(knowledgeGraphAssertions.agentId, agent.id),
+        ),
+      )
       .where(where);
   const [rows, [totalRow]] = await Promise.all([
     input.completeOverview

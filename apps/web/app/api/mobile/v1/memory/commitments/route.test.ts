@@ -3,18 +3,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   auth: vi.fn(),
   list: vi.fn(),
+  listClosed: vi.fn(),
   resolve: vi.fn(),
   snooze: vi.fn(),
   dismiss: vi.fn(),
   correct: vi.fn(),
+  reopen: vi.fn(),
 }));
 vi.mock('@/lib/server', () => ({
   getApplication: () => ({
     listCommitments: mocks.list,
+    listClosedCommitments: mocks.listClosed,
     resolveCommitment: mocks.resolve,
     snoozeCommitment: mocks.snooze,
     dismissCommitment: mocks.dismiss,
     correctCommitment: mocks.correct,
+    reopenCommitment: mocks.reopen,
   }),
 }));
 vi.mock('@/mobile-auth', () => ({
@@ -39,11 +43,13 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.auth.mockResolvedValue(true);
   mocks.list.mockResolvedValue([]);
+  mocks.listClosed.mockResolvedValue([]);
   // Each mutation reports whether it actually changed a row.
   mocks.resolve.mockResolvedValue(true);
   mocks.snooze.mockResolvedValue(true);
   mocks.dismiss.mockResolvedValue(true);
   mocks.correct.mockResolvedValue(true);
+  mocks.reopen.mockResolvedValue({ commitmentId: 'new-id', replay: false });
 });
 
 describe('native open loops', () => {
@@ -131,6 +137,32 @@ describe('native open loops', () => {
     const unknown = await post({ action: 'bogus', id: 'c1' });
     expect(unknown.status).toBe(400);
     expect(((await unknown.json()) as { error: string }).error).toContain('snooze');
+  });
+
+  it('reopens only with a fresh timestamp and UUID idempotency key', async () => {
+    const operationId = '2c4a4e77-5887-4c5f-9a7d-839b6ee0844e';
+    const expectedUpdatedAt = '2026-10-07T12:00:00.000Z';
+    const response = await post({
+      action: 'reopen',
+      id: 'closed-id',
+      expectedUpdatedAt,
+      operationId,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, commitmentId: 'new-id', replay: false });
+    expect(mocks.reopen).toHaveBeenCalledWith(
+      'closed-id',
+      new Date(expectedUpdatedAt),
+      operationId,
+    );
+    expect(
+      (await post({ action: 'reopen', id: 'closed-id', expectedUpdatedAt, operationId: 'bad' }))
+        .status,
+    ).toBe(400);
+    mocks.reopen.mockResolvedValue(null);
+    expect(
+      (await post({ action: 'reopen', id: 'closed-id', expectedUpdatedAt, operationId })).status,
+    ).toBe(409);
   });
 
   /**

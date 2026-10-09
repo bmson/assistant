@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   createDb,
+  createPostgresDocumentProcessorRepository,
   type Db,
   documentChunks,
   documents,
@@ -9,8 +10,9 @@ import {
   tasks,
 } from '@assistant/db';
 import { and, eq, like, sql } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { getAgent } from '../chat.js';
+import { listDocuments } from './document-catalog.js';
 import {
   type DocumentJobLaunchInput,
   type DocumentProcessorLauncher,
@@ -171,14 +173,88 @@ describe('document processor — sweep + callback', () => {
       );
     expect(extractTask).toBeTruthy();
 
-    // Replaying the same token after settle is rejected (no pending run).
+    // Identical callback replay returns its durable receipt without creating another task.
     const replay = await recordDocumentProcessorResult(db, {
       documentId: id,
       token,
       result: { ok: true, kind: 'text', chars: 1200 },
     });
-    expect(replay.ok).toBe(false);
-    if (!replay.ok) expect(replay.status).toBe(409);
+    expect(replay).toEqual(outcome);
+    const all = await db
+      .select()
+      .from(tasks)
+      .where(sql`${tasks.trigger}->'payload'->>'documentId' = ${id}`);
+    expect(all).toHaveLength(1);
+  });
+
+  it.each(['cell-addresses', 'ordered-slides'] as const)(
+    'retains %s metadata in the catalog and rejects changed callback receipts',
+    async (representation) => {
+      if (!dbUp) throw new Error('Requires isolated PostgreSQL fixture');
+      const id = await makeDoc(`XTESTPROC structure ${representation}`);
+      const { launcher, launches } = fakeLauncher();
+      await runDocumentProcessing(
+        { db, documentProcessor: { launcher, callbackUrl: 'http://cb/document' } },
+        sweepTask({ documentId: id }),
+      );
+      const token = launches[0]?.callbackToken ?? '';
+      const result = {
+        ok: true,
+        kind: 'text',
+        chars: 23,
+        structure: { complete: true, representation },
+      };
+      const outcome = await recordDocumentProcessorResult(db, { documentId: id, token, result });
+      expect(outcome.ok).toBe(true);
+      const metadata = {
+        version: 1,
+        source: 'processor',
+        chars: 23,
+        structure: { complete: true, representation },
+      };
+      expect(
+        (await listDocuments(db, agentId)).find((row) => row.id === id)?.extractionMetadata,
+      ).toEqual(metadata);
+      expect(await recordDocumentProcessorResult(db, { documentId: id, token, result })).toEqual(
+        outcome,
+      );
+      const different = representation === 'cell-addresses' ? 'ordered-slides' : 'cell-addresses';
+      expect(
+        await recordDocumentProcessorResult(db, {
+          documentId: id,
+          token,
+          result: { ...result, structure: { complete: true, representation: different } },
+        }),
+      ).toMatchObject({ ok: false, status: 409 });
+    },
+  );
+
+  it('rejects malformed structural coverage before consuming the launch token', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const id = await makeDoc('XTESTPROC invalid coverage');
+    const { launcher, launches } = fakeLauncher();
+    await runDocumentProcessing(
+      { db, documentProcessor: { launcher, callbackUrl: 'http://cb/document' } },
+      sweepTask({ documentId: id }),
+    );
+    const token = launches[0]?.callbackToken ?? '';
+    expect(
+      await recordDocumentProcessorResult(db, {
+        documentId: id,
+        token,
+        result: { ok: true, structure: { complete: true, representation: 'guessed' } },
+      }),
+    ).toMatchObject({ ok: false, status: 400 });
+    expect(
+      (await db.select().from(documents).where(eq(documents.id, id)))[0]?.processorTokenHash,
+    ).toBeTruthy();
+    expect(
+      await recordDocumentProcessorResult(db, {
+        documentId: id,
+        token,
+        result: { ok: true, chars: 0 },
+      }),
+    ).toMatchObject({ ok: true });
   });
 
   it('rejects a forged token before settle (403) and an unknown document (404)', async (ctx) => {
@@ -229,5 +305,121 @@ describe('document processor — sweep + callback', () => {
     expect(doc?.status).toBe('unsupported');
     expect(doc?.processorTokenHash).toBeNull();
     expect(doc?.error).toMatch(/no parser/);
+  });
+  it('does not retire a fresh final allowed attempt and never reprocesses accepted text', async () => {
+    const id = await makeDoc('XTESTPROC final allowed');
+    await db.update(documents).set({ processorAttempts: 2 }).where(eq(documents.id, id));
+    const { launcher, launches } = fakeLauncher();
+    const deps = { db, documentProcessor: { launcher, callbackUrl: 'http://cb/document' } };
+    await runDocumentProcessing(deps, sweepTask({ documentId: id }));
+    await runDocumentProcessing(deps, sweepTask({ documentId: id }));
+    expect(launches).toHaveLength(1);
+    expect((await db.select().from(documents).where(eq(documents.id, id)))[0]).toMatchObject({
+      status: 'pending',
+      processorAttempts: 3,
+    });
+    expect(
+      (
+        await recordDocumentProcessorResult(db, {
+          documentId: id,
+          token: launches[0]?.callbackToken ?? '',
+          result: { ok: true, kind: 'text' },
+        })
+      ).ok,
+    ).toBe(true);
+    await runDocumentProcessing(
+      { ...deps, now: () => new Date(Date.now() + 86_400_000) },
+      sweepTask({ documentId: id }),
+    );
+    expect(launches).toHaveLength(1);
+  });
+
+  it('leaves a newer claim intact when an older launch failure releases late', async () => {
+    const id = await makeDoc('XTESTPROC stale release');
+    const repository = createPostgresDocumentProcessorRepository(db);
+    const now = new Date();
+    expect(
+      await repository.claim(id, { tokenHash: 'first', now, staleBefore: now, maxAttempts: 3 }),
+    ).toBe(true);
+    expect(
+      await repository.claim(id, {
+        tokenHash: 'newer',
+        now: new Date(now.getTime() + 16 * 60_000),
+        staleBefore: new Date(now.getTime() + 60_000),
+        maxAttempts: 3,
+      }),
+    ).toBe(true);
+    await repository.release(id, new Date(), 'first');
+    expect(
+      (await db.select().from(documents).where(eq(documents.id, id)))[0]?.processorTokenHash,
+    ).toBe('newer');
+  });
+
+  it('rolls back the prepared extraction task when callback settlement fails, then recovers once', async () => {
+    const id = await makeDoc('XTESTPROC rollback callback');
+    const { launcher, launches } = fakeLauncher();
+    await runDocumentProcessing(
+      { db, documentProcessor: { launcher, callbackUrl: 'http://cb/document' } },
+      sweepTask({ documentId: id }),
+    );
+    const input = {
+      documentId: id,
+      token: launches[0]?.callbackToken ?? '',
+      result: { ok: true, kind: 'text', chars: 12 },
+    };
+    const original = db.transaction.bind(db);
+    const fault = vi.spyOn(db, 'transaction').mockImplementation((callback, config) =>
+      original(
+        async (tx) =>
+          callback(
+            new Proxy(tx, {
+              get(target, key) {
+                if (key === 'update')
+                  return (table: unknown) => {
+                    const builder = Reflect.apply(target.update, target, [table]);
+                    if (table !== documents) return builder;
+                    return new Proxy(builder, {
+                      get(update, property) {
+                        if (property === 'set')
+                          return (values: Record<string, unknown>) => {
+                            if (values.processedTextPath)
+                              throw new Error('callback commit interrupted');
+                            return Reflect.apply(update.set, update, [values]);
+                          };
+                        const value = Reflect.get(update, property, update);
+                        return typeof value === 'function' ? value.bind(update) : value;
+                      },
+                    });
+                  };
+                const value = Reflect.get(target, key, target);
+                return typeof value === 'function' ? value.bind(target) : value;
+              },
+            }),
+          ),
+        config,
+      ),
+    );
+    try {
+      await expect(recordDocumentProcessorResult(db, input)).rejects.toThrow(
+        'callback commit interrupted',
+      );
+    } finally {
+      fault.mockRestore();
+    }
+    expect(
+      (await db.select().from(documents).where(eq(documents.id, id)))[0]?.processedTextPath,
+    ).toBeNull();
+    expect(
+      await db.select().from(tasks).where(sql`${tasks.trigger}->'payload'->>'documentId' = ${id}`),
+    ).toHaveLength(0);
+    const settled = await recordDocumentProcessorResult(db, input);
+    expect(settled.ok).toBe(true);
+    expect(await recordDocumentProcessorResult(db, input)).toEqual(settled);
+    expect(
+      await db.select().from(tasks).where(sql`${tasks.trigger}->'payload'->>'documentId' = ${id}`),
+    ).toHaveLength(1);
+    expect(
+      await recordDocumentProcessorResult(db, { ...input, result: { ...input.result, chars: 13 } }),
+    ).toMatchObject({ ok: false, status: 409 });
   });
 });

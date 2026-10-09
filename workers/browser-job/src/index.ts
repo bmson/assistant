@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -104,6 +105,9 @@ async function run(input: JobInput): Promise<JobResult> {
       }
       const page = context.pages()[0] ?? (await context.newPage());
       stepResult = await runSteps(page, input.plan.steps, {
+        executionId: createHash('sha256')
+          .update(JSON.stringify([input.taskId, input.callbackToken]))
+          .digest('hex'),
         taskId: input.taskId,
         workspace: stores.workspace,
       });

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  CostAttemptMetadata,
   CostEventInput,
   CostRepository,
   ModelCallWrite,
@@ -239,6 +240,11 @@ export class EvaluationLedger implements CostRepository {
   readonly kind = 'cost-repository' as const;
   readonly entries: { usd: number; basis: string }[] = [];
   private holds = new Map<string, number>();
+  private attempts = new Map<string, CostAttemptMetadata>();
+  readonly unknownLiabilities = new Map<
+    string,
+    { reason: string; providerReceipt?: { requestId?: string; endpoint?: string } }
+  >();
   constructor(readonly limitUsd: number) {
     if (!Number.isFinite(limitUsd) || limitUsd <= 0) throw new Error('Invalid evaluation budget');
   }
@@ -270,6 +276,23 @@ export class EvaluationLedger implements CostRepository {
     this.holds.set(reservationId, input.estimatedUsd);
     return { ok: true as const, reservationId };
   }
+  async beginAttempt(reservationId: string, metadata: CostAttemptMetadata) {
+    if (!this.holds.has(reservationId) || this.attempts.has(reservationId)) return false;
+    this.attempts.set(reservationId, structuredClone(metadata));
+    return true;
+  }
+  async markAttemptUnknown(
+    reservationId: string,
+    reason: string,
+    providerReceipt?: { requestId?: string; endpoint?: string },
+  ) {
+    if (!this.holds.has(reservationId) || !this.attempts.has(reservationId))
+      throw new Error('Evaluation attempt is not open');
+    this.unknownLiabilities.set(reservationId, {
+      reason: reason.slice(0, 500),
+      ...(providerReceipt ? { providerReceipt: structuredClone(providerReceipt) } : {}),
+    });
+  }
   async record(input: CostEventInput) {
     if (!Number.isFinite(input.usd) || input.usd < 0) throw new Error('Invalid evaluation cost');
     this.entries.push({ usd: input.usd, basis: input.evidence?.basis ?? 'unknown' });
@@ -277,12 +300,20 @@ export class EvaluationLedger implements CostRepository {
   async reconcile(id: string, actual: ReservationActual) {
     if (!Number.isFinite(actual.usd) || actual.usd < 0) throw new Error('Invalid evaluation cost');
     if (!this.holds.delete(id)) throw new Error('Evaluation reservation already settled');
+    this.attempts.delete(id);
+    this.unknownLiabilities.delete(id);
     this.entries.push({ usd: actual.usd, basis: actual.evidence?.basis ?? 'unknown' });
   }
   async release(id: string) {
+    // An ambiguous provider outcome keeps its original liability until an
+    // actual usage receipt reconciles it. A generic release is not proof of
+    // zero usage.
+    if (this.unknownLiabilities.has(id)) return;
     const amount = this.holds.get(id);
     if (amount === undefined) return;
     this.holds.delete(id);
+    this.attempts.delete(id);
+    this.unknownLiabilities.delete(id);
     this.entries.push({ usd: amount, basis: 'failed_request_ceiling' });
   }
   async releaseStale() {

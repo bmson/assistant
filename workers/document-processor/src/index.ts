@@ -37,7 +37,13 @@ async function run(input: JobInput): Promise<JobResult> {
   // Even an empty parse is a success — the extract pipeline marks it ready/empty.
   const text = outcome.text.trim();
   await workspace.put(input.outputPath, Buffer.from(text, 'utf8'), 'text/plain; charset=utf-8');
-  return { ok: true, kind: 'text', chars: text.length, detail: outcome.detail };
+  return {
+    ok: true,
+    kind: 'text',
+    chars: text.length,
+    detail: outcome.detail,
+    structure: outcome.structure,
+  };
 }
 
 async function postCallback(input: JobInput, result: JobResult): Promise<void> {

@@ -1,13 +1,20 @@
-import { createHash, randomUUID } from 'node:crypto';
-import type {
-  KnowledgeGraphProjectionEntity,
-  KnowledgeGraphProjectionRelation,
-  KnowledgeGraphSyncClaim,
-  KnowledgeGraphSyncRepository,
-  KnowledgeGraphSyncSource,
-  Records,
+import { randomUUID } from 'node:crypto';
+import {
+  boundGraphRelationToSource,
+  canonicalizeKnowledgeAssertionDirection,
+  type KnowledgeGraphProjectionEntity,
+  type KnowledgeGraphProjectionRelation,
+  type KnowledgeGraphSyncClaim,
+  type KnowledgeGraphSyncRepository,
+  type KnowledgeGraphSyncSource,
+  knowledgeAssertionEvidenceId,
+  knowledgeAssertionId,
+  knowledgeAssertionSemanticKey,
+  type Records,
 } from '@assistant/persistence';
 import type { DocumentSnapshot, Query, Transaction } from '@google-cloud/firestore';
+import { decodeMemoryRecord } from './memory-record.js';
+import { deterministicUuid } from './stable-id.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 const PAGE_SIZE = 100;
@@ -23,6 +30,8 @@ type GraphSource = Records['knowledgeGraphSources'] & {
 type GraphEntity = Records['knowledgeGraphEntities'];
 type GraphAlias = Records['knowledgeGraphEntityAliases'];
 type GraphRelation = Records['knowledgeGraphRelations'];
+type GraphAssertion = Records['knowledgeGraphAssertions'];
+type GraphAssertionEvidence = Records['knowledgeGraphAssertionEvidence'];
 
 function identity(snapshot: DocumentSnapshot, id: unknown): id is string {
   return typeof id === 'string' && id.length > 0 && documentKey(id) === snapshot.id;
@@ -59,17 +68,13 @@ function betterLabel(existing: string, incoming: string): string {
   return incoming.length > existing.length ? incoming : existing;
 }
 
-function deterministicId(prefix: string, ...parts: string[]): string {
-  return `${prefix}-${createHash('sha256').update(parts.join('\0')).digest('hex')}`;
-}
-
 function ownedMemory(
   snapshot: DocumentSnapshot,
   source: KnowledgeGraphSyncSource,
   now: Date,
 ): Memory | null {
   if (!snapshot.exists) return null;
-  const memory = decodeRecord<Memory>(snapshot.data());
+  const memory = decodeMemoryRecord(snapshot.data());
   if (
     !identity(snapshot, memory.id) ||
     memory.id !== source.id ||
@@ -78,6 +83,10 @@ function ownedMemory(
     memory.contentHash !== source.contentHash ||
     snapshot.get('retrievalRevision') !== source.retrievalRevision ||
     memory.subjectContactId !== source.subjectContactId ||
+    (source.validFrom !== undefined &&
+      (memory.validFrom?.getTime() ?? null) !== (source.validFrom?.getTime() ?? null)) ||
+    (source.validUntil !== undefined &&
+      (memory.validUntil?.getTime() ?? null) !== (source.validUntil?.getTime() ?? null)) ||
     memory.category !== 'knowledge' ||
     memory.quarantined ||
     (memory.expiresAt && memory.expiresAt <= now)
@@ -200,7 +209,7 @@ export class FirestoreKnowledgeGraphSyncRepository implements KnowledgeGraphSync
       if (page.empty) break;
       cursor = page.docs.at(-1);
       const eligible = page.docs.flatMap((doc) => {
-        const memory = decodeRecord<Memory>(doc.data());
+        const memory = decodeMemoryRecord(doc.data());
         const retrievalRevision = doc.get('retrievalRevision');
         if (
           !identity(doc, memory.id) ||
@@ -256,8 +265,12 @@ export class FirestoreKnowledgeGraphSyncRepository implements KnowledgeGraphSync
             contentHash: candidate.memory.contentHash,
             retrievalRevision: candidate.retrievalRevision,
             confidence: candidate.memory.confidence,
+            originTrust: candidate.memory.originTrust,
+            ownerConfirmed: candidate.memory.ownerConfirmed,
             subjectContactId: candidate.memory.subjectContactId,
             createdAt: candidate.memory.createdAt,
+            validFrom: candidate.memory.validFrom,
+            validUntil: candidate.memory.validUntil,
           });
           if (found.length === input.limit) return found;
         }
@@ -369,6 +382,7 @@ export class FirestoreKnowledgeGraphSyncRepository implements KnowledgeGraphSync
     claim: KnowledgeGraphSyncClaim;
     extractionVersion: number;
     relations: KnowledgeGraphProjectionRelation[];
+    lastError?: string | null;
     now: Date;
   }): Promise<{ relationships: number; entities: number } | null> {
     if (input.relations.length > 5) throw new Error('Graph projection relation bound reached');
@@ -376,9 +390,14 @@ export class FirestoreKnowledgeGraphSyncRepository implements KnowledgeGraphSync
       const fence = await readFence(tx, this.store, input.source, input.now);
       if (
         !fence.live ||
+        !fence.memory ||
         !currentClaim(fence.checkpoint, input.source, input.claim, input.extractionVersion)
       )
         return null;
+      const relations = input.relations.flatMap((relation) => {
+        const bounded = boundGraphRelationToSource(relation, fence.memory ?? input.source);
+        return bounded ? [bounded] : [];
+      });
       const prior = await bounded(
         tx,
         this.store
@@ -391,7 +410,7 @@ export class FirestoreKnowledgeGraphSyncRepository implements KnowledgeGraphSync
         throw new Error('Graph source relation belongs to another agent');
 
       const entityInputs = new Map<string, KnowledgeGraphProjectionEntity>();
-      for (const relation of input.relations) {
+      for (const relation of relations) {
         entityInputs.set(relation.subject.canonicalKey, relation.subject);
         entityInputs.set(relation.object.canonicalKey, relation.object);
       }
@@ -440,7 +459,11 @@ export class FirestoreKnowledgeGraphSyncRepository implements KnowledgeGraphSync
           ? [
               this.store.doc(
                 'knowledgeGraphEntities',
-                deterministicId('entity', input.source.agentId, entity.canonicalKey),
+                deterministicUuid(
+                  'knowledge-graph-entity',
+                  input.source.agentId,
+                  entity.canonicalKey,
+                ),
               ),
             ]
           : [],
@@ -475,7 +498,11 @@ export class FirestoreKnowledgeGraphSyncRepository implements KnowledgeGraphSync
           );
           if (!snapshot?.exists) throw new Error('Graph alias target is missing');
         } else if (!snapshot) {
-          const id = deterministicId('entity', input.source.agentId, entity.canonicalKey);
+          const id = deterministicUuid(
+            'knowledge-graph-entity',
+            input.source.agentId,
+            entity.canonicalKey,
+          );
           const candidate = deterministicEntityByPath.get(
             this.store.doc('knowledgeGraphEntities', id).path,
           );
@@ -491,12 +518,87 @@ export class FirestoreKnowledgeGraphSyncRepository implements KnowledgeGraphSync
             throw new Error('Graph entity belongs to another agent');
           resolved.set(entity.canonicalKey, { id: row.id, ref: snapshot.ref, existing: row });
         } else {
-          const id = deterministicId('entity', input.source.agentId, entity.canonicalKey);
+          const id = deterministicUuid(
+            'knowledge-graph-entity',
+            input.source.agentId,
+            entity.canonicalKey,
+          );
           resolved.set(entity.canonicalKey, {
             id,
             ref: this.store.doc('knowledgeGraphEntities', id),
           });
         }
+      }
+
+      const assertionPlans = relations.map((relation) => {
+        const subject = resolved.get(relation.subject.canonicalKey);
+        const object = resolved.get(relation.object.canonicalKey);
+        if (!subject || !object) throw new Error('Graph assertion endpoint resolution failed');
+        const meaning = canonicalizeKnowledgeAssertionDirection({
+          subjectEntityId: subject.id,
+          predicate: relation.predicate,
+          objectEntityId: object.id,
+          assertion: relation.assertion,
+          validFrom: relation.validFrom,
+          validUntil: relation.validUntil,
+        });
+        const semanticKey = knowledgeAssertionSemanticKey(input.source.agentId, meaning);
+        const id = knowledgeAssertionId(input.source.agentId, semanticKey);
+        const evidenceId = knowledgeAssertionEvidenceId(
+          input.source.agentId,
+          id,
+          input.source.id,
+          relation.sourceFingerprint,
+        );
+        return { relation, meaning, semanticKey, id, evidenceId };
+      });
+      const priorAssertionIds = [
+        ...new Set(
+          prior.flatMap((doc) => {
+            const id = doc.get('assertionId');
+            return typeof id === 'string' ? [id] : [];
+          }),
+        ),
+      ];
+      const assertionIds = [
+        ...new Set([...priorAssertionIds, ...assertionPlans.map((plan) => plan.id)]),
+      ];
+      const [assertionDocs, priorEvidence, sourceEvidence] = await Promise.all([
+        assertionIds.length > 0
+          ? tx.getAll(...assertionIds.map((id) => this.store.doc('knowledgeGraphAssertions', id)))
+          : Promise.resolve([]),
+        Promise.all(
+          priorAssertionIds.map((id) =>
+            bounded(
+              tx,
+              this.store
+                .collection('knowledgeGraphAssertionEvidence')
+                .where('assertionId', '==', id),
+              RELATION_BOUND * 4,
+              'Graph assertion evidence bound reached',
+            ),
+          ),
+        ),
+        bounded(
+          tx,
+          this.store
+            .collection('knowledgeGraphAssertionEvidence')
+            .where('sourceMemoryId', '==', input.source.id),
+          RELATION_BOUND,
+          'Graph source assertion evidence bound reached',
+        ),
+      ]);
+      const assertionById = new Map(assertionDocs.map((doc) => [doc.id, doc] as const));
+      const priorEvidenceByAssertion = new Map(
+        priorAssertionIds.map((id, index) => [id, priorEvidence[index] ?? []] as const),
+      );
+      for (const doc of assertionDocs) {
+        if (doc.exists && doc.get('agentId') !== input.source.agentId)
+          throw new Error('Graph assertion belongs to another agent');
+      }
+      for (const doc of sourceEvidence) {
+        if (doc.get('agentId') !== input.source.agentId)
+          throw new Error('Graph assertion evidence belongs to another agent');
       }
 
       for (const [canonicalKey, entity] of entityInputs) {
@@ -528,14 +630,133 @@ export class FirestoreKnowledgeGraphSyncRepository implements KnowledgeGraphSync
         prior.map((doc) => [String(doc.get('sourceFingerprint')), doc] as const),
       );
       const saved = new Set<string>();
-      for (const relation of input.relations) {
+      const activeAssertionIds = new Set(assertionPlans.map((plan) => plan.id));
+      const activeEvidenceIds = new Set(assertionPlans.map((plan) => plan.evidenceId));
+      const reviewStatusByAssertionId = new Map(
+        assertionPlans.map((plan) => {
+          const doc = assertionById.get(plan.id);
+          const legacyStatus = priorByFingerprint
+            .get(plan.relation.sourceFingerprint)
+            ?.get('reviewStatus');
+          return [
+            plan.id,
+            doc?.exists
+              ? decodeRecord<GraphAssertion>(doc.data()).reviewStatus
+              : legacyStatus === 'confirmed' || legacyStatus === 'rejected'
+                ? legacyStatus
+                : 'unreviewed',
+          ] as const;
+        }),
+      );
+      for (const plan of assertionPlans) {
+        const assertionDoc = assertionById.get(plan.id);
+        const existingAssertion = assertionDoc?.exists
+          ? decodeRecord<GraphAssertion>(assertionDoc.data())
+          : null;
+        const evidenceSnapshot = sourceEvidence.find((doc) => doc.id === plan.evidenceId);
+        const priorEvidenceRow = evidenceSnapshot?.exists
+          ? decodeRecord<GraphAssertionEvidence>(evidenceSnapshot.data())
+          : null;
+        const assertionValue: GraphAssertion = {
+          id: plan.id,
+          agentId: input.source.agentId,
+          semanticKey: plan.semanticKey,
+          subjectEntityId: plan.meaning.subjectEntityId,
+          predicate: plan.meaning.predicate,
+          objectEntityId: plan.meaning.objectEntityId,
+          assertion: plan.meaning.assertion,
+          qualifiers: ('qualifiers' in plan.meaning
+            ? (plan.meaning.qualifiers ?? {})
+            : {}) as Record<string, string | number | boolean | null>,
+          validFrom: plan.meaning.validFrom,
+          validUntil: plan.meaning.validUntil,
+          semanticRevision: existingAssertion?.semanticRevision ?? 1,
+          evidenceRevision: (existingAssertion?.evidenceRevision ?? 0) + (priorEvidenceRow ? 0 : 1),
+          lifecycle: 'current',
+          reviewStatus:
+            existingAssertion?.reviewStatus ??
+            reviewStatusByAssertionId.get(plan.id) ??
+            'unreviewed',
+          reviewedRevision: existingAssertion?.reviewedRevision ?? null,
+          reviewedPayloadHash: existingAssertion?.reviewedPayloadHash ?? null,
+          ownerAuthored: existingAssertion?.ownerAuthored ?? false,
+          supersededById: existingAssertion?.supersededById ?? null,
+          createdAt: existingAssertion?.createdAt ?? input.now,
+          updatedAt: input.now,
+        };
+        const assertionRef =
+          assertionDoc?.ref ?? this.store.doc('knowledgeGraphAssertions', plan.id);
+        // Deterministic assertion IDs can already exist for another source or
+        // a concurrent identical extraction. We read it above, reject foreign
+        // ownership, preserve its curation, and use set so transaction retry
+        // semantics handle a concurrent first insert without ALREADY_EXISTS.
+        tx.set(assertionRef, encodeRecord(assertionValue));
+        const evidenceValue: GraphAssertionEvidence = {
+          id: plan.evidenceId,
+          agentId: input.source.agentId,
+          assertionId: plan.id,
+          sourceMemoryId: input.source.id,
+          sourceFingerprint: plan.relation.sourceFingerprint,
+          sourceContentHash: input.source.contentHash,
+          evidenceQuote: plan.relation.evidenceQuote,
+          sourceAuthor:
+            input.source.ownerConfirmed && input.source.originTrust === 'owner'
+              ? 'owner'
+              : input.source.originTrust === 'other'
+                ? 'other'
+                : 'unknown',
+          sourceTrust: input.source.originTrust ?? 'unknown',
+          independent: false,
+          spanStart: plan.relation.evidenceSpanStart ?? null,
+          spanEnd: plan.relation.evidenceSpanEnd ?? null,
+          extractionVersion: input.extractionVersion,
+          evidenceRevision: (priorEvidenceRow?.evidenceRevision ?? 0) + 1,
+          observedAt: input.now,
+          createdAt: priorEvidenceRow?.createdAt ?? input.now,
+        };
+        const evidenceRef =
+          evidenceSnapshot?.ref ??
+          this.store.doc('knowledgeGraphAssertionEvidence', plan.evidenceId);
+        tx.set(evidenceRef, encodeRecord(evidenceValue));
+      }
+      for (const priorEvidenceDoc of sourceEvidence) {
+        if (!activeEvidenceIds.has(priorEvidenceDoc.id)) tx.delete(priorEvidenceDoc.ref);
+      }
+      for (const oldAssertionId of priorAssertionIds) {
+        if (activeAssertionIds.has(oldAssertionId)) continue;
+        const remainingEvidence = (priorEvidenceByAssertion.get(oldAssertionId) ?? []).filter(
+          (doc) =>
+            !sourceEvidence.some(
+              (sourceDoc) => sourceDoc.id === doc.id && !activeEvidenceIds.has(doc.id),
+            ),
+        );
+        if (remainingEvidence.length === 0) {
+          const doc = assertionById.get(oldAssertionId);
+          if (doc?.exists) {
+            const row = decodeRecord<GraphAssertion>(doc.data());
+            if (!row.ownerAuthored)
+              tx.update(doc.ref, {
+                lifecycle: 'retracted',
+                semanticRevision: row.semanticRevision + 1,
+                updatedAt: input.now,
+              });
+          }
+        }
+      }
+      for (const plan of assertionPlans) {
+        const relation = plan.relation;
         const subject = resolved.get(relation.subject.canonicalKey);
         const object = resolved.get(relation.object.canonicalKey);
         if (!subject || !object) throw new Error('Graph relation endpoint resolution failed');
         const existing = priorByFingerprint.get(relation.sourceFingerprint);
         const priorRow = existing ? decodeRecord<GraphRelation>(existing.data()) : null;
         const id =
-          priorRow?.id ?? deterministicId('relation', input.source.id, relation.sourceFingerprint);
+          priorRow?.id ??
+          deterministicUuid(
+            'knowledge-graph-relation',
+            input.source.id,
+            relation.sourceFingerprint,
+          );
         const ref = existing?.ref ?? this.store.doc('knowledgeGraphRelations', id);
         const value = encodeRecord({
           id,
@@ -547,12 +768,17 @@ export class FirestoreKnowledgeGraphSyncRepository implements KnowledgeGraphSync
           validUntil: relation.validUntil,
           subjectEntityId: subject.id,
           predicate: relation.predicate,
+          assertion: relation.assertion,
+          assertionId: plan.id,
           objectEntityId: object.id,
           sourceMemoryId: input.source.id,
           evidenceQuote: relation.evidenceQuote,
           ordinal: relation.ordinal,
-          reviewStatus: priorRow?.reviewStatus ?? 'unreviewed',
+          reviewStatus: reviewStatusByAssertionId.get(plan.id) ?? 'unreviewed',
           reviewedAt: priorRow?.reviewedAt ?? null,
+          correctedByRelationId: priorRow?.correctedByRelationId ?? null,
+          correctionSourceContentHash: priorRow?.correctionSourceContentHash ?? null,
+          correctionDisposition: priorRow?.correctionDisposition ?? null,
         } satisfies GraphRelation);
         if (existing) tx.set(ref, value);
         else tx.create(ref, value);
@@ -563,12 +789,12 @@ export class FirestoreKnowledgeGraphSyncRepository implements KnowledgeGraphSync
       }
       tx.update(fence.sourceRef, {
         status: 'ready',
-        lastError: null,
+        lastError: input.lastError ?? null,
         nextRetryAt: null,
         claimToken: null,
         updatedAt: input.now,
       });
-      return { relationships: input.relations.length, entities: entityInputs.size };
+      return { relationships: relations.length, entities: entityInputs.size };
     });
   }
 
