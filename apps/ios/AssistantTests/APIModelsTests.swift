@@ -2069,6 +2069,7 @@ final class APIModelsTests: XCTestCase {
                             "id": .string("eta"),
                             "label": .string("Drive time"),
                             "value": .string("1 hour 15 minutes to 1 hour 30 minutes"),
+                            "source": .string("This answer"),
                         ]),
                     ]),
                     "blocks": .array([.object(["type": .string("facts"), "factIds": .array([.string("eta")])])]),
