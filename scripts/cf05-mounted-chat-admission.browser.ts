@@ -235,7 +235,10 @@ try {
   await waitForAdmission(first.attempts, 1);
   assert.equal(first.attempts[0]?.status, 200);
   assert.ok(first.attempts[0]?.taskId);
-  await firstPage.getByRole('alert').waitFor();
+  await firstPage
+    .getByRole('alert')
+    .filter({ hasText: 'The test proxy dropped the committed receipt.' })
+    .waitFor();
   await firstPage.getByRole('button', { name: 'Try again', exact: true }).click();
   await waitForAdmission(first.attempts, 2);
   assert.equal(first.attempts[1]?.status, 200);
