@@ -14,7 +14,7 @@ SCRIPT = pathlib.Path(__file__).parents[1] / "scripts" / "cf05-run-mounted-loopb
 spec = importlib.util.spec_from_file_location("cf05_runner", SCRIPT)
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
-ROOT = pathlib.Path("/Users/baldvinsmarason/.codex/worktrees/assistant-playbook-release/assistant")
+ROOT = None
 SHA = "a" * 40
 BRANCH = "codex/cf05-mounted-acceptance"
 
@@ -49,6 +49,23 @@ def profile():
 
 
 class RunnerProfileTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        global ROOT
+        cls._temporary = tempfile.TemporaryDirectory(prefix="cf05-profile-")
+        ROOT = pathlib.Path(cls._temporary.name) / ".codex" / "worktrees" / "cf05-test" / "assistant"
+        (ROOT / "apps" / "web").mkdir(parents=True)
+        (ROOT / "scripts").mkdir()
+        for fixture in (
+            "cf05-mounted-chat-admission.browser.ts",
+            "cf05-firestore-admission-and-late-completion.ts",
+        ):
+            (ROOT / "scripts" / fixture).write_text("// test fixture\n", encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._temporary.cleanup()
+
     def check(self, data):
         runner.check_manifest(data, expected_sha=SHA, expected_branch=BRANCH,
                               source_root=ROOT, app_url="http://127.0.0.1:3000")
@@ -100,7 +117,7 @@ class RunnerProfileTests(unittest.TestCase):
 
     def test_main_rechecks_manifest_after_browser_before_adapter(self):
         data = profile()
-        data["sourceRoot"] = str(pathlib.Path(__file__).parents[1].resolve())
+        data["sourceRoot"] = str(ROOT.resolve())
         data["serverWorkingDirectory"] = str(pathlib.Path(data["sourceRoot"]) / "apps" / "web")
         verified = dt.datetime.fromisoformat(data["verifiedAt"])
 
