@@ -33,13 +33,38 @@ final class StubURLProtocol: URLProtocol {
     private static var streamsByOperation: [String: StubURLProtocol] = [:]
     private static var streamsByIdentity: [String: StubURLProtocol] = [:]
     private static var readyStreamIdentities: Set<String> = []
+    private static var activeTestCaseID: String?
 
-    fileprivate final class SessionInvalidation: NSObject, URLSessionDelegate, @unchecked Sendable {
-        let finished = DispatchSemaphore(value: 0)
-
-        func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
-            finished.signal()
+    static func beginTestCase(_ id: String) {
+        lock.withLock {
+            activeTestCaseID = id
+            outcomes = []
+            pathOutcomes = [:]
+            tokenOutcomes = [:]
+            recordedMethods = []
+            recordedURLs = []
+            recordedBodies = []
+            recordedHeaders = []
+            activeStream = nil
+            streamsByOperation = [:]
+            streamsByIdentity = [:]
+            readyStreamIdentities = []
         }
+    }
+
+    static func endTestCase(_ id: String) {
+        lock.withLock {
+            if activeTestCaseID == id { activeTestCaseID = nil }
+        }
+    }
+
+    private static func testCaseID(in headers: [String: String]) -> String? {
+        headers.first(where: { $0.key.caseInsensitiveCompare("x-assistant-test-case") == .orderedSame })?.value
+    }
+
+    private static func isActiveTestCase(_ id: String?) -> Bool {
+        guard let id else { return false }
+        return lock.withLock { activeTestCaseID == id }
     }
 
     static func prime(_ queued: [Outcome], paths: [String: [Outcome]] = [:], tokens: [String: [Outcome]] = [:]) {
@@ -95,7 +120,8 @@ final class StubURLProtocol: URLProtocol {
             }
             return operationId.flatMap { streamsByOperation[$0] } ?? activeStream
         }
-        guard let stream else { return }
+        guard let stream,
+              isActiveTestCase(testCaseID(in: stream.request.allHTTPHeaderFields ?? [:])) else { return }
         stream.client?.urlProtocol(stream, didLoad: body)
     }
 
@@ -116,26 +142,36 @@ final class StubURLProtocol: URLProtocol {
     }
 
     private static func rememberStream(_ stream: StubURLProtocol, requestBody: Data,
-                                       headers: [String: String]) -> String? {
+                                       headers: [String: String]) -> (identityKey: String?, accepted: Bool) {
         let object = try? JSONSerialization.jsonObject(with: requestBody) as? [String: Any]
         let operationId = object?["clientOperationId"] as? String
         let authorization = headers.first(where: { $0.key.caseInsensitiveCompare("authorization") == .orderedSame })?.value ?? ""
         let identityKey = operationId.map { streamIdentityKey(operationId: $0, authorization: authorization) }
-        lock.withLock {
+        let accepted = lock.withLock {
+            guard let requestCaseID = testCaseID(in: headers), requestCaseID == activeTestCaseID else {
+                return false
+            }
             activeStream = stream
             if let operationId { streamsByOperation[operationId] = stream }
             if let identityKey { streamsByIdentity[identityKey] = stream }
+            return true
         }
-        return identityKey
+        return (identityKey, accepted)
     }
 
-    private static func markStreamReady(identityKey: String?) {
+    private static func markStreamReady(identityKey: String?, headers: [String: String]) {
         guard let identityKey else { return }
-        lock.withLock { readyStreamIdentities.insert(identityKey) }
+        lock.withLock {
+            guard let requestCaseID = testCaseID(in: headers), requestCaseID == activeTestCaseID else { return }
+            readyStreamIdentities.insert(identityKey)
+        }
     }
 
     private static func next(for method: String, url: URL?, body: Data, headers: [String: String]) -> Outcome {
         lock.withLock {
+            guard let requestCaseID = testCaseID(in: headers), requestCaseID == activeTestCaseID else {
+                return .failure(URLError(.cancelled))
+            }
             recordedMethods.append(method)
             if let url { recordedURLs.append(url) }
             recordedBodies.append(body)
@@ -177,6 +213,10 @@ final class StubURLProtocol: URLProtocol {
     override func stopLoading() { stopped.withLock { isStopped = true } }
 
     private func respond(status: Int, body: Data) {
+        guard Self.isActiveTestCase(Self.testCaseID(in: request.allHTTPHeaderFields ?? [:])) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
+            return
+        }
         let response = HTTPURLResponse(
             url: request.url!,
             statusCode: status,
@@ -200,20 +240,36 @@ final class StubURLProtocol: URLProtocol {
         case let .failure(error):
             client?.urlProtocol(self, didFailWithError: error)
         case let .stream(body):
-            let identityKey = Self.rememberStream(
+            guard Self.isActiveTestCase(Self.testCaseID(in: request.allHTTPHeaderFields ?? [:])) else {
+                client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
+                return
+            }
+            let registration = Self.rememberStream(
                 self, requestBody: requestBody, headers: request.allHTTPHeaderFields ?? [:]
             )
+            guard registration.accepted else {
+                client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
+                return
+            }
             let response = HTTPURLResponse(url: request.url!, statusCode: 200,
                 httpVersion: "HTTP/1.1", headerFields: ["content-type": "text/event-stream"])!
             guard let client else { return }
             client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client.urlProtocol(self, didLoad: body)
-            Self.markStreamReady(identityKey: identityKey)
+            Self.markStreamReady(identityKey: registration.identityKey, headers: request.allHTTPHeaderFields ?? [:])
             // Remain open so the test can deliver later tokens while sending.
         case let .taskStream(body, taskId):
-            let identityKey = Self.rememberStream(
+            guard Self.isActiveTestCase(Self.testCaseID(in: request.allHTTPHeaderFields ?? [:])) else {
+                client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
+                return
+            }
+            let registration = Self.rememberStream(
                 self, requestBody: requestBody, headers: request.allHTTPHeaderFields ?? [:]
             )
+            guard registration.accepted else {
+                client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
+                return
+            }
             let response = HTTPURLResponse(url: request.url!, statusCode: 200,
                 httpVersion: "HTTP/1.1", headerFields: [
                     "content-type": "text/event-stream", "x-async-task": taskId,
@@ -221,7 +277,7 @@ final class StubURLProtocol: URLProtocol {
             guard let client else { return }
             client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client.urlProtocol(self, didLoad: body)
-            Self.markStreamReady(identityKey: identityKey)
+            Self.markStreamReady(identityKey: registration.identityKey, headers: request.allHTTPHeaderFields ?? [:])
         case let .operationCancellation(status, outcome):
             let sent = try? JSONSerialization.jsonObject(with: requestBody) as? [String: String]
             var body: [String: Any] = [
@@ -300,28 +356,28 @@ final class StubURLProtocol: URLProtocol {
 }
 
 final class APIClientRetryTests: XCTestCase {
-    private struct TestSession {
-        let session: URLSession
-        let invalidation: StubURLProtocol.SessionInvalidation
+    private let sessionLock = NSLock()
+    private var testSessions: [URLSession] = []
+    private var testCaseID = ""
+
+    override func setUp() {
+        super.setUp()
+        testCaseID = UUID().uuidString
+        StubURLProtocol.beginTestCase(testCaseID)
     }
 
-    private let sessionLock = NSLock()
-    private var testSessions: [TestSession] = []
-
     override func tearDown() {
-        let sessions = sessionLock.withLock { () -> [TestSession] in
+        StubURLProtocol.endTestCase(testCaseID)
+        let sessions = sessionLock.withLock { () -> [URLSession] in
             defer { testSessions = [] }
             return testSessions
         }
-        for registered in sessions { registered.session.invalidateAndCancel() }
-        let deadline = DispatchTime.now() + 5
-        var allStopped = true
-        for registered in sessions {
-            if registered.invalidation.finished.wait(timeout: deadline) != .success {
-                allStopped = false
-            }
+        // Keep sessions valid: models can retain clients after a test method
+        // returns. Cancel current tasks; case scoping prevents late requests from
+        // touching the next test's recorder or consuming its outcomes.
+        for session in sessions {
+            session.getAllTasks { tasks in tasks.forEach { $0.cancel() } }
         }
-        XCTAssertTrue(allStopped, "Test-owned URLSession work must stop before shared stub state is reused")
         super.tearDown()
     }
 
@@ -2489,9 +2545,9 @@ final class APIClientRetryTests: XCTestCase {
     private func makeClient(clientID: String? = nil, token: String = "t") -> APIClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
-        let invalidation = StubURLProtocol.SessionInvalidation()
-        let session = URLSession(configuration: configuration, delegate: invalidation, delegateQueue: nil)
-        sessionLock.withLock { testSessions.append(TestSession(session: session, invalidation: invalidation)) }
+        configuration.httpAdditionalHeaders = ["X-Assistant-Test-Case": testCaseID]
+        let session = URLSession(configuration: configuration)
+        sessionLock.withLock { testSessions.append(session) }
         return APIClient(
             configuration: .init(baseURL: URL(string: "https://assistant.test")!, token: token),
             session: session,

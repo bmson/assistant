@@ -43,7 +43,7 @@ function memory(
     goalId: null,
     originTrust: 'assistant',
     category: 'knowledge',
-    content: `Fact ${id}`,
+    content: `Fact ${id.replaceAll('-', '')}`,
     importance: 3,
     quarantined: false,
     domain: null,
@@ -278,7 +278,8 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           relationship: 'friend',
           trust: 'confirmed',
         });
-        const first = memory(randomUUID(), 'owner', 'person');
+        // A UUID's numeric groups must not accidentally read as temporal prose.
+        const first = memory('aaaaaaaa-2024-4025-8026-aaaaaaaaaaaa', 'owner', 'person');
         const second = memory(randomUUID(), 'owner', 'person');
         await seed(store, first);
         await seed(store, second);

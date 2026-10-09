@@ -3,6 +3,27 @@ import SwiftUI
 @testable import Assistant
 
 final class ConversationDraftsTests: XCTestCase {
+    private let sessionLock = NSLock()
+    private var testSessions: [URLSession] = []
+    private var testCaseID = ""
+
+    override func setUp() {
+        super.setUp()
+        testCaseID = UUID().uuidString
+        StubURLProtocol.beginTestCase(testCaseID)
+    }
+
+    override func tearDown() {
+        StubURLProtocol.endTestCase(testCaseID)
+        let sessions = sessionLock.withLock { () -> [URLSession] in
+            defer { testSessions = [] }
+            return testSessions
+        }
+        for session in sessions {
+            session.getAllTasks { tasks in tasks.forEach { $0.cancel() } }
+        }
+        super.tearDown()
+    }
     func testSwitchingChatsRestoresEachUnsentDraft() {
         var drafts = ConversationDrafts()
         let main = drafts.scope(conversationID: "main")
@@ -71,10 +92,13 @@ final class ConversationDraftsTests: XCTestCase {
 
 extension ConversationDraftsTests {
     private func client() -> APIClient {
-        let session = URLSessionConfiguration.ephemeral
-        session.protocolClasses = [StubURLProtocol.self]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubURLProtocol.self]
+        configuration.httpAdditionalHeaders = ["X-Assistant-Test-Case": testCaseID]
+        let session = URLSession(configuration: configuration)
+        sessionLock.withLock { testSessions.append(session) }
         return APIClient(configuration: .init(baseURL: URL(string: "https://assistant.test")!, token: "test-token"),
-            session: URLSession(configuration: session))
+            session: session)
     }
 
     private func bootstrap(owner: String = "owner") throws -> Data {

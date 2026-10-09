@@ -2332,17 +2332,34 @@ final class APIModelsTests: XCTestCase {
         var visible = false
         var order: [String] = []
         let queue = LatestWinsQueue()
-        async let present: Void = queue.run(supersedable: true) {
-            try? await Task.sleep(for: .milliseconds(60))
-            visible = true
-            order.append("present")
+        let presentStarted = AsyncStream<Void>.makeStream()
+        let releasePresent = AsyncStream<Void>.makeStream()
+        let present = Task { @MainActor in
+            await queue.run(supersedable: true) {
+                presentStarted.continuation.yield(())
+                presentStarted.continuation.finish()
+                for await _ in releasePresent.stream { break }
+                visible = true
+                order.append("present")
+            }
         }
-        try? await Task.sleep(for: .milliseconds(10))
-        async let dismiss: Void = queue.run(supersedable: false) {
-            visible = false
-            order.append("dismiss")
+        for await _ in presentStarted.stream { break }
+
+        let dismissSubmitted = AsyncStream<Void>.makeStream()
+        let dismiss = Task { @MainActor in
+            dismissSubmitted.continuation.yield(())
+            dismissSubmitted.continuation.finish()
+            await queue.run(supersedable: false) {
+                visible = false
+                order.append("dismiss")
+            }
         }
-        _ = await (present, dismiss)
+        for await _ in dismissSubmitted.stream { break }
+
+        releasePresent.continuation.yield(())
+        releasePresent.continuation.finish()
+        await present.value
+        await dismiss.value
         XCTAssertFalse(visible)
         XCTAssertEqual(order.last, "dismiss")
     }
@@ -2351,15 +2368,40 @@ final class APIModelsTests: XCTestCase {
     func testQueueRunsOneAtATimeAndKeepsOnlyTheNewestWaitingState() async {
         var order: [String] = []
         let queue = LatestWinsQueue()
-        async let busy: Void = queue.run(supersedable: false) {
-            order.append("busy-start")
-            try? await Task.sleep(for: .milliseconds(60))
-            order.append("busy-end")
+        let busyStarted = AsyncStream<Void>.makeStream()
+        let releaseBusy = AsyncStream<Void>.makeStream()
+        let busy = Task { @MainActor in
+            await queue.run(supersedable: false) {
+                order.append("busy-start")
+                busyStarted.continuation.yield(())
+                busyStarted.continuation.finish()
+                for await _ in releaseBusy.stream { break }
+                order.append("busy-end")
+            }
         }
-        try? await Task.sleep(for: .milliseconds(10))
-        async let first: Void = queue.run(supersedable: true) { order.append("first") }
-        async let second: Void = queue.run(supersedable: true) { order.append("second") }
-        _ = await (busy, first, second)
+        for await _ in busyStarted.stream { break }
+
+        let firstSubmitted = AsyncStream<Void>.makeStream()
+        let first = Task { @MainActor in
+            firstSubmitted.continuation.yield(())
+            firstSubmitted.continuation.finish()
+            await queue.run(supersedable: true) { order.append("first") }
+        }
+        for await _ in firstSubmitted.stream { break }
+
+        let secondSubmitted = AsyncStream<Void>.makeStream()
+        let second = Task { @MainActor in
+            secondSubmitted.continuation.yield(())
+            secondSubmitted.continuation.finish()
+            await queue.run(supersedable: true) { order.append("second") }
+        }
+        for await _ in secondSubmitted.stream { break }
+
+        releaseBusy.continuation.yield(())
+        releaseBusy.continuation.finish()
+        await busy.value
+        await first.value
+        await second.value
         XCTAssertEqual(order, ["busy-start", "busy-end", "second"])
     }
 
