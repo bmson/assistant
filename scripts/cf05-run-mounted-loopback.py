@@ -177,6 +177,16 @@ def verify_live(data: dict[str, Any], source_root: pathlib.Path, app_url: str) -
     fail_if(payload.get("sha") != data["appSha"], "Live app health SHA differs from the pinned source")
 
 
+def verify_fixture_preflight(manifest_path: pathlib.Path, *, expected_sha: str, expected_branch: str, source_root: pathlib.Path, app_url: str, now: dt.datetime | None = None) -> dict[str, Any]:
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise CheckError("Root verification manifest could not be reread before fixture launch") from None
+    check_manifest(data, expected_sha=expected_sha, expected_branch=expected_branch, source_root=source_root, app_url=app_url, now=now)
+    verify_live(data, source_root, app_url)
+    return data
+
+
 def child_environment(data: dict[str, Any], *, app_url: str, expected_sha: str, manifest_path: pathlib.Path, receipt_path: pathlib.Path, report_path: pathlib.Path) -> dict[str, str]:
     env = dict(os.environ)
     for key in CREDENTIAL_KEYS:
@@ -225,12 +235,13 @@ def main() -> int:
         os.chmod(artifact_dir, 0o700)
         receipt = artifact_dir / "mounted-browser-receipt.json"
         report = artifact_dir / "firestore-adapter-report.json"
-        env = child_environment(data, app_url=args.app_url, expected_sha=args.expected_sha, manifest_path=manifest_path, receipt_path=receipt, report_path=report)
         print(json.dumps({"status": "preflight-passed", "sourceSha": args.expected_sha, "appOrigin": args.app_url, "artifacts": str(artifact_dir)}))
-        run_checked(["pnpm", "exec", "tsx", args.browser_fixture], cwd=root, env=env, timeout=300)
+        data = verify_fixture_preflight(manifest_path, expected_sha=args.expected_sha, expected_branch=args.expected_branch, source_root=root, app_url=args.app_url)
+        run_checked(["pnpm", "exec", "tsx", args.browser_fixture], cwd=root, env=child_environment(data, app_url=args.app_url, expected_sha=args.expected_sha, manifest_path=manifest_path, receipt_path=receipt, report_path=report), timeout=300)
         if not receipt.is_file():
             raise CheckError("Mounted browser fixture produced no durable receipt file")
-        run_checked(["pnpm", "exec", "tsx", args.adapter_fixture], cwd=root, env=env, timeout=300)
+        data = verify_fixture_preflight(manifest_path, expected_sha=args.expected_sha, expected_branch=args.expected_branch, source_root=root, app_url=args.app_url)
+        run_checked(["pnpm", "exec", "tsx", args.adapter_fixture], cwd=root, env=child_environment(data, app_url=args.app_url, expected_sha=args.expected_sha, manifest_path=manifest_path, receipt_path=receipt, report_path=report), timeout=300)
         if not report.is_file():
             raise CheckError("Firestore adapter fixture produced no report")
         result = json.loads(report.read_text(encoding="utf-8"))

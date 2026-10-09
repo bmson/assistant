@@ -1,7 +1,10 @@
 import datetime as dt
 import importlib.util
+import json
 import pathlib
+import tempfile
 import unittest
+from unittest.mock import patch
 
 SCRIPT = pathlib.Path(__file__).parents[1] / "scripts" / "cf05-run-mounted-loopback.py"
 spec = importlib.util.spec_from_file_location("cf05_runner", SCRIPT)
@@ -90,6 +93,34 @@ class RunnerProfileTests(unittest.TestCase):
         with self.assertRaises(runner.CheckError): self.check(data)
         data = profile(); data["installationId"] = "production"
         with self.assertRaises(runner.CheckError): self.check(data)
+
+    def test_expired_manifest_after_browser_latency_blocks_adapter_launch(self):
+        data = profile()
+        verified = dt.datetime.fromisoformat(data["verifiedAt"])
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = pathlib.Path(directory) / "root-manifest.json"
+            manifest_path.write_text(json.dumps(data), encoding="utf-8")
+            launched = []
+            with patch.object(runner, "verify_live"):
+                runner.verify_fixture_preflight(
+                    manifest_path,
+                    expected_sha=SHA,
+                    expected_branch=BRANCH,
+                    source_root=ROOT,
+                    app_url="http://127.0.0.1:3000",
+                    now=verified + dt.timedelta(seconds=1),
+                )
+                launched.append("browser")
+                with self.assertRaises(runner.CheckError):
+                    runner.verify_fixture_preflight(
+                        manifest_path,
+                        expected_sha=SHA,
+                        expected_branch=BRANCH,
+                        source_root=ROOT,
+                        app_url="http://127.0.0.1:3000",
+                        now=verified + dt.timedelta(seconds=301),
+                    )
+                self.assertEqual(launched, ["browser"])
 
     def test_accepts_only_plain_loopback_origin(self):
         for value in ("https://127.0.0.1:3000", "http://example.com:3000", "http://127.0.0.1:3000/path", "http://user@127.0.0.1:3000"):

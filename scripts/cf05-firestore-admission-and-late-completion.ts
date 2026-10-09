@@ -15,7 +15,9 @@ const manifestPath = process.env.ASSISTANT_CHAT_ROOT_VERIFIED_MANIFEST;
 const receiptPath = process.env.ASSISTANT_CHAT_RUN_RECEIPT_PATH;
 const reportPath = process.env.CF05_ADAPTER_REPORT_PATH;
 const expectedSha = process.env.ASSISTANT_CHAT_EXPECTED_SHA;
+const expectedBranch = process.env.ASSISTANT_CHAT_EXPECTED_BRANCH;
 assert(manifestPath && receiptPath && reportPath && expectedSha, 'Missing harness run inputs');
+assert(expectedBranch, 'Missing expected managed branch');
 
 interface AdmissionAttempt {
   body: {
@@ -51,7 +53,13 @@ interface Attestation {
   installationId: string;
   ownerId: string;
   sourceRoot: string;
+  sourceBranch: string;
+  sourceCommit: string;
+  sourceTreeClean: boolean;
+  appSha: string;
   serverWorkingDirectory: string;
+  verificationStatus: string;
+  verifiedAt: string;
 }
 
 function getAttempt(value: AdmissionAttempt | undefined, label: string) {
@@ -78,8 +86,23 @@ assert.equal(receipt.schemaVersion, 1);
 assert.equal(receipt.sourceSha, expectedSha);
 assert.equal(receipt.installationId, attestation.installationId);
 assert.equal(receipt.ownerId, attestation.ownerId);
+assert.equal(attestation.sourceCommit, expectedSha);
+assert.equal(attestation.appSha, expectedSha);
+assert.equal(attestation.sourceBranch, expectedBranch);
+assert.equal(attestation.sourceTreeClean, true);
+assert.equal(attestation.verificationStatus, 'root-verified');
+const verifiedAt = Date.parse(attestation.verifiedAt);
+assert(Number.isFinite(verifiedAt), 'The root verification timestamp is required');
+assert(Math.abs(Date.now() - verifiedAt) <= 5 * 60_000, 'Root verification must be fresh');
 const sourceRoot = resolve(attestation.sourceRoot);
 const serverWorkingDirectory = resolve(attestation.serverWorkingDirectory);
+assert.equal(
+  sourceRoot,
+  resolve(process.cwd()),
+  'The root-verified source must match this fixture checkout',
+);
+assert(sourceRoot.includes('/.codex/worktrees/'), 'Use the selected managed worktree for CF-05');
+assert(!sourceRoot.endsWith('/Code/Personal/assistant'), 'The primary checkout is forbidden');
 assert(
   serverWorkingDirectory === sourceRoot ||
     serverWorkingDirectory === resolve(sourceRoot, 'apps/web'),
@@ -99,9 +122,13 @@ const admissions = [
   ['queuedA', receipt.admissions.queuedA],
   ['queuedB', receipt.admissions.queuedB],
 ] as const;
-const requestFacts = Object.fromEntries(
-  admissions.map(([label, attempt]) => [label, getAttempt(attempt, label)]),
-);
+const requestFacts = {
+  retryCommitted: getAttempt(receipt.admissions.retryCommitted, 'retryCommitted'),
+  retryReplay: getAttempt(receipt.admissions.retryReplay, 'retryReplay'),
+  intentionalDuplicate: getAttempt(receipt.admissions.intentionalDuplicate, 'intentionalDuplicate'),
+  queuedA: getAttempt(receipt.admissions.queuedA, 'queuedA'),
+  queuedB: getAttempt(receipt.admissions.queuedB, 'queuedB'),
+};
 assert.equal(requestFacts.retryCommitted.taskId, requestFacts.retryReplay.taskId);
 assert.equal(requestFacts.retryCommitted.messageId, requestFacts.retryReplay.messageId);
 assert.equal(
