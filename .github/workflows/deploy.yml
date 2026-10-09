@@ -276,6 +276,26 @@ jobs:
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
       - name: Authorize Artifact Registry
         run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+      # Check Google's synchronized public cache before Docker Hub. Shared
+      # hosted-runner IPs can exhaust anonymous Hub pulls even for node:22-slim.
+      # Docker still falls back to Hub for an image missing from the cache.
+      - name: Configure Docker Hub cache
+        run: |
+          set -euo pipefail
+          sudo python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('/etc/docker/daemon.json')
+          config = json.loads(path.read_text()) if path.exists() else {}
+          mirrors = config.setdefault('registry-mirrors', [])
+          mirror = 'https://mirror.gcr.io'
+          if mirror not in mirrors:
+              mirrors.insert(0, mirror)
+          path.write_text(json.dumps(config) + '\n')
+          PY
+          sudo systemctl restart docker
+          docker info --format '{{json .RegistryConfig.Mirrors}}' |
+            python3 -c 'import json, sys; mirrors = json.load(sys.stdin); assert "https://mirror.gcr.io" in [mirror.rstrip("/") for mirror in mirrors], "Docker Hub cache is not active"; print("Docker Hub cache is active")'
       - name: Build the image
         env:
           # RUN --mount=type=cache in the Dockerfiles requires BuildKit.
