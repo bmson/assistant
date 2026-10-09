@@ -655,7 +655,7 @@ final class AppModel {
             async let overviewResult = fetchOverview(client)
             let response = try await client.bootstrap()
             guard connectionIsCurrent(client, version: version), pairingAttempt == pairingAttemptVersion else { return }
-            if bootstrap?.identity.id != response.identity.id {
+            if let existingOwner = bootstrap?.identity.id, existingOwner != response.identity.id {
                 connectionVersion += 1
                 resetConnectedState()
                 version = connectionVersion
@@ -1531,7 +1531,7 @@ final class AppModel {
         do {
             let response = try await client.bootstrap()
             guard connectionIsCurrent(client, version: version), pairingAttempt == pairingAttemptVersion else { return }
-            if bootstrap?.identity.id != response.identity.id {
+            if let existingOwner = bootstrap?.identity.id, existingOwner != response.identity.id {
                 connectionVersion += 1
                 resetConnectedState()
                 version = connectionVersion

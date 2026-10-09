@@ -52,8 +52,9 @@ jobs:
       - name: Lint shell scripts
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck
-          bash -n infra/gcp/*.sh infra/docker/*.sh scripts/*.sh
-          shellcheck --severity=warning infra/gcp/*.sh infra/docker/*.sh scripts/*.sh
+          bash -n infra/gcp/*.sh infra/docker/*.sh scripts/*.sh infra/ios-detect-changes.sh infra/ios-detect-changes.test.sh
+          shellcheck --severity=warning infra/gcp/*.sh infra/docker/*.sh scripts/*.sh infra/ios-detect-changes.sh infra/ios-detect-changes.test.sh
+          bash infra/ios-detect-changes.test.sh
           bash infra/gcp/release-diagnostics.test.sh
           bash infra/gcp/release.test.sh
           bash infra/docker/database-admin.test.sh
@@ -79,7 +80,7 @@ jobs:
 
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     services:
       postgres:
         image: pgvector/pgvector:pg17

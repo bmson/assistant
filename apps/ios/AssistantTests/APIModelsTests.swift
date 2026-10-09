@@ -2062,6 +2062,7 @@ final class APIModelsTests: XCTestCase {
                 "spec": .object([
                     "version": .number(1),
                     "title": .string("Drive to Bernal Intermediate"),
+                    "accessibilityLabel": .string("Drive time to Bernal Intermediate"),
                     "sourceLabel": .string("This answer"),
                     "facts": .array([
                         .object([

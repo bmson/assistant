@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import {
+  agents,
   contacts,
   createDb,
   createPostgresOwnerCardCompilationRepository,
@@ -11,7 +13,9 @@ import {
   occasions,
   ownerCard,
 } from '@assistant/db';
+import { allocateTestTarget, assertAllocatedTestTarget } from '@assistant/db/test-target';
 import { and, eq, inArray, sql } from 'drizzle-orm';
+import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getAgent } from '../chat.js';
 import type { ModelRouter } from '../model-router/router.js';
@@ -71,6 +75,77 @@ async function insertFact(
 }
 
 const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 3600 * 1000);
+
+async function withIsolatedConsolidationDatabase<T>(
+  run: (db: Db, isolatedAgentId: string) => Promise<T>,
+): Promise<T> {
+  assertAllocatedTestTarget({
+    databaseUrl: process.env.DATABASE_URL,
+    testDatabaseUrl: process.env.TEST_DATABASE_URL,
+    token: process.env.ASSISTANT_TEST_TARGET_TOKEN,
+  });
+  const target = allocateTestTarget(process.env.DATABASE_URL);
+  const adminUrl = new URL(target.databaseUrl);
+  adminUrl.pathname = '/postgres';
+  const admin = createDb(adminUrl.toString(), { max: 1 }).$client;
+  let created = false;
+  let isolatedDb: Db | undefined;
+  let result: { value: T } | undefined;
+  let primaryError: unknown;
+  const cleanupErrors: unknown[] = [];
+  try {
+    await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
+    created = true;
+    await admin.unsafe(
+      `COMMENT ON DATABASE "${target.databaseName}" IS 'assistant-test-target:${target.token}'`,
+    );
+    isolatedDb = createDb(target.databaseUrl, { max: 1 });
+    await migrate(isolatedDb, {
+      migrationsFolder: fileURLToPath(new URL('../../../db/drizzle/', import.meta.url)),
+    });
+    const isolatedAgentId = randomUUID();
+    await isolatedDb.insert(agents).values({
+      id: isolatedAgentId,
+      name: 'Consolidation fence owner',
+      email: `consolidation-${randomUUID()}@example.test`,
+      workspacePrefix: `consolidation-${isolatedAgentId}`,
+    });
+    result = { value: await run(isolatedDb, isolatedAgentId) };
+  } catch (error) {
+    primaryError = error;
+  } finally {
+    const attemptCleanup = async (cleanup: () => Promise<unknown>) => {
+      try {
+        await cleanup();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    };
+    const database = isolatedDb;
+    if (database) await attemptCleanup(() => database.$client.end({ timeout: 5 }));
+    if (created)
+      await attemptCleanup(async () => {
+        const [owned] = await admin<{ marker: string | null }[]>`
+          SELECT shobj_description(oid, 'pg_database') AS marker
+          FROM pg_database WHERE datname = ${target.databaseName}
+        `;
+        if (owned?.marker !== `assistant-test-target:${target.token}`)
+          throw new Error('Consolidation test database ownership mismatch');
+        await admin.unsafe(`DROP DATABASE "${target.databaseName}" WITH (FORCE)`);
+      });
+    await attemptCleanup(() => admin.end({ timeout: 5 }));
+  }
+  if (primaryError && cleanupErrors.length)
+    throw new AggregateError(
+      [primaryError, ...cleanupErrors],
+      'Consolidation test and cleanup failed',
+    );
+  if (primaryError) throw primaryError;
+  if (cleanupErrors.length)
+    throw new AggregateError(cleanupErrors, 'Consolidation test cleanup failed');
+  if (!result) throw new Error('Consolidation test produced no result');
+  return result.value;
+}
 
 /**
  * Detects one duplicate pair and one contradiction pair; fixes one domain;
@@ -612,117 +687,119 @@ describe('compileOwnerCard pinning (integration)', () => {
 
   it('does not publish a paused consolidation after its contributing import is deleted', async () => {
     if (!dbUp) throw new Error('Local PostgreSQL qualification database is required');
-    const subject = `source-fence-${randomUUID()}`;
-    const source = `source-fence-${randomUUID()}`;
-    const sourceFactContent = `${MARKER}: ${subject} imported detail`;
-    const ownerFactContent = `${MARKER}: ${subject} owner detail`;
-    const unified = `${MARKER}: ${subject} combined detail`;
-    const [contact] = await db
-      .insert(contacts)
-      .values({ name: subject })
-      .returning({ id: contacts.id });
-    if (!contact) throw new Error('Expected source-fence contact');
-    const [sourceRow] = await db
-      .insert(importSources)
-      .values({
-        agentId,
-        source,
-        workspacePath: `import/${source}.txt`,
-        kind: 'text',
-        status: 'done',
-      })
-      .returning({ id: importSources.id });
-    if (!sourceRow) throw new Error('Expected source-fence import source');
-    const inserted = await db
-      .insert(memories)
-      .values([
-        {
-          agentId,
-          category: 'knowledge',
-          kind: 'fact',
-          content: sourceFactContent,
-          contentHash: createHash('sha256').update(sourceFactContent).digest('hex'),
-          confidence: '0.75',
-          importance: 5,
-          originTrust: 'owner',
-          subjectContactId: contact.id,
+    await withIsolatedConsolidationDatabase(async (db, isolatedAgentId) => {
+      const subject = `source-fence-${randomUUID()}`;
+      const source = `source-fence-${randomUUID()}`;
+      const sourceFactContent = `${MARKER}: ${subject} imported detail`;
+      const ownerFactContent = `${MARKER}: ${subject} owner detail`;
+      const unified = `${MARKER}: ${subject} combined detail`;
+      const [contact] = await db
+        .insert(contacts)
+        .values({ name: subject })
+        .returning({ id: contacts.id });
+      if (!contact) throw new Error('Expected source-fence contact');
+      const [sourceRow] = await db
+        .insert(importSources)
+        .values({
+          agentId: isolatedAgentId,
           source,
-        },
-        {
-          agentId,
-          category: 'knowledge',
-          kind: 'fact',
-          content: ownerFactContent,
-          contentHash: createHash('sha256').update(ownerFactContent).digest('hex'),
-          confidence: '0.75',
-          importance: 5,
-          originTrust: 'owner',
-          subjectContactId: contact.id,
-        },
-      ])
-      .returning({ id: memories.id });
-    const [importedFact, ownerFact] = inserted;
-    if (!importedFact || !ownerFact) throw new Error('Expected consolidation facts');
-    await db.insert(memoryImportLineage).values({ source, memoryId: importedFact.id });
+          workspacePath: `import/${source}.txt`,
+          kind: 'text',
+          status: 'done',
+        })
+        .returning({ id: importSources.id });
+      if (!sourceRow) throw new Error('Expected source-fence import source');
+      const inserted = await db
+        .insert(memories)
+        .values([
+          {
+            agentId: isolatedAgentId,
+            category: 'knowledge',
+            kind: 'fact',
+            content: sourceFactContent,
+            contentHash: createHash('sha256').update(sourceFactContent).digest('hex'),
+            confidence: '0.75',
+            importance: 5,
+            originTrust: 'owner',
+            subjectContactId: contact.id,
+            source,
+          },
+          {
+            agentId: isolatedAgentId,
+            category: 'knowledge',
+            kind: 'fact',
+            content: ownerFactContent,
+            contentHash: createHash('sha256').update(ownerFactContent).digest('hex'),
+            confidence: '0.75',
+            importance: 5,
+            originTrust: 'owner',
+            subjectContactId: contact.id,
+          },
+        ])
+        .returning({ id: memories.id });
+      const [importedFact, ownerFact] = inserted;
+      if (!importedFact || !ownerFact) throw new Error('Expected consolidation facts');
+      await db.insert(memoryImportLineage).values({ source, memoryId: importedFact.id });
 
-    let notifyModelStarted!: () => void;
-    let resumeModel!: () => void;
-    const modelStarted = new Promise<void>((resolve) => {
-      notifyModelStarted = resolve;
-    });
-    const modelGate = new Promise<void>((resolve) => {
-      resumeModel = resolve;
-    });
-    const router = {
-      async embeddingSpace() {
-        return { provider: 'test', model: 'consolidation', dimensions: 1536, revision: '1' };
-      },
-      async object(_role: string, input: { prompt: string }) {
-        if (input.prompt.includes(sourceFactContent) && input.prompt.includes(ownerFactContent)) {
-          notifyModelStarted();
-          await modelGate;
+      let notifyModelStarted!: () => void;
+      let resumeModel!: () => void;
+      const modelStarted = new Promise<void>((resolve) => {
+        notifyModelStarted = resolve;
+      });
+      const modelGate = new Promise<void>((resolve) => {
+        resumeModel = resolve;
+      });
+      const router = {
+        async embeddingSpace() {
+          return { provider: 'test', model: 'consolidation', dimensions: 1536, revision: '1' };
+        },
+        async object(_role: string, input: { prompt: string }) {
+          if (input.prompt.includes(sourceFactContent) && input.prompt.includes(ownerFactContent)) {
+            notifyModelStarted();
+            await modelGate;
+            return {
+              ok: true,
+              object: {
+                duplicateGroups: [],
+                contradictionGroups: [],
+                mergeGroups: [{ ids: [importedFact.id, ownerFact.id], unified }],
+                domainFixes: [],
+                timeline: [],
+                occasions: [],
+              },
+            };
+          }
           return {
             ok: true,
             object: {
               duplicateGroups: [],
               contradictionGroups: [],
-              mergeGroups: [{ ids: [importedFact.id, ownerFact.id], unified }],
+              mergeGroups: [],
               domainFixes: [],
               timeline: [],
               occasions: [],
             },
           };
-        }
-        return {
-          ok: true,
-          object: {
-            duplicateGroups: [],
-            contradictionGroups: [],
-            mergeGroups: [],
-            domainFixes: [],
-            timeline: [],
-            occasions: [],
-          },
-        };
-      },
-      async embed(texts: string[]) {
-        return texts.map(() => new Array(1536).fill(0.01));
-      },
-    } as unknown as ModelRouter;
+        },
+        async embed(texts: string[]) {
+          return texts.map(() => new Array(1536).fill(0.01));
+        },
+      } as unknown as ModelRouter;
 
-    const consolidation = runMemoryConsolidation({ db, router }, { agentId });
-    await modelStarted;
-    await deleteImportSource(db, source, { delete: async () => {} });
-    resumeModel();
-    await expect(consolidation).rejects.toThrow(
-      'An imported source changed while consolidation was in flight',
-    );
-    expect(
-      await db.select().from(memories).where(eq(memories.content, sourceFactContent)),
-    ).toHaveLength(0);
-    expect(
-      await db.select().from(memories).where(eq(memories.content, ownerFactContent)),
-    ).toHaveLength(1);
-    expect(await db.select().from(memories).where(eq(memories.content, unified))).toHaveLength(0);
-  });
+      const consolidation = runMemoryConsolidation({ db, router }, { agentId: isolatedAgentId });
+      await modelStarted;
+      await deleteImportSource(db, source, { delete: async () => {} });
+      resumeModel();
+      await expect(consolidation).rejects.toThrow(
+        'An imported source changed while consolidation was in flight',
+      );
+      expect(
+        await db.select().from(memories).where(eq(memories.content, sourceFactContent)),
+      ).toHaveLength(0);
+      expect(
+        await db.select().from(memories).where(eq(memories.content, ownerFactContent)),
+      ).toHaveLength(1);
+      expect(await db.select().from(memories).where(eq(memories.content, unified))).toHaveLength(0);
+    });
+  }, 30_000);
 });

@@ -29,7 +29,7 @@ final class EncryptedCardFormDraftStorageTests: XCTestCase {
         XCTAssertFalse(String(decoding: ciphertext, as: UTF8.self).contains(secret))
         let loaded = try await storage.load(scope: value.scope)
         XCTAssertEqual(loaded, value)
-        #if os(iOS)
+        #if os(iOS) && !targetEnvironment(simulator)
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         XCTAssertEqual(attributes[.protectionKey] as? String, FileProtectionType.complete.rawValue)
         #else

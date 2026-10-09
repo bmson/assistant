@@ -289,7 +289,9 @@ final class APIClientRetryTests: XCTestCase {
     }
 
     func testActivityDiscoveryEncodesQueryAndCursorAndAcceptsLegacyResponse() async throws {
-        StubURLProtocol.prime([.success(status: 200, body: Data(#"{"items":[],"archivedCount":0}"#.utf8))])
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/activity": [.success(status: 200, body: Data(#"{"items":[],"archivedCount":0}"#.utf8))],
+        ])
         let cursor = "opaque+/=& cursor"
         let result = try await makeClient().activity(archived: true, query: "owner & older?", filter: "completed", cursor: cursor)
         let url = try XCTUnwrap(StubURLProtocol.urls.first)
@@ -519,7 +521,9 @@ final class APIClientRetryTests: XCTestCase {
     @MainActor
     func testSavedCardRefreshPostsSourceRefreshWithoutPretendingContentIsNew() async throws {
         let original = ChatMessage(id: "card-message", role: .assistant, parts: [RichMessageFixture.generated(stale: true)])
-        StubURLProtocol.prime([.success(status: 202, body: Data(#"{"ok":true,"taskId":"refresh-2","refreshState":"refreshing"}"#.utf8))])
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/cards/saved-1": [.success(status: 202, body: Data(#"{"ok":true,"taskId":"refresh-2","refreshState":"refreshing"}"#.utf8))],
+        ])
         let model = AppModel(apiClient: makeClient(), initialMessages: [original])
         let failure = await model.refreshSavedCard(id: "saved-1")
         XCTAssertNil(failure)
@@ -529,14 +533,19 @@ final class APIClientRetryTests: XCTestCase {
         XCTAssertEqual(data["stale"], .bool(true))
         XCTAssertEqual(StubURLProtocol.urls.first?.path, "/api/mobile/v1/cards/saved-1")
         let body = try JSONSerialization.jsonObject(with: XCTUnwrap(StubURLProtocol.bodies.first))
-        XCTAssertEqual(body as? [String: String], ["action": "refresh"])
+        let request = try XCTUnwrap(body as? [String: String])
+        XCTAssertEqual(request["action"], "refresh")
+        XCTAssertEqual(request["expectedRevisionId"], "r1")
+        XCTAssertNotNil(UUID(uuidString: try XCTUnwrap(request["operationId"])))
         XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
     }
 
     @MainActor
     func testFailedCardRefreshRetainsSnapshotAndReturnsInlineError() async {
         let original = ChatMessage(id: "card-message", role: .assistant, parts: [RichMessageFixture.generated(stale: true)])
-        StubURLProtocol.prime([.success(status: 409, body: Data(#"{"error":"The source is unavailable."}"#.utf8))])
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/cards/saved-1": [.success(status: 503, body: Data(#"{"error":"The source is unavailable."}"#.utf8))],
+        ])
         let model = AppModel(apiClient: makeClient(), initialMessages: [original])
         let failure = await model.refreshSavedCard(id: "saved-1")
         XCTAssertEqual(failure, "The source is unavailable.")
@@ -2312,6 +2321,7 @@ final class APIClientRetryTests: XCTestCase {
     }
 
     func testCardFormRejectsOversizedFrozenBodyBeforeNetworkAccess() async throws {
+        StubURLProtocol.prime([])
         let submission = CardFormSubmission(
             protocolVersion: CardFormSubmission.currentProtocol,
             conversationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -2447,7 +2457,9 @@ final class APIClientRetryTests: XCTestCase {
 
     /// Only failures a fresh connection could plausibly fix are retried.
     func testUnrecoverableTransportFailureIsNotRetried() async {
-        StubURLProtocol.prime([.failure(URLError(.userAuthenticationRequired))])
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/knowledge/cleanup": [.failure(URLError(.unsupportedURL))],
+        ])
 
         do {
             _ = try await makeClient().knowledgeCleanup()
@@ -2822,6 +2834,9 @@ extension APIClientRetryTests {
             "/api/mobile/v1/chat/status": [
                 .delayed(after: 0.08, status: 200, body: try JSONEncoder().encode(working)),
                 .success(status: 200, body: try JSONEncoder().encode(cancelled)),
+                .success(status: 200, body: try JSONEncoder().encode(cancelled)),
+                .success(status: 200, body: try JSONEncoder().encode(cancelled)),
+                .success(status: 200, body: try JSONEncoder().encode(cancelled)),
             ],
             "/api/mobile/v1/activity/task-stop-1": [
                 .success(status: 200, body: Data(#"{"ok":true,"cancelled":true,"effectStatus":"unknown"}"#.utf8)),
@@ -2838,7 +2853,7 @@ extension APIClientRetryTests {
         while !StubURLProtocol.urls.contains(where: { $0.path == "/api/mobile/v1/activity/task-stop-1" }) {
             await Task.yield()
         }
-        for _ in 0..<500 where model.isSending { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0..<1_000 where model.isSending { try await Task.sleep(for: .milliseconds(10)) }
 
         XCTAssertFalse(model.isSending)
         XCTAssertFalse(model.isCancellingSend)

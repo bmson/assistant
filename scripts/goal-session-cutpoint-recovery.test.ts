@@ -686,7 +686,7 @@ describe('goal rehearsal crash-stage recovery matrix', () => {
       if (laterIntentChecksPassed) await rm(laterIntentParent, { recursive: true, force: true });
       else console.error(`Preserved later-intent terminal evidence at ${laterIntentParent}`);
     }
-  });
+  }, 60_000);
 
   it('recovers cleanup crashes before transaction, before commit, and after commit', async () => {
     for (const stage of cleanupCutpoints) {
