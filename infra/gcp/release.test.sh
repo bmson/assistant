@@ -83,12 +83,20 @@ case "$args" in
   *'run services update'*) ;;
   *'run services update-traffic'*) ;;
   *'run jobs describe assistant-browser'*'--format=json'*)
-    image="$(cat "$STUB_JOB_IMAGE_FILE")"
-    extra=''
-    if [[ "${STUB_JOB_DB:-0}" == "1" ]]; then
-      extra=',{"name":"DATABASE_URL","valueFrom":{"secretKeyRef":{"name":"database-url","key":"latest"}}}'
-    fi
-    printf '{"spec":{"template":{"template":{"spec":{"containers":[{"image":"%s","env":[{"name":"X","value":"y"}%s]}]}}}}}\n' "$image" "$extra" ;;
+    node -e '
+      const image = require("node:fs").readFileSync(process.env.STUB_JOB_IMAGE_FILE, "utf8");
+      const shape = process.env.STUB_JOB_SHAPE || "v1";
+      const dbName = process.env.STUB_JOB_DB_NAME;
+      const secretName = process.env.STUB_JOB_DB_SECRET;
+      const secret = process.env.STUB_JOB_DB === "1" ? "database-url" : secretName;
+      const env = [{name:"X",value:"y"}];
+      if (dbName) env.push({name:dbName,value:"redacted"});
+      if (secret) env.push({name:"APP_CONFIG", ...(shape === "v2" ? {valueSource:{secretKeyRef:{secret,version:"latest"}}} : {valueFrom:{secretKeyRef:{name:secret,key:"latest"}}})});
+      const containers = [{image,env}];
+      if (process.env.STUB_JOB_DB_SIDECAR === "1") containers.push({name:"sidecar",env:[{name:"PGHOST",value:"redacted"}]});
+      const job = shape === "v2" ? {template:{template:{containers}}} : {spec:{template:{spec:{template:{spec:{containers}}}}}};
+      process.stdout.write(JSON.stringify(job)+"\n");
+    ' ;;
   *'run jobs describe assistant-browser'*) ;;
   *'run jobs update'*)
     while (($#)); do
@@ -149,7 +157,7 @@ reset() {
   : >"$STUB_CALLS"
   printf 'false' >"$STUB_WEB_PAUSED_FILE"
   unset STUB_AGENT_DRIVER STUB_WEB_DRIVER STUB_AGENT_EXTRA_ENV STUB_PITR STUB_BACKUP_AGE_HOURS \
-    STUB_INDEX_STATUS STUB_JOB_DB STUB_AGENT_DESCRIBE STUB_RELEASE_METADATA RELEASE_PERSISTENCE_DRIVER \
+    STUB_INDEX_STATUS STUB_JOB_DB STUB_JOB_SHAPE STUB_JOB_DB_NAME STUB_JOB_DB_SECRET STUB_JOB_DB_SIDECAR STUB_AGENT_DESCRIBE STUB_RELEASE_METADATA RELEASE_PERSISTENCE_DRIVER \
     RELEASE_EMAIL_OBSERVER_WORKER_ENABLED
 }
 
@@ -259,7 +267,8 @@ assert_no_database_calls() {
 }
 
 reset
-out="$(firestore_release)" || fail "Firestore release should succeed: $out"
+export STUB_JOB_SHAPE=v1
+out="$(firestore_release)" || fail "Firestore release should succeed with the standard Cloud Run v1 job JSON: $out"
 grep -q 'Firestore release abc123 is live' <<<"$out" || fail "release did not finish: $out"
 grep -q 'Recovery point: assistant-production at .* (point-in-time recovery' <<<"$out" ||
   fail "release must print its PITR recovery point: $out"
@@ -292,6 +301,43 @@ if out="$(firestore_release)"; then fail "a template with a database secret must
 grep -q 'not a database-free Firestore composition' <<<"$out" || fail "missing composition error: $out"
 grep -q 'DATABASE_URL from secret database-url' <<<"$out" || fail "the offending reference must be named: $out"
 grep -q 'run services update' "$STUB_CALLS" && fail "a mixed composition was rolled out"
+
+reset
+export STUB_JOB_SHAPE=v2
+out="$(firestore_release)" || fail "Firestore release should accept the Cloud Run v2 REST job shape: $out"
+grep -q 'run jobs update assistant-browser' "$STUB_CALLS" || fail "the v2 worker job was not rolled out"
+
+for shape in v1 v2; do
+  reset
+  export STUB_JOB_SHAPE="$shape" STUB_JOB_DB_NAME=DIRECT_DATABASE_URL
+  if out="$(firestore_release)"; then fail "$shape worker job with a direct database credential name must block release"; fi
+  grep -q 'env DIRECT_DATABASE_URL' <<<"$out" || fail "$shape direct database credential name was not identified: $out"
+  grep -q 'run jobs update' "$STUB_CALLS" && fail "$shape direct database credential name was updated"
+
+  reset
+  export STUB_JOB_SHAPE="$shape" STUB_JOB_DB_SECRET=projects/test/secrets/database-url
+  if out="$(firestore_release)"; then fail "$shape worker job with a qualified database secret reference must block release"; fi
+  grep -q 'APP_CONFIG from secret projects/test/secrets/database-url' <<<"$out" || fail "$shape qualified database secret reference was not identified: $out"
+  grep -q 'run jobs update' "$STUB_CALLS" && fail "$shape qualified database secret reference was updated"
+
+  reset
+  export STUB_JOB_SHAPE="$shape" STUB_JOB_DB_NAME=PROD_DATABASE_URL
+  if out="$(firestore_release)"; then fail "$shape worker job with a database credential name must block release"; fi
+  grep -q 'env PROD_DATABASE_URL' <<<"$out" || fail "$shape database credential name was not identified: $out"
+  grep -q 'run jobs update' "$STUB_CALLS" && fail "$shape database credential name was updated"
+
+  reset
+  export STUB_JOB_SHAPE="$shape" STUB_JOB_DB_SECRET=projects/test/secrets/neon-worker-credentials
+  if out="$(firestore_release)"; then fail "$shape worker job with a database secret reference must block release"; fi
+  grep -q 'APP_CONFIG from secret projects/test/secrets/neon-worker-credentials' <<<"$out" || fail "$shape secret reference was not identified: $out"
+  grep -q 'run jobs update' "$STUB_CALLS" && fail "$shape worker secret reference was updated"
+done
+
+reset
+export STUB_JOB_SHAPE=v2 STUB_JOB_DB_SIDECAR=1
+if out="$(firestore_release)"; then fail "a sidecar database credential must block release"; fi
+grep -q 'env PGHOST' <<<"$out" || fail "sidecar database credential was not identified: $out"
+grep -q 'run jobs update' "$STUB_CALLS" && fail "a job with a sidecar database credential was updated"
 
 reset
 export STUB_PITR=off STUB_BACKUP_AGE_HOURS=3
