@@ -233,8 +233,8 @@ try {
     assert.equal(message.text, facts.text);
     assert.equal(
       facts.requestMessageId,
-      facts.messageId,
-      `${label}: route request ID and persisted message ID differ`,
+      attempt.body.clientOperationId,
+      `${label}: route request message ID differs from the send operation ID`,
     );
 
     if (label === 'queuedA' || label === 'queuedB') tasksByLabel.set(label, task);
