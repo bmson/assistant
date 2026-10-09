@@ -51,7 +51,7 @@
     "@assistant/core": "workspace:*",
     "@assistant/db": "workspace:*",
     "@assistant/persistence": "workspace:*",
-    "ai": "^7.0.116",
+    "ai": "^7.0.128",
     "drizzle-orm": "^0.45.3",
     "google-auth-library": "^10.9.1",
     "zod": "^4.6.5"
