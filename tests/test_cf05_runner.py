@@ -1,0 +1,172 @@
+import datetime as dt
+import importlib.util
+import contextlib
+import io
+import json
+import pathlib
+import sys
+import tempfile
+import types
+import unittest
+from unittest.mock import patch
+
+SCRIPT = pathlib.Path(__file__).parents[1] / "scripts" / "cf05-run-mounted-loopback.py"
+spec = importlib.util.spec_from_file_location("cf05_runner", SCRIPT)
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+ROOT = None
+SHA = "a" * 40
+BRANCH = "codex/cf05-mounted-acceptance"
+
+
+def profile():
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    return {
+        "baseUrl": "http://127.0.0.1:3000",
+        "appSha": SHA,
+        "persistenceDriver": "firestore",
+        "firestoreEmulatorHost": "127.0.0.1:8789",
+        "firestoreProjectId": "demo-cf05-acceptance",
+        "firestoreDatabaseId": "(default)",
+        "installationId": "cf05-fixture-12345678",
+        "ownerId": "12345678-1234-4234-8234-123456789abc",
+        "queueDriver": "local",
+        "sourceRoot": str(ROOT),
+        "sourceBranch": BRANCH,
+        "sourceCommit": SHA,
+        "sourceTreeClean": True,
+        "serverPid": 12345,
+        "serverCommandSha256": "c" * 64,
+        "serverWorkingDirectory": str(ROOT),
+        "firestoreEmulatorPid": 23456,
+        "isolatedDatabaseConfirmed": True,
+        "installationOwnerCount": 1,
+        "noWorkerAttached": True,
+        "providerCallsDisabled": True,
+        "verificationStatus": "root-verified",
+        "verifiedAt": now,
+    }
+
+
+class RunnerProfileTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        global ROOT
+        cls._temporary = tempfile.TemporaryDirectory(prefix="cf05-profile-")
+        ROOT = pathlib.Path(cls._temporary.name) / ".codex" / "worktrees" / "cf05-test" / "assistant"
+        (ROOT / "apps" / "web").mkdir(parents=True)
+        (ROOT / "scripts").mkdir()
+        for fixture in (
+            "cf05-mounted-chat-admission.browser.ts",
+            "cf05-firestore-admission-and-late-completion.ts",
+        ):
+            (ROOT / "scripts" / fixture).write_text("// test fixture\n", encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._temporary.cleanup()
+
+    def check(self, data):
+        runner.check_manifest(data, expected_sha=SHA, expected_branch=BRANCH,
+                              source_root=ROOT, app_url="http://127.0.0.1:3000")
+
+    def test_accepts_exact_isolated_loopback_profile(self):
+        self.check(profile())
+
+    def test_accepts_exact_web_app_working_directory(self):
+        data = profile()
+        data["serverWorkingDirectory"] = str(ROOT / "apps" / "web")
+        self.check(data)
+
+    def test_rejects_other_working_directories(self):
+        for value in (str(ROOT / "apps"), str(ROOT / "packages"), "/tmp"):
+            data = profile(); data["serverWorkingDirectory"] = value
+            with self.subTest(value=value), self.assertRaises(runner.CheckError): self.check(data)
+
+    def test_rejects_hosted_app_or_firestore_targets(self):
+        for key, value in (("baseUrl", "https://example.com"),
+                           ("firestoreEmulatorHost", "firestore.googleapis.com:443")):
+            data = profile(); data[key] = value
+            with self.subTest(key=key), self.assertRaises(runner.CheckError): self.check(data)
+
+    def test_rejects_wrong_source_or_dirty_worktree(self):
+        for key, value in (("sourceCommit", "b" * 40), ("sourceBranch", "main"),
+                           ("sourceTreeClean", False), ("serverWorkingDirectory", "/tmp")):
+            data = profile(); data[key] = value
+            with self.subTest(key=key), self.assertRaises(runner.CheckError): self.check(data)
+
+    def test_rejects_non_emulator_storage_and_nonlocal_queue(self):
+        for key, value in (("firestoreProjectId", "production-project"),
+                           ("persistenceDriver", "postgres"), ("queueDriver", "cloudtasks"),
+                           ("isolatedDatabaseConfirmed", False)):
+            data = profile(); data[key] = value
+            with self.subTest(key=key), self.assertRaises(runner.CheckError): self.check(data)
+
+    def test_rejects_worker_or_provider_capability(self):
+        for key, value in (("noWorkerAttached", False), ("providerCallsDisabled", False)):
+            data = profile(); data[key] = value
+            with self.subTest(key=key), self.assertRaises(runner.CheckError): self.check(data)
+
+    def test_rejects_stale_or_shared_owner_profiles(self):
+        data = profile(); data["verifiedAt"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=6)).isoformat()
+        with self.assertRaises(runner.CheckError): self.check(data)
+        data = profile(); data["installationOwnerCount"] = 2
+        with self.assertRaises(runner.CheckError): self.check(data)
+        data = profile(); data["installationId"] = "production"
+        with self.assertRaises(runner.CheckError): self.check(data)
+
+    def test_main_rechecks_manifest_after_browser_before_adapter(self):
+        data = profile()
+        data["sourceRoot"] = str(ROOT.resolve())
+        data["serverWorkingDirectory"] = str(pathlib.Path(data["sourceRoot"]) / "apps" / "web")
+        verified = dt.datetime.fromisoformat(data["verifiedAt"])
+
+        class FrozenDateTime(dt.datetime):
+            current = verified
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current
+
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = pathlib.Path(directory) / "root-manifest.json"
+            manifest_path.write_text(json.dumps(data), encoding="utf-8")
+            calls = []
+
+            def run_fixture(command, *, cwd, env, timeout):
+                calls.append(command[-1])
+                if command[-1] == "scripts/cf05-mounted-chat-admission.browser.ts":
+                    pathlib.Path(env["ASSISTANT_CHAT_RUN_RECEIPT_PATH"]).write_text("{}", encoding="utf-8")
+                    FrozenDateTime.current += dt.timedelta(seconds=301)
+                return types.SimpleNamespace(returncode=0)
+
+            argv = [
+                "cf05-run-mounted-loopback.py",
+                "--source-root", data["sourceRoot"],
+                "--expected-sha", SHA,
+                "--expected-branch", BRANCH,
+                "--app-url", "http://127.0.0.1:3000",
+                "--root-manifest", str(manifest_path),
+            ]
+            output = io.StringIO()
+            errors = io.StringIO()
+            with (
+                patch.object(runner, "dt", types.SimpleNamespace(datetime=FrozenDateTime, timezone=dt.timezone)),
+                patch.object(runner, "verify_live"),
+                patch.object(runner, "run_checked", side_effect=run_fixture),
+                patch.object(sys, "argv", argv),
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(errors),
+            ):
+                self.assertEqual(runner.main(), 1)
+            self.assertEqual(calls, ["scripts/cf05-mounted-chat-admission.browser.ts"])
+            self.assertIn('"status": "not-exercised"', errors.getvalue())
+            self.assertIn("stale", errors.getvalue())
+
+    def test_accepts_only_plain_loopback_origin(self):
+        for value in ("https://127.0.0.1:3000", "http://example.com:3000", "http://127.0.0.1:3000/path", "http://user@127.0.0.1:3000"):
+            with self.subTest(value=value), self.assertRaises(runner.CheckError): runner.parse_loopback_url(value)
+
+
+if __name__ == "__main__":
+    unittest.main()
