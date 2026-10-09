@@ -7,6 +7,7 @@ import { runStepLoop } from './step-loop.js';
 
 type Scenario = {
   request: string;
+  history?: Array<{ role: string; content: string }>;
   expectedText: RegExp;
   expectedOutcome?: 'done' | 'needs_attention';
 };
@@ -88,7 +89,7 @@ async function runUnsupportedRequest(scenario: Scenario) {
   const state = TaskStateSchema.parse({
     untrustedContext: true,
     requestTimeZone: 'America/Los_Angeles',
-    contextWindow: [{ role: 'user', content: scenario.request }],
+    contextWindow: [...(scenario.history ?? []), { role: 'user', content: scenario.request }],
   });
   const task = {
     id: 'synthetic-r9-task',
@@ -123,7 +124,7 @@ async function runUnsupportedRequest(scenario: Scenario) {
       signal: new AbortController().signal,
       log: vi.fn(async () => {}),
     },
-    window: [{ role: 'user', content: scenario.request }],
+    window: [...(scenario.history ?? []), { role: 'user', content: scenario.request }],
   } as unknown as RunContext;
 
   const result = await runStepLoop(context, {
@@ -137,6 +138,18 @@ async function runUnsupportedRequest(scenario: Scenario) {
 
 describe('unsupported temporal requests through the actual executor step loop', () => {
   it.each([
+    {
+      request: 'There is nothing in the calendar about 9:15 flight.',
+      expectedText: /what date and destination is the flight you want me to recheck/i,
+    },
+    {
+      request: 'Are you sure?',
+      history: [
+        { role: 'user', content: 'When is my flight to Berlin tomorrow?' },
+        { role: 'assistant', content: 'Your flight is at 9:15 AM.' },
+      ],
+      expectedText: /what is the date of the flight you want me to recheck/i,
+    },
     {
       request: 'What was on my calendar 3 years ago?',
       expectedText: /can’t safely search that calendar period/i,
