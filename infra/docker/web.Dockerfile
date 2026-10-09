@@ -23,9 +23,9 @@ ENV BUILD_SHA=${GIT_SHA}
 RUN pnpm --filter @assistant/web build
 
 FROM node:22-slim AS runtime
-# Apply the Debian PCRE2 security update even when the base image layer is older.
+# Apply available Debian security updates even when the base image is older.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends --only-upgrade libpcre2-8-0 \
+  && apt-get upgrade -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0
