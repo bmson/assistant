@@ -7,7 +7,7 @@
 # Resolve workspace dependencies in a throwaway build stage and copy only the
 # production deployment into the image. Development TypeScript/esbuild binaries
 # and Vitest never enter the final filesystem.
-FROM node:22-slim AS build
+FROM public.ecr.aws/docker/library/node:22-slim AS build
 WORKDIR /workspace
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
@@ -18,7 +18,7 @@ COPY packages ./packages
 RUN pnpm install --frozen-lockfile --filter @assistant/code-runner... \
   && pnpm --filter @assistant/code-runner deploy --prod --legacy /runtime
 
-FROM node:22-slim
+FROM public.ecr.aws/docker/library/node:22-slim
 WORKDIR /app
 RUN apt-get update \
   && apt-get upgrade -y --no-install-recommends \
