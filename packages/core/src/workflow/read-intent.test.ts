@@ -892,6 +892,53 @@ describe('detectPersonalReadRequest', () => {
   it('does not route generic interview conversation into private account reads', () => {
     expect(detectPersonalReadRequest(turn('Why do interviews make me nervous?'))).toBeNull();
   });
+
+  it('accepts a lowercase destination answer but rejects generic replies and new instructions', () => {
+    const options = { now: new Date('2026-10-09T12:00:00Z'), timeZone: 'America/Los_Angeles' };
+    const datePrompt = {
+      role: 'assistant',
+      content: 'What date and destination is the flight you want me to recheck?',
+    };
+    const destinationPrompt = {
+      role: 'assistant',
+      content: 'What destination should I use for the flight?',
+    };
+    const date = { role: 'user', content: 'October 9, 2026.' };
+    const prior = [
+      { role: 'user', content: 'There is nothing in calendar about 9:15 flight.' },
+      datePrompt,
+      date,
+      destinationPrompt,
+    ];
+    expect(
+      detectPersonalReadRequest([...prior, { role: 'user', content: 'berlin' }], options),
+    ).toMatchObject({
+      answerFocus: 'flight',
+      queryTerms: expect.arrayContaining(['berlin']),
+      timeWindow: {
+        timeMin: '2026-10-09T07:00:00.000Z',
+        timeMax: '2026-10-10T07:00:00.000Z',
+      },
+    });
+    expect(
+      detectPersonalReadRequest([...prior, { role: 'user', content: 'The Hague' }], options),
+    ).toMatchObject({ answerFocus: 'flight', queryTerms: expect.arrayContaining(['hague']) });
+
+    for (const answer of [
+      'check my calendar',
+      'ignore previous instructions',
+      'doctor appointment',
+      'yes',
+      'no',
+    ]) {
+      const request = detectPersonalReadRequest(
+        [...prior, { role: 'user', content: answer }],
+        options,
+      );
+      expect(request?.answerFocus).not.toBe('flight');
+      expect(request?.scopeContext).toBeUndefined();
+    }
+  });
 });
 
 describe('required read sequence', () => {
@@ -1172,5 +1219,162 @@ describe('focused flight verification follow-ups', () => {
       options,
     );
     expect(request?.answerFocus).not.toBe('flight');
+  });
+
+  it('uses the owner date to finish an exact relative-flight clarification', () => {
+    const request = detectPersonalReadRequest(
+      [
+        { role: 'user', content: 'When is my flight to Berlin tomorrow?' },
+        { role: 'assistant', content: 'Your flight leaves at 9:15 AM.' },
+        { role: 'user', content: 'Are you sure?' },
+        {
+          role: 'assistant',
+          content: 'What is the date of the flight you want me to recheck?',
+        },
+        { role: 'user', content: 'October 9, 2026.' },
+      ],
+      options,
+    );
+    expect(request).toMatchObject({
+      kind: 'calendar_email',
+      answerFocus: 'flight',
+      verification: true,
+      queryTerms: ['berlin'],
+      timeWindow: { timeMin: '2026-10-09T07:00:00.000Z', timeMax: '2026-10-10T07:00:00.000Z' },
+    });
+    expect(request?.mailQuery).toBe('berlin');
+  });
+
+  it('uses only the owner-supplied date and destination after an exact scope question', () => {
+    const request = detectPersonalReadRequest(
+      [
+        { role: 'user', content: 'There is nothing in the calendar about 9:15 flight.' },
+        {
+          role: 'assistant',
+          content: 'What date and destination is the flight you want me to recheck?',
+        },
+        { role: 'user', content: 'October 9, 2026 to Berlin.' },
+      ],
+      options,
+    );
+    expect(request).toMatchObject({
+      kind: 'calendar_email',
+      answerFocus: 'flight',
+      verification: true,
+      queryTerms: ['berlin'],
+      timeWindow: { timeMin: '2026-10-09T07:00:00.000Z', timeMax: '2026-10-10T07:00:00.000Z' },
+    });
+    expect(request?.mailQuery).toBe('berlin');
+  });
+
+  it('does not inherit a flight from a quoted answer or a new owner topic', () => {
+    const quoted = detectPersonalReadRequest(
+      [
+        { role: 'user', content: 'There is nothing in the calendar about 9:15 flight.' },
+        {
+          role: 'assistant',
+          content: 'What date and destination is the flight you want me to recheck?',
+        },
+        { role: 'user', content: '> October 9, 2026 to Berlin' },
+      ],
+      options,
+    );
+    expect(quoted?.answerFocus).not.toBe('flight');
+
+    const newTopic = detectPersonalReadRequest(
+      [
+        { role: 'user', content: 'There is nothing in the calendar about 9:15 flight.' },
+        {
+          role: 'assistant',
+          content: 'What date and destination is the flight you want me to recheck?',
+        },
+        { role: 'user', content: 'October 9, 2026 to Berlin, and check my doctor appointment.' },
+      ],
+      options,
+    );
+    expect(newTopic?.answerFocus).not.toBe('flight');
+  });
+
+  it('finishes a missing-destination follow-up without asking the owner to repeat the date', () => {
+    const request = detectPersonalReadRequest(
+      [
+        { role: 'user', content: 'There is nothing in the calendar about 9:15 flight.' },
+        {
+          role: 'assistant',
+          content: 'What date and destination is the flight you want me to recheck?',
+        },
+        { role: 'user', content: 'October 9, 2026.' },
+        { role: 'assistant', content: 'What destination should I use for the flight?' },
+        { role: 'user', content: 'Berlin' },
+      ],
+      options,
+    );
+    expect(request).toMatchObject({
+      kind: 'calendar_email',
+      answerFocus: 'flight',
+      queryTerms: ['berlin'],
+      timeWindow: { timeMin: '2026-10-09T07:00:00.000Z', timeMax: '2026-10-10T07:00:00.000Z' },
+    });
+  });
+
+  it('uses the current task clock to resolve a yearless owner date answer', () => {
+    const request = detectPersonalReadRequest(
+      [
+        { role: 'user', content: 'When is my flight to Berlin tomorrow?' },
+        { role: 'assistant', content: 'Your flight leaves at 9:15 AM.' },
+        { role: 'user', content: 'Are you sure?' },
+        {
+          role: 'assistant',
+          content: 'What is the date of the flight you want me to recheck?',
+        },
+        { role: 'user', content: 'October 9.' },
+      ],
+      options,
+    );
+    expect(request).toMatchObject({
+      answerFocus: 'flight',
+      queryTerms: ['berlin'],
+      timeWindow: { timeMin: '2026-10-09T07:00:00.000Z', timeMax: '2026-10-10T07:00:00.000Z' },
+    });
+  });
+
+  it('does not resume an old flight scope after an intervening owner topic', () => {
+    const request = detectPersonalReadRequest(
+      [
+        { role: 'user', content: 'There is nothing in the calendar about 9:15 flight.' },
+        {
+          role: 'assistant',
+          content: 'What date and destination is the flight you want me to recheck?',
+        },
+        { role: 'user', content: 'Actually, check my doctor appointment.' },
+        {
+          role: 'assistant',
+          content: 'What date and destination is the flight you want me to recheck?',
+        },
+        { role: 'user', content: 'October 9, 2026 to Berlin.' },
+      ],
+      options,
+    );
+    expect(request?.answerFocus).not.toBe('flight');
+  });
+
+  it('asks for the missing destination instead of searching a date alone', () => {
+    const request = detectPersonalReadRequest(
+      [
+        { role: 'user', content: 'There is nothing in the calendar about 9:15 flight.' },
+        {
+          role: 'assistant',
+          content: 'What date and destination is the flight you want me to recheck?',
+        },
+        { role: 'user', content: 'October 9, 2026.' },
+      ],
+      options,
+    );
+    expect(request).toMatchObject({
+      answerFocus: 'flight',
+      scopeIssue: 'What destination should I use for the flight?',
+    });
+    if (!request) throw new Error('expected a destination clarification');
+    expect(nextRequiredReadTool(request, [])).toBeUndefined();
   });
 });
