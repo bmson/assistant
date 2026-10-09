@@ -24,23 +24,29 @@ final class StubURLProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var outcomes: [Outcome] = []
     private static var pathOutcomes: [String: [Outcome]] = [:]
+    private static var tokenOutcomes: [String: [Outcome]] = [:]
     private static var recordedMethods: [String] = []
     private static var recordedURLs: [URL] = []
     private static var recordedBodies: [Data] = []
     private static var recordedHeaders: [[String: String]] = []
     private static weak var activeStream: StubURLProtocol?
     private static var streamsByOperation: [String: StubURLProtocol] = [:]
+    private static var streamsByIdentity: [String: StubURLProtocol] = [:]
+    private static var readyStreamIdentities: Set<String> = []
 
-    static func prime(_ queued: [Outcome], paths: [String: [Outcome]] = [:]) {
+    static func prime(_ queued: [Outcome], paths: [String: [Outcome]] = [:], tokens: [String: [Outcome]] = [:]) {
         lock.withLock {
             outcomes = queued
             pathOutcomes = paths
+            tokenOutcomes = tokens
             recordedMethods = []
             recordedURLs = []
             recordedBodies = []
             recordedHeaders = []
             activeStream = nil
             streamsByOperation = [:]
+            streamsByIdentity = [:]
+            readyStreamIdentities = []
         }
     }
 
@@ -65,23 +71,59 @@ final class StubURLProtocol: URLProtocol {
     /// stream rather than as `httpBody`, so it is drained here once.
     static var bodies: [Data] { lock.withLock { recordedBodies } }
     static var headers: [[String: String]] { lock.withLock { recordedHeaders } }
+    static var requests: [(String, URL, [String: String], Data)] {
+        lock.withLock {
+            (0..<recordedMethods.count).compactMap { index in
+                guard index < recordedURLs.count, index < recordedHeaders.count, index < recordedBodies.count else { return nil }
+                return (recordedMethods[index], recordedURLs[index], recordedHeaders[index], recordedBodies[index])
+            }
+        }
+    }
 
-    static func appendStream(_ body: Data, operationId: String? = nil) {
+    static func appendStream(_ body: Data, operationId: String? = nil, authorization: String? = nil) {
         let stream = lock.withLock {
-            operationId.flatMap { streamsByOperation[$0] } ?? activeStream
+            if let operationId, let authorization {
+                return streamsByIdentity[streamIdentityKey(operationId: operationId, authorization: authorization)]
+            }
+            return operationId.flatMap { streamsByOperation[$0] } ?? activeStream
         }
         guard let stream else { return }
         stream.client?.urlProtocol(stream, didLoad: body)
     }
 
-    private static func rememberStream(_ stream: StubURLProtocol, requestBody: Data) {
+    static func isStreamReady(operationId: String, authorization: String) -> Bool {
+        let key = streamIdentityKey(operationId: operationId, authorization: authorization)
+        return lock.withLock { readyStreamIdentities.contains(key) }
+    }
+
+    static func cancelStream(operationId: String, authorization: String) {
+        let key = streamIdentityKey(operationId: operationId, authorization: authorization)
+        let stream = lock.withLock { streamsByIdentity[key] }
+        guard let stream else { return }
+        stream.client?.urlProtocol(stream, didFailWithError: URLError(.cancelled))
+    }
+
+    private static func streamIdentityKey(operationId: String, authorization: String) -> String {
+        "\(authorization)\u{0}\(operationId)"
+    }
+
+    private static func rememberStream(_ stream: StubURLProtocol, requestBody: Data,
+                                       headers: [String: String]) -> String? {
+        let object = try? JSONSerialization.jsonObject(with: requestBody) as? [String: Any]
+        let operationId = object?["clientOperationId"] as? String
+        let authorization = headers.first(where: { $0.key.caseInsensitiveCompare("authorization") == .orderedSame })?.value ?? ""
+        let identityKey = operationId.map { streamIdentityKey(operationId: $0, authorization: authorization) }
         lock.withLock {
             activeStream = stream
-            if let object = try? JSONSerialization.jsonObject(with: requestBody) as? [String: Any],
-               let operationId = object["clientOperationId"] as? String {
-                streamsByOperation[operationId] = stream
-            }
+            if let operationId { streamsByOperation[operationId] = stream }
+            if let identityKey { streamsByIdentity[identityKey] = stream }
         }
+        return identityKey
+    }
+
+    private static func markStreamReady(identityKey: String?) {
+        guard let identityKey else { return }
+        lock.withLock { readyStreamIdentities.insert(identityKey) }
     }
 
     private static func next(for method: String, url: URL?, body: Data, headers: [String: String]) -> Outcome {
@@ -90,6 +132,12 @@ final class StubURLProtocol: URLProtocol {
             if let url { recordedURLs.append(url) }
             recordedBodies.append(body)
             recordedHeaders.append(headers)
+            if let authorization = headers.first(where: { $0.key.caseInsensitiveCompare("authorization") == .orderedSame })?.value,
+               var queued = tokenOutcomes[authorization], !queued.isEmpty {
+                let result = queued.removeFirst()
+                tokenOutcomes[authorization] = queued
+                return result
+            }
             if let path = url?.path, var queued = pathOutcomes[path], !queued.isEmpty {
                 let result = queued.removeFirst()
                 pathOutcomes[path] = queued
@@ -144,20 +192,28 @@ final class StubURLProtocol: URLProtocol {
         case let .failure(error):
             client?.urlProtocol(self, didFailWithError: error)
         case let .stream(body):
-            Self.rememberStream(self, requestBody: requestBody)
+            let identityKey = Self.rememberStream(
+                self, requestBody: requestBody, headers: request.allHTTPHeaderFields ?? [:]
+            )
             let response = HTTPURLResponse(url: request.url!, statusCode: 200,
                 httpVersion: "HTTP/1.1", headerFields: ["content-type": "text/event-stream"])!
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: body)
+            guard let client else { return }
+            client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client.urlProtocol(self, didLoad: body)
+            Self.markStreamReady(identityKey: identityKey)
             // Remain open so the test can deliver later tokens while sending.
         case let .taskStream(body, taskId):
-            Self.rememberStream(self, requestBody: requestBody)
+            let identityKey = Self.rememberStream(
+                self, requestBody: requestBody, headers: request.allHTTPHeaderFields ?? [:]
+            )
             let response = HTTPURLResponse(url: request.url!, statusCode: 200,
                 httpVersion: "HTTP/1.1", headerFields: [
                     "content-type": "text/event-stream", "x-async-task": taskId,
                 ])!
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: body)
+            guard let client else { return }
+            client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client.urlProtocol(self, didLoad: body)
+            Self.markStreamReady(identityKey: identityKey)
         case let .operationCancellation(status, outcome):
             let sent = try? JSONSerialization.jsonObject(with: requestBody) as? [String: String]
             var body: [String: Any] = [
@@ -289,12 +345,18 @@ final class APIClientRetryTests: XCTestCase {
     }
 
     func testActivityDiscoveryEncodesQueryAndCursorAndAcceptsLegacyResponse() async throws {
-        StubURLProtocol.prime([], paths: [
-            "/api/mobile/v1/activity": [.success(status: 200, body: Data(#"{"items":[],"archivedCount":0}"#.utf8))],
+        let testToken = "activity-query-test"
+        StubURLProtocol.prime([], tokens: [
+            "Bearer \(testToken)": [.success(status: 200, body: Data(#"{"items":[],"archivedCount":0}"#.utf8))],
         ])
         let cursor = "opaque+/=& cursor"
-        let result = try await makeClient().activity(archived: true, query: "owner & older?", filter: "completed", cursor: cursor)
-        let url = try XCTUnwrap(StubURLProtocol.urls.first)
+        let result = try await makeClient(token: testToken).activity(archived: true, query: "owner & older?", filter: "completed", cursor: cursor)
+        let activityRequests = StubURLProtocol.requests.filter {
+            $0.1.path == "/api/mobile/v1/activity"
+                && $0.2.first(where: { $0.key.caseInsensitiveCompare("authorization") == .orderedSame })?.value == "Bearer \(testToken)"
+        }
+        XCTAssertEqual(activityRequests.count, 1, "This isolated client must issue one activity request")
+        let url = try XCTUnwrap(activityRequests.first?.1)
         let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         XCTAssertEqual(query.first(where: { $0.name == "cursor" })?.value, cursor)
         XCTAssertEqual(query.first(where: { $0.name == "q" })?.value, "owner & older?")
@@ -2391,11 +2453,11 @@ final class APIClientRetryTests: XCTestCase {
                        "A new server must bootstrap without advertising the previous encrypted session")
     }
 
-    private func makeClient(clientID: String? = nil) -> APIClient {
+    private func makeClient(clientID: String? = nil, token: String = "t") -> APIClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
         return APIClient(
-            configuration: .init(baseURL: URL(string: "https://assistant.test")!, token: "t"),
+            configuration: .init(baseURL: URL(string: "https://assistant.test")!, token: token),
             session: URLSession(configuration: configuration),
             clientID: clientID
         )
@@ -2457,19 +2519,27 @@ final class APIClientRetryTests: XCTestCase {
 
     /// Only failures a fresh connection could plausibly fix are retried.
     func testUnrecoverableTransportFailureIsNotRetried() async {
-        StubURLProtocol.prime([], paths: [
-            "/api/mobile/v1/knowledge/cleanup": [.failure(URLError(.unsupportedURL))],
+        let testToken = "nonretryable-transport-test"
+        StubURLProtocol.prime([], tokens: [
+            "Bearer \(testToken)": [
+                .failure(URLError(.unsupportedURL)),
+                .failure(URLError(.unsupportedURL)),
+            ],
         ])
 
         do {
-            _ = try await makeClient().knowledgeCleanup()
+            _ = try await makeClient(token: testToken).knowledgeCleanup()
             XCTFail("expected the error to propagate")
         } catch let error as APIError {
             XCTAssertTrue(error.isTransport)
         } catch {
             XCTFail("expected APIError.transport, got \(error)")
         }
-        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        let cleanupAttempts = StubURLProtocol.requests.filter {
+            $0.1.path == "/api/mobile/v1/knowledge/cleanup"
+                && $0.2.first(where: { $0.key.caseInsensitiveCompare("authorization") == .orderedSame })?.value == "Bearer \(testToken)"
+        }.map { $0.0 }
+        XCTAssertEqual(cleanupAttempts, ["GET"], "A non-retryable failure must not retry the knowledge-cleanup read")
     }
 
     /// A server that answered is not a transport failure, so the banner must
@@ -2962,7 +3032,8 @@ extension APIClientRetryTests {
     }
 
     func testChatOperationKeepsTheExactFrozenRequestBytes() async throws {
-        let client = makeClient(clientID: "33333333-3333-4333-8333-333333333333")
+        let testToken = "frozen-chat-request-test"
+        let client = makeClient(clientID: "33333333-3333-4333-8333-333333333333", token: testToken)
         let conversationId = "11111111-1111-4111-8111-111111111111"
         let operationId = "22222222-2222-4222-8222-222222222222"
         let body = try client.encodeChatRequest(
@@ -2974,7 +3045,7 @@ extension APIClientRetryTests {
             spoken: false,
             clientMessageId: "44444444-4444-4444-8444-444444444444"
         )
-        StubURLProtocol.prime([], paths: ["/api/mobile/v1/chat": [.stream(body: Data())]])
+        StubURLProtocol.prime([], tokens: ["Bearer \(testToken)": [.stream(body: Data())]])
         let send = Task {
             try await client.sendMessage(
                 conversationId: conversationId,
@@ -2986,9 +3057,28 @@ extension APIClientRetryTests {
                 onCue: { _ in }
             )
         }
-        while !StubURLProtocol.urls.contains(where: { $0.path == "/api/mobile/v1/chat" }) { await Task.yield() }
-        XCTAssertEqual(StubURLProtocol.bodies.first, body)
-        StubURLProtocol.appendStream(Data("data: [DONE]\n\n".utf8))
+        let authorization = "Bearer \(testToken)"
+        let streamDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !StubURLProtocol.isStreamReady(operationId: operationId, authorization: authorization),
+              ContinuousClock.now < streamDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard StubURLProtocol.isStreamReady(operationId: operationId, authorization: authorization) else {
+            send.cancel()
+            StubURLProtocol.cancelStream(operationId: operationId, authorization: authorization)
+            _ = try? await send.value
+            XCTFail("The exact operation stream did not become ready")
+            return
+        }
+        let chatRequests = StubURLProtocol.requests.filter {
+            $0.1.path == "/api/mobile/v1/chat"
+                && $0.2.first(where: { $0.key.caseInsensitiveCompare("authorization") == .orderedSame })?.value == "Bearer \(testToken)"
+        }
+        XCTAssertEqual(chatRequests.count, 1, "This frozen operation is sent once")
+        XCTAssertEqual(chatRequests.first?.3, body)
+        StubURLProtocol.appendStream(
+            Data("data: [DONE]\n\n".utf8), operationId: operationId, authorization: authorization
+        )
         let receipt = try await send.value
         XCTAssertNil(receipt.taskId)
     }
