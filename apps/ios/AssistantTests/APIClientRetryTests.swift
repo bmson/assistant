@@ -34,6 +34,14 @@ final class StubURLProtocol: URLProtocol {
     private static var streamsByIdentity: [String: StubURLProtocol] = [:]
     private static var readyStreamIdentities: Set<String> = []
 
+    fileprivate final class SessionInvalidation: NSObject, URLSessionDelegate, @unchecked Sendable {
+        let finished = DispatchSemaphore(value: 0)
+
+        func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
+            finished.signal()
+        }
+    }
+
     static func prime(_ queued: [Outcome], paths: [String: [Outcome]] = [:], tokens: [String: [Outcome]] = [:]) {
         lock.withLock {
             outcomes = queued
@@ -292,6 +300,31 @@ final class StubURLProtocol: URLProtocol {
 }
 
 final class APIClientRetryTests: XCTestCase {
+    private struct TestSession {
+        let session: URLSession
+        let invalidation: StubURLProtocol.SessionInvalidation
+    }
+
+    private let sessionLock = NSLock()
+    private var testSessions: [TestSession] = []
+
+    override func tearDown() {
+        let sessions = sessionLock.withLock { () -> [TestSession] in
+            defer { testSessions = [] }
+            return testSessions
+        }
+        for registered in sessions { registered.session.invalidateAndCancel() }
+        let deadline = DispatchTime.now() + 5
+        var allStopped = true
+        for registered in sessions {
+            if registered.invalidation.finished.wait(timeout: deadline) != .success {
+                allStopped = false
+            }
+        }
+        XCTAssertTrue(allStopped, "Test-owned URLSession work must stop before shared stub state is reused")
+        super.tearDown()
+    }
+
     func testOwnerReplyDeliveryUsesTheSameStableClientIdentityAsTheChatRequest() async throws {
         let clientID = "33333333-3333-4333-8333-333333333333"
         StubURLProtocol.prime([
@@ -2456,9 +2489,12 @@ final class APIClientRetryTests: XCTestCase {
     private func makeClient(clientID: String? = nil, token: String = "t") -> APIClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
+        let invalidation = StubURLProtocol.SessionInvalidation()
+        let session = URLSession(configuration: configuration, delegate: invalidation, delegateQueue: nil)
+        sessionLock.withLock { testSessions.append(TestSession(session: session, invalidation: invalidation)) }
         return APIClient(
             configuration: .init(baseURL: URL(string: "https://assistant.test")!, token: token),
-            session: URLSession(configuration: configuration),
+            session: session,
             clientID: clientID
         )
     }
