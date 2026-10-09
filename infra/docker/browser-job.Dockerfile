@@ -9,7 +9,9 @@ WORKDIR /workspace
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY workers/browser-job ./workers/browser-job
-COPY packages/persistence ./packages/persistence
+# Legacy deploy resolves root workspace links even for a filtered worker.
+# These build-only packages are excluded from the production runtime copy.
+COPY packages ./packages
 RUN pnpm install --frozen-lockfile --filter @assistant/browser-job... \
   && pnpm --filter @assistant/browser-job deploy --prod --legacy /runtime
 

@@ -12,7 +12,9 @@ WORKDIR /workspace
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY workers/code-runner ./workers/code-runner
-COPY packages/persistence ./packages/persistence
+# Legacy deploy resolves root workspace links even for a filtered worker.
+# These build-only packages are excluded from the production runtime copy.
+COPY packages ./packages
 RUN pnpm install --frozen-lockfile --filter @assistant/code-runner... \
   && pnpm --filter @assistant/code-runner deploy --prod --legacy /runtime
 
