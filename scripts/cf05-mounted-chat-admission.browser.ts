@@ -140,7 +140,7 @@ async function createConversation(page: Page): Promise<string> {
 
 async function openChat(page: Page, conversationId: string): Promise<void> {
   await page.goto(new URL(`/chat/${conversationId}`, baseUrl).toString());
-  await page.getByRole('textbox').waitFor();
+  await page.getByRole('combobox', { name: 'Message', exact: true }).waitFor();
 }
 
 function captureAdmissions(page: Page, options: { dropFirstResponse?: boolean } = {}) {
@@ -186,7 +186,7 @@ function captureAdmissions(page: Page, options: { dropFirstResponse?: boolean } 
 }
 
 async function send(page: Page, text: string): Promise<void> {
-  await page.getByRole('textbox').fill(text);
+  await page.getByRole('combobox', { name: 'Message', exact: true }).fill(text);
   await page.getByRole('button', { name: 'Send', exact: true }).click();
 }
 
