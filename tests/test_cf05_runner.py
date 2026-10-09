@@ -49,6 +49,16 @@ class RunnerProfileTests(unittest.TestCase):
     def test_accepts_exact_isolated_loopback_profile(self):
         self.check(profile())
 
+    def test_accepts_exact_web_app_working_directory(self):
+        data = profile()
+        data["serverWorkingDirectory"] = str(ROOT / "apps" / "web")
+        self.check(data)
+
+    def test_rejects_other_working_directories(self):
+        for value in (str(ROOT / "apps"), str(ROOT / "packages"), "/tmp"):
+            data = profile(); data["serverWorkingDirectory"] = value
+            with self.subTest(value=value), self.assertRaises(runner.CheckError): self.check(data)
+
     def test_rejects_hosted_app_or_firestore_targets(self):
         for key, value in (("baseUrl", "https://example.com"),
                            ("firestoreEmulatorHost", "firestore.googleapis.com:443")):

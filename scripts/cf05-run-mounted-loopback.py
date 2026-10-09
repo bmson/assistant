@@ -66,7 +66,12 @@ def check_manifest(data: dict[str, Any], *, expected_sha: str, expected_branch: 
     fail_if(data["sourceCommit"] != expected_sha or data["appSha"] != expected_sha, "Source SHA does not match the explicitly pinned SHA")
     fail_if(data["sourceBranch"] != expected_branch, "Source branch does not match explicit selection")
     fail_if(data["sourceTreeClean"] is not True, "Selected source worktree is not clean")
-    fail_if(data["serverWorkingDirectory"] != str(root), "App working directory does not match selected worktree")
+    allowed_server_directories = {root, (root / "apps" / "web").resolve(strict=True)}
+    try:
+        server_working_directory = pathlib.Path(data["serverWorkingDirectory"]).resolve(strict=True)
+    except (OSError, TypeError, ValueError):
+        raise CheckError("App working directory is not a valid existing directory") from None
+    fail_if(server_working_directory not in allowed_server_directories, "App working directory is outside the selected worktree or its exact web app directory")
     fail_if(data["persistenceDriver"] != "firestore", "CF-05 runtime acceptance requires Firestore")
     fail_if(data["queueDriver"] != "local", "CF-05 browser acceptance requires the inert local queue")
     fail_if(data["noWorkerAttached"] is not True, "A worker is attached to the local queue")
@@ -145,7 +150,9 @@ def verify_live(data: dict[str, Any], source_root: pathlib.Path, app_url: str) -
     app_cmd = pid_command(app_pid)
     import hashlib
     fail_if(hashlib.sha256(app_cmd.encode()).hexdigest() != data["serverCommandSha256"], "Live app command differs from root attestation")
-    fail_if(process_cwd(app_pid) != source_root.resolve(strict=True), "Live app process cwd differs from selected worktree")
+    expected_cwd = pathlib.Path(data["serverWorkingDirectory"]).resolve(strict=True)
+    fail_if(expected_cwd not in {source_root.resolve(strict=True), (source_root / "apps" / "web").resolve(strict=True)}, "Attested app working directory is outside the selected worktree")
+    fail_if(process_cwd(app_pid) != expected_cwd, "Live app process cwd differs from root-verified manifest")
     app_port = parse_loopback_url(app_url)[1]
     fail_if(app_pid not in listener_pids(app_port), "Attested app process does not own the selected loopback listener")
     emulator_pid = data["firestoreEmulatorPid"]
