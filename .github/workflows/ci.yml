@@ -48,9 +48,9 @@ jobs:
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 infra/gcp/cleanup-current.test.py
           bash infra/gcp/verify-release-source.test.sh
-          bash infra/ci/configure-docker-cache.test.sh
+          bash infra/ci/install-postgres17.test.sh
           bash infra/ci/postgres-service.test.sh
-          PYTHONDONTWRITEBYTECODE=1 python3 infra/ci/workflow-postgres.test.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tests/test_ci_postgres_workflow.py
       # 900+ lines of deploy bash run against production with no other check.
       - name: Lint shell scripts
         run: |
@@ -81,6 +81,17 @@ jobs:
           terraform validate
           terraform test
 
+  base-images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Pull and verify public Node 22 base image
+        run: |
+          image=public.ecr.aws/docker/library/node:22-slim
+          docker pull "$image"
+          version=$(docker run --rm "$image" node -p 'process.versions.node')
+          [[ "$version" == 22.* ]]
+
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -89,8 +100,8 @@ jobs:
       TEST_DATABASE_URL: postgres://assistant:assistant@localhost:5432/assistant_test
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Configure Docker Hub cache
-        run: bash infra/ci/configure-docker-cache.sh
+      - name: Install PostgreSQL 17 and pgvector
+        run: bash infra/ci/install-postgres17.sh
       - name: Start PostgreSQL service
         env:
           POSTGRES_USER: assistant
@@ -119,8 +130,8 @@ jobs:
       TEST_DATABASE_URL: postgres://assistant:assistant@localhost:5432/assistant_test
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Configure Docker Hub cache
-        run: bash infra/ci/configure-docker-cache.sh
+      - name: Install PostgreSQL 17 and pgvector
+        run: bash infra/ci/install-postgres17.sh
       - name: Start PostgreSQL service
         env:
           POSTGRES_USER: assistant
@@ -176,8 +187,8 @@ jobs:
       DATABASE_URL: postgres://assistant:assistant@localhost:5432/assistant
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Configure Docker Hub cache
-        run: bash infra/ci/configure-docker-cache.sh
+      - name: Install PostgreSQL 17 and pgvector
+        run: bash infra/ci/install-postgres17.sh
       - name: Start PostgreSQL service
         env:
           POSTGRES_USER: assistant

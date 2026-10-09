@@ -1,4 +1,4 @@
-FROM node:22-slim AS build
+FROM public.ecr.aws/docker/library/node:22-slim AS build
 WORKDIR /src
 RUN corepack enable
 
@@ -22,7 +22,7 @@ ARG GIT_SHA=unknown
 ENV BUILD_SHA=${GIT_SHA}
 RUN pnpm --filter @assistant/web build
 
-FROM node:22-slim AS runtime
+FROM public.ecr.aws/docker/library/node:22-slim AS runtime
 # Apply available Debian security updates even when the base image is older.
 RUN apt-get update \
   && apt-get upgrade -y --no-install-recommends \

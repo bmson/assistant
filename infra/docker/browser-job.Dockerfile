@@ -4,7 +4,7 @@
 # Build the workspace dependency graph, then deploy only this worker's production
 # dependencies. The root development install (TypeScript, test tools, old esbuild)
 # is confined to this stage and is not copied into the image.
-FROM node:22-slim AS build
+FROM public.ecr.aws/docker/library/node:22-slim AS build
 WORKDIR /workspace
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
@@ -16,7 +16,7 @@ RUN pnpm install --frozen-lockfile --filter @assistant/browser-job... \
   && pnpm --filter @assistant/browser-job deploy --prod --legacy /runtime
 
 # Chromium and its matched Playwright package are installed in the final image.
-FROM node:22-slim
+FROM public.ecr.aws/docker/library/node:22-slim
 WORKDIR /app
 RUN apt-get update \
   && apt-get upgrade -y --no-install-recommends \

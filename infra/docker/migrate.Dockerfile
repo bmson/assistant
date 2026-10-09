@@ -1,4 +1,4 @@
-FROM node:22-slim
+FROM public.ecr.aws/docker/library/node:22-slim
 ENV NODE_ENV=development
 ENV ASSISTANT_REPO_ROOT=/app
 ENV COREPACK_HOME=/opt/corepack
