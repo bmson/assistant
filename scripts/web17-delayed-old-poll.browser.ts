@@ -159,11 +159,15 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
         taskId,
         fixture.cursorAt(new Date()),
       );
-      await route.fulfill({
-        status: response.status,
-        headers: Object.fromEntries(response.headers.entries()),
-        body: await response.text(),
-      });
+      try {
+        await route.fulfill({
+          status: response.status,
+          headers: Object.fromEntries(response.headers.entries()),
+          body: await response.text(),
+        });
+      } catch (error) {
+        if (!request.failure()) throw error;
+      }
       return;
     }
     if (url.pathname === '/api/chat/status' && request.method() === 'GET') {
@@ -260,9 +264,32 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
 
     await composer.fill(secondMessage);
     await composer.press('Enter');
-    await page
-      .getByText('Still sending. Your next message stays here.', { exact: true })
-      .waitFor({ timeout: 10_000 });
+    const feedback = page.getByText('Still sending. Your next message stays here.', {
+      exact: true,
+    });
+    const feedbackShown = await feedback.waitFor({ timeout: 10_000 }).then(
+      () => true,
+      () => false,
+    );
+    if (!feedbackShown) {
+      const pageState = await page.evaluate(() => ({
+        path: window.location.pathname,
+        inputValue: document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')
+          ?.value,
+        sendDisabled: document.querySelector<HTMLButtonElement>('button[aria-label="Send"]')
+          ?.disabled,
+        visibleText: document.body.innerText.slice(-1200),
+      }));
+      throw new Error(
+        `WEB-17 second prompt feedback did not render: ${JSON.stringify({
+          pageState,
+          browserErrors,
+          apiEvents,
+          admissionCount,
+          admittedTexts,
+        })}`,
+      );
+    }
     assert.equal(await composer.inputValue(), secondMessage);
     assert.deepEqual(admittedTexts, [firstMessage]);
     assert.equal(
