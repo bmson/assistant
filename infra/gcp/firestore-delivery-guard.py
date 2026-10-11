@@ -301,7 +301,7 @@ class DeliveryGuard:
             # Project testIamPermissions is its supported permission probe.
             self._test_permissions(
                 f"project {self.project}",
-                ["cloudscheduler.jobs.get", "cloudscheduler.jobs.pause", "cloudscheduler.jobs.resume"],
+                ["cloudscheduler.jobs.get", "cloudscheduler.jobs.pause", "cloudscheduler.jobs.enable"],
                 self._api("cloudresourcemanager", f"v1/projects/{self.project}:testIamPermissions"),
             )
         if push_config.get("pushEndpoint"):

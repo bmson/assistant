@@ -161,6 +161,15 @@ python3 "$ROOT/firestore-delivery-guard.test.py" || fail "Firestore delivery hol
 
 workflow="$ROOT/../../.github/workflows/deploy.yml"
 env_example="$ROOT/../../.env.example"
+for worker_mapping in browser:BROWSER code:CODE processor:PROCESSOR; do
+  worker="${worker_mapping%:*}"
+  worker_env="${worker_mapping#*:}"
+  output_line="      ${worker}: \${{ steps.modules.outputs.${worker} }}"
+  [[ "$(grep -Fxc "$output_line" "$workflow")" == 1 ]] ||
+    fail "the ${worker} worker plan output must be forwarded exactly once"
+  grep -Fq "GUARD_WORKER_${worker_env}: \${{ needs.plan.outputs.${worker} }}" "$workflow" ||
+    fail "the delivery guard must receive the ${worker} worker plan output"
+done
 grep -Fq 'RELEASE_EMAIL_OBSERVER_WORKER_ENABLED: ${{ vars.RELEASE_EMAIL_OBSERVER_WORKER_ENABLED }}' "$workflow" ||
   fail "production release must forward the optional repository worker variable"
 grep -Fxq 'EMAIL_OBSERVER_WORKER_ENABLED=false' <(grep '^EMAIL_OBSERVER_WORKER_ENABLED=' "$env_example") ||
