@@ -157,6 +157,7 @@ fail() {
 
 bash "$ROOT/release-staged-services.test.sh" || fail "staged service promotion protocol tests failed"
 bash "$ROOT/release-legacy-bootstrap.test.sh" || fail "pinned legacy bootstrap helper contract failed"
+python3 "$ROOT/firestore-delivery-guard.test.py" || fail "Firestore delivery hold recovery tests failed"
 
 workflow="$ROOT/../../.github/workflows/deploy.yml"
 env_example="$ROOT/../../.env.example"

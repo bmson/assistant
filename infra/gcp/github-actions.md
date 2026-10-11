@@ -97,6 +97,50 @@ The manifest is archived as `release-manifest-<sha>` by the workflow. `infra/gcp
 
 The workflow defaults to the agent+web set. Manual dispatch can explicitly select a web-only release for either supported persistence driver; it requires an explicit driver, the schema-unchanged declaration, and proven live-agent API/schema metadata. The fast local release accepts only `web`, resolves the live driver, and uses the same staged protocol. Firestore releases use the same no-traffic staging, cross-service readiness probe, captured-traffic rollback, and worker-image rollback path as PostgreSQL releases.
 
+For a full Firestore agent+web release, the workflow reads the live
+`assistant-agent` Cloud Run service URL and runs
+`firestore-delivery-guard.py` around `release.sh`. It checks permission probes
+before changing any control, then pauses only `agent-steps`, the three named
+Assistant schedulers, and the `gmail-events-push` subscription. Controls that
+were already paused or disabled stay that way. After acquiring all holds, the
+guard checks BASIC task-attempt metadata and selected Cloud Run worker-job
+execution metadata, and waits for active work to finish before continuing.
+Unknown execution status stops the release. It writes a mode-0600 receipt in the Actions runner
+temp directory before each mutation, restores only controls recorded as owned
+by that run, and checks the live state before restoring so an external change
+stops recovery instead of being overwritten. It restores on ordinary release
+errors and SIGINT/SIGTERM, and stops the release process group before restoring
+delivery. The workflow's `always()` restore step retries before artifact
+archival and cleanup. Worker execution checks are read-only and limited to
+workers selected by the same module plan as the release.
+
+The deploy identity needs queue read/pause/resume and task-list permissions for
+Cloud Tasks, job read/pause/resume permissions for Cloud Scheduler, read/list
+permissions for selected Cloud Run worker-job executions, and subscription
+read/update for the Gmail Pub/Sub subscription. When the saved push config uses
+OIDC, it also needs `iam.serviceAccounts.actAs` on the exact service account
+named by that config; the guard checks that identity's permission before
+acquiring holds so it can restore the authenticated push configuration.
+The checked-in bootstrap currently grants Artifact Registry Writer, Cloud Run
+Admin, and Cloud Scheduler Admin; it does not grant Cloud Tasks or Pub/Sub
+permissions or service-account `actAs`. Do not add project-wide admin roles for
+this guard. Configure resource-scoped grants where the service supports them;
+Scheduler's permission probe is project-scoped. The workflow stops before
+acquiring holds when a permission probe reports a missing permission. Google
+documents these probes as advisory and notes they can fail open; actual
+mutation calls enforce IAM, and a denied call after acquisition triggers
+ownership-based rollback.
+
+A runner loss, forced cancellation, or machine termination can prevent both
+the process trap and `always()` step from running. If artifact archival
+completed, use `firestore-delivery-guard-<sha>` to inspect the exact prior
+states and restore only its remaining owned entries after checking current
+state. If the runner disappeared before upload, its temp receipt may be lost;
+an operator must inspect each control and determine ownership from the release
+logs and observed state before restoring it. Recovery is not automatic in that
+case. A receipt entry is removed only after a verified restoration; changed
+state or failed restoration leaves the private receipt for recovery.
+
 
 ## GitHub configuration
 
