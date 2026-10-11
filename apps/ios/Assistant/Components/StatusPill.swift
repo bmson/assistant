@@ -35,7 +35,7 @@ struct StatusPill: View {
         case "running": "arrow.triangle.2.circlepath"
         case "done", "approved", "ready": "checkmark"
         case "failed", "denied", "cancelled": "xmark"
-        case "waiting_approval", "waiting_budget", "needs_attention": "hand.raised.fill"
+        case "waiting_approval", "waiting_budget", "needs_attention", "stuck": "hand.raised.fill"
         case "sleeping", "waiting_event": "clock"
         default: "circle.fill"
         }
@@ -46,7 +46,7 @@ struct StatusPill: View {
         case "running": AssistantTheme.accent(for: colorScheme)
         case "done", "approved", "ready": AssistantTheme.success(for: colorScheme)
         case "failed", "denied", "cancelled": .red
-        case "waiting_approval", "waiting_budget", "needs_attention": AssistantTheme.warning(for: colorScheme)
+        case "waiting_approval", "waiting_budget", "needs_attention", "stuck": AssistantTheme.warning(for: colorScheme)
         default: .secondary
         }
     }

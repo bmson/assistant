@@ -8,6 +8,7 @@ import {
   type TaskDiscoveryRepository,
   type TaskDiscoveryRow,
 } from '@assistant/persistence';
+import { activityProgress } from './presentation.js';
 
 const SCAN_LIMIT = 500;
 export async function discoverActivityWithRepository(
@@ -38,6 +39,7 @@ export async function discoverActivityWithRepository(
   return {
     items: selected.map(({ agentId: _owner, suppressed: _suppressed, autonomyGrant, ...row }) => ({
       ...row,
+      progress: activityProgress(row.status, row.progress),
       hasPendingApproval: pending.has(row.id),
       hasActiveAutonomy: activeAutonomyGrant({ ...row, autonomyGrant }, Date.now()) !== null,
       stuckWaiting: row.status === 'waiting_approval' && !pending.has(row.id),

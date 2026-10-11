@@ -28,6 +28,7 @@ import {
 } from '@assistant/persistence';
 import { and, asc, count, desc, eq, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { PgColumn } from 'drizzle-orm/pg-core';
+import { activityProgress } from './presentation.js';
 
 export const terminalTaskStatuses = ['done', 'failed', 'cancelled'] as const;
 export type ActivityFilter = 'all' | 'needs-you' | 'working' | 'scheduled' | 'completed';
@@ -69,6 +70,7 @@ function activityItem(
   const hasPendingApproval = pendingApprovalTaskIds.has(task.id);
   return {
     ...task,
+    progress: activityProgress(task.status, task.progress),
     hasPendingApproval,
     hasActiveAutonomy: activeAutonomyGrant({ ...task, autonomyGrant }, Date.now()) !== null,
     stuckWaiting: task.status === 'waiting_approval' && !hasPendingApproval,
@@ -480,6 +482,7 @@ export async function getTaskDetail(
   const parsedChecklist = RequestChecklistSchema.safeParse(checklist);
   const snapshot: TaskSnapshot = {
     ...rest,
+    progress: activityProgress(task.status, task.progress),
     plan: record(plan, MAX_RECORDED_CHARS),
     ...(parsedChecklist.success ? { checklist: { items: parsedChecklist.data.items } } : {}),
   };
@@ -569,6 +572,7 @@ export async function getTaskDetailWithRepository(
   const parsedChecklist = RequestChecklistSchema.safeParse(stateRecord.requestChecklist);
   const snapshot: TaskSnapshot = {
     ...task,
+    progress: activityProgress(task.status, task.progress),
     plan: record(plan, MAX_RECORDED_CHARS),
     ...(parsedChecklist.success ? { checklist: { items: parsedChecklist.data.items } } : {}),
   };

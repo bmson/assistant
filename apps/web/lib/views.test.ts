@@ -1,6 +1,11 @@
 import type { ApprovalSnapshot } from '@assistant/application/approvals';
 import { describe, expect, it } from 'vitest';
-import { displayTaskStatus, statusLabel, toPendingApprovalView } from './views';
+import {
+  displayTaskStatus,
+  hasReviewableApproval,
+  statusLabel,
+  toPendingApprovalView,
+} from './views';
 
 const now = new Date('2026-07-22T18:00:00.000Z');
 
@@ -66,5 +71,13 @@ describe('displayTaskStatus', () => {
       expect(displayTaskStatus(status, false)).toBe(status);
       expect(displayTaskStatus(status, true)).toBe(status);
     }
+  });
+});
+
+describe('hasReviewableApproval', () => {
+  it('offers the approval destination only for a live approval wait', () => {
+    expect(hasReviewableApproval('waiting_approval', false)).toBe(true);
+    expect(hasReviewableApproval('waiting_approval', true)).toBe(false);
+    expect(hasReviewableApproval('needs_attention', false)).toBe(false);
   });
 });

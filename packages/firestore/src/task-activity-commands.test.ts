@@ -45,6 +45,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           reminderId: '',
         }),
         status: 'running',
+        progress: 'attempt 1 failed: AI_APICallError https://provider.example/private',
         lockedUntil: new Date(Date.now() + 60_000),
         leaseToken: randomUUID(),
       });
@@ -168,6 +169,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       });
       const task = await store.doc('tasks', runningId).get();
       expect(task.get('status')).toBe('cancelled');
+      expect(task.get('progress')).toBe('This task was cancelled.');
       expect(task.get('leaseToken')).toBeNull();
       expect(task.get('lockedUntil')).toBeNull();
       expect(await new FirestoreTaskRepository(store).claim(runningId)).toBeNull();

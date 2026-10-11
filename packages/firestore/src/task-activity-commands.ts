@@ -241,6 +241,7 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
       const current = withCurrent(task, { status: 'cancelled' }, 'cancelled', true);
       tx.update(ref, {
         status: 'cancelled',
+        progress: 'This task was cancelled.',
         lockedUntil: null,
         leaseToken: null,
         runAfter: null,

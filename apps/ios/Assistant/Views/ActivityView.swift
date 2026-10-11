@@ -199,7 +199,7 @@ struct ActivityView: View {
     }
 
     private var activitySummary: some View {
-        let summary = ActivityVisualSummary(statuses: items.map(\.status))
+        let summary = ActivityVisualSummary(statuses: items.map(\.displayStatus))
         let colors: [Color] = [AssistantTheme.warning(for: colorScheme),
             AssistantTheme.accent(for: colorScheme), AssistantTheme.inkMuted(for: colorScheme),
             AssistantTheme.success(for: colorScheme).opacity(0.4), AssistantTheme.errorInk(for: colorScheme), .secondary]
@@ -254,7 +254,7 @@ struct ActivityView: View {
         return items.filter { item in
             switch filter {
             case .all: true
-            case .needsYou: ["waiting_approval", "waiting_budget", "needs_attention"].contains(item.status)
+            case .needsYou: ["waiting_approval", "waiting_budget", "needs_attention", "stuck"].contains(item.displayStatus)
             case .working: ["pending", "running"].contains(item.status)
             case .scheduled: ["sleeping", "waiting_event"].contains(item.status)
             case .completed: ["done", "failed", "cancelled"].contains(item.status)
@@ -414,7 +414,7 @@ struct ActivityView: View {
     @ViewBuilder
     private func activityHeader(_ item: ActivityItem) -> some View {
         let identity = HStack(alignment: .top, spacing: 12) {
-                AssistantGlyph(systemName: icon(for: item.status), tint: color(for: item.status))
+                AssistantGlyph(systemName: icon(for: item.displayStatus), tint: color(for: item.displayStatus))
                 VStack(alignment: .leading, spacing: 4) {
                     Text(item.displayTitle)
                         .font(.headline)
@@ -431,12 +431,12 @@ struct ActivityView: View {
         if usesAccessibilityLayout {
             VStack(alignment: .leading, spacing: 10) {
                 identity
-                StatusPill(status: item.status)
+                StatusPill(status: item.displayStatus)
             }
         } else {
             HStack(alignment: .top, spacing: 12) {
                 identity
-                StatusPill(status: item.status)
+                StatusPill(status: item.displayStatus)
             }
         }
     }
@@ -474,7 +474,7 @@ struct ActivityView: View {
         case "running": "arrow.triangle.2.circlepath"
         case "done": "checkmark.circle.fill"
         case "failed", "cancelled": "xmark.circle.fill"
-        case "waiting_approval", "waiting_budget", "needs_attention": "hand.raised.fill"
+        case "waiting_approval", "waiting_budget", "needs_attention", "stuck": "hand.raised.fill"
         case "sleeping", "waiting_event": "clock.fill"
         default: "circle.dotted"
         }
@@ -487,7 +487,7 @@ struct ActivityView: View {
         // same card — system green is a visibly different hue.
         case "done": AssistantTheme.success(for: colorScheme)
         case "failed", "cancelled": .red
-        case "waiting_approval", "waiting_budget", "needs_attention": AssistantTheme.warning(for: colorScheme)
+        case "waiting_approval", "waiting_budget", "needs_attention", "stuck": AssistantTheme.warning(for: colorScheme)
         default: .secondary
         }
     }

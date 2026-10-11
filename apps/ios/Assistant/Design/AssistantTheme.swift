@@ -606,7 +606,7 @@ struct ActivityVisualSummary {
         var counts = Array(repeating: 0, count: Self.labels.count)
         for status in statuses {
             let index: Int = switch status {
-            case "waiting_approval", "waiting_budget", "needs_attention": 0
+            case "waiting_approval", "waiting_budget", "needs_attention", "stuck": 0
             case "pending", "running": 1
             case "sleeping", "waiting_event": 2
             case "done": 3

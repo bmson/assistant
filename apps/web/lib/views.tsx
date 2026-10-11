@@ -232,6 +232,10 @@ export function displayTaskStatus(status: string, hasPendingApproval: boolean): 
   return status === 'waiting_approval' && !hasPendingApproval ? 'stuck' : status;
 }
 
+export function hasReviewableApproval(status: string, stuckWaiting: boolean): boolean {
+  return status === 'waiting_approval' && !stuckWaiting;
+}
+
 /** The voice-rewrite tool sets `voiceFlag` on its args when fact-preservation fails. */
 function extractVoiceFlag(payload: unknown): string | null {
   if (payload === null || typeof payload !== 'object') return null;
