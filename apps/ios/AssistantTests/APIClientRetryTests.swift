@@ -2086,17 +2086,22 @@ final class APIClientRetryTests: XCTestCase {
 
     @MainActor
     func testCancelledRefreshesNeverCreateOrReplaceAnError() async {
-        let model = AppModel(apiClient: makeClient())
         for hasExistingError in [false, true] {
-            if hasExistingError {
-                model.reportError(APIError.transport(URLError(.notConnectedToInternet)), retry: {})
-            }
-            let original = model.errorMessage
-            let notice = model.errorNotice
             for read in 0..<4 {
+                let iterationID = "\(testCaseID)-\(UUID().uuidString)"
+                StubURLProtocol.beginTestCase(iterationID)
+                let (client, session) = makeClient(requestScopeID: iterationID)
+                let model = AppModel(apiClient: client)
+                if hasExistingError {
+                    model.reportError(APIError.transport(URLError(.notConnectedToInternet)), retry: {})
+                }
+                let original = model.errorMessage
+                let notice = model.errorNotice
                 // A cancelled bootstrap can end the operation before the
                 // parallel overview child starts. Every endpoint that did
                 // start still makes one attempt and cannot trigger a retry.
+                // Each iteration owns its model, URLSession, and request scope,
+                // so a late overview start cannot consume the next prime().
                 let requests = read == 0 ? 2 : 1
                 StubURLProtocol.prime(Array(repeating: .failure(URLError(.cancelled)), count: requests))
                 switch read {
@@ -2116,6 +2121,9 @@ final class APIClientRetryTests: XCTestCase {
                 XCTAssertEqual(model.errorMessage, original)
                 XCTAssertEqual(model.errorNotice, notice)
                 XCTAssertEqual(model.errorRetry != nil, hasExistingError)
+                StubURLProtocol.endTestCase(iterationID)
+                let didDrain = await cancelAndDrain(session)
+                XCTAssertTrue(didDrain, "The iteration's URLSession must drain before priming the next case")
             }
         }
     }
@@ -2543,16 +2551,39 @@ final class APIClientRetryTests: XCTestCase {
     }
 
     private func makeClient(clientID: String? = nil, token: String = "t") -> APIClient {
+        makeClient(clientID: clientID, token: token, requestScopeID: testCaseID).client
+    }
+
+    private func makeClient(clientID: String? = nil, token: String = "t",
+                            requestScopeID: String) -> (client: APIClient, session: URLSession) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
-        configuration.httpAdditionalHeaders = ["X-Assistant-Test-Case": testCaseID]
+        configuration.httpAdditionalHeaders = ["X-Assistant-Test-Case": requestScopeID]
         let session = URLSession(configuration: configuration)
         sessionLock.withLock { testSessions.append(session) }
-        return APIClient(
+        let client = APIClient(
             configuration: .init(baseURL: URL(string: "https://assistant.test")!, token: token),
             session: session,
             clientID: clientID
         )
+        return (client, session)
+    }
+
+    /// End one repeated fixture scope before the next one is primed. A late
+    /// URLProtocol start carries the old scope ID and cannot consume the next
+    /// iteration's global response queue.
+    private func cancelAndDrain(_ session: URLSession) async -> Bool {
+        session.invalidateAndCancel()
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline {
+            let tasks = await withCheckedContinuation { continuation in
+                session.getAllTasks { continuation.resume(returning: $0) }
+            }
+            if tasks.isEmpty { return true }
+            tasks.forEach { $0.cancel() }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
     }
 
     /// The failure this whole change exists for: the first attempt is handed a
@@ -3028,6 +3059,71 @@ extension APIClientRetryTests {
     }
 
     @MainActor
+    func testComposerKeepsSendSeparateFromStopWhenDraftExists() {
+        let activeWithDraft = ChatComposerActionPolicy.resolve(
+            hasDraft: true, canSend: false, isSending: true,
+            canCancel: true, isCancelling: false, formAdmissionPending: false,
+            hasUnresolvedTurn: true
+        )
+        XCTAssertEqual(activeWithDraft.primary, .send(enabled: false))
+        XCTAssertTrue(activeWithDraft.showsSeparateStop)
+        XCTAssertTrue(activeWithDraft.separateStopEnabled)
+
+        let stoppingWithDraft = ChatComposerActionPolicy.resolve(
+            hasDraft: true, canSend: false, isSending: true,
+            canCancel: true, isCancelling: true, formAdmissionPending: false,
+            hasUnresolvedTurn: true
+        )
+        XCTAssertEqual(stoppingWithDraft.primary, .send(enabled: false))
+        XCTAssertTrue(stoppingWithDraft.showsSeparateStop)
+        XCTAssertFalse(stoppingWithDraft.separateStopEnabled)
+
+        let activeWithoutDraft = ChatComposerActionPolicy.resolve(
+            hasDraft: false, canSend: false, isSending: true,
+            canCancel: true, isCancelling: false, formAdmissionPending: false,
+            hasUnresolvedTurn: true
+        )
+        XCTAssertEqual(activeWithoutDraft.primary, .stop)
+        XCTAssertFalse(activeWithoutDraft.showsSeparateStop)
+
+        let readyWithDraft = ChatComposerActionPolicy.resolve(
+            hasDraft: true, canSend: true, isSending: false,
+            canCancel: false, isCancelling: false, formAdmissionPending: false,
+            hasUnresolvedTurn: false
+        )
+        XCTAssertEqual(readyWithDraft.primary, .send(enabled: true))
+        XCTAssertFalse(readyWithDraft.showsSeparateStop)
+
+        // A task can remain unresolved after its active-send flag clears, for
+        // example while its durable status is being reconciled after reconnect.
+        let resumedUnknownWithDraft = ChatComposerActionPolicy.resolve(
+            hasDraft: true, canSend: true, isSending: false,
+            canCancel: false, isCancelling: false, formAdmissionPending: false,
+            hasUnresolvedTurn: true
+        )
+        XCTAssertEqual(resumedUnknownWithDraft.primary, .send(enabled: false))
+        XCTAssertFalse(resumedUnknownWithDraft.showsSeparateStop)
+
+        // Form admission owns its frozen operation. Even a transiently stale
+        // can-cancel flag must not show a Stop control that AppModel will reject.
+        let emptyDraftDuringFormAdmission = ChatComposerActionPolicy.resolve(
+            hasDraft: false, canSend: false, isSending: true,
+            canCancel: true, isCancelling: false, formAdmissionPending: true,
+            hasUnresolvedTurn: true
+        )
+        XCTAssertEqual(emptyDraftDuringFormAdmission.primary, .waiting)
+        XCTAssertFalse(emptyDraftDuringFormAdmission.showsSeparateStop)
+
+        let draftDuringFormAdmission = ChatComposerActionPolicy.resolve(
+            hasDraft: true, canSend: false, isSending: true,
+            canCancel: true, isCancelling: false, formAdmissionPending: true,
+            hasUnresolvedTurn: true
+        )
+        XCTAssertEqual(draftDuringFormAdmission.primary, .send(enabled: false))
+        XCTAssertFalse(draftDuringFormAdmission.showsSeparateStop)
+    }
+
+    @MainActor
     func testStopBeforeTaskReceiptCancelsExactOperationAndIgnoresLateStream() async throws {
         let model = try await notificationModel()
         StubURLProtocol.prime([], paths: [
@@ -3040,6 +3136,8 @@ extension APIClientRetryTests {
         let send = try XCTUnwrap(JSONSerialization.jsonObject(with: sendBody) as? [String: Any])
         let operationId = try XCTUnwrap(send["clientOperationId"] as? String)
         let conversationId = try XCTUnwrap(send["conversationId"] as? String)
+        let scope = try XCTUnwrap(model.composerDraftScope)
+        model.saveComposerDraft("Follow up about the return flight", in: scope)
 
         model.cancelSend()
         while !StubURLProtocol.urls.contains(where: { $0.path == "/api/mobile/v1/chat/cancel" }) { await Task.yield() }
@@ -3053,6 +3151,7 @@ extension APIClientRetryTests {
         XCTAssertFalse(model.isSending)
         XCTAssertFalse(model.messages.contains(where: { $0.role == .user && $0.text == "A request whose receipt is delayed" }))
         XCTAssertEqual(model.restoreFailedDraft(), "A request whose receipt is delayed")
+        XCTAssertEqual(model.composerDraft(in: scope), "Follow up about the return flight")
         XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 1)
         XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat/cancel" }.count, 1)
 
