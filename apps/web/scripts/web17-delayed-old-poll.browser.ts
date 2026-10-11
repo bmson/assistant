@@ -21,6 +21,10 @@ assert(['localhost', '127.0.0.1', '::1'].includes(origin.hostname));
 const databaseUrl = process.env.DATABASE_URL;
 assert(databaseUrl, 'Set DATABASE_URL to the isolated CI PostgreSQL database');
 
+function isPathOrChild(pathname: string, basePath: string): boolean {
+  return pathname === basePath || pathname.startsWith(`${basePath}/`);
+}
+
 const db = createDb(databaseUrl, { max: 2, statementTimeoutMs: 10_000 });
 const createdConversations: string[] = [];
 const createdTasks: string[] = [];
@@ -140,7 +144,12 @@ async function verifyDelayedTerminalPoll(status: 'done' | 'cancelled' | 'failed'
   const routeHandler = async (route: Route) => {
     const request = route.request();
     const url = new URL(request.url());
-    if (url.pathname === '/api/chat/status') {
+    if (url.origin !== origin.origin) {
+      unexpectedChatRequests.push(`${request.method()} ${url.origin}${url.pathname}`);
+      await route.abort('blockedbyclient');
+      return;
+    }
+    if (url.pathname === '/api/chat/status' && request.method() === 'GET') {
       const taskId = url.searchParams.get('taskId');
       if (!taskId && newPollCount >= 2) {
         await route.fulfill({ json: statusPayload(null) });
@@ -193,7 +202,11 @@ async function verifyDelayedTerminalPoll(status: 'done' | 'cancelled' | 'failed'
     }
     if (url.pathname === '/api/chat' && request.method() === 'POST') {
       admissionCount += 1;
-      assert.equal(admissionCount, 1, 'B should be admitted once in this race');
+      if (admissionCount !== 1) {
+        unexpectedChatRequests.push(`${request.method()} ${url.pathname} (duplicate)`);
+        await route.abort('blockedbyclient');
+        return;
+      }
       const requestBody = request.postDataJSON() as {
         messages?: Array<{ parts?: Array<{ text?: string }> }>;
       };
@@ -211,13 +224,18 @@ async function verifyDelayedTerminalPoll(status: 'done' | 'cancelled' | 'failed'
       });
       return;
     }
-    if (url.pathname === '/api/chat' || url.pathname.startsWith('/api/chat/')) {
+    if (
+      isPathOrChild(url.pathname, '/api/chat') ||
+      isPathOrChild(url.pathname, '/api/mobile/v1/chat')
+    ) {
       unexpectedChatRequests.push(`${request.method()} ${url.pathname}`);
       await route.abort('blockedbyclient');
       return;
     }
     await route.continue();
   };
+  const isChatSafetyRoute = (url: URL) =>
+    isPathOrChild(url.pathname, '/api/chat') || isPathOrChild(url.pathname, '/api/mobile/v1/chat');
   await context.route('**/*', async (route) => {
     const requestUrl = new URL(route.request().url());
     if (
@@ -229,8 +247,7 @@ async function verifyDelayedTerminalPoll(status: 'done' | 'cancelled' | 'failed'
     }
     await route.continue();
   });
-  await page.route('**/api/chat/status**', routeHandler);
-  await page.route('**/api/chat', routeHandler);
+  await page.route(isChatSafetyRoute, routeHandler);
 
   try {
     await page.goto(
@@ -307,8 +324,7 @@ async function verifyDelayedTerminalPoll(status: 'done' | 'cancelled' | 'failed'
   } finally {
     releaseOldPoll();
     releaseNewTerminal();
-    await page.unroute('**/api/chat/status**', routeHandler).catch(() => {});
-    await page.unroute('**/api/chat', routeHandler).catch(() => {});
+    await page.unroute(isChatSafetyRoute, routeHandler).catch(() => {});
     await page.close();
   }
 }
