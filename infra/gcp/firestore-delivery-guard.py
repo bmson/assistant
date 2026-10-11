@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -204,11 +205,15 @@ class DeliveryGuard:
     def _execution_active_or_unknown(execution: dict[str, Any]) -> bool:
         if execution.get("completionTime"):
             return False
-        completed = any(
-            condition.get("type") == "Completed" and condition.get("status") == "True"
+        terminal = any(
+            condition.get("type") == "Completed"
+            and (
+                condition.get("state") in {"CONDITION_SUCCEEDED", "CONDITION_FAILED"}
+                or condition.get("status") == "True"
+            )
             for condition in execution.get("conditions", [])
         )
-        if completed:
+        if terminal:
             return False
         if execution.get("startTime"):
             return True
@@ -247,6 +252,23 @@ class DeliveryGuard:
         value = subscription.get("pushConfig") or {}
         return value if isinstance(value, dict) else {}
 
+    @staticmethod
+    def _push_service_account(push_config: dict[str, Any]) -> tuple[str, str] | None:
+        oidc = push_config.get("oidcToken")
+        if not oidc:
+            return None
+        if not isinstance(oidc, dict):
+            raise GuardError("Pub/Sub OIDC token configuration is malformed")
+        email = oidc.get("serviceAccountEmail")
+        match = re.fullmatch(
+            r"([a-z][a-z0-9-]{4,28}[a-z0-9])@"
+            r"([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com",
+            str(email or ""),
+        )
+        if not match:
+            raise GuardError("Pub/Sub OIDC token has a malformed serviceAccountEmail")
+        return email, match.group(2)
+
     def preflight(self) -> dict[str, Any]:
         """Read states and verify every mutation permission before changing anything."""
         queue = self._read_queue()
@@ -283,6 +305,15 @@ class DeliveryGuard:
                 ["pubsub.subscriptions.get", "pubsub.subscriptions.update"],
                 self._api("pubsub", f"v1/{self.subscription_name}:testIamPermissions"),
             )
+            push_identity = self._push_service_account(push_config)
+            if push_identity:
+                email, service_account_project = push_identity
+                service_account = f"projects/{service_account_project}/serviceAccounts/{email}"
+                self._test_permissions(
+                    service_account,
+                    ["iam.serviceAccounts.actAs"],
+                    self._api("iam", f"v1/{service_account}:testIamPermissions"),
+                )
         self.worker_job_names = []
         for worker, enabled in self.workers.items():
             if not enabled:

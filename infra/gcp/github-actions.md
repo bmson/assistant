@@ -117,15 +117,19 @@ workers selected by the same module plan as the release.
 The deploy identity needs queue read/pause/resume and task-list permissions for
 Cloud Tasks, job read/pause/resume permissions for Cloud Scheduler, read/list
 permissions for selected Cloud Run worker-job executions, and subscription
-read/update for the Gmail Pub/Sub subscription.
+read/update for the Gmail Pub/Sub subscription. When the saved push config uses
+OIDC, it also needs `iam.serviceAccounts.actAs` on the exact service account
+named by that config; the guard checks that identity's permission before
+acquiring holds so it can restore the authenticated push configuration.
 The checked-in bootstrap currently grants Artifact Registry Writer, Cloud Run
 Admin, and Cloud Scheduler Admin; it does not grant Cloud Tasks or Pub/Sub
-permissions. Do not add project-wide admin roles for this guard. Configure
-resource-scoped grants where the service supports them; Scheduler's permission
-probe is project-scoped. The workflow stops before acquiring holds when a
-permission probe reports a missing permission. Google documents these probes
-as advisory and notes they can fail open; actual mutation calls enforce IAM,
-and a denied call after acquisition triggers ownership-based rollback.
+permissions or service-account `actAs`. Do not add project-wide admin roles for
+this guard. Configure resource-scoped grants where the service supports them;
+Scheduler's permission probe is project-scoped. The workflow stops before
+acquiring holds when a permission probe reports a missing permission. Google
+documents these probes as advisory and notes they can fail open; actual
+mutation calls enforce IAM, and a denied call after acquisition triggers
+ownership-based rollback.
 
 A runner loss, forced cancellation, or machine termination can prevent both
 the process trap and `always()` step from running. If artifact archival

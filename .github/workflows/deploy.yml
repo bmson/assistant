@@ -374,7 +374,7 @@ jobs:
         run: |
           driver="$(gcloud run services describe assistant-agent \
             --project "$GCP_PROJECT" --region "$GCP_REGION" --format=json |
-            node -e 'let data="";process.stdin.on("data",x=>data+=x);process.stdin.on("end",()=>{const s=JSON.parse(data);const e=s.spec?.template?.containers?.[0]?.env??s.spec?.template?.spec?.containers?.[0]?.env??[];process.stdout.write(e.find(x=>x.name==="PERSISTENCE_DRIVER")?.value??"")})')"
+            node -e 'let data="";process.stdin.on("data",x=>data+=x);process.stdin.on("end",()=>{const s=JSON.parse(data);const e=s.spec?.template?.containers?.[0]?.env??s.spec?.template?.spec?.containers?.[0]?.env??[];process.stdout.write(e.find(x=>x.name==="PERSISTENCE_DRIVER")?.value||"postgres")})')"
           case "$driver" in
             postgres|firestore) ;;
             *) echo "live assistant-agent has an unknown persistence driver" >&2; exit 1 ;;

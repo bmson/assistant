@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -25,7 +26,13 @@ SCHEDULERS = [
 ]
 SUBSCRIPTION = f"projects/{PROJECT}/subscriptions/gmail-events-push"
 AGENT_URL = "https://assistant-agent-test-abcdef-uw.a.run.app"
-PUSH = {"pushEndpoint": f"{AGENT_URL}{guard_module.PUSH_PATH}", "oidcToken": {"audience": "test"}}
+PUSH = {
+    "pushEndpoint": f"{AGENT_URL}{guard_module.PUSH_PATH}",
+    "oidcToken": {
+        "serviceAccountEmail": "assistant-gmail-push@test-project.iam.gserviceaccount.com",
+        "audience": "test",
+    },
+}
 
 
 class FakeApi:
@@ -35,6 +42,7 @@ class FakeApi:
         self.push_config = json.loads(json.dumps(PUSH))
         self.calls = []
         self.permissions = None
+        self.service_account_permissions = None
         self.fail_pause_scheduler = None
         self.active_tasks = []
         self.executions = {}
@@ -44,6 +52,10 @@ class FakeApi:
     def request(self, method, url, payload=None):
         self.calls.append((method, url, payload))
         if url.endswith(":testIamPermissions"):
+            if url.startswith("https://iam.googleapis.com/v1/projects/"):
+                if self.service_account_permissions is not None:
+                    return {"permissions": self.service_account_permissions}
+                return {"permissions": payload["permissions"]}
             if self.permissions is not None:
                 return {"permissions": self.permissions}
             return {"permissions": payload["permissions"]}
@@ -108,6 +120,29 @@ class DeliveryGuardTests(unittest.TestCase):
             self.assertEqual(api.queue_state, "RUNNING")
             self.assertEqual(api.scheduler_states, {name: "ENABLED" for name in SCHEDULERS})
             self.assertEqual(api.push_config, PUSH)
+            self.assertFalse(guard.receipt_path.exists())
+            self.assertFalse(any(":pause" in call[1] or ":modifyPushConfig" in call[1] for call in api.calls))
+
+    def test_missing_pubsub_push_service_account_actas_fails_before_any_hold(self):
+        api = FakeApi()
+        api.service_account_permissions = []
+        with tempfile.TemporaryDirectory() as directory:
+            guard = self.make_guard(api, directory)
+            with self.assertRaisesRegex(guard_module.GuardError, "iam.serviceAccounts.actAs"):
+                guard.acquire()
+            self.assertEqual(api.queue_state, "RUNNING")
+            self.assertEqual(api.scheduler_states, {name: "ENABLED" for name in SCHEDULERS})
+            self.assertEqual(api.push_config, PUSH)
+            self.assertFalse(guard.receipt_path.exists())
+            self.assertFalse(any(":pause" in call[1] or ":modifyPushConfig" in call[1] for call in api.calls))
+
+    def test_malformed_pubsub_oidc_service_account_fails_before_any_hold(self):
+        api = FakeApi()
+        api.push_config["oidcToken"]["serviceAccountEmail"] = "not-an-email"
+        with tempfile.TemporaryDirectory() as directory:
+            guard = self.make_guard(api, directory)
+            with self.assertRaisesRegex(guard_module.GuardError, "malformed serviceAccountEmail"):
+                guard.acquire()
             self.assertFalse(guard.receipt_path.exists())
             self.assertFalse(any(":pause" in call[1] or ":modifyPushConfig" in call[1] for call in api.calls))
 
@@ -298,6 +333,20 @@ class DeliveryGuardTests(unittest.TestCase):
         self.assertIn("if: always() && steps.release_path.outputs.firestore_pair == 'true'", workflow)
         self.assertIn("-- bash infra/gcp/release.sh", workflow)
 
+    def test_workflow_live_driver_script_defaults_missing_or_empty_value_to_postgres(self):
+        workflow = (SCRIPT.parents[2] / ".github/workflows/deploy.yml").read_text()
+        match = re.search(r"node -e '([^']+)'\)", workflow)
+        self.assertIsNotNone(match)
+        script = match.group(1)
+        for service, expected in (
+            ({"spec": {"template": {"containers": [{"env": []}]}}}, "postgres"),
+            ({"spec": {"template": {"containers": [{"env": [{"name": "PERSISTENCE_DRIVER", "value": ""}]}]}}}, "postgres"),
+            ({"spec": {"template": {"containers": [{"env": [{"name": "PERSISTENCE_DRIVER", "value": "firestore"}]}]}}}, "firestore"),
+        ):
+            result = subprocess.run(["node", "-e", script], input=json.dumps(service), capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, expected)
+
     def test_active_task_must_drain_and_timeout_restores_owned_holds(self):
         api = FakeApi()
         api.active_tasks = [
@@ -334,6 +383,16 @@ class DeliveryGuardTests(unittest.TestCase):
             self.assertEqual(api.queue_state, "RUNNING")
             self.assertEqual(api.scheduler_states, {name: "ENABLED" for name in SCHEDULERS})
             self.assertEqual(api.push_config, PUSH)
+
+    def test_cloud_run_v2_terminal_condition_states_are_not_treated_as_active(self):
+        for state in ("CONDITION_SUCCEEDED", "CONDITION_FAILED"):
+            with self.subTest(state=state):
+                execution = {
+                    "name": "projects/test/locations/us/jobs/worker/executions/done",
+                    "conditions": [{"type": "Completed", "state": state}],
+                }
+                self.assertFalse(guard_module.DeliveryGuard._execution_active_or_unknown(execution))
+        self.assertFalse(guard_module.DeliveryGuard._execution_active_or_unknown({"completionTime": "now"}))
 
     def test_paused_pubsub_is_preserved_without_a_mutation(self):
         api = FakeApi()
