@@ -1133,6 +1133,47 @@ struct ActivityStatusResponse: Codable, Sendable {
     let stuckWaiting: Bool
 }
 
+enum ActivityStatusReadOutcome: Sendable {
+    case updated(ActivityStatusResponse)
+    case unavailable
+    case discarded
+}
+
+struct ActivityStatusAvailabilityKey: Hashable, Sendable {
+    let ownerID: String
+    let taskID: String
+}
+
+struct ActivityStatusAvailability: Equatable, Sendable {
+    private(set) var unavailableKeys: Set<ActivityStatusAvailabilityKey> = []
+
+    mutating func record(_ outcome: ActivityStatusReadOutcome, for key: ActivityStatusAvailabilityKey) {
+        switch outcome {
+        case .updated:
+            unavailableKeys.remove(key)
+        case .unavailable:
+            unavailableKeys.insert(key)
+        case .discarded:
+            break
+        }
+    }
+
+    func notice(for key: ActivityStatusAvailabilityKey, savedStatus: String) -> String? {
+        guard unavailableKeys.contains(key), !["done", "failed", "cancelled"].contains(savedStatus) else {
+            return nil
+        }
+        return "Latest update unavailable. Showing saved status."
+    }
+
+    mutating func reset() {
+        unavailableKeys.removeAll()
+    }
+
+    mutating func clear(_ key: ActivityStatusAvailabilityKey) {
+        unavailableKeys.remove(key)
+    }
+}
+
 extension ActivityItem {
     func applying(_ status: ActivityStatusResponse) -> ActivityItem {
         guard status.id == id,
