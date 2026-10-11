@@ -445,6 +445,7 @@ describe('chat needs-action triage', () => {
     ['needs_attention', 'needs your attention'],
     ['done', 'completed'],
     ['failed', 'failed'],
+    ['sleeping', 'waiting until its next run'],
   ])('reports persisted %s status without model generation', async (status, label) => {
     const createdAt = new Date(Date.now() - 3 * 60 * 60 * 1000);
     const result = await turn(
@@ -475,6 +476,47 @@ describe('chat needs-action triage', () => {
     expect(result.completions[0]?.messages[0]?.text).toContain(`marked ${label}`);
     expect(result.completions[0]?.messages[0]?.text).toContain('3 hours ago');
   });
+
+  it.each(['failed', 'sleeping'])(
+    'keeps %s provider diagnostics out of chat status',
+    async (status) => {
+      const createdAt = new Date(Date.now() - 3 * 60 * 60 * 1000);
+      const result = await turn(
+        'Is it working?',
+        { triage: { needsAction: false }, draft: 'Yes, it is working.' },
+        {},
+        {
+          tasks: {
+            'prior-task': {
+              id: 'prior-task',
+              agentId: AGENT,
+              conversationId: CONVERSATION,
+              trust: 'owner',
+              type: 'chat_turn',
+              status,
+              title: 'KLM gate',
+              progress:
+                'attempt 3 failed: AI_APICallError: No endpoints found that support tool_choice. https://openrouter.ai/docs/guides/routing/provider-selection',
+              createdAt,
+              updatedAt: createdAt,
+              runAfter: new Date(Date.now() + 60_000),
+              state: {},
+              trigger: { payload: { text: 'Find the KLM gate.' } },
+            },
+          },
+        },
+      );
+      const reply = result.completions[0]?.messages[0]?.text ?? '';
+      expect(reply).toContain(status === 'failed' ? 'marked failed' : 'waiting until its next run');
+      expect(reply).not.toContain('AI_APICallError');
+      expect(reply).not.toContain('No endpoints found');
+      expect(reply).not.toContain('tool_choice');
+      expect(reply).not.toContain('openrouter.ai');
+      expect(reply).not.toContain('scheduled for later');
+      expect(result.object).not.toHaveBeenCalled();
+      expect(result.stream).not.toHaveBeenCalled();
+    },
+  );
 
   it('asks which request when no prior owner task can be bound', async () => {
     const result = await turn(

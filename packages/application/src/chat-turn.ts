@@ -239,7 +239,7 @@ function taskStatusLabel(status: string): string {
     case 'waiting_budget':
       return 'waiting for a budget decision';
     case 'sleeping':
-      return 'scheduled for later';
+      return 'waiting until its next run';
     case 'waiting_event':
       return 'waiting for an event';
     case 'cancelled':
@@ -329,8 +329,6 @@ async function taskProgressReply(
   else if (updatedAge)
     lines.push(`Its last recorded update was ${updatedAge} ago; the creation time is unavailable.`);
   else lines.push('The task age and last update time are unavailable.');
-  if (task.progress.trim())
-    lines.push(`Latest recorded progress: ${task.progress.trim().slice(0, 300)}`);
   const checklist = taskRequestChecklist(task.state);
   if (checklist?.items.length) {
     const unfinished = checklist.items.filter(
