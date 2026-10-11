@@ -1120,6 +1120,122 @@ struct ActivityList: Codable, Sendable {
     }
 }
 
+enum SecurityReviewDisposition: String, Codable, Sendable {
+    case unreviewed
+    case expected
+    case dismissed
+}
+
+struct SecurityReviewEvidence: Decodable, Sendable, Equatable {
+    let providerIncidentRef: String?
+    let eventType: String?
+    let affectedAccount: String?
+    let eventAt: String?
+    let device: String?
+    let location: String?
+    let recoveryCopyOf: String?
+    let evidenceQuote: String?
+
+    var isValid: Bool {
+        Self.isBounded(providerIncidentRef, maximum: 200) &&
+            Self.isBounded(eventType, maximum: 200) &&
+            Self.isBounded(affectedAccount, maximum: 200) &&
+            Self.isBounded(eventAt, maximum: 200) &&
+            Self.isBounded(device, maximum: 200) &&
+            Self.isBounded(location, maximum: 200) &&
+            Self.isBounded(recoveryCopyOf, maximum: 200) &&
+            Self.isBounded(evidenceQuote, maximum: 600)
+    }
+
+    private static func isBounded(_ value: String?, maximum: Int) -> Bool {
+        guard let value else { return true }
+        return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && value.utf16.count <= maximum
+    }
+}
+
+struct SecurityReviewItem: Decodable, Identifiable, Sendable, Equatable {
+    let incidentId: String
+    let revision: Int
+    let confidence: String
+    let disposition: SecurityReviewDisposition
+    let category: String
+    let importance: Double
+    let subject: String
+    let fromName: String?
+    let observedAt: String
+    let materialChangeReason: String?
+    let evidence: SecurityReviewEvidence?
+
+    var id: String { incidentId }
+
+    var observedDate: Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: observedAt) { return date }
+        let wholeSeconds = ISO8601DateFormatter()
+        wholeSeconds.formatOptions = [.withInternetDateTime]
+        return wholeSeconds.date(from: observedAt)
+    }
+
+    var readableCategory: String {
+        category
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(whereSeparator: \.isWhitespace)
+            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+            .joined(separator: " ")
+    }
+
+    var isValid: Bool {
+        Self.hasValidIdentifier(incidentId) && revision > 0 && disposition == .unreviewed &&
+            Self.isBounded(confidence, maximum: 80) &&
+            Self.isBounded(category, maximum: 120) &&
+            importance.isFinite && (0...10).contains(importance) &&
+            Self.isBounded(subject, maximum: 300) &&
+            Self.isOptionalBounded(fromName, maximum: 200) &&
+            observedDate != nil &&
+            Self.isOptionalBounded(materialChangeReason, maximum: 300) &&
+            (evidence?.isValid ?? true)
+    }
+
+    private static func isOptionalBounded(_ value: String?, maximum: Int) -> Bool {
+        guard let value else { return true }
+        return isBounded(value, maximum: maximum)
+    }
+
+    private static func isBounded(_ value: String, maximum: Int) -> Bool {
+        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && value.utf16.count <= maximum
+    }
+
+    static func hasValidIdentifier(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        guard bytes.count == 36,
+              [8, 13, 18, 23].allSatisfy({ bytes[$0] == 45 }),
+              bytes[14] == 53,
+              [56, 57, 97, 98].contains(bytes[19]) else { return false }
+        return bytes.enumerated().allSatisfy { index, byte in
+            if [8, 13, 18, 23].contains(index) { return true }
+            return (48...57).contains(byte) || (65...70).contains(byte) || (97...102).contains(byte)
+        }
+    }
+}
+
+struct SecurityReviewList: Decodable, Sendable {
+    let items: [SecurityReviewItem]
+}
+
+struct SecurityReviewDecisionBody: Encodable, Sendable {
+    let expectedRevision: Int
+    let disposition: SecurityReviewDisposition
+    let reason: String
+}
+
+enum SecurityReviewDecisionResult: Sendable, Equatable {
+    case saved
+    case stale
+    case uncertain
+}
+
 struct ActivityStatusResponse: Codable, Sendable {
     let id: String
     let status: String

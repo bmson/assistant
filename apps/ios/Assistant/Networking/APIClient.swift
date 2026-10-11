@@ -142,18 +142,32 @@ struct APIClient: Sendable {
     /// request path consistently. Replacing a server configuration starts
     /// with a fresh, disabled capability until that server's owner is verified.
     private let nativeCardFormProjectionReadiness: NativeCardFormProjectionReadiness
+    private let securityReviewDeadline: TimeInterval
 
-    init(configuration: APIConfiguration, session: URLSession? = nil, clientID: String? = nil) {
+    init(
+        configuration: APIConfiguration,
+        session: URLSession? = nil,
+        clientID: String? = nil,
+        securityReviewDeadline: TimeInterval = 12
+    ) {
       self.configuration = configuration
       self.clientID = clientID ?? (session == nil ? KeychainStore.readOrCreateClientID() : nil)
       self.sessionOverride = session
       self.nativeCardFormProjectionReadiness = NativeCardFormProjectionReadiness()
+      self.securityReviewDeadline = securityReviewDeadline.isFinite && securityReviewDeadline > 0
+          ? securityReviewDeadline
+          : 12
     }
 
     /// Verify a candidate connection with the same transport. Production
     /// continues to use the shared pool; injected sessions remain isolated.
     func replacingConfiguration(_ configuration: APIConfiguration) -> APIClient {
-      APIClient(configuration: configuration, session: sessionOverride, clientID: clientID)
+      APIClient(
+          configuration: configuration,
+          session: sessionOverride,
+          clientID: clientID,
+          securityReviewDeadline: securityReviewDeadline
+      )
     }
 
     var nativeCardFormsEnabled: Bool { nativeCardFormProjectionReadiness.isEnabled }
@@ -196,6 +210,77 @@ struct APIClient: Sendable {
         if let cursor { components?.queryItems?.append(.init(name: "cursor", value: cursor)) }
         guard let url = components?.url else { throw APIError.invalidServerURL }
         return try await perform(makeRequest(url: url), as: ActivityList.self)
+    }
+
+    func securityReviews() async throws -> [SecurityReviewItem] {
+        var components = URLComponents(
+            url: configuration.baseURL.appending(path: "api/mobile/v1/security-reviews"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [.init(name: "limit", value: "50")]
+        guard let url = components?.url else { throw APIError.invalidServerURL }
+        var request = makeRequest(url: url)
+        request.timeoutInterval = 12
+
+        let data: Data
+        let response: URLResponse
+        do {
+            // This bounded review read is intentionally a single attempt. A
+            // refresh after an uncertain decision is explicit and must not
+            // silently turn into a retry loop on a failed connection.
+            (data, response) = try await securityReviewData(for: request)
+        } catch let error as URLError {
+            throw APIError.transport(error)
+        }
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        try await validate(http, data: data)
+        do {
+            let result = try JSONDecoder().decode(SecurityReviewList.self, from: data)
+            let ids = Set(result.items.map(\.incidentId))
+            guard result.items.count <= 50, ids.count == result.items.count,
+                  result.items.allSatisfy(\.isValid) else { throw APIError.invalidResponse }
+            return result.items
+        } catch let error as APIError {
+            throw error
+        } catch {
+            throw APIError.decodeFailure(error, as: SecurityReviewList.self)
+        }
+    }
+
+    func decideSecurityReview(
+        incidentId: String,
+        expectedRevision: Int,
+        disposition: SecurityReviewDisposition
+    ) async -> SecurityReviewDecisionResult {
+        guard SecurityReviewItem.hasValidIdentifier(incidentId), expectedRevision > 0,
+              disposition == .expected || disposition == .dismissed else { return .uncertain }
+        let reason = disposition == .expected
+            ? "Owner marked this activity as expected."
+            : "Owner dismissed this notice."
+        var request = makeRequest(
+            url: configuration.baseURL.appending(path: "api/mobile/v1/security-reviews/\(incidentId)")
+        )
+        request.timeoutInterval = 12
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        do {
+            request.httpBody = try JSONEncoder().encode(
+                SecurityReviewDecisionBody(
+                    expectedRevision: expectedRevision,
+                    disposition: disposition,
+                    reason: reason
+                )
+            )
+            let (data, response) = try await securityReviewData(for: request)
+            guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+            try await validate(http, data: data)
+            let result = try JSONDecoder().decode(OkPayload.self, from: data)
+            return result.ok ? .saved : .uncertain
+        } catch let APIError.server(status: 409, _) {
+            return .stale
+        } catch {
+            return .uncertain
+        }
     }
 
     func activityStatus(id: String) async throws -> ActivityStatusResponse {
@@ -1566,6 +1651,25 @@ struct APIClient: Sendable {
         return request
     }
 
+    private func securityReviewData(for request: URLRequest) async throws -> (Data, URLResponse) {
+        do {
+            return try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
+                group.addTask { try await self.session.data(for: request) }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(self.securityReviewDeadline))
+                    throw SecurityReviewDeadlineExceeded()
+                }
+                defer { group.cancelAll() }
+                guard let result = try await group.next() else { throw APIError.invalidResponse }
+                return result
+            }
+        } catch is SecurityReviewDeadlineExceeded {
+            throw APIError.transport(URLError(.timedOut))
+        } catch let error as URLError {
+            throw APIError.transport(error)
+        }
+    }
+
     private func perform<T: Decodable>(_ request: URLRequest, as type: T.Type) async throws -> T {
         let (data, response) = try await load(request)
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
@@ -1606,6 +1710,7 @@ private struct ChatOperationCancellationRequest: Encodable {
 }
 
 private struct OkPayload: Decodable { let ok: Bool }
+private struct SecurityReviewDeadlineExceeded: Error, Sendable {}
 private struct KnowledgeConnectionSavedPayload: Decodable {
     let memoryId: String
     let relationId: String
