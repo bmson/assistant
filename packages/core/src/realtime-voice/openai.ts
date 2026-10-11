@@ -146,9 +146,12 @@ async function connectOpenAIRealtime(
   // request is a reply that never comes: the caller hears silence. A request
   // made while one is active waits for its `response.done` instead.
   let responseActive = false;
+  let activeResponseId: string | null = null;
   let responseRequested = false;
   let pendingResponse: { instructions?: string } | null = null;
   let activeTurn: ToolCallTurn | null = null;
+  const startedResponseIds = new Set<string>();
+  const settledResponseIds = new Set<string>();
   const turnsByResponse = new Map<string, ToolCallTurn>();
   const pendingCallsByResponse = new Map<string, Set<string>>();
   // Keep terminal IDs for this socket's lifetime: an event replay must not
@@ -235,11 +238,19 @@ async function connectOpenAIRealtime(
     }
     switch (event.type) {
       case 'response.created':
+        if (!event.response?.id) {
+          events.error(new Error('OpenAI Realtime created a response without its ID'));
+          break;
+        }
+        if (startedResponseIds.has(event.response.id) || settledResponseIds.has(event.response.id))
+          break;
         cancelReplyWatch();
         responseRequested = false;
         responseActive = true;
+        activeResponseId = event.response.id;
         activeTurn = { spoke: false };
-        if (event.response?.id) turnsByResponse.set(event.response.id, activeTurn);
+        startedResponseIds.add(event.response.id);
+        turnsByResponse.set(event.response.id, activeTurn);
         break;
       case 'response.output_audio.delta':
         if (event.delta) {
@@ -337,6 +348,27 @@ async function connectOpenAIRealtime(
         break;
       }
       case 'response.done': {
+        const responseId = event.response?.id;
+        if (!responseId) {
+          for (const pendingIds of pendingCallsByResponse.values()) {
+            for (const callId of pendingIds) {
+              const record = callsById.get(callId);
+              if (record?.state === 'pending') {
+                record.state = 'rejected';
+                record.call = undefined;
+              }
+            }
+          }
+          pendingCallsByResponse.clear();
+          events.error(new Error('OpenAI Realtime completed a response without its ID'));
+          break;
+        }
+        // Completion events can be replayed after a later response has begun.
+        // Settle a response once so its usage, tool output, and lifecycle do
+        // not affect a newer response.
+        if (settledResponseIds.has(responseId)) break;
+        settledResponseIds.add(responseId);
+        const ownsActiveResponse = activeResponseId === responseId;
         const input = event.response?.usage?.input_token_details;
         const output = event.response?.usage?.output_token_details;
         const cached = count(input?.cached_tokens);
@@ -354,7 +386,6 @@ async function connectOpenAIRealtime(
           usage.reasoningOutputTokens += count(output.reasoning_tokens);
           usage.reasoningUsageReported = true;
         }
-        const responseId = event.response?.id;
         const pending = responseId ? pendingCallsByResponse.get(responseId) : undefined;
         if (pending) {
           const outputItems = event.response?.output ?? [];
@@ -407,20 +438,13 @@ async function connectOpenAIRealtime(
             ),
           );
         }
-        if (!responseId && pendingCallsByResponse.size > 0) {
-          for (const pendingIds of pendingCallsByResponse.values()) {
-            for (const callId of pendingIds) {
-              const record = callsById.get(callId);
-              if (record?.state === 'pending') record.state = 'rejected';
-            }
-          }
-          pendingCallsByResponse.clear();
-          events.error(new Error('OpenAI Realtime completed a response without its ID'));
+        turnsByResponse.delete(responseId);
+        if (ownsActiveResponse) {
+          responseActive = false;
+          activeResponseId = null;
+          activeTurn = null;
         }
-        if (responseId) turnsByResponse.delete(responseId);
-        responseActive = false;
-        activeTurn = null;
-        if (pendingResponse) {
+        if (ownsActiveResponse && pendingResponse) {
           const next = pendingResponse;
           pendingResponse = null;
           requestResponse(next.instructions);

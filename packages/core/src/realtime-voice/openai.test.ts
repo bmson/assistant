@@ -313,6 +313,78 @@ describe('OpenAI Realtime adapter', () => {
     await session.close();
   });
 
+  it('ignores a settled response replay without settling a newer active response', async () => {
+    const fake = await fakeRealtime();
+    const events = recorder();
+    const session = await createOpenAIRealtimeProvider({ apiKey: 'k', url: fake.url }).connect(
+      { model: 'gpt-realtime', instructions: '', tools: [] },
+      events,
+    );
+    const socket = await fake.client;
+    const push = (event: Record<string, unknown>) => socket.send(JSON.stringify(event));
+    const call = (responseId: string, callId: string) =>
+      push({
+        type: 'response.function_call_arguments.done',
+        response_id: responseId,
+        call_id: callId,
+        name: 'note',
+        arguments: '{}',
+      });
+    const finish = (responseId: string, callId: string, inputAudioTokens: number) =>
+      push({
+        type: 'response.done',
+        response: {
+          id: responseId,
+          status: 'completed',
+          output: [responseItem(callId, 'note', '{}')],
+          usage: { input_token_details: { audio_tokens: inputAudioTokens } },
+        },
+      });
+    const toolCalls = () =>
+      events.log.filter((entry) => Array.isArray(entry) && entry[0] === 'toolCall');
+    const creates = () => fake.received.filter((event) => event.type === 'response.create');
+
+    push({ type: 'response.created', response: { id: 'resp_a' } });
+    call('resp_a', 'call_a');
+    finish('resp_a', 'call_a', 10);
+    await until(() => toolCalls().length === 1);
+    session.sendToolResult({ id: 'call_a', name: 'note', args: {} }, { noted: true }, 'none');
+    await until(
+      () => fake.received.filter((event) => event.type === 'conversation.item.create').length === 1,
+    );
+
+    push({ type: 'response.created', response: { id: 'resp_b' } });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    session.respond('Wait for response B.');
+    finish('resp_a', 'call_a', 100); // delayed duplicate completion for settled A
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(creates()).toHaveLength(0);
+    expect(session.usage().inputAudioTokens).toBe(10);
+    expect(events.log.filter((entry) => Array.isArray(entry) && entry[0] === 'error')).toEqual([]);
+
+    push({
+      type: 'response.output_audio.delta',
+      response_id: 'resp_b',
+      item_id: 'audio_b',
+      delta: 'AQI=',
+    });
+    call('resp_b', 'call_b');
+    finish('resp_b', 'call_b', 5);
+    await until(() => toolCalls().length === 2);
+    session.sendToolResult({ id: 'call_b', name: 'note', args: {} }, { noted: true }, 'if_silent');
+    await until(() => creates().length === 1);
+
+    expect(creates()).toEqual([
+      { type: 'response.create', response: { instructions: 'Wait for response B.' } },
+    ]);
+    expect(session.usage().inputAudioTokens).toBe(15);
+    expect(toolCalls()).toEqual([
+      ['toolCall', { id: 'call_a', name: 'note', args: {} }],
+      ['toolCall', { id: 'call_b', name: 'note', args: {} }],
+    ]);
+    await session.close();
+  });
+
   it('speaks after a tool result only when the turn needs a reply', async () => {
     const fake = await fakeRealtime();
     const events = recorder();
