@@ -9,6 +9,7 @@ import { withSpan } from '../otel.js';
 import { classifyFailure, failureNotice, ownerTaskLabel } from '../owner-text.js';
 import { requestedArtifactIntent } from './artifact-intent.js';
 import {
+  projectChecklistCancellationResume,
   projectChecklistCorrectionResume,
   taskBoundCorrectionReadRequest,
 } from './checklist-correction-resume.js';
@@ -54,7 +55,12 @@ import {
   taskState,
 } from './machine.js';
 import { latestOwnerIntent, ownerAuthoredWindow } from './owner-intent.js';
-import { buildRequestChecklist } from './request-checklist.js';
+import {
+  buildRequestChecklist,
+  hasOwnerChecklistCancellationMarker,
+  ownerCancellationAuditIsConsistent,
+} from './request-checklist.js';
+import { RequestChecklistSchema } from './request-checklist-schema.js';
 import { isSaveStatusQuestion, previousSaveStatus } from './saved-work.js';
 
 /**
@@ -227,15 +233,100 @@ export function shouldTaintContext(task: Pick<TaskRow, 'trust' | 'trigger'>): bo
   return !ownerAuthored;
 }
 
+async function checklistCancellationOwnersAreValid(
+  repository: ExecutionContextRepository,
+  task: TaskRow,
+  value: unknown,
+): Promise<string | undefined> {
+  const parsed = RequestChecklistSchema.safeParse(value);
+  if (!parsed.success) return 'malformed-checklist';
+  const checklist = parsed.data;
+  if (!ownerCancellationAuditIsConsistent(checklist)) return 'inconsistent-cancellation-audit';
+  const audit = checklist.cancellationAudit ?? [];
+  if (audit.length === 0) return undefined;
+  const trigger = task.trigger as {
+    source?: unknown;
+    agentId?: unknown;
+    conversationId?: unknown;
+    trust?: unknown;
+    payload?: { text?: unknown; triggerMessageId?: unknown };
+  } | null;
+  if (
+    task.type !== 'chat_turn' ||
+    task.trust !== 'owner' ||
+    !task.conversationId ||
+    trigger?.source !== 'chat' ||
+    trigger.agentId !== task.agentId ||
+    trigger.conversationId !== task.conversationId ||
+    trigger.trust !== 'owner' ||
+    trigger.payload?.text !== checklist.request ||
+    typeof trigger.payload.triggerMessageId !== 'string'
+  )
+    return 'unsupported-cancellation-task';
+  const request = await repository.getOwnerMessage({
+    agentId: task.agentId,
+    conversationId: task.conversationId,
+    messageId: trigger.payload.triggerMessageId,
+  });
+  if (
+    !request ||
+    request.taskId !== task.id ||
+    request.role !== 'user' ||
+    request.origin !== 'owner' ||
+    request.text !== checklist.request
+  )
+    return 'original-owner-message-unverified';
+  for (const entry of audit) {
+    if (
+      entry.taskId !== task.id ||
+      entry.conversationId !== task.conversationId ||
+      entry.ownerTaskId !== task.id
+    )
+      return 'cancellation-audit-task-mismatch';
+    const message = await repository.getOwnerMessage({
+      agentId: task.agentId,
+      conversationId: task.conversationId,
+      messageId: entry.ownerMessageId,
+    });
+    if (
+      !message ||
+      message.id !== entry.ownerMessageId ||
+      message.taskId !== task.id ||
+      message.role !== 'user' ||
+      message.origin !== 'owner' ||
+      entry.requestSpans.some((span) => !message.text.includes(span))
+    )
+      return 'cancellation-owner-message-unverified';
+  }
+  const lastAction = checklist.lastOwnerAction;
+  const expectedLatestOwnerMessageId =
+    lastAction?.kind === 'replace'
+      ? checklist.revisionAudit?.at(-1)?.ownerMessageId
+      : audit.at(-1)?.ownerMessageId;
+  if (!expectedLatestOwnerMessageId) return 'latest-owner-action-unverified';
+  const latestOwner = await repository.getLatestOwnerMessage({
+    agentId: task.agentId,
+    conversationId: task.conversationId,
+  });
+  if (latestOwner?.id !== expectedLatestOwnerMessageId) return 'cancellation-owner-head-changed';
+  return undefined;
+}
+
 async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteResult> {
   const { db, router, dispatcher } = deps;
   const persistence = deps.persistence ?? createPostgresExecutionPersistence(db);
   const lease = task;
   const state = taskState(task);
   const rawChecklist = (state as { requestChecklist?: Record<string, unknown> }).requestChecklist;
+  const lastOwnerAction = rawChecklist?.lastOwnerAction as { kind?: unknown } | undefined;
+  let hasChecklistCancellation = lastOwnerAction?.kind === 'cancel';
   const hasChecklistCorrection = Boolean(
     rawChecklist &&
-      (Object.hasOwn(rawChecklist, 'revision') || Object.hasOwn(rawChecklist, 'revisionAudit')),
+      !hasChecklistCancellation &&
+      (lastOwnerAction?.kind === 'replace' ||
+        (!lastOwnerAction &&
+          (Object.hasOwn(rawChecklist, 'revision') ||
+            Object.hasOwn(rawChecklist, 'revisionAudit')))),
   );
 
   const trigger = task.trigger as {
@@ -277,8 +368,29 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
       contractBlocked: false,
     });
   }
-  if (state.pendingFinal && !hasChecklistCorrection)
+  if (state.pendingFinal && !hasChecklistCorrection) {
+    // A cancellation-bound final is scoped to the owner message that selected
+    // the retained work. A delivery retry must not publish that saved answer
+    // after a newer owner message has changed the conversation context.
+    if (hasOwnerChecklistCancellationMarker(state.requestChecklist)) {
+      const cancellationIssue = await checklistCancellationOwnersAreValid(
+        persistence.executionContext,
+        task,
+        state.requestChecklist,
+      );
+      if (cancellationIssue) {
+        const marked = await markTaskNeedsAttention(
+          persistence.tasks,
+          lease,
+          'saved cancellation reply could not be delivered because its owner context changed',
+        );
+        return marked
+          ? { outcome: 'needs_attention', detail: 'saved cancellation reply requires review' }
+          : LOST_LEASE;
+      }
+    }
     return finalizePendingResponse(deps, lease, state.pendingFinal, state);
+  }
 
   if (shouldTaintContext(task)) {
     state.untrustedContext = true;
@@ -294,6 +406,8 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
   const abort = new AbortController();
 
   let correction: ReturnType<typeof projectChecklistCorrectionResume>;
+  let cancellation: ReturnType<typeof projectChecklistCancellationResume>;
+  let cancellationOriginalIntent: ReturnType<typeof latestOwnerIntent> | undefined;
   let correctionOwnerMessage: Awaited<ReturnType<ExecutionContextRepository['getOwnerMessage']>> =
     null;
   let originalCorrectionIntent: ReturnType<typeof latestOwnerIntent> | undefined;
@@ -763,8 +877,195 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
   // Fold any owner correction typed while this task was parked into the window,
   // so a resumed task acts on the latest owner intent, not a stale checkpoint.
   // (First run just baselines the watermark; chat channel only.)
-  if (!correction)
-    await foldOwnerRepliesSincePark(persistence.executionContext, task, state, rc.window);
+  if (
+    !correction &&
+    !(await foldOwnerRepliesSincePark(persistence.executionContext, task, state, rc.window))
+  ) {
+    const marked = await markTaskNeedsAttention(
+      persistence.tasks,
+      lease,
+      'a recognized owner cancellation could not be recorded safely; no additional action was dispatched',
+    );
+    return marked
+      ? { outcome: 'needs_attention', detail: 'owner cancellation audit requires review' }
+      : LOST_LEASE;
+  }
+  // foldOwnerRepliesSincePark may recognize and persist a cancellation that
+  // arrived after this task was parked. Re-read the action marker after that
+  // fold so the fresh cancellation projection, dispatch fences, and final
+  // owner-head checks all apply to the same resumed execution.
+  hasChecklistCancellation =
+    (state.requestChecklist as { lastOwnerAction?: { kind?: unknown } } | undefined)
+      ?.lastOwnerAction?.kind === 'cancel';
+  if (state.requestChecklist && hasOwnerChecklistCancellationMarker(state.requestChecklist)) {
+    const invalidCancellation = await checklistCancellationOwnersAreValid(
+      persistence.executionContext,
+      task,
+      state.requestChecklist,
+    );
+    if (invalidCancellation) {
+      const marked = await markTaskNeedsAttention(
+        persistence.tasks,
+        lease,
+        'owner cancellation evidence could not be verified; no additional action was dispatched',
+      );
+      return marked
+        ? {
+            outcome: 'needs_attention',
+            detail: `owner cancellation evidence requires review: ${invalidCancellation}`,
+          }
+        : LOST_LEASE;
+    }
+  }
+  if (hasChecklistCancellation) {
+    const checklist = state.requestChecklist;
+    const lastAction = checklist?.lastOwnerAction;
+    const payload = (task.trigger as { payload?: Record<string, unknown> } | null)?.payload;
+    const requestText = payload?.text;
+    const cancellationMessageId = lastAction?.ownerMessageId;
+    const refuseCancellation = async (reason: string): Promise<ExecuteResult> => {
+      const text =
+        'I could not safely resume this request after the cancellation. Review it in Activity.';
+      return stageFinalResponse(deps, lease, state, rc.window, {
+        text,
+        progress: `cancellation resume paused for review: ${reason.slice(0, 120)}`,
+        terminalStatus: 'needs_attention',
+        outcome: 'needs_attention',
+        contractNotice: true,
+      });
+    };
+    if (
+      lastAction?.kind !== 'cancel' ||
+      !checklist ||
+      task.type !== 'chat_turn' ||
+      task.trust !== 'owner' ||
+      task.goalId !== null ||
+      !task.conversationId ||
+      typeof requestText !== 'string' ||
+      typeof cancellationMessageId !== 'string' ||
+      state.pendingJob ||
+      state.pendingApprovals.length > 0 ||
+      state.pendingFinal
+    )
+      return refuseCancellation('task binding or pending effects are unsupported');
+
+    const originalIntent = latestOwnerIntent([{ role: 'user', content: requestText }], {
+      trust: task.trust as Trust,
+      trigger: task.trigger,
+    });
+    cancellationOriginalIntent = originalIntent;
+    const cancellationOwnerMessage = await persistence.executionContext.getOwnerMessage({
+      agentId: task.agentId,
+      conversationId: task.conversationId,
+      messageId: cancellationMessageId,
+    });
+    const latestOwnerMessage = await persistence.executionContext.getLatestOwnerMessage({
+      agentId: task.agentId,
+      conversationId: task.conversationId,
+    });
+    if (!cancellationOwnerMessage || latestOwnerMessage?.id !== cancellationMessageId)
+      return refuseCancellation('the exact cancellation message is no longer the owner head');
+    cancellation = projectChecklistCancellationResume({
+      task: {
+        id: task.id,
+        agentId: task.agentId,
+        conversationId: task.conversationId,
+        createdAt: task.createdAt,
+      },
+      checklist,
+      ownerMessage: {
+        id: cancellationOwnerMessage.id,
+        taskId: cancellationOwnerMessage.taskId ?? '',
+        agentId: task.agentId,
+        conversationId: task.conversationId,
+        role: 'user',
+        origin: 'owner',
+        text: cancellationOwnerMessage.text,
+        createdAt: cancellationOwnerMessage.createdAt,
+      },
+      latestConversationOwnerMessageId: latestOwnerMessage.id,
+      originalIntent,
+    });
+    if (!cancellation)
+      return refuseCancellation('the selected cancellation or remaining work is unsupported');
+    const checklistEvidence = await persistence.executionEvidence.taskEvidence({
+      agentId: task.agentId,
+      taskId: task.id,
+    });
+    for (const completed of cancellation.completedOutcomes) {
+      const item = checklist.items.find((candidate) => candidate.id === completed.id);
+      if (
+        !item ||
+        item.evidence.length === 0 ||
+        !item.evidence.every((receipt) =>
+          checklistEvidence.some((row) => row.id === receipt.id && row.status === 'succeeded'),
+        )
+      )
+        return refuseCancellation('a completed sibling lacks its durable successful evidence');
+    }
+    const referenceAtByItem = new Map<string, Date>();
+    for (const outcome of cancellation.activeOutcomes) {
+      const replacement = (checklist.revisionAudit ?? [])
+        .filter((entry) => entry.itemId === outcome.id)
+        .at(-1);
+      if (!replacement) {
+        referenceAtByItem.set(outcome.id, task.createdAt);
+        continue;
+      }
+      const referenceMessage = await persistence.executionContext.getOwnerMessage({
+        agentId: task.agentId,
+        conversationId: task.conversationId,
+        messageId: replacement.ownerMessageId,
+      });
+      const normalizedMessage = referenceMessage?.text
+        .trim()
+        .replace(/[.!?]+$/, '')
+        .trim();
+      const normalizedLabel = replacement.toLabel
+        .trim()
+        .replace(/[.!?]+$/, '')
+        .trim();
+      if (
+        !referenceMessage ||
+        referenceMessage.taskId !== task.id ||
+        referenceMessage.role !== 'user' ||
+        referenceMessage.origin !== 'owner' ||
+        normalizedMessage !== normalizedLabel ||
+        !(referenceMessage.createdAt instanceof Date) ||
+        !Number.isFinite(referenceMessage.createdAt.getTime())
+      )
+        return refuseCancellation('a retained lookup has no exact owner-message time anchor');
+      referenceAtByItem.set(outcome.id, referenceMessage.createdAt);
+    }
+    cancellation = {
+      ...cancellation,
+      activeOutcomes: cancellation.activeOutcomes.map((outcome) => ({
+        ...outcome,
+        referenceAt: referenceAtByItem.get(outcome.id) ?? task.createdAt,
+      })),
+    };
+    const firstLookup = cancellation.activeOutcomes.find((outcome) => outcome.status === 'pending');
+    if (
+      firstLookup &&
+      !taskBoundCorrectionReadRequest(firstLookup.label, {
+        now: firstLookup.referenceAt,
+        timeZone: state.requestTimeZone ?? agent.timezone,
+        authorizedScopes: cancellation.authorizedScopes,
+      })
+    )
+      return refuseCancellation('a retained lookup is outside the original private-read authority');
+    const cancellationWindow = [
+      {
+        role: 'system',
+        content: `Resume only task ${task.id}, cancellation revision ${cancellation.cancellationRevision}. The owner cancelled outcomes ${cancellation.cancelledOutcomeIds.join(', ')}. Preserve completed outcomes and perform only the remaining pending private lookups listed in the validated checklist. Do not perform writes or any cancelled action.`,
+      },
+      { role: 'user', content: cancellationOwnerMessage.text },
+    ] as unknown as TaskState['contextWindow'];
+    state.contextWindow = cancellationWindow;
+    rc.window = cancellationWindow as unknown as ModelMessage[];
+    rc.checklistCancellation = cancellation;
+    rc.ctx.ownerIntent = originalIntent;
+  }
   // Rebuild persisted conversations.search evidence before a resumed planner or
   // model can consume a pre-park private result. This is a local bounded text
   // refresh; it never replays embedding or arbitrary tools.
@@ -787,19 +1088,20 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
   // dispatch; otherwise the dispatcher could keep using the pre-resume scope.
   const resumedOwnerIntent = correction
     ? ownerIntent
-    : latestOwnerIntent(rc.window, {
+    : (cancellationOriginalIntent ??
+      latestOwnerIntent(rc.window, {
         trust: task.trust as Trust,
         trigger: task.trigger,
         clarificationContinuation: state.clarificationContinuation,
-      });
+      }));
   rc.ctx.ownerIntent = resumedOwnerIntent;
   const resumedOwnerWindow = ownerAuthoredWindow(rc.window, resumedOwnerIntent);
   rc.artifactIntent =
-    !correction && state.step === 0 && !isKnownReply
+    !correction && !cancellation && state.step === 0 && !isKnownReply
       ? requestedArtifactIntent(resumedOwnerIntent.ownerAuthoredText)
       : undefined;
   rc.documentReadIntent =
-    !correction && state.step === 0 && !rc.artifactIntent && !isKnownReply
+    !correction && !cancellation && state.step === 0 && !rc.artifactIntent && !isKnownReply
       ? await unreadSharedDocumentIntent(persistence.executionEvidence, task, resumedOwnerWindow)
       : undefined;
   const payload = (task.trigger as { payload?: { text?: unknown } } | null)?.payload;
@@ -841,10 +1143,10 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
   }
 
   // Read an owner-supplied shared document (step 0) before the model continues.
-  const documentReadResult = correction ? null : await runDirectDocumentRead(rc);
+  const documentReadResult = correction || cancellation ? null : await runDirectDocumentRead(rc);
   if (documentReadResult) return documentReadResult;
 
-  const planResult = correction ? { plan: null } : await runPlanPhase(rc);
+  const planResult = correction || cancellation ? { plan: null } : await runPlanPhase(rc);
   if ('outcome' in planResult) return planResult;
   if (
     !state.requestChecklist &&

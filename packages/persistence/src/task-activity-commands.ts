@@ -1,4 +1,7 @@
 /** Owner-scoped archive state changes for mobile Activity. */
+/** Highest value persisted by PostgreSQL's signed 32-bit queue_generation column. */
+export const MAX_TASK_QUEUE_GENERATION = 2_147_483_647;
+
 export interface ArchiveOldActivityProgress {
   /** Stable identifier for resuming a bounded archive run. Null for atomic SQL runs. */
   operationId: string | null;
@@ -72,6 +75,60 @@ export interface PendingChecklistCorrectionOutcome {
   transitioned: boolean;
   queueGeneration: number | null;
   ownerMessageId: string | null;
+}
+
+/** Explicit Activity selection for cancelling one pending checklist item. */
+export interface PendingChecklistCancellationInput {
+  taskId: string;
+  itemId: string;
+  expectedRevision: number;
+  expectedCancellationRevision: number;
+  /** Stable across retries; becomes the durable owner-message ID. */
+  ownerMessageId: string;
+}
+
+export interface PendingChecklistCancellationOutcome {
+  outcome:
+    | 'cancelled'
+    | 'already_cancelled'
+    | 'not_found'
+    | 'no_longer_retriable'
+    | 'stale_revision'
+    | 'unsafe_evidence'
+    | 'invalid';
+  transitioned: boolean;
+  queueGeneration: number | null;
+  ownerMessageId: string | null;
+}
+
+export interface ChecklistCancellationPolicyInput {
+  checklist: unknown;
+  task: { id: string; agentId: string; conversationId: string };
+  binding: PendingChecklistCancellationInput;
+  evidence: unknown;
+}
+
+export interface ChecklistCancellationPolicy {
+  /** Apply the same cancellation rules to PG and Firestore transaction snapshots. */
+  cancel(
+    input: ChecklistCancellationPolicyInput,
+  ):
+    | { decision: 'cancelled'; checklist: unknown; ownerMessageText: string }
+    | { decision: 'not_found' | 'stale_revision' | 'invalid' | 'unsafe_evidence' };
+  /** Match an exact owner-message replay against the durable cancellation audit. */
+  matchesReplay(input: {
+    checklist: unknown;
+    cancellation: PendingChecklistCancellationInput;
+    task: { id: string; conversationId: string };
+    priorMessage: {
+      id: string;
+      taskId: string | null;
+      conversationId: string | null;
+      role: string;
+      origin: string;
+      text: string;
+    };
+  }): boolean;
 }
 
 /** Transaction-snapshot inputs for the one shared checklist-correction policy. */
@@ -218,6 +275,10 @@ export interface TaskActivityCommandRepository {
     agentId: string,
     input: PendingChecklistCorrectionInput,
   ): Promise<PendingChecklistCorrectionOutcome>;
+  cancelPendingChecklist(
+    agentId: string,
+    input: PendingChecklistCancellationInput,
+  ): Promise<PendingChecklistCancellationOutcome>;
   cancel(agentId: string, taskId: string): Promise<TaskActivityCommandOutcome>;
   revokeAutonomy(agentId: string, taskId: string): Promise<TaskActivityCommandOutcome>;
   raiseBudget(agentId: string, taskId: string, limit: number): Promise<TaskActivityCommandOutcome>;

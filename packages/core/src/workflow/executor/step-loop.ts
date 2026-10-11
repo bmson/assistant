@@ -1,4 +1,8 @@
-import { createPostgresExecutionEvidenceRepository, suggestions } from '@assistant/db';
+import {
+  createPostgresExecutionContextRepository,
+  createPostgresExecutionEvidenceRepository,
+  suggestions,
+} from '@assistant/db';
 import type { ModelMessage } from 'ai';
 import { and, eq } from 'drizzle-orm';
 import { hashCallbackToken } from '../../browse.js';
@@ -69,7 +73,14 @@ import {
   isCompletionDependentReminderRequest,
   shouldUseTaskScheduleDirective,
 } from '../reminder-grounding.js';
-import { requestChecklistDirective } from '../request-checklist.js';
+import {
+  activeChecklistLookupOutcomeForToolCall,
+  assessCancelledChecklistToolCall,
+  hasOwnerChecklistCancellationMarker,
+  ownerCancellationAuditIsConsistent,
+  requestChecklistDirective,
+  supersededChecklistLookupForToolCall,
+} from '../request-checklist.js';
 import { responseCardsForFinal } from '../response-cards.js';
 import {
   enforcePersonalReadResponse,
@@ -116,6 +127,36 @@ function stableJson(value: unknown): string {
       .join(',')}}`;
   }
   return JSON.stringify(value);
+}
+
+function evidenceModelToolCallId(row: { decision: unknown }): string | undefined {
+  if (!row.decision || typeof row.decision !== 'object' || Array.isArray(row.decision))
+    return undefined;
+  const value = (row.decision as Record<string, unknown>).modelToolCallId;
+  return typeof value === 'string' ? value : undefined;
+}
+
+function cancellationLedgerIsComplete(
+  rows: unknown,
+): rows is Array<{ id: string; decision: unknown }> {
+  return (
+    Array.isArray(rows) &&
+    rows.length <= 256 &&
+    rows.every(
+      (row) =>
+        row &&
+        typeof row === 'object' &&
+        typeof row.id === 'string' &&
+        row.id.length > 0 &&
+        row.id.length <= 128 &&
+        typeof row.toolName === 'string' &&
+        row.toolName.length > 0 &&
+        row.toolName.length <= 128 &&
+        typeof row.status === 'string' &&
+        Object.hasOwn(row, 'decision'),
+    ) &&
+    new Set(rows.map((row) => row.id)).size === rows.length
+  );
 }
 
 /**
@@ -258,8 +299,11 @@ export function latestCurrentTaskAssistantText(window: ModelMessage[]): string {
 
 export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<ExecuteResult> {
   const { deps, db, router, dispatcher, task, agent, state, ctx, artifactIntent } = rc;
+  const restrictedChecklistResume = Boolean(rc.checklistCorrection || rc.checklistCancellation);
   const evidence =
     deps.persistence?.executionEvidence ?? createPostgresExecutionEvidenceRepository(db);
+  const executionContext =
+    deps.persistence?.executionContext ?? createPostgresExecutionContextRepository(db);
   const lease = task;
   // Relative dates belong to the owner's request, not the worker attempt. Keep
   // the same clock in the model prompt and deterministic reads so a retry over
@@ -322,10 +366,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     ownerIntent.separation !== 'unknown' &&
     ownerText.length > 0;
   const futureWatchIntent =
-    directOwner && !rc.checklistCorrection ? detectFutureWatchIntent(ownerText) : null;
-  const memoryWrite = directOwner && !rc.checklistCorrection && isMemoryWriteRequest(ownerText);
+    directOwner && !restrictedChecklistResume ? detectFutureWatchIntent(ownerText) : null;
+  const memoryWrite = directOwner && !restrictedChecklistResume && isMemoryWriteRequest(ownerText);
   const detectedLookups =
-    directOwner && !rc.checklistCorrection ? detectLiveLookups(ownerWindow) : [];
+    directOwner && !restrictedChecklistResume ? detectLiveLookups(ownerWindow) : [];
   // A registry without the scores tool (a trimmed install or trust tier) takes
   // a sports question down the general search-then-fetch path instead of
   // failing on a tool that is not there.
@@ -350,8 +394,9 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // comes from the route.
   const tripOwnsCalendar = liveLookups.some((lookup) => lookup.destination === 'calendar');
   const birthdaySaves =
-    directOwner && !rc.checklistCorrection ? requestedBirthdaySaves(ownerWindow) : [];
-  const situationRequest = directOwner && !rc.checklistCorrection && isSituationRequest(ownerText);
+    directOwner && !restrictedChecklistResume ? requestedBirthdaySaves(ownerWindow) : [];
+  const situationRequest =
+    directOwner && !restrictedChecklistResume && isSituationRequest(ownerText);
   // Private calendar/mail forcing belongs only to direct owner requests. Never
   // let third-party text or an assistant-generated child task trigger a search
   // of the owner's accounts or override its explicit action plan.
@@ -359,7 +404,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // so it is exactly the "third-party text" this rule excludes: without the
   // guard, a crafted message reading like "what's on my calendar tomorrow?"
   // would force a search of the owner's own accounts and override the plan.
-  let readRequest: PersonalReadRequest | null = rc.checklistCorrection
+  let readRequest: PersonalReadRequest | null = restrictedChecklistResume
     ? null
     : task.trust === 'owner' &&
         !isForwardedIngest(task) &&
@@ -371,7 +416,25 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           timeZone: requestTimeZone,
         })
       : null;
-  const stageReadFinal = (pending: Parameters<typeof stageFinalResponse>[4]) => {
+  const stageReadFinal = async (
+    pending: Parameters<typeof stageFinalResponse>[4],
+  ): Promise<ExecuteResult> => {
+    if (rc.checklistCancellation) {
+      const latestOwner = await executionContext.getLatestOwnerMessage({
+        agentId: task.agentId,
+        conversationId: task.conversationId ?? '',
+      });
+      if (latestOwner?.id !== rc.checklistCancellation.ownerMessageId) {
+        const marked = await markTaskNeedsAttention(
+          deps.persistence?.tasks ?? db,
+          lease,
+          'a newer owner message changed the cancellation context before the reply was staged',
+        );
+        return marked
+          ? { outcome: 'needs_attention', detail: 'cancellation reply requires review' }
+          : LOST_LEASE;
+      }
+    }
     if (rc.checklistCorrection) {
       const outcomeIds = new Set(
         [...rc.checklistCorrection.completedOutcomes, ...rc.checklistCorrection.activeOutcomes].map(
@@ -405,7 +468,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         };
       }
     }
-    return !rc.checklistCorrection && directOwner && requestedCardIntent(ownerText)
+    return !restrictedChecklistResume && directOwner && requestedCardIntent(ownerText)
       ? stageModelFinalResponse(deps, lease, state, rc.window, pending, artifactIntent, {
           readRequest,
           lookupContext,
@@ -416,7 +479,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // Keep the same no-tool guarantee at execution time: a model may still emit
   // a calendar or Gmail call when tools are present even for a `reply` plan.
   const conceptualNoTool =
-    !rc.checklistCorrection &&
+    !restrictedChecklistResume &&
     task.trust === 'owner' &&
     !situationRequest &&
     isConceptualNoToolRequest(ownerText);
@@ -426,7 +489,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // answers these with plausible prose and no tool calls — how a request can
   // look handled while nothing happened.
   const role =
-    rc.checklistCorrection || readRequest || memoryWrite || liveLookup
+    restrictedChecklistResume || readRequest || memoryWrite || liveLookup
       ? 'reason'
       : roleForTask(task, plan);
   // Artifact retries can use the draft role's tool-capable fallback. Agent
@@ -437,7 +500,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   const triggerPayload = (task.trigger as { payload?: Record<string, unknown> } | null)?.payload;
   const arrivalTask = triggerPayload?.kind === 'arrival';
   const ownerCard =
-    !rc.checklistCorrection &&
+    !restrictedChecklistResume &&
     privilegedTask &&
     !readRequest &&
     !state.untrustedContext &&
@@ -450,7 +513,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // transient, so it mirrors the owner-card gate.
   let ambientBlock: string | undefined;
   if (
-    !rc.checklistCorrection &&
+    !restrictedChecklistResume &&
     privilegedTask &&
     !readRequest &&
     !state.untrustedContext &&
@@ -476,7 +539,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   if (
     loadConfig().CHAT_RECALL_ENABLED &&
     state.plannerState.planningRecall === undefined &&
-    !rc.checklistCorrection &&
+    !restrictedChecklistResume &&
     !readRequest &&
     privilegedTask &&
     !state.untrustedContext &&
@@ -545,7 +608,12 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     }
   }
 
-  if (!rc.checklistCorrection && privilegedTask && !state.untrustedContext && task.conversationId) {
+  if (
+    !restrictedChecklistResume &&
+    privilegedTask &&
+    !state.untrustedContext &&
+    task.conversationId
+  ) {
     try {
       const lastUser = [...rc.window].reverse().find((m) => m.role === 'user');
       const query = typeof lastUser?.content === 'string' ? lastUser.content : '';
@@ -573,7 +641,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // task is done, not what it is allowed to do. Fetched once and reused across
   // loop iterations — the library is task-stable.
   let skillsBlock: string | undefined;
-  if (!rc.checklistCorrection && privilegedTask && !readRequest) {
+  if (!restrictedChecklistResume && privilegedTask && !readRequest) {
     const lastUser = [...rc.window].reverse().find((m) => m.role === 'user');
     const skillQuery = [
       plan?.reasoning,
@@ -618,6 +686,23 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // tool ledger. Measured from the entry step so a retry after a real database
   // failure gets exactly one fresh persistence attempt instead of none.
   const bookkeepingStepCap = Math.max(task.maxSteps, state.step) + 1;
+  const cancellationHeadIsCurrent = async (): Promise<boolean> => {
+    const checklist = state.requestChecklist;
+    const audit = checklist?.cancellationAudit;
+    if (!audit || audit.length === 0) return !hasOwnerChecklistCancellationMarker(checklist);
+    if (!ownerCancellationAuditIsConsistent(checklist)) return false;
+    const ownerAction = checklist.lastOwnerAction;
+    if (!ownerAction) return false;
+    const latest = await executionContext.getLatestOwnerMessage({
+      agentId: task.agentId,
+      conversationId: task.conversationId ?? '',
+    });
+    return latest?.id === ownerAction.ownerMessageId;
+  };
+  const cancellationNeedsAttention = async (reason: string): Promise<ExecuteResult> => {
+    const marked = await markTaskNeedsAttention(deps.persistence?.tasks ?? db, lease, reason);
+    return marked ? { outcome: 'needs_attention', detail: reason } : LOST_LEASE;
+  };
   // The answer turn happens once. Without this a model that somehow emits a
   // tool call on it would come back round to another answer turn, and a lookup
   // could ping-pong until the step budget ran out.
@@ -626,7 +711,180 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   let lastCorrectionExcludedEvidenceIds: string[] = [];
   while (state.step < bookkeepingStepCap) {
     let correctionOutcomeId: string | undefined;
+    let cancellationOutcomeId: string | undefined;
     let resumingBatch = state.pendingToolBatch !== null && state.pendingToolBatch !== undefined;
+    const hasOwnerCancellations = hasOwnerChecklistCancellationMarker(state.requestChecklist);
+    if (hasOwnerCancellations && !(await cancellationHeadIsCurrent()))
+      return cancellationNeedsAttention(
+        'a newer owner message changed the cancellation context; no additional action was dispatched',
+      );
+    if (hasOwnerCancellations && resumingBatch && state.pendingToolBatch) {
+      let rows: Awaited<ReturnType<typeof evidence.taskEvidence>>;
+      try {
+        rows = await evidence.taskEvidence({
+          agentId: task.agentId,
+          taskId: task.id,
+          maxRows: 256,
+        });
+      } catch {
+        return cancellationNeedsAttention(
+          'the bounded action ledger could not be verified; no pending action was replayed',
+        );
+      }
+      if (!cancellationLedgerIsComplete(rows))
+        return cancellationNeedsAttention(
+          'the action ledger was incomplete or malformed; no pending action was replayed',
+        );
+      let changed = false;
+      for (const journalCall of state.pendingToolBatch.calls) {
+        const assessment = assessCancelledChecklistToolCall(state.requestChecklist, {
+          taskId: task.id,
+          conversationId: task.conversationId ?? '',
+          toolName: journalCall.toolName,
+          args: journalCall.input,
+        });
+        if (assessment.decision === 'allow') {
+          if (journalCall.ownerCancellation)
+            return cancellationNeedsAttention(
+              'a skipped action no longer matches its owner-cancellation record',
+            );
+          if (
+            rc.checklistCorrection &&
+            state.pendingToolBatch.modelId !== 'runtime/private-read-router'
+          ) {
+            const related = rows.filter(
+              (row) =>
+                row.id === journalCall.dbToolCallId ||
+                evidenceModelToolCallId(row) === journalCall.toolCallId,
+            );
+            const safelyDiscardableLookup =
+              !journalCall.dbToolCallId &&
+              related.length === 0 &&
+              ['queued', 'budget'].includes(journalCall.status) &&
+              Boolean(
+                activeChecklistLookupOutcomeForToolCall(state.requestChecklist, {
+                  toolName: journalCall.toolName,
+                  args: journalCall.input,
+                }) ||
+                  supersededChecklistLookupForToolCall(state.requestChecklist, {
+                    outcomeId: rc.checklistCorrection.selectedOutcomeId,
+                    toolName: journalCall.toolName,
+                    args: journalCall.input,
+                  }),
+              );
+            if (!safelyDiscardableLookup)
+              return cancellationNeedsAttention(
+                'a stale or unrelated queued action could not be safely discarded after correction',
+              );
+            journalCall.status = 'settled';
+            changed = true;
+            continue;
+          }
+          if (rc.checklistCancellation) {
+            const related = rows.filter(
+              (row) =>
+                row.id === journalCall.dbToolCallId ||
+                evidenceModelToolCallId(row) === journalCall.toolCallId,
+            );
+            if (journalCall.status === 'settled') {
+              const receipt = related[0];
+              const provenance =
+                receipt?.decision && typeof receipt.decision === 'object'
+                  ? (receipt.decision as { checklistCancellation?: Record<string, unknown> })
+                      .checklistCancellation
+                  : undefined;
+              const activeOutcomeId = activeChecklistLookupOutcomeForToolCall(
+                state.requestChecklist,
+                { toolName: journalCall.toolName, args: journalCall.input },
+              );
+              if (
+                related.length !== 1 ||
+                !receipt ||
+                receipt.id !== journalCall.dbToolCallId ||
+                receipt.status !== 'succeeded' ||
+                receipt.toolName !== journalCall.toolName ||
+                stableJson(receipt.args) !== stableJson(journalCall.input) ||
+                evidenceModelToolCallId(receipt) !== journalCall.toolCallId ||
+                !journalCall.dbToolCallId ||
+                !activeOutcomeId ||
+                provenance?.revision !== rc.checklistCancellation.cancellationRevision ||
+                provenance.outcomeId !== activeOutcomeId ||
+                provenance.ownerMessageId !== rc.checklistCancellation.ownerMessageId
+              )
+                return cancellationNeedsAttention(
+                  'a settled retained lookup lacks an exact cancellation-bound success receipt',
+                );
+              continue;
+            }
+            if (
+              !['queued', 'budget'].includes(journalCall.status) ||
+              related.length !== 0 ||
+              !activeChecklistLookupOutcomeForToolCall(state.requestChecklist, {
+                toolName: journalCall.toolName,
+                args: journalCall.input,
+              })
+            )
+              return cancellationNeedsAttention(
+                'a parked sibling action cannot be safely rebound to one pending private lookup',
+              );
+            journalCall.status = 'settled';
+            changed = true;
+          }
+          continue;
+        }
+        if (
+          assessment.decision !== 'cancelled' ||
+          !assessment.cancellation ||
+          (journalCall.ownerCancellation &&
+            (journalCall.ownerCancellation.revision !== assessment.cancellation.revision ||
+              journalCall.ownerCancellation.ownerMessageId !==
+                assessment.cancellation.ownerMessageId ||
+              JSON.stringify(journalCall.ownerCancellation.itemIds) !==
+                JSON.stringify(assessment.cancellation.itemIds)))
+        )
+          return cancellationNeedsAttention(
+            'a pending action could not be matched safely to the owner cancellation; no action was replayed',
+          );
+        const related = rows.filter(
+          (row) =>
+            row.id === journalCall.dbToolCallId ||
+            evidenceModelToolCallId(row) === journalCall.toolCallId,
+        ) as Array<(typeof rows)[number] & { effectOutcome?: string }>;
+        if (related.length > 0)
+          return cancellationNeedsAttention(
+            'a cancelled action may already have started; its effect was not replayed',
+          );
+        if (journalCall.status === 'settled' && !journalCall.ownerCancellation)
+          return cancellationNeedsAttention(
+            'a settled action has no verifiable owner-cancellation receipt',
+          );
+        if (journalCall.ownerCancellation) continue;
+        if (!['queued', 'budget'].includes(journalCall.status))
+          return cancellationNeedsAttention(
+            'the cancelled action has no proof that it remained undispatched',
+          );
+        replaceToolResultMessage(rc.window, journalCall.toolCallId, journalCall.toolName, {
+          error: 'This action was cancelled by the owner and was not dispatched.',
+        });
+        journalCall.status = 'settled';
+        journalCall.ownerCancellation = assessment.cancellation;
+        changed = true;
+      }
+      if (changed) {
+        state.contextWindow = compact(rc.window) as unknown as TaskState['contextWindow'];
+        if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
+      }
+      const canDiscardOriginalBatchAfterCorrection =
+        rc.checklistCorrection !== undefined &&
+        state.pendingToolBatch.modelId !== 'runtime/private-read-router' &&
+        state.pendingToolBatch.calls.every((call) => call.status === 'settled');
+      if (rc.checklistCancellation || canDiscardOriginalBatchAfterCorrection) {
+        state.pendingToolBatch = null;
+        state.contextWindow = compact(rc.window) as unknown as TaskState['contextWindow'];
+        if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
+        resumingBatch = false;
+      }
+    }
     // Preserve the ordinary resume path: a batch whose calls have all settled
     // is complete and must be cleared before the next model turn. Correction
     // batches go through the stricter receipt-binding check below instead.
@@ -645,7 +903,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     // lane advances each selected item only after its deterministic read
     // contract has completed, so generic checklist reconciliation must not
     // let a stale receipt or search result satisfy it early.
-    if (!rc.checklistCorrection) await refreshRequestChecklist(evidence, task, state);
+    if (!restrictedChecklistResume) await refreshRequestChecklist(evidence, task, state);
     let correctionExcludedEvidenceIds: string[] = [];
     if (rc.checklistCorrection) {
       const latestOwner = await deps.persistence?.executionContext.getLatestOwnerMessage({
@@ -743,6 +1001,64 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         });
       }
     }
+    if (rc.checklistCancellation) {
+      const latestOwner = await executionContext.getLatestOwnerMessage({
+        agentId: task.agentId,
+        conversationId: task.conversationId ?? '',
+      });
+      if (latestOwner?.id !== rc.checklistCancellation.ownerMessageId)
+        return cancellationNeedsAttention(
+          'a newer owner message changed the cancellation context; no additional action was dispatched',
+        );
+      const active = rc.checklistCancellation.activeOutcomes
+        .map((outcome) => ({
+          outcome,
+          item: state.requestChecklist?.items.find((candidate) => candidate.id === outcome.id),
+        }))
+        .filter(
+          (entry): entry is typeof entry & { item: NonNullable<typeof entry.item> } =>
+            entry.item?.status === 'pending',
+        );
+      const selected = active[0];
+      if (selected) {
+        cancellationOutcomeId = selected.outcome.id;
+        const parsed = taskBoundCorrectionReadRequest(selected.outcome.label, {
+          now: selected.outcome.referenceAt,
+          timeZone: requestTimeZone,
+          authorizedScopes: rc.checklistCancellation.authorizedScopes,
+        });
+        if (!parsed)
+          return cancellationNeedsAttention(
+            'a remaining lookup is outside the original private-read authority',
+          );
+        readRequest = parsed;
+      } else {
+        const checklist = state.requestChecklist;
+        if (!checklist)
+          return cancellationNeedsAttention('the checklist disappeared during cancellation resume');
+        const lines = checklist.items.map((item) => {
+          if (item.status === 'cancelled')
+            return `${item.label}: Cancelled by the owner; not done.`;
+          if (item.status === 'completed') return `${item.label}: ${item.detail || 'completed'}`;
+          if (item.status === 'blocked') return `${item.label}: Needs attention; not completed.`;
+          return `${item.label}: Still pending; not completed.`;
+        });
+        const remaining = checklist.items.some(
+          (item) => item.status === 'pending' || item.status === 'blocked',
+        );
+        const text = lines.join('\n\n');
+        rc.window.push({ role: 'assistant', content: text } as ModelMessage);
+        return stageReadFinal({
+          text,
+          progress: remaining
+            ? 'remaining checklist work needs attention'
+            : 'cancelled request resumed',
+          terminalStatus: remaining ? 'needs_attention' : 'done',
+          outcome: remaining ? 'needs_attention' : 'done',
+          contractNotice: remaining || undefined,
+        });
+      }
+    }
     const goalToolEvidence = isUnattendedGoalSession(task)
       ? await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id })
       : [];
@@ -756,6 +1072,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         ? await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id })
         : [];
     const correctionProjection = rc.checklistCorrection;
+    const cancellationProjection = rc.checklistCancellation;
     const readToolEvidence: ReadToolEvidence[] = correctionProjection
       ? allReadToolEvidence.filter((row) => {
           if (correctionExcludedEvidenceIds.includes(row.id)) return false;
@@ -774,7 +1091,20 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               .checklistCorrection?.ownerMessageId === correctionProjection.ownerMessageId
           );
         })
-      : allReadToolEvidence;
+      : cancellationProjection
+        ? allReadToolEvidence.filter((row) => {
+            const decision =
+              row.decision && typeof row.decision === 'object'
+                ? (row.decision as { checklistCancellation?: Record<string, unknown> })
+                    .checklistCancellation
+                : undefined;
+            return (
+              decision?.revision === cancellationProjection.cancellationRevision &&
+              decision.outcomeId === cancellationOutcomeId &&
+              decision.ownerMessageId === cancellationProjection.ownerMessageId
+            );
+          })
+        : allReadToolEvidence;
     const forcedReadTool =
       !mustRecordGoalProgress && readRequest
         ? nextRequiredReadTool(readRequest, readToolEvidence)
@@ -937,6 +1267,66 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         readRequest,
         readToolEvidence.map((row) => ({ ...row, result: row.result })),
       );
+      if (rc.checklistCancellation) {
+        const checklist = state.requestChecklist;
+        const selectedOutcome = rc.checklistCancellation.activeOutcomes.find(
+          (outcome) => outcome.id === cancellationOutcomeId,
+        );
+        const selectedItem = checklist?.items.find((item) => item.id === selectedOutcome?.id);
+        if (!checklist || !selectedOutcome || !selectedItem) {
+          return cancellationNeedsAttention('the selected retained lookup disappeared');
+        }
+        selectedItem.status = checked.blocked ? 'blocked' : 'completed';
+        const detailSuffix = '… (details omitted)';
+        selectedItem.detail =
+          checked.text.length <= 500
+            ? checked.text
+            : `${checked.text.slice(0, 500 - detailSuffix.length).trimEnd()}${detailSuffix}`;
+        selectedItem.evidence = allReadToolEvidence
+          .filter((row) => {
+            const binding =
+              row.decision && typeof row.decision === 'object'
+                ? (row.decision as { checklistCancellation?: Record<string, unknown> })
+                    .checklistCancellation
+                : undefined;
+            return (
+              binding?.revision === rc.checklistCancellation?.cancellationRevision &&
+              binding?.outcomeId === selectedItem.id &&
+              binding?.ownerMessageId === rc.checklistCancellation?.ownerMessageId &&
+              row.status === 'succeeded'
+            );
+          })
+          .slice(-256)
+          .map((row) => ({ id: row.id, toolName: row.toolName }));
+        if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
+
+        const hasPending = checklist.items.some((item) => item.status === 'pending');
+        if (hasPending) {
+          rc.window.push({ role: 'assistant', content: checked.text } as ModelMessage);
+          state.contextWindow = compact(rc.window) as unknown as TaskState['contextWindow'];
+          if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state)))
+            return LOST_LEASE;
+          continue;
+        }
+        const text = checklist.items
+          .map((item) => {
+            if (item.status === 'cancelled')
+              return `${item.label}: Cancelled by the owner; not done.`;
+            if (item.status === 'completed') return `${item.label}: ${item.detail || 'completed'}`;
+            return `${item.label}: Needs attention; not completed.`;
+          })
+          .join('\n\n');
+        rc.window.push({ role: 'assistant', content: text } as ModelMessage);
+        return stageReadFinal({
+          text,
+          progress: checked.blocked
+            ? 'the retained lookup needs attention; the cancellation was preserved'
+            : 'the retained lookup completed; the cancellation was preserved',
+          terminalStatus: checked.blocked ? 'needs_attention' : 'done',
+          outcome: checked.blocked ? 'needs_attention' : 'done',
+          contractNotice: checked.blocked || undefined,
+        });
+      }
       if (rc.checklistCorrection) {
         const checklist = state.requestChecklist;
         const selectedOutcome = rc.checklistCorrection.activeOutcomes.find(
@@ -1079,7 +1469,9 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       readRequest ? readLookupDirective(readRequest) : '',
       rc.checklistCorrection
         ? `\nThis is a task-bound owner correction. Use only the runtime-selected private read for the currently pending checklist item. Do not use the original stale plan, add targets, or perform writes. Keep unrelated active lookup siblings in the checklist and do not replay completed or cancelled items.`
-        : '',
+        : rc.checklistCancellation
+          ? `\nThis is a task-bound owner cancellation. Use only the runtime-selected private read for a remaining pending checklist lookup. Do not use the original plan, add targets, or perform writes. Preserve completed items and do not repeat any cancelled item.`
+          : '',
       readAnswerTurn && readRequest ? readAnswerDirective(readRequest) : '',
       liveLookupDirective(liveLookups, {
         next: forcedLiveLookup?.lookup,
@@ -1119,7 +1511,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       readToolEvidence.some(
         (row) => row.toolName === 'watch.create' || row.toolName === 'watch.web',
       );
-    const toolDefs = rc.checklistCorrection
+    const toolDefs = restrictedChecklistResume
       ? forcedReadTool
         ? goalFilteredTools.filter((tool) => tool.name === forcedReadTool)
         : []
@@ -1756,6 +2148,64 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         if (state.pendingJob) {
           break;
         }
+        if (hasOwnerCancellations && !rc.checklistCorrection) {
+          if (!(await cancellationHeadIsCurrent()))
+            return cancellationNeedsAttention(
+              'a newer owner message changed the cancellation context; no additional action was dispatched',
+            );
+          const assessment = assessCancelledChecklistToolCall(state.requestChecklist, {
+            taskId: task.id,
+            conversationId: task.conversationId ?? '',
+            toolName: tc.toolName,
+            args: tc.input,
+          });
+          if (assessment.decision === 'invalid' || assessment.decision === 'ambiguous')
+            return cancellationNeedsAttention(
+              'a proposed action could not be matched safely to the owner cancellation; no action was dispatched',
+            );
+          if (assessment.decision === 'cancelled') {
+            if (!assessment.cancellation || !['queued', 'budget'].includes(journalCall.status))
+              return cancellationNeedsAttention(
+                'a cancelled action had no proof that it remained undispatched',
+              );
+            let rows: Awaited<ReturnType<typeof evidence.taskEvidence>>;
+            try {
+              rows = await evidence.taskEvidence({
+                agentId: task.agentId,
+                taskId: task.id,
+                maxRows: 256,
+              });
+            } catch {
+              return cancellationNeedsAttention(
+                'the bounded action ledger could not be verified; no proposed action was dispatched',
+              );
+            }
+            if (!cancellationLedgerIsComplete(rows))
+              return cancellationNeedsAttention(
+                'the action ledger was incomplete or malformed; no proposed action was dispatched',
+              );
+            const related = rows.filter(
+              (row) =>
+                row.id === journalCall.dbToolCallId ||
+                evidenceModelToolCallId(row) === tc.toolCallId,
+            );
+            if (related.length > 0)
+              return cancellationNeedsAttention(
+                'a cancelled action may already have started; its effect was not repeated',
+              );
+            replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, {
+              error: 'This action was cancelled by the owner and was not dispatched.',
+            });
+            if (
+              !(await updateCall({
+                status: 'settled',
+                ownerCancellation: assessment.cancellation,
+              }))
+            )
+              return LOST_LEASE;
+            continue;
+          }
+        }
         if (rc.checklistCorrection) {
           const latestOwner = await deps.persistence?.executionContext.getLatestOwnerMessage({
             agentId: task.agentId,
@@ -1850,6 +2300,15 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
                     revision: rc.checklistCorrection.revision,
                     outcomeId: correctionOutcomeId,
                     ownerMessageId: rc.checklistCorrection.ownerMessageId,
+                  },
+                }
+              : {}),
+            ...(rc.checklistCancellation && cancellationOutcomeId
+              ? {
+                  checklistCancellation: {
+                    revision: rc.checklistCancellation.cancellationRevision,
+                    outcomeId: cancellationOutcomeId,
+                    ownerMessageId: rc.checklistCancellation.ownerMessageId,
                   },
                 }
               : {}),
@@ -2070,7 +2529,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
 
       rc.window = compact(rc.window);
       state.contextWindow = rc.window as unknown as TaskState['contextWindow'];
-      if (!rc.checklistCorrection) await refreshRequestChecklist(evidence, task, state);
+      if (!restrictedChecklistResume) await refreshRequestChecklist(evidence, task, state);
 
       if (pendingApprovals.length > 0) {
         const parked = await parkForApproval(

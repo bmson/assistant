@@ -2,13 +2,19 @@ import { describe, expect, it } from 'vitest';
 import { makeCommunicationReceipt } from '../communication-receipt.js';
 import { TaskStateSchema } from '../events.js';
 import {
+  activeChecklistLookupOutcomeForToolCall,
+  assessCancelledChecklistToolCall,
   buildRequestChecklist,
   type ChecklistEvidence,
+  cancelPendingRequestChecklistItem,
+  ownerCancellationAuditIsConsistent,
   reconcileRequestChecklist,
+  recordOwnerChecklistCancellation,
   requestChecklistHasUnfinished,
   requestChecklistSummary,
   revisePendingRequestChecklistItem,
   reviseRequestChecklist,
+  supersededChecklistLookupForToolCall,
 } from './request-checklist.js';
 import { RequestChecklistSchema } from './request-checklist-schema.js';
 
@@ -75,6 +81,541 @@ function correctionInput(
 }
 
 describe('durable request checklist', () => {
+  it('cancels only the selected pending item and retains a completed sibling', () => {
+    const original = checklist('Find my hotel reservation and remind me about check-in');
+    const [lookupItem, reminderItem] = original.items;
+    if (!lookupItem || !reminderItem) throw new Error('missing checklist outcomes');
+    lookupItem.status = 'completed';
+    lookupItem.evidence = [{ id: 'lookup-done', toolName: 'gmail.search' }];
+    const result = cancelPendingRequestChecklistItem(original, {
+      task: { id: 'task-1', agentId: 'agent-1', conversationId: 'conversation-1' },
+      ownerMessage: {
+        id: '11111111-1111-4111-8111-111111111111',
+        taskId: 'task-1',
+        agentId: 'agent-1',
+        conversationId: 'conversation-1',
+        role: 'user',
+        origin: 'owner',
+        text: `Cancel this request: ${reminderItem.label}`,
+      },
+      binding: {
+        taskId: 'task-1',
+        itemId: reminderItem.id,
+        expectedRevision: 0,
+        expectedCancellationRevision: 0,
+        ownerMessageId: '11111111-1111-4111-8111-111111111111',
+      },
+      evidence: [
+        {
+          id: 'lookup-done',
+          toolName: 'gmail.search',
+          status: 'succeeded',
+          effectOutcome: 'completed',
+          args: { query: 'hotel' },
+          result: { messages: [{ subject: 'Hotel' }] },
+        },
+      ],
+    });
+    expect(result.decision).toBe('cancelled');
+    if (result.decision !== 'cancelled') return;
+    expect(result.checklist.items.map((item) => item.status)).toEqual(['completed', 'cancelled']);
+    expect(result.checklist.cancellationAudit?.[0]).toMatchObject({
+      revision: 1,
+      checklistRevision: 0,
+      itemIds: [reminderItem.id],
+    });
+    expect(result.ownerMessageText).toBe(`Cancel this request: ${reminderItem.label}`);
+    expect(ownerCancellationAuditIsConsistent(result.checklist)).toBe(true);
+  });
+
+  it('requires both the replacement revision and cancellation revision to match', () => {
+    const original = checklist('Find my hotel reservation and remind me about check-in');
+    const selected = original.items[1];
+    if (!selected) throw new Error('missing reminder item');
+    const input = {
+      task: { id: 'task-1', agentId: 'agent-1', conversationId: 'conversation-1' },
+      ownerMessage: {
+        id: '22222222-2222-4222-8222-222222222222',
+        taskId: 'task-1',
+        agentId: 'agent-1',
+        conversationId: 'conversation-1',
+        role: 'user' as const,
+        origin: 'owner' as const,
+        text: `Cancel this request: ${selected.label}`,
+      },
+      binding: {
+        taskId: 'task-1',
+        itemId: selected.id,
+        expectedRevision: 0,
+        expectedCancellationRevision: 0,
+        ownerMessageId: '22222222-2222-4222-8222-222222222222',
+      },
+      evidence: [],
+    };
+    expect(cancelPendingRequestChecklistItem({ ...original, revision: 1 }, input)).toEqual({
+      decision: 'stale_revision',
+    });
+    const first = cancelPendingRequestChecklistItem(original, input);
+    if (first.decision !== 'cancelled') throw new Error('fixture cancellation was refused');
+    expect(cancelPendingRequestChecklistItem(first.checklist, input)).toEqual({
+      decision: 'stale_revision',
+    });
+  });
+
+  it('refuses unknown or same-kind effect evidence for the selected item', () => {
+    const original = checklist('Find my hotel reservation and remind me about check-in');
+    const selected = original.items[1];
+    if (!selected) throw new Error('missing reminder item');
+    const base = {
+      task: { id: 'task-1', agentId: 'agent-1', conversationId: 'conversation-1' },
+      ownerMessage: {
+        id: '33333333-3333-4333-8333-333333333333',
+        taskId: 'task-1',
+        agentId: 'agent-1',
+        conversationId: 'conversation-1',
+        role: 'user' as const,
+        origin: 'owner' as const,
+        text: `Cancel this request: ${selected.label}`,
+      },
+      binding: {
+        taskId: 'task-1',
+        itemId: selected.id,
+        expectedRevision: 0,
+        expectedCancellationRevision: 0,
+        ownerMessageId: '33333333-3333-4333-8333-333333333333',
+      },
+    };
+    expect(
+      cancelPendingRequestChecklistItem(original, {
+        ...base,
+        evidence: [
+          {
+            id: 'unknown',
+            toolName: 'reminder.create',
+            status: 'succeeded',
+            effectOutcome: 'unknown',
+            args: { text: 'check-in' },
+          },
+        ],
+      }),
+    ).toEqual({ decision: 'unsafe_evidence' });
+    expect(
+      cancelPendingRequestChecklistItem(original, {
+        ...base,
+        evidence: [
+          {
+            id: 'reminder-effect',
+            toolName: 'reminder.create',
+            status: 'succeeded',
+            effectOutcome: 'completed',
+            args: { text: 'check-in' },
+          },
+        ],
+      }),
+    ).toEqual({ decision: 'unsafe_evidence' });
+  });
+
+  it('requires positive exclusive mapping for same-kind work after an owner cancellation', () => {
+    const original = buildRequestChecklist(
+      'Remind me about the hotel check-in and remind me about the flight check-in',
+    );
+    if (!original) throw new Error('missing checklist');
+    const cancelled = recordOwnerChecklistCancellation(original, {
+      taskId: 'task-1',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      ownerMessageId: 'owner-cancel-1',
+      text: 'Cancel reminding about the hotel',
+    });
+    if (!cancelled) throw new Error('cancellation was not recorded');
+    const call = (text: string) =>
+      assessCancelledChecklistToolCall(cancelled, {
+        taskId: 'task-1',
+        conversationId: 'conversation-1',
+        toolName: 'reminder.create',
+        args: { text },
+      }).decision;
+
+    expect(cancelled.items.map((item) => item.status)).toEqual(['cancelled', 'pending']);
+    expect(call('Hotel check-in')).toBe('cancelled');
+    expect(call('Flight check-in')).toBe('allow');
+    expect(call('A note for the guest')).toBe('ambiguous');
+    expect(call('Hotel and flight check-in')).toBe('ambiguous');
+  });
+
+  it('does not use an empty cancelled target as a wildcard for a same-kind active sibling', () => {
+    const original = buildRequestChecklist(
+      'Find my hotel reservation and find my flight itinerary',
+    );
+    if (!original) throw new Error('missing same-kind lookup checklist');
+    const cancelled = recordOwnerChecklistCancellation(original, {
+      taskId: 'task-1',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      ownerMessageId: 'owner-cancel-hotel',
+      text: "Don't find my hotel reservation",
+    });
+    if (!cancelled) throw new Error('owner cancellation was not recorded');
+    const damaged = {
+      ...cancelled,
+      items: cancelled.items.map((item) =>
+        item.status === 'cancelled' ? { ...item, targetTerms: [] } : item,
+      ),
+    };
+    const active = damaged.items.find((item) => item.status === 'pending');
+    if (!active) throw new Error('missing active same-kind lookup');
+
+    expect(
+      assessCancelledChecklistToolCall(damaged, {
+        taskId: 'task-1',
+        conversationId: 'conversation-1',
+        toolName: 'gmail.search',
+        args: { query: active.targetTerms.join(' ') },
+      }).decision,
+    ).toBe('ambiguous');
+  });
+
+  it('binds a discarded parked lookup to one still-active private lookup only', () => {
+    const value = checklist('Find the hotel reservation and remind me about hotel check-in');
+    expect(
+      activeChecklistLookupOutcomeForToolCall(value, {
+        toolName: 'gmail.search',
+        args: { query: 'hotel reservation' },
+      }),
+    ).toBe(value.items[0]?.id);
+    expect(
+      activeChecklistLookupOutcomeForToolCall(value, {
+        toolName: 'reminder.create',
+        args: { text: 'hotel reservation' },
+      }),
+    ).toBeUndefined();
+    expect(
+      activeChecklistLookupOutcomeForToolCall(value, {
+        toolName: 'gmail.search',
+        args: { query: 'flight reservation' },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('identifies only an undispatched lookup made stale by the latest explicit replacement', () => {
+    const original = checklist('Find the hotel reservation and remind me about hotel check-in');
+    const cancelled = recordOwnerChecklistCancellation(original, {
+      taskId: 'task-1',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      ownerMessageId: 'owner-cancel-reminder',
+      text: 'Cancel the reminder portion',
+    });
+    if (!cancelled) throw new Error('cancellation was not recorded');
+    const replaced = revisePendingRequestChecklistItem(cancelled, {
+      task: { id: 'task-1', agentId: 'agent-1', conversationId: 'conversation-1' },
+      ownerMessage: {
+        id: 'owner-replace-lookup',
+        taskId: 'task-1',
+        agentId: 'agent-1',
+        conversationId: 'conversation-1',
+        role: 'user',
+        origin: 'owner',
+        text: 'Find the flight reservation',
+      },
+      binding: {
+        taskId: 'task-1',
+        itemId: original.items[0]?.id ?? '',
+        expectedRevision: cancelled.revision ?? 0,
+        ownerTaskId: 'task-1',
+        ownerMessageId: 'owner-replace-lookup',
+      },
+      evidence: { complete: true, rows: [] },
+      replacement: { kind: 'lookup', label: 'Find the flight reservation' },
+    });
+    const outcomeId = original.items[0]?.id ?? '';
+    expect(
+      supersededChecklistLookupForToolCall(replaced, {
+        outcomeId,
+        toolName: 'gmail.search',
+        args: { query: 'hotel reservation' },
+      }),
+    ).toBe(true);
+    expect(
+      supersededChecklistLookupForToolCall(replaced, {
+        outcomeId,
+        toolName: 'reminder.create',
+        args: { text: 'hotel reservation' },
+      }),
+    ).toBe(false);
+    expect(
+      supersededChecklistLookupForToolCall(replaced, {
+        outcomeId,
+        toolName: 'gmail.search',
+        args: { query: 'hotel and flight reservation' },
+      }),
+    ).toBe(false);
+    expect(
+      supersededChecklistLookupForToolCall(replaced, {
+        outcomeId: original.items[1]?.id ?? '',
+        toolName: 'gmail.search',
+        args: { query: 'hotel reservation' },
+      }),
+    ).toBe(false);
+  });
+
+  it('parks a call that exactly matches one cancellation but partially overlaps another', () => {
+    const original = checklist('Find my hotel and remind me about hotel check-in');
+    if (!original) throw new Error('missing checklist');
+    const first = original.items[0];
+    const second = original.items[1];
+    if (!first || !second) throw new Error('missing checklist outcomes');
+    const cancelled = {
+      ...original,
+      items: [
+        {
+          ...first,
+          kind: 'reminder' as const,
+          targetTerms: ['hotel', 'checkin'],
+          status: 'cancelled' as const,
+          ownerCancellation: {
+            messageId: 'owner-cancel-hotel-checkin',
+            requestSpan: 'Cancel the hotel check-in reminder',
+          },
+        },
+        {
+          ...second,
+          kind: 'reminder' as const,
+          targetTerms: ['hotel', 'checkout'],
+          status: 'cancelled' as const,
+          ownerCancellation: {
+            messageId: 'owner-cancel-hotel-checkout',
+            requestSpan: 'Cancel the hotel checkout reminder',
+          },
+        },
+      ],
+      cancellationRevision: 2,
+      cancellationAudit: [
+        {
+          revision: 1,
+          taskId: 'task-1',
+          conversationId: 'conversation-1',
+          ownerTaskId: 'task-1',
+          ownerMessageId: 'owner-cancel-hotel-checkin',
+          itemIds: [first.id],
+          requestSpans: ['Cancel the hotel check-in reminder'],
+        },
+        {
+          revision: 2,
+          taskId: 'task-1',
+          conversationId: 'conversation-1',
+          ownerTaskId: 'task-1',
+          ownerMessageId: 'owner-cancel-hotel-checkout',
+          itemIds: [second.id],
+          requestSpans: ['Cancel the hotel checkout reminder'],
+        },
+      ],
+      lastOwnerAction: {
+        kind: 'cancel' as const,
+        revision: 2,
+        ownerMessageId: 'owner-cancel-hotel-checkout',
+        itemIds: [second.id],
+      },
+    };
+
+    expect(cancelled.items.map((item) => item.status)).toEqual(['cancelled', 'cancelled']);
+    expect(
+      assessCancelledChecklistToolCall(cancelled, {
+        taskId: 'task-1',
+        conversationId: 'conversation-1',
+        toolName: 'reminder.create',
+        args: { text: 'Hotel check-in' },
+      }).decision,
+    ).toBe('ambiguous');
+  });
+
+  it('rejects cancellation metadata present without a consistent revision and audit', () => {
+    const original = checklist('Find my hotel reservation and remind me about the hotel');
+    const inputs = [
+      { ...original, cancellationAudit: [] },
+      { ...original, cancellationRevision: 0 },
+      { ...original, cancellationAudit: 'invalid' },
+      { ...original, lastOwnerAction: { kind: 'cancel' } },
+      {
+        ...original,
+        items: original.items.map((item, index) =>
+          index === 1
+            ? {
+                ...item,
+                ownerCancellation: {
+                  messageId: 'owner-cancel',
+                  requestSpan: 'Cancel the reminder',
+                },
+              }
+            : item,
+        ),
+      },
+    ];
+    for (const value of inputs) {
+      expect(
+        assessCancelledChecklistToolCall(value, {
+          taskId: 'task-1',
+          conversationId: 'conversation-1',
+          toolName: 'reminder.create',
+          args: { text: 'Hotel check-in' },
+        }).decision,
+      ).toBe('invalid');
+    }
+  });
+
+  it('keeps a full bounded cancellation history stable for already cancelled outcomes', () => {
+    const original = checklist('Find my hotel and remind me about hotel check-in');
+    const template = original.items[1];
+    if (!template) throw new Error('missing reminder checklist item');
+    const items = Array.from({ length: 12 }, (_, index) => ({
+      ...template,
+      id: `reminder-${index}`,
+      status: 'cancelled' as const,
+      ownerCancellation: {
+        messageId: `owner-cancel-${index}`,
+        requestSpan: 'Cancel the reminder outcome',
+      },
+    }));
+    const cancellationAudit = items.map((item, index) => ({
+      revision: index + 1,
+      taskId: 'task-1',
+      conversationId: 'conversation-1',
+      ownerTaskId: 'task-1',
+      ownerMessageId: `owner-cancel-${index}`,
+      itemIds: [item.id],
+      requestSpans: ['Cancel the reminder outcome'],
+    }));
+    const bounded = {
+      ...original,
+      items,
+      cancellationRevision: 12,
+      cancellationAudit,
+      lastOwnerAction: {
+        kind: 'cancel' as const,
+        revision: 12,
+        ownerMessageId: 'owner-cancel-11',
+        itemIds: ['reminder-11'],
+      },
+    };
+    expect(ownerCancellationAuditIsConsistent(bounded)).toBe(true);
+    expect(
+      recordOwnerChecklistCancellation(bounded, {
+        taskId: 'task-1',
+        agentId: 'agent-1',
+        conversationId: 'conversation-1',
+        ownerMessageId: 'owner-cancel-13',
+        text: "Don't remind me about hotel check-in for all",
+      }),
+    ).toEqual(bounded);
+  });
+
+  it('keeps a completed outcome complete and fences its action from replay', () => {
+    const original = buildRequestChecklist(
+      'Find the hotel reservation and remind me about hotel check-in',
+    );
+    if (!original) throw new Error('missing checklist');
+    const completed = reconcileRequestChecklist(original, [lookup]);
+    const cancelled = recordOwnerChecklistCancellation(completed, {
+      taskId: 'task-1',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      ownerMessageId: 'owner-cancel-completed-lookup',
+      text: "Don't find the hotel reservation",
+    });
+    if (!cancelled) throw new Error('owner cancellation was not recorded');
+
+    expect(cancelled.items[0]?.status).toBe('completed');
+    expect(cancelled.items[0]?.detail).toContain('prior completed action is not undone');
+    expect(ownerCancellationAuditIsConsistent(cancelled)).toBe(true);
+    expect(
+      assessCancelledChecklistToolCall(cancelled, {
+        taskId: 'task-1',
+        conversationId: 'conversation-1',
+        toolName: 'gmail.search',
+        args: { query: 'hotel reservation' },
+      }).decision,
+    ).toBe('ambiguous');
+  });
+
+  it('preserves a cancelled sibling across a later explicit item replacement', () => {
+    const original = checklist('Find my hotel reservation and remind me about hotel check-in');
+    const cancelled = recordOwnerChecklistCancellation(original, {
+      taskId: 'task-1',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      ownerMessageId: 'owner-cancel-reminder',
+      text: 'Cancel the reminder portion',
+    });
+    if (!cancelled) throw new Error('owner cancellation was not recorded');
+    const replaced = revisePendingRequestChecklistItem(
+      cancelled,
+      correctionInput(cancelled, {
+        itemIndex: 0,
+        ownerMessageId: 'owner-replace-lookup',
+        replacement: { kind: 'lookup', label: 'Find the flight reservation' },
+      }),
+    );
+
+    expect(replaced.items[1]).toEqual(cancelled.items[1]);
+    expect(replaced.cancellationAudit).toEqual(cancelled.cancellationAudit);
+    expect(ownerCancellationAuditIsConsistent(replaced)).toBe(true);
+    expect(replaced.lastOwnerAction).toMatchObject({
+      kind: 'replace',
+      ownerMessageId: 'owner-replace-lookup',
+      itemId: cancelled.items[0]?.id,
+    });
+    expect(
+      assessCancelledChecklistToolCall(replaced, {
+        taskId: 'task-1',
+        conversationId: 'conversation-1',
+        toolName: 'reminder.create',
+        args: { text: 'Hotel check-in' },
+      }).decision,
+    ).toBe('cancelled');
+  });
+
+  it('keeps prior cancellation provenance when later cancellation selects another item', () => {
+    const original = checklist(
+      'Find my hotel reservation and remind me about hotel check-in tomorrow',
+    );
+    const firstCancellation = recordOwnerChecklistCancellation(original, {
+      taskId: 'task-1',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      ownerMessageId: 'owner-cancel-reminder',
+      text: 'Cancel the reminder portion',
+    });
+    if (!firstCancellation) throw new Error('first owner cancellation was not recorded');
+    const secondCancellation = recordOwnerChecklistCancellation(firstCancellation, {
+      taskId: 'task-1',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      ownerMessageId: 'owner-cancel-lookup',
+      text: "Don't find the hotel reservation",
+    });
+    if (!secondCancellation) throw new Error('second owner cancellation was not recorded');
+
+    expect(secondCancellation.items[1]).toEqual(firstCancellation.items[1]);
+    expect(secondCancellation.cancellationAudit).toHaveLength(2);
+    expect(ownerCancellationAuditIsConsistent(secondCancellation)).toBe(true);
+    expect(
+      assessCancelledChecklistToolCall(secondCancellation, {
+        taskId: 'task-1',
+        conversationId: 'conversation-1',
+        toolName: 'reminder.create',
+        args: { text: 'Hotel check-in tomorrow' },
+      }).decision,
+    ).toBe('cancelled');
+    const repeated = recordOwnerChecklistCancellation(secondCancellation, {
+      taskId: 'task-1',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      ownerMessageId: 'owner-repeat-cancel-reminder',
+      text: 'Cancel the reminder portion',
+    });
+    expect(repeated).toEqual(secondCancellation);
+  });
+
   it('retains explicit owner cancellation and excludes it from completion requirements', () => {
     const original = checklist('Find my hotel and remind me about the hotel');
     const done = reconcileRequestChecklist(original, [lookup]);

@@ -20,7 +20,11 @@ import { TaskStateSchema } from '../../events.js';
 import * as generatedCardModule from '../../generative-card.js';
 import { GenerativeCardSpecV1Schema } from '../../generative-card.js';
 import { refreshRequestChecklist } from '../executor/checklist.js';
-import { buildRequestChecklist } from '../request-checklist.js';
+import {
+  buildRequestChecklist,
+  recordOwnerChecklistCancellation,
+  revisePendingRequestChecklistItem,
+} from '../request-checklist.js';
 import { type GoldenFixture, runGoldenTask } from './harness.js';
 
 /**
@@ -283,6 +287,594 @@ describe('golden tasks', () => {
       .from(tasks)
       .where(eq(tasks.id, result.taskId));
     expect(TaskStateSchema.parse(row?.state).checklistRecoveryAttempts).toBe(0);
+  });
+
+  it('cancels only the selected parked outcome before resuming the remaining lookup', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const [conversation] = await db
+      .insert(conversations)
+      .values({ agentId, channel: 'chat', trust: 'owner' })
+      .returning();
+    if (!conversation) throw new Error('missing conversation');
+    createdConversationIds.push(conversation.id);
+
+    const request =
+      'Find the museum ticket confirmation email and remind me about check-in tomorrow';
+    let firstLookupParked = false;
+    let lookupExecutions = 0;
+    let reminderExecutions = 0;
+    const result = await runGoldenTask(db, agentId, {
+      name: 'parked-item-cancellation-resumes-supported-email-sibling',
+      event: {
+        source: 'chat',
+        trust: 'owner',
+        conversationId: conversation.id,
+        payload: { text: request },
+      },
+      taskType: 'chat_turn',
+      plan: workflowPlan,
+      pinOwnerRequest: true,
+      resumeAfterBudget: true,
+      script: [
+        {
+          toolCalls: [
+            { toolName: 'gmail.search', input: { query: 'museum ticket' } },
+            { toolName: 'reminder.create', input: { text: 'Museum ticket check-in tomorrow' } },
+          ],
+        },
+        // The model deliberately tries the cancelled write again after resume.
+        {
+          toolCalls: [
+            { toolName: 'reminder.create', input: { text: 'Museum ticket check-in tomorrow' } },
+          ],
+        },
+        { text: 'I found the museum ticket confirmation. I did not create the reminder.' },
+      ],
+      afterFirstExecution: async ({ taskId }) => {
+        const [parked] = await db
+          .select({ status: tasks.status })
+          .from(tasks)
+          .where(eq(tasks.id, taskId));
+        expect(parked?.status).toBe('waiting_budget');
+        await db.insert(messages).values({
+          conversationId: conversation.id,
+          taskId,
+          role: 'user',
+          text: 'Cancel the reminder portion; keep the email lookup.',
+          origin: 'owner',
+        });
+      },
+      beforeDispatch: (input) => {
+        if (input.toolName === 'gmail.search' && !firstLookupParked) {
+          firstLookupParked = true;
+          return {
+            kind: 'budget_blocked',
+            reason: 'fixture budget reset',
+            resumeAt: new Date(0),
+          };
+        }
+      },
+      tools: {
+        'gmail.search': {
+          schema: z.object({ query: z.string() }),
+          execute: async () => {
+            lookupExecutions += 1;
+            return {
+              complete: true,
+              mailboxSearched: 'all mail',
+              results: [{ subject: 'Museum ticket confirmation' }],
+            };
+          },
+        },
+        'reminder.create': {
+          schema: z.object({ text: z.string() }),
+          execute: async () => {
+            reminderExecutions += 1;
+            return { reminderId: 'must-not-run' };
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+
+    expect(result.status, result.finalText).toBe('done');
+    expect(result.toolNames).toEqual(['gmail.search']);
+    expect(lookupExecutions).toBe(1);
+    expect(reminderExecutions).toBe(0);
+    expect(result.finalText).toContain('Museum ticket confirmation');
+    expect(result.finalText).toContain('Cancelled by the owner; not done.');
+    expect(result.finalText).toContain(
+      'Thread bodies were not opened because the requested sender/subject metadata was sufficient.',
+    );
+    expect(result.finalText).not.toContain('reminder was created');
+
+    const [finished] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
+    const checklist = TaskStateSchema.parse(finished?.state).requestChecklist;
+    expect(checklist?.items.map(({ status }) => status)).toEqual(['completed', 'cancelled']);
+    expect(checklist?.items[1]?.ownerCancellation?.requestSpan).toBe('Cancel the reminder portion');
+    expect(checklist?.cancellationAudit).toHaveLength(1);
+    expect(checklist?.lastOwnerAction).toMatchObject({
+      kind: 'cancel',
+      itemIds: [checklist?.items[1]?.id],
+    });
+  });
+
+  it('parks a combined calendar-and-email resume when its required calendar tool is unavailable', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const [conversation] = await db
+      .insert(conversations)
+      .values({ agentId, channel: 'chat', trust: 'owner' })
+      .returning();
+    if (!conversation) throw new Error('missing conversation');
+    createdConversationIds.push(conversation.id);
+
+    let firstLookupParked = false;
+    let reminderExecutions = 0;
+    const result = await runGoldenTask(db, agentId, {
+      name: 'cancellation-does-not-substitute-email-for-required-calendar-read',
+      event: {
+        source: 'chat',
+        trust: 'owner',
+        conversationId: conversation.id,
+        payload: {
+          text: 'Find my hotel reservation and remind me about hotel check-in tomorrow',
+        },
+      },
+      taskType: 'chat_turn',
+      plan: workflowPlan,
+      pinOwnerRequest: true,
+      resumeAfterBudget: true,
+      script: [
+        {
+          toolCalls: [
+            { toolName: 'gmail.search', input: { query: 'hotel reservation' } },
+            { toolName: 'reminder.create', input: { text: 'Hotel reservation check-in tomorrow' } },
+          ],
+        },
+        { text: 'I found the hotel reservation. I did not create the reminder.' },
+      ],
+      afterFirstExecution: async ({ taskId }) => {
+        const [parked] = await db
+          .select({ status: tasks.status })
+          .from(tasks)
+          .where(eq(tasks.id, taskId));
+        expect(parked?.status).toBe('waiting_budget');
+        await db.insert(messages).values({
+          conversationId: conversation.id,
+          taskId,
+          role: 'user',
+          text: 'Cancel the reminder portion; keep the hotel lookup.',
+          origin: 'owner',
+        });
+      },
+      beforeDispatch: (input) => {
+        if (input.toolName === 'gmail.search' && !firstLookupParked) {
+          firstLookupParked = true;
+          return {
+            kind: 'budget_blocked',
+            reason: 'fixture budget reset',
+            resumeAt: new Date(0),
+          };
+        }
+      },
+      tools: {
+        'gmail.search': {
+          schema: z.object({ query: z.string() }),
+          execute: async () => ({
+            complete: true,
+            mailboxSearched: 'all mail',
+            results: [{ subject: 'Harbor Hotel reservation' }],
+          }),
+        },
+        'reminder.create': {
+          schema: z.object({ text: z.string() }),
+          execute: async () => {
+            reminderExecutions += 1;
+            return { reminderId: 'must-not-run' };
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+
+    expect(result.status, result.finalText).toBe('failed');
+    expect(result.finalText).toContain('Not completed: Find my hotel reservation');
+    expect(result.finalText).not.toContain('found the hotel reservation');
+    expect(result.finalText).not.toContain('reminder was created');
+    expect(reminderExecutions).toBe(0);
+    expect(result.toolNames).not.toContain('calendar.search_events');
+  });
+
+  it('does not act on a cancellation after a newer owner message changes the head', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    let firstLookupParked = false;
+    let lookupExecutions = 0;
+    let reminderExecutions = 0;
+    let checklistBeforeOwnerMessages: unknown;
+    const [conversation] = await db
+      .insert(conversations)
+      .values({ agentId, channel: 'chat', trust: 'owner' })
+      .returning();
+    if (!conversation) throw new Error('missing conversation');
+    createdConversationIds.push(conversation.id);
+    const result = await runGoldenTask(db, agentId, {
+      name: 'cancellation-owner-head-changed-before-resume',
+      event: {
+        source: 'chat',
+        trust: 'owner',
+        conversationId: conversation.id,
+        payload: { text: 'Find the hotel reservation and remind me about hotel check-in.' },
+      },
+      taskType: 'chat_turn',
+      plan: workflowPlan,
+      pinOwnerRequest: true,
+      resumeAfterBudget: true,
+      script: [
+        {
+          toolCalls: [
+            { toolName: 'gmail.search', input: { query: 'hotel reservation' } },
+            { toolName: 'reminder.create', input: { text: 'Hotel check-in tomorrow' } },
+          ],
+        },
+      ],
+      afterFirstExecution: async ({ taskId }) => {
+        const [beforeMessages] = await db
+          .select({ state: tasks.state })
+          .from(tasks)
+          .where(eq(tasks.id, taskId));
+        checklistBeforeOwnerMessages = TaskStateSchema.parse(
+          beforeMessages?.state,
+        ).requestChecklist;
+        const firstCreatedAt = new Date();
+        await db.insert(messages).values({
+          conversationId: conversation.id,
+          taskId,
+          role: 'user',
+          text: 'Cancel the reminder portion; keep the hotel lookup.',
+          origin: 'owner',
+          createdAt: firstCreatedAt,
+        });
+        await db.insert(messages).values({
+          conversationId: conversation.id,
+          taskId,
+          role: 'user',
+          text: 'Actually, wait until I review this.',
+          origin: 'owner',
+          createdAt: new Date(firstCreatedAt.getTime() + 1),
+        });
+      },
+      beforeDispatch: (input) => {
+        if (input.toolName === 'gmail.search' && !firstLookupParked) {
+          firstLookupParked = true;
+          return {
+            kind: 'budget_blocked',
+            reason: 'fixture budget reset',
+            resumeAt: new Date(0),
+          };
+        }
+      },
+      tools: {
+        'gmail.search': {
+          schema: z.object({ query: z.string() }),
+          execute: async () => {
+            lookupExecutions += 1;
+            return { complete: true, results: [{ subject: 'Harbor Hotel reservation' }] };
+          },
+        },
+        'reminder.create': {
+          schema: z.object({ text: z.string() }),
+          execute: async () => {
+            reminderExecutions += 1;
+            return { reminderId: 'must-not-run' };
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+
+    expect(result.status).toBe('needs_attention');
+    expect(lookupExecutions).toBe(0);
+    expect(reminderExecutions).toBe(0);
+    expect(result.toolNames).toEqual([]);
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
+    expect(task?.status).toBe('needs_attention');
+    const checklist = TaskStateSchema.parse(task?.state).requestChecklist;
+    expect(checklist).toEqual(checklistBeforeOwnerMessages);
+    expect(checklist?.cancellationAudit).toBeUndefined();
+  });
+
+  it('preserves a prior cancellation when the owner later replaces a different pending item', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    let lookupExecutions = 0;
+    let reminderExecutions = 0;
+    let firstLookupBlocked = false;
+    const [conversation] = await db
+      .insert(conversations)
+      .values({ agentId, channel: 'chat', trust: 'owner' })
+      .returning();
+    if (!conversation) throw new Error('missing conversation');
+    createdConversationIds.push(conversation.id);
+
+    const result = await runGoldenTask(db, agentId, {
+      name: 'replacement-after-cancellation-preserves-cancelled-sibling',
+      event: {
+        source: 'chat',
+        trust: 'owner',
+        conversationId: conversation.id,
+        payload: { text: 'Find my hotel reservation and remind me about hotel check-in tomorrow' },
+      },
+      taskType: 'chat_turn',
+      plan: workflowPlan,
+      pinOwnerRequest: true,
+      resumeAfterBudget: true,
+      script: [
+        {
+          toolCalls: [
+            { toolName: 'gmail.search', input: { query: 'hotel reservation' } },
+            { toolName: 'reminder.create', input: { text: 'Hotel check-in tomorrow' } },
+          ],
+        },
+        {
+          toolCalls: [{ toolName: 'reminder.create', input: { text: 'Hotel check-in tomorrow' } }],
+        },
+        { text: 'I found the train ticket email. I did not create the reminder.' },
+      ],
+      afterFirstExecution: async ({ taskId }) => {
+        const [parked] = await db.select().from(tasks).where(eq(tasks.id, taskId));
+        if (!parked) throw new Error('missing parked task');
+        const state = TaskStateSchema.parse(parked.state);
+        const checklist = state.requestChecklist;
+        if (!checklist || checklist.items.length < 2) throw new Error('missing request checklist');
+
+        const cancelledOwnerMessageId = randomUUID();
+        const cancelledAt = new Date(Date.now() + 10);
+        const [cancelledOwnerMessage] = await db
+          .insert(messages)
+          .values({
+            id: cancelledOwnerMessageId,
+            conversationId: conversation.id,
+            taskId,
+            role: 'user',
+            origin: 'owner',
+            text: 'Cancel the reminder portion.',
+            parts: [{ type: 'text', text: 'Cancel the reminder portion.' }],
+            createdAt: cancelledAt,
+          })
+          .returning({ id: messages.id });
+        if (!cancelledOwnerMessage) throw new Error('missing cancellation owner message');
+        const cancelled = recordOwnerChecklistCancellation(checklist, {
+          taskId,
+          agentId,
+          conversationId: conversation.id,
+          ownerMessageId: cancelledOwnerMessage.id,
+          text: 'Cancel the reminder portion.',
+        });
+        if (cancelled?.lastOwnerAction?.kind !== 'cancel')
+          throw new Error('fixture cancellation was not recorded');
+
+        const replacementOwnerMessageId = randomUUID();
+        const replacementAt = new Date(cancelledAt.getTime() + 10);
+        const [replacementOwnerMessage] = await db
+          .insert(messages)
+          .values({
+            id: replacementOwnerMessageId,
+            conversationId: conversation.id,
+            taskId,
+            role: 'user',
+            origin: 'owner',
+            text: 'Find the train ticket email instead.',
+            parts: [{ type: 'text', text: 'Find the train ticket email instead.' }],
+            createdAt: replacementAt,
+          })
+          .returning({ id: messages.id });
+        if (!replacementOwnerMessage) throw new Error('missing replacement owner message');
+        const replaced = revisePendingRequestChecklistItem(cancelled, {
+          task: { id: taskId, agentId, conversationId: conversation.id },
+          ownerMessage: {
+            id: replacementOwnerMessage.id,
+            taskId,
+            agentId,
+            conversationId: conversation.id,
+            role: 'user',
+            origin: 'owner',
+            text: 'Find the train ticket email instead.',
+          },
+          binding: {
+            taskId,
+            itemId: checklist.items[0]?.id ?? '',
+            expectedRevision: cancelled.revision ?? 0,
+            ownerTaskId: taskId,
+            ownerMessageId: replacementOwnerMessage.id,
+          },
+          evidence: { complete: true, rows: [] },
+          replacement: { kind: 'lookup', label: 'Find the train ticket email instead.' },
+        });
+        if (replaced.lastOwnerAction?.kind !== 'replace')
+          throw new Error('fixture replacement was not recorded');
+        await db
+          .update(tasks)
+          .set({
+            state: {
+              ...state,
+              requestChecklist: replaced,
+              seenConversationAt: replacementAt.toISOString(),
+              seenConversationId: replacementOwnerMessage.id,
+            },
+          })
+          .where(eq(tasks.id, taskId));
+      },
+      beforeDispatch: (input) => {
+        if (input.toolName === 'gmail.search' && !firstLookupBlocked) {
+          firstLookupBlocked = true;
+          return {
+            kind: 'budget_blocked',
+            reason: 'fixture budget reset',
+            resumeAt: new Date(0),
+          };
+        }
+      },
+      tools: {
+        'gmail.search': {
+          schema: z.object({ query: z.string() }),
+          execute: async () => {
+            lookupExecutions += 1;
+            return {
+              complete: true,
+              mailboxSearched: 'owner@example.com',
+              results: [
+                {
+                  threadId: 'train-ticket-1',
+                  subject: 'Train ticket receipt',
+                  from: 'rail@example.com',
+                },
+              ],
+            };
+          },
+        },
+        'gmail.read_thread': {
+          schema: z.object({ threadId: z.literal('train-ticket-1') }),
+          execute: async () => ({
+            complete: true,
+            messages: [
+              {
+                subject: 'Train ticket receipt',
+                from: 'rail@example.com',
+                text: 'Your train ticket is confirmed for October 20.',
+              },
+            ],
+          }),
+        },
+        'reminder.create': {
+          schema: z.object({ text: z.string() }),
+          execute: async () => {
+            reminderExecutions += 1;
+            return { reminderId: 'must-not-run' };
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+
+    expect(result.status, result.finalText).toBe('done');
+    expect(lookupExecutions).toBe(1);
+    expect(reminderExecutions).toBe(0);
+    const [finished] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
+    const checklist = TaskStateSchema.parse(finished?.state).requestChecklist;
+    expect(checklist?.items.map((item) => item.status)).toEqual(['completed', 'cancelled']);
+    expect(checklist?.lastOwnerAction).toMatchObject({ kind: 'replace' });
+    expect(checklist?.cancellationAudit).toHaveLength(1);
+  });
+
+  it('parks when the cancelled sibling already has an executing ledger row', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const [conversation] = await db
+      .insert(conversations)
+      .values({ agentId, channel: 'chat', trust: 'owner' })
+      .returning();
+    if (!conversation) throw new Error('missing conversation');
+    createdConversationIds.push(conversation.id);
+    let blockedFirstLookup = false;
+    let lookupExecutions = 0;
+    let reminderExecutions = 0;
+    const result = await runGoldenTask(db, agentId, {
+      name: 'cancelled-running-sibling-parks-before-replay',
+      event: {
+        source: 'chat',
+        trust: 'owner',
+        conversationId: conversation.id,
+        payload: { text: 'Find my hotel reservation and remind me about hotel check-in' },
+      },
+      taskType: 'chat_turn',
+      plan: workflowPlan,
+      pinOwnerRequest: true,
+      resumeAfterBudget: true,
+      script: [
+        {
+          toolCalls: [
+            { toolName: 'gmail.search', input: { query: 'hotel reservation' } },
+            { toolName: 'reminder.create', input: { text: 'Hotel check-in' } },
+          ],
+        },
+      ],
+      afterFirstExecution: async ({ taskId }) => {
+        const [current] = await db
+          .select({ state: tasks.state })
+          .from(tasks)
+          .where(eq(tasks.id, taskId));
+        const pending = TaskStateSchema.parse(current?.state).pendingToolBatch;
+        const reminder = pending?.calls.find((call) => call.toolName === 'reminder.create');
+        if (!pending || !reminder) throw new Error('missing parked reminder call');
+        await db.insert(messages).values({
+          conversationId: conversation.id,
+          taskId,
+          role: 'user',
+          text: 'Cancel the reminder portion; keep the hotel lookup.',
+          origin: 'owner',
+        });
+        await db.insert(toolCalls).values({
+          taskId,
+          step: pending.step,
+          toolName: reminder.toolName,
+          args: reminder.input,
+          risk: 'autonomous',
+          status: 'executing',
+          decision: { modelToolCallId: reminder.toolCallId },
+          startedAt: new Date(),
+        });
+      },
+      beforeDispatch: (input) => {
+        if (input.toolName === 'gmail.search' && !blockedFirstLookup) {
+          blockedFirstLookup = true;
+          return {
+            kind: 'budget_blocked',
+            reason: 'fixture budget reset',
+            resumeAt: new Date(0),
+          };
+        }
+      },
+      tools: {
+        'gmail.search': {
+          schema: z.object({ query: z.string() }),
+          execute: async () => {
+            lookupExecutions += 1;
+            return { complete: true, results: [{ subject: 'Harbor Hotel reservation' }] };
+          },
+        },
+        'reminder.create': {
+          schema: z.object({ text: z.string() }),
+          execute: async () => {
+            reminderExecutions += 1;
+            return { reminderId: 'must-not-run' };
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+
+    expect(result.status).toBe('needs_attention');
+    expect(lookupExecutions).toBe(0);
+    expect(reminderExecutions).toBe(0);
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
+    const pending = TaskStateSchema.parse(task?.state).pendingToolBatch;
+    expect(
+      pending?.calls.map(({ toolName, status, ownerCancellation }) => ({
+        toolName,
+        status,
+        ownerCancellation,
+      })),
+    ).toEqual([
+      { toolName: 'gmail.search', status: 'budget', ownerCancellation: undefined },
+      { toolName: 'reminder.create', status: 'queued', ownerCancellation: undefined },
+    ]);
+    const [startedCall] = await db
+      .select({ status: toolCalls.status, decision: toolCalls.decision })
+      .from(toolCalls)
+      .where(eq(toolCalls.taskId, result.taskId));
+    expect(startedCall?.status).toBe('executing');
+    expect(startedCall?.decision).toMatchObject({
+      modelToolCallId: pending?.calls.find((call) => call.toolName === 'reminder.create')
+        ?.toolCallId,
+    });
   });
 
   it('resumes a three-call batch after a budget park without asking the model for new calls', async (ctx) => {

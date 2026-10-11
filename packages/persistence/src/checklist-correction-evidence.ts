@@ -6,7 +6,7 @@ export const MAX_CHECKLIST_CORRECTION_LEDGER_ROWS = 128;
 
 export type ChecklistCorrectionLedgerCall = Pick<
   Records['toolCalls'],
-  'id' | 'taskId' | 'toolName' | 'status' | 'result' | 'error'
+  'id' | 'taskId' | 'toolName' | 'status' | 'args' | 'result' | 'error'
 >;
 
 export type ChecklistCorrectionLedgerReceipt = Pick<
@@ -98,6 +98,7 @@ export function completeChecklistCorrectionEvidence(input: {
       toolName: call.toolName,
       status: call.status,
       effectOutcome,
+      args: call.args,
       result: call.result,
     });
   }

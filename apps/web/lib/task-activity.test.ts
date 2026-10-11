@@ -20,6 +20,9 @@ const mocked = vi.hoisted(() => ({
     restoreActivity: vi.fn(),
     restoreActivityWithRepository: vi.fn(),
     taskActivityChecklistCorrectionPolicy: { id: 'checklist-correction-policy' },
+    taskActivityChecklistCancellationPolicy: { id: 'checklist-cancellation-policy' },
+    cancelPendingChecklistActivity: vi.fn(),
+    cancelPendingChecklistWithRepository: vi.fn(),
   },
 }));
 
@@ -41,9 +44,10 @@ vi.mock('@assistant/firestore', () => ({
   FirestoreTaskActivityCommandRepository: class {
     constructor(
       readonly store: unknown,
-      readonly policy: unknown,
+      readonly correctionPolicy: unknown,
+      readonly cancellationPolicy: unknown,
     ) {
-      mocked.commandRepositoryPolicies.push(policy);
+      mocked.commandRepositoryPolicies.push([correctionPolicy, cancellationPolicy]);
     }
   },
 }));
@@ -51,6 +55,7 @@ vi.mock('@assistant/firestore', () => ({
 import {
   archiveOldTaskActivity,
   archiveTaskActivity,
+  cancelTaskChecklistItemActivity,
   getTaskActivityDetail,
   getTaskActivityStatus,
   listTaskActivity,
@@ -81,6 +86,18 @@ describe('web Activity persistence dispatch', () => {
     expect(mocked.application.archiveActivity).toHaveBeenCalledWith(mocked.db, 'task-id');
     expect(mocked.application.restoreActivity).toHaveBeenCalledWith(mocked.db, 'task-id');
     expect(mocked.application.archiveOldActivity).toHaveBeenCalledWith(mocked.db);
+    const cancellation = {
+      taskId: 'task-id',
+      itemId: 'outcome-1',
+      expectedRevision: 2,
+      expectedCancellationRevision: 1,
+      ownerMessageId: '11111111-1111-4111-8111-111111111111',
+    };
+    await cancelTaskChecklistItemActivity(cancellation);
+    expect(mocked.application.cancelPendingChecklistActivity).toHaveBeenCalledWith(
+      mocked.db,
+      cancellation,
+    );
   });
 
   it('uses Firestore repositories and the configured owner ID for every Activity operation', async () => {
@@ -91,6 +108,14 @@ describe('web Activity persistence dispatch', () => {
     await archiveTaskActivity('task-id');
     await restoreTaskActivity('task-id');
     await archiveOldTaskActivity();
+    const cancellation = {
+      taskId: 'task-id',
+      itemId: 'outcome-1',
+      expectedRevision: 2,
+      expectedCancellationRevision: 1,
+      ownerMessageId: '11111111-1111-4111-8111-111111111111',
+    };
+    await cancelTaskChecklistItemActivity(cancellation);
 
     const listRepository = mocked.application.listActivityWithRepository.mock.calls[0]?.[0] as {
       store: unknown;
@@ -125,10 +150,28 @@ describe('web Activity persistence dispatch', () => {
       expect.objectContaining({ store: mocked.store }),
       mocked.agentId,
     );
+    expect(mocked.application.cancelPendingChecklistWithRepository).toHaveBeenCalledWith(
+      expect.objectContaining({ store: mocked.store }),
+      mocked.agentId,
+      cancellation,
+    );
     expect(mocked.commandRepositoryPolicies).toEqual([
-      mocked.application.taskActivityChecklistCorrectionPolicy,
-      mocked.application.taskActivityChecklistCorrectionPolicy,
-      mocked.application.taskActivityChecklistCorrectionPolicy,
+      [
+        mocked.application.taskActivityChecklistCorrectionPolicy,
+        mocked.application.taskActivityChecklistCancellationPolicy,
+      ],
+      [
+        mocked.application.taskActivityChecklistCorrectionPolicy,
+        mocked.application.taskActivityChecklistCancellationPolicy,
+      ],
+      [
+        mocked.application.taskActivityChecklistCorrectionPolicy,
+        mocked.application.taskActivityChecklistCancellationPolicy,
+      ],
+      [
+        mocked.application.taskActivityChecklistCorrectionPolicy,
+        mocked.application.taskActivityChecklistCancellationPolicy,
+      ],
     ]);
     expect(mocked.application.listActivity).not.toHaveBeenCalled();
     expect(mocked.application.getTaskDetail).not.toHaveBeenCalled();

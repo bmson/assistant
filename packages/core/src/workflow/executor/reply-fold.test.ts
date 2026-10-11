@@ -66,7 +66,7 @@ describe('foldOwnerRepliesSincePark', () => {
   it('persists precise microsecond watermarks across repeated resumes', async () => {
     if (!dbUp) throw new Error('Database unavailable');
     const conversationId = await makeConversation('chat');
-    const task = { conversationId, agentId };
+    const task = { id: 'task-fold-replies', conversationId, agentId };
     const state = stateWith('2026-07-22T09:00:00.000Z');
     const window: ModelMessage[] = [];
     for (const [index, fraction] of ['123456', '123789'].entries()) {
@@ -107,7 +107,12 @@ describe('foldOwnerRepliesSincePark', () => {
     await addOwnerMessage(conversationId, 'seed message', new Date('2026-07-22T10:00:00Z'));
     const state = stateWith(undefined);
     const window: ModelMessage[] = [];
-    await foldOwnerRepliesSincePark(db, { agentId, conversationId } as TaskRow, state, window);
+    await foldOwnerRepliesSincePark(
+      db,
+      { id: 'task-fold-baseline', agentId, conversationId } as TaskRow,
+      state,
+      window,
+    );
     expect(window).toHaveLength(0); // nothing folded — seed already holds it
     expect(state.seenConversationAt).toBe('2026-07-22T10:00:00.000000000Z');
     expect(state.seenConversationId).toBeTruthy();
@@ -119,7 +124,12 @@ describe('foldOwnerRepliesSincePark', () => {
     await addOwnerMessage(conversationId, 'actually make it Bob', new Date('2026-07-22T11:00:00Z'));
     const state = stateWith('2026-07-22T10:00:00.000000000Z');
     const window: ModelMessage[] = [];
-    await foldOwnerRepliesSincePark(db, { agentId, conversationId } as TaskRow, state, window);
+    await foldOwnerRepliesSincePark(
+      db,
+      { id: 'task-fold-reply', agentId, conversationId } as TaskRow,
+      state,
+      window,
+    );
     expect(window).toHaveLength(1);
     expect(String(window[0]?.content)).toContain('actually make it Bob');
     expect(String(window[0]?.content)).toContain('while the task was paused');
@@ -128,7 +138,12 @@ describe('foldOwnerRepliesSincePark', () => {
 
     // Idempotent: a second fold with the advanced watermark appends nothing.
     const window2: ModelMessage[] = [];
-    await foldOwnerRepliesSincePark(db, { agentId, conversationId } as TaskRow, state, window2);
+    await foldOwnerRepliesSincePark(
+      db,
+      { id: 'task-fold-idempotent', agentId, conversationId } as TaskRow,
+      state,
+      window2,
+    );
     expect(window2).toHaveLength(0);
   });
 
@@ -143,7 +158,12 @@ describe('foldOwnerRepliesSincePark', () => {
     const state = stateWith(at.toISOString(), firstId);
     const window: ModelMessage[] = [];
 
-    await foldOwnerRepliesSincePark(db, { agentId, conversationId } as TaskRow, state, window);
+    await foldOwnerRepliesSincePark(
+      db,
+      { id: 'task-fold-same-time', agentId, conversationId } as TaskRow,
+      state,
+      window,
+    );
 
     expect(window.map((message) => String(message.content))).toEqual([
       expect.stringContaining('same-time correction'),
@@ -151,7 +171,12 @@ describe('foldOwnerRepliesSincePark', () => {
     expect(state.seenConversationAt).toBe(at.toISOString().replace(/(\.\d{3})Z$/, '$1000000Z'));
     expect(state.seenConversationId).toBe(secondId);
     const repeated: ModelMessage[] = [];
-    await foldOwnerRepliesSincePark(db, { agentId, conversationId } as TaskRow, state, repeated);
+    await foldOwnerRepliesSincePark(
+      db,
+      { id: 'task-fold-same-time-repeat', agentId, conversationId } as TaskRow,
+      state,
+      repeated,
+    );
     expect(repeated).toEqual([]);
   });
 
@@ -161,7 +186,12 @@ describe('foldOwnerRepliesSincePark', () => {
     await addOwnerMessage(conversationId, 'a quoted forward', new Date('2026-07-22T11:00:00Z'));
     const state = stateWith('2026-07-22T10:00:00.000000000Z');
     const window: ModelMessage[] = [];
-    await foldOwnerRepliesSincePark(db, { agentId, conversationId } as TaskRow, state, window);
+    await foldOwnerRepliesSincePark(
+      db,
+      { id: 'task-fold-email', agentId, conversationId } as TaskRow,
+      state,
+      window,
+    );
     expect(window).toHaveLength(0);
     // The watermark is left untouched for a non-chat channel.
     expect(state.seenConversationAt).toBe('2026-07-22T10:00:00.000000000Z');

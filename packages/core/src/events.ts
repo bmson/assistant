@@ -190,6 +190,14 @@ export const PendingToolBatchCallSchema = z.object({
   status: z.enum(['queued', 'awaiting_approval', 'budget', 'job', 'settled']).default('queued'),
   dbToolCallId: z.string().optional(),
   approvalId: z.string().optional(),
+  /** Runtime-authored proof that this queued call was skipped after an exact owner cancellation. */
+  ownerCancellation: z
+    .object({
+      revision: z.number().int().positive(),
+      ownerMessageId: z.string().min(1).max(128),
+      itemIds: z.array(z.string().min(1).max(128)).min(1).max(12),
+    })
+    .optional(),
 });
 export const PendingToolBatchSchema = z.object({
   step: z.number().int().nonnegative(),

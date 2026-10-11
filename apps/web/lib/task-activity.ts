@@ -7,6 +7,8 @@ import {
   archiveOldActivityWithRepository,
   cancelActivity,
   cancelActivityWithRepository,
+  cancelPendingChecklistActivity,
+  cancelPendingChecklistWithRepository,
   discoverActivityWithRepository,
   getActivityStatusWithRepository,
   getActivityStatus as getPostgresActivityStatus,
@@ -23,6 +25,7 @@ import {
   revokeTaskAutonomy,
   revokeTaskAutonomyWithRepository,
   type TaskDetail,
+  taskActivityChecklistCancellationPolicy,
   taskActivityChecklistCorrectionPolicy,
 } from '@assistant/application/tasks';
 import { loadConfig } from '@assistant/config';
@@ -30,7 +33,12 @@ import {
   FirestoreTaskActivityCommandRepository,
   FirestoreTaskActivityRepository,
 } from '@assistant/firestore';
-import type { TaskActivityCommandOutcome, TaskDiscoveryInput } from '@assistant/persistence';
+import type {
+  PendingChecklistCancellationInput,
+  PendingChecklistCancellationOutcome,
+  TaskActivityCommandOutcome,
+  TaskDiscoveryInput,
+} from '@assistant/persistence';
 import { getDb, getFirestoreInstallationStore, getTaskDiscoveryPorts } from '@/lib/server';
 
 function firestoreActivity() {
@@ -80,9 +88,20 @@ function firestoreActivityCommands() {
     repository: new FirestoreTaskActivityCommandRepository(
       getFirestoreInstallationStore(),
       taskActivityChecklistCorrectionPolicy,
+      taskActivityChecklistCancellationPolicy,
     ),
     agentId,
   };
+}
+
+/** Cancel one currently pending checklist item selected directly in Activity. */
+export async function cancelTaskChecklistItemActivity(
+  input: Omit<PendingChecklistCancellationInput, 'taskId'> & { taskId: string },
+): Promise<PendingChecklistCancellationOutcome> {
+  const firestore = firestoreActivityCommands();
+  if (firestore)
+    return cancelPendingChecklistWithRepository(firestore.repository, firestore.agentId, input);
+  return cancelPendingChecklistActivity(getDb(), input);
 }
 
 export function archiveTaskActivity(taskId: string): Promise<TaskActivityCommandOutcome> {

@@ -39,6 +39,11 @@ export interface DispatcherPort {
       promptVersion: number;
       model: string;
       checklistCorrection?: { revision: number; outcomeId: string; ownerMessageId: string };
+      checklistCancellation?: {
+        revision: number;
+        outcomeId: string;
+        ownerMessageId: string;
+      };
     };
   }): Promise<
     | { kind: 'executed'; toolCallId: string; result: unknown; cached: boolean }

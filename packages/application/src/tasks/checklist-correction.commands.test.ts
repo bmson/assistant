@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { buildRequestChecklist, executeTask, type ModelRouter } from '@assistant/core';
+import {
+  buildRequestChecklist,
+  type ExecutorDeps,
+  executeTask,
+  type ModelRouter,
+} from '@assistant/core';
 import { getAgent } from '@assistant/core/chat';
 import {
   agents,
@@ -17,12 +22,17 @@ import {
 import {
   finalChannelDelivery,
   finalChannelDeliveryReport,
+  MAX_TASK_QUEUE_GENERATION,
   newTaskRecord,
 } from '@assistant/persistence';
 import { and, eq, inArray } from 'drizzle-orm';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { retryActivity, revisePendingChecklistActivity } from './commands.js';
+import {
+  cancelPendingChecklistActivity,
+  retryActivity,
+  revisePendingChecklistActivity,
+} from './commands.js';
 
 describe('atomic Activity checklist correction', () => {
   const db = createDb(
@@ -236,6 +246,577 @@ describe('atomic Activity checklist correction', () => {
     expect(await db.query.messages.findMany({ where: eq(messages.taskId, taskId) })).toHaveLength(
       2,
     );
+  });
+
+  it('atomically records an explicit item cancellation and preserves completed siblings', async () => {
+    const { ownerId, taskId, checklist, conversationId } = await seed({
+      request: 'Find my hotel reservation and remind me about check-in',
+    });
+    const completed = checklist.items[0];
+    const selected = checklist.items[1];
+    if (!completed || !selected) throw new Error('missing compound checklist items');
+    completed.status = 'completed';
+    completed.evidence = [{ id: randomUUID(), toolName: 'gmail.search' }];
+    await db
+      .update(tasks)
+      .set({ state: { requestChecklist: checklist, plannerState: { retained: true } } })
+      .where(eq(tasks.id, taskId));
+    const evidenceId = completed.evidence[0]?.id;
+    if (!evidenceId) throw new Error('missing completed sibling evidence ID');
+    await db.insert(toolCalls).values({
+      id: evidenceId,
+      taskId,
+      toolName: 'gmail.search',
+      args: { query: 'hotel' },
+      risk: 'autonomous',
+      status: 'succeeded',
+      result: { messages: [{ subject: 'Hotel' }] },
+      step: 1,
+    });
+    await db.insert(toolCallReceipts).values({
+      id: evidenceId,
+      agentId: ownerId,
+      taskId,
+      toolCallId: evidenceId,
+      toolName: 'gmail.search',
+      effectOutcome: 'completed',
+      recordedAt: new Date(),
+    });
+
+    const input = {
+      taskId,
+      itemId: selected.id,
+      expectedRevision: 0,
+      expectedCancellationRevision: 0,
+      ownerMessageId: randomUUID(),
+    };
+    const outcomes = await Promise.all([
+      cancelPendingChecklistActivity(db, input),
+      cancelPendingChecklistActivity(db, input),
+    ]);
+    expect(outcomes.map((row) => row.outcome).sort()).toEqual(['already_cancelled', 'cancelled']);
+    expect(outcomes.filter((row) => row.transitioned)).toHaveLength(1);
+    const stored = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+    expect(stored).toMatchObject({ status: 'pending', queueGeneration: 5, plan: null });
+    expect(stored?.state).toMatchObject({ plannerState: { retained: true } });
+    expect(stored?.state).not.toHaveProperty('pendingFinal');
+    expect(stored?.state).toMatchObject({
+      requestChecklist: {
+        cancellationRevision: 1,
+        cancellationAudit: [
+          {
+            checklistRevision: 0,
+            ownerMessageId: input.ownerMessageId,
+            itemIds: [selected.id],
+          },
+        ],
+        items: [
+          { id: completed.id, status: 'completed' },
+          { id: selected.id, status: 'cancelled' },
+        ],
+      },
+    });
+    const message = await db.query.messages.findFirst({
+      where: and(eq(messages.id, input.ownerMessageId), eq(messages.taskId, taskId)),
+    });
+    expect(message).toMatchObject({
+      conversationId,
+      role: 'user',
+      origin: 'owner',
+      text: `Cancel this request: ${selected.label}`,
+    });
+    await expect(
+      revisePendingChecklistActivity(db, ownerId, {
+        taskId,
+        itemId: selected.id,
+        expectedRevision: 0,
+        ownerMessageId: randomUUID(),
+        replacementKind: 'lookup',
+        replacementLabel: 'Find a different hotel reservation',
+      }),
+    ).resolves.toMatchObject({ outcome: 'no_longer_retriable', transitioned: false });
+    expect(await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) })).toMatchObject({
+      status: 'pending',
+      queueGeneration: 5,
+    });
+    expect(await db.query.messages.findMany({ where: eq(messages.taskId, taskId) })).toHaveLength(
+      2,
+    );
+    await expect(cancelPendingChecklistActivity(db, input)).resolves.toMatchObject({
+      outcome: 'already_cancelled',
+      transitioned: false,
+    });
+    const router = {
+      object: vi.fn(),
+      step: vi.fn(),
+      embed: vi.fn(),
+    } as unknown as ModelRouter;
+    const dispatcher: ExecutorDeps['dispatcher'] = {
+      toolDefs: () => [],
+      resultIsUntrusted: () => false,
+      dispatch: vi.fn(async () => {
+        throw new Error('a terminal checklist must not dispatch another action');
+      }),
+      executeApproved: async () => ({ kind: 'failed', error: 'unused' }),
+    };
+    await expect(
+      executeTask(
+        {
+          db,
+          persistence: createPostgresExecutionPersistence(db),
+          router,
+          dispatcher,
+          deliverFinal: async (_task, _text, attemptId) =>
+            finalChannelDelivery('synthetic', 'accepted', attemptId),
+        },
+        taskId,
+        outcomes.find((row) => row.outcome === 'cancelled')?.queueGeneration ?? undefined,
+      ),
+    ).resolves.toMatchObject({ outcome: 'done' });
+    expect(router.object).not.toHaveBeenCalled();
+    expect(router.step).not.toHaveBeenCalled();
+    expect(dispatcher.dispatch).not.toHaveBeenCalled();
+    const terminalMessages = await db.query.messages.findMany({
+      where: and(eq(messages.taskId, taskId), eq(messages.role, 'assistant')),
+    });
+    expect(terminalMessages).toHaveLength(1);
+    expect(terminalMessages[0]?.text).toContain('Cancelled by the owner; not done.');
+    expect(terminalMessages[0]?.text).toContain(`${completed.label}: completed`);
+
+    const storedState = structuredClone(stored?.state) as Record<string, unknown> | undefined;
+    const replayChecklist = structuredClone(storedState?.requestChecklist) as
+      | {
+          items: Array<{ id: string; status: string }>;
+        }
+      | undefined;
+    if (!replayChecklist) throw new Error('cancelled checklist disappeared before replay check');
+    const replaySelected = replayChecklist.items.find((item) => item.id === selected.id);
+    if (!replaySelected) throw new Error('cancelled item disappeared before replay check');
+    replaySelected.status = 'pending';
+    await db
+      .update(tasks)
+      .set({ state: { ...(storedState ?? {}), requestChecklist: replayChecklist } })
+      .where(eq(tasks.id, taskId));
+    await expect(cancelPendingChecklistActivity(db, input)).resolves.toMatchObject({
+      outcome: 'invalid',
+      transitioned: false,
+    });
+  });
+
+  it.each([
+    {
+      label: 'accepts the exact receipt',
+      receiptMismatch: false,
+      newerOwner: false,
+      ownerDuringLookup: false,
+    },
+    {
+      label: 'parks on a mismatched receipt',
+      receiptMismatch: true,
+      newerOwner: false,
+      ownerDuringLookup: false,
+    },
+    {
+      label: 'parks when the owner head changes before execution',
+      receiptMismatch: false,
+      newerOwner: true,
+      ownerDuringLookup: false,
+    },
+    {
+      label: 'parks when the owner head changes while the lookup is held',
+      receiptMismatch: false,
+      newerOwner: false,
+      ownerDuringLookup: true,
+    },
+  ])(
+    'runs the permitted lookup after Activity cancellation and $label',
+    async ({ receiptMismatch, newerOwner, ownerDuringLookup = false }) => {
+      const { taskId, checklist, conversationId, originalMessageId } = await seed({
+        request: 'Find the museum ticket confirmation email and remind me about check-in tomorrow',
+      });
+      const lookup = checklist.items.find((item) => item.kind === 'lookup');
+      const reminder = checklist.items.find((item) => item.kind === 'reminder');
+      if (!lookup || !reminder) throw new Error('missing compound request outcomes');
+
+      const ownerMessageId = randomUUID();
+      const command = await cancelPendingChecklistActivity(db, {
+        taskId,
+        itemId: reminder.id,
+        expectedRevision: checklist.revision ?? 0,
+        expectedCancellationRevision: checklist.cancellationRevision ?? 0,
+        ownerMessageId,
+      });
+      expect(command).toMatchObject({
+        outcome: 'cancelled',
+        transitioned: true,
+        queueGeneration: 5,
+      });
+      if (newerOwner) {
+        await db.insert(messages).values({
+          conversationId,
+          taskId: null,
+          role: 'user',
+          origin: 'owner',
+          text: 'Please pause this request while I check the details.',
+        });
+      }
+
+      const router = {
+        object: vi.fn(async (role: string) => ({
+          ok: true,
+          modelId: 'synthetic/cancellation-resume',
+          degraded: false,
+          object:
+            role === 'plan'
+              ? {
+                  action: 'workflow',
+                  reasoning: 'Use the permitted remaining lookup.',
+                  steps: ['Search for the hotel reservation'],
+                  missingInfo: [],
+                }
+              : role === 'classify'
+                ? { trivial: false }
+                : { decision: 'publish', reasons: [] },
+          finishReason: 'stop',
+        })),
+        step: vi.fn(async () => {
+          throw new Error('Activity cancellation lookups use the deterministic read runtime');
+        }),
+        embed: vi.fn(async (values: string[]) => values.map(() => new Array(1536).fill(0))),
+      } as unknown as ModelRouter;
+      const dispatched: string[] = [];
+      const dispatcher: ExecutorDeps['dispatcher'] = {
+        toolDefs: () => [
+          {
+            name: 'gmail.search',
+            description: 'Search mail',
+            inputSchema: z.object({ query: z.string() }),
+          },
+          {
+            name: 'reminder.create',
+            description: 'Create a reminder',
+            inputSchema: z.object({ text: z.string() }),
+          },
+        ],
+        resultIsUntrusted: () => false,
+        dispatch: async (input) => {
+          dispatched.push(input.toolName);
+          const result =
+            input.toolName === 'gmail.search'
+              ? {
+                  complete: true,
+                  mailboxSearched: 'all mail',
+                  results: [{ subject: 'Museum ticket confirmation' }],
+                }
+              : { reminderId: 'must-not-be-created' };
+          const [stored] = await db
+            .insert(toolCalls)
+            .values({
+              taskId: input.task.id,
+              toolName: input.toolName,
+              args: input.args,
+              risk: 'autonomous',
+              status: 'succeeded',
+              result,
+              step: input.step,
+              decision: {
+                ...input.provenance,
+                ...(receiptMismatch && input.provenance.checklistCancellation
+                  ? {
+                      checklistCancellation: {
+                        ...input.provenance.checklistCancellation,
+                        revision: input.provenance.checklistCancellation.revision + 1,
+                      },
+                    }
+                  : {}),
+                modelToolCallId: input.modelToolCallId,
+              },
+              finishedAt: new Date(),
+            })
+            .returning({ id: toolCalls.id });
+          if (!stored) throw new Error('synthetic dispatch did not persist the tool call');
+          if (ownerDuringLookup && input.toolName === 'gmail.search') {
+            await db.insert(messages).values({
+              conversationId,
+              taskId: null,
+              role: 'user',
+              origin: 'owner',
+              text: 'Please pause this request while I check the details.',
+            });
+          }
+          return { kind: 'executed', toolCallId: stored.id, result, cached: false };
+        },
+        executeApproved: async () => ({ kind: 'failed', error: 'unused' }),
+      };
+      const executed = await executeTask(
+        {
+          db,
+          persistence: createPostgresExecutionPersistence(db),
+          router,
+          dispatcher,
+          deliverFinal: async (_task, _text, attemptId) =>
+            finalChannelDelivery('synthetic', 'accepted', attemptId),
+        },
+        taskId,
+        command.queueGeneration ?? undefined,
+      );
+
+      const taskAfterExecution = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+      const callsAfterExecution = await db.query.toolCalls.findMany({
+        where: eq(toolCalls.taskId, taskId),
+      });
+      expect(
+        executed,
+        JSON.stringify({
+          executed,
+          dispatched,
+          objectRoles: (router as unknown as { object: ReturnType<typeof vi.fn> }).object.mock
+            .calls,
+          task: taskAfterExecution
+            ? {
+                status: taskAfterExecution.status,
+                progress: taskAfterExecution.progress,
+                plan: taskAfterExecution.plan,
+                step: (taskAfterExecution.state as { step?: unknown }).step,
+                pendingFinal: (taskAfterExecution.state as { pendingFinal?: unknown }).pendingFinal,
+                contextWindow: (taskAfterExecution.state as { contextWindow?: unknown })
+                  .contextWindow,
+              }
+            : null,
+          calls: callsAfterExecution.map(({ toolName, status, result }) => ({
+            toolName,
+            status,
+            result,
+          })),
+          checklist: (taskAfterExecution?.state as { requestChecklist?: unknown } | undefined)
+            ?.requestChecklist,
+        }),
+      ).toMatchObject({
+        outcome: receiptMismatch || newerOwner || ownerDuringLookup ? 'needs_attention' : 'done',
+      });
+      expect(dispatched).toEqual(newerOwner ? [] : ['gmail.search']);
+      expect(router.step).not.toHaveBeenCalled();
+      expect(router.object).not.toHaveBeenCalled();
+      const storedTask = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+      const finishedChecklist = (storedTask?.state as { requestChecklist?: typeof checklist })
+        ?.requestChecklist;
+      if (newerOwner || ownerDuringLookup) {
+        expect(storedTask).toMatchObject({ status: 'needs_attention' });
+        expect(finishedChecklist?.items.map(({ id, status }) => ({ id, status }))).toEqual(
+          ownerDuringLookup
+            ? [
+                { id: lookup.id, status: 'pending' },
+                { id: reminder.id, status: 'cancelled' },
+              ]
+            : [
+                { id: lookup.id, status: 'pending' },
+                { id: reminder.id, status: 'cancelled' },
+              ],
+        );
+        expect(
+          await db.query.toolCalls.findMany({ where: eq(toolCalls.taskId, taskId) }),
+        ).toHaveLength(ownerDuringLookup ? 1 : 0);
+        expect(
+          await db.query.messages.findMany({
+            where: and(eq(messages.taskId, taskId), eq(messages.role, 'assistant')),
+          }),
+        ).toEqual([]);
+        expect(
+          (storedTask?.state as { pendingFinal?: unknown } | undefined)?.pendingFinal,
+        ).toBeUndefined();
+        return;
+      }
+      if (receiptMismatch) {
+        expect(storedTask).toMatchObject({ status: 'needs_attention' });
+        expect(finishedChecklist?.items.map(({ id, status }) => ({ id, status }))).toEqual([
+          { id: lookup.id, status: 'pending' },
+          { id: reminder.id, status: 'cancelled' },
+        ]);
+        const calls = await db.query.toolCalls.findMany({ where: eq(toolCalls.taskId, taskId) });
+        expect(calls.map((call) => call.toolName)).toEqual(['gmail.search']);
+        return;
+      }
+      expect(storedTask?.status).toBe('done');
+      expect(finishedChecklist?.items.map(({ id, status }) => ({ id, status }))).toEqual([
+        { id: lookup.id, status: 'completed' },
+        { id: reminder.id, status: 'cancelled' },
+      ]);
+      expect(finishedChecklist?.cancellationAudit).toHaveLength(1);
+      const assistantMessages = await db.query.messages.findMany({
+        where: and(eq(messages.taskId, taskId), eq(messages.role, 'assistant')),
+      });
+      expect(assistantMessages).toHaveLength(1);
+      expect(assistantMessages[0]?.text).toContain('museum ticket confirmation');
+      expect(assistantMessages[0]?.text).toContain('Cancelled by the owner; not done.');
+      expect(assistantMessages[0]?.text).not.toContain('must-not-be-created');
+      expect(
+        await db.query.messages.findFirst({ where: eq(messages.id, originalMessageId) }),
+      ).toBeDefined();
+      expect(
+        await db.query.messages.findFirst({ where: eq(messages.id, ownerMessageId) }),
+      ).toMatchObject({ origin: 'owner', role: 'user' });
+    },
+  );
+
+  it('does not retry a saved cancellation reply after a newer owner message', async () => {
+    const { taskId, checklist, conversationId } = await seed({
+      request: 'Find the museum ticket confirmation email and remind me about check-in tomorrow',
+    });
+    const reminder = checklist.items.find((item) => item.kind === 'reminder');
+    if (!reminder) throw new Error('missing reminder cancellation target');
+    const cancellation = await cancelPendingChecklistActivity(db, {
+      taskId,
+      itemId: reminder.id,
+      expectedRevision: checklist.revision ?? 0,
+      expectedCancellationRevision: checklist.cancellationRevision ?? 0,
+      ownerMessageId: randomUUID(),
+    });
+    if (!cancellation.transitioned || cancellation.outcome !== 'cancelled')
+      throw new Error('synthetic cancellation did not transition');
+
+    const savedFinal = {
+      text: 'The museum ticket was found. The reminder was cancelled.',
+      progress: 'The retained lookup completed; the cancellation was preserved',
+      terminalStatus: 'done' as const,
+      outcome: 'done' as const,
+    };
+    const stored = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+    if (!stored) throw new Error('cancelled task disappeared');
+    await db
+      .update(tasks)
+      .set({
+        status: 'pending',
+        state: { ...(stored.state as Record<string, unknown>), pendingFinal: savedFinal },
+      })
+      .where(eq(tasks.id, taskId));
+    await db.insert(messages).values({
+      conversationId,
+      taskId: null,
+      role: 'user',
+      origin: 'owner',
+      text: 'Please pause this request while I check the details.',
+    });
+
+    const deliverFinal = vi.fn(async (_task, _text, attemptId) =>
+      finalChannelDelivery('synthetic', 'accepted', attemptId),
+    );
+    const result = await executeTask(
+      {
+        db,
+        persistence: createPostgresExecutionPersistence(db),
+        router: {} as ModelRouter,
+        dispatcher: {
+          toolDefs: () => [],
+          resultIsUntrusted: () => false,
+          dispatch: async () => ({
+            kind: 'budget_blocked',
+            reason: 'unused',
+            resumeAt: new Date(),
+          }),
+          executeApproved: async () => ({ kind: 'failed', error: 'unused' }),
+        },
+        deliverFinal,
+      },
+      taskId,
+      cancellation.queueGeneration ?? undefined,
+    );
+
+    expect(result).toMatchObject({ outcome: 'needs_attention' });
+    expect(deliverFinal).not.toHaveBeenCalled();
+    const after = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+    expect(after).toMatchObject({ status: 'needs_attention' });
+    expect((after?.state as { pendingFinal?: unknown } | undefined)?.pendingFinal).toEqual(
+      savedFinal,
+    );
+    expect(
+      await db.query.messages.findMany({
+        where: and(eq(messages.taskId, taskId), eq(messages.role, 'assistant')),
+      }),
+    ).toEqual([]);
+  });
+
+  it('rejects stale checklist versions and unknown or in-flight action evidence without a write', async () => {
+    const stale = await seed({ request: 'Find my hotel and remind me about check-in' });
+    const selected = stale.checklist.items[1];
+    if (!selected) throw new Error('missing reminder item');
+    const base = {
+      taskId: stale.taskId,
+      itemId: selected.id,
+      expectedRevision: 0,
+      expectedCancellationRevision: 0,
+      ownerMessageId: randomUUID(),
+    };
+    await expect(
+      cancelPendingChecklistActivity(db, { ...base, expectedRevision: 1 }),
+    ).resolves.toMatchObject({ outcome: 'stale_revision', transitioned: false });
+    await expect(
+      cancelPendingChecklistActivity(db, {
+        ...base,
+        expectedCancellationRevision: 1,
+      }),
+    ).resolves.toMatchObject({ outcome: 'stale_revision', transitioned: false });
+
+    const unsafe = await seed({ request: 'Find my hotel and remind me about check-in' });
+    const unsafeItem = unsafe.checklist.items[1];
+    if (!unsafeItem) throw new Error('missing reminder item');
+    const inFlightId = randomUUID();
+    await db.insert(toolCalls).values({
+      id: inFlightId,
+      taskId: unsafe.taskId,
+      toolName: 'reminder.create',
+      args: { text: 'check-in' },
+      risk: 'autonomous',
+      status: 'executing',
+      step: 1,
+    });
+    const refused = await cancelPendingChecklistActivity(db, {
+      taskId: unsafe.taskId,
+      itemId: unsafeItem.id,
+      expectedRevision: 0,
+      expectedCancellationRevision: 0,
+      ownerMessageId: randomUUID(),
+    });
+    expect(refused).toMatchObject({ outcome: 'unsafe_evidence', transitioned: false });
+    const unchanged = await db.query.tasks.findFirst({ where: eq(tasks.id, unsafe.taskId) });
+    expect(unchanged).toMatchObject({ status: 'needs_attention', queueGeneration: 4 });
+    expect(
+      await db.query.messages.findMany({ where: eq(messages.taskId, unsafe.taskId) }),
+    ).toHaveLength(1);
+
+    const overflow = await seed({
+      request: 'Find my hotel and remind me about check-in',
+      queueGeneration: MAX_TASK_QUEUE_GENERATION,
+    });
+    const overflowItem = overflow.checklist.items[1];
+    if (!overflowItem) throw new Error('missing overflow cancellation target');
+    const overflowInput = {
+      taskId: overflow.taskId,
+      itemId: overflowItem.id,
+      expectedRevision: 0,
+      expectedCancellationRevision: 0,
+      ownerMessageId: randomUUID(),
+    };
+    await expect(cancelPendingChecklistActivity(db, overflowInput)).resolves.toMatchObject({
+      outcome: 'invalid',
+      transitioned: false,
+    });
+    await expect(
+      revisePendingChecklistActivity(db, overflow.ownerId, {
+        taskId: overflow.taskId,
+        itemId: overflow.checklist.items[0]?.id ?? '',
+        expectedRevision: 0,
+        ownerMessageId: randomUUID(),
+        replacementKind: 'lookup',
+        replacementLabel: 'Find the train ticket email instead',
+      }),
+    ).resolves.toMatchObject({ outcome: 'invalid', transitioned: false });
+    expect(await db.query.tasks.findFirst({ where: eq(tasks.id, overflow.taskId) })).toMatchObject({
+      status: 'needs_attention',
+      queueGeneration: MAX_TASK_QUEUE_GENERATION,
+    });
+    expect(
+      await db.query.messages.findMany({ where: eq(messages.taskId, overflow.taskId) }),
+    ).toHaveLength(1);
   });
 
   it.each([
@@ -643,7 +1224,7 @@ describe('atomic Activity checklist correction', () => {
     );
   });
 
-  it('rolls message insertion back if the durable queue generation cannot advance', async () => {
+  it('refuses replacement before a queue generation can overflow', async () => {
     const { ownerId, taskId, checklist } = await seed({ queueGeneration: 2_147_483_647 });
     const ownerMessageId = randomUUID();
     await expect(
@@ -655,13 +1236,14 @@ describe('atomic Activity checklist correction', () => {
         replacementKind: 'lookup',
         replacementLabel: 'Find my flight to Berlin',
       }),
-    ).rejects.toThrow();
+    ).resolves.toMatchObject({ outcome: 'invalid', transitioned: false });
     expect(
       await db.query.messages.findMany({ where: eq(messages.id, ownerMessageId) }),
     ).toHaveLength(0);
-    expect((await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) }))?.status).toBe(
-      'needs_attention',
-    );
+    expect(await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) })).toMatchObject({
+      status: 'needs_attention',
+      queueGeneration: 2_147_483_647,
+    });
   });
 
   it.each([null, 'malformed', []])(

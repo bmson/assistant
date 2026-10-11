@@ -58,6 +58,7 @@ export interface DispatchInput {
     promptVersion: number;
     model: string;
     checklistCorrection?: { revision: number; outcomeId: string; ownerMessageId: string };
+    checklistCancellation?: { revision: number; outcomeId: string; ownerMessageId: string };
   };
 }
 
@@ -1546,6 +1547,9 @@ export class ToolDispatcher {
       modelToolCallId: input.modelToolCallId,
       ...(input.provenance.checklistCorrection
         ? { checklistCorrection: input.provenance.checklistCorrection }
+        : {}),
+      ...(input.provenance.checklistCancellation
+        ? { checklistCancellation: input.provenance.checklistCancellation }
         : {}),
     };
 

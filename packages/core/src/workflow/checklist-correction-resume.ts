@@ -5,6 +5,7 @@ import {
 } from '../events.js';
 import { extractOwnerIntent, type OwnerIntent, type OwnerIntentScope } from './owner-intent.js';
 import { detectPersonalReadRequest, type PersonalReadRequest } from './read-intent.js';
+import { ownerCancellationAuditIsConsistent } from './request-checklist.js';
 import { type RequestChecklist, RequestChecklistSchema } from './request-checklist-schema.js';
 
 export interface ChecklistCorrectionResumeMessage {
@@ -202,6 +203,133 @@ export interface ChecklistCorrectionResumeProjection {
   completedOutcomes: Array<{ id: string; label: string; detail?: string }>;
   excludedOutcomeIds: string[];
   clarificationContinuation?: ClarificationContinuation;
+}
+
+/**
+ * Bounded projection for an explicit Activity cancellation. It is intentionally
+ * separate from correction: the owner removed selected work, not replaced its
+ * meaning. Callers must validate every audit message and the current task lease
+ * before constructing this projection.
+ */
+export interface ChecklistCancellationResumeProjection {
+  taskId: string;
+  conversationId: string;
+  cancellationRevision: number;
+  ownerMessageId: string;
+  originalRequest: string;
+  authorizedScopes: OwnerIntentScope[];
+  activeOutcomes: Array<{
+    id: string;
+    kind: RequestChecklist['items'][number]['kind'];
+    label: string;
+    targetTerms: string[];
+    status: 'pending' | 'blocked';
+    referenceAt: Date;
+  }>;
+  completedOutcomes: Array<{ id: string; label: string; detail?: string }>;
+  cancelledOutcomeIds: string[];
+}
+
+export interface ChecklistCancellationResumeInput {
+  task: { id: string; agentId: string; conversationId: string; createdAt: Date };
+  checklist: RequestChecklist;
+  ownerMessage: ChecklistCorrectionResumeMessage;
+  latestConversationOwnerMessageId: string;
+  originalIntent: OwnerIntent;
+}
+
+/**
+ * Create a cancellation-only execution view. Remaining work is limited to
+ * direct private lookups; unsupported pending writes park for owner review.
+ */
+export function projectChecklistCancellationResume(
+  input: ChecklistCancellationResumeInput,
+): ChecklistCancellationResumeProjection | undefined {
+  const { task, checklist, ownerMessage, latestConversationOwnerMessageId, originalIntent } = input;
+  if (!RequestChecklistSchema.safeParse(checklist).success) return undefined;
+  if (
+    !ownerCancellationAuditIsConsistent(checklist) ||
+    !task.id ||
+    !task.agentId ||
+    !task.conversationId ||
+    !(task.createdAt instanceof Date) ||
+    !Number.isFinite(task.createdAt.getTime()) ||
+    ownerMessage.taskId !== task.id ||
+    ownerMessage.agentId !== task.agentId ||
+    ownerMessage.conversationId !== task.conversationId ||
+    ownerMessage.role !== 'user' ||
+    ownerMessage.origin !== 'owner' ||
+    !ownerMessage.text ||
+    ownerMessage.text.length > 8_000 ||
+    latestConversationOwnerMessageId !== ownerMessage.id ||
+    originalIntent.sourceActor !== 'owner' ||
+    originalIntent.requestKind !== 'new_request' ||
+    originalIntent.separation !== 'none' ||
+    originalIntent.ownerAuthoredText.trim() !== checklist.request.trim()
+  )
+    return undefined;
+
+  const revision = checklist.cancellationRevision;
+  const audit = checklist.cancellationAudit;
+  const latest = audit?.at(-1);
+  const action = checklist.lastOwnerAction;
+  if (
+    !Number.isSafeInteger(revision) ||
+    revision === undefined ||
+    revision < 1 ||
+    !audit ||
+    audit.length !== revision ||
+    !latest ||
+    latest.revision !== revision ||
+    latest.taskId !== task.id ||
+    latest.conversationId !== task.conversationId ||
+    latest.ownerTaskId !== task.id ||
+    latest.ownerMessageId !== ownerMessage.id ||
+    action?.kind !== 'cancel' ||
+    action.revision !== revision ||
+    action.ownerMessageId !== ownerMessage.id ||
+    JSON.stringify(action.itemIds) !== JSON.stringify(latest.itemIds)
+  )
+    return undefined;
+
+  const cancelledOutcomeIds = [...new Set(audit.flatMap((entry) => entry.itemIds))];
+  const active = checklist.items.filter(
+    (item) => item.status === 'pending' || item.status === 'blocked',
+  );
+  if (active.some((item) => item.kind !== 'lookup')) return undefined;
+  const completed = checklist.items.filter((item) => item.status === 'completed');
+  const excluded = checklist.items.filter((item) => item.status === 'cancelled');
+  if (
+    cancelledOutcomeIds.length === 0 ||
+    excluded.some((item) => !cancelledOutcomeIds.includes(item.id)) ||
+    cancelledOutcomeIds.some(
+      (id) => !checklist.items.some((item) => item.id === id && item.status === 'cancelled'),
+    )
+  )
+    return undefined;
+
+  return {
+    taskId: task.id,
+    conversationId: task.conversationId,
+    cancellationRevision: revision,
+    ownerMessageId: ownerMessage.id,
+    originalRequest: checklist.request,
+    authorizedScopes: [...originalIntent.authorizedScopes],
+    activeOutcomes: active.map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      label: item.label,
+      targetTerms: [...item.targetTerms],
+      status: item.status as 'pending' | 'blocked',
+      referenceAt: task.createdAt,
+    })),
+    completedOutcomes: completed.map((item) => ({
+      id: item.id,
+      label: item.label,
+      ...('detail' in item && item.detail ? { detail: item.detail } : {}),
+    })),
+    cancelledOutcomeIds,
+  };
 }
 
 function directClause(text: string): string {

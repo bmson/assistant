@@ -1,9 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import { taskActivityChecklistCorrectionPolicy } from '@assistant/application/tasks';
+import {
+  taskActivityChecklistCancellationPolicy,
+  taskActivityChecklistCorrectionPolicy,
+} from '@assistant/application/tasks';
 import { buildRequestChecklist } from '@assistant/core/workflow/request-checklist';
 import {
   chatAdmissionCancellationTrigger,
   chatAdmissionExternalEventId,
+  MAX_TASK_QUEUE_GENERATION,
 } from '@assistant/persistence';
 import { taskFixture } from '@assistant/persistence/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -30,6 +34,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       repository = new FirestoreTaskActivityCommandRepository(
         store,
         taskActivityChecklistCorrectionPolicy,
+        taskActivityChecklistCancellationPolicy,
       );
       await store.doc('agents', agentId).set({ id: agentId });
       await store.doc('tasks', retryId).set({
@@ -137,6 +142,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         id: input.conversationId,
         agentId,
         channel: 'chat',
+        archivedAt: null,
       });
       await store.doc('tasks', input.taskId).set({
         ...taskFixture({
@@ -171,6 +177,211 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         });
       return originalMessageId;
     }
+
+    it('atomically cancels the selected item, preserves its sibling, and replays once', async () => {
+      const taskId = randomUUID();
+      const conversationId = randomUUID();
+      const checklist = buildRequestChecklist(
+        'Find my hotel reservation and remind me about check-in',
+      );
+      if (!checklist) throw new Error('test checklist is invalid');
+      const lookup = checklist.items[0];
+      const reminder = checklist.items[1];
+      if (!lookup || !reminder) throw new Error('missing test outcomes');
+      lookup.status = 'completed';
+      lookup.evidence = [{ id: randomUUID(), toolName: 'gmail.search' }];
+      const originalMessageId = await seedCorrectionTask({ taskId, conversationId, checklist });
+      const original = await store.doc('tasks', taskId).get();
+      await store.doc('tasks', taskId).update({ state: { requestChecklist: checklist } });
+      const evidenceId = lookup.evidence[0]?.id;
+      if (!evidenceId) throw new Error('missing completed evidence ID');
+      await store.doc('toolCalls', evidenceId).set({
+        id: evidenceId,
+        taskId,
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        args: { query: 'hotel' },
+        result: { messages: [{ subject: 'Hotel' }] },
+        error: null,
+        step: 1,
+      });
+      await store.doc('toolCallReceipts', evidenceId).set({
+        id: evidenceId,
+        agentId,
+        taskId,
+        toolCallId: evidenceId,
+        toolName: 'gmail.search',
+        effectOutcome: 'completed',
+        recordedAt: store.now(),
+      });
+      const input = {
+        taskId,
+        itemId: reminder.id,
+        expectedRevision: 0,
+        expectedCancellationRevision: 0,
+        ownerMessageId: randomUUID(),
+      };
+      const outcomes = await Promise.all([
+        repository.cancelPendingChecklist(agentId, input),
+        repository.cancelPendingChecklist(agentId, input),
+      ]);
+      expect(outcomes.map((row) => row.outcome).sort()).toEqual(['already_cancelled', 'cancelled']);
+      expect(outcomes.filter((row) => row.transitioned)).toHaveLength(1);
+      const task = await store.doc('tasks', taskId).get();
+      expect(task.data()).toMatchObject({ status: 'pending', queueGeneration: 5, plan: null });
+      expect(task.get('state')).toMatchObject({
+        requestChecklist: {
+          cancellationRevision: 1,
+          cancellationAudit: [
+            {
+              checklistRevision: 0,
+              ownerMessageId: input.ownerMessageId,
+              itemIds: [reminder.id],
+            },
+          ],
+          items: [
+            { id: lookup.id, status: 'completed' },
+            { id: reminder.id, status: 'cancelled' },
+          ],
+        },
+      });
+      const message = await store.doc('messages', input.ownerMessageId).get();
+      expect(message.data()).toMatchObject({
+        taskId,
+        conversationId,
+        role: 'user',
+        origin: 'owner',
+        text: `Cancel this request: ${reminder.label}`,
+      });
+      expect(message.get('appendedAt')).toBeDefined();
+      expect(original.exists).toBe(true);
+      expect((await store.doc('messages', originalMessageId).get()).exists).toBe(true);
+      expect((await store.doc('outbox', wakeIntentId(taskId, 5)).get()).data()).toMatchObject({
+        taskId,
+        generation: 5,
+        status: 'pending',
+      });
+      await expect(
+        repository.revisePendingChecklist(agentId, {
+          taskId,
+          itemId: reminder.id,
+          expectedRevision: 0,
+          ownerMessageId: randomUUID(),
+          replacementKind: 'lookup',
+          replacementLabel: 'Find a different hotel reservation',
+        }),
+      ).resolves.toMatchObject({ outcome: 'no_longer_retriable', transitioned: false });
+      expect((await store.doc('tasks', taskId).get()).data()).toMatchObject({
+        status: 'pending',
+        queueGeneration: 5,
+      });
+      expect((await store.collection('messages').where('taskId', '==', taskId).get()).size).toBe(2);
+      expect((await store.doc('outbox', wakeIntentId(taskId, 6)).get()).exists).toBe(false);
+
+      const corruptedState = structuredClone(task.get('state')) as {
+        requestChecklist: { items: Array<{ id: string; status: string }> };
+      };
+      const corruptedSelected = corruptedState.requestChecklist.items.find(
+        (item) => item.id === reminder.id,
+      );
+      if (!corruptedSelected) throw new Error('cancelled item disappeared before replay check');
+      corruptedSelected.status = 'pending';
+      await store.doc('tasks', taskId).update({ state: corruptedState });
+      await expect(repository.cancelPendingChecklist(agentId, input)).resolves.toMatchObject({
+        outcome: 'invalid',
+        transitioned: false,
+      });
+    });
+
+    it('rejects stale versions, a foreign owner, and in-flight effects without writes', async () => {
+      const taskId = randomUUID();
+      const conversationId = randomUUID();
+      const checklist = buildRequestChecklist('Find my hotel and remind me about check-in');
+      if (!checklist) throw new Error('test checklist is invalid');
+      const selected = checklist.items[1];
+      if (!selected) throw new Error('missing reminder item');
+      await seedCorrectionTask({ taskId, conversationId, checklist });
+      const input = {
+        taskId,
+        itemId: selected.id,
+        expectedRevision: 0,
+        expectedCancellationRevision: 0,
+        ownerMessageId: randomUUID(),
+      };
+      await expect(
+        repository.cancelPendingChecklist(agentId, { ...input, expectedRevision: 1 }),
+      ).resolves.toMatchObject({ outcome: 'stale_revision', transitioned: false });
+      await expect(
+        repository.cancelPendingChecklist(agentId, {
+          ...input,
+          expectedCancellationRevision: 1,
+        }),
+      ).resolves.toMatchObject({ outcome: 'stale_revision', transitioned: false });
+      await expect(repository.cancelPendingChecklist(foreignAgentId, input)).resolves.toMatchObject(
+        { outcome: 'not_found', transitioned: false },
+      );
+      const callId = randomUUID();
+      await store.doc('toolCalls', callId).set({
+        id: callId,
+        taskId,
+        toolName: 'reminder.create',
+        status: 'executing',
+        args: { text: 'check-in' },
+        step: 1,
+      });
+      const refused = await repository.cancelPendingChecklist(agentId, input);
+      expect(refused).toMatchObject({ outcome: 'unsafe_evidence', transitioned: false });
+      expect((await store.doc('tasks', taskId).get()).get('status')).toBe('needs_attention');
+      expect((await store.doc('messages', input.ownerMessageId).get()).exists).toBe(false);
+      expect((await store.doc('outbox', wakeIntentId(taskId, 5)).get()).exists).toBe(false);
+
+      const overflowTaskId = randomUUID();
+      const overflowConversationId = randomUUID();
+      const overflowChecklist = buildRequestChecklist('Find my hotel and remind me about check-in');
+      if (!overflowChecklist) throw new Error('overflow checklist is invalid');
+      const overflowItem = overflowChecklist.items[1];
+      if (!overflowItem) throw new Error('missing overflow cancellation item');
+      await seedCorrectionTask({
+        taskId: overflowTaskId,
+        conversationId: overflowConversationId,
+        checklist: overflowChecklist,
+        queueGeneration: MAX_TASK_QUEUE_GENERATION,
+      });
+      const overflowInput = {
+        taskId: overflowTaskId,
+        itemId: overflowItem.id,
+        expectedRevision: 0,
+        expectedCancellationRevision: 0,
+        ownerMessageId: randomUUID(),
+      };
+      await expect(
+        repository.cancelPendingChecklist(agentId, overflowInput),
+      ).resolves.toMatchObject({
+        outcome: 'invalid',
+        transitioned: false,
+      });
+      expect((await store.doc('tasks', overflowTaskId).get()).data()).toMatchObject({
+        status: 'needs_attention',
+        queueGeneration: MAX_TASK_QUEUE_GENERATION,
+      });
+      expect((await store.doc('messages', overflowInput.ownerMessageId).get()).exists).toBe(false);
+      await expect(
+        repository.revisePendingChecklist(agentId, {
+          taskId: overflowTaskId,
+          itemId: overflowChecklist.items[0]?.id ?? '',
+          expectedRevision: 0,
+          ownerMessageId: randomUUID(),
+          replacementKind: 'lookup',
+          replacementLabel: 'Find the train ticket email instead',
+        }),
+      ).resolves.toMatchObject({ outcome: 'invalid', transitioned: false });
+      expect((await store.doc('tasks', overflowTaskId).get()).get('queueGeneration')).toBe(
+        MAX_TASK_QUEUE_GENERATION,
+      );
+      expect(
+        (await store.collection('messages').where('taskId', '==', overflowTaskId).get()).size,
+      ).toBe(1);
+    });
 
     it('retries once, reports the winning generation, and commits one matching wake intent', async () => {
       const results = await Promise.all([

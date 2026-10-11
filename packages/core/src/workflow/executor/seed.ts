@@ -12,7 +12,7 @@ import {
   type TaskState,
 } from '../../events.js';
 import { clarificationAnswerStatus } from '../owner-intent.js';
-import { reviseRequestChecklist } from '../request-checklist.js';
+import { recordOwnerChecklistCancellation } from '../request-checklist.js';
 import {
   isKnownSenderReplyTask,
   isMissionSessionTask,
@@ -69,7 +69,7 @@ async function precedingClarification(
 ): Promise<ClarificationContinuation | undefined> {
   if (task.trust !== 'owner' || task.type !== 'chat_turn' || !task.conversationId) return;
   const previous = history[triggerIndex - 1];
-  if (!previous || previous.role !== 'assistant' || !previous.taskId) return;
+  if (previous?.role !== 'assistant' || !previous.taskId) return;
   const priorTask = await repository.getTask(task.agentId, previous.taskId);
   if (
     !priorTask ||
@@ -323,11 +323,11 @@ export async function seedContext(
  */
 export async function foldOwnerRepliesSincePark(
   db: Db | ExecutionContextRepository,
-  task: Pick<TaskRow, 'conversationId' | 'agentId'>,
+  task: Pick<TaskRow, 'id' | 'conversationId' | 'agentId'>,
   state: TaskState,
   window: ModelMessage[],
-): Promise<void> {
-  if (!task.conversationId) return;
+): Promise<boolean> {
+  if (!task.conversationId) return true;
   const repository = executionContextRepository(db);
 
   if (!state.seenConversationAt) {
@@ -336,11 +336,11 @@ export async function foldOwnerRepliesSincePark(
       agentId: task.agentId,
       conversationId: task.conversationId,
     });
-    if (!baseline) return;
+    if (!baseline) return true;
     state.seenConversationAt =
       baseline.cursor?.exactCreatedAt ?? (baseline.cursor?.createdAt ?? new Date(0)).toISOString();
     state.seenConversationId = baseline.cursor?.id ?? null;
-    return;
+    return true;
   }
 
   const seenAt = new Date(state.seenConversationAt);
@@ -355,15 +355,21 @@ export async function foldOwnerRepliesSincePark(
     },
     limit: 200,
   });
-  if (newer.length === 0) return;
+  if (newer.length === 0) return true;
   for (const m of newer) {
     const text = m.text?.trim();
     if (text) {
-      if (state.requestChecklist)
-        state.requestChecklist = reviseRequestChecklist(state.requestChecklist, {
-          messageId: m.id,
+      if (state.requestChecklist) {
+        const next = recordOwnerChecklistCancellation(state.requestChecklist, {
+          taskId: task.id,
+          agentId: task.agentId,
+          conversationId: task.conversationId,
+          ownerMessageId: m.id,
           text,
         });
+        if (!next) return false;
+        state.requestChecklist = next;
+      }
       window.push({
         role: 'user',
         content: `[The owner added this while the task was paused:]\n${text}`,
@@ -375,4 +381,5 @@ export async function foldOwnerRepliesSincePark(
     state.seenConversationAt = last.exactCreatedAt ?? last.createdAt.toISOString();
     state.seenConversationId = last.id;
   }
+  return true;
 }

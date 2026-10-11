@@ -1,4 +1,4 @@
-import { type Db, tasks, toolCalls } from '@assistant/db';
+import { type Db, messages, tasks, toolCalls } from '@assistant/db';
 import { eq } from 'drizzle-orm';
 import type { ZodType } from 'zod';
 import type { InboundEvent, Plan } from '../../events.js';
@@ -31,6 +31,10 @@ export interface GoldenFixture {
   maxSteps?: number;
   /** Resume a budget-parked task once after moving its runAfter into the past. */
   resumeAfterBudget?: boolean;
+  /** Mutate durable owner context after the first execution parks, before an optional resume. */
+  afterFirstExecution?: (input: { db: Db; taskId: string; agentId: string }) => Promise<void>;
+  /** Give this synthetic chat the durable pinned owner-message shape of a production admission. */
+  pinOwnerRequest?: boolean;
   /** One entry per model step: tool calls to propose and/or final text. */
   script: Array<{
     text?: string;
@@ -215,6 +219,34 @@ export async function runGoldenTask(
     ...(fixture.plan ? { plan: fixture.plan } : {}),
     ...(fixture.maxSteps ? { maxSteps: fixture.maxSteps } : {}),
   });
+  if (fixture.pinOwnerRequest && task.conversationId) {
+    const payload = (fixture.event as { payload?: Record<string, unknown> }).payload ?? {};
+    const text = payload.text;
+    if (typeof text !== 'string' || !text)
+      throw new Error('pinned golden owner requests require nonempty event text');
+    const [ownerMessage] = await db
+      .insert(messages)
+      .values({
+        conversationId: task.conversationId,
+        taskId: task.id,
+        role: 'user',
+        origin: 'owner',
+        text,
+        parts: [{ type: 'text', text }],
+      })
+      .returning({ id: messages.id });
+    if (!ownerMessage) throw new Error('golden fixture failed to pin owner request');
+    const currentEvent = { ...fixture.event, agentId } as Record<string, unknown>;
+    await db
+      .update(tasks)
+      .set({
+        trigger: {
+          ...currentEvent,
+          payload: { ...payload, triggerMessageId: ownerMessage.id },
+        },
+      })
+      .where(eq(tasks.id, task.id));
+  }
 
   const deps: ExecutorDeps = {
     db,
@@ -222,6 +254,7 @@ export async function runGoldenTask(
     dispatcher: fixtureDispatcher(db, fixture),
   };
   await executeTask(deps, task.id);
+  await fixture.afterFirstExecution?.({ db, taskId: task.id, agentId });
   if (fixture.resumeAfterBudget) {
     await db
       .update(tasks)

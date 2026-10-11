@@ -17,6 +17,7 @@ function call(
     taskId,
     toolName: 'calendar.list_events',
     status: 'succeeded',
+    args: {},
     result: { events: [] },
     error: null,
     ...input,

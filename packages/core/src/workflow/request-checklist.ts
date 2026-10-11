@@ -37,7 +37,7 @@ const CLAUSE = new RegExp(
   'gi',
 );
 const STOP = new Set(
-  'a an the my our your me us it this that them those these to for in on at with and then also please as into find check search look up read save remember create make remind send email draft schedule add card cards reminder reminders reservation reservations booking confirmation document doc about before after tomorrow today morning evening day days week next hour hours minutes again earlier exact own inbox message messages'.split(
+  'a an the my our your me us it this that them those these to for in on at with and then also please as into find check search look up read save remember create make remind send email draft schedule add card cards reminder reminders reservation reservations booking confirmation document doc about before after tomorrow today morning evening day days week next hour hours minutes again earlier exact own inbox message messages portion part outcome outcomes action actions step steps item items'.split(
     ' ',
   ),
 );
@@ -156,6 +156,7 @@ function candidates(kind: Kind, name: string): boolean {
       return name === 'calendar.create_event';
   }
 }
+
 function proven(kind: Kind, row: ChecklistEvidence): boolean {
   const result = record(row.result);
   if (
@@ -552,9 +553,544 @@ export function revisePendingRequestChecklistItem(
         excludedEvidenceIds: newlyExcludedEvidenceIds,
       },
     ],
+    lastOwnerAction: {
+      kind: 'replace',
+      revision,
+      ownerMessageId: ownerMessage.id,
+      itemId: item.id,
+    },
     items,
   };
   return RequestChecklistSchema.safeParse(revised).success ? revised : checklist;
+}
+
+export function recordOwnerChecklistCancellation(
+  checklist: RequestChecklist,
+  input: {
+    taskId: string;
+    agentId: string;
+    conversationId: string;
+    ownerMessageId: string;
+    text: string;
+  },
+): RequestChecklist | undefined {
+  if (
+    !RequestChecklistSchema.safeParse(checklist).success ||
+    !input.taskId ||
+    input.taskId.length > 128 ||
+    !input.agentId ||
+    input.agentId.length > 128 ||
+    !input.conversationId ||
+    input.conversationId.length > 128 ||
+    !input.ownerMessageId ||
+    input.ownerMessageId.length > 128 ||
+    !input.text ||
+    input.text.length > 8_000
+  )
+    return undefined;
+  if (!ownerCancellationAuditIsConsistent(checklist)) return undefined;
+  const proposed = reviseRequestChecklist(checklist, {
+    messageId: input.ownerMessageId,
+    text: input.text,
+  });
+  const revised: RequestChecklist = {
+    ...proposed,
+    items: proposed.items.map((item, index) => {
+      const prior = checklist.items[index];
+      return prior?.ownerCancellation ? prior : item;
+    }),
+  };
+  const cancelled = revised.items.filter((item, index) => {
+    const prior = checklist.items[index];
+    return (
+      prior !== undefined &&
+      prior.ownerCancellation === undefined &&
+      item.ownerCancellation?.messageId === input.ownerMessageId
+    );
+  });
+  // Ordinary owner replies and cancellation wording that does not identify a
+  // pending checklist outcome remain ordinary conversation context.
+  if (cancelled.length === 0) return checklist;
+  const audit = checklist.cancellationAudit ?? [];
+  const revision = checklist.cancellationRevision ?? 0;
+  if (checklist.items.some((item) => item.ownerCancellation) && audit.length === 0)
+    return undefined;
+  if (
+    !Number.isSafeInteger(revision) ||
+    revision < 0 ||
+    revision !== audit.length ||
+    revision >= 12 ||
+    audit.some(
+      (entry, index) =>
+        entry.revision !== index + 1 ||
+        entry.taskId !== input.taskId ||
+        entry.conversationId !== input.conversationId ||
+        entry.ownerTaskId !== input.taskId ||
+        new Set(entry.itemIds).size !== entry.itemIds.length ||
+        entry.itemIds.length !== entry.requestSpans.length,
+    ) ||
+    new Set(audit.map((entry) => entry.ownerMessageId)).size !== audit.length
+  )
+    return undefined;
+  if (audit.some((entry) => entry.ownerMessageId === input.ownerMessageId)) return checklist;
+  if (checklist.lastOwnerAction && checklist.lastOwnerAction.kind === 'cancel') {
+    const last = audit.at(-1);
+    if (
+      !last ||
+      checklist.lastOwnerAction.revision !== last.revision ||
+      checklist.lastOwnerAction.ownerMessageId !== last.ownerMessageId ||
+      JSON.stringify(checklist.lastOwnerAction.itemIds) !== JSON.stringify(last.itemIds)
+    )
+      return undefined;
+  }
+  const nextRevision = revision + 1;
+  const entry = {
+    revision: nextRevision,
+    checklistRevision: checklist.revision ?? 0,
+    taskId: input.taskId,
+    conversationId: input.conversationId,
+    ownerTaskId: input.taskId,
+    ownerMessageId: input.ownerMessageId,
+    itemIds: cancelled.map((item) => item.id),
+    requestSpans: cancelled.map((item) => item.ownerCancellation?.requestSpan ?? ''),
+  };
+  const next: RequestChecklist = {
+    ...revised,
+    cancellationRevision: nextRevision,
+    cancellationAudit: [...audit, entry],
+    lastOwnerAction: {
+      kind: 'cancel',
+      revision: nextRevision,
+      ownerMessageId: input.ownerMessageId,
+      itemIds: entry.itemIds,
+    },
+  };
+  return RequestChecklistSchema.safeParse(next).success ? next : undefined;
+}
+
+/**
+ * Apply an explicit Activity selection. The item ID and both checklist revisions
+ * are supplied by the owner UI; no text parsing chooses the target. The durable
+ * owner message text is generated from the selected checklist label.
+ */
+export function cancelPendingRequestChecklistItem(
+  checklistValue: unknown,
+  input: {
+    task: { id: string; agentId: string; conversationId: string };
+    ownerMessage: {
+      id: string;
+      taskId: string;
+      agentId: string;
+      conversationId: string;
+      role: 'user';
+      origin: 'owner';
+      text: string;
+    };
+    binding: {
+      taskId: string;
+      itemId: string;
+      expectedRevision: number;
+      expectedCancellationRevision: number;
+      ownerMessageId: string;
+    };
+    evidence: ChecklistEvidence[];
+  },
+):
+  | { decision: 'cancelled'; checklist: RequestChecklist; ownerMessageText: string }
+  | { decision: 'not_found' | 'stale_revision' | 'invalid' | 'unsafe_evidence' } {
+  const parsed = RequestChecklistSchema.safeParse(checklistValue);
+  if (!parsed.success) return { decision: 'invalid' };
+  const checklist = parsed.data;
+  const { task, ownerMessage, binding, evidence } = input;
+  if (
+    !ownerCancellationAuditIsConsistent(checklist) ||
+    task.id !== binding.taskId ||
+    ownerMessage.id !== binding.ownerMessageId ||
+    ownerMessage.taskId !== task.id ||
+    ownerMessage.agentId !== task.agentId ||
+    ownerMessage.conversationId !== task.conversationId ||
+    ownerMessage.role !== 'user' ||
+    ownerMessage.origin !== 'owner' ||
+    !Number.isSafeInteger(binding.expectedRevision) ||
+    binding.expectedRevision < 0 ||
+    !Number.isSafeInteger(binding.expectedCancellationRevision) ||
+    binding.expectedCancellationRevision < 0
+  )
+    return { decision: 'invalid' };
+
+  const revision = checklist.revision ?? 0;
+  const cancellationRevision = checklist.cancellationRevision ?? 0;
+  if (
+    revision !== binding.expectedRevision ||
+    cancellationRevision !== binding.expectedCancellationRevision
+  )
+    return { decision: 'stale_revision' };
+  if (checklist.revisionAudit !== undefined && checklist.revisionAudit.length !== revision)
+    return { decision: 'invalid' };
+
+  const item = checklist.items.find((candidate) => candidate.id === binding.itemId);
+  if (!item) return { decision: 'not_found' };
+  if (item.status === 'completed' || item.status === 'cancelled' || item.ownerCancellation)
+    return { decision: 'unsafe_evidence' };
+  if (item.status !== 'pending' && item.status !== 'blocked')
+    return { decision: 'unsafe_evidence' };
+  if (cancellationRevision >= MAX_CHECKLIST_CORRECTIONS) return { decision: 'invalid' };
+
+  const expectedText = `Cancel this request: ${item.label}`;
+  if (ownerMessage.text !== expectedText || expectedText.length > 8_000)
+    return { decision: 'invalid' };
+  const byId = new Map(evidence.map((row) => [row.id, row]));
+  if (byId.size !== evidence.length || evidence.some((row) => !row.id || row.id.length > 128))
+    return { decision: 'unsafe_evidence' };
+  const completedSiblingEvidence = new Set(
+    checklist.items
+      .filter((candidate) => candidate.id !== item.id && candidate.status === 'completed')
+      .flatMap((candidate) => candidate.evidence.map((receipt) => receipt.id)),
+  );
+  if (item.evidence.some((receipt) => !byId.has(receipt.id)))
+    return { decision: 'unsafe_evidence' };
+  for (const row of evidence) {
+    const safeNoEffect = row.effectOutcome === 'not_executed';
+    if (row.effectOutcome === 'unknown') return { decision: 'unsafe_evidence' };
+    if (!candidates(item.kind, row.toolName) || safeNoEffect) continue;
+    if (completedSiblingEvidence.has(row.id)) continue;
+    const corpus = new Set(words(JSON.stringify([row.args, row.result])));
+    const overlap = item.targetTerms.filter((term) => corpus.has(term)).length;
+    // A same-kind effect can belong to the selected item even when result
+    // metadata is weak. Only a durable completed sibling binding exempts it.
+    if (overlap > 0 || item.targetTerms.length === 0 || row.status === 'compacted')
+      return { decision: 'unsafe_evidence' };
+    return { decision: 'unsafe_evidence' };
+  }
+
+  const audit = checklist.cancellationAudit ?? [];
+  if (
+    audit.length !== cancellationRevision ||
+    audit.length >= MAX_CHECKLIST_CORRECTIONS ||
+    audit.some((entry) => entry.ownerMessageId === ownerMessage.id)
+  )
+    return { decision: 'invalid' };
+  const nextRevision = cancellationRevision + 1;
+  const next: RequestChecklist = {
+    ...checklist,
+    savedCards: checklist.savedCards ?? [],
+    cancellationRevision: nextRevision,
+    cancellationAudit: [
+      ...audit,
+      {
+        revision: nextRevision,
+        checklistRevision: revision,
+        taskId: task.id,
+        conversationId: task.conversationId,
+        ownerTaskId: task.id,
+        ownerMessageId: ownerMessage.id,
+        itemIds: [item.id],
+        requestSpans: [item.label],
+      },
+    ],
+    lastOwnerAction: {
+      kind: 'cancel',
+      revision: nextRevision,
+      ownerMessageId: ownerMessage.id,
+      itemIds: [item.id],
+    },
+    items: checklist.items.map((candidate) =>
+      candidate.id === item.id
+        ? {
+            ...candidate,
+            status: 'cancelled' as const,
+            ownerCancellation: { messageId: ownerMessage.id, requestSpan: item.label },
+            detail: 'Cancelled by the owner; no completion is claimed.',
+          }
+        : candidate,
+    ),
+  };
+  const verified = RequestChecklistSchema.safeParse(next);
+  if (!verified.success || !ownerCancellationAuditIsConsistent(verified.data))
+    return { decision: 'invalid' };
+  return { decision: 'cancelled', checklist: verified.data, ownerMessageText: expectedText };
+}
+
+export type CancelledChecklistToolDecision = 'allow' | 'cancelled' | 'ambiguous' | 'invalid';
+
+export interface CancelledChecklistToolAssessment {
+  decision: CancelledChecklistToolDecision;
+  cancellation?: { revision: number; ownerMessageId: string; itemIds: string[] };
+}
+
+export function hasOwnerChecklistCancellationMarker(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const checklist = value as Record<string, unknown>;
+  const action = checklist.lastOwnerAction;
+  const items = Array.isArray(checklist.items) ? checklist.items : [];
+  return (
+    Object.hasOwn(checklist, 'cancellationRevision') ||
+    Object.hasOwn(checklist, 'cancellationAudit') ||
+    (Boolean(action) &&
+      typeof action === 'object' &&
+      (action as { kind?: unknown }).kind === 'cancel') ||
+    items.some(
+      (item) => item && typeof item === 'object' && Object.hasOwn(item, 'ownerCancellation'),
+    )
+  );
+}
+
+export function ownerCancellationAuditIsConsistent(value: unknown): boolean {
+  const parsed = RequestChecklistSchema.safeParse(value);
+  if (!parsed.success) return false;
+  const checklist = parsed.data;
+  const cancellationItems = checklist.items.filter((item) => item.ownerCancellation);
+  if (!hasOwnerChecklistCancellationMarker(checklist)) return true;
+  const audit = checklist.cancellationAudit;
+  if (!audit || checklist.cancellationRevision !== audit.length || audit.length === 0) return false;
+  if (
+    audit.some(
+      (entry, index) =>
+        entry.revision !== index + 1 ||
+        (entry.checklistRevision !== undefined &&
+          entry.checklistRevision > (checklist.revision ?? 0)) ||
+        entry.itemIds.length !== entry.requestSpans.length ||
+        new Set(entry.itemIds).size !== entry.itemIds.length,
+    ) ||
+    new Set(audit.map((entry) => entry.ownerMessageId)).size !== audit.length
+  )
+    return false;
+  for (const entry of audit) {
+    for (const [index, id] of entry.itemIds.entries()) {
+      const item = checklist.items.find((candidate) => candidate.id === id);
+      if (
+        !item ||
+        (item.status !== 'cancelled' && item.status !== 'completed') ||
+        item.ownerCancellation?.messageId !== entry.ownerMessageId ||
+        item.ownerCancellation.requestSpan !== entry.requestSpans[index]
+      )
+        return false;
+    }
+  }
+  if (cancellationItems.length !== new Set(audit.flatMap((entry) => entry.itemIds)).size)
+    return false;
+  const last = audit.at(-1);
+  if (!last) return false;
+  const action = checklist.lastOwnerAction;
+  if (!action) return false;
+  if (action.kind === 'cancel')
+    return (
+      action.revision === last.revision &&
+      action.ownerMessageId === last.ownerMessageId &&
+      JSON.stringify(action.itemIds) === JSON.stringify(last.itemIds)
+    );
+  const revision = checklist.revisionAudit?.at(-1);
+  return Boolean(
+    revision &&
+      action.revision === revision.revision &&
+      action.ownerMessageId === revision.ownerMessageId &&
+      action.itemId === revision.itemId,
+  );
+}
+
+/** Conservative per-call fence used before queued replay and before dispatch. */
+export function assessCancelledChecklistToolCall(
+  checklistValue: unknown,
+  input: {
+    taskId: string;
+    conversationId: string;
+    toolName: string;
+    args: unknown;
+  },
+): CancelledChecklistToolAssessment {
+  const parsed = RequestChecklistSchema.safeParse(checklistValue);
+  if (!parsed.success) return { decision: 'invalid' };
+  const checklist = parsed.data;
+  if (!ownerCancellationAuditIsConsistent(checklist)) return { decision: 'invalid' };
+  if (checklist.cancellationAudit === undefined && checklist.cancellationRevision === undefined)
+    return {
+      decision: hasOwnerChecklistCancellationMarker(checklist) ? 'invalid' : 'allow',
+    };
+  const audit = checklist.cancellationAudit ?? [];
+  if (
+    checklist.cancellationRevision !== audit.length ||
+    audit.some(
+      (entry, index) =>
+        entry.revision !== index + 1 ||
+        entry.taskId !== input.taskId ||
+        entry.conversationId !== input.conversationId ||
+        entry.ownerTaskId !== input.taskId ||
+        entry.itemIds.length !== entry.requestSpans.length,
+    )
+  )
+    return { decision: 'invalid' };
+  const canceledIds = new Set(audit.flatMap((entry) => entry.itemIds));
+  if (
+    checklist.items.some((item) => {
+      if (!canceledIds.has(item.id)) return false;
+      const entry = audit.find((candidate) => candidate.itemIds.includes(item.id));
+      return (
+        (item.status !== 'cancelled' && item.status !== 'completed') ||
+        item.ownerCancellation?.messageId !== entry?.ownerMessageId ||
+        item.ownerCancellation?.requestSpan !== entry?.requestSpans[entry.itemIds.indexOf(item.id)]
+      );
+    }) ||
+    [...canceledIds].some((id) => !checklist.items.some((item) => item.id === id))
+  )
+    return { decision: 'invalid' };
+  const argsText = JSON.stringify(input.args);
+  if (typeof argsText !== 'string' || argsText.length > 32_000) return { decision: 'ambiguous' };
+  const argsWords = new Set(words(argsText));
+  const cancelled = checklist.items.filter(
+    (item) =>
+      canceledIds.has(item.id) &&
+      item.status === 'cancelled' &&
+      candidates(item.kind, input.toolName),
+  );
+  const previouslyCompleted = checklist.items.filter(
+    (item) =>
+      canceledIds.has(item.id) &&
+      item.status === 'completed' &&
+      candidates(item.kind, input.toolName),
+  );
+  if (cancelled.length === 0 && previouslyCompleted.length === 0) return { decision: 'allow' };
+
+  let canceledOverlap = false;
+  const matchedCancelledIds: string[] = [];
+  for (const item of cancelled) {
+    const overlap = item.targetTerms.filter((term) => argsWords.has(term)).length;
+    if (item.targetTerms.length === 0) {
+    } else if (overlap === item.targetTerms.length) {
+      matchedCancelledIds.push(item.id);
+    } else if (overlap > 0) {
+      canceledOverlap = true;
+    }
+  }
+  if (
+    previouslyCompleted.some(
+      (item) =>
+        item.targetTerms.length === 0 || item.targetTerms.some((term) => argsWords.has(term)),
+    )
+  )
+    return { decision: 'ambiguous' };
+  const activeSiblingMatches = checklist.items.filter(
+    (item) =>
+      !canceledIds.has(item.id) &&
+      (item.status === 'pending' || item.status === 'blocked') &&
+      cancelled.some((candidate) => candidate.kind === item.kind) &&
+      candidates(item.kind, input.toolName) &&
+      item.targetTerms.length > 0 &&
+      item.targetTerms.every((term) => argsWords.has(term)),
+  );
+  if (matchedCancelledIds.length > 0) {
+    if (activeSiblingMatches.length > 0 || canceledOverlap) return { decision: 'ambiguous' };
+    const matchingAudit = audit.filter((entry) =>
+      entry.itemIds.some((id) => matchedCancelledIds.includes(id)),
+    );
+    const latest = matchingAudit.at(-1);
+    if (!latest) return { decision: 'invalid' };
+    return {
+      decision: 'cancelled',
+      cancellation: {
+        revision: latest.revision,
+        ownerMessageId: latest.ownerMessageId,
+        itemIds: latest.itemIds.filter((id) => matchedCancelledIds.includes(id)),
+      },
+    };
+  }
+
+  // A same-category call that cannot be positively assigned to an active
+  // sibling may be a paraphrase of the cancelled outcome. It is never allowed
+  // merely because none of the cancelled target words happened to match.
+  const activeSiblingMatch =
+    activeSiblingMatches.length > 0 &&
+    cancelled.every(
+      (candidate) =>
+        candidate.targetTerms.length > 0 &&
+        candidate.targetTerms.every((term) => !argsWords.has(term)),
+    );
+  if (activeSiblingMatch && !canceledOverlap) return { decision: 'allow' };
+  return { decision: 'ambiguous' };
+}
+
+/** A prior undispatched lookup batch may be discarded only when each call is
+ * uniquely bound to one still-active lookup outcome. */
+export function activeChecklistLookupOutcomeForToolCall(
+  checklistValue: unknown,
+  input: { toolName: string; args: unknown },
+): string | undefined {
+  const parsed = RequestChecklistSchema.safeParse(checklistValue);
+  if (!parsed.success || !ownerCancellationAuditIsConsistent(parsed.data)) return undefined;
+  const argsText = JSON.stringify(input.args);
+  if (typeof argsText !== 'string' || argsText.length > 32_000) return undefined;
+  const argsWords = new Set(words(argsText));
+  const candidates = parsed.data.items.filter(
+    (item) =>
+      item.kind === 'lookup' &&
+      (item.status === 'pending' || item.status === 'blocked') &&
+      !item.ownerCancellation &&
+      candidatesForLookup(input.toolName) &&
+      item.targetTerms.length > 0 &&
+      item.targetTerms.every((term) => argsWords.has(term)),
+  );
+  if (candidates.length !== 1) return undefined;
+  const selected = candidates[0];
+  if (!selected) return undefined;
+  const overlapsAnother = parsed.data.items.some(
+    (item) =>
+      item.id !== selected.id &&
+      item.kind === 'lookup' &&
+      (item.status === 'pending' || item.status === 'blocked') &&
+      item.targetTerms.some((term) => argsWords.has(term)),
+  );
+  return overlapsAnother ? undefined : selected.id;
+}
+
+/** True only for a safe private-read call whose exact query still names the
+ * prior label after that same pending lookup was explicitly replaced. */
+export function supersededChecklistLookupForToolCall(
+  checklistValue: unknown,
+  input: { outcomeId: string; toolName: string; args: unknown },
+): boolean {
+  const parsed = RequestChecklistSchema.safeParse(checklistValue);
+  if (!parsed.success || !candidatesForLookup(input.toolName)) return false;
+  const checklist = parsed.data;
+  const item = checklist.items.find((candidate) => candidate.id === input.outcomeId);
+  const audit = checklist.revisionAudit?.at(-1);
+  if (
+    item?.kind !== 'lookup' ||
+    (item.status !== 'pending' && item.status !== 'blocked') ||
+    !audit ||
+    audit.itemId !== item.id ||
+    checklist.lastOwnerAction?.kind !== 'replace' ||
+    checklist.lastOwnerAction.revision !== audit.revision ||
+    checklist.lastOwnerAction.ownerMessageId !== audit.ownerMessageId ||
+    audit.fromTargetTerms.length === 0
+  )
+    return false;
+  const argsText = JSON.stringify(input.args);
+  if (typeof argsText !== 'string' || argsText.length > 32_000) return false;
+  const argsWords = new Set(words(argsText));
+  const oldTerms = audit.fromTargetTerms.map((term) => term.toLowerCase());
+  const newTerms = audit.toTargetTerms.map((term) => term.toLowerCase());
+  return (
+    oldTerms.every((term) => argsWords.has(term)) &&
+    oldTerms.some((term) => !newTerms.includes(term)) &&
+    !newTerms.some((term) => argsWords.has(term))
+  );
+}
+
+function candidatesForLookup(name: string): boolean {
+  return /^(?:conversations\.search|gmail\.(?:search|read_thread)|calendar\.(?:list_events|search_events)|memory\.recall|documents\.search|drive\.(?:search|read)|web\.(?:search|fetch)|docs\.get|contacts\.lookup)$/.test(
+    name,
+  );
+}
+
+export function cancelledChecklistToolDecision(
+  checklistValue: unknown,
+  input: {
+    taskId: string;
+    conversationId: string;
+    toolName: string;
+    args: unknown;
+  },
+): CancelledChecklistToolDecision {
+  return assessCancelledChecklistToolCall(checklistValue, input).decision;
 }
 
 export function requestChecklistDirective(checklist: RequestChecklist | undefined): string {
@@ -639,11 +1175,12 @@ export function reviseRequestChecklist(
         messageId: owner.messageId,
         requestSpan: span.trim().slice(0, 500),
       };
-      if (item.status !== 'completed') item.status = 'cancelled';
-      item.detail =
-        item.status === 'completed'
-          ? 'The owner cancelled further work; the prior completed action is not undone.'
-          : 'Cancelled by the owner; no completion is claimed.';
+      if (item.status === 'completed') {
+        item.detail = 'The owner cancelled further work; the prior completed action is not undone.';
+      } else {
+        item.status = 'cancelled';
+        item.detail = 'Cancelled by the owner; no completion is claimed.';
+      }
     }
   }
   return { ...checklist, items };

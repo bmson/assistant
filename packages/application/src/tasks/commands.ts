@@ -4,7 +4,11 @@ import {
   isParkedUnknownChecklistCorrectionFinal,
   isRetryableChecklistCorrectionFinal,
 } from '@assistant/core/workflow/checklist-correction-resume';
-import { revisePendingRequestChecklistItem } from '@assistant/core/workflow/request-checklist';
+import {
+  cancelPendingRequestChecklistItem,
+  ownerCancellationAuditIsConsistent,
+  revisePendingRequestChecklistItem,
+} from '@assistant/core/workflow/request-checklist';
 import { RequestChecklistSchema } from '@assistant/core/workflow/request-checklist-schema';
 import {
   approvals,
@@ -18,7 +22,10 @@ import {
 } from '@assistant/db';
 import type {
   ArchiveOldActivityProgress,
+  ChecklistCancellationPolicy,
   ChecklistCorrectionPolicy,
+  PendingChecklistCancellationInput,
+  PendingChecklistCancellationOutcome,
   PendingChecklistCorrectionInput,
   PendingChecklistCorrectionOutcome,
   Records,
@@ -31,6 +38,7 @@ import {
   completeChecklistCorrectionEvidence,
   isPinnedOwnerChatRequestMessage,
   MAX_CHECKLIST_CORRECTION_LEDGER_ROWS,
+  MAX_TASK_QUEUE_GENERATION,
   normalizeTaskBudget,
   ownerChatChecklistRequestMessageId,
   taskActivityOutcome,
@@ -248,12 +256,80 @@ export const taskActivityChecklistCorrectionPolicy: ChecklistCorrectionPolicy = 
   },
 };
 
+/** Shared selected-item cancellation rules injected into both storage drivers. */
+export const taskActivityChecklistCancellationPolicy: ChecklistCancellationPolicy = {
+  cancel(input) {
+    const parsed = RequestChecklistSchema.safeParse(input.checklist);
+    if (!parsed.success) return { decision: 'invalid' };
+    const selected = parsed.data.items.find((item) => item.id === input.binding.itemId);
+    if (!selected) return { decision: 'not_found' };
+    const ownerMessageText = `Cancel this request: ${selected.label}`;
+    return cancelPendingRequestChecklistItem(parsed.data, {
+      task: input.task,
+      ownerMessage: {
+        id: input.binding.ownerMessageId,
+        taskId: input.task.id,
+        agentId: input.task.agentId,
+        conversationId: input.task.conversationId,
+        role: 'user',
+        origin: 'owner',
+        text: ownerMessageText,
+      },
+      binding: input.binding,
+      evidence: input.evidence as Parameters<
+        typeof cancelPendingRequestChecklistItem
+      >[1]['evidence'],
+    });
+  },
+  matchesReplay({ checklist: value, cancellation, task, priorMessage }) {
+    const parsed = RequestChecklistSchema.safeParse(value);
+    if (!parsed.success || !ownerCancellationAuditIsConsistent(parsed.data)) return false;
+    const audit = parsed.data.cancellationAudit?.find(
+      (entry) => entry.ownerMessageId === cancellation.ownerMessageId,
+    );
+    const item = parsed.data.items.find((candidate) => candidate.id === cancellation.itemId);
+    const text = item ? `Cancel this request: ${item.label}` : '';
+    return Boolean(
+      audit &&
+        item &&
+        priorMessage.id === cancellation.ownerMessageId &&
+        priorMessage.taskId === cancellation.taskId &&
+        priorMessage.conversationId === task.conversationId &&
+        priorMessage.role === 'user' &&
+        priorMessage.origin === 'owner' &&
+        priorMessage.text === text &&
+        task.id === cancellation.taskId &&
+        audit.taskId === task.id &&
+        audit.conversationId === task.conversationId &&
+        audit.ownerTaskId === task.id &&
+        item.status === 'cancelled' &&
+        audit.revision === cancellation.expectedCancellationRevision + 1 &&
+        audit.checklistRevision === cancellation.expectedRevision &&
+        audit.itemIds.length === 1 &&
+        audit.itemIds[0] === item.id &&
+        audit.requestSpans.length === 1 &&
+        audit.requestSpans[0] === item.label &&
+        item.ownerCancellation?.messageId === cancellation.ownerMessageId &&
+        item.ownerCancellation.requestSpan === item.label,
+    );
+  },
+};
+
 function checklistCorrectionOutcome(
   outcome: PendingChecklistCorrectionOutcome['outcome'],
   queueGeneration: number | null = null,
   ownerMessageId: string | null = null,
   transitioned = false,
 ): PendingChecklistCorrectionOutcome {
+  return { outcome, transitioned, queueGeneration, ownerMessageId };
+}
+
+function checklistCancellationOutcome(
+  outcome: PendingChecklistCancellationOutcome['outcome'],
+  queueGeneration: number | null = null,
+  ownerMessageId: string | null = null,
+  transitioned = false,
+): PendingChecklistCancellationOutcome {
   return { outcome, transitioned, queueGeneration, ownerMessageId };
 }
 
@@ -342,7 +418,11 @@ export async function revisePendingChecklistActivity(
       task.archivedAt !== null
     )
       return checklistCorrectionOutcome('no_longer_retriable');
-    if (!Number.isSafeInteger(task.queueGeneration) || task.queueGeneration < 0)
+    if (
+      !Number.isSafeInteger(task.queueGeneration) ||
+      task.queueGeneration < 0 ||
+      task.queueGeneration >= MAX_TASK_QUEUE_GENERATION
+    )
       return checklistCorrectionOutcome('invalid');
     if (state?.pendingApprovalId || state?.pendingJob != null || state?.pendingToolBatch != null)
       return checklistCorrectionOutcome('unsafe_evidence');
@@ -486,6 +566,235 @@ export async function revisePendingChecklistActivity(
       // Durable task status and generation remain authoritative; the normal sweeper can wake it.
     }
   }
+  return outcome;
+}
+
+/**
+ * Cancel one explicitly selected pending checklist outcome. This command uses
+ * no model or text matching to choose the item; the repository binds the
+ * selection, both revisions, owner message, and wake in one transaction.
+ */
+export async function cancelPendingChecklistActivity(
+  db: Db,
+  input: PendingChecklistCancellationInput,
+): Promise<PendingChecklistCancellationOutcome> {
+  const owner = await getAgent(db);
+  const agentId = owner.id;
+  if (
+    !UUID.test(input.taskId) ||
+    !UUID.test(input.ownerMessageId) ||
+    !input.itemId ||
+    input.itemId.length > 128 ||
+    !Number.isSafeInteger(input.expectedRevision) ||
+    input.expectedRevision < 0 ||
+    !Number.isSafeInteger(input.expectedCancellationRevision) ||
+    input.expectedCancellationRevision < 0
+  )
+    return checklistCancellationOutcome('invalid');
+
+  const outcome = await db.transaction(async (tx) => {
+    const [task] = await tx
+      .select()
+      .from(tasks)
+      .where(and(eq(tasks.id, input.taskId), eq(tasks.agentId, agentId)))
+      .limit(1)
+      .for('update');
+    if (!task || chatAdmissionCancellationPayload(task))
+      return checklistCancellationOutcome('not_found');
+    if (!task.conversationId || task.type !== 'chat_turn' || task.trust !== 'owner' || task.goalId)
+      return checklistCancellationOutcome('unsafe_evidence');
+
+    const state =
+      task.state && typeof task.state === 'object' && !Array.isArray(task.state)
+        ? ({ ...(task.state as Record<string, unknown>) } as Record<string, unknown>)
+        : null;
+    const parsed = RequestChecklistSchema.safeParse(state?.requestChecklist);
+    if (!parsed.success) return checklistCancellationOutcome('invalid');
+    const checklist = parsed.data;
+    const originalMessageId = ownerChatChecklistRequestMessageId(task, checklist.request);
+    if (!originalMessageId) return checklistCancellationOutcome('unsafe_evidence');
+    const [originalMessage] = await tx
+      .select()
+      .from(messages)
+      .where(eq(messages.id, originalMessageId))
+      .limit(1);
+    if (
+      !originalMessage ||
+      !isPinnedOwnerChatRequestMessage(task, originalMessage, originalMessageId, checklist.request)
+    )
+      return checklistCancellationOutcome('unsafe_evidence');
+
+    const [priorMessage] = await tx
+      .select()
+      .from(messages)
+      .where(eq(messages.id, input.ownerMessageId))
+      .limit(1);
+    if (priorMessage) {
+      if (
+        taskActivityChecklistCancellationPolicy.matchesReplay({
+          checklist,
+          cancellation: input,
+          task: { id: task.id, conversationId: task.conversationId },
+          priorMessage,
+        })
+      )
+        return checklistCancellationOutcome(
+          'already_cancelled',
+          Number.isSafeInteger(task.queueGeneration) ? task.queueGeneration : null,
+          priorMessage.id,
+        );
+      return checklistCancellationOutcome('invalid');
+    }
+
+    if (
+      task.status !== 'needs_attention' ||
+      task.leaseToken !== null ||
+      task.lockedUntil !== null ||
+      task.archivedAt !== null
+    )
+      return checklistCancellationOutcome('no_longer_retriable');
+    if (
+      !Number.isSafeInteger(task.queueGeneration) ||
+      task.queueGeneration < 0 ||
+      task.queueGeneration >= MAX_TASK_QUEUE_GENERATION
+    )
+      return checklistCancellationOutcome('invalid');
+    if (
+      state?.pendingApprovalId ||
+      state?.pendingJob != null ||
+      state?.pendingToolBatch != null ||
+      state?.pendingFinal != null ||
+      (Array.isArray(state?.pendingApprovals) && state.pendingApprovals.length > 0)
+    )
+      return checklistCancellationOutcome('unsafe_evidence');
+
+    const [conversation] = await tx
+      .select({ id: conversations.id, archivedAt: conversations.archivedAt })
+      .from(conversations)
+      .where(
+        and(
+          eq(conversations.id, task.conversationId),
+          eq(conversations.agentId, agentId),
+          eq(conversations.channel, 'chat'),
+        ),
+      )
+      .for('update')
+      .limit(1);
+    if (!conversation) return checklistCancellationOutcome('not_found');
+    if (conversation.archivedAt !== null)
+      return checklistCancellationOutcome('no_longer_retriable');
+    const [pendingApproval] = await tx
+      .select({ id: approvals.id })
+      .from(approvals)
+      .where(and(eq(approvals.taskId, task.id), inArray(approvals.status, ['pending', 'approved'])))
+      .limit(1);
+    if (pendingApproval) return checklistCancellationOutcome('unsafe_evidence');
+
+    const calls = await tx
+      .select()
+      .from(toolCalls)
+      .where(eq(toolCalls.taskId, task.id))
+      .orderBy(toolCalls.step, toolCalls.createdAt, toolCalls.id)
+      .limit(MAX_CHECKLIST_CORRECTION_LEDGER_ROWS + 1);
+    const rawReceipts = await tx
+      .select()
+      .from(toolCallReceipts)
+      .where(eq(toolCallReceipts.taskId, task.id))
+      .orderBy(toolCallReceipts.recordedAt, toolCallReceipts.id)
+      .limit(MAX_CHECKLIST_CORRECTION_LEDGER_ROWS + 1);
+    if (
+      calls.length > MAX_CHECKLIST_CORRECTION_LEDGER_ROWS ||
+      rawReceipts.length > MAX_CHECKLIST_CORRECTION_LEDGER_ROWS
+    )
+      return checklistCancellationOutcome('unsafe_evidence');
+    const receipts: Array<Records['toolCallReceipts']> = [];
+    for (const receipt of rawReceipts) {
+      if (!['completed', 'failed', 'unknown', 'not_executed'].includes(receipt.effectOutcome))
+        return checklistCancellationOutcome('unsafe_evidence');
+      receipts.push(receipt as Records['toolCallReceipts']);
+    }
+    const evidence = completeChecklistCorrectionEvidence({
+      agentId,
+      taskId: task.id,
+      toolCalls: calls,
+      receipts,
+    });
+    if (!evidence) return checklistCancellationOutcome('unsafe_evidence');
+
+    const cancellation = taskActivityChecklistCancellationPolicy.cancel({
+      checklist,
+      task: { id: task.id, agentId: task.agentId, conversationId: task.conversationId },
+      binding: input,
+      evidence: evidence.rows,
+    });
+    if (cancellation.decision !== 'cancelled')
+      return checklistCancellationOutcome(cancellation.decision);
+
+    const generation = task.queueGeneration + 1;
+    const now = new Date();
+    const nextState: Record<string, unknown> = {
+      ...(state ?? {}),
+      requestChecklist: cancellation.checklist,
+    };
+    const [insertedMessage] = await tx
+      .insert(messages)
+      .values({
+        id: input.ownerMessageId,
+        conversationId: task.conversationId,
+        taskId: task.id,
+        role: 'user',
+        origin: 'owner',
+        parts: [{ type: 'text', text: cancellation.ownerMessageText }],
+        text: cancellation.ownerMessageText,
+      })
+      .returning({ id: messages.id });
+    if (!insertedMessage) throw new Error('Checklist cancellation owner message was not persisted');
+    const [updated] = await tx
+      .update(tasks)
+      .set({
+        state: nextState,
+        plan: null,
+        status: 'pending',
+        runAfter: null,
+        lockedUntil: null,
+        leaseToken: null,
+        queueGeneration: generation,
+        attempt: 0,
+        attentionNotifiedAt: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(tasks.id, task.id),
+          eq(tasks.agentId, agentId),
+          eq(tasks.status, 'needs_attention'),
+          eq(tasks.queueGeneration, task.queueGeneration),
+          isNull(tasks.leaseToken),
+          isNull(tasks.lockedUntil),
+          isNull(tasks.archivedAt),
+        ),
+      )
+      .returning({ queueGeneration: tasks.queueGeneration });
+    if (!updated) throw new Error('Checklist cancellation task changed before commit');
+    await tx
+      .update(conversations)
+      .set({ updatedAt: now })
+      .where(
+        and(
+          eq(conversations.id, task.conversationId),
+          eq(conversations.agentId, agentId),
+          isNull(conversations.archivedAt),
+        ),
+      );
+    return checklistCancellationOutcome(
+      'cancelled',
+      updated.queueGeneration,
+      input.ownerMessageId,
+      true,
+    );
+  });
+  if (outcome.outcome === 'cancelled' && outcome.queueGeneration !== null)
+    notifyWake(input.taskId, outcome.queueGeneration);
   return outcome;
 }
 
@@ -651,6 +960,14 @@ export function revisePendingChecklistWithRepository(
   input: PendingChecklistCorrectionInput,
 ): Promise<PendingChecklistCorrectionOutcome> {
   return repository.revisePendingChecklist(agentId, input);
+}
+
+export function cancelPendingChecklistWithRepository(
+  repository: TaskActivityCommandRepository,
+  agentId: string,
+  input: PendingChecklistCancellationInput,
+): Promise<PendingChecklistCancellationOutcome> {
+  return repository.cancelPendingChecklist(agentId, input);
 }
 
 export function cancelActivityWithRepository(
