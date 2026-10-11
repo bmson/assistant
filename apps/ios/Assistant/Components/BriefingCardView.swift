@@ -61,8 +61,8 @@ struct BriefingCardView: View {
     @ViewBuilder
     private func sectionView(_ section: MessageResponseCard.BriefingCard.Section) -> some View {
         switch section {
-        case let .agenda(_, complete, items):
-            agenda(items, complete: complete)
+        case let .agenda(_, complete, omittedCount, items):
+            agenda(items, complete: complete, omittedCount: omittedCount)
         case let .weather(title, location, temperature, condition, symbol, detail):
             VStack(alignment: .leading, spacing: 6) {
                 heading(title.isEmpty ? "Weather" : title)
@@ -97,7 +97,11 @@ struct BriefingCardView: View {
             .accessibilityAddTraits(.isHeader)
     }
 
-    private func agenda(_ items: [MessageResponseCard.BriefingCard.AgendaItem], complete: Bool) -> some View {
+    private func agenda(
+        _ items: [MessageResponseCard.BriefingCard.AgendaItem],
+        complete: Bool,
+        omittedCount: Int?
+    ) -> some View {
         var days: [String] = []
         for item in items where !days.contains(item.day) { days.append(item.day) }
         return VStack(alignment: .leading, spacing: 14) {
@@ -108,6 +112,12 @@ struct BriefingCardView: View {
                         agendaRow(item)
                     }
                 }
+            }
+            if let omittedCount {
+                Text("\(omittedCount) additional \(omittedCount == 1 ? "event is" : "events are") not shown.")
+                    .font(.caption)
+                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if !complete {
                 Text("Some calendars could not be read, so this may be incomplete.")

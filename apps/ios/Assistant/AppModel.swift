@@ -95,6 +95,13 @@ struct AssistantErrorNotice: Equatable {
     }
 }
 
+private struct MissingTaskReplyNotice: Equatable {
+    let ownerID: String
+    let conversationID: String
+    let taskID: String
+    let connectionVersion: Int
+}
+
 /// A message just taken out of the log, and where to put it back. Held only
 /// while the undo bar is on screen; hiding is otherwise a quiet action.
 struct HiddenMessageUndo: Identifiable, Equatable {
@@ -198,11 +205,15 @@ final class AppModel {
     /// `reportError(_:retry:)` sets the message first, then the retry.
     var errorMessage: String? {
         didSet {
+            if errorMessage != Self.completedTaskReplyUnavailableMessage {
+                missingTaskReplyNotice = nil
+            }
             errorRetry = nil
             errorSource = nil
             errorNotice = errorMessage.map { AssistantErrorNotice(message: $0) }
         }
     }
+    @ObservationIgnored private var missingTaskReplyNotice: MissingTaskReplyNotice?
     private(set) var errorNotice: AssistantErrorNotice?
     @ObservationIgnored private var errorSource: AssistantErrorSource?
     /// Offered by the banner when the failure was the network rather than the
@@ -330,6 +341,8 @@ final class AppModel {
     static let arrivalNudgesKey = "assistant.arrival-nudges"
     private static let cancelledTaskEffectNotice =
         "The task was cancelled. Any external action already started may still have taken effect."
+    private static let completedTaskReplyUnavailableMessage =
+        "This task is marked complete, but its reply has not appeared yet."
     /// One-time notification ask after a successful pairing (APNs opt-in).
     private let pushPromptedKey = "assistant.push-prompted"
     @ObservationIgnored private var lastLocationPostAt: Date?
@@ -4259,6 +4272,28 @@ final class AppModel {
         SpeechPlayer.shared.stop()
     }
 
+    /// A terminal task row can arrive before its durable assistant message.
+    /// Keep the notice tied to the exact session and task so an unrelated
+    /// later message cannot dismiss it.
+    func recordCompletedTaskWithoutReply(taskId: String) {
+        guard let conversationId, let ownerID = bootstrap?.identity.id else { return }
+        missingTaskReplyNotice = MissingTaskReplyNotice(
+            ownerID: ownerID,
+            conversationID: conversationId,
+            taskID: taskId,
+            connectionVersion: connectionVersion
+        )
+        errorMessage = Self.completedTaskReplyUnavailableMessage
+    }
+
+    private func isVisibleDurableAssistantReply(_ message: ChatMessage) -> Bool {
+        guard message.role == .assistant, !message.id.hasPrefix("stream-") else { return false }
+        return message.parts.contains { part in
+            (part.type == "text" && !(part.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                || (part.type == "data-card" && MessageResponseCard(part: part, formRendererAvailable: true) != nil)
+        }
+    }
+
     private func pollForReply(taskId: String?, streamID: String, ordinaryTurnToken: UUID? = nil) async {
         guard let client, let conversationId else { return }
         let version = connectionVersion
@@ -4267,6 +4302,21 @@ final class AppModel {
         var grace = 0
         var finalStatus: String?
         var receivedCurrentReply = false
+        var currentReplyMessageIDs = Set<String>()
+        let assistantMessageIDsAtStart = Set(messages.compactMap { message in
+            message.role == .assistant && !message.id.hasPrefix("stream-") ? message.id : nil
+        })
+        func refreshCurrentReplyState() {
+            currentReplyMessageIDs = Set(messages.compactMap { message in
+                guard isVisibleDurableAssistantReply(message) else { return nil }
+                if let taskId {
+                    return message.metadata?["taskId"]?.string == taskId ? message.id : nil
+                }
+                return !assistantMessageIDsAtStart.contains(message.id) ? message.id : nil
+            })
+            receivedCurrentReply = !currentReplyMessageIDs.isEmpty
+        }
+        refreshCurrentReplyState()
         // A held poll waits on the server, so the loop is bounded by how long a
         // turn may legitimately take rather than by a count of ticks.
         let deadline = Date().addingTimeInterval(30 * 60)
@@ -4295,7 +4345,6 @@ final class AppModel {
                 guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
                 let elapsedMilliseconds = Int64(Date().timeIntervalSince(startedAt) * 1_000)
-                let assistantBefore = messages.filter { !$0.id.hasPrefix("stream-") && $0.role == .assistant }.count
                 merge(updates.messages)
                 merge(updates.refreshed)
                 removeSuperseded(updates.superseded)
@@ -4309,20 +4358,19 @@ final class AppModel {
                 guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
                 if let nextCursor = updates.nextCursor { cursor = nextCursor }
-                let assistantAfter = messages.filter { !$0.id.hasPrefix("stream-") && $0.role == .assistant }.count
+                refreshCurrentReplyState()
                 gapMilliseconds = PollingPolicy.gapMilliseconds(
                     elapsedMilliseconds: elapsedMilliseconds,
                     // `superseded` is optional on the wire — a server that sent
                     // no retractions omits it entirely.
-                    carriedNews: assistantAfter > assistantBefore
-                        || !updates.messages.isEmpty
+                    carriedNews: !updates.messages.isEmpty
+                        || !updates.refreshed.isEmpty
                         || !(updates.superseded?.isEmpty ?? true),
                     attempt: attempt,
                     hasTaskID: taskId != nil
                 )
 
-                if taskId == nil, assistantAfter > assistantBefore {
-                    receivedCurrentReply = true
+                if taskId == nil, receivedCurrentReply {
                     messages.removeAll { $0.id == streamID }
                     break
                 }
@@ -4331,7 +4379,8 @@ final class AppModel {
                     if settled.contains(status) {
                         finalStatus = status
                         grace += 1
-                        if assistantAfter > assistantBefore || grace >= 4 { break }
+                        if receivedCurrentReply || grace >= 4 { break }
+                        if updates.hasMore { continue }
                     }
                 }
                 if updates.hasMore { continue }
@@ -4355,6 +4404,7 @@ final class AppModel {
         }
         guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
+        refreshCurrentReplyState()
         if finalStatus == nil && (!receivedCurrentReply || cancelRequestedWithoutTaskID) {
             spokenTurn = nil
             isSending = false
@@ -4367,15 +4417,6 @@ final class AppModel {
             // A cancelled task status does not prove that an external handler
             // rolled back work that had already started.
             errorMessage = Self.cancelledTaskEffectNotice
-        }
-        if let turn = spokenTurn {
-            let durableReply = messages.reversed().first { message in
-                message.role == .assistant
-                    && !message.id.hasPrefix("stream-")
-                    && !turn.previousAssistantMessageIDs.contains(message.id)
-            }
-            if let durableReply { finishSpeaking(for: durableReply) }
-            else { spokenTurn = nil }
         }
         toolActivity = []
         if let taskId, let finalStatus, ["done", "failed", "cancelled"].contains(finalStatus) {
@@ -4396,8 +4437,21 @@ final class AppModel {
         await refreshWorkspace(reportFailure: false)
         guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
+        refreshCurrentReplyState()
+        if let turn = spokenTurn {
+            let durableReply = messages.reversed().first { message in
+                message.role == .assistant
+                    && !message.id.hasPrefix("stream-")
+                    && currentReplyMessageIDs.contains(message.id)
+                    && !turn.previousAssistantMessageIDs.contains(message.id)
+            }
+            if let durableReply { finishSpeaking(for: durableReply) }
+            else { spokenTurn = nil }
+        }
 
-        let reply = messages.reversed().first(where: { $0.role == .assistant && !$0.text.isEmpty })?.text
+        let reply = messages.reversed().first(where: {
+            currentReplyMessageIDs.contains($0.id) && $0.role == .assistant && !$0.text.isEmpty
+        })?.text
         if let finalStatus, attention.contains(finalStatus) {
             let matchingApproval = finalStatus == "waiting_approval"
                 ? overview?.approvals.pending.first(where: { $0.approval.taskId == taskId })
@@ -4436,16 +4490,28 @@ final class AppModel {
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
             await syncNotificationBadge()
         } else {
-            let succeeded = finalStatus != "failed" && finalStatus != "cancelled"
-            let thought: AssistantThought = succeeded ? .finished : .stopped
-            let detail = finalStatus == "cancelled"
+            let completedWithoutReply = finalStatus == "done" && !receivedCurrentReply
+            let succeeded = finalStatus != "failed" && finalStatus != "cancelled" && !completedWithoutReply
+            let thought: AssistantThought = completedWithoutReply
+                ? .replyUnavailable
+                : succeeded ? .finished : .stopped
+            let detail = completedWithoutReply
+                ? "This task is marked complete, but its reply has not appeared yet."
+                : finalStatus == "cancelled"
                 ? "Task cancelled; external effects are not reversed"
                 : concise(reply ?? (succeeded ? "Your assistant finished the task." : "Open the conversation for details."))
+            if completedWithoutReply {
+                if let taskId {
+                    recordCompletedTaskWithoutReply(taskId: taskId)
+                } else {
+                    errorMessage = detail
+                }
+            }
             setActivityThought(thought, proposedDetail: detail)
             _ = await notifyOnce(
                 key: "\(taskId ?? streamID)-\(finalStatus ?? "reply")",
-                title: succeeded ? "\(agentName) finished" : "\(agentName) stopped",
-                body: succeeded ? "Your result is ready." : "Open the conversation for details.",
+                title: completedWithoutReply ? "Task complete; reply not yet available" : succeeded ? "\(agentName) finished" : "\(agentName) stopped",
+                body: succeeded ? "Your result is ready." : "Open the conversation to check the task.",
                 route: .chat
             )
             guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
@@ -4545,6 +4611,7 @@ final class AppModel {
               !notificationTurnSettlements.isSettling,
               let client, let conversationId, let ownerID = bootstrap?.identity.id else { return nil }
         let version = idlePollingVersion
+        let connectionRevision = connectionVersion
         let requestCursor = cursor
         let notificationTitle = "\(agentName) replied"
         guard let updates = try? await client.updates(
@@ -4557,6 +4624,7 @@ final class AppModel {
         guard !Task.isCancelled, isSceneActive, !isSending,
               !notificationTurnSettlements.isSettling,
               idlePollingVersion == version,
+              connectionVersion == connectionRevision,
               self.client?.configuration == client.configuration,
               self.conversationId == conversationId,
               bootstrap?.identity.id == ownerID,
@@ -4564,26 +4632,48 @@ final class AppModel {
 
         let changed = !updates.messages.isEmpty || !updates.refreshed.isEmpty ||
             !(updates.superseded?.isEmpty ?? true)
-        let assistantBefore = messages.filter { $0.role == .assistant }.count
+        let visibleAssistantIDsBefore = Set(messages.compactMap { message in
+            isVisibleDurableAssistantReply(message) ? message.id : nil
+        })
         let decisionsBefore = openDecisionSignature
         merge(updates.messages)
         merge(updates.refreshed)
         removeSuperseded(updates.superseded)
         if let cursor = updates.nextCursor { self.cursor = cursor }
+        let visibleAssistantIDsAfter = Set(messages.compactMap { message in
+            isVisibleDurableAssistantReply(message) ? message.id : nil
+        })
+        let newlyVisibleAssistantIDs = visibleAssistantIDsAfter.subtracting(visibleAssistantIDsBefore)
+        if let notice = missingTaskReplyNotice,
+           notice.ownerID == ownerID,
+           notice.conversationID == conversationId,
+           notice.connectionVersion == connectionRevision,
+           errorMessage == Self.completedTaskReplyUnavailableMessage,
+           messages.contains(where: {
+               $0.metadata?["taskId"]?.string == notice.taskID
+                   && isVisibleDurableAssistantReply($0)
+           }) {
+            missingTaskReplyNotice = nil
+            errorMessage = nil
+        }
         // Decisions resolved elsewhere must refresh the Island, badge, and
         // inbox as well as the retained receipt in this conversation.
         if openDecisionSignature != decisionsBefore {
             Task { [weak self] in await self?.refreshOverview(reportFailure: false) }
         }
-        let assistantAfter = messages.filter { $0.role == .assistant }.count
-        if assistantAfter > assistantBefore,
-           messages.contains(where: { $0.role == .assistant && !$0.text.isEmpty }) {
-            await NotificationManager.shared.schedule(
-                title: notificationTitle,
-                body: "A new response is ready.",
-                route: .chat,
-                agentID: ownerID,
-                conversationID: conversationId
+        if !newlyVisibleAssistantIDs.isEmpty,
+           connectionVersion == connectionRevision,
+           idlePollingVersion == version,
+           self.client?.configuration == client.configuration,
+           self.conversationId == conversationId,
+           bootstrap?.identity.id == ownerID {
+            await scheduleLocalNotification(
+                notificationTitle,
+                "A new response is ready.",
+                .chat,
+                nil,
+                ownerID,
+                conversationId
             )
         }
         return changed
