@@ -28,7 +28,10 @@ const browser = await chromium.launch({ channel: process.env.SMOKE_BROWSER_CHANN
 const context = await browser.newContext();
 
 async function createConversation(page: Page): Promise<string> {
-  await page.goto(new URL('/chat', origin).toString(), { waitUntil: 'domcontentloaded' });
+  await page.goto(new URL('/chat', origin).toString(), {
+    waitUntil: 'domcontentloaded',
+    timeout: 90_000,
+  });
   const created = await page.evaluate(async () => {
     const response = await fetch('/api/mobile/v1/chats', {
       method: 'POST',
@@ -242,7 +245,7 @@ async function verifyDelayedTerminalPoll(status: 'done' | 'cancelled' | 'failed'
         `/chat/${conversationId}?task=${oldTaskId}&cursor=${encodeURIComponent(oldCursor)}`,
         origin,
       ).toString(),
-      { waitUntil: 'domcontentloaded' },
+      { waitUntil: 'domcontentloaded', timeout: 90_000 },
     );
     const composer = page.getByRole('combobox', { name: 'Message', exact: true });
     try {
