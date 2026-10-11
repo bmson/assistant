@@ -2317,7 +2317,7 @@ final class APIModelsTests: XCTestCase {
             progress: "The draft is ready: https://docs.example.test/draft"
         )
 
-        XCTAssertEqual(diagnostic.displayProgress, "A provider request failed. You can retry this task from Activity.")
+        XCTAssertEqual(diagnostic.displayProgress, "A service request failed.")
         XCTAssertFalse(diagnostic.displayProgress.contains("provider.example"))
         XCTAssertEqual(cancelled.displayProgress, "This task was cancelled.")
         XCTAssertEqual(usefulLink.displayProgress, "The draft is ready: https://docs.example.test/draft")

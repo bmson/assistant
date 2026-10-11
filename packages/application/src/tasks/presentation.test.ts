@@ -8,9 +8,7 @@ describe('owner-facing Activity progress', () => {
     const progress =
       'attempt 4 failed: AI_APICallError: model unavailable https://provider.example/private';
 
-    expect(activityProgress('needs_attention', progress)).toBe(
-      'A provider request failed. You can retry this task from Activity.',
-    );
+    expect(activityProgress('needs_attention', progress)).toBe('A service request failed.');
   });
 
   it('uses neutral copy for cancelled tasks even when their last progress was a provider error', () => {
@@ -54,8 +52,6 @@ describe('owner-facing Activity progress', () => {
       filter: 'all',
     });
 
-    expect(result.items[0]?.progress).toBe(
-      'A provider request failed. You can retry this task from Activity.',
-    );
+    expect(result.items[0]?.progress).toBe('A service request failed.');
   });
 });

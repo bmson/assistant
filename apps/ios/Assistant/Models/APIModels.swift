@@ -1063,7 +1063,7 @@ struct ActivityItem: Codable, Identifiable, Sendable {
         // preserving the raw value in the task record for diagnostics.
         let lower = humanized.lowercased()
         if lower.range(of: #"\bai_(?:apicallerror|retryerror)\b|^attempt\s+\d+\s+failed:"#, options: .regularExpression) != nil {
-            return "A provider request failed. You can retry this task from Activity."
+            return "A service request failed."
         }
         if lower.hasPrefix("pulse:") || lower.hasPrefix("document processor:") ||
             lower.contains("no-candidates") || lower.contains("segmentation") {
