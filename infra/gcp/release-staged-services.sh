@@ -209,14 +209,35 @@ release_restore_jobs() {
   [[ "$failed" == false ]]
 }
 
+release_traffic_tag_suffix() {
+  # Cloud Run limits the combined service name and traffic tag to 46 characters.
+  # Keep the full release SHA in images, manifests and probes; aliases identify
+  # this invocation, including a rerun of the same source.
+  node -e '
+    const {GITHUB_RUN_ID: id, GITHUB_RUN_ATTEMPT: attempt} = process.env;
+    if (id || attempt) {
+      const suffix = `${id}-${attempt}`;
+      if (!/^\d+-\d+$/.test(suffix) || suffix.length > 21) {
+        console.error("GitHub run identity does not fit the Cloud Run traffic tag budget");
+        process.exit(2);
+      }
+      process.stdout.write(suffix);
+    } else {
+      process.stdout.write(require("node:crypto").randomBytes(10).toString("hex"));
+    }
+  '
+}
+
 release_staged_services() {
-  local selected="${RELEASE_COMPONENTS:-agent,web}" staging_tag="candidate-${TAG}"
+  local selected="${RELEASE_COMPONENTS:-agent,web}" traffic_tag_suffix staging_tag
+  traffic_tag_suffix="$(release_traffic_tag_suffix)" || return $?
+  staging_tag="candidate-${traffic_tag_suffix}"
   local agent_digest='' web_digest='' browser_digest='' code_digest='' processor_digest=''
   local manifest_path manifest_sha manifest_selected="$selected"
   local worker
   local worker_env_override="${RELEASE_EMAIL_OBSERVER_WORKER_ENABLED:-}"
   local agent_candidate_env
-  local web_candidate_env web_resume_env web_resume_tag="resume-${TAG}"
+  local web_candidate_env web_resume_env web_resume_tag="resume-${traffic_tag_suffix}"
   local web_writes_paused=false
   local RELEASE_CHANGED_JOBS=''
   local agent_before='' web_before='' agent_old_traffic='' web_old_traffic=''

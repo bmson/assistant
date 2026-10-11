@@ -69,6 +69,8 @@ if a[:3]==['run','revisions','describe']:
 if a[:3]==['run','services','update']:
  with open(os.environ['STUB_SERVICE_UPDATE_CALLS'],'a') as f: f.write(json.dumps(a)+'\n')
  name=a[3]
+ if len(name)+len(val('--tag'))>46:
+  print('traffic tag and service exceed Cloud Run limit', file=sys.stderr); sys.exit(2)
  if name=='assistant-agent' and os.getenv('FAIL_AGENT_STAGE')=='1': sys.exit(1)
  svc=s[name]; svc['next']+=1; rev=f"{name}-new{svc['next']}"
  for item in val('--update-env-vars').split(','):
@@ -97,7 +99,7 @@ web_new=any('new' in r for r in s['assistant-web']['traffic'])
 legacy_live_web=url.startswith('https://assistant-web.example/') and not web_new
 if path=='/ready': print('{"ready":false}' if os.getenv('UNHEALTHY_AGENT')=='1' else '{"ready":true}')
 elif path=='/api/health':
- print('{"ok":true,"service":"web","sha":"wrong"}' if os.getenv('UNHEALTHY_WEB')=='1' or (os.getenv('UNHEALTHY_LIVE_WEB')=='1' and 'assistant-web.example' in url) else '{"ok":true,"service":"web","sha":"abc123"}')
+ print(json.dumps({'ok':True,'service':'web','sha':'wrong' if os.getenv('UNHEALTHY_WEB')=='1' or (os.getenv('UNHEALTHY_LIVE_WEB')=='1' and 'assistant-web.example' in url) else os.environ['TAG']}))
 elif path=='/api/ready':
  if legacy_live_web: sys.exit(22)
  print('{"ready":true}')
@@ -246,7 +248,7 @@ web=next(i for i,x in enumerate(release_calls) if 'update-traffic assistant-web 
 agent=next(i for i,x in enumerate(release_calls) if 'update-traffic assistant-agent ' in x and 'assistant-agent-new' in x)
 assert web < agent, 'new web must be promoted and checked against old agent before agent promotion'
 probes=[json.loads(line) for line in open(sys.argv[3])]
-candidate=[x for x in probes if x['url']=='https://candidate-abc123-assistant-web.example/api/release-probe']
+candidate=[x for x in probes if x['url'].startswith('https://candidate-') and x['url'].endswith('-assistant-web.example/api/release-probe')]
 assert candidate and all('new' not in next(iter(x['agent'])) for x in candidate), 'tagged web must prove new-web/old-agent compatibility'
 live=[x for x in probes if x['url'].startswith('https://assistant-web.example/')]
 assert live and all(any('new' in revision for revision in x['web']) for x in live), 'the old web, whose routes return 404, must never receive a compatibility probe'
@@ -390,4 +392,30 @@ import json,sys
 m=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2])); assert 'processor' in m['selected']; assert '@sha256:' in s['assistant-processor']['image']
 PY
 fi
+reset_case; prepare_firestore_state
+export TAG=c77cd3152d27364316451a1a055f2e9edc176fc3
+release_staged_services || fail 'full 40-character release SHA must fit Cloud Run traffic tags'
+python3 - "$TEST_ROOT/state.json" "$TEST_ROOT/manifest.json" "$TAG" <<'PYTEST'
+import json,sys
+state=json.load(open(sys.argv[1])); manifest=json.load(open(sys.argv[2])); source=sys.argv[3]
+assert manifest['release']==source, 'full source identity must remain in the manifest'
+for name in ('assistant-agent','assistant-web'):
+ for stage in state[name]['staged']:
+  assert len(name)+len(stage['tag'])<=46
+  assert '@sha256:' in stage['image'], 'traffic aliases must not alter immutable image identity'
+PYTEST
+export TAG=abc123
+(
+ export GITHUB_RUN_ID=37996499728 GITHUB_RUN_ATTEMPT=1
+ first="$(release_traffic_tag_suffix)"
+ export GITHUB_RUN_ATTEMPT=2
+ second="$(release_traffic_tag_suffix)"
+ [[ "$first" == 37996499728-1 && "$second" == 37996499728-2 && "$first" != "$second" ]] || fail 'reruns must use distinct traffic aliases'
+ export GITHUB_RUN_ID=12345678901234567890
+ if release_traffic_tag_suffix; then fail 'oversized traffic alias must fail before staging'; fi
+ export GITHUB_RUN_ID=invalid
+ if release_traffic_tag_suffix; then fail 'invalid traffic alias must fail before staging'; fi
+ unset GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
+ [[ "$(release_traffic_tag_suffix)" =~ ^[0-9a-f]{20}$ ]] || fail 'local aliases must fit the same budget'
+)
 echo 'staged release protocol tests passed'

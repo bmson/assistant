@@ -14,6 +14,7 @@ export GCP_REGION="test-region"
 export STUB_CALLS="$TEST_ROOT/calls"
 export STUB_WEB_PAUSED_FILE="$TEST_ROOT/web-paused"
 export STUB_JOB_IMAGE_FILE="$TEST_ROOT/browser-image"
+export STUB_CANDIDATE_TAG_FILE="$TEST_ROOT/candidate-tag" STUB_RESUME_TAG_FILE="$TEST_ROOT/resume-tag"
 printf 'registry/old-browser' >"$STUB_JOB_IMAGE_FILE"
 printf 'false' >"$STUB_WEB_PAUSED_FILE"
 
@@ -24,8 +25,23 @@ set -u
 printf 'gcloud %s\n' "$*" >>"$STUB_CALLS"
 args="$*"
 
+capture_traffic_tag() {
+  local previous='' argument
+  for argument in "$@"; do
+    if [[ "$previous" == --tag ]]; then
+      case "$argument" in
+        candidate-*) printf '%s' "$argument" >"$STUB_CANDIDATE_TAG_FILE" ;;
+        resume-*) printf '%s' "$argument" >"$STUB_RESUME_TAG_FILE" ;;
+      esac
+    fi
+    previous="$argument"
+  done
+}
+
 service_json() {
-  local driver="$1" extra="${2:-}" env='[]' tag="${IMAGE_TAG:-abc123}"
+  local driver="$1" extra="${2:-}" env='[]' candidate_tag='' resume_tag=''
+  [[ ! -f "$STUB_CANDIDATE_TAG_FILE" ]] || candidate_tag="$(cat "$STUB_CANDIDATE_TAG_FILE")"
+  [[ ! -f "$STUB_RESUME_TAG_FILE" ]] || resume_tag="$(cat "$STUB_RESUME_TAG_FILE")"
   local names="AGENT_URL BROWSER_JOB_NAME CLOUD_TASKS_QUEUE CODE_JOB_NAME FIRESTORE_AGENT_ID FIRESTORE_EMBEDDING_SPACE GCP_LOCATION GCP_PROJECT GMAIL_PUBSUB_TOPIC GMAIL_PUSH_SERVICE_ACCOUNT INTERNAL_AUTH_MODE INTERNAL_OIDC_AUDIENCE INTERNAL_OIDC_SERVICE_ACCOUNT OWNER_EMAIL PROCESSOR_DRIVER PROCESSOR_JOB_NAME PUBLIC_URL QUEUE_DRIVER WORKSPACE_BUCKET"
   env="["
   for name in $names; do env="${env}{\"name\":\"${name}\",\"value\":\"x\"},"; done
@@ -37,8 +53,8 @@ service_json() {
   if [[ "${STUB_RELEASE_METADATA:-present}" != "missing" ]]; then
   env="${env%]},{\"name\":\"ASSISTANT_RELEASE_API_CONTRACT\",\"value\":\"1\"},{\"name\":\"ASSISTANT_RELEASE_WEB_API_MIN\",\"value\":\"1\"},{\"name\":\"ASSISTANT_RELEASE_WEB_API_MAX\",\"value\":\"1\"},{\"name\":\"ASSISTANT_RELEASE_AGENT_API_MIN\",\"value\":\"1\"},{\"name\":\"ASSISTANT_RELEASE_AGENT_API_MAX\",\"value\":\"1\"},{\"name\":\"ASSISTANT_RELEASE_SCHEMA_DRIVER\",\"value\":\"firestore\"},{\"name\":\"ASSISTANT_RELEASE_SCHEMA_MIN\",\"value\":\"1\"},{\"name\":\"ASSISTANT_RELEASE_SCHEMA_MAX\",\"value\":\"1\"}]"
   fi
-  printf '{"metadata":{"name":"svc"},"status":{"url":"https://%s.example","traffic":[{"revisionName":"%s-old","percent":100},{"revisionName":"%s-candidate","tag":"candidate-%s","url":"https://candidate-%s-%s.example","percent":0},{"revisionName":"%s-resume","tag":"resume-%s","url":"https://resume-%s-%s.example","percent":0}]},"spec":{"template":{"spec":{"containers":[{"env":%s}]}}}}\n' \
-    "${SERVICE_NAME:-assistant-agent}" "${SERVICE_NAME:-assistant-agent}" "${SERVICE_NAME:-assistant-agent}" "$tag" "$tag" "${SERVICE_NAME:-assistant-agent}" "${SERVICE_NAME:-assistant-agent}" "$tag" "$tag" "${SERVICE_NAME:-assistant-agent}" "$env"
+  printf '{"metadata":{"name":"svc"},"status":{"url":"https://%s.example","traffic":[{"revisionName":"%s-old","percent":100},{"revisionName":"%s-candidate","tag":"%s","url":"https://%s-%s.example","percent":0},{"revisionName":"%s-resume","tag":"%s","url":"https://%s-%s.example","percent":0}]},"spec":{"template":{"spec":{"containers":[{"env":%s}]}}}}\n' \
+    "${SERVICE_NAME:-assistant-agent}" "${SERVICE_NAME:-assistant-agent}" "${SERVICE_NAME:-assistant-agent}" "$candidate_tag" "$candidate_tag" "${SERVICE_NAME:-assistant-agent}" "${SERVICE_NAME:-assistant-agent}" "$resume_tag" "$resume_tag" "${SERVICE_NAME:-assistant-agent}" "$env"
 }
 
 case "$args" in
@@ -63,6 +79,7 @@ case "$args" in
     if [[ "$revision" == *agent* ]]; then SERVICE_NAME=assistant-agent; driver="${STUB_AGENT_DRIVER-firestore}"; else SERVICE_NAME=assistant-web; driver="${STUB_WEB_DRIVER-firestore}"; fi
     service_json "$driver" | node -e 'let s="";process.stdin.on("data",x=>s+=x).on("end",()=>{const x=JSON.parse(s);const env=x.spec.template.spec.containers[0].env;process.stdout.write(JSON.stringify({spec:{timeoutSeconds:300,containers:[{env}]}}))})' ;;
   *'run services update assistant-web'*)
+    capture_traffic_tag "$@"
     if [[ "$args" == *'ASSISTANT_RELEASE_WRITES_PAUSED='* ]]; then
       value="${args#*ASSISTANT_RELEASE_WRITES_PAUSED=}"
       value="${value%%,*}"
@@ -80,7 +97,7 @@ case "$args" in
     printf '[{"name":"projects/test-project/locations/us/backups/b1","database":"projects/test-project/databases/assistant-production","state":"READY","snapshotTime":"%s"}]\n' "$snapshot" ;;
   *'scheduler jobs describe'*) echo 'name: job' ;;
   *'scheduler jobs update'*) ;;
-  *'run services update'*) ;;
+  *'run services update'*) capture_traffic_tag "$@" ;;
   *'run services update-traffic'*) ;;
   *'run jobs describe assistant-browser'*'--format=json'*)
     node -e '
