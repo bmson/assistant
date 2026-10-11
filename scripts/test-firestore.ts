@@ -117,6 +117,7 @@ const files = [
   'apps/web/app/profile/page.firestore.test.tsx',
   'apps/web/app/profile/memories/page.test.tsx',
   'apps/web/app/api/mobile/v1/people/route.test.ts',
+  'apps/web/app/api/mobile/v1/activity/[id]/route.test.ts',
   'apps/web/lib/chat-server.test.ts',
   'apps/web/app/api/mobile/v1/location/route.firestore.test.ts',
   'apps/web/app/api/mobile/v1/memory/people/[id]/route.firestore.test.ts',
