@@ -3488,6 +3488,110 @@ extension APIClientRetryTests {
     }
 
     @MainActor
+    func testRetainedFollowUpDraftSurvivesDelayedTerminalTurnAndCanThenSend() async throws {
+        let model = try await notificationModel()
+        let scope = try XCTUnwrap(model.composerDraftScope)
+        let firstTaskId = "33333333-3333-4333-8333-333333333333"
+        let secondTaskId = "44444444-4444-4444-8444-444444444444"
+        func updates(status: String, reply: String?, cursor: String) throws -> Data {
+            let messages = reply.map { [ChatMessage(id: "reply-\(cursor)", role: .assistant,
+                parts: [.init(type: "text", text: $0)])] } ?? []
+            return try JSONEncoder().encode(ChatUpdates(
+                taskStatus: status, messages: messages, refreshed: [], superseded: nil,
+                nextCursor: cursor, hasMore: false, activity: []
+            ))
+        }
+        let firstReply = "The first answer is complete."
+        let followUp = "Now compare the return options."
+        let workspaceUnavailable = StubURLProtocol.Outcome.success(status: 401, body: Data())
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [
+                .taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: firstTaskId),
+                .taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: secondTaskId),
+            ],
+            "/api/mobile/v1/chat/status": [
+                .success(status: 200, body: try updates(status: "working", reply: nil, cursor: "working")),
+                .held(status: 200, body: try updates(status: "done", reply: firstReply, cursor: "first-done")),
+                .success(status: 200, body: try updates(status: "done", reply: "The comparison is ready.", cursor: "second-done")),
+            ],
+            "/api/mobile/v1/overview": [
+                .success(status: 200, body: try overviewBody(pending: [])),
+                .success(status: 200, body: try overviewBody(pending: [])),
+            ],
+            "/api/mobile/v1/workspace": [workspaceUnavailable, workspaceUnavailable],
+        ])
+        defer { StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/chat/status") }
+
+        model.saveComposerDraft("", in: scope)
+        model.send("Find return flight options")
+        let firstStatusDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while StubURLProtocol.urls.filter({ $0.path == "/api/mobile/v1/chat/status" }).count < 1,
+              ContinuousClock.now < firstStatusDeadline {
+            await Task.yield()
+        }
+        XCTAssertTrue(model.isSending)
+
+        model.saveComposerDraft(followUp, in: scope)
+        XCTAssertEqual(model.composerDraft(in: scope), followUp)
+        model.send(followUp)
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 1,
+            "AppModel cannot admit the retained draft while the earlier task is active")
+
+        let heldTerminalDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/chat/status"),
+              ContinuousClock.now < heldTerminalDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/chat/status"),
+            "The terminal status response is held until the pending-state assertions complete")
+        XCTAssertTrue(model.isSending, "The unresolved turn stays active while its terminal response is held")
+        XCTAssertTrue(model.hasUnresolvedTurn)
+        XCTAssertEqual(model.composerDraft(in: scope), followUp,
+            "Polling and the held terminal response cannot consume the second draft")
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 1,
+            "The retained draft cannot start a second task while the first terminal response is held")
+
+        StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/chat/status")
+
+        let firstSettlementDeadline = ContinuousClock.now.advanced(by: .seconds(8))
+        while model.hasUnresolvedTurn, ContinuousClock.now < firstSettlementDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(model.hasUnresolvedTurn)
+        XCTAssertEqual(model.composerDraft(in: scope), followUp)
+        XCTAssertTrue(model.messages.contains(where: { $0.role == .assistant && $0.text == firstReply }))
+        XCTAssertEqual(model.messages.filter { $0.role == .user && $0.text == "Find return flight options" }.count, 1)
+
+        model.saveComposerDraft("", in: scope)
+        model.send(followUp)
+        let secondSendDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while StubURLProtocol.urls.filter({ $0.path == "/api/mobile/v1/chat" }).count < 2,
+              ContinuousClock.now < secondSendDeadline {
+            await Task.yield()
+        }
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 2,
+            "The same follow-up becomes admissible once the first task reaches a terminal status")
+        let sentBodies = try StubURLProtocol.urls.enumerated().compactMap { index, url -> [String: Any]? in
+            guard url.path == "/api/mobile/v1/chat" else { return nil }
+            return try JSONSerialization.jsonObject(with: StubURLProtocol.bodies[index]) as? [String: Any]
+        }
+        let sentTexts = sentBodies.compactMap { body -> String? in
+            let messages = body["messages"] as? [[String: Any]]
+            let parts = messages?.first?["parts"] as? [[String: Any]]
+            return parts?.first?["text"] as? String
+        }
+        XCTAssertEqual(sentTexts, ["Find return flight options", followUp])
+
+        let secondSettlementDeadline = ContinuousClock.now.advanced(by: .seconds(8))
+        while model.hasUnresolvedTurn, ContinuousClock.now < secondSettlementDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(model.hasUnresolvedTurn)
+        XCTAssertTrue(model.messages.contains(where: { $0.role == .assistant && $0.text == "The comparison is ready." }))
+        XCTAssertEqual(model.messages.filter { $0.role == .user && $0.text == followUp }.count, 1)
+    }
+
+    @MainActor
     func testStopBeforeTaskReceiptCancelsExactOperationAndIgnoresLateStream() async throws {
         let model = try await notificationModel()
         StubURLProtocol.prime([], paths: [
