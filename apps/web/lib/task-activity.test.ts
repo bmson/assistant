@@ -12,6 +12,8 @@ const mocked = vi.hoisted(() => ({
     archiveOldActivityWithRepository: vi.fn(),
     getTaskDetail: vi.fn(),
     getTaskDetailWithRepository: vi.fn(),
+    getActivityStatus: vi.fn(),
+    getActivityStatusWithRepository: vi.fn(),
     listActivity: vi.fn(),
     listActivityWithRepository: vi.fn(),
     restoreActivity: vi.fn(),
@@ -43,6 +45,7 @@ import {
   archiveOldTaskActivity,
   archiveTaskActivity,
   getTaskActivityDetail,
+  getTaskActivityStatus,
   listTaskActivity,
   restoreTaskActivity,
 } from './task-activity.js';
@@ -114,5 +117,29 @@ describe('web Activity persistence dispatch', () => {
     );
     expect(mocked.application.listActivity).not.toHaveBeenCalled();
     expect(mocked.application.getTaskDetail).not.toHaveBeenCalled();
+  });
+
+  it('dispatches compact status reads through the configured persistence driver', async () => {
+    mocked.application.getActivityStatus.mockResolvedValue({ id: 'task-id', status: 'running' });
+    expect(await getTaskActivityStatus('task-id')).toMatchObject({ status: 'running' });
+    expect(mocked.application.getActivityStatus).toHaveBeenCalledWith(mocked.db, 'task-id');
+
+    mocked.driver = 'firestore';
+    mocked.application.getActivityStatusWithRepository.mockResolvedValue({
+      id: 'task-id',
+      status: 'done',
+    });
+    expect(await getTaskActivityStatus('task-id')).toMatchObject({ status: 'done' });
+    const repository = mocked.application.getActivityStatusWithRepository.mock.calls.at(
+      -1,
+    )?.[0] as {
+      store: unknown;
+    };
+    expect(repository.store).toBe(mocked.store);
+    expect(mocked.application.getActivityStatusWithRepository).toHaveBeenCalledWith(
+      expect.any(Object),
+      mocked.agentId,
+      'task-id',
+    );
   });
 });

@@ -707,6 +707,10 @@ final class APIModelsTests: XCTestCase {
     }
 
     func testPollingPolicyBacksOffWithoutMakingFreshRepliesFeelSlow() {
+        XCTAssertEqual(PollingPolicy.activityIntervalSeconds(consecutiveFailures: 0), 30)
+        XCTAssertEqual(PollingPolicy.activityIntervalSeconds(consecutiveFailures: 1), 60)
+        XCTAssertEqual(PollingPolicy.activityIntervalSeconds(consecutiveFailures: 2), 120)
+        XCTAssertEqual(PollingPolicy.activityIntervalSeconds(consecutiveFailures: 100), 180)
         XCTAssertEqual(PollingPolicy.callIntervalSeconds(consecutiveFailures: 0), 2)
         XCTAssertGreaterThan(PollingPolicy.callIntervalSeconds(consecutiveFailures: 1), 2)
         XCTAssertEqual(PollingPolicy.callIntervalSeconds(consecutiveFailures: 100), 8)
@@ -2283,6 +2287,50 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(generatedTitle.displayTitle, "Document Processing")
         XCTAssertEqual(humanTitle.displayTitle, "Review the travel plan")
         XCTAssertEqual(missingTitle.displayTitle, "Ambient Refresh")
+    }
+
+    func testActivityStatusOverlayUpdatesLiveFieldsAndPreservesLoadedIdentity() {
+        let original = ActivityItem(
+            id: "task-1", type: "chat_turn", status: "running", title: "Compare options",
+            progress: "Starting", trust: "owner", spentUsd: "0", budgetUsdLimit: "0.50",
+            updatedAt: "2026-10-11T11:00:00Z", archivedAt: nil, hasPendingApproval: false,
+            hasActiveAutonomy: false, stuckWaiting: false, createdAt: "2026-10-11T10:00:00Z",
+            conversationId: "conversation-1", source: "chat", externalEventId: nil
+        )
+        let changed = original.applying(ActivityStatusResponse(
+            id: "task-1", status: "done", progress: "Finished", spentUsd: "0.02",
+            budgetUsdLimit: "0.50", updatedAt: "2026-10-11T12:00:00Z", archivedAt: nil,
+            hasPendingApproval: false, hasActiveAutonomy: false, stuckWaiting: false
+        ))
+        XCTAssertEqual(changed.status, "done")
+        XCTAssertEqual(changed.progress, "Finished")
+        XCTAssertEqual(changed.title, "Compare options")
+        XCTAssertEqual(changed.conversationId, "conversation-1")
+        XCTAssertEqual(changed.updatedAt, "2026-10-11T12:00:00Z")
+
+        let newerBase = ActivityItem(
+            id: "task-1", type: "chat_turn", status: "done", title: "Compare options",
+            progress: "Finished", trust: "owner", spentUsd: "0.02", budgetUsdLimit: "0.50",
+            updatedAt: "2026-10-11T13:00:00Z", archivedAt: nil, hasPendingApproval: false,
+            hasActiveAutonomy: false, stuckWaiting: false
+        )
+        XCTAssertEqual(newerBase.applying(ActivityStatusResponse(
+            id: "task-1", status: "running", progress: "Old work", spentUsd: "0.01",
+            budgetUsdLimit: "0.50", updatedAt: "2026-10-11T12:00:00Z", archivedAt: nil,
+            hasPendingApproval: false, hasActiveAutonomy: false, stuckWaiting: false
+        )).status, "done")
+        XCTAssertEqual(original.applying(ActivityStatusResponse(
+            id: "task-1", status: "done", progress: "Finished", spentUsd: "0.02",
+            budgetUsdLimit: "0.50", updatedAt: "not-a-date", archivedAt: nil,
+            hasPendingApproval: false, hasActiveAutonomy: false, stuckWaiting: false
+        )).status, "running")
+
+        let unmatched = original.applying(ActivityStatusResponse(
+            id: "another-task", status: "done", progress: "Finished", spentUsd: "0.02",
+            budgetUsdLimit: "0.50", updatedAt: "2026-10-11T12:00:00Z", archivedAt: nil,
+            hasPendingApproval: false, hasActiveAutonomy: false, stuckWaiting: false
+        ))
+        XCTAssertEqual(unmatched.status, "running")
     }
 
     func testGoalTitlesHideAutomationRunIdentifiers() {

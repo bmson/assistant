@@ -249,6 +249,7 @@ final class AppModel {
     @ObservationIgnored private var cardFormTaskCursors: [String: String] = [:]
     @ObservationIgnored private var cardFormPreparationVersion = 0
     @ObservationIgnored private var connectionVersion = 0
+    private(set) var activityConnectionRevision = 0
     @ObservationIgnored private var pairingAttemptVersion = 0
     @ObservationIgnored private var cursor: String?
     /// Sequence for the rendered log. A merge can only add or replace by id —
@@ -444,6 +445,12 @@ final class AppModel {
 
     private func connectionIsCurrent(_ client: APIClient, version: Int) -> Bool {
         !Task.isCancelled && connectionIdentityIsCurrent(client, version: version)
+    }
+
+    var activityConnectionVersion: Int { activityConnectionRevision }
+
+    func activityConnectionIsCurrent(version: Int) -> Bool {
+        activityConnectionRevision == version && client != nil
     }
 
     /// Cancellation prevents publishing a result, but does not mean the owner
@@ -681,6 +688,7 @@ final class AppModel {
             guard connectionIsCurrent(client, version: version), pairingAttempt == pairingAttemptVersion else { return }
             if let existingOwner = bootstrap?.identity.id, existingOwner != response.identity.id {
                 connectionVersion += 1
+                activityConnectionRevision += 1
                 resetConnectedState()
                 version = connectionVersion
             }
@@ -1397,6 +1405,7 @@ final class AppModel {
                     && cardFormSession?.ownerId == verified.identity.id
                     && hasKnownCardFormRecoveryFence
                 connectionVersion += 1
+                activityConnectionRevision += 1
                 resetConnectedState(preserveCardFormRecoveryFence: sameCardFormPartition)
             }
             try await prepareCardFormSession(for: candidate, ownerId: verified.identity.id, pairingAttempt: attempt)
@@ -1557,6 +1566,7 @@ final class AppModel {
             guard connectionIsCurrent(client, version: version), pairingAttempt == pairingAttemptVersion else { return }
             if let existingOwner = bootstrap?.identity.id, existingOwner != response.identity.id {
                 connectionVersion += 1
+                activityConnectionRevision += 1
                 resetConnectedState()
                 version = connectionVersion
             }
@@ -1671,27 +1681,41 @@ final class AppModel {
         }
     }
 
-    func refreshOverview(reportFailure: Bool = true) async {
-        guard let client else { return }
+    @discardableResult
+    func refreshOverview(reportFailure: Bool = true) async -> Bool {
+        guard let client else { return false }
         let version = connectionVersion
         do {
             let response = try await client.overview()
-            guard connectionIsCurrent(client, version: version) else { return }
+            guard connectionIsCurrent(client, version: version) else { return false }
             overview = withLocalApprovalDecisions(response)
             documentPageError = nil
             clearRecoveredError(from: .overview)
             await reconcileBaselineActivity()
-            guard connectionIsCurrent(client, version: version) else { return }
+            guard connectionIsCurrent(client, version: version) else { return false }
             await syncNotificationBadge()
+            guard connectionIsCurrent(client, version: version) else { return false }
+            return true
         }
         catch where reportFailure {
-            guard connectionIsCurrent(client, version: version) else { return }
+            guard connectionIsCurrent(client, version: version) else { return false }
             reportError(error, source: .overview, retry: { [weak self] in
                 guard let self else { return }
                 await self.refreshOverview()
             })
+            return false
         }
-        catch { }
+        catch { return false }
+    }
+
+    func fetchActivityStatus(id: String) async -> ActivityStatusResponse? {
+        guard !Task.isCancelled, let client else { return nil }
+        let version = connectionVersion
+        do {
+            let status = try await client.activityStatus(id: id)
+            guard status.id == id, connectionIsCurrent(client, version: version) else { return nil }
+            return status
+        } catch { return nil }
     }
 
     func activityDiscoveryPage(archived: Bool, query: String, filter: String, cursor: String?) async -> ActivityList? {
@@ -1708,19 +1732,22 @@ final class AppModel {
         }
     }
 
-    func refreshArchivedActivity(reportFailure: Bool = true) async {
-        guard let client else { return }
+    @discardableResult
+    func refreshArchivedActivity(reportFailure: Bool = true) async -> Bool {
+        guard let client else { return false }
         let version = connectionVersion
         do {
             let result = try await client.activity(archived: true)
-            guard connectionIsCurrent(client, version: version) else { return }
+            guard connectionIsCurrent(client, version: version) else { return false }
             archivedActivity = result
+            return true
         }
         catch where reportFailure {
-            guard connectionIsCurrent(client, version: version) else { return }
+            guard connectionIsCurrent(client, version: version) else { return false }
             reportError(error)
+            return false
         }
-        catch { }
+        catch { return false }
     }
 
     func refreshArchivedGoals(reportFailure: Bool = true) async {
@@ -1747,10 +1774,10 @@ final class AppModel {
     ) {
         Task { [weak self] in
             guard let self else { return }
-            async let overviewRefresh: Void = self.refreshOverview(reportFailure: false)
-            async let activityRefresh: Void = archivedActivity
+            async let overviewRefresh: Bool = self.refreshOverview(reportFailure: false)
+            async let activityRefresh: Bool = archivedActivity
                 ? self.refreshArchivedActivity(reportFailure: false)
-                : ()
+                : false
             async let goalsRefresh: Void = archivedGoals
                 ? self.refreshArchivedGoals(reportFailure: false)
                 : ()
@@ -3722,7 +3749,7 @@ final class AppModel {
         approvalReconciliation = Task { [weak self] in
             await previous?.value
             guard let self, self.connectionIsCurrent(client, version: version) else { return }
-            async let inbox: Void = self.refreshOverview(reportFailure: false)
+            async let inbox: Bool = self.refreshOverview(reportFailure: false)
             async let decisions: Void = self.refreshDecisionMessages()
             // A standing approval adds a rule to Settings. That is the heaviest
             // read the app makes and nothing on the approval screen waits on it.
@@ -4098,6 +4125,7 @@ final class AppModel {
             // Authentication of the new bootstrap does not make old private
             // caches or delayed responses belong to the new identity.
             connectionVersion += 1
+            activityConnectionRevision += 1
             resetConnectedState()
         }
         bootstrap = response

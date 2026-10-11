@@ -15,6 +15,7 @@ private enum ActivityFilter: String, CaseIterable, Identifiable {
 struct ActivityView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var filter: ActivityFilter = .all
@@ -28,6 +29,9 @@ struct ActivityView: View {
     @State private var discovery: ActivityList?
     @State private var discoveryInFlight = false
     @State private var discoveryGeneration = UUID()
+    @State private var discoveryTask: Task<Void, Never>?
+    @State private var activityStatuses: [String: ActivityStatusResponse] = [:]
+    @State private var statusRefreshOffset = 0
 
     var body: some View {
         ScrollView {
@@ -108,11 +112,33 @@ struct ActivityView: View {
         }
         .navigationTitle("Activity")
         .onChange(of: showingArchived) { _, _ in
+            discoveryTask?.cancel()
             discoveryGeneration = UUID()
             discoveryInFlight = false
             discovery = nil
+            activityStatuses = [:]
+            statusRefreshOffset = 0
         }
-        .onChange(of: filter) { _, _ in if discovery != nil { loadDiscovery(reset: true) } }
+        .onChange(of: filter) { _, _ in
+            discoveryTask?.cancel()
+            discoveryGeneration = UUID()
+            discoveryInFlight = false
+            if discovery != nil { loadDiscovery(reset: true) }
+        }
+        .onChange(of: model.activityConnectionVersion) { _, _ in
+            discoveryTask?.cancel()
+            discoveryGeneration = UUID()
+            discoveryInFlight = false
+            discovery = nil
+            activityStatuses = [:]
+            statusRefreshOffset = 0
+        }
+        .onDisappear {
+            discoveryTask?.cancel()
+            discoveryTask = nil
+            discoveryGeneration = UUID()
+            discoveryInFlight = false
+        }
         .assistantSubmenuChrome()
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
@@ -153,9 +179,17 @@ struct ActivityView: View {
             else { await model.refreshOverview() }
             if discovery != nil { loadDiscovery(reset: true) }
         }
-        .task {
-            if showingArchived { await model.refreshArchivedActivity() }
-            else if model.overview == nil { await model.refreshOverview() }
+        .task(id: "\(scenePhase)-\(model.activityConnectionVersion)-\(showingArchived)-\(filter.rawValue)") {
+            guard scenePhase == .active else { return }
+            var failures = 0
+            while !Task.isCancelled, scenePhase == .active {
+                failures = await refreshVisibleActivity() ? 0 : failures + 1
+                do {
+                    try await Task.sleep(
+                        for: .seconds(PollingPolicy.activityIntervalSeconds(consecutiveFailures: failures))
+                    )
+                } catch { return }
+            }
         }
         .alert(
             "Raise task budget",
@@ -223,18 +257,21 @@ struct ActivityView: View {
 
     private func loadDiscovery(reset: Bool) {
         if !reset && discoveryInFlight { return }
+        if reset { discoveryTask?.cancel() }
         let generation = UUID()
         discoveryGeneration = generation
+        if reset { statusRefreshOffset = 0 }
         discoveryInFlight = true
         let archived = showingArchived
         let query = discoveryQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let status = filter.requestValue
         let cursor = reset ? nil : discovery?.nextCursor
         let previous = reset ? [] : discovery?.items ?? []
-        Task {
+        discoveryTask = Task {
             let page = await model.activityDiscoveryPage(archived: archived, query: query, filter: status, cursor: cursor)
-            guard discoveryGeneration == generation, showingArchived == archived else { return }
+            guard !Task.isCancelled, discoveryGeneration == generation, showingArchived == archived else { return }
             discoveryInFlight = false
+            discoveryTask = nil
             guard let page else { return }
             var seen = Set(previous.map(\.id))
             let newItems = page.items.filter { seen.insert($0.id).inserted }
@@ -244,10 +281,67 @@ struct ActivityView: View {
         }
     }
 
-    private var items: [ActivityItem] {
-        discovery?.items ?? (showingArchived
+    private func refreshVisibleActivity() async -> Bool {
+        let generation = discoveryGeneration
+        let connectionVersion = model.activityConnectionVersion
+        let archived = showingArchived
+        let refreshed = archived
+            ? await model.refreshArchivedActivity(reportFailure: false)
+            : await model.refreshOverview(reportFailure: false)
+        guard isCurrentActivityRefresh(generation, connectionVersion, archived) else { return false }
+
+        let candidates = storedItems.filter { !["done", "failed", "cancelled"].contains($0.status) }
+        guard !candidates.isEmpty else { return refreshed }
+        let cap = 12
+        let start = statusRefreshOffset % candidates.count
+        let rotated = Array(candidates.dropFirst(start)) + Array(candidates.prefix(start))
+        let batch = Array(rotated.prefix(cap))
+        statusRefreshOffset = (start + batch.count) % candidates.count
+
+        let statuses = await withTaskGroup(of: ActivityStatusResponse?.self) { group in
+            var next = 0
+            let initialCount = min(4, batch.count)
+            while next < initialCount {
+                let id = batch[next].id
+                group.addTask { await model.fetchActivityStatus(id: id) }
+                next += 1
+            }
+            var collected: [ActivityStatusResponse] = []
+            while let result = await group.next() {
+                guard !Task.isCancelled else {
+                    group.cancelAll()
+                    break
+                }
+                if let result { collected.append(result) }
+                if !Task.isCancelled, next < batch.count {
+                    let id = batch[next].id
+                    group.addTask { await model.fetchActivityStatus(id: id) }
+                    next += 1
+                }
+            }
+            return collected
+        }
+        guard isCurrentActivityRefresh(generation, connectionVersion, archived) else { return false }
+        for status in statuses { activityStatuses[status.id] = status }
+        return refreshed && statuses.count == batch.count
+    }
+
+    private func isCurrentActivityRefresh(_ generation: UUID, _ connectionVersion: Int, _ archived: Bool) -> Bool {
+        !Task.isCancelled && scenePhase == .active && discoveryGeneration == generation &&
+            showingArchived == archived && model.activityConnectionIsCurrent(version: connectionVersion)
+    }
+
+    private var storedItems: [ActivityItem] {
+        let source = discovery?.items ?? (showingArchived
             ? model.archivedActivity?.items ?? []
             : model.overview?.activity.items ?? [])
+        return source.map { item in
+            activityStatuses[item.id].map(item.applying) ?? item
+        }
+    }
+
+    private var items: [ActivityItem] {
+        storedItems.filter { showingArchived ? $0.archivedAt != nil : $0.archivedAt == nil }
     }
 
     private var filteredItems: [ActivityItem] {

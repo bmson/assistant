@@ -1,5 +1,6 @@
 import {
   type ActivityFilter,
+  type ActivityStatus,
   archiveActivity,
   archiveActivityWithRepository,
   archiveOldActivity,
@@ -7,6 +8,8 @@ import {
   cancelActivity,
   cancelActivityWithRepository,
   discoverActivityWithRepository,
+  getActivityStatusWithRepository,
+  getActivityStatus as getPostgresActivityStatus,
   getTaskDetail,
   getTaskDetailWithRepository,
   listActivity,
@@ -57,6 +60,15 @@ export function getTaskActivityDetail(
     return getTaskDetailWithRepository(repository, agentId, taskId, options);
   }
   return getTaskDetail(getDb(), taskId, options);
+}
+
+/** Compact owner-scoped status read for refreshing rows already shown in Activity. */
+export async function getTaskActivityStatus(taskId: string): Promise<ActivityStatus | null> {
+  if (loadConfig().PERSISTENCE_DRIVER === 'firestore') {
+    const { repository, agentId } = firestoreActivity();
+    return getActivityStatusWithRepository(repository, agentId, taskId);
+  }
+  return getPostgresActivityStatus(getDb(), taskId);
 }
 
 /** Owner-scoped task commands for the configured driver; null outside Firestore mode. */

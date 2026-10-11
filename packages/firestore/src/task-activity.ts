@@ -204,6 +204,37 @@ export class FirestoreTaskActivityRepository
     return { tasks, archivedCount, pendingApprovalTaskIds };
   }
 
+  async getStatus(agentId: string, taskId: string) {
+    if (!agentId || !taskId) throw new Error('Invalid owner activity status request');
+    const agents = await this.store.collection('agents').limit(2).get();
+    const agent = agents.docs[0];
+    if (
+      agents.size !== 1 ||
+      !agent ||
+      agent.id !== documentKey(agentId) ||
+      agent.get('id') !== agentId
+    )
+      throw new Error('Activity requires one matching configured agent');
+    const fence = await readPrivacyErasureFence(this.store, agentId);
+    const snapshot = await this.store.collection('tasks').doc(documentKey(taskId)).get();
+    if (!snapshot.exists) return null;
+    if (snapshot.get('agentId') !== agentId) return null;
+    const task = taskFromDocument(snapshot.data(), snapshot.id, agentId);
+    if (isCanary(task.trigger) || isChatAdmissionCancellationProjection(task)) return null;
+    const hasPendingApproval =
+      task.status === 'waiting_approval' &&
+      !(
+        await this.store
+          .collection('approvals')
+          .where('taskId', '==', taskId)
+          .where('status', '==', 'pending')
+          .limit(1)
+          .get()
+      ).empty;
+    await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
+    return { task, hasPendingApproval };
+  }
+
   async getDetail(
     agentId: string,
     taskId: string,

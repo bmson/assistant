@@ -19,11 +19,30 @@ import {
 } from '@assistant/firestore';
 import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getDb } from '@/lib/server';
+import { getTaskActivityStatus } from '@/lib/task-activity';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
 export const dynamic = 'force-dynamic';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Refresh the compact live fields for one owner-visible Activity row. */
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<Response> {
+  if (!(await isMobileAuthed(request))) return mobileUnauthorized();
+  const { id } = await params;
+  if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid activity id' }, { status: 400 });
+  try {
+    const status = await getTaskActivityStatus(id);
+    return status
+      ? mobileJson(status)
+      : mobileJson({ error: 'activity not found' }, { status: 404 });
+  } catch {
+    return mobileJson({ error: 'activity status unavailable' }, { status: 500 });
+  }
+}
 
 function activityOutcomeResponse(
   action: string,
