@@ -27,6 +27,7 @@ export * from './profile.js';
 export * from './push.js';
 export * from './recall-feedback.js';
 export * from './relationship-presentation.js';
+export * from './security-incidents.js';
 export * from './self-repair.js';
 export * from './settings.js';
 export * from './shell.js';

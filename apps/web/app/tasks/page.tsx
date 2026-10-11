@@ -13,6 +13,7 @@ import Link from 'next/link';
 import { AutoRefresh } from '@/app/auto-refresh';
 import { requireOwner } from '@/auth';
 import { formatUsd, relativeTime, stripMarkdown, truncate } from '@/lib/format';
+import { getEmailObligationRepository } from '@/lib/server';
 import { listTaskActivity } from '@/lib/task-activity';
 import {
   btn,
@@ -29,6 +30,7 @@ import {
 import { SubmitButton } from '@/lib/ui-client';
 import { displayTaskStatus, StatusChip, taskTypeLabel, trustLabel } from '@/lib/views';
 import { archiveOldTasks, archiveTask, restoreTask } from './actions';
+import { SecurityNoticeReview } from './security-notice-review';
 
 export const metadata = { title: 'Activity' };
 
@@ -104,6 +106,10 @@ export default async function TasksPage({
     ? (rawFilter as ActivityFilter)
     : 'all';
   const { items: rows, archivedCount } = await listTaskActivity({ archived, filter });
+  const reviewOwnerId =
+    !archived && (filter === 'all' || filter === 'needs-you')
+      ? (await getEmailObligationRepository().mailbox()).agentId
+      : null;
   const now = new Date();
   const groups = [...new Set(rows.map((task) => calendarDay(task.updatedAt)))].map((day) => ({
     day,
@@ -177,6 +183,8 @@ export default async function TasksPage({
         </nav>
       ) : null}
 
+      {reviewOwnerId ? <SecurityNoticeReview key={reviewOwnerId} ownerId={reviewOwnerId} /> : null}
+
       {rows.length === 0 ? (
         <EmptyState
           icon={<ListChecks className="size-5" />}
@@ -195,8 +203,8 @@ export default async function TasksPage({
           {archived
             ? 'No archived activity.'
             : filter === 'all'
-              ? 'Nothing yet. Give the assistant something in chat and its work will appear here.'
-              : `No ${FILTERS.find((item) => item.value === filter)?.label.toLowerCase()} activity.`}
+              ? 'No task activity yet.'
+              : `No ${FILTERS.find((item) => item.value === filter)?.label.toLowerCase()} task activity.`}
         </EmptyState>
       ) : (
         <div className="mt-8 flex flex-col gap-8">

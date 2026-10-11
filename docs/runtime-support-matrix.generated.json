@@ -75,7 +75,7 @@
     }
   },
   "agentWebSchemaCompatible": true,
-  "webApiRouteCount": 93,
+  "webApiRouteCount": 95,
   "routes": {
     "apps/web/app/api/audit/[id]/route.ts": {
       "methods": ["GET"],
@@ -356,6 +356,14 @@
     "apps/web/app/api/mobile/v1/repairs/route.ts": {
       "methods": ["GET", "POST"],
       "sha256": "b32dfc3113a65b3addc171f1a2c9c857f1e1ab91571a74919d890b3dece2bfac"
+    },
+    "apps/web/app/api/mobile/v1/security-reviews/[id]/route.ts": {
+      "methods": ["POST"],
+      "sha256": "db6147806512e3d543bdb5e8e76419fffbb0a1c40bea061cd87d747de930678d"
+    },
+    "apps/web/app/api/mobile/v1/security-reviews/route.ts": {
+      "methods": ["GET"],
+      "sha256": "82b3f14e5ca74baf8315c0d06d6b82e10497bbaa11f9b39ed162ef49b3a1fb4b"
     },
     "apps/web/app/api/mobile/v1/settings/policies/[id]/route.ts": {
       "methods": ["DELETE", "POST"],

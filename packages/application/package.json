@@ -17,6 +17,7 @@
     "./dashboard": "./src/dashboard.ts",
     "./documents": "./src/documents.ts",
     "./email-obligations": "./src/email-obligations.ts",
+    "./security-incidents": "./src/security-incidents.ts",
     "./goals": "./src/goals.ts",
     "./health": "./src/health.ts",
     "./imports": "./src/imports.ts",

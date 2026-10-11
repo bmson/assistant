@@ -2750,6 +2750,82 @@ export class FirestoreEmailSyncRepository implements EmailSyncRepository {
     return rows;
   }
 
+  async listSecurityReviewItems(
+    agentId: string,
+    limit: number,
+  ): Promise<SecurityIncidentAttentionCandidate[]> {
+    if (agentId !== this.agentId) return [];
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+      throw new Error('Security incident review limit must be from one to one hundred');
+    const assertReadReady = () =>
+      this.store.db.runTransaction(async (tx) => {
+        await this.assertOperationalInTransaction(tx);
+        await assertPrivacyErasureInactiveInTransaction(tx, this.store, agentId);
+      });
+    await assertReadReady();
+    const fence = await readPrivacyErasureFence(this.store, agentId);
+    const sourceSnapshot = await this.store
+      .collection('securityIncidentSources')
+      .where('agentId', '==', agentId)
+      .orderBy('observedAt', 'asc')
+      .limit(10_001)
+      .get();
+    if (sourceSnapshot.size > 10_000)
+      throw new Error('Security incident source scan exceeded bound');
+    const rows: SecurityIncidentAttentionCandidate[] = [];
+    const seenIncidents = new Set<string>();
+    // Keep the existing indexed query shape and walk its bounded result newest-first.
+    for (const sourceDoc of [...sourceSnapshot.docs].reverse()) {
+      const source = decodeRecord<Records['securityIncidentSources']>(sourceDoc.data());
+      if (
+        documentKey(source.id) !== sourceDoc.id ||
+        source.agentId !== agentId ||
+        !source.incidentId ||
+        seenIncidents.has(source.incidentId)
+      )
+        continue;
+      const incidentDoc = await this.store.doc('securityIncidents', source.incidentId).get();
+      if (!incidentDoc.exists) continue;
+      const incident = decodeRecord<Records['securityIncidents']>(incidentDoc.data());
+      const undecidedCurrentRevision =
+        incident.disposition === 'unreviewed' ||
+        (incident.decisionRevision !== null && incident.decisionRevision !== incident.revision);
+      if (
+        documentKey(incident.id) !== incidentDoc.id ||
+        incident.agentId !== agentId ||
+        incident.revision < 1 ||
+        !undecidedCurrentRevision
+      )
+        continue;
+      const emailSnapshot = await this.ingestQuery(source.channelMessageId).limit(2).get();
+      if (emailSnapshot.size !== 1) continue;
+      const emailDoc = emailSnapshot.docs[0];
+      if (!emailDoc) continue;
+      const email = decodeRecord<Records['emailIngest']>(emailDoc.data());
+      if (email.agentId !== agentId || email.category !== 'security') continue;
+      seenIncidents.add(source.incidentId);
+      rows.push({
+        channelMessageId: source.channelMessageId,
+        incidentId: incident.id,
+        revision: incident.revision,
+        confidence: incident.confidence as SecurityIncidentAttentionCandidate['confidence'],
+        disposition: incident.disposition as SecurityIncidentAttentionCandidate['disposition'],
+        decisionRevision: incident.decisionRevision,
+        materialChangeReason: incident.materialChangeReason,
+        observedAt: source.observedAt,
+        category: email.category,
+        importance: email.importance,
+        subject: email.subject,
+        fromName: email.fromName,
+        evidence: email.securityEvidence ?? null,
+      });
+      if (rows.length >= limit) break;
+    }
+    await assertReadReady();
+    await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
+    return rows;
+  }
+
   async decideSecurityIncident(input: {
     agentId: string;
     incidentId: string;

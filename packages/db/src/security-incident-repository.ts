@@ -8,7 +8,7 @@ import {
   securityIncidentIdentity,
   securityIncidentMailboxHash,
 } from '@assistant/persistence';
-import { and, desc, eq, ne, notExists, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, ne, notExists, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import {
   assertPostgresPrivacyObservationFence,
@@ -298,6 +298,82 @@ export function createPostgresSecurityIncidentRepository(
               | import('@assistant/persistence').SecurityIncidentEvidence
               | null,
           }));
+      });
+    },
+    async listReviewItems(agentId, limit) {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+        throw new Error('Security incident review limit must be from one to one hundred');
+      return db.transaction(async (tx) => {
+        const [owner] = await tx.select({ id: agents.id }).from(agents).where(ownerWhere(agentId));
+        if (!owner) return [];
+        await postgresPrivacyObservationFence(tx as unknown as Db, agentId);
+        const latestPerIncident = tx
+          .selectDistinctOn([securityIncidents.id], {
+            channelMessageId: securityIncidentSources.channelMessageId,
+            incidentId: securityIncidents.id,
+            revision: securityIncidents.revision,
+            confidence: securityIncidents.confidence,
+            disposition: securityIncidents.disposition,
+            decisionRevision: securityIncidents.decisionRevision,
+            materialChangeReason: securityIncidents.materialChangeReason,
+            observedAt: securityIncidentSources.observedAt,
+            category: emailIngest.category,
+            importance: emailIngest.importance,
+            subject: emailIngest.subject,
+            fromName: emailIngest.fromName,
+            evidence: emailIngest.securityEvidence,
+          })
+          .from(securityIncidentSources)
+          .innerJoin(
+            securityIncidents,
+            and(
+              eq(securityIncidents.id, securityIncidentSources.incidentId),
+              eq(securityIncidents.agentId, securityIncidentSources.agentId),
+            ),
+          )
+          .innerJoin(
+            emailIngest,
+            and(
+              eq(emailIngest.agentId, securityIncidentSources.agentId),
+              eq(emailIngest.channelMessageId, securityIncidentSources.channelMessageId),
+            ),
+          )
+          .where(
+            and(
+              eq(securityIncidentSources.agentId, agentId),
+              eq(emailIngest.category, 'security'),
+              sql`${securityIncidents.revision} > 0`,
+              or(
+                eq(securityIncidents.disposition, 'unreviewed'),
+                ne(securityIncidents.decisionRevision, securityIncidents.revision),
+              ),
+            ),
+          )
+          .orderBy(
+            securityIncidents.id,
+            desc(securityIncidentSources.observedAt),
+            asc(securityIncidentSources.channelMessageId),
+          )
+          .as('latest_security_review_source_per_incident');
+        const rows = await tx
+          .select()
+          .from(latestPerIncident)
+          .orderBy(desc(latestPerIncident.observedAt), asc(latestPerIncident.incidentId))
+          .limit(limit);
+        return rows.map((row) => ({
+          ...row,
+          confidence: row.confidence as
+            | 'provider-reference'
+            | 'recovery-reference'
+            | 'source-message'
+            | 'separate-source',
+          disposition: row.disposition as 'unreviewed' | 'expected' | 'dismissed',
+          subject: row.subject ?? '',
+          fromName: row.fromName ?? null,
+          evidence: row.evidence as
+            | import('@assistant/persistence').SecurityIncidentEvidence
+            | null,
+        }));
       });
     },
     async decide(input) {

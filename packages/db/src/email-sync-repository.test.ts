@@ -17,6 +17,7 @@ import {
   gmailSyncState,
   maintenanceCursors,
   messages,
+  securityIncidentSources,
   securityIncidents,
   suggestions,
 } from './schema.js';
@@ -570,6 +571,155 @@ describe('PostgreSQL Gmail sync fencing', () => {
     expect(
       await db.select().from(securityIncidents).where(eq(securityIncidents.agentId, agentId)),
     ).toEqual([]);
+  });
+
+  it('lists delivered incidents, suppresses a dismissed revision, and exposes only the latest material revision', async () => {
+    const repository = createPostgresEmailSyncRepository(db, agentId);
+    const providerIncidentRef = `incident-${randomUUID()}`;
+    const observe = async (
+      suffix: string,
+      device: string,
+      eventAt: string,
+      incidentRef = providerIncidentRef,
+    ) => {
+      const channelMessageId = `gmail:security-review:${suffix}`;
+      const quote = `Sign-in reference ${incidentRef} to ${mailbox} from ${device} at ${eventAt}.`;
+      const evidence = {
+        providerIncidentRef: incidentRef,
+        eventType: 'sign-in',
+        affectedAccount: mailbox,
+        eventAt,
+        device,
+        evidenceQuote: quote,
+      };
+      await repository.recordIngest(
+        {
+          agentId,
+          channelMessageId,
+          conversationId: null,
+          fromEmail: 'security@example.test',
+          fromName: 'Account Security',
+          subject: `Sign-in from ${device}`,
+          contentTrust: 'unknown',
+          authenticated: true,
+          category: 'security',
+          importance: 3,
+          actionable: false,
+          reason: 'security notice',
+          dates: [],
+          securityEvidence: evidence,
+        },
+        null,
+      );
+      return repository.observeSecurityIncident({
+        agentId,
+        channelMessageId,
+        sourceMessageId: `<${suffix}@provider.test>`,
+        mailbox,
+        authenticated: true,
+        evidence,
+        sourceText: quote,
+        observedAt: new Date(eventAt),
+        observationFence: null,
+      });
+    };
+
+    const first = await observe('original', 'Pixel 9', '2026-10-06T17:55:00.000Z');
+    expect(first.incident.revision).toBe(1);
+    expect(await repository.listSecurityReviewItems(agentId, 10)).toEqual([
+      expect.objectContaining({ incidentId: first.incident.id, revision: 1 }),
+    ]);
+    expect(
+      await repository.claimSecurityAttention({
+        agentId,
+        incidentId: first.incident.id,
+        revision: 1,
+        producer: 'arrival',
+        now: new Date('2026-10-06T17:56:00Z'),
+      }),
+    ).toBe(true);
+    expect(await repository.listSecurityAttentionCandidates(agentId, 10)).toEqual([]);
+    expect(await repository.listSecurityReviewItems(agentId, 10)).toEqual([
+      expect.objectContaining({ incidentId: first.incident.id, revision: 1 }),
+    ]);
+
+    expect(
+      await repository.decideSecurityIncident({
+        agentId,
+        incidentId: first.incident.id,
+        expectedRevision: 1,
+        disposition: 'dismissed',
+        reason: 'owner reviewed',
+        now: new Date('2026-10-06T17:57:00Z'),
+      }),
+    ).toBe(true);
+    expect(await repository.listSecurityReviewItems(agentId, 10)).toEqual([]);
+
+    const changed = await observe('material-change', 'Pixel 10', '2026-10-06T17:59:00.000Z');
+    expect(changed.incident.id).toBe(first.incident.id);
+    expect(changed.incident.revision).toBe(2);
+    expect(await repository.listSecurityReviewItems(agentId, 10)).toEqual([
+      expect.objectContaining({
+        incidentId: first.incident.id,
+        revision: 2,
+        channelMessageId: 'gmail:security-review:material-change',
+        subject: 'Sign-in from Pixel 10',
+      }),
+    ]);
+    expect(
+      await repository.decideSecurityIncident({
+        agentId,
+        incidentId: first.incident.id,
+        expectedRevision: 2,
+        disposition: 'expected',
+        reason: 'owner recognizes this device',
+        now: new Date('2026-10-06T18:00:00Z'),
+      }),
+    ).toBe(true);
+    expect(
+      await repository.decideSecurityIncident({
+        agentId,
+        incidentId: first.incident.id,
+        expectedRevision: 2,
+        disposition: 'dismissed',
+        reason: 'owner changed their decision',
+        now: new Date('2026-10-06T18:00:01Z'),
+      }),
+    ).toBe(true);
+    expect(
+      await repository.securityIncidentForMessage(agentId, 'gmail:security-review:material-change'),
+    ).toMatchObject({
+      disposition: 'dismissed',
+      decisionRevision: 2,
+    });
+
+    const older = await observe(
+      'limit-order-older',
+      'Pixel 11',
+      '2026-10-06T18:01:00.000Z',
+      `incident-${randomUUID()}`,
+    );
+    const newer = await observe(
+      'limit-order-newer',
+      'Pixel 12',
+      '2026-10-06T18:02:00.000Z',
+      `incident-${randomUUID()}`,
+    );
+    const [lexicalFirst, lexicalLast] = [older.incident, newer.incident].sort((a, b) =>
+      a.id.localeCompare(b.id),
+    );
+    if (!lexicalFirst || !lexicalLast) throw new Error('Expected two distinct incidents');
+    await db
+      .update(securityIncidentSources)
+      .set({ observedAt: new Date('2026-10-06T18:03:00.000Z') })
+      .where(eq(securityIncidentSources.incidentId, lexicalLast.id));
+    await db
+      .update(securityIncidentSources)
+      .set({ observedAt: new Date('2026-10-06T18:00:00.000Z') })
+      .where(eq(securityIncidentSources.incidentId, lexicalFirst.id));
+    expect(await repository.listSecurityReviewItems(agentId, 1)).toEqual([
+      expect.objectContaining({ incidentId: lexicalLast.id }),
+    ]);
   });
 
   it('rejects stale forwarded conversation creation after erasure before writing conversation or binding', async () => {
