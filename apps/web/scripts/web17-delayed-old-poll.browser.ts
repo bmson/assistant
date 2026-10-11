@@ -88,6 +88,19 @@ async function syntheticAcceptedStream(
 
 async function verifyDelayedTerminalPoll(status: 'done' | 'cancelled' | 'failed'): Promise<void> {
   const page = await context.newPage();
+  const browserErrors: string[] = [];
+  const apiEvents: string[] = [];
+  page.on('pageerror', (error) => browserErrors.push(error.message));
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.startsWith('/api/')) apiEvents.push(`${request.method()} ${url.pathname}`);
+  });
+  page.on('requestfailed', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.startsWith('/api/')) {
+      apiEvents.push(`${request.method()} ${url.pathname} failed: ${request.failure()?.errorText}`);
+    }
+  });
   const conversationId = await createConversation(page);
   const oldTaskId = await fixture.insertTerminalTask(conversationId, status);
   const newTaskId = randomUUID();
@@ -232,7 +245,22 @@ async function verifyDelayedTerminalPoll(status: 'done' | 'cancelled' | 'failed'
       { waitUntil: 'domcontentloaded' },
     );
     const composer = page.getByRole('combobox', { name: 'Message', exact: true });
-    await composer.waitFor();
+    try {
+      await composer.waitFor({ timeout: 10_000 });
+    } catch (error) {
+      const details = {
+        pagePath: new URL(page.url()).pathname,
+        title: await page.title(),
+        visibleTextareaLabels: await page
+          .locator('textarea')
+          .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('aria-label'))),
+        browserErrors,
+        apiEvents,
+      };
+      throw new Error(`WEB-17 initial composer did not render: ${JSON.stringify(details)}`, {
+        cause: error,
+      });
+    }
     await page.getByRole('button', { name: 'Stop this task', exact: true }).waitFor();
     let pollTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
