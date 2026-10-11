@@ -2086,17 +2086,22 @@ final class APIClientRetryTests: XCTestCase {
 
     @MainActor
     func testCancelledRefreshesNeverCreateOrReplaceAnError() async {
-        let model = AppModel(apiClient: makeClient())
         for hasExistingError in [false, true] {
-            if hasExistingError {
-                model.reportError(APIError.transport(URLError(.notConnectedToInternet)), retry: {})
-            }
-            let original = model.errorMessage
-            let notice = model.errorNotice
             for read in 0..<4 {
+                let iterationID = "\(testCaseID)-\(UUID().uuidString)"
+                StubURLProtocol.beginTestCase(iterationID)
+                let (client, session) = makeClient(requestScopeID: iterationID)
+                let model = AppModel(apiClient: client)
+                if hasExistingError {
+                    model.reportError(APIError.transport(URLError(.notConnectedToInternet)), retry: {})
+                }
+                let original = model.errorMessage
+                let notice = model.errorNotice
                 // A cancelled bootstrap can end the operation before the
                 // parallel overview child starts. Every endpoint that did
                 // start still makes one attempt and cannot trigger a retry.
+                // Each iteration owns its model, URLSession, and request scope,
+                // so a late overview start cannot consume the next prime().
                 let requests = read == 0 ? 2 : 1
                 StubURLProtocol.prime(Array(repeating: .failure(URLError(.cancelled)), count: requests))
                 switch read {
@@ -2116,6 +2121,9 @@ final class APIClientRetryTests: XCTestCase {
                 XCTAssertEqual(model.errorMessage, original)
                 XCTAssertEqual(model.errorNotice, notice)
                 XCTAssertEqual(model.errorRetry != nil, hasExistingError)
+                StubURLProtocol.endTestCase(iterationID)
+                let didDrain = await cancelAndDrain(session)
+                XCTAssertTrue(didDrain, "The iteration's URLSession must drain before priming the next case")
             }
         }
     }
@@ -2543,16 +2551,39 @@ final class APIClientRetryTests: XCTestCase {
     }
 
     private func makeClient(clientID: String? = nil, token: String = "t") -> APIClient {
+        makeClient(clientID: clientID, token: token, requestScopeID: testCaseID).client
+    }
+
+    private func makeClient(clientID: String? = nil, token: String = "t",
+                            requestScopeID: String) -> (client: APIClient, session: URLSession) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
-        configuration.httpAdditionalHeaders = ["X-Assistant-Test-Case": testCaseID]
+        configuration.httpAdditionalHeaders = ["X-Assistant-Test-Case": requestScopeID]
         let session = URLSession(configuration: configuration)
         sessionLock.withLock { testSessions.append(session) }
-        return APIClient(
+        let client = APIClient(
             configuration: .init(baseURL: URL(string: "https://assistant.test")!, token: token),
             session: session,
             clientID: clientID
         )
+        return (client, session)
+    }
+
+    /// End one repeated fixture scope before the next one is primed. A late
+    /// URLProtocol start carries the old scope ID and cannot consume the next
+    /// iteration's global response queue.
+    private func cancelAndDrain(_ session: URLSession) async -> Bool {
+        session.invalidateAndCancel()
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline {
+            let tasks = await withCheckedContinuation { continuation in
+                session.getAllTasks { continuation.resume(returning: $0) }
+            }
+            if tasks.isEmpty { return true }
+            tasks.forEach { $0.cancel() }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
     }
 
     /// The failure this whole change exists for: the first attempt is handed a
