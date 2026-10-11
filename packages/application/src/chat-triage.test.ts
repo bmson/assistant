@@ -11,6 +11,8 @@ describe('last-two continuation intent', () => {
       'Can you solve my last two questions?',
       'Please finish the last two requests.',
       'Could you please handle the last two questions',
+      'Can you solve my last 2 questions?',
+      'Can you solve my last two wuestions',
     ])
       expect(isLastTwoRequestsContinuation(text), text).toBe(true);
   });
@@ -22,6 +24,7 @@ describe('last-two continuation intent', () => {
       'Solve the last two.',
       'Solve my last two questions and email the hotel.',
       'Solve my last three questions.',
+      'Solve the last two wuestions and send the answer.',
     ])
       expect(isLastTwoRequestsContinuation(text), text).toBe(false);
   });

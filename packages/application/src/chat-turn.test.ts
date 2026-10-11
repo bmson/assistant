@@ -449,6 +449,8 @@ describe('chat needs-action triage', () => {
     expect(responseText).toContain('NH Collection Mitte Checkpoint Charlie');
     expect(responseText).toContain('waiting for your approval');
     expect(responseText).toContain('Approvals');
+    expect(responseText).toContain('Here’s where your last two requests stand:');
+    expect(responseText.match(/^- \*\*/gm)).toHaveLength(2);
     expect(responseText).not.toContain('quoted-third-party');
     expect(responseText).not.toContain('recorded as completed');
   });
@@ -516,6 +518,60 @@ describe('chat needs-action triage', () => {
     expect(stubs.notifyTask).not.toHaveBeenCalled();
     expect(responseText).toContain('recorded as completed');
     expect(responseText).toContain('cancelled');
+  });
+
+  it('does not notify pending tasks with a negative queue generation', async () => {
+    const now = Date.now();
+    const history = [
+      {
+        id: 'owner-one',
+        taskId: 'task-one',
+        role: 'user',
+        origin: 'owner',
+        text: 'Look up the KLM lounge.',
+        createdAt: new Date(now - 20 * 60 * 1000),
+      },
+      {
+        id: 'owner-two',
+        taskId: 'task-two',
+        role: 'user',
+        origin: 'owner',
+        text: 'Look up the Berlin route.',
+        createdAt: new Date(now - 10 * 60 * 1000),
+      },
+    ];
+    const makeTask = (id: string, text: string, createdAt: Date) => ({
+      id,
+      agentId: AGENT,
+      conversationId: CONVERSATION,
+      trust: 'owner',
+      type: 'chat_turn',
+      status: 'pending',
+      title: text,
+      progress: '',
+      createdAt,
+      updatedAt: createdAt,
+      queueGeneration: -1,
+      runAfter: null,
+      lockedUntil: null,
+      trigger: { source: 'chat', payload: { text } },
+      state: {},
+    });
+    await turn(
+      'Finish my last two requests.',
+      {},
+      {},
+      {
+        history,
+        tasks: {
+          'task-one': makeTask('task-one', history[0]?.text ?? '', history[0]?.createdAt as Date),
+          'task-two': makeTask('task-two', history[1]?.text ?? '', history[1]?.createdAt as Date),
+        },
+      },
+      false,
+      'cloudtasks',
+    );
+    expect(stubs.notifyTask).not.toHaveBeenCalled();
   });
 
   it('does not notify one task when two linked requests cannot be resolved', async () => {
@@ -765,6 +821,71 @@ describe('chat needs-action triage', () => {
     expect(responseText).not.toContain('recorded as completed');
     expect(responseText).not.toContain('resolved');
     expect(stubs.notifyTask).not.toHaveBeenCalled();
+  });
+
+  it('uses the neutral next-run wording for sleeping continuation tasks', async () => {
+    const now = Date.now();
+    const history = [
+      {
+        id: 'owner-one',
+        taskId: 'task-one',
+        role: 'user',
+        origin: 'owner',
+        text: 'Look up the KLM lounge.',
+        createdAt: new Date(now - 20 * 60 * 1000),
+      },
+      {
+        id: 'owner-two',
+        taskId: 'task-two',
+        role: 'user',
+        origin: 'owner',
+        text: 'Look up the Berlin route.',
+        createdAt: new Date(now - 10 * 60 * 1000),
+      },
+    ];
+    const makeTask = (id: string, text: string, createdAt: Date, status: string) => ({
+      id,
+      agentId: AGENT,
+      conversationId: CONVERSATION,
+      trust: 'owner',
+      type: 'chat_turn',
+      status,
+      title: text,
+      progress: '',
+      createdAt,
+      updatedAt: createdAt,
+      queueGeneration: 3,
+      runAfter: new Date(now + 60_000),
+      lockedUntil: null,
+      trigger: { source: 'chat', payload: { text } },
+      state: {},
+    });
+    const result = await turn(
+      'Finish my last two requests.',
+      {},
+      {},
+      {
+        history,
+        tasks: {
+          'task-one': makeTask(
+            'task-one',
+            history[0]?.text ?? '',
+            history[0]?.createdAt as Date,
+            'sleeping',
+          ),
+          'task-two': makeTask(
+            'task-two',
+            history[1]?.text ?? '',
+            history[1]?.createdAt as Date,
+            'done',
+          ),
+        },
+      },
+    );
+    const responseText = result.completions[0]?.messages[0]?.text ?? '';
+    expect(responseText).toContain('waiting until its next run');
+    expect(responseText).not.toContain('scheduled for later');
+    expect(responseText).not.toContain('scheduled task has been rescheduled');
   });
 
   it('answers a status question from the nearest owner task and ignores a foreign task', async () => {

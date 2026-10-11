@@ -443,7 +443,8 @@ async function taskContinuationReply(
     if (
       dependencies.config.QUEUE_DRIVER !== 'cloudtasks' ||
       task.status !== 'pending' ||
-      !Number.isSafeInteger(task.queueGeneration)
+      !Number.isSafeInteger(task.queueGeneration) ||
+      task.queueGeneration < 0
     )
       continue;
     const runAfter = task.runAfter == null ? null : new Date(task.runAfter).getTime();
@@ -467,7 +468,7 @@ async function taskContinuationReply(
     switch (task.status) {
       case 'pending':
         state = nudged.has(task.id)
-          ? 'still queued; I requested a wake-up for this same task, but delivery is not confirmed'
+          ? 'still queued; I requested a wake-up, but delivery is not confirmed'
           : 'still queued';
         break;
       case 'running':
@@ -483,7 +484,7 @@ async function taskContinuationReply(
         state = 'needs your attention in Activity';
         break;
       case 'sleeping':
-        state = 'scheduled for later';
+        state = 'waiting until its next run';
         break;
       case 'waiting_event':
         state = 'waiting for an event';
@@ -502,7 +503,7 @@ async function taskContinuationReply(
     }
     return `- **${subject}** — ${state}.`;
   });
-  return `I matched your last two requests to their existing tasks. Current recorded status:\n\n${rows.join('\n')}\n\nI did not replay terminal or approval-gated tasks.`;
+  return `Here’s where your last two requests stand:\n\n${rows.join('\n')}`;
 }
 
 /**
