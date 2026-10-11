@@ -34,7 +34,12 @@ export interface DispatcherPort {
     toolName: string;
     args: Record<string, unknown>;
     ctx: ToolContextLike;
-    provenance: { plannerVersion: number; promptVersion: number; model: string };
+    provenance: {
+      plannerVersion: number;
+      promptVersion: number;
+      model: string;
+      checklistCorrection?: { revision: number; outcomeId: string; ownerMessageId: string };
+    };
   }): Promise<
     | { kind: 'executed'; toolCallId: string; result: unknown; cached: boolean }
     | {

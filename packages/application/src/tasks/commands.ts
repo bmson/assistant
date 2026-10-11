@@ -1,15 +1,33 @@
 import { getAgent } from '@assistant/core/chat';
 import { getQueueNotifier } from '@assistant/core/queue';
-import { type Db, notChatAdmissionCancellationSql, tasks } from '@assistant/db';
+import { revisePendingRequestChecklistItem } from '@assistant/core/workflow/request-checklist';
+import { RequestChecklistSchema } from '@assistant/core/workflow/request-checklist-schema';
+import {
+  approvals,
+  conversations,
+  type Db,
+  messages,
+  notChatAdmissionCancellationSql,
+  tasks,
+  toolCallReceipts,
+  toolCalls,
+} from '@assistant/db';
 import type {
   ArchiveOldActivityProgress,
+  PendingChecklistCorrectionInput,
+  PendingChecklistCorrectionOutcome,
+  Records,
   TaskActivityCommandOutcome,
   TaskActivityCommandRepository,
   TaskActivityCurrentState,
 } from '@assistant/persistence';
 import {
   chatAdmissionCancellationPayload,
+  completeChecklistCorrectionEvidence,
+  isPinnedOwnerChatRequestMessage,
+  MAX_CHECKLIST_CORRECTION_LEDGER_ROWS,
   normalizeTaskBudget,
+  ownerChatChecklistRequestMessageId,
   taskActivityOutcome,
 } from '@assistant/persistence';
 import { and, eq, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
@@ -92,6 +110,258 @@ export async function retryActivity(db: Db, taskId: string): Promise<TaskActivit
   });
   if (outcome.outcome === 'retried' && outcome.current && outcome.current.queueGeneration !== null)
     notifyWake(taskId, outcome.current.queueGeneration);
+  return outcome;
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function checklistCorrectionOutcome(
+  outcome: PendingChecklistCorrectionOutcome['outcome'],
+  queueGeneration: number | null = null,
+  ownerMessageId: string | null = null,
+  transitioned = false,
+): PendingChecklistCorrectionOutcome {
+  return { outcome, transitioned, queueGeneration, ownerMessageId };
+}
+
+/**
+ * Persist an explicitly selected, owner-authored checklist correction as one
+ * task-locked transaction. No chat/model text is used to select the target.
+ */
+export async function revisePendingChecklistActivity(
+  db: Db,
+  agentId: string,
+  input: PendingChecklistCorrectionInput,
+): Promise<PendingChecklistCorrectionOutcome> {
+  const owner = await getAgent(db);
+  if (owner.id !== agentId) return checklistCorrectionOutcome('not_found');
+  if (
+    !UUID.test(input.taskId) ||
+    !UUID.test(input.ownerMessageId) ||
+    !input.itemId ||
+    input.itemId.length > 128 ||
+    !Number.isSafeInteger(input.expectedRevision) ||
+    input.expectedRevision < 0 ||
+    !input.replacementLabel ||
+    input.replacementLabel.length > 500
+  )
+    return checklistCorrectionOutcome('invalid');
+
+  const outcome = await db.transaction(async (tx) => {
+    const [task] = await tx
+      .select()
+      .from(tasks)
+      .where(and(eq(tasks.id, input.taskId), eq(tasks.agentId, agentId)))
+      .limit(1)
+      .for('update');
+    if (!task || chatAdmissionCancellationPayload(task))
+      return checklistCorrectionOutcome('not_found');
+    if (!task.conversationId) return checklistCorrectionOutcome('invalid');
+
+    const state =
+      task.state && typeof task.state === 'object' && !Array.isArray(task.state)
+        ? ({ ...(task.state as Record<string, unknown>) } as Record<string, unknown>)
+        : null;
+    const parsed = RequestChecklistSchema.safeParse(state?.requestChecklist);
+    if (!parsed.success) return checklistCorrectionOutcome('invalid');
+    const checklist = parsed.data;
+
+    const originalMessageId = ownerChatChecklistRequestMessageId(task, checklist.request);
+    if (!originalMessageId) return checklistCorrectionOutcome('unsafe_evidence');
+    const [originalMessage] = await tx
+      .select()
+      .from(messages)
+      .where(eq(messages.id, originalMessageId))
+      .limit(1);
+    if (
+      !originalMessage ||
+      !isPinnedOwnerChatRequestMessage(task, originalMessage, originalMessageId, checklist.request)
+    )
+      return checklistCorrectionOutcome('unsafe_evidence');
+
+    // The task lock makes same-message retries observe the already committed audit.
+    const [priorMessage] = await tx
+      .select()
+      .from(messages)
+      .where(eq(messages.id, input.ownerMessageId))
+      .limit(1);
+    if (priorMessage) {
+      const matchingAudit = checklist.revisionAudit?.find(
+        (entry) => entry.ownerMessageId === input.ownerMessageId,
+      );
+      if (
+        priorMessage.taskId === task.id &&
+        priorMessage.conversationId === task.conversationId &&
+        priorMessage.role === 'user' &&
+        priorMessage.origin === 'owner' &&
+        priorMessage.text === input.replacementLabel &&
+        matchingAudit?.itemId === input.itemId &&
+        matchingAudit.toLabel === input.replacementLabel &&
+        matchingAudit.toKind === input.replacementKind &&
+        matchingAudit.revision === input.expectedRevision + 1 &&
+        matchingAudit.taskId === task.id &&
+        matchingAudit.conversationId === task.conversationId
+      )
+        return checklistCorrectionOutcome(
+          'already_applied',
+          Number.isSafeInteger(task.queueGeneration) ? task.queueGeneration : null,
+          priorMessage.id,
+        );
+      return checklistCorrectionOutcome('invalid');
+    }
+
+    if (
+      task.status !== 'needs_attention' ||
+      task.leaseToken !== null ||
+      task.lockedUntil !== null ||
+      task.archivedAt !== null
+    )
+      return checklistCorrectionOutcome('no_longer_retriable');
+    if (!Number.isSafeInteger(task.queueGeneration) || task.queueGeneration < 0)
+      return checklistCorrectionOutcome('invalid');
+    if (state?.pendingApprovalId || state?.pendingJob != null || state?.pendingToolBatch != null)
+      return checklistCorrectionOutcome('unsafe_evidence');
+
+    const [conversation] = await tx
+      .select({ id: conversations.id })
+      .from(conversations)
+      .where(and(eq(conversations.id, task.conversationId), eq(conversations.agentId, agentId)))
+      .limit(1);
+    if (!conversation) return checklistCorrectionOutcome('not_found');
+    const [pendingApproval] = await tx
+      .select({ id: approvals.id })
+      .from(approvals)
+      .where(and(eq(approvals.taskId, task.id), inArray(approvals.status, ['pending', 'approved'])))
+      .limit(1);
+    if (pendingApproval) return checklistCorrectionOutcome('unsafe_evidence');
+
+    const calls = await tx
+      .select()
+      .from(toolCalls)
+      .where(eq(toolCalls.taskId, task.id))
+      .orderBy(toolCalls.step, toolCalls.createdAt, toolCalls.id)
+      .limit(MAX_CHECKLIST_CORRECTION_LEDGER_ROWS + 1);
+    const rawReceipts = await tx
+      .select()
+      .from(toolCallReceipts)
+      // Scope by task alone so a corrupted receipt with a foreign agent ID cannot
+      // disappear from the effect history; the shared validator checks both IDs.
+      .where(eq(toolCallReceipts.taskId, task.id))
+      .orderBy(toolCallReceipts.recordedAt, toolCallReceipts.id)
+      .limit(MAX_CHECKLIST_CORRECTION_LEDGER_ROWS + 1);
+    if (
+      calls.length > MAX_CHECKLIST_CORRECTION_LEDGER_ROWS ||
+      rawReceipts.length > MAX_CHECKLIST_CORRECTION_LEDGER_ROWS
+    )
+      return checklistCorrectionOutcome('unsafe_evidence');
+    const receipts: Array<Records['toolCallReceipts']> = [];
+    for (const receipt of rawReceipts) {
+      if (!['completed', 'failed', 'unknown', 'not_executed'].includes(receipt.effectOutcome))
+        return checklistCorrectionOutcome('unsafe_evidence');
+      receipts.push(receipt as Records['toolCallReceipts']);
+    }
+    const evidence = completeChecklistCorrectionEvidence({
+      agentId,
+      taskId: task.id,
+      toolCalls: calls,
+      receipts,
+    });
+    if (!evidence) return checklistCorrectionOutcome('unsafe_evidence');
+    const nextChecklist = revisePendingRequestChecklistItem(checklist, {
+      task: {
+        id: task.id,
+        agentId: task.agentId,
+        conversationId: task.conversationId,
+      },
+      ownerMessage: {
+        id: input.ownerMessageId,
+        taskId: task.id,
+        agentId: task.agentId,
+        conversationId: task.conversationId,
+        role: 'user',
+        origin: 'owner',
+        text: input.replacementLabel,
+      },
+      binding: {
+        taskId: task.id,
+        itemId: input.itemId,
+        expectedRevision: input.expectedRevision,
+        ownerTaskId: task.id,
+        ownerMessageId: input.ownerMessageId,
+      },
+      evidence,
+      replacement: {
+        kind: input.replacementKind,
+        label: input.replacementLabel,
+      },
+    });
+    if (nextChecklist === checklist)
+      return checklistCorrectionOutcome(
+        input.expectedRevision !== (checklist.revision ?? 0) ? 'stale_revision' : 'invalid',
+      );
+    const generation = task.queueGeneration + 1;
+    const now = new Date();
+    const nextState: Record<string, unknown> = {
+      ...(state ?? {}),
+      requestChecklist: nextChecklist,
+    };
+    delete nextState.pendingFinal;
+    const [insertedMessage] = await tx
+      .insert(messages)
+      .values({
+        id: input.ownerMessageId,
+        conversationId: task.conversationId,
+        taskId: task.id,
+        role: 'user',
+        origin: 'owner',
+        parts: [{ type: 'text', text: input.replacementLabel }],
+        text: input.replacementLabel,
+      })
+      .returning({ id: messages.id });
+    if (!insertedMessage) throw new Error('Checklist correction owner message was not persisted');
+    const [updated] = await tx
+      .update(tasks)
+      .set({
+        state: nextState,
+        plan: null,
+        status: 'pending',
+        runAfter: null,
+        lockedUntil: null,
+        leaseToken: null,
+        queueGeneration: generation,
+        attempt: 0,
+        attentionNotifiedAt: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(tasks.id, task.id),
+          eq(tasks.agentId, agentId),
+          eq(tasks.status, 'needs_attention'),
+          eq(tasks.queueGeneration, task.queueGeneration),
+        ),
+      )
+      .returning({ queueGeneration: tasks.queueGeneration });
+    if (!updated) throw new Error('Checklist correction task changed before commit');
+    await tx
+      .update(conversations)
+      .set({ updatedAt: now })
+      .where(and(eq(conversations.id, task.conversationId), eq(conversations.agentId, agentId)));
+    return checklistCorrectionOutcome(
+      'corrected',
+      updated.queueGeneration,
+      input.ownerMessageId,
+      true,
+    );
+  });
+
+  if (outcome.outcome === 'corrected' && outcome.queueGeneration !== null) {
+    try {
+      getQueueNotifier().notify(input.taskId, outcome.queueGeneration);
+    } catch {
+      // Durable task status and generation remain authoritative; the normal sweeper can wake it.
+    }
+  }
   return outcome;
 }
 
@@ -249,6 +519,14 @@ export function retryActivityWithRepository(
   taskId: string,
 ): Promise<TaskActivityCommandOutcome> {
   return repository.retry(agentId, taskId);
+}
+
+export function revisePendingChecklistWithRepository(
+  repository: TaskActivityCommandRepository,
+  agentId: string,
+  input: PendingChecklistCorrectionInput,
+): Promise<PendingChecklistCorrectionOutcome> {
+  return repository.revisePendingChecklist(agentId, input);
 }
 
 export function cancelActivityWithRepository(

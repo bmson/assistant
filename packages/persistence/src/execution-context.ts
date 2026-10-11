@@ -27,6 +27,17 @@ export interface ExecutionContextRepository {
     throughMessageId?: string;
     limit?: number;
   }): Promise<Records['messages'][]>;
+  /** Exact visible owner-authored chat message; validates both owner and conversation scope. */
+  getOwnerMessage(input: {
+    agentId: string;
+    conversationId: string;
+    messageId: string;
+  }): Promise<Records['messages'] | null>;
+  /** Most recent visible owner-authored user message in an owned chat. */
+  getLatestOwnerMessage(input: {
+    agentId: string;
+    conversationId: string;
+  }): Promise<Records['messages'] | null>;
   getInboundMessage(input: {
     agentId: string;
     conversationId: string;

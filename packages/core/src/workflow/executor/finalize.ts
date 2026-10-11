@@ -433,7 +433,13 @@ export async function stageFinalResponse(
   window: ModelMessage[],
   pending: PendingFinal,
 ): Promise<ExecuteResult> {
-  await refreshRequestChecklist(executionEvidence(deps), task, state);
+  const correctionOwnedChecklist =
+    state.requestChecklist?.revision !== undefined ||
+    state.requestChecklist?.revisionAudit !== undefined;
+  // Correction reads reconcile only their selected, revision-bound item after
+  // typed coverage. The generic receipt matcher uses broader target terms and
+  // can both lose corrected state and satisfy a same-kind sibling by accident.
+  if (!correctionOwnedChecklist) await refreshRequestChecklist(executionEvidence(deps), task, state);
   const checklist = state.requestChecklist;
   if (checklist && requestChecklistHasUnfinished(checklist)) {
     // A partial success is not the whole request. This is also applied to
@@ -449,7 +455,8 @@ export async function stageFinalResponse(
       )
       .trim();
     const answer =
-      qualifiedDraft && (pending.outcome === 'clarify' || pending.contractBlocked === false)
+      qualifiedDraft &&
+      (correctionOwnedChecklist || pending.outcome === 'clarify' || pending.contractBlocked === false)
         ? `${qualifiedDraft}\n\n`
         : '';
     pending.text = `${answer}This request is not fully completed.\n\n${requestChecklistSummary(checklist)}`;

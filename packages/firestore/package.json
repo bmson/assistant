@@ -14,6 +14,7 @@
     "workspace-import-job": "tsx src/workspace-import-job-cli.ts"
   },
   "dependencies": {
+    "@assistant/core": "workspace:*",
     "@assistant/persistence": "workspace:*",
     "@google-cloud/firestore": "^9.2.0",
     "google-auth-library": "^10.9.1"

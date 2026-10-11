@@ -40,6 +40,103 @@ export interface TaskActivityCommandOutcome {
   current: TaskActivityCurrentState | null;
 }
 
+/** Explicit Activity selection for an owner-authored pending checklist correction. */
+export interface PendingChecklistCorrectionInput {
+  taskId: string;
+  itemId: string;
+  expectedRevision: number;
+  /** Stable across an Activity form retry; also becomes the durable owner-message ID. */
+  ownerMessageId: string;
+  /** Exact direct request clause entered by the owner and stored as the message text. */
+  replacementLabel: string;
+  replacementKind:
+    | 'lookup'
+    | 'save'
+    | 'card'
+    | 'reminder'
+    | 'send'
+    | 'draft'
+    | 'document'
+    | 'calendar';
+}
+
+export interface PendingChecklistCorrectionOutcome {
+  outcome:
+    | 'corrected'
+    | 'already_applied'
+    | 'not_found'
+    | 'no_longer_retriable'
+    | 'stale_revision'
+    | 'unsafe_evidence'
+    | 'invalid';
+  transitioned: boolean;
+  queueGeneration: number | null;
+  ownerMessageId: string | null;
+}
+
+const OWNER_CHAT_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Return the pinned original owner-message ID only for a supported owner chat task. */
+export function ownerChatChecklistRequestMessageId(
+  task: {
+    id: string;
+    agentId: string;
+    conversationId: string | null;
+    goalId?: string | null;
+    type: string;
+    trust: string;
+    trigger: unknown;
+  },
+  request: string,
+): string | null {
+  const trigger = task.trigger;
+  if (!trigger || typeof trigger !== 'object' || Array.isArray(trigger)) return null;
+  const row = trigger as Record<string, unknown>;
+  const payload = row.payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const fields = payload as Record<string, unknown>;
+  const messageId = fields.triggerMessageId;
+  if (
+    task.type !== 'chat_turn' ||
+    task.trust !== 'owner' ||
+    task.goalId != null ||
+    !task.conversationId ||
+    row.source !== 'chat' ||
+    row.agentId !== task.agentId ||
+    row.conversationId !== task.conversationId ||
+    row.trust !== 'owner' ||
+    fields.text !== request ||
+    typeof messageId !== 'string' ||
+    !OWNER_CHAT_MESSAGE_ID.test(messageId)
+  )
+    return null;
+  return messageId;
+}
+
+/** Validate the durable row pinned by the task's original owner chat trigger. */
+export function isPinnedOwnerChatRequestMessage(
+  task: { id: string; agentId: string; conversationId: string | null },
+  message: {
+    id: string;
+    taskId: string | null;
+    conversationId: string;
+    role: string;
+    origin: string;
+    text: string;
+  },
+  messageId: string,
+  request: string,
+): boolean {
+  return (
+    message.id === messageId &&
+    message.taskId === task.id &&
+    message.conversationId === task.conversationId &&
+    message.role === 'user' &&
+    message.origin === 'owner' &&
+    message.text === request
+  );
+}
+
 export function taskActivityOutcome(
   outcome: TaskActivityOutcomeCode,
   current: TaskActivityCurrentState | null,
@@ -53,6 +150,10 @@ export interface TaskActivityCommandRepository {
   archive(agentId: string, taskId: string): Promise<TaskActivityCommandOutcome>;
   restore(agentId: string, taskId: string): Promise<TaskActivityCommandOutcome>;
   retry(agentId: string, taskId: string): Promise<TaskActivityCommandOutcome>;
+  revisePendingChecklist(
+    agentId: string,
+    input: PendingChecklistCorrectionInput,
+  ): Promise<PendingChecklistCorrectionOutcome>;
   cancel(agentId: string, taskId: string): Promise<TaskActivityCommandOutcome>;
   revokeAutonomy(agentId: string, taskId: string): Promise<TaskActivityCommandOutcome>;
   raiseBudget(agentId: string, taskId: string, limit: number): Promise<TaskActivityCommandOutcome>;

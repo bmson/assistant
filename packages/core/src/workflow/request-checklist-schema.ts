@@ -14,6 +14,10 @@ const ChecklistRevisionAuditSchema = z.object({
   fromLabel: z.string().min(1).max(500),
   fromTargetTerms: z.array(z.string().min(1).max(100)).max(8),
   toLabel: z.string().min(1).max(500),
+  /** Present on newly authored audits; optional for existing v1 history. */
+  toKind: z
+    .enum(['lookup', 'save', 'card', 'reminder', 'send', 'draft', 'document', 'calendar'])
+    .optional(),
   toTargetTerms: z.array(z.string().min(1).max(100)).max(8),
   excludedEvidenceIds: z.array(z.string().min(1).max(128)).max(256),
 });

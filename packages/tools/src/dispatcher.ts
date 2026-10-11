@@ -53,7 +53,12 @@ export interface DispatchInput {
   args: Record<string, unknown>;
   ctx: ToolContext;
   /** Provenance for tool_calls.decision. */
-  provenance: { plannerVersion: number; promptVersion: number; model: string };
+  provenance: {
+    plannerVersion: number;
+    promptVersion: number;
+    model: string;
+    checklistCorrection?: { revision: number; outcomeId: string; ownerMessageId: string };
+  };
 }
 
 const MISSION_ROOT_TOOLS = new Set([
@@ -1539,6 +1544,9 @@ export class ToolDispatcher {
       promptVersion: input.provenance.promptVersion,
       model: input.provenance.model,
       modelToolCallId: input.modelToolCallId,
+      ...(input.provenance.checklistCorrection
+        ? { checklistCorrection: input.provenance.checklistCorrection }
+        : {}),
     };
 
     if (tier === 'approval') {

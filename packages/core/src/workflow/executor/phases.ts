@@ -19,6 +19,7 @@ import {
   renderSituationDecisionContext,
 } from '../../memory/situation-context.js';
 import type { ModelRouter } from '../../model-router/router.js';
+import type { ChecklistCorrectionResumeProjection } from '../checklist-correction-resume.js';
 import { approvalHeadline, approvalPrompt, clarifyingQuestion } from '../../owner-text.js';
 import { deliveredChannels, markApprovalsNotified } from '../approvals.js';
 import {
@@ -120,6 +121,8 @@ export interface RunContext {
   window: ModelMessage[];
   artifactIntent?: ArtifactIntent;
   documentReadIntent?: DocumentReadIntent;
+  /** Validated, exact-owner correction mode. Never populated from chat recency. */
+  checklistCorrection?: ChecklistCorrectionResumeProjection;
 }
 
 const PLANNING_RECALL_MARKER = '[[assistant:owner-context-recall:v1]]';

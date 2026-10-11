@@ -41,12 +41,19 @@ export class FirestoreExecutionContextRepository implements ExecutionContextRepo
     return value.id === id && documentKey(value.id) === snapshot.ref.id ? value : null;
   }
 
-  private decodeMessage(doc: FirebaseFirestore.QueryDocumentSnapshot): Records['messages'] {
+  private decodeMessage(doc: FirebaseFirestore.DocumentSnapshot): Records['messages'] {
     const row = decodeRecord<Records['messages']>(doc.data());
     if (documentKey(row.id) !== doc.id) {
       throw new Error('Execution context message document identity mismatch');
     }
-    return row;
+    const appendedAt = doc.get('appendedAt');
+    const appendSequence =
+      appendedAt instanceof Timestamp
+        ? (BigInt(appendedAt.seconds) * 1_000_000_000n + BigInt(appendedAt.nanoseconds))
+            .toString()
+            .padStart(20, '0')
+        : row.appendSequence;
+    return { ...row, appendSequence };
   }
 
   private async ownedConversation(agentId: string, conversationId: string) {
@@ -101,6 +108,57 @@ export class FirestoreExecutionContextRepository implements ExecutionContextRepo
     } else query = query.where('createdAt', '<', before);
     const snapshot = await query.limit(limit).get();
     return snapshot.docs.map((doc) => this.decodeMessage(doc)).reverse();
+  }
+
+  async getOwnerMessage({ agentId, conversationId, messageId }: {
+    agentId: string;
+    conversationId: string;
+    messageId: string;
+  }) {
+    const conversation = await this.ownedConversation(agentId, conversationId);
+    if (conversation?.channel !== 'chat') return null;
+    const snapshot = await this.store.doc('messages', messageId).get();
+    if (!snapshot.exists) return null;
+    const message = this.decodeMessage(snapshot);
+    return message.conversationId === conversationId &&
+      message.role === 'user' &&
+      message.origin === 'owner' &&
+      message.hiddenAt === null
+      ? message
+      : null;
+  }
+
+  async getLatestOwnerMessage({ agentId, conversationId }: {
+    agentId: string;
+    conversationId: string;
+  }) {
+    const conversation = await this.ownedConversation(agentId, conversationId);
+    if (conversation?.channel !== 'chat') return null;
+    const snapshot = await this.store
+      .collection('messages')
+      .where('conversationId', '==', conversationId)
+      .where('role', '==', 'user')
+      .where('origin', '==', 'owner')
+      .where('hiddenAt', '==', null)
+      // Appends are server timestamped at commit. createdAt may be backdated
+      // and therefore cannot establish which owner message is the head.
+      .orderBy('appendedAt', 'desc')
+      .orderBy('id', 'desc')
+      .limit(1)
+      .get();
+    const doc = snapshot.docs[0];
+    if (!doc) return null;
+    const message = this.decodeMessage(doc);
+    if (
+      message.conversationId !== conversationId ||
+      typeof message.appendSequence !== 'string' ||
+      message.appendSequence.length !== 20 ||
+      message.role !== 'user' ||
+      message.origin !== 'owner' ||
+      message.hiddenAt !== null
+    )
+      throw new Error('Execution context latest owner-message scope mismatch');
+    return message;
   }
 
   async getInboundMessage({

@@ -315,6 +315,43 @@ describe('durable request checklist', () => {
     expect(revised.revisionAudit?.[0]?.excludedEvidenceIds).toContain(preRevision.id);
     expect(reconcileRequestChecklist(revised, [staleSuccess]).items[1]?.status).toBe('pending');
   });
+  it('preserves a completed same-kind sibling while revising only the explicitly bound pending item', () => {
+    const original = checklist(
+      'Find my hotel confirmation email in Berlin and find my flight confirmation email to Paris on 2026-12-21',
+    );
+    const completedHotel: ChecklistEvidence = {
+      id: 'completed-hotel-receipt',
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      effectOutcome: 'completed',
+      args: { query: 'hotel berlin' },
+      result: { results: [{ threadId: 'berlin-hotel', subject: 'Berlin hotel confirmation' }] },
+    };
+    const withCompletedSibling = {
+      ...original,
+      items: original.items.map((item, index) =>
+        index === 0
+          ? {
+              ...item,
+              status: 'completed' as const,
+              evidence: [{ id: completedHotel.id, toolName: completedHotel.toolName }],
+            }
+          : item,
+      ),
+    };
+    const revised = revisePendingRequestChecklistItem(
+      withCompletedSibling,
+      correctionInput(withCompletedSibling, {
+        itemIndex: 1,
+        evidenceRows: [completedHotel],
+        replacement: { kind: 'lookup', label: 'Find my flight confirmation email to London on 2026-12-21' },
+      }),
+    );
+    expect(revised.revision).toBe(1);
+    expect(revised.items[0]).toMatchObject({ status: 'completed', label: original.items[0]?.label });
+    expect(revised.items[1]).toMatchObject({ status: 'pending', label: 'Find my flight confirmation email to London on 2026-12-21' });
+    expect(revised.revisionAudit?.[0]?.excludedEvidenceIds).toContain(completedHotel.id);
+  });
   it('fails closed on missing authority, stale revisions, ambiguity, and evidence overflow', () => {
     const original = checklist('Find my hotel reservation and remind me about the hotel');
     const base = correctionInput(original);
@@ -343,9 +380,12 @@ describe('durable request checklist', () => {
       ...original,
       items: [...original.items, { ...reminderItem, id: 'second-reminder' }],
     };
-    expect(
-      revisePendingRequestChecklistItem(duplicateKind, correctionInput(duplicateKind)),
-    ).toEqual(duplicateKind);
+    const exactItemCorrection = revisePendingRequestChecklistItem(
+      duplicateKind,
+      correctionInput(duplicateKind),
+    );
+    expect(exactItemCorrection.items[1]?.label).not.toBe(reminderItem.label);
+    expect(exactItemCorrection.items[2]?.label).toBe(reminderItem.label);
   });
   it('rejects mismatched kind, quoted, conditional, ambiguous, or targetless replacements', () => {
     const original = checklist('Find my hotel reservation and remind me about the hotel');

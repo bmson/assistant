@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { communicationReceipt } from '../communication-receipt.js';
 import { effectiveReminders, reminderIdentity } from './reminder-state.js';
 import { type RequestChecklist, RequestChecklistSchema } from './request-checklist-schema.js';
-import { isDurableSave } from './saved-work.js';
+import { isDurableSave } from './saved-work-evidence.js';
 
 type Kind = RequestChecklist['items'][number]['kind'];
 const CHECKLIST_KINDS: Kind[] = [
@@ -434,10 +434,8 @@ export function revisePendingRequestChecklistItem(
   if (!item) return checklist;
   if (item.status !== 'pending' || item.ownerCancellation || item.kind !== replacement.kind)
     return checklist;
-  // Duplicate same-kind outcomes are deliberately not guessed, even with an
-  // item selector, because the selected target can still share a receipt path.
-  if (checklist.items.filter((candidate) => candidate.kind === item.kind).length !== 1)
-    return checklist;
+  // The durable task/item binding disambiguates same-kind outcomes. Do not
+  // infer a target from kind or wording; only this exact pending item changes.
 
   const label = replacement.label
     .trim()
@@ -485,9 +483,15 @@ export function revisePendingRequestChecklistItem(
     new Set(evidenceIds).size !== evidenceIds.length
   )
     return checklist;
+  const preservedCompletedSiblingEvidenceIds = new Set(
+    checklist.items
+      .filter((candidate) => candidate.id !== item.id && candidate.status === 'completed')
+      .flatMap((candidate) => candidate.evidence.map((receipt) => receipt.id)),
+  );
   // Unknown outcomes and unrecognized tools may still have changed the world.
-  // Any matching same-kind call may have crossed dispatch; only a durable
-  // failed-before-execution proof is safe to ignore.
+  // A receipt already bound to a different completed sibling is preserved as
+  // that sibling's effect; it cannot satisfy or retarget the selected item.
+  // Otherwise only a durable failed-before-execution proof is safe to ignore.
   if (
     evidence.rows.some((row) => {
       const safeNoEffect = row.status === 'failed' && row.effectOutcome === 'not_executed';
@@ -495,7 +499,9 @@ export function revisePendingRequestChecklistItem(
       return (
         row.effectOutcome === 'unknown' ||
         (!knownTool && !safeNoEffect) ||
-        (candidates(item.kind, row.toolName) && !safeNoEffect)
+        (candidates(item.kind, row.toolName) &&
+          !safeNoEffect &&
+          !preservedCompletedSiblingEvidenceIds.has(row.id))
       );
     })
   )
@@ -541,6 +547,7 @@ export function revisePendingRequestChecklistItem(
         fromLabel: item.label,
         fromTargetTerms: item.targetTerms,
         toLabel: label,
+        toKind: replacement.kind,
         toTargetTerms: targetTerms,
         excludedEvidenceIds: newlyExcludedEvidenceIds,
       },
