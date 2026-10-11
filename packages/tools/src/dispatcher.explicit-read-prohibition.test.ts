@@ -45,15 +45,24 @@ function makeRepositories() {
   let approvedCall: Records['toolCalls'] | null = null;
   let approvedTask: TaskLease | null = null;
   let approvedApproval: Records['approvals'] | null = null;
-  const started = vi.fn(async (input: StartAutonomousToolCallInput) => toolCallRow(input));
+  let currentTask: TaskLease | null = null;
+  let startedCall: Records['toolCalls'] | null = null;
+  const started = vi.fn(async (input: StartAutonomousToolCallInput) => {
+    startedCall = toolCallRow(input);
+    return startedCall;
+  });
   const outcome = vi.fn(async () => true);
   const contacts = vi.fn(async () => [] as Array<{ emails: string[]; phones: string[] }>);
   const execution: ToolExecutionRepository = {
     kind: 'tool-execution-repository',
-    load: async () =>
-      approvedCall && approvedTask
-        ? { toolCall: approvedCall, task: approvedTask, approval: approvedApproval }
-        : null,
+    load: async (_agentId, taskId, toolCallId) => {
+      if (approvedCall && approvedTask) {
+        return { toolCall: approvedCall, task: approvedTask, approval: approvedApproval };
+      }
+      return currentTask?.id === taskId && startedCall?.id === toolCallId
+        ? { toolCall: startedCall, task: currentTask, approval: null }
+        : null;
+    },
     findByModelToolCallId: async () => null,
     findReceiptByToolCallId: async () => null,
     findReceiptByModelToolCallId: async () => null,
@@ -125,6 +134,9 @@ function makeRepositories() {
       approvedTask = task;
       approvedCall = call;
       approvedApproval = approval;
+    },
+    setCurrentTask(task: TaskLease) {
+      currentTask = task;
     },
   };
 }
@@ -235,8 +247,10 @@ function fixture(docsReplayKey = false, preparedDocumentId?: string) {
     type: 'chat_turn',
     status: 'running',
     trigger: { source: 'chat', payload: { text: '' } },
+    leaseToken: 'synthetic-running-lease',
     lockedUntil: new Date(Date.now() + 60_000),
   };
+  repositories.setCurrentTask(task);
   let step = 0;
   const makeContext = (text: string): ToolContext => {
     const ownerIntent = extractOwnerIntent({ trust: 'owner', text });
