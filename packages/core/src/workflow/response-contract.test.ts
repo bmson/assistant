@@ -291,6 +291,64 @@ describe('response execution contract', () => {
     expect(response).toContain('more metadata pages remain');
     expect(response).not.toMatch(/no matching messages were returned\.$/);
   });
+
+  it('states the checked and remaining scope for a bounded exhaustive mail-history lookup', () => {
+    const request = detectPersonalReadRequest([
+      { role: 'user', content: 'Search my inbox history for Clay' },
+    ]);
+    expect(request).toMatchObject({ kind: 'email', requiresExhaustiveMail: true });
+    if (!request) throw new Error('expected an exhaustive mail-history request');
+
+    const searchPages = Array.from({ length: 3 }, (_, index) => ({
+      toolName: 'gmail.search' as const,
+      status: 'succeeded' as const,
+      args: {
+        query: request.mailQuery,
+        ...(index > 0 ? { pageToken: `page-${index + 1}` } : {}),
+      },
+      result: {
+        complete: false,
+        hasMore: true,
+        nextPageToken: `page-${index + 2}`,
+        mailboxSearched: 'assistant@example.com',
+        matchingMessagesEstimate: 43,
+        results: [
+          {
+            messageId: `message-${index + 1}`,
+            threadId: `thread-${index + 1}`,
+            from: 'recruiter@example.com',
+            subject: `Clay interview ${index + 1}`,
+          },
+        ],
+      },
+    }));
+    const openedThread = {
+      toolName: 'gmail.read_thread' as const,
+      status: 'succeeded' as const,
+      args: { threadId: 'thread-2' },
+      result: {
+        complete: true,
+        messages: [
+          {
+            messageId: 'message-2',
+            threadId: 'thread-2',
+            from: 'recruiter@example.com',
+            subject: 'Clay interview 2',
+            text: 'The interview decision is still pending.',
+          },
+        ],
+      },
+    };
+    const response = verifiedReadResponse(request, [...searchPages, openedThread]);
+
+    expect(response).toContain(`Mail coverage: searched “${request.mailQuery}”`);
+    expect(response).toContain('about 43 matching messages; metadata returned for 3');
+    expect(response).toContain('1 of 3 matching threads opened (2 remain unopened)');
+    expect(response).toContain('more metadata pages remain');
+    expect(response).toContain(`Searched assistant@example.com for “${request.mailQuery}”.`);
+    expect(response).not.toMatch(/complete inbox history|all matching messages were checked/i);
+  });
+
   it('renders every returned calendar event in a complete deterministic agenda', () => {
     const events = Array.from({ length: 50 }, (_, index) => ({
       eventId: `event-${index}`,
