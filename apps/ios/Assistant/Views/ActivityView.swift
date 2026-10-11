@@ -545,19 +545,10 @@ struct ActivityView: View {
             if discovery != nil { loadDiscovery(reset: true) }
             if showsSecurityReviews { await securityReviewController?.refresh() }
         }
-        .task(id: "\(scenePhase)-\(model.activityConnectionVersion)-\(showingArchived)-\(filter.rawValue)") {
-            guard scenePhase == .active else { return }
-            var failures = 0
-            while !Task.isCancelled, scenePhase == .active {
-                failures = await refreshVisibleActivity() ? 0 : failures + 1
-                do {
-                    try await Task.sleep(
-                        for: .seconds(PollingPolicy.activityIntervalSeconds(consecutiveFailures: failures))
-                    )
-                } catch { return }
-            }
+        .task(id: activityPollingTaskID) {
+            await pollVisibleActivity()
         }
-        .task(id: "security-\(scenePhase)-\(model.activityConnectionVersion)-\(showingArchived)-\(filter.rawValue)") {
+        .task(id: securityReviewTaskID) {
             await refreshSecurityReviews()
         }
         .alert(
@@ -952,6 +943,29 @@ struct ActivityView: View {
             securityReviewController = controller
         }
         await controller.refresh()
+    }
+
+    private var activityPollingTaskID: String {
+        "\(scenePhase)-\(model.activityConnectionVersion)-\(showingArchived)-\(filter.rawValue)"
+    }
+
+    private var securityReviewTaskID: String {
+        "security-\(scenePhase)-\(model.activityConnectionVersion)-\(showingArchived)-\(filter.rawValue)"
+    }
+
+    private func pollVisibleActivity() async {
+        guard scenePhase == .active else { return }
+        var failures = 0
+        while !Task.isCancelled, scenePhase == .active {
+            let refreshed = await refreshVisibleActivity()
+            failures = refreshed ? 0 : failures + 1
+            let interval = PollingPolicy.activityIntervalSeconds(consecutiveFailures: failures)
+            do {
+                try await Task.sleep(for: .seconds(interval))
+            } catch {
+                return
+            }
+        }
     }
 
     private func pauseChecklistCorrections() {
