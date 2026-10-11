@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createUIMessageStream, createUIMessageStreamResponse } from 'ai';
 import { chromium, type Page, type Route } from 'playwright';
-import { createWeb17Fixture } from '../../../scripts/web17-delayed-old-poll-fixture.js';
+import { createWeb17Fixture } from './web17-delayed-old-poll-fixture.js';
 
 const baseUrl = process.env.SMOKE_BASE_URL;
 assert(baseUrl, 'Set SMOKE_BASE_URL to the running loopback production web app');
