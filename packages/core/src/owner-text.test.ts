@@ -244,6 +244,25 @@ describe('failureNotice', () => {
     );
     expect(failureNotice(raw[3])).toContain('Want me to try again');
   });
+
+  it('classifies a failed configured fallback from its bounded primary cause', () => {
+    const wrapped = (cause: unknown) =>
+      Object.assign(new Error('configured model fallback attempt failed'), {
+        name: 'ModelCallFallbackAttemptError',
+        fallbackAttempted: true,
+        cause,
+      });
+
+    expect(classifyFailure(wrapped(new Error('AI_APICallError: HTTP 404 no endpoints')))).toBe(
+      'provider',
+    );
+    expect(classifyFailure(wrapped(new Error('payment method is required')))).toBe('billing');
+    expect(classifyFailure(wrapped(new Error('invalid internal tool state')))).toBe('internal');
+
+    const cyclic = wrapped(new Error('temporary upstream failure'));
+    Object.defineProperty(cyclic, 'cause', { value: cyclic });
+    expect(classifyFailure(cyclic)).toBe('internal');
+  });
 });
 
 describe('ownerTaskLabel', () => {

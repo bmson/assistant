@@ -201,7 +201,25 @@ export type FailureCause = 'provider' | 'billing' | 'internal';
  * need to know whether it is worth trying again, and whether it is theirs to fix.
  */
 export function classifyFailure(error: unknown): FailureCause {
-  const text = String(error).toLowerCase();
+  // ModelRouter wraps a failed configured fallback so both attempts remain
+  // available for diagnostics. Classify the original provider rejection for
+  // notice presentation without exposing either raw error to the owner.
+  let classifiedError = error;
+  const seen = new Set<Error>();
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (
+      !(classifiedError instanceof Error) ||
+      classifiedError.name !== 'ModelCallFallbackAttemptError' ||
+      !('fallbackAttempted' in classifiedError) ||
+      classifiedError.fallbackAttempted !== true
+    )
+      break;
+    const cause = (classifiedError as Error & { cause?: unknown }).cause;
+    if (!(cause instanceof Error) || cause === classifiedError || seen.has(cause)) break;
+    seen.add(classifiedError);
+    classifiedError = cause;
+  }
+  const text = String(classifiedError).toLowerCase();
   if (/payment method|credit|billing|quota|insufficient|exhausted/u.test(text)) return 'billing';
   if (
     /rate.?limit|overload|temporar|timed? ?out|timeout|(?:code|status|http)\W{0,3}5\d\d|bad gateway|upstream|not available|ai_(?:apicall|retry)|api_?call|provider|unavailable/u.test(
