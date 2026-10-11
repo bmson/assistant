@@ -128,11 +128,16 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
   const admissionRelease = new Promise<void>((resolve) => {
     releaseAdmission = resolve;
   });
+  let settleAdmission!: () => void;
+  const admissionSettled = new Promise<void>((resolve) => {
+    settleAdmission = resolve;
+  });
   let admissionStarted!: () => void;
   const admissionSeen = new Promise<void>((resolve) => {
     admissionStarted = resolve;
   });
   let admissionCount = 0;
+  let admissionRouteError: unknown;
   const admittedTexts: string[] = [];
   const routeHandler = async (route: Route) => {
     const request = route.request();
@@ -166,7 +171,9 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
           body: await response.text(),
         });
       } catch (error) {
-        if (!request.failure()) throw error;
+        if (!request.failure()) admissionRouteError = error;
+      } finally {
+        settleAdmission();
       }
       return;
     }
@@ -300,6 +307,8 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
     assert.equal(await page.getByText(secondMessage, { exact: true }).count(), 0);
 
     releaseAdmission();
+    await waitFor(admissionSettled, 'The held first admission did not settle');
+    if (admissionRouteError) throw admissionRouteError;
     await page.getByText(resultText, { exact: true }).waitFor({ timeout: 20_000 });
     const settledSendButton = page.getByRole('button', { name: 'Send', exact: true });
     await settledSendButton.waitFor();
@@ -313,6 +322,11 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
     assert.deepEqual(browserErrors, []);
   } finally {
     releaseAdmission();
+    if (admissionCount > 0) {
+      await waitFor(admissionSettled, 'The held first admission did not drain', 5_000).catch(
+        () => {},
+      );
+    }
     await page.unroute(isChatSafetyRoute, routeHandler).catch(() => {});
     await page.close();
     await context.unroute('**/*').catch(() => {});
