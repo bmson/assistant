@@ -179,6 +179,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore call sessions',
       ),
     ).toBe(true);
 
+    expect(await restarted.requestHangup(agentId, call.id)).toBe(true);
+    expect(await restarted.applyVoiceToolEffect(input)).toEqual({ status: 'unavailable' });
+    expect(await restarted.applyVoiceToolEffect(checkinInput)).toEqual({ status: 'unavailable' });
     await restarted.finish(call.id, { status: 'completed' });
     const before = await restarted.get(call.id);
     expect(await restarted.applyVoiceToolEffect(input)).toEqual({ status: 'unavailable' });

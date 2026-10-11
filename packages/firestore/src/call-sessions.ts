@@ -392,7 +392,7 @@ export class FirestoreCallSessionRepository implements CallSessionRepository {
       const row = this.owned(await tx.get(ref));
       if (!row || row.taskId !== input.taskId || row.toolCallId !== input.parentToolCallId)
         return { status: 'unavailable' } as const;
-      if (!(ACTIVE_CALL_STATUSES as readonly string[]).includes(row.status))
+      if (row.hangupRequested || !(ACTIVE_CALL_STATUSES as readonly string[]).includes(row.status))
         return { status: 'unavailable' } as const;
       const identity = callVoiceToolEffectIdentity(input.callId, input);
       const receipts = parseCallVoiceToolReceipts(row.voiceToolReceipts);

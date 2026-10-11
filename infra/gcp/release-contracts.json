@@ -12,7 +12,7 @@
       },
       "schema": {
         "postgres": {
-          "min": 125,
+          "min": 127,
           "max": 127
         },
         "firestore": {
@@ -29,7 +29,7 @@
       },
       "schema": {
         "postgres": {
-          "min": 125,
+          "min": 127,
           "max": 127
         },
         "firestore": {

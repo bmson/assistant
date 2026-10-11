@@ -246,7 +246,7 @@ function memoryCalls(): CallSessionRepository & { rows: Map<string, CallSession>
         row.toolCallId !== input.parentToolCallId
       )
         return { status: 'unavailable' } as const;
-      if (!active(row)) return { status: 'unavailable' } as const;
+      if (row.hangupRequested || !active(row)) return { status: 'unavailable' } as const;
       const identity = callVoiceToolEffectIdentity(input.callId, input);
       const receipts = parseCallVoiceToolReceipts(row.voiceToolReceipts);
       const previous = receipts.find((receipt) => receipt.id === identity.id);
@@ -1110,6 +1110,16 @@ describe('live call bridge', () => {
         expect.objectContaining({
           error: 'This call action identity was already used with different content.',
         }),
+        'respond',
+      ),
+    );
+    expect(notifyOwner).toHaveBeenCalledTimes(2);
+    expect(await calls.requestHangup('agent-1', CALL_ID)).toBe(true);
+    voice.events().toolCall(ask);
+    await vi.waitFor(() =>
+      expect(voice.session.sendToolResult).toHaveBeenLastCalledWith(
+        ask,
+        expect.objectContaining({ error: 'The call is no longer active.' }),
         'respond',
       ),
     );

@@ -260,6 +260,9 @@ describe('PostgreSQL call-session repository', () => {
         providerCallId: 'wrong-parent-tool',
       }),
     ).toEqual({ status: 'unavailable' });
+    expect(await restarted.requestHangup(agentId, call.id)).toBe(true);
+    expect(await restarted.applyVoiceToolEffect(note)).toEqual({ status: 'unavailable' });
+    expect(await restarted.applyVoiceToolEffect(checkinInput)).toEqual({ status: 'unavailable' });
     await restarted.finish(call.id, { status: 'completed' });
     const before = await restarted.get(call.id);
     expect(await restarted.applyVoiceToolEffect(note)).toEqual({ status: 'unavailable' });
