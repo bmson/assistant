@@ -35,6 +35,9 @@ enum AssistantDestination: Hashable {
 /// Sendable so it can be handed to the `Task` the banner's button starts;
 /// capturing `AppModel` is safe because global-actor isolation makes it so.
 typealias RetryAction = @MainActor @Sendable () async -> Void
+typealias LocalNotificationScheduler = @MainActor (
+    String, String, AssistantRoute?, String?, String?, String?
+) async -> Bool
 
 /// View-scoped loads are routinely cancelled when a navigation destination is
 /// replaced. Cancellation is control flow, not a failed request, so it must
@@ -314,6 +317,7 @@ final class AppModel {
     private let defaults: UserDefaults
     private let storeConnectionToken: (String) throws -> Void
     private let enqueueAutomaticSpeech: @MainActor (ChatMessage) -> Void
+    private let scheduleLocalNotification: LocalNotificationScheduler
     private let serverKey = "assistant.server-url"
     private let configuredKey = "assistant.connection-configured"
     /// More → Assistant context owns this toggle; the model only reads it.
@@ -336,6 +340,7 @@ final class AppModel {
         enqueueAutomaticSpeech: @escaping @MainActor (ChatMessage) -> Void = { message in
             SpeechPlayer.shared.enqueue(SpeakableText.passages(for: message), for: message.id)
         },
+        scheduleLocalNotification: LocalNotificationScheduler? = nil,
         captureCurrentPlace: @escaping @MainActor () async -> (location: CLLocation, label: String)? = {
             await LocationManager.shared.captureCurrentPlace()
         }
@@ -343,6 +348,16 @@ final class AppModel {
         self.defaults = defaults
         self.storeConnectionToken = storeConnectionToken
         self.enqueueAutomaticSpeech = enqueueAutomaticSpeech
+        self.scheduleLocalNotification = scheduleLocalNotification ?? { title, body, route, approvalId, agentID, conversationID in
+            await NotificationManager.shared.schedule(
+                title: title,
+                body: body,
+                route: route,
+                approvalId: approvalId,
+                agentID: agentID,
+                conversationID: conversationID
+            )
+        }
         self.captureCurrentPlace = captureCurrentPlace
         messages = initialMessages
         serverURL = defaults.string(forKey: serverKey) ?? "http://localhost:3000"
@@ -4340,23 +4355,39 @@ final class AppModel {
 
         let reply = messages.reversed().first(where: { $0.role == .assistant && !$0.text.isEmpty })?.text
         if let finalStatus, attention.contains(finalStatus) {
-            let pendingApproval = overview?.approvals.pending.first
-            let summary = pendingApproval?.approval.summary ?? "Open the assistant to review the next step."
-            setActivityThought(.needsYou, proposedDetail: summary)
-            await LiveActivityManager.shared.needsAttention(
-                agentName: self.agentName,
-                detail: summary,
-                pendingCount: pendingApprovalCount
-            )
-            guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
-                  ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
-            _ = await notifyOnce(
-                key: "\(taskId ?? streamID)-\(finalStatus)",
-                title: "\(agentName) needs you",
-                body: "A decision is ready to review.",
-                route: .approvals,
-                approvalId: pendingApproval?.id
-            )
+            let matchingApproval = finalStatus == "waiting_approval"
+                ? overview?.approvals.pending.first(where: { $0.approval.taskId == taskId })
+                : nil
+            if let matchingApproval {
+                let summary = matchingApproval.approval.summary
+                setActivityThought(.needsYou, proposedDetail: summary)
+                await LiveActivityManager.shared.needsAttention(
+                    agentName: self.agentName,
+                    detail: summary,
+                    pendingCount: pendingApprovalCount
+                )
+                guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                      ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
+                _ = await notifyOnce(
+                    key: "\(taskId ?? streamID)-\(finalStatus)",
+                    title: "\(agentName) needs you",
+                    body: "A decision is ready to review.",
+                    route: .approvals,
+                    approvalId: matchingApproval.id
+                )
+            } else {
+                let detail = "This task needs attention. Open the chat for details."
+                setActivityThought(.needsYou, proposedDetail: detail)
+                await syncApprovalSurfaces()
+                guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
+                      ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
+                _ = await notifyOnce(
+                    key: "\(taskId ?? streamID)-\(finalStatus)",
+                    title: "\(agentName) needs attention",
+                    body: "Open the chat to see what needs your attention.",
+                    route: .chat
+                )
+            }
             guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
             await syncNotificationBadge()
@@ -4541,8 +4572,9 @@ final class AppModel {
     private func notifyOnce(key: String, title: String, body: String, route: AssistantRoute?, approvalId: String? = nil) async -> Bool {
         guard key != lastNotifiedTaskState else { return false }
         lastNotifiedTaskState = key
-        return await NotificationManager.shared.schedule(title: title, body: body, route: route,
-            approvalId: approvalId, agentID: bootstrap?.identity.id, conversationID: conversationId)
+        return await scheduleLocalNotification(
+            title, body, route, approvalId, bootstrap?.identity.id, conversationId
+        )
     }
 
     /// The app icon badge tracks exactly one thing: decisions waiting on the
