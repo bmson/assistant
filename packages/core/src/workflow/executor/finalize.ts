@@ -47,7 +47,6 @@ import {
 import {
   checkpointTask,
   completeTask,
-  enqueueTask,
   markAttentionNotified,
   markTaskNeedsAttention,
   renewTaskLease,
@@ -370,9 +369,13 @@ export async function finalizePendingResponse(
     state.pendingFinal = pending;
     if (!(await checkpointTask(deps.persistence?.tasks ?? deps.db, task, state))) return LOST_LEASE;
   } else if (pending.deliveryNeedsAttention) {
-    pending.terminalStatus = 'done';
-    pending.outcome = 'done';
     pending.deliveryNeedsAttention = false;
+    const checklistStillBlocked = pending.checklistCorrection?.outcomes.some(
+      (outcome) => outcome.status === 'blocked',
+    );
+    pending.terminalStatus = checklistStillBlocked ? 'needs_attention' : 'done';
+    pending.outcome = checklistStillBlocked ? 'needs_attention' : 'done';
+    if (checklistStillBlocked) pending.progress = 'A requested lookup still needs attention.';
     state.pendingFinal = pending;
     if (!(await checkpointTask(deps.persistence?.tasks ?? deps.db, task, state))) return LOST_LEASE;
   }
@@ -439,7 +442,8 @@ export async function stageFinalResponse(
   // Correction reads reconcile only their selected, revision-bound item after
   // typed coverage. The generic receipt matcher uses broader target terms and
   // can both lose corrected state and satisfy a same-kind sibling by accident.
-  if (!correctionOwnedChecklist) await refreshRequestChecklist(executionEvidence(deps), task, state);
+  if (!correctionOwnedChecklist)
+    await refreshRequestChecklist(executionEvidence(deps), task, state);
   const checklist = state.requestChecklist;
   if (checklist && requestChecklistHasUnfinished(checklist)) {
     // A partial success is not the whole request. This is also applied to
@@ -456,7 +460,9 @@ export async function stageFinalResponse(
       .trim();
     const answer =
       qualifiedDraft &&
-      (correctionOwnedChecklist || pending.outcome === 'clarify' || pending.contractBlocked === false)
+      (correctionOwnedChecklist ||
+        pending.outcome === 'clarify' ||
+        pending.contractBlocked === false)
         ? `${qualifiedDraft}\n\n`
         : '';
     pending.text = `${answer}This request is not fully completed.\n\n${requestChecklistSummary(checklist)}`;

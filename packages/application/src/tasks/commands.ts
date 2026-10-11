@@ -1,5 +1,9 @@
 import { getAgent } from '@assistant/core/chat';
 import { getQueueNotifier } from '@assistant/core/queue';
+import {
+  isParkedUnknownChecklistCorrectionFinal,
+  isRetryableChecklistCorrectionFinal,
+} from '@assistant/core/workflow/checklist-correction-resume';
 import { revisePendingRequestChecklistItem } from '@assistant/core/workflow/request-checklist';
 import { RequestChecklistSchema } from '@assistant/core/workflow/request-checklist-schema';
 import {
@@ -14,6 +18,7 @@ import {
 } from '@assistant/db';
 import type {
   ArchiveOldActivityProgress,
+  ChecklistCorrectionPolicy,
   PendingChecklistCorrectionInput,
   PendingChecklistCorrectionOutcome,
   Records,
@@ -87,8 +92,69 @@ export async function retryActivity(db: Db, taskId: string): Promise<TaskActivit
       task.state && typeof task.state === 'object' && !Array.isArray(task.state)
         ? { ...(task.state as Record<string, unknown>) }
         : task.state;
-    if (task.status === 'needs_attention' && state && typeof state === 'object')
-      delete (state as Record<string, unknown>).pendingFinal;
+    let preserveCorrectionFinal = false;
+    let parkUnknownCorrectionFinal = false;
+    if (task.status === 'needs_attention' && state && typeof state === 'object') {
+      const pendingFinal = (state as Record<string, unknown>).pendingFinal;
+      const hasCorrectionFinal = Boolean(
+        pendingFinal &&
+          typeof pendingFinal === 'object' &&
+          Object.hasOwn(pendingFinal, 'checklistCorrection'),
+      );
+      const correction = hasCorrectionFinal
+        ? (pendingFinal as Record<string, unknown>).checklistCorrection
+        : undefined;
+      const ownerMessageId =
+        correction && typeof correction === 'object' && !Array.isArray(correction)
+          ? (correction as Record<string, unknown>).ownerMessageId
+          : undefined;
+      if (hasCorrectionFinal && (typeof ownerMessageId !== 'string' || !task.conversationId))
+        return taskActivityOutcome('no_longer_retriable', currentTask(task));
+      if (typeof ownerMessageId === 'string' && task.conversationId) {
+        const [ownedConversation] = await tx
+          .select({ id: conversations.id })
+          .from(conversations)
+          .where(
+            and(eq(conversations.id, task.conversationId), eq(conversations.agentId, task.agentId)),
+          )
+          .limit(1);
+        const [ownerMessage] = await tx
+          .select()
+          .from(messages)
+          .where(
+            and(
+              eq(messages.id, ownerMessageId),
+              eq(messages.taskId, task.id),
+              eq(messages.conversationId, task.conversationId),
+              eq(messages.role, 'user'),
+              eq(messages.origin, 'owner'),
+              isNull(messages.hiddenAt),
+            ),
+          )
+          .limit(1);
+        preserveCorrectionFinal = Boolean(
+          ownedConversation &&
+            ownerMessage &&
+            taskActivityChecklistCorrectionPolicy.isRetryableFinal({
+              task,
+              state,
+              ownerMessage: { ...ownerMessage, agentId: task.agentId },
+            }),
+        );
+        parkUnknownCorrectionFinal = Boolean(
+          ownedConversation &&
+            ownerMessage &&
+            taskActivityChecklistCorrectionPolicy.isUnknownFinal({
+              task,
+              state,
+              ownerMessage: { ...ownerMessage, agentId: task.agentId },
+            }),
+        );
+      }
+      if (hasCorrectionFinal && (parkUnknownCorrectionFinal || !preserveCorrectionFinal))
+        return taskActivityOutcome('no_longer_retriable', currentTask(task));
+      if (!preserveCorrectionFinal) delete (state as Record<string, unknown>).pendingFinal;
+    }
     const now = new Date();
     const [updated] = await tx
       .update(tasks)
@@ -114,6 +180,73 @@ export async function retryActivity(db: Db, taskId: string): Promise<TaskActivit
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Shared pure checklist policy injected into storage adapters at composition time. */
+export const taskActivityChecklistCorrectionPolicy: ChecklistCorrectionPolicy = {
+  readChecklist(value) {
+    const parsed = RequestChecklistSchema.safeParse(value);
+    return parsed.success
+      ? {
+          checklist: parsed.data,
+          request: parsed.data.request,
+          revision: parsed.data.revision ?? 0,
+          latestAudit: parsed.data.revisionAudit?.at(-1) ?? null,
+        }
+      : null;
+  },
+  matchesReplay({ checklist: value, correction, task, priorMessage }) {
+    const parsed = RequestChecklistSchema.safeParse(value);
+    if (!parsed.success) return false;
+    const audit = parsed.data.revisionAudit?.find(
+      (entry) => entry.ownerMessageId === correction.ownerMessageId,
+    );
+    return (
+      priorMessage.id === correction.ownerMessageId &&
+      priorMessage.taskId === correction.taskId &&
+      priorMessage.conversationId === task.conversationId &&
+      priorMessage.role === 'user' &&
+      priorMessage.origin === 'owner' &&
+      priorMessage.text === correction.replacementLabel &&
+      audit?.itemId === correction.itemId &&
+      audit.toLabel === correction.replacementLabel &&
+      audit.toKind === correction.replacementKind &&
+      audit.revision === correction.expectedRevision + 1 &&
+      audit.taskId === task.id &&
+      audit.conversationId === task.conversationId &&
+      audit.ownerTaskId === task.id
+    );
+  },
+  revise(input) {
+    const parsed = RequestChecklistSchema.safeParse(input.checklist);
+    if (!parsed.success) return { decision: 'invalid' };
+    const checklist = revisePendingRequestChecklistItem(parsed.data, {
+      task: input.task,
+      ownerMessage: input.ownerMessage,
+      binding: input.binding,
+      evidence: input.evidence as Parameters<
+        typeof revisePendingRequestChecklistItem
+      >[1]['evidence'],
+      replacement: input.replacement,
+    });
+    if (checklist !== parsed.data) return { decision: 'revised', checklist };
+    return {
+      decision:
+        input.binding.expectedRevision !== (parsed.data.revision ?? 0)
+          ? 'stale_revision'
+          : 'invalid',
+    };
+  },
+  isRetryableFinal(input) {
+    return isRetryableChecklistCorrectionFinal(
+      input as Parameters<typeof isRetryableChecklistCorrectionFinal>[0],
+    );
+  },
+  isUnknownFinal(input) {
+    return isParkedUnknownChecklistCorrectionFinal(
+      input as Parameters<typeof isParkedUnknownChecklistCorrectionFinal>[0],
+    );
+  },
+};
 
 function checklistCorrectionOutcome(
   outcome: PendingChecklistCorrectionOutcome['outcome'],
@@ -162,11 +295,11 @@ export async function revisePendingChecklistActivity(
       task.state && typeof task.state === 'object' && !Array.isArray(task.state)
         ? ({ ...(task.state as Record<string, unknown>) } as Record<string, unknown>)
         : null;
-    const parsed = RequestChecklistSchema.safeParse(state?.requestChecklist);
-    if (!parsed.success) return checklistCorrectionOutcome('invalid');
-    const checklist = parsed.data;
+    const parsed = taskActivityChecklistCorrectionPolicy.readChecklist(state?.requestChecklist);
+    if (!parsed) return checklistCorrectionOutcome('invalid');
+    const checklist = parsed.checklist as ReturnType<typeof RequestChecklistSchema.parse>;
 
-    const originalMessageId = ownerChatChecklistRequestMessageId(task, checklist.request);
+    const originalMessageId = ownerChatChecklistRequestMessageId(task, parsed.request);
     if (!originalMessageId) return checklistCorrectionOutcome('unsafe_evidence');
     const [originalMessage] = await tx
       .select()
@@ -175,7 +308,7 @@ export async function revisePendingChecklistActivity(
       .limit(1);
     if (
       !originalMessage ||
-      !isPinnedOwnerChatRequestMessage(task, originalMessage, originalMessageId, checklist.request)
+      !isPinnedOwnerChatRequestMessage(task, originalMessage, originalMessageId, parsed.request)
     )
       return checklistCorrectionOutcome('unsafe_evidence');
 
@@ -186,21 +319,13 @@ export async function revisePendingChecklistActivity(
       .where(eq(messages.id, input.ownerMessageId))
       .limit(1);
     if (priorMessage) {
-      const matchingAudit = checklist.revisionAudit?.find(
-        (entry) => entry.ownerMessageId === input.ownerMessageId,
-      );
       if (
-        priorMessage.taskId === task.id &&
-        priorMessage.conversationId === task.conversationId &&
-        priorMessage.role === 'user' &&
-        priorMessage.origin === 'owner' &&
-        priorMessage.text === input.replacementLabel &&
-        matchingAudit?.itemId === input.itemId &&
-        matchingAudit.toLabel === input.replacementLabel &&
-        matchingAudit.toKind === input.replacementKind &&
-        matchingAudit.revision === input.expectedRevision + 1 &&
-        matchingAudit.taskId === task.id &&
-        matchingAudit.conversationId === task.conversationId
+        taskActivityChecklistCorrectionPolicy.matchesReplay({
+          checklist,
+          correction: input,
+          task: { id: task.id, conversationId: task.conversationId },
+          priorMessage,
+        })
       )
         return checklistCorrectionOutcome(
           'already_applied',
@@ -267,7 +392,8 @@ export async function revisePendingChecklistActivity(
       receipts,
     });
     if (!evidence) return checklistCorrectionOutcome('unsafe_evidence');
-    const nextChecklist = revisePendingRequestChecklistItem(checklist, {
+    const revision = taskActivityChecklistCorrectionPolicy.revise({
+      checklist,
       task: {
         id: task.id,
         agentId: task.agentId,
@@ -295,10 +421,8 @@ export async function revisePendingChecklistActivity(
         label: input.replacementLabel,
       },
     });
-    if (nextChecklist === checklist)
-      return checklistCorrectionOutcome(
-        input.expectedRevision !== (checklist.revision ?? 0) ? 'stale_revision' : 'invalid',
-      );
+    if (revision.decision !== 'revised') return checklistCorrectionOutcome(revision.decision);
+    const nextChecklist = revision.checklist as typeof checklist;
     const generation = task.queueGeneration + 1;
     const now = new Date();
     const nextState: Record<string, unknown> = {

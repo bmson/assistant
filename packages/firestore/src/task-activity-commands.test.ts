@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { taskActivityChecklistCorrectionPolicy } from '@assistant/application/tasks';
 import { buildRequestChecklist } from '@assistant/core/workflow/request-checklist';
 import {
   chatAdmissionCancellationTrigger,
@@ -26,7 +27,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
 
     beforeEach(async () => {
       store = emulatorStore();
-      repository = new FirestoreTaskActivityCommandRepository(store);
+      repository = new FirestoreTaskActivityCommandRepository(
+        store,
+        taskActivityChecklistCorrectionPolicy,
+      );
       await store.doc('agents', agentId).set({ id: agentId });
       await store.doc('tasks', retryId).set({
         ...taskFixture({
@@ -190,6 +194,39 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect(intents.docs[0]?.get('generation')).toBe(6);
     });
 
+    it.each([null, 'malformed', []])(
+      'preserves a saved correction final with malformed marker %j instead of requeueing it',
+      async (marker) => {
+        const taskId = randomUUID();
+        const conversationId = randomUUID();
+        const originalState = {
+          checkpoint: { step: 3 },
+          pendingFinal: {
+            text: 'The saved grounded answer.',
+            checklistCorrection: marker,
+          },
+        };
+        await store.doc('tasks', taskId).set({
+          ...taskFixture({ id: taskId, agentId, conversationId, reminderId: '' }),
+          status: 'needs_attention',
+          queueGeneration: 4,
+          state: originalState,
+        });
+
+        await expect(repository.retry(agentId, taskId)).resolves.toMatchObject({
+          outcome: 'no_longer_retriable',
+          transitioned: false,
+        });
+        const persisted = await store.doc('tasks', taskId).get();
+        expect(persisted.data()).toMatchObject({
+          status: 'needs_attention',
+          queueGeneration: 4,
+          state: originalState,
+        });
+        expect((await store.collection('outbox').where('taskId', '==', taskId).get()).size).toBe(0);
+      },
+    );
+
     it('atomically revises one explicitly selected pending item and deduplicates its owner message', async () => {
       const taskId = randomUUID();
       const conversationId = randomUUID();
@@ -247,6 +284,47 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         replacementKind: 'lookup' as const,
         replacementLabel: 'Find my flight to Berlin',
       };
+      const missingPolicy = new FirestoreTaskActivityCommandRepository(store);
+      await expect(missingPolicy.revisePendingChecklist(agentId, input)).resolves.toMatchObject({
+        outcome: 'unsafe_evidence',
+        transitioned: false,
+      });
+      expect((await store.doc('tasks', taskId).get()).get('plan')).toEqual(priorPlan);
+      expect((await store.doc('messages', ownerMessageId).get()).exists).toBe(false);
+
+      const malformedPolicyRepository = new FirestoreTaskActivityCommandRepository(store, {
+        ...taskActivityChecklistCorrectionPolicy,
+        revise: () => ({
+          decision: 'revised',
+          checklist: {
+            ...checklist,
+            request: 'silently changed original scope',
+            revision: 1,
+            revisionAudit: [
+              {
+                revision: 1,
+                taskId,
+                conversationId,
+                ownerTaskId: taskId,
+                ownerMessageId,
+                itemId: input.itemId,
+                fromLabel: checklist.items[0]?.label ?? '',
+                fromTargetTerms: [],
+                toLabel: input.replacementLabel,
+                toKind: input.replacementKind,
+                toTargetTerms: [],
+                excludedEvidenceIds: [],
+              },
+            ],
+          },
+        }),
+      });
+      await expect(
+        malformedPolicyRepository.revisePendingChecklist(agentId, input),
+      ).resolves.toMatchObject({ outcome: 'unsafe_evidence', transitioned: false });
+      expect((await store.doc('tasks', taskId).get()).get('plan')).toEqual(priorPlan);
+      expect((await store.doc('messages', ownerMessageId).get()).exists).toBe(false);
+
       const [first, replay] = await Promise.all([
         repository.revisePendingChecklist(agentId, input),
         repository.revisePendingChecklist(agentId, input),

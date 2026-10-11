@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { buildRequestChecklist } from '@assistant/core';
+import { buildRequestChecklist, executeTask, type ModelRouter } from '@assistant/core';
 import { getAgent } from '@assistant/core/chat';
 import {
   agents,
@@ -7,16 +7,22 @@ import {
   conversations,
   createDb,
   createPostgresApplicationChatPersistence,
+  createPostgresExecutionPersistence,
   goals,
   messages,
   tasks,
   toolCallReceipts,
   toolCalls,
 } from '@assistant/db';
-import { newTaskRecord } from '@assistant/persistence';
+import {
+  finalChannelDelivery,
+  finalChannelDeliveryReport,
+  newTaskRecord,
+} from '@assistant/persistence';
 import { and, eq, inArray } from 'drizzle-orm';
-import { afterAll, afterEach, describe, expect, it } from 'vitest';
-import { revisePendingChecklistActivity } from './commands.js';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
+import { retryActivity, revisePendingChecklistActivity } from './commands.js';
 
 describe('atomic Activity checklist correction', () => {
   const db = createDb(
@@ -36,6 +42,7 @@ describe('atomic Activity checklist correction', () => {
       trust?: 'owner' | 'known' | 'unknown';
       goalTask?: boolean;
       omitOriginalMessage?: boolean;
+      request?: string;
       trigger?: (
         messageId: string,
         agentId: string,
@@ -49,7 +56,9 @@ describe('atomic Activity checklist correction', () => {
       owner.id,
     );
     const taskId = randomUUID();
-    const checklist = buildRequestChecklist('Find my hotel and remind me about the hotel');
+    const checklist = buildRequestChecklist(
+      input.request ?? 'Find my hotel and remind me about the hotel',
+    );
     if (!checklist) throw new Error('test checklist is invalid');
     const originalMessageId = randomUUID();
     const goalId = input.goalTask ? randomUUID() : null;
@@ -230,6 +239,270 @@ describe('atomic Activity checklist correction', () => {
   });
 
   it.each([
+    { recovery: 'expired lease', blockSelected: false },
+    { recovery: 'owner retry', blockSelected: false },
+    { recovery: 'expired lease', blockSelected: true },
+    { recovery: 'owner retry', blockSelected: true },
+    { recovery: 'unknown delivery', blockSelected: false },
+  ] as const)(
+    'executes the atomically queued correction and retries a $blockSelected final after $recovery without another read',
+    async ({ recovery, blockSelected }) => {
+      const originalRequest =
+        'Search my Drive for the Berlin hotel invoice and search my Drive for the Paris flight itinerary';
+      const { ownerId, taskId, checklist, conversationId } = await seed({
+        request: originalRequest,
+      });
+      const flightItem = checklist.items[1];
+      if (!flightItem) throw new Error('compound checklist is missing the flight item');
+      const ownerMessageId = randomUUID();
+      const correction = await revisePendingChecklistActivity(db, ownerId, {
+        taskId,
+        itemId: flightItem.id,
+        expectedRevision: 0,
+        ownerMessageId,
+        replacementKind: 'lookup',
+        replacementLabel: 'Search my Drive for the London flight itinerary',
+      });
+      expect(correction).toMatchObject({
+        outcome: 'corrected',
+        transitioned: true,
+        queueGeneration: 5,
+      });
+      const queued = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+      expect(queued).toMatchObject({ status: 'pending', queueGeneration: 5, plan: null });
+
+      const dispatched: string[] = [];
+      const router = {
+        object: vi.fn(async () => {
+          throw new Error('corrected execution must not call the planner');
+        }),
+        step: vi.fn(async () => {
+          throw new Error('corrected execution must not call the model');
+        }),
+        embed: vi.fn(async (values: string[]) => values.map(() => new Array(1536).fill(0))),
+      } as unknown as ModelRouter;
+      let deliveryAttempts = 0;
+      const delivery = vi.fn(async (_task, _text, attemptId) => {
+        deliveryAttempts += 1;
+        if (deliveryAttempts === 1 && recovery === 'unknown delivery')
+          return finalChannelDeliveryReport([
+            finalChannelDelivery('synthetic', 'unknown', attemptId),
+            finalChannelDelivery('email', 'rejected', attemptId),
+          ]);
+        return finalChannelDelivery(
+          'synthetic',
+          deliveryAttempts === 1
+            ? recovery === 'unknown delivery'
+              ? 'unknown'
+              : 'rejected'
+            : 'accepted',
+          attemptId,
+        );
+      });
+      const dispatcher = {
+        toolDefs: () => [
+          {
+            name: 'drive.search',
+            description: 'Search Drive files',
+            inputSchema: z.object({ query: z.string() }),
+          },
+        ],
+        resultIsUntrusted: () => false,
+        dispatch: async (input: {
+          task: { id: string };
+          step: number;
+          modelToolCallId: string;
+          toolName: string;
+          args: Record<string, unknown>;
+          provenance: Record<string, unknown>;
+        }) => {
+          dispatched.push(input.toolName);
+          const query = String(input.args.query ?? 'lookup');
+          if (blockSelected && query.toLowerCase().includes('london'))
+            return { kind: 'rejected' as const, reason: 'synthetic read unavailable' };
+          const result = {
+            complete: true,
+            files: [
+              {
+                fileId: `file-${dispatched.length}`,
+                name: query.toLowerCase().includes('london')
+                  ? `London flight itinerary.pdf — ${'grounded detail '.repeat(40)}`
+                  : 'Berlin hotel invoice.pdf',
+                modifiedTime: '2026-10-10T12:00:00.000Z',
+              },
+            ],
+          };
+          const [stored] = await db
+            .insert(toolCalls)
+            .values({
+              taskId: input.task.id,
+              toolName: input.toolName,
+              args: input.args,
+              risk: 'autonomous',
+              status: 'succeeded',
+              result,
+              step: input.step,
+              decision: { ...input.provenance, modelToolCallId: input.modelToolCallId },
+              finishedAt: new Date(),
+            })
+            .returning({ id: toolCalls.id });
+          if (!stored) throw new Error('synthetic dispatch did not save its receipt');
+          return { kind: 'executed' as const, toolCallId: stored.id, result, cached: false };
+        },
+        executeApproved: vi.fn(async () => ({ kind: 'failed' as const, error: 'unused' })),
+      };
+      const basePersistence = createPostgresExecutionPersistence(db);
+      let interruptAttentionTransition = recovery === 'expired lease';
+      const taskRepository = new Proxy(basePersistence.tasks, {
+        get(target, property, receiver) {
+          if (property === 'markTaskNeedsAttention')
+            return async (...args: Parameters<typeof target.markTaskNeedsAttention>) => {
+              if (interruptAttentionTransition) {
+                interruptAttentionTransition = false;
+                return false;
+              }
+              return target.markTaskNeedsAttention(...args);
+            };
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const persistence = { ...basePersistence, tasks: taskRepository };
+      const deps = { db, persistence, router, dispatcher, deliverFinal: delivery };
+
+      const firstExecution = await executeTask(
+        deps,
+        taskId,
+        correction.queueGeneration ?? undefined,
+      );
+      expect(firstExecution.outcome).toBe(
+        recovery === 'expired lease' ? 'not_claimable' : 'needs_attention',
+      );
+      expect(delivery).toHaveBeenCalledTimes(1);
+      expect(router.object).not.toHaveBeenCalled();
+      expect(router.step).not.toHaveBeenCalled();
+      const afterFirstAttempt = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+      const firstState = afterFirstAttempt?.state as {
+        step?: number;
+        pendingFinal?: {
+          text?: string;
+          finalDelivery?: { legs?: Array<{ status?: string }> };
+          checklistCorrection?: { revision?: number; ownerMessageId?: string };
+        };
+        requestChecklist?: { items?: Array<{ status: string; label: string }> };
+      };
+      expect(
+        dispatched,
+        JSON.stringify({
+          blockSelected,
+          calls: dispatched,
+          items: firstState.requestChecklist?.items,
+          step: firstState.step,
+          pendingFinal: firstState.pendingFinal,
+        }),
+      ).toHaveLength(2);
+      if (recovery === 'expired lease')
+        expect(firstState.pendingFinal).toMatchObject({
+          terminalStatus: 'needs_attention',
+          outcome: 'needs_attention',
+          deliveryNeedsAttention: true,
+          finalDelivery: { legs: [{ status: 'rejected' }] },
+          checklistCorrection: { revision: 1, ownerMessageId },
+        });
+      if (recovery === 'unknown delivery') {
+        expect(firstState.pendingFinal).toMatchObject({
+          terminalStatus: 'needs_attention',
+          outcome: 'needs_attention',
+          deliveryNeedsAttention: true,
+          finalDelivery: { legs: [{ status: 'unknown' }, { status: 'rejected' }] },
+          checklistCorrection: { revision: 1, ownerMessageId },
+        });
+        const retry = await retryActivity(db, taskId);
+        expect(retry.outcome).toBe('no_longer_retriable');
+        expect(retry.transitioned).toBe(false);
+        const parked = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+        const parkedState = parked?.state as { pendingFinal?: unknown } | undefined;
+        expect(parkedState?.pendingFinal).toEqual(firstState.pendingFinal);
+        expect(parked).toMatchObject({ status: 'needs_attention', queueGeneration: 5 });
+        expect(await executeTask(deps, taskId, 5)).toMatchObject({ outcome: 'not_claimable' });
+        expect(delivery).toHaveBeenCalledTimes(1);
+        expect(dispatched).toHaveLength(2);
+        expect(router.object).not.toHaveBeenCalled();
+        expect(router.step).not.toHaveBeenCalled();
+        const finalMessages = await db.query.messages.findMany({
+          where: and(eq(messages.taskId, taskId), eq(messages.role, 'assistant')),
+        });
+        expect(finalMessages).toHaveLength(1);
+        expect(finalMessages[0]?.text).toBe(firstState.pendingFinal?.text);
+        return;
+      }
+      expect(firstState.requestChecklist?.items?.map((item) => item.status)).toEqual(
+        blockSelected ? ['completed', 'blocked'] : ['completed', 'completed'],
+      );
+
+      let resumeGeneration = correction.queueGeneration;
+      if (recovery === 'expired lease') {
+        await db
+          .update(tasks)
+          .set({ lockedUntil: new Date(Date.now() - 1_000) })
+          .where(eq(tasks.id, taskId));
+      } else {
+        const retry = await retryActivity(db, taskId);
+        expect(retry.outcome).toBe('retried');
+        resumeGeneration =
+          (await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) }))?.queueGeneration ??
+          null;
+        const retryState = (await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) }))
+          ?.state as { pendingFinal?: { text?: string } };
+        expect(retryState.pendingFinal?.text).toBe(firstState.pendingFinal?.text);
+      }
+      const secondExecution = await executeTask(deps, taskId, resumeGeneration ?? undefined);
+      expect(secondExecution.outcome).toBe(blockSelected ? 'needs_attention' : 'done');
+      expect(delivery).toHaveBeenCalledTimes(2);
+      const deliveryResults = await Promise.all(
+        delivery.mock.results.map((result) => result.value),
+      );
+      expect(
+        deliveryResults.filter(
+          (result) => result && 'status' in result && result.status === 'accepted',
+        ),
+      ).toHaveLength(1);
+      expect(dispatched).toHaveLength(2);
+      expect(router.object).not.toHaveBeenCalled();
+      expect(router.step).not.toHaveBeenCalled();
+
+      const finalMessages = await db.query.messages.findMany({
+        where: and(eq(messages.taskId, taskId), eq(messages.role, 'assistant')),
+      });
+      expect(
+        finalMessages,
+        JSON.stringify({
+          texts: finalMessages.map((message) => message.text),
+          firstPendingFinal: firstState.pendingFinal,
+          firstProgress: afterFirstAttempt?.progress,
+          secondState: (await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) }))?.state,
+        }),
+      ).toHaveLength(1);
+      expect(finalMessages[0]?.conversationId).toBe(conversationId);
+      if (blockSelected) {
+        expect(finalMessages[0]?.text).toContain(
+          'Blocked: Search my Drive for the London flight itinerary',
+        );
+        expect(finalMessages[0]?.text).not.toContain('London flight itinerary.pdf');
+      } else {
+        expect(finalMessages[0]?.text).toContain('London flight itinerary.pdf');
+        expect(finalMessages[0]?.text).toContain('(details omitted)');
+      }
+      expect(finalMessages[0]?.text).toContain('Berlin hotel invoice.pdf');
+      expect(finalMessages[0]?.text).not.toContain('Paris');
+      expect(await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) })).toMatchObject({
+        status: blockSelected ? 'needs_attention' : 'done',
+        queueGeneration: recovery === 'expired lease' ? 5 : 6,
+      });
+    },
+  );
+
+  it.each([
     ['pending batch', { pendingToolBatch: { calls: [{ toolCallId: 'queued-not-ledgered' }] } }],
     ['pending job', { pendingJob: { dbToolCallId: 'queued-not-ledgered' } }],
   ])('refuses a %s journal and leaves task/message/wake untouched', async (_name, journal) => {
@@ -390,6 +663,27 @@ describe('atomic Activity checklist correction', () => {
       'needs_attention',
     );
   });
+
+  it.each([null, 'malformed', []])(
+    'preserves a saved correction final with malformed marker %j instead of requeueing it',
+    async (marker) => {
+      const originalState = {
+        checkpoint: { step: 3 },
+        pendingFinal: {
+          text: 'The saved grounded answer.',
+          checklistCorrection: marker,
+        },
+      };
+      const { taskId } = await seed({ state: originalState });
+      const outcome = await retryActivity(db, taskId);
+      expect(outcome).toMatchObject({ outcome: 'no_longer_retriable', transitioned: false });
+      expect(await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) })).toMatchObject({
+        status: 'needs_attention',
+        queueGeneration: 4,
+        state: originalState,
+      });
+    },
+  );
 
   it('rejects unknown retained effects and over-bound receipt history without mutating the task', async () => {
     const { ownerId, taskId, checklist } = await seed();

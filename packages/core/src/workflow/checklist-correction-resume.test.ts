@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
+  isParkedUnknownChecklistCorrectionFinal,
+  isRetryableChecklistCorrectionFinal,
   projectChecklistCorrectionResume,
   taskBoundCorrectionReadRequest,
 } from './checklist-correction-resume.js';
@@ -15,7 +17,9 @@ describe('task-bound checklist correction resume projection', () => {
       authorizedScopes: ['private_read', 'external_read'] as OwnerIntent['authorizedScopes'],
     };
     expect(taskBoundCorrectionReadRequest('Find my flight to Berlin', options)).toBeDefined();
-    expect(taskBoundCorrectionReadRequest('Check my flight to Berlin today', options)).toBeDefined();
+    expect(
+      taskBoundCorrectionReadRequest('Check my flight to Berlin today', options),
+    ).toBeDefined();
     for (const rejected of [
       'The email says “Find my flight to Berlin.”',
       'If I asked you to find my flight to Berlin',
@@ -133,6 +137,185 @@ describe('task-bound checklist correction resume projection', () => {
     expect(
       projectChecklistCorrectionResume({ ...input, clarificationContinuation }),
     ).toBeUndefined();
+  });
+
+  it('preserves only a durable, correction-bound final with a definite rejected delivery', () => {
+    const { input, checklist, ownerMessage } = fixture();
+    const receiptId = randomUUID();
+    const attemptId = randomUUID();
+    const selected = checklist.items[0];
+    if (!selected) throw new Error('selected correction item missing');
+    const completedChecklist = {
+      ...checklist,
+      items: checklist.items.map((item) =>
+        item.id === selected.id
+          ? {
+              ...item,
+              status: 'completed' as const,
+              evidence: [{ id: receiptId, toolName: 'drive.search' }],
+              detail: 'Found the corrected flight itinerary.',
+            }
+          : item,
+      ),
+    };
+    const state = {
+      requestChecklist: completedChecklist,
+      pendingFinal: {
+        text: 'Found the corrected flight itinerary.',
+        progress: 'Corrected lookup complete.',
+        outcome: 'needs_attention',
+        terminalStatus: 'needs_attention',
+        deliveryNeedsAttention: true,
+        finalDelivery: {
+          legs: [{ channel: 'synthetic', status: 'rejected', attemptId }],
+        },
+        checklistCorrection: {
+          revision: 1,
+          ownerMessageId: ownerMessage.id,
+          outcomes: [{ id: selected.id, status: 'completed', evidenceIds: [receiptId] }],
+        },
+      },
+    };
+    const task = {
+      ...input.task,
+      type: 'chat_turn',
+      trust: 'owner',
+      goalId: null,
+      trigger: {
+        source: 'chat',
+        agentId: input.task.agentId,
+        conversationId: input.task.conversationId,
+        trust: 'owner',
+        payload: {
+          text: checklist.request,
+          triggerMessageId: randomUUID(),
+        },
+      },
+    };
+    const durableOwnerMessage = { ...ownerMessage, hiddenAt: null };
+    const eligible = {
+      task,
+      state,
+      ownerMessage: durableOwnerMessage,
+    };
+    expect(isRetryableChecklistCorrectionFinal(eligible)).toBe(true);
+    expect(
+      isRetryableChecklistCorrectionFinal({
+        ...eligible,
+        state: {
+          ...state,
+          pendingFinal: {
+            ...state.pendingFinal,
+            finalDelivery: {
+              legs: [{ channel: 'synthetic', status: 'unknown', attemptId }],
+            },
+          },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isParkedUnknownChecklistCorrectionFinal({
+        ...eligible,
+        state: {
+          ...state,
+          pendingFinal: {
+            ...state.pendingFinal,
+            finalDelivery: {
+              legs: [
+                { channel: 'synthetic', status: 'unknown', attemptId },
+                { channel: 'email', status: 'rejected', attemptId },
+                { channel: 'sms', status: 'not_applicable', attemptId },
+              ],
+            },
+          },
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isRetryableChecklistCorrectionFinal({
+        ...eligible,
+        ownerMessage: { ...durableOwnerMessage, text: 'Find my hotel in Berlin' },
+      }),
+    ).toBe(false);
+    expect(
+      isRetryableChecklistCorrectionFinal({
+        ...eligible,
+        state: {
+          ...state,
+          pendingFinal: {
+            ...state.pendingFinal,
+            finalDelivery: {
+              legs: [{ channel: 'synthetic', status: 'rejected' }],
+            },
+          },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isRetryableChecklistCorrectionFinal({
+        ...eligible,
+        state: {
+          ...state,
+          pendingFinal: {
+            ...state.pendingFinal,
+            finalDelivery: {
+              legs: [{ status: 'rejected', attemptId }],
+            },
+          },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isRetryableChecklistCorrectionFinal({
+        ...eligible,
+        state: {
+          ...state,
+          requestChecklist: {
+            ...completedChecklist,
+            revisionAudit: completedChecklist.revisionAudit?.map((entry) => ({
+              ...entry,
+              conversationId: randomUUID(),
+            })),
+          },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isRetryableChecklistCorrectionFinal({
+        ...eligible,
+        state: {
+          ...state,
+          pendingFinal: {
+            ...state.pendingFinal,
+            checklistCorrection: {
+              ...state.pendingFinal.checklistCorrection,
+              outcomes: Array.from({ length: 13 }, (_, index) => ({
+                id: `${selected.id}-${index}`,
+                status: 'completed',
+                evidenceIds: [receiptId],
+              })),
+            },
+          },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isRetryableChecklistCorrectionFinal({
+        ...eligible,
+        state: {
+          ...state,
+          pendingFinal: {
+            ...state.pendingFinal,
+            checklistCorrection: {
+              ...state.pendingFinal.checklistCorrection,
+              outcomes: [
+                { id: selected.id, status: 'completed', evidenceIds: [receiptId, receiptId] },
+              ],
+            },
+          },
+        },
+      }),
+    ).toBe(false);
   });
 
   it('refuses changed text, foreign identity, broken revision binding, or an approval item', () => {

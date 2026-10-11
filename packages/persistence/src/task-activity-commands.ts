@@ -74,6 +74,70 @@ export interface PendingChecklistCorrectionOutcome {
   ownerMessageId: string | null;
 }
 
+/** Transaction-snapshot inputs for the one shared checklist-correction policy. */
+export interface ChecklistCorrectionPolicyInput {
+  checklist: unknown;
+  task: { id: string; agentId: string; conversationId: string };
+  ownerMessage: {
+    id: string;
+    taskId: string;
+    agentId: string;
+    conversationId: string;
+    role: 'user';
+    origin: 'owner';
+    text: string;
+  };
+  binding: {
+    taskId: string;
+    itemId: string;
+    expectedRevision: number;
+    ownerTaskId: string;
+    ownerMessageId: string;
+  };
+  evidence: unknown;
+  replacement: { kind: PendingChecklistCorrectionInput['replacementKind']; label: string };
+}
+
+export interface ChecklistCorrectionPolicy {
+  /** Validate the stored v1 checklist and expose only the request needed for message binding. */
+  readChecklist(value: unknown): {
+    checklist: unknown;
+    request: string;
+    revision: number;
+    latestAudit: {
+      revision: number;
+      taskId: string;
+      conversationId: string;
+      ownerTaskId: string;
+      ownerMessageId: string;
+      itemId: string;
+      toLabel: string;
+      toKind?: PendingChecklistCorrectionInput['replacementKind'];
+    } | null;
+  } | null;
+  /** Match exact Activity-message replay against its durable revision audit entry. */
+  matchesReplay(input: {
+    checklist: unknown;
+    correction: PendingChecklistCorrectionInput;
+    task: { id: string; conversationId: string };
+    priorMessage: {
+      id: string;
+      taskId: string | null;
+      conversationId: string | null;
+      role: string;
+      origin: string;
+      text: string;
+    };
+  }): boolean;
+  /** Apply the shared pure policy to the immutable state/effect snapshot in the transaction. */
+  revise(
+    input: ChecklistCorrectionPolicyInput,
+  ): { decision: 'revised'; checklist: unknown } | { decision: 'stale_revision' | 'invalid' };
+  /** Positive-only final delivery decisions; callers preserve unrecognized correction finals. */
+  isRetryableFinal(input: { task: unknown; state: unknown; ownerMessage: unknown }): boolean;
+  isUnknownFinal(input: { task: unknown; state: unknown; ownerMessage: unknown }): boolean;
+}
+
 const OWNER_CHAT_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Return the pinned original owner-message ID only for a supported owner chat task. */

@@ -23,6 +23,7 @@ import {
   revokeTaskAutonomy,
   revokeTaskAutonomyWithRepository,
   type TaskDetail,
+  taskActivityChecklistCorrectionPolicy,
 } from '@assistant/application/tasks';
 import { loadConfig } from '@assistant/config';
 import {
@@ -76,7 +77,10 @@ function firestoreActivityCommands() {
   if (loadConfig().PERSISTENCE_DRIVER !== 'firestore') return null;
   const { agentId } = firestoreActivity();
   return {
-    repository: new FirestoreTaskActivityCommandRepository(getFirestoreInstallationStore()),
+    repository: new FirestoreTaskActivityCommandRepository(
+      getFirestoreInstallationStore(),
+      taskActivityChecklistCorrectionPolicy,
+    ),
     agentId,
   };
 }

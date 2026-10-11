@@ -577,10 +577,20 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
           );
         });
       const hasBlockedOutcome = currentBindings.some((outcome) => outcome.status === 'blocked');
+      const deliveryRetryIsBounded =
+        state.pendingFinal.deliveryNeedsAttention === true &&
+        state.pendingFinal.finalDelivery?.legs.some((leg) => leg.status === 'rejected') === true &&
+        state.pendingFinal.finalDelivery?.legs.some((leg) => leg.status === 'unknown') !== true;
       const finalStatusMatchesChecklist = hasBlockedOutcome
         ? state.pendingFinal.terminalStatus === 'needs_attention' &&
-          state.pendingFinal.outcome === 'needs_attention'
-        : state.pendingFinal.terminalStatus === 'done' && state.pendingFinal.outcome === 'done';
+          state.pendingFinal.outcome === 'needs_attention' &&
+          (!state.pendingFinal.deliveryNeedsAttention || deliveryRetryIsBounded)
+        : (state.pendingFinal.terminalStatus === 'done' &&
+            state.pendingFinal.outcome === 'done' &&
+            !state.pendingFinal.deliveryNeedsAttention) ||
+          (state.pendingFinal.terminalStatus === 'needs_attention' &&
+            state.pendingFinal.outcome === 'needs_attention' &&
+            deliveryRetryIsBounded);
       const rows = await persistence.executionEvidence.taskEvidence({
         agentId: task.agentId,
         taskId: task.id,

@@ -344,12 +344,21 @@ describe('durable request checklist', () => {
       correctionInput(withCompletedSibling, {
         itemIndex: 1,
         evidenceRows: [completedHotel],
-        replacement: { kind: 'lookup', label: 'Find my flight confirmation email to London on 2026-12-21' },
+        replacement: {
+          kind: 'lookup',
+          label: 'Find my flight confirmation email to London on 2026-12-21',
+        },
       }),
     );
     expect(revised.revision).toBe(1);
-    expect(revised.items[0]).toMatchObject({ status: 'completed', label: original.items[0]?.label });
-    expect(revised.items[1]).toMatchObject({ status: 'pending', label: 'Find my flight confirmation email to London on 2026-12-21' });
+    expect(revised.items[0]).toMatchObject({
+      status: 'completed',
+      label: original.items[0]?.label,
+    });
+    expect(revised.items[1]).toMatchObject({
+      status: 'pending',
+      label: 'Find my flight confirmation email to London on 2026-12-21',
+    });
     expect(revised.revisionAudit?.[0]?.excludedEvidenceIds).toContain(completedHotel.id);
   });
   it('fails closed on missing authority, stale revisions, ambiguity, and evidence overflow', () => {

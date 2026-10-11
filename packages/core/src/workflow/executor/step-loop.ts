@@ -14,6 +14,7 @@ import { retrieveOwnerContext } from '../../memory/recall-context.js';
 import { recordRecallMetric } from '../../memory/recall-metrics.js';
 import { bumpSkillUse, recallSkills, renderSkillsBlock } from '../../memory/skills.js';
 import type { StepCallOutcome } from '../../model-router/router.js';
+import { withSpan } from '../../otel.js';
 import { approvalHeadline, approvalPrompt } from '../../owner-text.js';
 import { isSituationRequest } from '../../situations-schema.js';
 import { acceptedKnownSenderReplyIntent } from '../accepted-suggestion-intent.js';
@@ -626,6 +627,20 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   while (state.step < bookkeepingStepCap) {
     let correctionOutcomeId: string | undefined;
     let resumingBatch = state.pendingToolBatch !== null && state.pendingToolBatch !== undefined;
+    // Preserve the ordinary resume path: a batch whose calls have all settled
+    // is complete and must be cleared before the next model turn. Correction
+    // batches go through the stricter receipt-binding check below instead.
+    if (!rc.checklistCorrection && resumingBatch && state.pendingToolBatch) {
+      const runnable = state.pendingToolBatch.calls.filter((call) =>
+        ['queued', 'budget', 'awaiting_approval', 'job'].includes(call.status),
+      );
+      if (runnable.length === 0) {
+        state.pendingToolBatch = null;
+        state.contextWindow = compact(rc.window) as unknown as TaskState['contextWindow'];
+        if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
+        resumingBatch = false;
+      }
+    }
     // A normal lookup result can close an item on metadata alone. A correction
     // lane advances each selected item only after its deterministic read
     // contract has completed, so generic checklist reconciliation must not
@@ -691,10 +706,15 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         readRequest = lastCorrectionReadRequest;
         correctionExcludedEvidenceIds = lastCorrectionExcludedEvidenceIds;
       } else {
+        const originalChecklistItems = state.requestChecklist?.items ?? [];
         const outcomes = [
           ...rc.checklistCorrection.completedOutcomes,
           ...rc.checklistCorrection.activeOutcomes,
-        ];
+        ].sort(
+          (left, right) =>
+            originalChecklistItems.findIndex((item) => item.id === left.id) -
+            originalChecklistItems.findIndex((item) => item.id === right.id),
+        );
         const summaries = outcomes.map((outcome) => {
           const item = state.requestChecklist?.items.find(
             (candidate) => candidate.id === outcome.id,
@@ -712,7 +732,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         const text = summaries.length
           ? summaries.join('\n\n')
           : 'The corrected checklist is already complete; I did not repeat any lookup.';
-        return stageFinalResponse(deps, lease, state, rc.window, {
+        return stageReadFinal({
           text,
           progress: blocked
             ? 'some corrected lookups need attention'
@@ -762,26 +782,29 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     if (correctionProjection && resumingBatch && state.pendingToolBatch) {
       const batch = state.pendingToolBatch;
       const calls = batch.calls;
-      const failClosed = () => {
-        const text = 'I couldn’t complete this lookup. Review it in Activity to continue.';
-        return stageReadFinal({
-          text,
-          progress: 'lookup paused for review',
-          terminalStatus: 'needs_attention',
-          outcome: 'needs_attention',
-          contractNotice: true,
-        });
-      };
+      const failClosed = (reason: string) =>
+        withSpan(
+          'task.checklist_correction.resume_refused',
+          { taskId: task.id, reason: reason.slice(0, 180) },
+          () =>
+            stageReadFinal({
+              text: 'I couldn’t complete this lookup. Review it in Activity to continue.',
+              progress: 'lookup paused for review',
+              terminalStatus: 'needs_attention',
+              outcome: 'needs_attention',
+              contractNotice: true,
+            }),
+        );
       if (
         calls.length !== 1 ||
         batch.step !== state.step ||
         batch.modelId !== 'runtime/private-read-router' ||
         correctionOutcomeId === undefined
       )
-        return failClosed();
+        return failClosed('batch-shape');
       const call = calls[0];
       if (!call || call.toolCallId !== `runtime-private-read-${task.id}-${batch.step}`)
-        return failClosed();
+        return failClosed('call-id');
       const linkedReceipt = allReadToolEvidence.find((row) => row.id === call.dbToolCallId);
       const callReceipt = allReadToolEvidence.find((row) => {
         const modelToolCallId =
@@ -823,7 +846,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           binding.ownerMessageId !== correctionProjection.ownerMessageId ||
           !knownOutcome
         )
-          return failClosed();
+          return failClosed('settled-receipt');
         state.pendingToolBatch = null;
         state.contextWindow = compact(rc.window) as unknown as TaskState['contextWindow'];
         if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
@@ -840,7 +863,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           stableJson(call.input) !== stableJson(expectedInput) ||
           callReceipt
         )
-          return failClosed();
+          return failClosed('queued-input');
       }
     }
     // A request that also reads the calendar or mail ("what's on tomorrow and
@@ -930,7 +953,11 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           });
         }
         selectedItem.status = checked.blocked ? 'blocked' : 'completed';
-        selectedItem.detail = checked.text.slice(0, 500);
+        const detailSuffix = '… (details omitted)';
+        selectedItem.detail =
+          checked.text.length <= 500
+            ? checked.text
+            : `${checked.text.slice(0, 500 - detailSuffix.length).trimEnd()}${detailSuffix}`;
         selectedItem.evidence = allReadToolEvidence
           .filter((row) => {
             const binding =
@@ -972,20 +999,22 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             return LOST_LEASE;
           continue;
         }
-        const summaries = [
+        const outcomes = [
           ...rc.checklistCorrection.completedOutcomes,
           ...rc.checklistCorrection.activeOutcomes,
-        ].map((outcome) => {
+        ].sort(
+          (left, right) =>
+            checklist.items.findIndex((item) => item.id === left.id) -
+            checklist.items.findIndex((item) => item.id === right.id),
+        );
+        const summaries = outcomes.map((outcome) => {
           const item = checklist.items.find((candidate) => candidate.id === outcome.id);
           const detail =
             item && 'detail' in item ? (item as { detail?: string }).detail : undefined;
           const outcomeDetail = (outcome as { detail?: string }).detail;
           return `${outcome.label}: ${detail || outcomeDetail || 'lookup needs attention'}`;
         });
-        const blocked = [
-          ...rc.checklistCorrection.completedOutcomes,
-          ...rc.checklistCorrection.activeOutcomes,
-        ].some(
+        const blocked = outcomes.some(
           (outcome) =>
             checklist.items.find((item) => item.id === outcome.id)?.status !== 'completed',
         );
@@ -1982,6 +2011,46 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             error: outcome.reason,
           });
           journalCall.status = 'settled';
+          if (
+            outcome.kind === 'rejected' &&
+            rc.checklistCorrection &&
+            readRequest &&
+            forcedReadTool === tc.toolName &&
+            correctionOutcomeId
+          ) {
+            const item = state.requestChecklist?.items.find(
+              (candidate) => candidate.id === correctionOutcomeId,
+            );
+            if (!item || (item.status !== 'pending' && item.status !== 'blocked'))
+              return stageReadFinal({
+                text: 'I couldn’t complete this lookup. Review it in Activity to continue.',
+                progress: 'lookup paused for review',
+                terminalStatus: 'needs_attention',
+                outcome: 'needs_attention',
+                contractNotice: true,
+              });
+            await withSpan(
+              'task.checklist_correction.read_rejected',
+              {
+                taskId: task.id,
+                outcomeId: correctionOutcomeId,
+                revision: rc.checklistCorrection.revision,
+                reason: outcome.reason.slice(0, 180),
+              },
+              async () => undefined,
+            );
+            item.status = 'blocked';
+            item.detail = 'This lookup could not be completed from the available results.';
+            item.evidence = [];
+            // A rejected read is known not to have entered an external effect.
+            // Clear its one-call journal before continuing independent sibling
+            // lookups, so a missing receipt cannot make the next resume ambiguous.
+            state.pendingToolBatch = null;
+            state.contextWindow = compact(rc.window) as unknown as TaskState['contextWindow'];
+            if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state)))
+              return LOST_LEASE;
+            continue;
+          }
           if (!(await updateCall({ status: 'settled' }))) return LOST_LEASE;
           if (tc.toolName === 'goals.update_progress') {
             requiredGoalProgressFailure = outcome.reason;
@@ -2001,7 +2070,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
 
       rc.window = compact(rc.window);
       state.contextWindow = rc.window as unknown as TaskState['contextWindow'];
-      await refreshRequestChecklist(evidence, task, state);
+      if (!rc.checklistCorrection) await refreshRequestChecklist(evidence, task, state);
 
       if (pendingApprovals.length > 0) {
         const parked = await parkForApproval(

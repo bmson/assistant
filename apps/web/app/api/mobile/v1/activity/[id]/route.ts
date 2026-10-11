@@ -11,6 +11,7 @@ import {
   retryActivityWithRepository,
   revokeTaskAutonomy,
   revokeTaskAutonomyWithRepository,
+  taskActivityChecklistCorrectionPolicy,
 } from '@assistant/application/tasks';
 import { loadConfig } from '@assistant/config';
 import {
@@ -104,7 +105,10 @@ export async function POST(
         databaseId: config.FIRESTORE_DATABASE_ID,
       });
       try {
-        const repository = new FirestoreTaskActivityCommandRepository(store);
+        const repository = new FirestoreTaskActivityCommandRepository(
+          store,
+          taskActivityChecklistCorrectionPolicy,
+        );
         let result: Awaited<ReturnType<typeof archiveActivity>>;
         if (body.action === 'archive')
           result = await archiveActivityWithRepository(repository, config.FIRESTORE_AGENT_ID, id);

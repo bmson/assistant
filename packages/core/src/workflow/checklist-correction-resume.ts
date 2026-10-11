@@ -1,4 +1,8 @@
-import { type ClarificationContinuation, ClarificationContinuationSchema } from '../events.js';
+import {
+  type ClarificationContinuation,
+  ClarificationContinuationSchema,
+  PendingFinalSchema,
+} from '../events.js';
 import { extractOwnerIntent, type OwnerIntent, type OwnerIntentScope } from './owner-intent.js';
 import { detectPersonalReadRequest, type PersonalReadRequest } from './read-intent.js';
 import { type RequestChecklist, RequestChecklistSchema } from './request-checklist-schema.js';
@@ -24,6 +28,155 @@ export interface ChecklistCorrectionResumeInput {
   /** Authority extracted from the task's original trigger/request, not the correction. */
   originalIntent: OwnerIntent;
   clarificationContinuation?: ClarificationContinuation;
+}
+
+/**
+ * Whether an owner retry may deliver an already staged correction response
+ * after a definite channel rejection. The caller still has to load the exact
+ * durable owner message and fence this snapshot in its transaction.
+ */
+type ChecklistCorrectionFinalEligibilityInput = {
+  task: {
+    id: string;
+    agentId: string;
+    conversationId: string | null;
+    type: string;
+    trust: string;
+    goalId: string | null;
+    trigger: unknown;
+  };
+  state: unknown;
+  ownerMessage: {
+    id: string;
+    taskId: string | null;
+    agentId: string;
+    conversationId: string | null;
+    role: string;
+    origin: string;
+    text: string;
+    hiddenAt?: Date | null;
+  };
+};
+
+function checklistCorrectionFinalMatches(
+  input: ChecklistCorrectionFinalEligibilityInput,
+  failedStatus: 'rejected' | 'unknown',
+): boolean {
+  const { task, ownerMessage } = input;
+  const state = input.state;
+  if (!state || typeof state !== 'object' || Array.isArray(state)) return false;
+  const stateRecord = state as Record<string, unknown>;
+  const checklistResult = RequestChecklistSchema.safeParse(stateRecord.requestChecklist);
+  if (!checklistResult.success) return false;
+  const checklist = checklistResult.data;
+  const pendingResult = PendingFinalSchema.safeParse(stateRecord.pendingFinal);
+  if (!pendingResult.success) return false;
+  const pending = pendingResult.data;
+  const correction = pending.checklistCorrection;
+  if (!correction) return false;
+  const outcomes = correction.outcomes;
+  const legs = pending.finalDelivery?.legs;
+  if (!legs) return false;
+  const trigger = task.trigger;
+  if (!trigger || typeof trigger !== 'object' || Array.isArray(trigger)) return false;
+  const triggerRecord = trigger as Record<string, unknown>;
+  const payload = triggerRecord.payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const payloadRecord = payload as Record<string, unknown>;
+  const revision = checklist.revision;
+  const audit = checklist.revisionAudit;
+  const latestAudit = audit?.at(-1);
+  if (
+    task.type !== 'chat_turn' ||
+    task.trust !== 'owner' ||
+    task.goalId !== null ||
+    !task.conversationId ||
+    triggerRecord.source !== 'chat' ||
+    triggerRecord.agentId !== task.agentId ||
+    triggerRecord.conversationId !== task.conversationId ||
+    triggerRecord.trust !== 'owner' ||
+    payloadRecord.text !== checklist.request ||
+    typeof payloadRecord.triggerMessageId !== 'string' ||
+    payloadRecord.triggerMessageId.length === 0 ||
+    pending.deliveryNeedsAttention !== true ||
+    pending.terminalStatus !== 'needs_attention' ||
+    pending.outcome !== 'needs_attention' ||
+    !legs.some(
+      (leg) => leg && typeof leg === 'object' && !Array.isArray(leg) && leg.status === failedStatus,
+    ) ||
+    legs.some((leg) => {
+      if (!leg || typeof leg !== 'object' || Array.isArray(leg)) return true;
+      const status = leg.status;
+      const allowedStatuses =
+        failedStatus === 'unknown'
+          ? ['accepted', 'rejected', 'unknown', 'not_applicable']
+          : ['accepted', 'rejected', 'not_applicable'];
+      return !allowedStatuses.includes(status);
+    }) ||
+    !Number.isSafeInteger(revision) ||
+    revision === undefined ||
+    correction.revision !== revision ||
+    typeof correction.ownerMessageId !== 'string' ||
+    !latestAudit ||
+    latestAudit.revision !== revision ||
+    latestAudit.taskId !== task.id ||
+    latestAudit.conversationId !== task.conversationId ||
+    latestAudit.ownerTaskId !== task.id ||
+    latestAudit.ownerMessageId !== correction.ownerMessageId ||
+    !outcomes.length ||
+    ownerMessage.id !== correction.ownerMessageId ||
+    ownerMessage.taskId !== task.id ||
+    ownerMessage.agentId !== task.agentId ||
+    ownerMessage.conversationId !== task.conversationId ||
+    ownerMessage.role !== 'user' ||
+    ownerMessage.origin !== 'owner' ||
+    ownerMessage.hiddenAt !== null ||
+    directClause(ownerMessage.text) !== directClause(latestAudit.toLabel)
+  )
+    return false;
+  const seen = new Set<string>();
+  for (const value of outcomes) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const outcome = value as Record<string, unknown>;
+    if (
+      typeof outcome.id !== 'string' ||
+      seen.has(outcome.id) ||
+      !Array.isArray(outcome.evidenceIds) ||
+      outcome.evidenceIds.some((id) => typeof id !== 'string')
+    )
+      return false;
+    seen.add(outcome.id);
+    const item = checklist.items.find((candidate) => candidate.id === outcome.id);
+    if (
+      !item ||
+      (outcome.status !== 'completed' && outcome.status !== 'blocked') ||
+      item.status !== outcome.status ||
+      new Set(outcome.evidenceIds).size !== outcome.evidenceIds.length ||
+      new Set(item.evidence.map((entry) => entry.id)).size !== item.evidence.length ||
+      [...outcome.evidenceIds].sort().join('\u0000') !==
+        item.evidence
+          .map((entry) => entry.id)
+          .sort()
+          .join('\u0000') ||
+      (item.status === 'completed' && outcome.evidenceIds.length === 0)
+    )
+      return false;
+  }
+  return seen.has(latestAudit.itemId);
+}
+
+/** Owner retry may redeliver only a definitely rejected correction response. */
+export function isRetryableChecklistCorrectionFinal(
+  input: ChecklistCorrectionFinalEligibilityInput,
+): boolean {
+  return checklistCorrectionFinalMatches(input, 'rejected');
+}
+
+/** A correction final with an ambiguous delivery stays saved and cannot be retried. */
+export function isParkedUnknownChecklistCorrectionFinal(
+  input: ChecklistCorrectionFinalEligibilityInput,
+): boolean {
+  return checklistCorrectionFinalMatches(input, 'unknown');
 }
 
 export interface ChecklistCorrectionResumeProjection {

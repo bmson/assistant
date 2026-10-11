@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { revisePendingRequestChecklistItem } from '@assistant/core/workflow/request-checklist';
-import { RequestChecklistSchema } from '@assistant/core/workflow/request-checklist-schema';
 import type {
   ArchiveOldActivityProgress,
+  ChecklistCorrectionPolicy,
   PendingChecklistCorrectionInput,
   PendingChecklistCorrectionOutcome,
+  Records,
   TaskActivityCommandOutcome,
   TaskActivityCommandRepository,
   TaskActivityCurrentState,
@@ -169,13 +169,18 @@ function isTerminalArchiveCandidate(
 export class FirestoreTaskActivityCommandRepository implements TaskActivityCommandRepository {
   readonly kind = 'task-activity-command-repository' as const;
 
-  constructor(readonly store: InstallationStore) {}
+  constructor(
+    readonly store: InstallationStore,
+    readonly checklistCorrectionPolicy?: ChecklistCorrectionPolicy,
+  ) {}
 
   /** Atomically append the selected owner correction, revise its checklist, and queue the task. */
   revisePendingChecklist(
     agentId: string,
     input: PendingChecklistCorrectionInput,
   ): Promise<PendingChecklistCorrectionOutcome> {
+    const policy = this.checklistCorrectionPolicy;
+    if (!policy) return Promise.resolve(correctionOutcome('unsafe_evidence'));
     if (
       !UUID.test(input.taskId) ||
       !UUID.test(input.ownerMessageId) ||
@@ -226,9 +231,9 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
         task.state && typeof task.state === 'object' && !Array.isArray(task.state)
           ? ({ ...(task.state as Record<string, unknown>) } as Record<string, unknown>)
           : null;
-      const parsed = RequestChecklistSchema.safeParse(state?.requestChecklist);
-      if (!parsed.success) return correctionOutcome('invalid');
-      const checklist = parsed.data;
+      const parsed = policy.readChecklist(state?.requestChecklist);
+      if (!parsed) return correctionOutcome('invalid');
+      const checklist = parsed.checklist;
 
       const originalMessageId = ownerChatChecklistRequestMessageId(
         task as {
@@ -240,7 +245,7 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
           trust: string;
           trigger: unknown;
         },
-        checklist.request,
+        parsed.request,
       );
       if (!originalMessageId) return correctionOutcome('unsafe_evidence');
       const originalMessageSnapshot = await tx.get(this.store.doc('messages', originalMessageId));
@@ -258,7 +263,7 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
             text: string;
           },
           originalMessageId,
-          checklist.request,
+          parsed.request,
         )
       )
         return correctionOutcome('unsafe_evidence');
@@ -266,22 +271,20 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
       const priorMessageSnapshot = await tx.get(messageRef);
       if (priorMessageSnapshot.exists) {
         const priorMessage = decodeRecord<Record<string, unknown>>(priorMessageSnapshot.data());
-        const matchingAudit = checklist.revisionAudit?.find(
-          (entry) => entry.ownerMessageId === input.ownerMessageId,
-        );
         if (
-          priorMessage.id === input.ownerMessageId &&
-          priorMessage.taskId === task.id &&
-          priorMessage.conversationId === task.conversationId &&
-          priorMessage.role === 'user' &&
-          priorMessage.origin === 'owner' &&
-          priorMessage.text === input.replacementLabel &&
-          matchingAudit?.itemId === input.itemId &&
-          matchingAudit.toLabel === input.replacementLabel &&
-          matchingAudit.toKind === input.replacementKind &&
-          matchingAudit.revision === input.expectedRevision + 1 &&
-          matchingAudit.taskId === task.id &&
-          matchingAudit.conversationId === task.conversationId
+          policy.matchesReplay({
+            checklist,
+            correction: input,
+            task: { id: task.id, conversationId: task.conversationId },
+            priorMessage: priorMessage as {
+              id: string;
+              taskId: string | null;
+              conversationId: string | null;
+              role: string;
+              origin: string;
+              text: string;
+            },
+          })
         )
           return correctionOutcome(
             'already_applied',
@@ -384,7 +387,8 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
         kind: input.replacementKind,
         label: input.replacementLabel,
       };
-      const revised = revisePendingRequestChecklistItem(checklist, {
+      const revision = policy.revise({
+        checklist,
         task: { id: task.id, agentId, conversationId: task.conversationId },
         ownerMessage: {
           id: input.ownerMessageId,
@@ -405,10 +409,25 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
         evidence,
         replacement,
       });
-      if (revised === checklist)
-        return correctionOutcome(
-          input.expectedRevision !== (checklist.revision ?? 0) ? 'stale_revision' : 'invalid',
-        );
+      if (revision?.decision !== 'revised')
+        return correctionOutcome(revision?.decision ?? 'unsafe_evidence');
+      const verifiedRevision = policy.readChecklist(revision.checklist);
+      const audit = verifiedRevision?.latestAudit;
+      if (
+        !verifiedRevision ||
+        verifiedRevision.request !== parsed.request ||
+        verifiedRevision.revision !== input.expectedRevision + 1 ||
+        audit?.revision !== input.expectedRevision + 1 ||
+        audit.taskId !== task.id ||
+        audit.conversationId !== task.conversationId ||
+        audit.ownerTaskId !== task.id ||
+        audit.ownerMessageId !== input.ownerMessageId ||
+        audit.itemId !== input.itemId ||
+        audit.toLabel !== input.replacementLabel ||
+        audit.toKind !== input.replacementKind
+      )
+        return correctionOutcome('unsafe_evidence');
+      const revised = verifiedRevision.checklist;
 
       const generation = Number(task.queueGeneration) + 1;
       const now = this.store.now();
@@ -457,7 +476,7 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
 
   /** Requeue a parked owner task and publish its generation in the same transaction. */
   retry(agentId: string, taskId: string): Promise<TaskActivityCommandOutcome> {
-    return this.changeOwnerTask(agentId, taskId, (task, ref, tx) => {
+    return this.changeOwnerTask(agentId, taskId, async (task, ref, tx) => {
       if (typeof task.status !== 'string') throw new Error('Invalid activity task');
       // This makes client retries idempotent: after the first successful wake,
       // pending is no longer wakeable and cannot increment the generation twice.
@@ -476,8 +495,64 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
         task.state && typeof task.state === 'object' && !Array.isArray(task.state)
           ? { ...(task.state as Record<string, unknown>) }
           : task.state;
-      if (task.status === 'needs_attention' && state && typeof state === 'object')
-        delete (state as Record<string, unknown>).pendingFinal;
+      let preserveCorrectionFinal = false;
+      let parkUnknownCorrectionFinal = false;
+      if (task.status === 'needs_attention' && state && typeof state === 'object') {
+        const pendingFinal = (state as Record<string, unknown>).pendingFinal;
+        const hasCorrectionFinal = Boolean(
+          pendingFinal &&
+            typeof pendingFinal === 'object' &&
+            Object.hasOwn(pendingFinal, 'checklistCorrection'),
+        );
+        const correction = hasCorrectionFinal
+          ? (pendingFinal as Record<string, unknown>).checklistCorrection
+          : undefined;
+        const ownerMessageId =
+          correction && typeof correction === 'object' && !Array.isArray(correction)
+            ? (correction as Record<string, unknown>).ownerMessageId
+            : undefined;
+        if (typeof ownerMessageId === 'string') {
+          const ownerMessageSnapshot = await tx.get(this.store.doc('messages', ownerMessageId));
+          const conversationId = task.conversationId;
+          const conversationSnapshot =
+            typeof conversationId === 'string'
+              ? await tx.get(this.store.doc('conversations', conversationId))
+              : null;
+          const ownerMessage = ownerMessageSnapshot.exists
+            ? decodeRecord<Records['messages']>(ownerMessageSnapshot.data())
+            : null;
+          const conversation = conversationSnapshot?.exists
+            ? decodeRecord<Records['conversations']>(conversationSnapshot.data())
+            : null;
+          preserveCorrectionFinal = Boolean(
+            ownerMessage &&
+              conversation?.agentId === agentId &&
+              this.checklistCorrectionPolicy?.isRetryableFinal({
+                task: task as never,
+                state,
+                ownerMessage: { ...ownerMessage, agentId },
+              }),
+          );
+          parkUnknownCorrectionFinal = Boolean(
+            ownerMessage &&
+              conversation?.agentId === agentId &&
+              this.checklistCorrectionPolicy?.isUnknownFinal({
+                task: task as never,
+                state,
+                ownerMessage: { ...ownerMessage, agentId },
+              }),
+          );
+        }
+        if (
+          hasCorrectionFinal &&
+          (typeof ownerMessageId !== 'string' ||
+            !this.checklistCorrectionPolicy ||
+            parkUnknownCorrectionFinal ||
+            !preserveCorrectionFinal)
+        )
+          return withCurrent(task, {}, 'no_longer_retriable');
+        if (!preserveCorrectionFinal) delete (state as Record<string, unknown>).pendingFinal;
+      }
       tx.update(ref, {
         status: 'pending',
         ...(state === undefined ? {} : { state }),
@@ -826,7 +901,7 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
       task: Record<string, unknown>,
       ref: DocumentReference,
       tx: Transaction,
-    ) => TaskActivityCommandOutcome,
+    ) => TaskActivityCommandOutcome | Promise<TaskActivityCommandOutcome>,
   ): Promise<TaskActivityCommandOutcome> {
     if (!agentId || !taskId) throw new Error('Activity agent and task are required');
     return this.store.db.runTransaction(async (tx) => {

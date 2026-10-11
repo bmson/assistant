@@ -19,7 +19,6 @@ import {
   renderSituationDecisionContext,
 } from '../../memory/situation-context.js';
 import type { ModelRouter } from '../../model-router/router.js';
-import type { ChecklistCorrectionResumeProjection } from '../checklist-correction-resume.js';
 import { approvalHeadline, approvalPrompt, clarifyingQuestion } from '../../owner-text.js';
 import { deliveredChannels, markApprovalsNotified } from '../approvals.js';
 import {
@@ -27,6 +26,7 @@ import {
   type DocumentReadIntent,
   documentReadDispatchFailure,
 } from '../artifact-intent.js';
+import type { ChecklistCorrectionResumeProjection } from '../checklist-correction-resume.js';
 import {
   checkpointTask,
   completeTask,

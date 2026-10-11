@@ -46,13 +46,20 @@ export class FirestoreExecutionContextRepository implements ExecutionContextRepo
     if (documentKey(row.id) !== doc.id) {
       throw new Error('Execution context message document identity mismatch');
     }
+    return row;
+  }
+
+  private decodeLatestOwnerMessage(doc: FirebaseFirestore.DocumentSnapshot): Records['messages'] {
+    const row = this.decodeMessage(doc);
     const appendedAt = doc.get('appendedAt');
-    const appendSequence =
-      appendedAt instanceof Timestamp
-        ? (BigInt(appendedAt.seconds) * 1_000_000_000n + BigInt(appendedAt.nanoseconds))
-            .toString()
-            .padStart(20, '0')
-        : row.appendSequence;
+    if (!(appendedAt instanceof Timestamp))
+      throw new Error('Execution context latest owner-message append timestamp is invalid');
+    const appendSequence = (
+      BigInt(appendedAt.seconds) * 1_000_000_000n +
+      BigInt(appendedAt.nanoseconds)
+    )
+      .toString()
+      .padStart(20, '0');
     return { ...row, appendSequence };
   }
 
@@ -110,7 +117,11 @@ export class FirestoreExecutionContextRepository implements ExecutionContextRepo
     return snapshot.docs.map((doc) => this.decodeMessage(doc)).reverse();
   }
 
-  async getOwnerMessage({ agentId, conversationId, messageId }: {
+  async getOwnerMessage({
+    agentId,
+    conversationId,
+    messageId,
+  }: {
     agentId: string;
     conversationId: string;
     messageId: string;
@@ -128,7 +139,10 @@ export class FirestoreExecutionContextRepository implements ExecutionContextRepo
       : null;
   }
 
-  async getLatestOwnerMessage({ agentId, conversationId }: {
+  async getLatestOwnerMessage({
+    agentId,
+    conversationId,
+  }: {
     agentId: string;
     conversationId: string;
   }) {
@@ -148,7 +162,7 @@ export class FirestoreExecutionContextRepository implements ExecutionContextRepo
       .get();
     const doc = snapshot.docs[0];
     if (!doc) return null;
-    const message = this.decodeMessage(doc);
+    const message = this.decodeLatestOwnerMessage(doc);
     if (
       message.conversationId !== conversationId ||
       typeof message.appendSequence !== 'string' ||

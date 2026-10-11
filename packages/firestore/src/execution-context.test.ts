@@ -190,6 +190,59 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       ).resolves.toBeNull();
     });
 
+    it('uses append order, then the canonical ID tie-break, for the visible owner head', async () => {
+      await addConversation('head-chat', 'agent-a', 'chat');
+      const base = Timestamp.fromDate(new Date('2026-09-12T10:00:00Z'));
+      const at = (millis: number) => Timestamp.fromMillis(base.toMillis() + millis);
+      const rows = [
+        {
+          ...message({
+            id: 'owner-backdated',
+            conversationId: 'head-chat',
+            at: new Date('2010-01-01T00:00:00Z'),
+            text: 'original request',
+          }),
+          hiddenAt: null,
+          appendedAt: at(1),
+        },
+        {
+          ...message({
+            id: 'owner-newer-created',
+            conversationId: 'head-chat',
+            at: new Date('2035-01-01T00:00:00Z'),
+            text: 'late createdAt',
+          }),
+          hiddenAt: null,
+          appendedAt: at(2),
+        },
+        {
+          ...message({
+            id: 'owner-tie-a',
+            conversationId: 'head-chat',
+            at: new Date('2000-01-01T00:00:00Z'),
+            text: 'same append time, lower ID',
+          }),
+          hiddenAt: null,
+          appendedAt: at(3),
+        },
+        {
+          ...message({
+            id: 'owner-tie-z',
+            conversationId: 'head-chat',
+            at: new Date('1990-01-01T00:00:00Z'),
+            text: 'same append time, higher ID',
+          }),
+          hiddenAt: null,
+          appendedAt: at(3),
+        },
+      ];
+      for (const row of rows) await store.doc('messages', row.id).set(row);
+
+      await expect(
+        repository.getLatestOwnerMessage({ agentId: 'agent-a', conversationId: 'head-chat' }),
+      ).resolves.toMatchObject({ id: 'owner-tie-z', text: 'same append time, higher ID' });
+    });
+
     it('returns the latest 20 eligible messages before the cutoff from an owned email thread', async () => {
       await addConversation('email-a', 'agent-a', 'email');
       const rows = Array.from({ length: 25 }, (_, index) =>
