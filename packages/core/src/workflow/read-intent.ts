@@ -98,11 +98,13 @@ export interface ReadIntentMessage {
 }
 
 export interface ReadToolEvidence {
+  id?: string;
   toolName: string;
   status: string;
   args?: unknown;
   result?: unknown;
   error?: string | null;
+  decision?: unknown;
 }
 
 const LODGING_QUESTION =

@@ -7,8 +7,10 @@ import {
   reconcileRequestChecklist,
   requestChecklistHasUnfinished,
   requestChecklistSummary,
+  revisePendingRequestChecklistItem,
   reviseRequestChecklist,
 } from './request-checklist.js';
+import { RequestChecklistSchema } from './request-checklist-schema.js';
 
 function checklist(request = 'Find my hotel reservation, save it as a card, and remind me') {
   const result = buildRequestChecklist(request);
@@ -29,6 +31,48 @@ const reminder: ChecklistEvidence = {
   args: { text: 'Hotel check-in' },
   result: { reminderId: 'r-1' },
 };
+
+function correctionInput(
+  value: ReturnType<typeof checklist>,
+  options: {
+    ownerMessageId?: string;
+    ownerMessageText?: string;
+    expectedRevision?: number;
+    itemIndex?: number;
+    evidenceRows?: ChecklistEvidence[];
+    replacement?: { kind: ReturnType<typeof checklist>['items'][number]['kind']; label: string };
+  } = {},
+) {
+  const item = value.items[options.itemIndex ?? 1];
+  if (!item) throw new Error('missing selected checklist item');
+  const ownerMessageId = options.ownerMessageId ?? 'owner-correction-1';
+  const expectedRevision = options.expectedRevision ?? value.revision ?? 0;
+  const replacement = options.replacement ?? {
+    kind: 'reminder' as const,
+    label: 'Remind me about the flight',
+  };
+  return {
+    task: { id: 'task-1', agentId: 'agent-1', conversationId: 'conversation-1' },
+    ownerMessage: {
+      id: ownerMessageId,
+      taskId: 'owner-task-1',
+      agentId: 'agent-1',
+      conversationId: 'conversation-1',
+      role: 'user' as const,
+      origin: 'owner' as const,
+      text: options.ownerMessageText ?? replacement.label,
+    },
+    binding: {
+      taskId: 'task-1',
+      itemId: item.id,
+      expectedRevision,
+      ownerTaskId: 'owner-task-1',
+      ownerMessageId,
+    },
+    evidence: { complete: true as const, rows: options.evidenceRows ?? [] },
+    replacement,
+  };
+}
 
 describe('durable request checklist', () => {
   it('retains explicit owner cancellation and excludes it from completion requirements', () => {
@@ -52,6 +96,475 @@ describe('durable request checklist', () => {
     expect(reconcileRequestChecklist(resumed.requestChecklist, [lookup]).items[1]?.status).toBe(
       'cancelled',
     );
+  });
+  it('revises only the explicitly selected pending item and preserves its identity', () => {
+    const original = checklist('Find my hotel reservation and remind me about the hotel');
+    const revised = revisePendingRequestChecklistItem(original, correctionInput(original));
+
+    expect(revised.request).toBe(original.request);
+    expect(revised.items[0]).toEqual(original.items[0]);
+    expect(revised.items[1]).toMatchObject({
+      id: original.items[1]?.id,
+      label: 'Remind me about the flight',
+      targetTerms: ['flight'],
+      status: 'pending',
+      evidence: [],
+    });
+    expect(revised.revision).toBe(1);
+    expect(revised.revisionAudit?.[0]).toMatchObject({
+      taskId: 'task-1',
+      ownerTaskId: 'owner-task-1',
+      ownerMessageId: 'owner-correction-1',
+      itemId: original.items[1]?.id,
+      fromLabel: 'remind me about the hotel',
+      toLabel: 'Remind me about the flight',
+    });
+    expect(TaskStateSchema.parse({ requestChecklist: revised }).requestChecklist).toEqual(revised);
+  });
+  it('normalizes the backward-compatible saved-card default before returning a revised value', () => {
+    const original = checklist('Find my hotel reservation and remind me about the hotel');
+    const legacy = { ...original, savedCards: undefined } as unknown as typeof original;
+    const revised = revisePendingRequestChecklistItem(legacy, correctionInput(legacy));
+    expect(revised.revision).toBe(1);
+    expect(revised.savedCards).toEqual([]);
+    expect(RequestChecklistSchema.safeParse(revised).success).toBe(true);
+  });
+  it('requires the bound owner message to contain the exact replacement clause', () => {
+    const original = checklist('Find my hotel reservation and remind me about the hotel');
+    const exactClauseWithPunctuation = revisePendingRequestChecklistItem(
+      original,
+      correctionInput(original, { ownerMessageText: 'Remind me about the flight!!!' }),
+    );
+    expect(exactClauseWithPunctuation.revision).toBe(1);
+
+    for (const ownerMessageText of [
+      'Actually, remind me about the flight instead.',
+      'Remind me about the airport',
+      'The owner wants me to remind them about the flight',
+    ]) {
+      expect(
+        revisePendingRequestChecklistItem(
+          original,
+          correctionInput(original, { ownerMessageText }),
+        ),
+      ).toEqual(original);
+    }
+  });
+  it('allows revisions to different pending kinds and scopes receipt exclusions per item', () => {
+    const original = checklist('Find my hotel reservation and remind me about the hotel');
+    const oldLookup: ChecklistEvidence = {
+      id: 'old-hotel-lookup',
+      toolName: 'gmail.search',
+      status: 'failed',
+      effectOutcome: 'not_executed',
+      args: { query: 'hotel' },
+      result: {},
+    };
+    const oldReminder: ChecklistEvidence = {
+      id: 'old-hotel-reminder',
+      toolName: 'reminder.create',
+      status: 'failed',
+      effectOutcome: 'not_executed',
+      args: { text: 'Hotel check-in' },
+      result: {},
+    };
+    const first = revisePendingRequestChecklistItem(
+      original,
+      correctionInput(original, { evidenceRows: [oldLookup, oldReminder] }),
+    );
+    const staleLookupSuccess = {
+      ...oldLookup,
+      status: 'succeeded',
+      result: { results: [{ subject: 'Harbor Hotel reservation' }] },
+    };
+    const afterFirstRevision = reconcileRequestChecklist(first, [staleLookupSuccess]);
+    expect(afterFirstRevision.items.map((item) => item.status)).toEqual(['completed', 'pending']);
+
+    const second = revisePendingRequestChecklistItem(
+      first,
+      correctionInput(first, {
+        ownerMessageId: 'owner-correction-2',
+        itemIndex: 0,
+        expectedRevision: 1,
+        evidenceRows: [oldLookup, oldReminder],
+        replacement: { kind: 'lookup', label: 'Find my airport itinerary' },
+      }),
+    );
+    expect(second.revision).toBe(2);
+    expect(second.request).toBe(original.request);
+    expect(second.items.map((item) => item.id)).toEqual(original.items.map((item) => item.id));
+    expect(second.revisionAudit?.map((entry) => entry.itemId)).toEqual([
+      original.items[1]?.id,
+      original.items[0]?.id,
+    ]);
+    expect(
+      reconcileRequestChecklist(second, [staleLookupSuccess]).items.map((item) => item.status),
+    ).toEqual(['pending', 'pending']);
+  });
+  it('makes owner-message replays idempotent and does not bind ordinary correction text', () => {
+    const original = checklist('Find my hotel reservation and remind me about the hotel');
+    const revised = revisePendingRequestChecklistItem(original, correctionInput(original));
+    expect(
+      revisePendingRequestChecklistItem(revised, correctionInput(revised, { expectedRevision: 1 })),
+    ).toBe(revised);
+    for (const text of [
+      'Actually, remind me about the flight instead.',
+      'The email says: “Actually, remind me about the flight instead.”',
+      'If we travel, actually remind me about the flight instead.',
+    ]) {
+      expect(reviseRequestChecklist(original, { messageId: text, text })).toEqual(original);
+    }
+  });
+  it.each(['blocked', 'awaiting_approval', 'completed', 'cancelled'] as const)(
+    'does not revise a %s item',
+    (status) => {
+      const original = checklist('Find my hotel reservation and remind me about the hotel');
+      const guarded = {
+        ...original,
+        items: original.items.map((item, index) => (index === 1 ? { ...item, status } : item)),
+      };
+      expect(revisePendingRequestChecklistItem(guarded, correctionInput(guarded))).toEqual(guarded);
+    },
+  );
+  it.each([
+    'queued',
+    'executing',
+    'approved',
+    'awaiting_approval',
+    'succeeded',
+    'unknown',
+    'failed',
+  ])(
+    'blocks same-kind evidence in %s state unless durable evidence says not executed',
+    (status) => {
+      const original = checklist('Find my hotel reservation and remind me about the hotel');
+      const row: ChecklistEvidence = {
+        id: `effect-${status}`,
+        toolName: 'reminder.create',
+        status,
+      };
+      expect(
+        revisePendingRequestChecklistItem(
+          original,
+          correctionInput(original, { evidenceRows: [row] }),
+        ),
+      ).toEqual(original);
+    },
+  );
+  it.each([
+    {
+      id: 'unknown-generic-effect',
+      toolName: 'unrecognized.write',
+      status: 'failed',
+      effectOutcome: 'unknown' as const,
+    },
+    {
+      id: 'unrecognized-success',
+      toolName: 'unrecognized.write',
+      status: 'succeeded',
+    },
+    {
+      id: 'known-tool-unknown-outcome',
+      toolName: 'gmail.search',
+      status: 'failed',
+      effectOutcome: 'unknown' as const,
+    },
+  ])('blocks potentially effectful unknown evidence $id', (row) => {
+    const original = checklist('Find my hotel reservation and remind me about the hotel');
+    expect(
+      revisePendingRequestChecklistItem(
+        original,
+        correctionInput(original, { evidenceRows: [row] }),
+      ),
+    ).toEqual(original);
+  });
+  it('permits only an explicit terminal not-executed proof and records its receipt ID', () => {
+    const original = checklist('Find my hotel reservation and remind me about the hotel');
+    const safelyUnexecuted: ChecklistEvidence = {
+      id: 'failed-before-dispatch',
+      toolName: 'reminder.create',
+      status: 'failed',
+      effectOutcome: 'not_executed',
+    };
+    const revised = revisePendingRequestChecklistItem(
+      original,
+      correctionInput(original, { evidenceRows: [safelyUnexecuted] }),
+    );
+    expect(revised.items[1]?.targetTerms).toEqual(['flight']);
+    expect(revised.revisionAudit?.[0]?.excludedEvidenceIds).toContain(safelyUnexecuted.id);
+  });
+  it('excludes all pre-revision IDs so stale hotel evidence cannot complete the flight target', () => {
+    const original = checklist('Find my hotel reservation and remind me about the hotel');
+    const preRevision: ChecklistEvidence = {
+      id: 'old-hotel-reminder',
+      toolName: 'reminder.create',
+      status: 'failed',
+      effectOutcome: 'not_executed',
+      args: { text: 'Hotel check-in' },
+      result: {},
+    };
+    const revised = revisePendingRequestChecklistItem(
+      original,
+      correctionInput(original, { evidenceRows: [preRevision] }),
+    );
+    const staleSuccess = {
+      ...preRevision,
+      status: 'succeeded',
+      result: { reminderId: 'old-hotel-reminder-id' },
+    };
+    expect(revised.revisionAudit?.[0]?.excludedEvidenceIds).toContain(preRevision.id);
+    expect(reconcileRequestChecklist(revised, [staleSuccess]).items[1]?.status).toBe('pending');
+  });
+  it('preserves a completed same-kind sibling while revising only the explicitly bound pending item', () => {
+    const original = checklist(
+      'Find my hotel confirmation email in Berlin and find my flight confirmation email to Paris on 2026-12-21',
+    );
+    const completedHotel: ChecklistEvidence = {
+      id: 'completed-hotel-receipt',
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      effectOutcome: 'completed',
+      args: { query: 'hotel berlin' },
+      result: { results: [{ threadId: 'berlin-hotel', subject: 'Berlin hotel confirmation' }] },
+    };
+    const withCompletedSibling = {
+      ...original,
+      items: original.items.map((item, index) =>
+        index === 0
+          ? {
+              ...item,
+              status: 'completed' as const,
+              evidence: [{ id: completedHotel.id, toolName: completedHotel.toolName }],
+            }
+          : item,
+      ),
+    };
+    const revised = revisePendingRequestChecklistItem(
+      withCompletedSibling,
+      correctionInput(withCompletedSibling, {
+        itemIndex: 1,
+        evidenceRows: [completedHotel],
+        replacement: {
+          kind: 'lookup',
+          label: 'Find my flight confirmation email to London on 2026-12-21',
+        },
+      }),
+    );
+    expect(revised.revision).toBe(1);
+    expect(revised.items[0]).toMatchObject({
+      status: 'completed',
+      label: original.items[0]?.label,
+    });
+    expect(revised.items[1]).toMatchObject({
+      status: 'pending',
+      label: 'Find my flight confirmation email to London on 2026-12-21',
+    });
+    expect(revised.revisionAudit?.[0]?.excludedEvidenceIds).toContain(completedHotel.id);
+  });
+  it('fails closed on missing authority, stale revisions, ambiguity, and evidence overflow', () => {
+    const original = checklist('Find my hotel reservation and remind me about the hotel');
+    const base = correctionInput(original);
+    for (const change of [
+      { binding: { ...base.binding, taskId: 'other-task' } },
+      { binding: { ...base.binding, expectedRevision: 4 } },
+      { binding: { ...base.binding, ownerMessageId: 'other-message' } },
+      { ownerMessage: { ...base.ownerMessage, conversationId: 'other-conversation' } },
+      { evidence: { complete: false as true, rows: [] } },
+      {
+        evidence: {
+          complete: true as const,
+          rows: Array.from({ length: 257 }, (_, index) => ({
+            id: `row-${index}`,
+            toolName: 'gmail.search',
+            status: 'succeeded',
+          })),
+        },
+      },
+    ]) {
+      expect(revisePendingRequestChecklistItem(original, { ...base, ...change })).toEqual(original);
+    }
+    const reminderItem = original.items[1];
+    if (!reminderItem) throw new Error('missing reminder item');
+    const duplicateKind = {
+      ...original,
+      items: [...original.items, { ...reminderItem, id: 'second-reminder' }],
+    };
+    const exactItemCorrection = revisePendingRequestChecklistItem(
+      duplicateKind,
+      correctionInput(duplicateKind),
+    );
+    expect(exactItemCorrection.items[1]?.label).not.toBe(reminderItem.label);
+    expect(exactItemCorrection.items[2]?.label).toBe(reminderItem.label);
+  });
+  it('rejects mismatched kind, quoted, conditional, ambiguous, or targetless replacements', () => {
+    const original = checklist('Find my hotel reservation and remind me about the hotel');
+    for (const replacement of [
+      { kind: 'send' as const, label: 'Email the flight details' },
+      { kind: 'reminder' as const, label: 'Remind me about the flight or hotel' },
+      { kind: 'reminder' as const, label: 'If I travel remind me about the flight' },
+      { kind: 'reminder' as const, label: '“Remind me about the flight”' },
+      { kind: 'reminder' as const, label: 'Remind me about the flight and email Alice' },
+      { kind: 'reminder' as const, label: 'Remind me' },
+      { kind: 'reminder' as const, label: `Remind me about ${'x'.repeat(101)}` },
+      {
+        kind: 'reminder' as const,
+        label: 'Remind me about alpha bravo charlie delta echo foxtrot golf hotel india',
+      },
+    ]) {
+      expect(
+        revisePendingRequestChecklistItem(original, { ...correctionInput(original), replacement }),
+      ).toEqual(original);
+    }
+  });
+  it('bounds revision and cumulative pre-revision evidence history', () => {
+    const original = checklist('Find my hotel reservation and remind me about the hotel');
+    const atRevisionLimit = { ...original, revision: 12 };
+    expect(
+      revisePendingRequestChecklistItem(atRevisionLimit, correctionInput(atRevisionLimit)),
+    ).toBe(atRevisionLimit);
+    const priorAudit = {
+      revision: 1,
+      taskId: 'task-1',
+      conversationId: 'conversation-1',
+      ownerTaskId: 'old-owner-task',
+      ownerMessageId: 'old-message',
+      itemId: original.items[1]?.id ?? '',
+      fromLabel: 'Remind me about the hotel',
+      fromTargetTerms: ['hotel'],
+      toLabel: 'Remind me about the airport',
+      toTargetTerms: ['airport'],
+      excludedEvidenceIds: Array.from({ length: 256 }, (_, index) => `old-${index}`),
+    };
+    const overEvidenceLimit = { ...original, revision: 1, revisionAudit: [priorAudit] };
+    expect(
+      revisePendingRequestChecklistItem(
+        overEvidenceLimit,
+        correctionInput(overEvidenceLimit, {
+          ownerMessageId: 'new-message',
+          evidenceRows: [{ id: 'one-more', toolName: 'gmail.search', status: 'succeeded' }],
+        }),
+      ),
+    ).toBe(overEvidenceLimit);
+  });
+  it('rejects overlong identities, negative revisions, and duplicate-message audit history', () => {
+    const original = checklist('Find my hotel reservation and remind me about the hotel');
+    const tooLongTask = correctionInput(original);
+    tooLongTask.task.id = 't'.repeat(129);
+    tooLongTask.binding.taskId = tooLongTask.task.id;
+    expect(revisePendingRequestChecklistItem(original, tooLongTask)).toEqual(original);
+
+    const negativeRevision = { ...original, revision: -1 };
+    expect(
+      revisePendingRequestChecklistItem(
+        negativeRevision,
+        correctionInput(negativeRevision, { expectedRevision: -1 }),
+      ),
+    ).toEqual(negativeRevision);
+
+    const first = revisePendingRequestChecklistItem(original, correctionInput(original));
+    const firstAudit = first.revisionAudit?.[0];
+    if (!firstAudit) throw new Error('missing revision audit');
+    const duplicateAudit = {
+      ...first,
+      revision: 2,
+      revisionAudit: [firstAudit, { ...firstAudit, revision: 2 }],
+    };
+    expect(
+      revisePendingRequestChecklistItem(
+        duplicateAudit,
+        correctionInput(duplicateAudit, {
+          ownerMessageId: 'new-owner-message',
+          replacement: { kind: 'reminder', label: 'Remind me about the airport' },
+        }),
+      ),
+    ).toEqual(duplicateAudit);
+  });
+  it('preserves legacy v1 parsing while declining unbounded correction audit values', () => {
+    const original = checklist('Find my hotel reservation and remind me about the hotel');
+    const overlongItemId = {
+      ...original,
+      items: original.items.map((item, index) =>
+        index === 1 ? { ...item, id: 'i'.repeat(129) } : item,
+      ),
+    };
+    expect(RequestChecklistSchema.safeParse(overlongItemId).success).toBe(true);
+    expect(
+      revisePendingRequestChecklistItem(
+        overlongItemId,
+        correctionInput(overlongItemId as typeof original),
+      ),
+    ).toEqual(overlongItemId);
+
+    const overlongExistingTerm = {
+      ...original,
+      items: original.items.map((item, index) =>
+        index === 1 ? { ...item, targetTerms: ['x'.repeat(101)] } : item,
+      ),
+    };
+    expect(RequestChecklistSchema.safeParse(overlongExistingTerm).success).toBe(true);
+    expect(
+      revisePendingRequestChecklistItem(
+        overlongExistingTerm,
+        correctionInput(overlongExistingTerm as typeof original),
+      ),
+    ).toEqual(overlongExistingTerm);
+
+    const first = revisePendingRequestChecklistItem(original, correctionInput(original));
+    const inconsistentHistory = { ...first, revision: 2 };
+    expect(RequestChecklistSchema.safeParse(inconsistentHistory).success).toBe(true);
+    expect(
+      revisePendingRequestChecklistItem(
+        inconsistentHistory,
+        correctionInput(inconsistentHistory, {
+          ownerMessageId: 'another-message',
+          expectedRevision: 2,
+        }),
+      ),
+    ).toEqual(inconsistentHistory);
+
+    const mismatchedAuditTarget = {
+      ...first,
+      items: first.items.map((item, index) =>
+        index === 1
+          ? { ...item, label: 'Remind me about the airport', targetTerms: ['airport'] }
+          : item,
+      ),
+    };
+    expect(RequestChecklistSchema.safeParse(mismatchedAuditTarget).success).toBe(true);
+    expect(
+      revisePendingRequestChecklistItem(
+        mismatchedAuditTarget,
+        correctionInput(mismatchedAuditTarget, {
+          ownerMessageId: 'third-message',
+          expectedRevision: 1,
+        }),
+      ),
+    ).toEqual(mismatchedAuditTarget);
+
+    const longEvidenceTool = {
+      ...original,
+      items: original.items.map((item, index) =>
+        index === 1
+          ? { ...item, evidence: [{ id: 'old-receipt', toolName: 'x'.repeat(129) }] }
+          : item,
+      ),
+    };
+    expect(RequestChecklistSchema.safeParse(longEvidenceTool).success).toBe(true);
+    expect(
+      revisePendingRequestChecklistItem(
+        longEvidenceTool,
+        correctionInput(longEvidenceTool as typeof original),
+      ),
+    ).toEqual(longEvidenceTool);
+
+    expect(
+      revisePendingRequestChecklistItem(
+        original,
+        correctionInput(original, {
+          evidenceRows: [{ id: 'receipt', toolName: 'x'.repeat(129), status: 'succeeded' }],
+        }),
+      ),
+    ).toEqual(original);
   });
   it.each([
     'The email says do not remind me about the hotel',
@@ -112,6 +625,11 @@ describe('durable request checklist', () => {
       { label: 'save it as a card', kind: 'card', targetTerms: ['hotel'] },
       { label: 'remind me', kind: 'reminder', targetTerms: ['hotel'] },
     ]);
+  });
+  it('preserves existing checklist admission for a long target token', () => {
+    expect(
+      buildRequestChecklist(`Find my ${'x'.repeat(101)} and remind me about the hotel`),
+    ).toBeDefined();
   });
 
   it.each([

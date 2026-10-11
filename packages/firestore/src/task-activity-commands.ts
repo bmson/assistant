@@ -1,13 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import type {
   ArchiveOldActivityProgress,
+  ChecklistCorrectionPolicy,
+  PendingChecklistCorrectionInput,
+  PendingChecklistCorrectionOutcome,
+  Records,
   TaskActivityCommandOutcome,
   TaskActivityCommandRepository,
   TaskActivityCurrentState,
 } from '@assistant/persistence';
 import {
+  completeChecklistCorrectionEvidence,
   isChatAdmissionCancellationProjection,
+  isPinnedOwnerChatRequestMessage,
+  MAX_CHECKLIST_CORRECTION_LEDGER_ROWS,
   normalizeTaskBudget,
+  ownerChatChecklistRequestMessageId,
   taskActivityOutcome,
 } from '@assistant/persistence';
 import {
@@ -17,9 +25,21 @@ import {
   type QueryDocumentSnapshot,
   type Transaction,
 } from '@google-cloud/firestore';
+import { messageRecord } from './messages.js';
 import { createWakeIntent } from './outbox.js';
 import { privacyErasureIsActive } from './privacy-erasure.js';
-import { decodeRecord, documentKey, type InstallationStore } from './store.js';
+import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function correctionOutcome(
+  outcome: PendingChecklistCorrectionOutcome['outcome'],
+  queueGeneration: number | null = null,
+  ownerMessageId: string | null = null,
+  transitioned = false,
+): PendingChecklistCorrectionOutcome {
+  return { outcome, transitioned, queueGeneration, ownerMessageId };
+}
 
 const TERMINAL = new Set(['done', 'failed', 'cancelled']);
 const WAKEABLE = new Set([
@@ -149,7 +169,302 @@ function isTerminalArchiveCandidate(
 export class FirestoreTaskActivityCommandRepository implements TaskActivityCommandRepository {
   readonly kind = 'task-activity-command-repository' as const;
 
-  constructor(readonly store: InstallationStore) {}
+  constructor(
+    readonly store: InstallationStore,
+    readonly checklistCorrectionPolicy?: ChecklistCorrectionPolicy,
+  ) {}
+
+  /** Atomically append the selected owner correction, revise its checklist, and queue the task. */
+  revisePendingChecklist(
+    agentId: string,
+    input: PendingChecklistCorrectionInput,
+  ): Promise<PendingChecklistCorrectionOutcome> {
+    const policy = this.checklistCorrectionPolicy;
+    if (!policy) return Promise.resolve(correctionOutcome('unsafe_evidence'));
+    if (
+      !UUID.test(input.taskId) ||
+      !UUID.test(input.ownerMessageId) ||
+      !input.itemId ||
+      input.itemId.length > 128 ||
+      !Number.isSafeInteger(input.expectedRevision) ||
+      input.expectedRevision < 0 ||
+      !input.replacementLabel ||
+      input.replacementLabel.length > 500
+    )
+      return Promise.resolve(correctionOutcome('invalid'));
+
+    return this.store.db.runTransaction(async (tx) => {
+      const owners = await tx.get(this.store.collection('agents').limit(2));
+      const owner = owners.docs[0];
+      if (
+        owners.size !== 1 ||
+        !owner ||
+        owner.id !== documentKey(agentId) ||
+        owner.get('id') !== agentId
+      )
+        return correctionOutcome('not_found');
+      const erasure = await tx.get(this.store.doc('privacyErasureJobs', agentId));
+      if (
+        erasure.exists &&
+        (erasure.get('agentId') !== agentId ||
+          privacyErasureIsActive(erasure.get('status')) ||
+          !erasure.updateTime)
+      )
+        throw new Error('Privacy erasure is in progress');
+
+      const taskRef = this.store.doc('tasks', input.taskId);
+      const messageRef = this.store.doc('messages', input.ownerMessageId);
+      const taskSnapshot = await tx.get(taskRef);
+      if (!taskSnapshot.exists || taskSnapshot.get('agentId') !== agentId)
+        return correctionOutcome('not_found');
+      const task = decodeRecord<Record<string, unknown>>(taskSnapshot.data());
+      if (
+        task.id !== input.taskId ||
+        documentKey(input.taskId) !== taskSnapshot.id ||
+        isChatAdmissionCancellationProjection(task)
+      )
+        return correctionOutcome('not_found');
+      if (typeof task.conversationId !== 'string' || !task.conversationId)
+        return correctionOutcome('invalid');
+
+      const state =
+        task.state && typeof task.state === 'object' && !Array.isArray(task.state)
+          ? ({ ...(task.state as Record<string, unknown>) } as Record<string, unknown>)
+          : null;
+      const parsed = policy.readChecklist(state?.requestChecklist);
+      if (!parsed) return correctionOutcome('invalid');
+      const checklist = parsed.checklist;
+
+      const originalMessageId = ownerChatChecklistRequestMessageId(
+        task as {
+          id: string;
+          agentId: string;
+          conversationId: string | null;
+          goalId: string | null;
+          type: string;
+          trust: string;
+          trigger: unknown;
+        },
+        parsed.request,
+      );
+      if (!originalMessageId) return correctionOutcome('unsafe_evidence');
+      const originalMessageSnapshot = await tx.get(this.store.doc('messages', originalMessageId));
+      if (!originalMessageSnapshot.exists) return correctionOutcome('unsafe_evidence');
+      const originalMessage = decodeRecord<Record<string, unknown>>(originalMessageSnapshot.data());
+      if (
+        !isPinnedOwnerChatRequestMessage(
+          task as { id: string; agentId: string; conversationId: string | null },
+          originalMessage as {
+            id: string;
+            taskId: string | null;
+            conversationId: string;
+            role: string;
+            origin: string;
+            text: string;
+          },
+          originalMessageId,
+          parsed.request,
+        )
+      )
+        return correctionOutcome('unsafe_evidence');
+
+      const priorMessageSnapshot = await tx.get(messageRef);
+      if (priorMessageSnapshot.exists) {
+        const priorMessage = decodeRecord<Record<string, unknown>>(priorMessageSnapshot.data());
+        if (
+          policy.matchesReplay({
+            checklist,
+            correction: input,
+            task: { id: task.id, conversationId: task.conversationId },
+            priorMessage: priorMessage as {
+              id: string;
+              taskId: string | null;
+              conversationId: string | null;
+              role: string;
+              origin: string;
+              text: string;
+            },
+          })
+        )
+          return correctionOutcome(
+            'already_applied',
+            Number.isSafeInteger(task.queueGeneration) ? Number(task.queueGeneration) : null,
+            input.ownerMessageId,
+          );
+        return correctionOutcome('invalid');
+      }
+
+      if (
+        task.status !== 'needs_attention' ||
+        task.leaseToken !== null ||
+        task.lockedUntil !== null ||
+        task.archivedAt !== null
+      )
+        return correctionOutcome('no_longer_retriable');
+      if (!Number.isSafeInteger(task.queueGeneration) || Number(task.queueGeneration) < 0)
+        return correctionOutcome('invalid');
+      if (state?.pendingApprovalId || state?.pendingJob != null || state?.pendingToolBatch != null)
+        return correctionOutcome('unsafe_evidence');
+
+      const conversationRef = this.store.doc('conversations', task.conversationId);
+      const callsQuery = this.store
+        .collection('toolCalls')
+        .where('taskId', '==', task.id)
+        .limit(MAX_CHECKLIST_CORRECTION_LEDGER_ROWS + 1);
+      const receiptsQuery = this.store
+        .collection('toolCallReceipts')
+        .where('taskId', '==', task.id)
+        .limit(MAX_CHECKLIST_CORRECTION_LEDGER_ROWS + 1);
+      const pendingApprovalsQuery = this.store
+        .collection('approvals')
+        .where('taskId', '==', task.id)
+        .where('status', 'in', ['pending', 'approved'])
+        .limit(1);
+      const [conversationSnapshot, callsSnapshot, receiptsSnapshot, approvalsSnapshot] =
+        await Promise.all([
+          tx.get(conversationRef),
+          tx.get(callsQuery),
+          tx.get(receiptsQuery),
+          tx.get(pendingApprovalsQuery),
+        ]);
+      if (!conversationSnapshot.exists || conversationSnapshot.get('agentId') !== agentId)
+        return correctionOutcome('not_found');
+      if (approvalsSnapshot.size > 0) return correctionOutcome('unsafe_evidence');
+      if (
+        callsSnapshot.size > MAX_CHECKLIST_CORRECTION_LEDGER_ROWS ||
+        receiptsSnapshot.size > MAX_CHECKLIST_CORRECTION_LEDGER_ROWS
+      )
+        return correctionOutcome('unsafe_evidence');
+
+      const calls: Parameters<
+        typeof completeChecklistCorrectionEvidence
+      >[0]['toolCalls'][number][] = [];
+      for (const document of callsSnapshot.docs) {
+        const row = decodeRecord<Record<string, unknown>>(document.data());
+        if (
+          typeof row.id !== 'string' ||
+          document.id !== documentKey(row.id) ||
+          row.taskId !== task.id ||
+          typeof row.toolName !== 'string' ||
+          typeof row.status !== 'string'
+        )
+          return correctionOutcome('unsafe_evidence');
+        calls.push(
+          row as unknown as Parameters<
+            typeof completeChecklistCorrectionEvidence
+          >[0]['toolCalls'][number],
+        );
+      }
+      const receipts: Parameters<
+        typeof completeChecklistCorrectionEvidence
+      >[0]['receipts'][number][] = [];
+      for (const document of receiptsSnapshot.docs) {
+        const row = decodeRecord<Record<string, unknown>>(document.data());
+        if (
+          typeof row.id !== 'string' ||
+          document.id !== documentKey(row.id) ||
+          row.agentId !== agentId ||
+          row.taskId !== task.id ||
+          typeof row.toolCallId !== 'string' ||
+          typeof row.toolName !== 'string' ||
+          !['completed', 'failed', 'unknown', 'not_executed'].includes(String(row.effectOutcome))
+        )
+          return correctionOutcome('unsafe_evidence');
+        receipts.push(
+          row as unknown as Parameters<
+            typeof completeChecklistCorrectionEvidence
+          >[0]['receipts'][number],
+        );
+      }
+      const evidence = completeChecklistCorrectionEvidence({
+        agentId,
+        taskId: task.id,
+        toolCalls: calls,
+        receipts,
+      });
+      if (!evidence) return correctionOutcome('unsafe_evidence');
+      const replacement = {
+        kind: input.replacementKind,
+        label: input.replacementLabel,
+      };
+      const revision = policy.revise({
+        checklist,
+        task: { id: task.id, agentId, conversationId: task.conversationId },
+        ownerMessage: {
+          id: input.ownerMessageId,
+          taskId: task.id,
+          agentId,
+          conversationId: task.conversationId,
+          role: 'user',
+          origin: 'owner',
+          text: input.replacementLabel,
+        },
+        binding: {
+          taskId: task.id,
+          itemId: input.itemId,
+          expectedRevision: input.expectedRevision,
+          ownerTaskId: task.id,
+          ownerMessageId: input.ownerMessageId,
+        },
+        evidence,
+        replacement,
+      });
+      if (revision?.decision !== 'revised')
+        return correctionOutcome(revision?.decision ?? 'unsafe_evidence');
+      const verifiedRevision = policy.readChecklist(revision.checklist);
+      const audit = verifiedRevision?.latestAudit;
+      if (
+        !verifiedRevision ||
+        verifiedRevision.request !== parsed.request ||
+        verifiedRevision.revision !== input.expectedRevision + 1 ||
+        audit?.revision !== input.expectedRevision + 1 ||
+        audit.taskId !== task.id ||
+        audit.conversationId !== task.conversationId ||
+        audit.ownerTaskId !== task.id ||
+        audit.ownerMessageId !== input.ownerMessageId ||
+        audit.itemId !== input.itemId ||
+        audit.toLabel !== input.replacementLabel ||
+        audit.toKind !== input.replacementKind
+      )
+        return correctionOutcome('unsafe_evidence');
+      const revised = verifiedRevision.checklist;
+
+      const generation = Number(task.queueGeneration) + 1;
+      const now = this.store.now();
+      const nextState: Record<string, unknown> = { ...(state ?? {}), requestChecklist: revised };
+      delete nextState.pendingFinal;
+      const message = messageRecord(
+        {
+          conversationId: task.conversationId,
+          taskId: task.id,
+          role: 'user',
+          origin: 'owner',
+          parts: [{ type: 'text', text: input.replacementLabel }],
+          text: input.replacementLabel,
+        },
+        input.ownerMessageId,
+        now,
+      );
+      const nextTask = {
+        ...task,
+        state: nextState,
+        plan: null,
+        status: 'pending',
+        runAfter: null,
+        lockedUntil: null,
+        leaseToken: null,
+        queueGeneration: generation,
+        attempt: 0,
+        attentionNotifiedAt: null,
+        updatedAt: now,
+      };
+      tx.create(messageRef, encodeRecord(message));
+      tx.update(taskRef, encodeRecord(nextTask));
+      tx.update(conversationRef, { updatedAt: now });
+      createWakeIntent(tx, this.store, { taskId: task.id, generation, availableAt: now });
+      return correctionOutcome('corrected', generation, input.ownerMessageId, true);
+    });
+  }
 
   archive(agentId: string, taskId: string): Promise<TaskActivityCommandOutcome> {
     return this.change(agentId, taskId, 'archive');
@@ -161,7 +476,7 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
 
   /** Requeue a parked owner task and publish its generation in the same transaction. */
   retry(agentId: string, taskId: string): Promise<TaskActivityCommandOutcome> {
-    return this.changeOwnerTask(agentId, taskId, (task, ref, tx) => {
+    return this.changeOwnerTask(agentId, taskId, async (task, ref, tx) => {
       if (typeof task.status !== 'string') throw new Error('Invalid activity task');
       // This makes client retries idempotent: after the first successful wake,
       // pending is no longer wakeable and cannot increment the generation twice.
@@ -180,8 +495,64 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
         task.state && typeof task.state === 'object' && !Array.isArray(task.state)
           ? { ...(task.state as Record<string, unknown>) }
           : task.state;
-      if (task.status === 'needs_attention' && state && typeof state === 'object')
-        delete (state as Record<string, unknown>).pendingFinal;
+      let preserveCorrectionFinal = false;
+      let parkUnknownCorrectionFinal = false;
+      if (task.status === 'needs_attention' && state && typeof state === 'object') {
+        const pendingFinal = (state as Record<string, unknown>).pendingFinal;
+        const hasCorrectionFinal = Boolean(
+          pendingFinal &&
+            typeof pendingFinal === 'object' &&
+            Object.hasOwn(pendingFinal, 'checklistCorrection'),
+        );
+        const correction = hasCorrectionFinal
+          ? (pendingFinal as Record<string, unknown>).checklistCorrection
+          : undefined;
+        const ownerMessageId =
+          correction && typeof correction === 'object' && !Array.isArray(correction)
+            ? (correction as Record<string, unknown>).ownerMessageId
+            : undefined;
+        if (typeof ownerMessageId === 'string') {
+          const ownerMessageSnapshot = await tx.get(this.store.doc('messages', ownerMessageId));
+          const conversationId = task.conversationId;
+          const conversationSnapshot =
+            typeof conversationId === 'string'
+              ? await tx.get(this.store.doc('conversations', conversationId))
+              : null;
+          const ownerMessage = ownerMessageSnapshot.exists
+            ? decodeRecord<Records['messages']>(ownerMessageSnapshot.data())
+            : null;
+          const conversation = conversationSnapshot?.exists
+            ? decodeRecord<Records['conversations']>(conversationSnapshot.data())
+            : null;
+          preserveCorrectionFinal = Boolean(
+            ownerMessage &&
+              conversation?.agentId === agentId &&
+              this.checklistCorrectionPolicy?.isRetryableFinal({
+                task: task as never,
+                state,
+                ownerMessage: { ...ownerMessage, agentId },
+              }),
+          );
+          parkUnknownCorrectionFinal = Boolean(
+            ownerMessage &&
+              conversation?.agentId === agentId &&
+              this.checklistCorrectionPolicy?.isUnknownFinal({
+                task: task as never,
+                state,
+                ownerMessage: { ...ownerMessage, agentId },
+              }),
+          );
+        }
+        if (
+          hasCorrectionFinal &&
+          (typeof ownerMessageId !== 'string' ||
+            !this.checklistCorrectionPolicy ||
+            parkUnknownCorrectionFinal ||
+            !preserveCorrectionFinal)
+        )
+          return withCurrent(task, {}, 'no_longer_retriable');
+        if (!preserveCorrectionFinal) delete (state as Record<string, unknown>).pendingFinal;
+      }
       tx.update(ref, {
         status: 'pending',
         ...(state === undefined ? {} : { state }),
@@ -530,7 +901,7 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
       task: Record<string, unknown>,
       ref: DocumentReference,
       tx: Transaction,
-    ) => TaskActivityCommandOutcome,
+    ) => TaskActivityCommandOutcome | Promise<TaskActivityCommandOutcome>,
   ): Promise<TaskActivityCommandOutcome> {
     if (!agentId || !taskId) throw new Error('Activity agent and task are required');
     return this.store.db.runTransaction(async (tx) => {

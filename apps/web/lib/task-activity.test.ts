@@ -5,6 +5,7 @@ const mocked = vi.hoisted(() => ({
   db: { id: 'postgres-db' },
   store: { id: 'firestore-store' },
   agentId: 'configured-owner-agent',
+  commandRepositoryPolicies: [] as unknown[],
   application: {
     archiveActivity: vi.fn(),
     archiveActivityWithRepository: vi.fn(),
@@ -18,6 +19,7 @@ const mocked = vi.hoisted(() => ({
     listActivityWithRepository: vi.fn(),
     restoreActivity: vi.fn(),
     restoreActivityWithRepository: vi.fn(),
+    taskActivityChecklistCorrectionPolicy: { id: 'checklist-correction-policy' },
   },
 }));
 
@@ -37,7 +39,12 @@ vi.mock('@assistant/firestore', () => ({
     constructor(readonly store: unknown) {}
   },
   FirestoreTaskActivityCommandRepository: class {
-    constructor(readonly store: unknown) {}
+    constructor(
+      readonly store: unknown,
+      readonly policy: unknown,
+    ) {
+      mocked.commandRepositoryPolicies.push(policy);
+    }
   },
 }));
 
@@ -53,7 +60,10 @@ import {
 describe('web Activity persistence dispatch', () => {
   beforeEach(() => {
     mocked.driver = 'postgres';
-    for (const method of Object.values(mocked.application)) method.mockReset();
+    mocked.commandRepositoryPolicies.length = 0;
+    for (const method of Object.values(mocked.application)) {
+      if (vi.isMockFunction(method)) method.mockReset();
+    }
   });
 
   it('keeps PostgreSQL list, detail, archive, restore, and archive-old use cases unchanged', async () => {
@@ -115,6 +125,11 @@ describe('web Activity persistence dispatch', () => {
       expect.objectContaining({ store: mocked.store }),
       mocked.agentId,
     );
+    expect(mocked.commandRepositoryPolicies).toEqual([
+      mocked.application.taskActivityChecklistCorrectionPolicy,
+      mocked.application.taskActivityChecklistCorrectionPolicy,
+      mocked.application.taskActivityChecklistCorrectionPolicy,
+    ]);
     expect(mocked.application.listActivity).not.toHaveBeenCalled();
     expect(mocked.application.getTaskDetail).not.toHaveBeenCalled();
   });

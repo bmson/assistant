@@ -3,7 +3,7 @@ import {
   MAX_EXECUTION_SEED_MESSAGES,
   parseExactTimestamp,
 } from '@assistant/persistence';
-import { and, asc, desc, eq, inArray, lt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, lt, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { agents, conversations, goals, messages, tasks } from './schema.js';
 
@@ -66,6 +66,47 @@ export function createPostgresExecutionContextRepository(db: Db): ExecutionConte
         .orderBy(desc(messages.createdAt), desc(messages.id))
         .limit(limit);
       return rows.map(({ message }) => message).reverse();
+    },
+    async getOwnerMessage({ agentId, conversationId, messageId }) {
+      const [row] = await db
+        .select({ message: messages })
+        .from(messages)
+        .innerJoin(conversations, eq(conversations.id, messages.conversationId))
+        .where(
+          and(
+            eq(conversations.id, conversationId),
+            eq(conversations.agentId, agentId),
+            eq(conversations.channel, 'chat'),
+            eq(messages.id, messageId),
+            eq(messages.role, 'user'),
+            eq(messages.origin, 'owner'),
+            isNull(messages.hiddenAt),
+          ),
+        )
+        .limit(1);
+      return row?.message ?? null;
+    },
+    async getLatestOwnerMessage({ agentId, conversationId }) {
+      const [row] = await db
+        .select({ message: messages })
+        .from(messages)
+        .innerJoin(conversations, eq(conversations.id, messages.conversationId))
+        .where(
+          and(
+            eq(conversations.id, conversationId),
+            eq(conversations.agentId, agentId),
+            eq(conversations.channel, 'chat'),
+            eq(messages.role, 'user'),
+            eq(messages.origin, 'owner'),
+            isNull(messages.hiddenAt),
+          ),
+        )
+        // A pinned owner correction must be compared with the actual append
+        // head. createdAt can be client supplied/backdated; appendSequence is
+        // assigned under the conversation append trigger at commit time.
+        .orderBy(desc(messages.appendSequence))
+        .limit(1);
+      return row?.message ?? null;
     },
     async getInboundMessage({ agentId, conversationId, channelMessageId }) {
       const [row] = await db

@@ -8,6 +8,10 @@ import type { TaskState, Trust } from '../events.js';
 import { withSpan } from '../otel.js';
 import { classifyFailure, failureNotice, ownerTaskLabel } from '../owner-text.js';
 import { requestedArtifactIntent } from './artifact-intent.js';
+import {
+  projectChecklistCorrectionResume,
+  taskBoundCorrectionReadRequest,
+} from './checklist-correction-resume.js';
 import { isKnownSenderReplyTask } from './executor/context-helpers.js';
 import { refreshResumedConversationSearch } from './executor/conversation-search-refresh.js';
 import { finalizePendingResponse, stageFinalResponse } from './executor/finalize.js';
@@ -228,6 +232,11 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
   const persistence = deps.persistence ?? createPostgresExecutionPersistence(db);
   const lease = task;
   const state = taskState(task);
+  const rawChecklist = (state as { requestChecklist?: Record<string, unknown> }).requestChecklist;
+  const hasChecklistCorrection = Boolean(
+    rawChecklist &&
+      (Object.hasOwn(rawChecklist, 'revision') || Object.hasOwn(rawChecklist, 'revisionAudit')),
+  );
 
   const trigger = task.trigger as {
     source?: unknown;
@@ -268,7 +277,8 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
       contractBlocked: false,
     });
   }
-  if (state.pendingFinal) return finalizePendingResponse(deps, lease, state.pendingFinal, state);
+  if (state.pendingFinal && !hasChecklistCorrection)
+    return finalizePendingResponse(deps, lease, state.pendingFinal, state);
 
   if (shouldTaintContext(task)) {
     state.untrustedContext = true;
@@ -282,6 +292,368 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
       return LOST_LEASE;
   }
   const abort = new AbortController();
+
+  let correction: ReturnType<typeof projectChecklistCorrectionResume>;
+  let correctionOwnerMessage: Awaited<ReturnType<ExecutionContextRepository['getOwnerMessage']>> =
+    null;
+  let originalCorrectionIntent: ReturnType<typeof latestOwnerIntent> | undefined;
+  if (hasChecklistCorrection) {
+    const trigger = task.trigger as {
+      source?: unknown;
+      payload?: { text?: unknown; triggerMessageId?: unknown };
+    } | null;
+    const checklist = state.requestChecklist;
+    const payloadText = trigger?.payload?.text;
+    const triggerMessageId = trigger?.payload?.triggerMessageId;
+    const audit = checklist?.revisionAudit;
+    const correctionMessageId = audit?.at(-1)?.ownerMessageId;
+    const rejectCorrection = async (reason: string): Promise<ExecuteResult> =>
+      withSpan(
+        'task.checklist_correction.refused',
+        { taskId: task.id, reason: reason.slice(0, 180) },
+        async () => {
+          const text = 'I couldn’t complete this lookup. Review it in Activity to continue.';
+          return stageFinalResponse(
+            deps,
+            lease,
+            state,
+            state.contextWindow as unknown as ModelMessage[],
+            {
+              text,
+              progress: 'lookup paused for review',
+              terminalStatus: 'needs_attention',
+              outcome: 'needs_attention',
+              contractNotice: true,
+            },
+          );
+        },
+      );
+    if (
+      task.type !== 'chat_turn' ||
+      task.trust !== 'owner' ||
+      task.goalId !== null ||
+      !task.conversationId ||
+      trigger?.source !== 'chat' ||
+      isForwardedIngest(task) ||
+      typeof payloadText !== 'string' ||
+      !payloadText.trim() ||
+      typeof triggerMessageId !== 'string' ||
+      !checklist ||
+      !correctionMessageId ||
+      state.pendingJob ||
+      state.pendingApprovals.length > 0
+    )
+      return rejectCorrection('the task is not a clean, directly admitted owner chat lookup');
+
+    const triggerMessage = await persistence.executionContext.getOwnerMessage({
+      agentId: task.agentId,
+      conversationId: task.conversationId,
+      messageId: triggerMessageId,
+    });
+    correctionOwnerMessage = await persistence.executionContext.getOwnerMessage({
+      agentId: task.agentId,
+      conversationId: task.conversationId,
+      messageId: correctionMessageId,
+    });
+    const latestOwnerMessage = await persistence.executionContext.getLatestOwnerMessage({
+      agentId: task.agentId,
+      conversationId: task.conversationId,
+    });
+    if (
+      !triggerMessage ||
+      triggerMessage.taskId !== task.id ||
+      triggerMessage.text !== payloadText ||
+      payloadText.trim() !== checklist.request.trim() ||
+      !correctionOwnerMessage ||
+      correctionOwnerMessage.taskId !== task.id ||
+      latestOwnerMessage?.id !== correctionMessageId
+    )
+      return rejectCorrection(
+        'the original request or latest correction no longer matches its durable owner message',
+      );
+
+    originalCorrectionIntent = latestOwnerIntent([{ role: 'user', content: payloadText }], {
+      trust: task.trust as Trust,
+      trigger: task.trigger,
+    });
+    const correctionRead = taskBoundCorrectionReadRequest(correctionOwnerMessage.text, {
+      now: correctionOwnerMessage.createdAt,
+      timeZone: state.requestTimeZone ?? agent.timezone,
+      authorizedScopes: originalCorrectionIntent.authorizedScopes,
+    });
+    if (
+      originalCorrectionIntent.sourceActor !== 'owner' ||
+      originalCorrectionIntent.requestKind !== 'new_request' ||
+      originalCorrectionIntent.separation !== 'none' ||
+      !originalCorrectionIntent.authorizedScopes.includes('private_read') ||
+      !correctionRead
+    )
+      return rejectCorrection(
+        'the correction is not a direct owner-authored private lookup within the original request scope',
+      );
+
+    correction = projectChecklistCorrectionResume({
+      task: { id: task.id, agentId: task.agentId, conversationId: task.conversationId },
+      checklist,
+      ownerMessage: {
+        id: correctionOwnerMessage.id,
+        taskId: correctionOwnerMessage.taskId ?? '',
+        agentId: task.agentId,
+        conversationId: task.conversationId,
+        role: 'user',
+        origin: 'owner',
+        text: correctionOwnerMessage.text,
+        createdAt: correctionOwnerMessage.createdAt,
+      },
+      latestConversationOwnerMessageId: latestOwnerMessage.id,
+      originalIntent: originalCorrectionIntent,
+      clarificationContinuation: state.clarificationContinuation,
+    });
+    if (!correction)
+      return rejectCorrection(
+        'the selected checklist item, revision audit, clarification, or owner-message binding is inconsistent',
+      );
+    if (
+      correction.activeOutcomes.length === 0 &&
+      correction.excludedOutcomeIds.length !== checklist.items.length
+    )
+      return rejectCorrection(
+        'the revised checklist has no verifiable active or completed outcomes',
+      );
+    const referenceAtByItem = new Map<string, Date>();
+    for (const outcome of correction.activeOutcomes) {
+      const priorAudit = (checklist.revisionAudit ?? [])
+        .filter((entry) => entry.itemId === outcome.id)
+        .at(-1);
+      if (!priorAudit) {
+        referenceAtByItem.set(outcome.id, task.createdAt);
+        continue;
+      }
+      const referenceMessage = await persistence.executionContext.getOwnerMessage({
+        agentId: task.agentId,
+        conversationId: task.conversationId,
+        messageId: priorAudit.ownerMessageId,
+      });
+      const normalizedText = referenceMessage?.text
+        .trim()
+        .replace(/[.!?]+$/, '')
+        .trim();
+      const normalizedLabel = priorAudit.toLabel
+        .trim()
+        .replace(/[.!?]+$/, '')
+        .trim();
+      if (
+        !referenceMessage ||
+        referenceMessage.taskId !== task.id ||
+        referenceMessage.conversationId !== task.conversationId ||
+        referenceMessage.role !== 'user' ||
+        referenceMessage.origin !== 'owner' ||
+        normalizedText !== normalizedLabel ||
+        !(referenceMessage.createdAt instanceof Date) ||
+        !Number.isFinite(referenceMessage.createdAt.getTime())
+      )
+        return rejectCorrection(
+          'an earlier corrected lookup has no exact durable owner-message time anchor',
+        );
+      referenceAtByItem.set(outcome.id, referenceMessage.createdAt);
+    }
+    correction = {
+      ...correction,
+      activeOutcomes: correction.activeOutcomes.map((outcome) => ({
+        ...outcome,
+        referenceAt: referenceAtByItem.get(outcome.id),
+      })),
+    };
+    // Keep completed siblings in the corrected answer only when their current
+    // evidence is still bound to the unchanged item or that item's latest audit.
+    const correctionEvidence = await persistence.executionEvidence.taskEvidence({
+      agentId: task.agentId,
+      taskId: task.id,
+    });
+    const completedOutcomes: typeof correction.completedOutcomes = [];
+    for (const item of checklist.items.filter((candidate) => candidate.status === 'completed')) {
+      const itemAudits = (checklist.revisionAudit ?? []).filter(
+        (entry) => entry.itemId === item.id,
+      );
+      const latestItemAudit = itemAudits.at(-1);
+      const supersededEvidenceIds = new Set(
+        itemAudits.flatMap((entry) => entry.excludedEvidenceIds),
+      );
+      const itemEvidenceIsBound =
+        item.evidence.length > 0 &&
+        new Set(item.evidence.map((entry) => entry.id)).size === item.evidence.length &&
+        item.evidence.every((entry) => {
+          if (supersededEvidenceIds.has(entry.id)) return false;
+          const row = correctionEvidence.find((candidate) => candidate.id === entry.id);
+          if (row?.status !== 'succeeded') return false;
+          if (!latestItemAudit) return true;
+          const decision =
+            row.decision && typeof row.decision === 'object'
+              ? (
+                  row.decision as {
+                    checklistCorrection?: {
+                      revision?: unknown;
+                      outcomeId?: unknown;
+                      ownerMessageId?: unknown;
+                    };
+                  }
+                ).checklistCorrection
+              : undefined;
+          return (
+            latestItemAudit.toLabel === item.label &&
+            JSON.stringify(latestItemAudit.toTargetTerms) === JSON.stringify(item.targetTerms) &&
+            decision?.revision === latestItemAudit.revision &&
+            decision.outcomeId === item.id &&
+            decision.ownerMessageId === latestItemAudit.ownerMessageId
+          );
+        });
+      if (!itemEvidenceIsBound)
+        return rejectCorrection('a completed checklist item has no current successful receipt');
+      completedOutcomes.push({
+        id: item.id,
+        label: item.label,
+        ...((item as { detail?: string }).detail
+          ? { detail: (item as { detail?: string }).detail }
+          : {}),
+      });
+    }
+    correction = {
+      ...correction,
+      completedOutcomes,
+    };
+    if (
+      correction.activeOutcomes.some(
+        (item) =>
+          item.kind !== 'lookup' ||
+          !taskBoundCorrectionReadRequest(item.label, {
+            now: item.referenceAt ?? task.createdAt,
+            timeZone: state.requestTimeZone ?? agent.timezone,
+            authorizedScopes: originalCorrectionIntent?.authorizedScopes ?? [],
+          }),
+      )
+    ) {
+      return rejectCorrection('the correction task contains a mixed or unsupported action outcome');
+    }
+
+    if (state.pendingFinal) {
+      const savedBinding = state.pendingFinal.checklistCorrection;
+      const outcomeIds = new Set(
+        [...correction.completedOutcomes, ...correction.activeOutcomes].map(
+          (outcome) => outcome.id,
+        ),
+      );
+      const currentBindings = checklist.items
+        .filter((item) => outcomeIds.has(item.id))
+        .map((item) => ({
+          id: item.id,
+          status: item.status,
+          evidenceIds:
+            item.status === 'completed'
+              ? item.evidence
+                  .map((entry) => entry.id)
+                  .slice(-256)
+                  .sort()
+              : [],
+        }));
+      const sameStrings = (left: string[], right: string[]) =>
+        left.length === right.length && left.every((value, index) => value === right[index]);
+      const bindingMatches =
+        savedBinding?.revision === correction.revision &&
+        savedBinding.ownerMessageId === correction.ownerMessageId &&
+        new Set(savedBinding.outcomes.map((outcome) => outcome.id)).size ===
+          savedBinding.outcomes.length &&
+        savedBinding.outcomes.length === currentBindings.length &&
+        currentBindings.every((current, index) => {
+          const saved = savedBinding.outcomes[index];
+          return (
+            current !== undefined &&
+            saved !== undefined &&
+            (current.status === 'completed' || current.status === 'blocked') &&
+            current.id === saved.id &&
+            current.status === saved.status &&
+            new Set(current.evidenceIds).size === current.evidenceIds.length &&
+            new Set(saved.evidenceIds).size === saved.evidenceIds.length &&
+            sameStrings(current.evidenceIds, [...saved.evidenceIds].sort())
+          );
+        });
+      const hasBlockedOutcome = currentBindings.some((outcome) => outcome.status === 'blocked');
+      const deliveryRetryIsBounded =
+        state.pendingFinal.deliveryNeedsAttention === true &&
+        state.pendingFinal.finalDelivery?.legs.some((leg) => leg.status === 'rejected') === true &&
+        state.pendingFinal.finalDelivery?.legs.some((leg) => leg.status === 'unknown') !== true;
+      const finalStatusMatchesChecklist = hasBlockedOutcome
+        ? state.pendingFinal.terminalStatus === 'needs_attention' &&
+          state.pendingFinal.outcome === 'needs_attention' &&
+          (!state.pendingFinal.deliveryNeedsAttention || deliveryRetryIsBounded)
+        : (state.pendingFinal.terminalStatus === 'done' &&
+            state.pendingFinal.outcome === 'done' &&
+            !state.pendingFinal.deliveryNeedsAttention) ||
+          (state.pendingFinal.terminalStatus === 'needs_attention' &&
+            state.pendingFinal.outcome === 'needs_attention' &&
+            deliveryRetryIsBounded);
+      const rows = await persistence.executionEvidence.taskEvidence({
+        agentId: task.agentId,
+        taskId: task.id,
+      });
+      const evidenceMatches = Boolean(
+        savedBinding &&
+          bindingMatches &&
+          finalStatusMatchesChecklist &&
+          savedBinding.outcomes.every((outcome) => {
+            const item = checklist.items.find((candidate) => candidate.id === outcome.id);
+            const latestItemAudit = (checklist.revisionAudit ?? [])
+              .filter((entry) => entry.itemId === outcome.id)
+              .at(-1);
+            if (!item || (outcome.status === 'completed' && outcome.evidenceIds.length === 0))
+              return false;
+            return outcome.evidenceIds.every((id) => {
+              const row = rows.find((candidate) => candidate.id === id);
+              if (!row) return false;
+              const decision =
+                row.decision && typeof row.decision === 'object'
+                  ? (
+                      row.decision as {
+                        checklistCorrection?: {
+                          revision?: unknown;
+                          outcomeId?: unknown;
+                          ownerMessageId?: unknown;
+                        };
+                      }
+                    ).checklistCorrection
+                  : undefined;
+              return (
+                row.status === 'succeeded' &&
+                (!latestItemAudit ||
+                  (decision?.revision === latestItemAudit.revision &&
+                    decision.outcomeId === outcome.id &&
+                    decision.ownerMessageId === latestItemAudit.ownerMessageId))
+              );
+            });
+          }),
+      );
+      if (!evidenceMatches) {
+        const marked = await markTaskNeedsAttention(
+          persistence.tasks,
+          lease,
+          'saved corrected reply could not be verified; no new lookup was run',
+        );
+        return marked
+          ? { outcome: 'needs_attention', detail: 'saved corrected reply could not be verified' }
+          : LOST_LEASE;
+      }
+      return finalizePendingResponse(deps, lease, state.pendingFinal, state);
+    }
+
+    // A correction gets its own bounded, task-local context. Keep original
+    // authority in ctx.ownerIntent; omit stale model prose, plans and receipts.
+    state.contextWindow = [
+      {
+        role: 'system',
+        content: `Resume only task ${task.id}, checklist revision ${correction.revision}. Original owner request scope ceiling: ${checklist.request}. Active checklist outcomes: ${correction.activeOutcomes.map((item) => `${item.id}: ${item.label}`).join('; ') || 'none'}. Do not perform work outside those exact pending or blocked outcomes.`,
+      },
+      { role: 'user', content: correctionOwnerMessage.text },
+    ] as unknown as TaskState['contextWindow'];
+  }
 
   // Code jobs (nightly extraction/consolidation, imports) run a registered
   // function, and missions run a deadline/reflection wake — both instead of the
@@ -314,18 +686,21 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
   // instruction embeds the sender's own draft, whose free text could otherwise
   // trip the artifact/doc-URL heuristics and force docs.create over gmail.send.
   const isKnownReply = isKnownSenderReplyTask(task);
-  const ownerIntent = latestOwnerIntent(window, {
-    trust: task.trust as Trust,
-    trigger: task.trigger,
-    clarificationContinuation: state.clarificationContinuation,
-  });
+  const ownerIntent =
+    correction && originalCorrectionIntent
+      ? originalCorrectionIntent
+      : latestOwnerIntent(window, {
+          trust: task.trust as Trust,
+          trigger: task.trigger,
+          clarificationContinuation: state.clarificationContinuation,
+        });
   const ownerWindow = ownerAuthoredWindow(window, ownerIntent);
   const artifactIntent =
-    state.step === 0 && !isKnownReply
+    !correction && state.step === 0 && !isKnownReply
       ? requestedArtifactIntent(ownerIntent.ownerAuthoredText)
       : undefined;
   const documentReadIntent =
-    state.step === 0 && !artifactIntent && !isKnownReply
+    !correction && state.step === 0 && !artifactIntent && !isKnownReply
       ? await unreadSharedDocumentIntent(persistence.executionEvidence, task, ownerWindow)
       : undefined;
   const browserStageSnapshots = new Map<
@@ -352,6 +727,7 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
     window,
     artifactIntent,
     documentReadIntent,
+    ...(correction ? { checklistCorrection: correction } : {}),
   };
   rc.ctx = createToolContext({
     db,
@@ -364,14 +740,15 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
     getWindow: () => rc.window,
     browserStageSnapshots,
   });
+  if (correction) rc.ctx.ownerIntent = ownerIntent;
 
   // ── Resume: settle a finished (or timed-out) browser job, then approvals ───
-  await resumePendingJob(rc);
-  const approvalsResult = await resumePendingApprovals(rc);
+  if (!correction) await resumePendingJob(rc);
+  const approvalsResult = correction ? null : await resumePendingApprovals(rc);
   if (approvalsResult) return approvalsResult;
 
   // A browser job is (still) in flight — sleep until its callback or timeout.
-  if (state.pendingJob) {
+  if (state.pendingJob && !correction) {
     state.contextWindow = compact(rc.window) as unknown as TaskState['contextWindow'];
     const slept = await sleepTask(
       persistence.tasks,
@@ -386,15 +763,18 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
   // Fold any owner correction typed while this task was parked into the window,
   // so a resumed task acts on the latest owner intent, not a stale checkpoint.
   // (First run just baselines the watermark; chat channel only.)
-  await foldOwnerRepliesSincePark(persistence.executionContext, task, state, rc.window);
+  if (!correction)
+    await foldOwnerRepliesSincePark(persistence.executionContext, task, state, rc.window);
   // Rebuild persisted conversations.search evidence before a resumed planner or
   // model can consume a pre-park private result. This is a local bounded text
   // refresh; it never replays embedding or arbitrary tools.
-  const refreshedSearch = await refreshResumedConversationSearch(rc.window, {
-    agentId: task.agentId,
-    ...(task.conversationId ? { currentConversationId: task.conversationId } : {}),
-    repository: persistence.conversationSearch,
-  });
+  const refreshedSearch = correction
+    ? { changed: false, observationGeneration: 0 }
+    : await refreshResumedConversationSearch(rc.window, {
+        agentId: task.agentId,
+        ...(task.conversationId ? { currentConversationId: task.conversationId } : {}),
+        repository: persistence.conversationSearch,
+      });
   if (refreshedSearch.changed) {
     state.plannerState.conversationSearchObservationGeneration =
       refreshedSearch.observationGeneration;
@@ -405,19 +785,21 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
   // The fold can append a newer owner-authored instruction. Refresh the typed
   // intent and forced step-zero routes from that window before any planning or
   // dispatch; otherwise the dispatcher could keep using the pre-resume scope.
-  const resumedOwnerIntent = latestOwnerIntent(rc.window, {
-    trust: task.trust as Trust,
-    trigger: task.trigger,
-    clarificationContinuation: state.clarificationContinuation,
-  });
+  const resumedOwnerIntent = correction
+    ? ownerIntent
+    : latestOwnerIntent(rc.window, {
+        trust: task.trust as Trust,
+        trigger: task.trigger,
+        clarificationContinuation: state.clarificationContinuation,
+      });
   rc.ctx.ownerIntent = resumedOwnerIntent;
   const resumedOwnerWindow = ownerAuthoredWindow(rc.window, resumedOwnerIntent);
   rc.artifactIntent =
-    state.step === 0 && !isKnownReply
+    !correction && state.step === 0 && !isKnownReply
       ? requestedArtifactIntent(resumedOwnerIntent.ownerAuthoredText)
       : undefined;
   rc.documentReadIntent =
-    state.step === 0 && !rc.artifactIntent && !isKnownReply
+    !correction && state.step === 0 && !rc.artifactIntent && !isKnownReply
       ? await unreadSharedDocumentIntent(persistence.executionEvidence, task, resumedOwnerWindow)
       : undefined;
   const payload = (task.trigger as { payload?: { text?: unknown } } | null)?.payload;
@@ -441,6 +823,7 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
   // Save-status questions are read-only receipt checks, not new work for a
   // planner to invent or clarify. Resolve them before any model call.
   if (
+    !correction &&
     task.trust === 'owner' &&
     !isForwardedIngest(task) &&
     !state.untrustedContext &&
@@ -458,10 +841,10 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
   }
 
   // Read an owner-supplied shared document (step 0) before the model continues.
-  const documentReadResult = await runDirectDocumentRead(rc);
+  const documentReadResult = correction ? null : await runDirectDocumentRead(rc);
   if (documentReadResult) return documentReadResult;
 
-  const planResult = await runPlanPhase(rc);
+  const planResult = correction ? { plan: null } : await runPlanPhase(rc);
   if ('outcome' in planResult) return planResult;
   if (
     !state.requestChecklist &&
@@ -480,5 +863,30 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
     !(await checkpointTask(persistence.tasks, lease, state, { preserveFailureCounters: true }))
   )
     return LOST_LEASE;
+  if (correction && correction.activeOutcomes.length === 0) {
+    const text =
+      correction.completedOutcomes
+        .map((outcome) => `${outcome.label}: ${outcome.detail || 'lookup completed'}`)
+        .join('\n\n') || 'The corrected checklist has no pending lookup work.';
+    const completedIds = new Set(correction.completedOutcomes.map((outcome) => outcome.id));
+    return stageFinalResponse(deps, lease, state, rc.window, {
+      text,
+      progress: 'corrected checklist already complete; no read was repeated',
+      terminalStatus: 'done',
+      outcome: 'done',
+      contractBlocked: false,
+      checklistCorrection: {
+        revision: correction.revision,
+        ownerMessageId: correction.ownerMessageId,
+        outcomes: (state.requestChecklist?.items ?? [])
+          .filter((item) => completedIds.has(item.id))
+          .map((item) => ({
+            id: item.id,
+            status: 'completed' as const,
+            evidenceIds: item.evidence.map((evidence) => evidence.id).sort(),
+          })),
+      },
+    });
+  }
   return runStepLoop(rc, planResult.plan);
 }

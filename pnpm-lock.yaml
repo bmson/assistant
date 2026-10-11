@@ -390,6 +390,12 @@ importers:
         specifier: 10.9.1
         version: 10.9.1
     devDependencies:
+      '@assistant/application':
+        specifier: workspace:*
+        version: link:../application
+      '@assistant/core':
+        specifier: workspace:*
+        version: link:../core
       tsx:
         specifier: ^4.23.15
         version: 4.23.15

@@ -19,6 +19,7 @@ export * from './card-form.js';
 export * from './card-form-admission.js';
 export * from './card-refresh.js';
 export * from './chat-admission.js';
+export * from './checklist-correction-evidence.js';
 export * from './code-jobs.js';
 export * from './commitment-maintenance.js';
 export * from './consolidation-temporal.js';

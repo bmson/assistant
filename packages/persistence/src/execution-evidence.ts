@@ -3,7 +3,7 @@ import type { Records } from './records.js';
 /** Durable evidence read/write port used by the executor finalization funnel. */
 export type ExecutionEvidenceRecord = Pick<
   Records['toolCalls'],
-  'id' | 'toolName' | 'status' | 'args' | 'result' | 'error' | 'step'
+  'id' | 'toolName' | 'status' | 'args' | 'result' | 'error' | 'step' | 'decision'
 >;
 
 export type ResponseCheckInput = {

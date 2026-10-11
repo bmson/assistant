@@ -20,17 +20,30 @@ import {
   restoreActivityWithRepository,
   retryActivity,
   retryActivityWithRepository,
+  revisePendingChecklistActivity,
+  revisePendingChecklistWithRepository,
   revokeTaskAutonomy,
   revokeTaskAutonomyWithRepository,
   type TaskDetail,
+  taskActivityChecklistCorrectionPolicy,
 } from '@assistant/application/tasks';
 import { loadConfig } from '@assistant/config';
 import {
   FirestoreTaskActivityCommandRepository,
   FirestoreTaskActivityRepository,
 } from '@assistant/firestore';
-import type { TaskActivityCommandOutcome, TaskDiscoveryInput } from '@assistant/persistence';
-import { getDb, getFirestoreInstallationStore, getTaskDiscoveryPorts } from '@/lib/server';
+import type {
+  PendingChecklistCorrectionInput,
+  PendingChecklistCorrectionOutcome,
+  TaskActivityCommandOutcome,
+  TaskDiscoveryInput,
+} from '@assistant/persistence';
+import {
+  getAgentIdentity,
+  getDb,
+  getFirestoreInstallationStore,
+  getTaskDiscoveryPorts,
+} from '@/lib/server';
 
 function firestoreActivity() {
   const config = loadConfig();
@@ -76,7 +89,10 @@ function firestoreActivityCommands() {
   if (loadConfig().PERSISTENCE_DRIVER !== 'firestore') return null;
   const { agentId } = firestoreActivity();
   return {
-    repository: new FirestoreTaskActivityCommandRepository(getFirestoreInstallationStore()),
+    repository: new FirestoreTaskActivityCommandRepository(
+      getFirestoreInstallationStore(),
+      taskActivityChecklistCorrectionPolicy,
+    ),
     agentId,
   };
 }
@@ -139,6 +155,18 @@ export function raiseTaskActivityBudget(
   if (firestore)
     return raiseTaskBudgetWithRepository(firestore.repository, firestore.agentId, taskId, limit);
   return raiseTaskBudget(getDb(), taskId, limit);
+}
+
+/** Persist the Activity-selected private lookup correction through the active driver. */
+export async function reviseTaskActivityChecklistItem(
+  input: PendingChecklistCorrectionInput,
+): Promise<PendingChecklistCorrectionOutcome> {
+  const firestore = firestoreActivityCommands();
+  if (firestore)
+    return revisePendingChecklistWithRepository(firestore.repository, firestore.agentId, input);
+  const db = getDb();
+  const owner = await getAgentIdentity();
+  return revisePendingChecklistActivity(db, owner.id, input);
 }
 
 export async function discoverTaskActivity(input: TaskDiscoveryInput) {

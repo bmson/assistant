@@ -29,6 +29,7 @@ function evidence(row: Records['toolCalls']): ExecutionEvidenceRecord {
     result: row.result,
     error: row.error,
     step: row.step,
+    decision: row.decision,
   };
 }
 

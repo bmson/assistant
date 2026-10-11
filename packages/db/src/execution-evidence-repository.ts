@@ -13,6 +13,7 @@ function evidence(row: typeof toolCalls.$inferSelect) {
     result: row.result,
     error: row.error,
     step: row.step,
+    decision: row.decision,
   };
 }
 

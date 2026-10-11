@@ -87,7 +87,7 @@ describe('getTaskDetail', () => {
       })
       .where(eq(tasks.id, taskId));
     const detail = await getTaskDetail(db, taskId);
-    expect(detail?.task.checklist).toEqual({ items });
+    expect(detail?.task.checklist).toEqual({ items, revision: 0, revisionAudit: [] });
     expect(JSON.stringify(detail)).not.toContain('PRIVATE-');
     await db
       .update(tasks)

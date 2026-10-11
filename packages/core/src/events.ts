@@ -256,6 +256,22 @@ export const PendingFinalSchema = z.object({
   cues: z.array(CueSchema).optional(),
   /** Evidence-derived response surfaces, persisted so retries render identically. */
   responseCards: z.array(z.record(z.string(), z.unknown())).optional(),
+  /** Exact revision and read receipts required before retrying a corrected final delivery. */
+  checklistCorrection: z
+    .object({
+      revision: z.number().int().min(1).max(12),
+      ownerMessageId: z.string().min(1).max(128),
+      outcomes: z
+        .array(
+          z.object({
+            id: z.string().min(1).max(128),
+            status: z.enum(['completed', 'blocked']),
+            evidenceIds: z.array(z.string().min(1).max(128)).max(256),
+          }),
+        )
+        .max(12),
+    })
+    .optional(),
 });
 export type PendingFinal = z.infer<typeof PendingFinalSchema>;
 
