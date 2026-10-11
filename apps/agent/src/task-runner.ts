@@ -48,7 +48,8 @@ export async function executeAgentTask(deps: AgentDeps, taskId: string, generati
     if (!lease) return { outcome: 'not_claimable' as const };
     const progress =
       'Retired a legacy arrival task because its short-lived observation is unavailable.';
-    await taskRepository.completeTask(lease, { status: 'cancelled', progress });
+    const completed = await taskRepository.completeTask(lease, { status: 'cancelled', progress });
+    if (!completed) return { outcome: 'not_claimable' as const };
     return { outcome: 'cancelled' as const, detail: progress };
   }
   let arrivalObservationCheck:

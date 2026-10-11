@@ -79,6 +79,27 @@ describe('legacy arrival retirement', () => {
     expect(executeTaskSpy).not.toHaveBeenCalled();
   });
 
+  it('does not claim retirement or enter another execution path when the fenced completion loses', async () => {
+    executeTaskSpy.mockClear();
+    const legacyTask = task({
+      source: 'internal',
+      agentId: AGENT,
+      trust: 'assistant',
+      externalEventId: `arrival:${AGENT}:2026-09-24:47.12,-122.57`,
+      payload: { instruction },
+    });
+    const { deps, taskRepository, modules } = dependencies(legacyTask);
+    taskRepository.completeTask.mockResolvedValue(false);
+
+    await expect(executeAgentTask(deps, TASK, 0)).resolves.toEqual({ outcome: 'not_claimable' });
+
+    expect(taskRepository.claim).toHaveBeenCalledOnce();
+    expect(taskRepository.completeTask).toHaveBeenCalledOnce();
+    expect(executeTaskSpy).not.toHaveBeenCalled();
+    expect(modules.taskHandlerFor).not.toHaveBeenCalled();
+    expect(modules.taskKindUnavailable).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['different trigger source', { source: 'chat' }],
     ['different agent', { agentId: '00000000-0000-4000-8000-000000000099' }],
