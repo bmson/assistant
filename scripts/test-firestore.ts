@@ -57,6 +57,7 @@ const files = [
   'apps/agent/src/firestore-owner-notices.test.ts',
   'apps/agent/src/firestore-boot.test.ts',
   'apps/agent/src/firestore-portable-web-workspace.test.ts',
+  'apps/agent/src/firestore-chat-stop.e2e.test.ts',
   'apps/agent/src/firestore-google-calendar.test.ts',
   'apps/agent/src/firestore-schedule.test.ts',
   'apps/agent/src/firestore-repair-schedule.test.ts',
