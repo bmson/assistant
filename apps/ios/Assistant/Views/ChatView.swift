@@ -380,20 +380,28 @@ struct ChatComposerActionPolicy: Equatable {
         isSending: Bool,
         canCancel: Bool,
         isCancelling: Bool,
-        formAdmissionPending: Bool
+        formAdmissionPending: Bool,
+        hasUnresolvedTurn: Bool
     ) -> Self {
+        if formAdmissionPending {
+            return Self(
+                primary: hasDraft ? .send(enabled: false) : .waiting,
+                showsSeparateStop: false,
+                separateStopEnabled: false
+            )
+        }
         if hasDraft {
-            let unresolved = isSending || canCancel || isCancelling || formAdmissionPending
+            let unresolved = isSending || canCancel || isCancelling || hasUnresolvedTurn
             return Self(
                 primary: .send(enabled: canSend && !unresolved),
                 showsSeparateStop: canCancel,
-                separateStopEnabled: canCancel && !isCancelling && !formAdmissionPending
+                separateStopEnabled: canCancel && !isCancelling
             )
         }
         if canCancel && !isCancelling {
             return Self(primary: .stop, showsSeparateStop: false, separateStopEnabled: false)
         }
-        if isSending || isCancelling || formAdmissionPending {
+        if isSending || isCancelling || hasUnresolvedTurn {
             return Self(primary: .waiting, showsSeparateStop: false, separateStopEnabled: false)
         }
         return Self(primary: .send(enabled: canSend), showsSeparateStop: false, separateStopEnabled: false)
@@ -2890,7 +2898,8 @@ struct ChatView: View {
             isSending: model.isSending,
             canCancel: model.canCancelCurrentSend,
             isCancelling: model.isCancellingSend,
-            formAdmissionPending: model.isCardFormAdmissionPending
+            formAdmissionPending: model.isCardFormAdmissionPending,
+            hasUnresolvedTurn: model.hasUnresolvedTurn
         )
     }
 

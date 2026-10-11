@@ -3031,7 +3031,8 @@ extension APIClientRetryTests {
     func testComposerKeepsSendSeparateFromStopWhenDraftExists() {
         let activeWithDraft = ChatComposerActionPolicy.resolve(
             hasDraft: true, canSend: false, isSending: true,
-            canCancel: true, isCancelling: false, formAdmissionPending: false
+            canCancel: true, isCancelling: false, formAdmissionPending: false,
+            hasUnresolvedTurn: true
         )
         XCTAssertEqual(activeWithDraft.primary, .send(enabled: false))
         XCTAssertTrue(activeWithDraft.showsSeparateStop)
@@ -3039,7 +3040,8 @@ extension APIClientRetryTests {
 
         let stoppingWithDraft = ChatComposerActionPolicy.resolve(
             hasDraft: true, canSend: false, isSending: true,
-            canCancel: true, isCancelling: true, formAdmissionPending: false
+            canCancel: true, isCancelling: true, formAdmissionPending: false,
+            hasUnresolvedTurn: true
         )
         XCTAssertEqual(stoppingWithDraft.primary, .send(enabled: false))
         XCTAssertTrue(stoppingWithDraft.showsSeparateStop)
@@ -3047,17 +3049,47 @@ extension APIClientRetryTests {
 
         let activeWithoutDraft = ChatComposerActionPolicy.resolve(
             hasDraft: false, canSend: false, isSending: true,
-            canCancel: true, isCancelling: false, formAdmissionPending: false
+            canCancel: true, isCancelling: false, formAdmissionPending: false,
+            hasUnresolvedTurn: true
         )
         XCTAssertEqual(activeWithoutDraft.primary, .stop)
         XCTAssertFalse(activeWithoutDraft.showsSeparateStop)
 
         let readyWithDraft = ChatComposerActionPolicy.resolve(
             hasDraft: true, canSend: true, isSending: false,
-            canCancel: false, isCancelling: false, formAdmissionPending: false
+            canCancel: false, isCancelling: false, formAdmissionPending: false,
+            hasUnresolvedTurn: false
         )
         XCTAssertEqual(readyWithDraft.primary, .send(enabled: true))
         XCTAssertFalse(readyWithDraft.showsSeparateStop)
+
+        // A task can remain unresolved after its active-send flag clears, for
+        // example while its durable status is being reconciled after reconnect.
+        let resumedUnknownWithDraft = ChatComposerActionPolicy.resolve(
+            hasDraft: true, canSend: true, isSending: false,
+            canCancel: false, isCancelling: false, formAdmissionPending: false,
+            hasUnresolvedTurn: true
+        )
+        XCTAssertEqual(resumedUnknownWithDraft.primary, .send(enabled: false))
+        XCTAssertFalse(resumedUnknownWithDraft.showsSeparateStop)
+
+        // Form admission owns its frozen operation. Even a transiently stale
+        // can-cancel flag must not show a Stop control that AppModel will reject.
+        let emptyDraftDuringFormAdmission = ChatComposerActionPolicy.resolve(
+            hasDraft: false, canSend: false, isSending: true,
+            canCancel: true, isCancelling: false, formAdmissionPending: true,
+            hasUnresolvedTurn: true
+        )
+        XCTAssertEqual(emptyDraftDuringFormAdmission.primary, .waiting)
+        XCTAssertFalse(emptyDraftDuringFormAdmission.showsSeparateStop)
+
+        let draftDuringFormAdmission = ChatComposerActionPolicy.resolve(
+            hasDraft: true, canSend: false, isSending: true,
+            canCancel: true, isCancelling: false, formAdmissionPending: true,
+            hasUnresolvedTurn: true
+        )
+        XCTAssertEqual(draftDuringFormAdmission.primary, .send(enabled: false))
+        XCTAssertFalse(draftDuringFormAdmission.showsSeparateStop)
     }
 
     @MainActor
