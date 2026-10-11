@@ -4378,7 +4378,7 @@ final class AppModel {
             } else {
                 let detail = "This task needs attention. Open the chat for details."
                 setActivityThought(.needsYou, proposedDetail: detail)
-                await LiveActivityManager.shared.dismiss()
+                await syncApprovalSurfaces()
                 guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
                       ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
                 _ = await notifyOnce(
