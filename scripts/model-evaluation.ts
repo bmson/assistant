@@ -64,6 +64,375 @@ export function evaluationCoverage(rows: { status: EvaluationStatus }[], planned
   };
 }
 
+export type EvaluationReasoningVariant = 'production-policy' | 'default' | 'disabled';
+
+export interface PairedReasoningResult {
+  model: string;
+  case: string;
+  repeat: number;
+  role: EvaluationCase['role'];
+  kind: EvaluationCase['kind'];
+  status: EvaluationStatus;
+  costUsd: number;
+  heldUsd: number;
+  critical: boolean;
+  requestedReasoning: EvaluationReasoningVariant;
+  effectiveReasoningModes: Array<'enabled' | 'disabled' | 'unsupported' | 'unknown'>;
+  canDisableReasoning: boolean;
+}
+
+export interface PairedReasoningRun {
+  mode: 'live' | 'plan';
+  reasoningVariant: EvaluationReasoningVariant;
+  sourceCommit: string;
+  sourceDirty: boolean;
+  routerSha256: string;
+  providerSha256: string;
+  evaluationHarnessSha256: string;
+  runtime: Record<string, unknown>;
+  sdkVersions: Record<string, string>;
+  corpusSha256: string;
+  catalogSha256: string;
+  cases: string[];
+  criticalCases: string[];
+  caseMetadata: Array<Pick<EvaluationCase, 'id' | 'role' | 'kind' | 'critical'>>;
+  models: string[];
+  repeats: number;
+  budgetUsd: number;
+  settings: Record<string, unknown>;
+  heldUsd: number;
+  results: PairedReasoningResult[];
+}
+
+const MAX_EVALUATION_REPEATS = 5;
+const MAX_EVALUATION_MODELS = 12;
+
+export interface PairedReasoningComparison {
+  eligible: boolean;
+  recommendationAllowed: boolean;
+  blockers: string[];
+  coverage: {
+    planned: number;
+    paired: number;
+    notRun: number;
+    budgetInterruptions: number;
+    failures: number;
+    criticalFailures: number;
+    heldUsd: number;
+  };
+  variants: {
+    default: { passed: number; costUsd: number; accountedCostPerSuccessUsd: number | null };
+    disabled: { passed: number; costUsd: number; accountedCostPerSuccessUsd: number | null };
+  };
+  pairs: Array<{
+    model: string;
+    case: string;
+    repeat: number;
+    defaultStatus: EvaluationStatus;
+    disabledStatus: EvaluationStatus;
+    defaultCostUsd: number;
+    disabledCostUsd: number;
+  }>;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+      a.localeCompare(b),
+    );
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
+}
+
+function settingsWithoutReasoning(settings: Record<string, unknown>) {
+  const { reasoning: _reasoning, ...shared } = settings;
+  return shared;
+}
+
+function pairKey(result: Pick<PairedReasoningResult, 'model' | 'case' | 'repeat'>): string {
+  return `${result.model}\0${result.case}\0${result.repeat}`;
+}
+
+/**
+ * Compare two immutable run artifacts. This is analysis only: it does not
+ * change router policy or treat production-policy runs as explicit mode pairs.
+ * Cost-per-success uses accounted cost, which may include conservative failed
+ * request ceilings; unresolved holds block the comparison altogether.
+ */
+export function comparePairedReasoningRuns(
+  defaultRun: PairedReasoningRun,
+  disabledRun: PairedReasoningRun,
+): PairedReasoningComparison {
+  const blockers = new Set<string>();
+  if (defaultRun.reasoningVariant !== 'default' || disabledRun.reasoningVariant !== 'disabled') {
+    blockers.add('Runs must explicitly declare default and disabled reasoning variants');
+  }
+  if (defaultRun.mode !== 'live' || disabledRun.mode !== 'live')
+    blockers.add('Only live inference runs are eligible for paired recommendations');
+  if (
+    !Number.isFinite(defaultRun.budgetUsd) ||
+    defaultRun.budgetUsd <= 0 ||
+    !Number.isFinite(disabledRun.budgetUsd) ||
+    disabledRun.budgetUsd <= 0
+  ) {
+    blockers.add('Run budget must be finite and positive');
+  }
+  if (
+    !Number.isSafeInteger(defaultRun.repeats) ||
+    defaultRun.repeats <= 0 ||
+    defaultRun.repeats > MAX_EVALUATION_REPEATS ||
+    !Number.isSafeInteger(disabledRun.repeats) ||
+    disabledRun.repeats <= 0 ||
+    disabledRun.repeats > MAX_EVALUATION_REPEATS
+  ) {
+    blockers.add(`Run repetitions must be an integer from 1 to ${MAX_EVALUATION_REPEATS}`);
+  }
+  if (
+    !Number.isFinite(defaultRun.heldUsd) ||
+    defaultRun.heldUsd < 0 ||
+    !Number.isFinite(disabledRun.heldUsd) ||
+    disabledRun.heldUsd < 0
+  ) {
+    blockers.add('Run held cost must be finite and nonnegative');
+  }
+  if (defaultRun.sourceDirty || disabledRun.sourceDirty)
+    blockers.add('Dirty source runs are not eligible for paired recommendations');
+  for (const key of [
+    'sourceCommit',
+    'routerSha256',
+    'providerSha256',
+    'evaluationHarnessSha256',
+    'runtime',
+    'sdkVersions',
+    'corpusSha256',
+    'catalogSha256',
+    'cases',
+    'criticalCases',
+    'caseMetadata',
+    'models',
+    'repeats',
+    'budgetUsd',
+  ] as const) {
+    if (canonicalJson(defaultRun[key]) !== canonicalJson(disabledRun[key]))
+      blockers.add(`Run evidence differs: ${key}`);
+  }
+  if (
+    canonicalJson(settingsWithoutReasoning(defaultRun.settings)) !==
+    canonicalJson(settingsWithoutReasoning(disabledRun.settings))
+  ) {
+    blockers.add('Run evidence differs: settings');
+  }
+
+  const repeats =
+    Number.isSafeInteger(defaultRun.repeats) &&
+    defaultRun.repeats > 0 &&
+    defaultRun.repeats <= MAX_EVALUATION_REPEATS
+      ? defaultRun.repeats
+      : 0;
+  const validModels =
+    defaultRun.models.length > 0 &&
+    defaultRun.models.length <= MAX_EVALUATION_MODELS &&
+    new Set(defaultRun.models).size === defaultRun.models.length;
+  const validCases =
+    defaultRun.cases.length > 0 &&
+    defaultRun.cases.length <= MODEL_EVALUATION_CASES.length &&
+    new Set(defaultRun.cases).size === defaultRun.cases.length;
+  if (!validModels || !validCases)
+    blockers.add('Captured model/case plan is empty, duplicated, or exceeds harness limits');
+  const validMetadata = defaultRun.caseMetadata.length <= MODEL_EVALUATION_CASES.length;
+  if (!validMetadata) blockers.add('Captured corpus metadata exceeds harness limits');
+  const planned =
+    validModels && validCases ? defaultRun.models.length * defaultRun.cases.length * repeats : 0;
+  const expectedKeys = new Set<string>();
+  const caseMetadata = new Map<string, PairedReasoningRun['caseMetadata'][number]>();
+  if (validMetadata) {
+    for (const metadata of defaultRun.caseMetadata) {
+      if (caseMetadata.has(metadata.id))
+        blockers.add('Captured corpus has duplicate case metadata');
+      caseMetadata.set(metadata.id, metadata);
+    }
+  }
+  if (
+    (validMetadata && caseMetadata.size !== defaultRun.cases.length) ||
+    (validMetadata && defaultRun.cases.some((id) => !caseMetadata.has(id)))
+  ) {
+    blockers.add('Captured corpus metadata does not cover the selected cases');
+  }
+  if (
+    !validMetadata ||
+    canonicalJson(defaultRun.caseMetadata.map(({ id }) => id)) !==
+      canonicalJson(defaultRun.cases) ||
+    canonicalJson(
+      defaultRun.caseMetadata.filter(({ critical }) => critical).map(({ id }) => id),
+    ) !== canonicalJson(defaultRun.criticalCases)
+  ) {
+    blockers.add('Captured corpus case list or critical-case list is inconsistent');
+  }
+  if (validModels && validCases) {
+    for (const model of defaultRun.models) {
+      for (const testCase of defaultRun.cases) {
+        for (let repeat = 1; repeat <= repeats; repeat++) {
+          expectedKeys.add(pairKey({ model, case: testCase, repeat }));
+        }
+      }
+    }
+  }
+  const indexRun = (run: PairedReasoningRun, label: string) => {
+    const indexed = new Map<string, PairedReasoningResult>();
+    for (const result of run.results) {
+      const key = pairKey(result);
+      if (indexed.has(key)) blockers.add(`${label} run has duplicate model/case/repeat rows`);
+      if (!expectedKeys.has(key))
+        blockers.add(`${label} run has an unexpected model/case/repeat row`);
+      indexed.set(key, result);
+      if (result.requestedReasoning !== run.reasoningVariant)
+        blockers.add(`${label} row does not preserve its requested reasoning variant`);
+      if (result.critical !== run.criticalCases.includes(result.case))
+        blockers.add(`${label} row critical-case label differs from the captured corpus`);
+      const metadata = caseMetadata.get(result.case);
+      if (
+        !metadata ||
+        result.role !== metadata.role ||
+        result.kind !== metadata.kind ||
+        result.critical !== metadata.critical
+      ) {
+        blockers.add(`${label} row role/kind/critical fields differ from the captured corpus`);
+      }
+      if (
+        run.reasoningVariant === 'disabled' &&
+        (result.role === 'plan' || result.role === 'reason' || result.kind === 'tool')
+      ) {
+        blockers.add(
+          `Disabled reasoning is not allowed for mandatory-reasoning case: ${result.case}`,
+        );
+      }
+      if (
+        !result.effectiveReasoningModes.length ||
+        result.effectiveReasoningModes.includes('unknown')
+      )
+        blockers.add(`${label} row is missing effective reasoning evidence`);
+      if (
+        ![result.costUsd, result.heldUsd].every((amount) => Number.isFinite(amount) && amount >= 0)
+      )
+        blockers.add(`${label} row has invalid cost evidence`);
+    }
+    if (indexed.size !== planned) blockers.add(`${label} run has incomplete paired coverage`);
+    return indexed;
+  };
+  const defaults = indexRun(defaultRun, 'Default');
+  const disabled = indexRun(disabledRun, 'Disabled');
+  const pairs: PairedReasoningComparison['pairs'] = [];
+  let notRun = 0;
+  let budgetInterruptions = 0;
+  let failures = 0;
+  let criticalFailures = 0;
+  let defaultRowHeldUsd = 0;
+  let disabledRowHeldUsd = 0;
+  let defaultPassed = 0;
+  let disabledPassed = 0;
+  let defaultCostUsd = 0;
+  let disabledCostUsd = 0;
+
+  for (const key of expectedKeys) {
+    const left = defaults.get(key);
+    const right = disabled.get(key);
+    if (!left || !right) continue;
+    pairs.push({
+      model: left.model,
+      case: left.case,
+      repeat: left.repeat,
+      defaultStatus: left.status,
+      disabledStatus: right.status,
+      defaultCostUsd: left.costUsd,
+      disabledCostUsd: right.costUsd,
+    });
+    if (left.role !== right.role || left.kind !== right.kind) {
+      blockers.add(`Paired rows differ in role or kind: ${left.case}`);
+    }
+    for (const [result, variant] of [
+      [left, 'default'],
+      [right, 'disabled'],
+    ] as const) {
+      if (result.status === 'not_run') notRun++;
+      if (result.status === 'budget_interrupted') budgetInterruptions++;
+      if (result.status !== 'passed' && result.status !== 'not_run') {
+        failures++;
+      }
+      if (result.critical && result.status !== 'passed') {
+        criticalFailures++;
+        blockers.add(`Critical case failed or was not completed: ${result.case}`);
+      }
+      if (variant === 'default') {
+        defaultCostUsd +=
+          Number.isFinite(result.costUsd) && result.costUsd >= 0 ? result.costUsd : Infinity;
+        defaultRowHeldUsd +=
+          Number.isFinite(result.heldUsd) && result.heldUsd >= 0 ? result.heldUsd : Infinity;
+        if (result.status === 'passed') defaultPassed++;
+        if (!result.effectiveReasoningModes.every((mode) => mode === 'enabled'))
+          blockers.add(`Default row did not effectively use reasoning: ${result.case}`);
+      } else {
+        disabledCostUsd +=
+          Number.isFinite(result.costUsd) && result.costUsd >= 0 ? result.costUsd : Infinity;
+        disabledRowHeldUsd +=
+          Number.isFinite(result.heldUsd) && result.heldUsd >= 0 ? result.heldUsd : Infinity;
+        if (result.status === 'passed') disabledPassed++;
+        if (!result.canDisableReasoning)
+          blockers.add(`Disabled row lacks verified model disable capability: ${result.case}`);
+        if (!result.effectiveReasoningModes.every((mode) => mode === 'disabled'))
+          blockers.add(`Disabled row did not effectively disable reasoning: ${result.case}`);
+      }
+    }
+  }
+  if (notRun > 0) blockers.add('Paired coverage includes cases that were not run');
+  if (budgetInterruptions > 0) blockers.add('Paired coverage includes budget interruptions');
+  const heldUsd =
+    Math.max(
+      Number.isFinite(defaultRun.heldUsd) && defaultRun.heldUsd >= 0
+        ? defaultRun.heldUsd
+        : Infinity,
+      defaultRowHeldUsd,
+    ) +
+    Math.max(
+      Number.isFinite(disabledRun.heldUsd) && disabledRun.heldUsd >= 0
+        ? disabledRun.heldUsd
+        : Infinity,
+      disabledRowHeldUsd,
+    );
+  if (heldUsd > 0) blockers.add('Unresolved held cost prevents cost-per-success claims');
+  if (defaultPassed === 0 || disabledPassed === 0)
+    blockers.add('Both variants need at least one successful case for cost-per-success');
+
+  return {
+    eligible: blockers.size === 0,
+    recommendationAllowed: blockers.size === 0,
+    blockers: [...blockers],
+    coverage: {
+      planned: planned * 2,
+      paired: pairs.length,
+      notRun,
+      budgetInterruptions,
+      failures,
+      criticalFailures,
+      heldUsd,
+    },
+    variants: {
+      default: {
+        passed: defaultPassed,
+        costUsd: defaultCostUsd,
+        accountedCostPerSuccessUsd: defaultPassed ? defaultCostUsd / defaultPassed : null,
+      },
+      disabled: {
+        passed: disabledPassed,
+        costUsd: disabledCostUsd,
+        accountedCostPerSuccessUsd: disabledPassed ? disabledCostUsd / disabledPassed : null,
+      },
+    },
+    pairs,
+  };
+}
+
 export const MODEL_EVALUATION_CASES: readonly EvaluationCase[] = [
   {
     id: 'mail-material-change',
@@ -239,6 +608,9 @@ export function gradeEvaluationCase(test: EvaluationCase, output: unknown): stri
 export class EvaluationLedger implements CostRepository {
   readonly kind = 'cost-repository' as const;
   readonly entries: { usd: number; basis: string }[] = [];
+  /** Effective router modes for every provider dispatch, including failed calls. */
+  readonly reasoningAttempts: CostAttemptMetadata['reasoning'][] = [];
+  private reservationIds: string[] = [];
   private holds = new Map<string, number>();
   private attempts = new Map<string, CostAttemptMetadata>();
   readonly unknownLiabilities = new Map<
@@ -253,6 +625,12 @@ export class EvaluationLedger implements CostRepository {
   }
   get heldUsd(): number {
     return [...this.holds.values()].reduce((sum, amount) => sum + amount, 0);
+  }
+  heldForReservations(ids: readonly string[]): number {
+    return ids.reduce((sum, id) => sum + (this.holds.get(id) ?? 0), 0);
+  }
+  reservationsSince(index: number): string[] {
+    return this.reservationIds.slice(index);
   }
   async getRate() {
     return null;
@@ -274,11 +652,13 @@ export class EvaluationLedger implements CostRepository {
       return { ok: false as const, reason: 'evaluation budget exhausted', resumeAt: new Date() };
     const reservationId = randomUUID();
     this.holds.set(reservationId, input.estimatedUsd);
+    this.reservationIds.push(reservationId);
     return { ok: true as const, reservationId };
   }
   async beginAttempt(reservationId: string, metadata: CostAttemptMetadata) {
     if (!this.holds.has(reservationId) || this.attempts.has(reservationId)) return false;
     this.attempts.set(reservationId, structuredClone(metadata));
+    this.reasoningAttempts.push(metadata.reasoning);
     return true;
   }
   async markAttemptUnknown(
