@@ -3335,7 +3335,8 @@ extension APIClientRetryTests {
                 )
             })
             let reply = ChatMessage(id: "reply-\(scenario.taskId)", role: .assistant,
-                parts: [.init(type: "text", text: "The task needs attention.")])
+                parts: [.init(type: "text", text: "The task needs attention.")],
+                metadata: ["taskId": .string(scenario.taskId)])
             let updates = ChatUpdates(taskStatus: scenario.status, messages: [reply], refreshed: [],
                 superseded: nil, nextCursor: nil, hasMore: false, activity: [])
             StubURLProtocol.prime([], paths: [
@@ -3372,6 +3373,106 @@ extension APIClientRetryTests {
                 XCTAssertEqual(model.activityDetail, "A decision is ready to review")
             }
         }
+    }
+
+    @MainActor
+    func testDoneTaskWithoutItsOwnReplyNeverUsesAnOlderOrForeignReply() async throws {
+        let recorder = LocalNotificationRecorder()
+        let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
+            await recorder.schedule(
+                title: title,
+                body: body,
+                route: route,
+                approvalId: approvalId,
+                agentID: agentID,
+                conversationID: conversationID
+            )
+        })
+        let taskId = "33333333-3333-4333-8333-333333333333"
+        let unrelated = ChatMessage(
+            id: "reply-from-another-task",
+            role: .assistant,
+            parts: [.init(type: "text", text: "This is another task's result.")],
+            metadata: ["taskId": .string("44444444-4444-4444-8444-444444444444")]
+        )
+        let intermediateToolRow = ChatMessage(
+            id: "tool-only-row-for-current-task",
+            role: .assistant,
+            parts: [.init(type: "tool-call")],
+            metadata: ["taskId": .string(taskId)]
+        )
+        let doneWithoutOwnReply = try JSONEncoder().encode(ChatUpdates(
+            taskStatus: "done", messages: [unrelated, intermediateToolRow], refreshed: [], superseded: nil,
+            nextCursor: nil, hasMore: false, activity: []
+        ))
+        let recorderUnavailable = StubURLProtocol.Outcome.success(status: 401, body: Data())
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: taskId)],
+            "/api/mobile/v1/chat/status": Array(repeating: .success(status: 200, body: doneWithoutOwnReply), count: 4),
+            "/api/mobile/v1/overview": [.success(status: 200, body: try overviewBody(pending: []))],
+            "/api/mobile/v1/workspace": [recorderUnavailable],
+        ])
+
+        model.send("Check the completed task")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+        while recorder.entries.isEmpty, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let notification = try XCTUnwrap(recorder.entries.first)
+        XCTAssertEqual(notification.title, "Task complete; reply not yet available")
+        XCTAssertEqual(notification.body, "Open the conversation to check the task.")
+        XCTAssertEqual(model.activityDetail, "This task is marked complete, but its reply has not appeared yet.")
+        XCTAssertEqual(model.activityThought, .replyUnavailable)
+        XCTAssertEqual(model.errorMessage, "This task is marked complete, but its reply has not appeared yet.")
+        XCTAssertFalse(model.isSending)
+        XCTAssertTrue(model.messages.contains(where: { $0.id == unrelated.id }))
+        XCTAssertTrue(model.messages.contains(where: { $0.id == intermediateToolRow.id }))
+        XCTAssertNotEqual(notification.body, "Your result is ready.")
+    }
+
+    @MainActor
+    func testDoneTaskUsesItsMatchingAssistantReply() async throws {
+        let recorder = LocalNotificationRecorder()
+        let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
+            await recorder.schedule(
+                title: title,
+                body: body,
+                route: route,
+                approvalId: approvalId,
+                agentID: agentID,
+                conversationID: conversationID
+            )
+        })
+        let taskId = "33333333-3333-4333-8333-333333333333"
+        let reply = ChatMessage(
+            id: "reply-for-current-task",
+            role: .assistant,
+            parts: [.init(type: "text", text: "The requested update is ready.")],
+            metadata: ["taskId": .string(taskId)]
+        )
+        let doneWithReply = try JSONEncoder().encode(ChatUpdates(
+            taskStatus: "done", messages: [reply], refreshed: [], superseded: nil,
+            nextCursor: nil, hasMore: false, activity: []
+        ))
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: taskId)],
+            "/api/mobile/v1/chat/status": [.success(status: 200, body: doneWithReply)],
+            "/api/mobile/v1/overview": [.success(status: 200, body: try overviewBody(pending: []))],
+            "/api/mobile/v1/workspace": [.success(status: 401, body: Data())],
+        ])
+
+        model.send("Check the completed task")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while recorder.entries.isEmpty, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let notification = try XCTUnwrap(recorder.entries.first)
+        XCTAssertEqual(notification.title, "Ada finished")
+        XCTAssertEqual(notification.body, "Your result is ready.")
+        XCTAssertEqual(model.activityDetail, "The requested update is ready.")
+        XCTAssertEqual(model.activityThought, .finished)
     }
 
     @MainActor
@@ -3649,7 +3750,7 @@ extension APIClientRetryTests {
         let secondTaskId = "44444444-4444-4444-8444-444444444444"
         func updates(status: String, reply: String?, cursor: String) throws -> Data {
             let messages = reply.map { [ChatMessage(id: "reply-\(cursor)", role: .assistant,
-                parts: [.init(type: "text", text: $0)])] } ?? []
+                parts: [.init(type: "text", text: $0)], metadata: ["taskId": .string(cursor == "first-done" ? firstTaskId : secondTaskId)])] } ?? []
             return try JSONEncoder().encode(ChatUpdates(
                 taskStatus: status, messages: messages, refreshed: [], superseded: nil,
                 nextCursor: cursor, hasMore: false, activity: []

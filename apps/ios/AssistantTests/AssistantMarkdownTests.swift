@@ -272,7 +272,7 @@ final class AssistantMarkdownTests: XCTestCase {
           {"type":"data-card","data":{"kind":"briefing","id":"b1","date":"Tuesday, Sep 22","timeZone":"America/Los_Angeles",
             "lead":"Two overlapping events this morning, and one approval is waiting on you.",
             "sections":[
-              {"type":"agenda","title":"Schedule","complete":true,"items":[
+            {"type":"agenda","title":"Schedule","complete":true,"omittedCount":3,"items":[
                 {"day":"Today","time":"9:30 AM – 10:30 AM","title":"Dentist","location":"Laugavegur 12, Reykjavík","flag":"conflict","note":"Overlaps another event"},
                 {"day":"Today","time":"10:00 AM – 11:00 AM","title":"Interview with Linear","flag":"conflict","note":"Overlaps another event"},
                 {"day":"Tomorrow","time":"All day","title":"Team offsite"}]},
@@ -288,6 +288,10 @@ final class AssistantMarkdownTests: XCTestCase {
         let cards = message.parts.compactMap(MessageResponseCard.init(part:))
         guard case let .briefing(briefing)? = cards.first else { return XCTFail("expected a briefing card") }
         XCTAssertEqual(briefing.sections.count, 4)
+        guard case let .agenda(_, _, omittedCount, _)? = briefing.sections.first else {
+            return XCTFail("expected a briefing agenda section")
+        }
+        XCTAssertEqual(omittedCount, 3)
         guard case let .calendarConflicts(_, _, conflicts, complete)? = cards.last else { return XCTFail("expected overlap evidence") }
         XCTAssertFalse(complete)
         XCTAssertEqual(conflicts.first?.evidenceNote, "Keep the earlier arrival time; identity is unverified.")
@@ -309,6 +313,21 @@ final class AssistantMarkdownTests: XCTestCase {
             attachment.name = "briefing-\(name)"
             attachment.lifetime = .keepAlways
             add(attachment)
+        }
+    }
+
+    func testBriefingAgendaOmittedCountRejectsMalformedValues() throws {
+        for (index, value) in ["0", "-1", "1.5", "\"2\"", "9007199254740992", "9223372036854775808"].enumerated() {
+            let payload = """
+            {"id":"brief-\(index)","lead":"Schedule","sections":[{"type":"agenda","omittedCount":\(value),"items":[{"day":"Today","time":"9 AM","title":"Check-in"}]}]}
+            """
+            let message = try JSONDecoder().decode(ChatMessage.self, from: Data(#"{"id":"message","role":"assistant","parts":[{"type":"data-card","data":\#(payload)}]}"#.utf8))
+            let cards = message.parts.compactMap(MessageResponseCard.init(part:))
+            guard case let .briefing(briefing)? = cards.first,
+                  case let .agenda(_, _, omittedCount, _)? = briefing.sections.first else {
+                return XCTFail("expected a decoded agenda for omittedCount \(value)")
+            }
+            XCTAssertNil(omittedCount, "Malformed omittedCount \(value) must not be shown")
         }
     }
 

@@ -4267,6 +4267,23 @@ final class AppModel {
         var grace = 0
         var finalStatus: String?
         var receivedCurrentReply = false
+        var currentReplyMessageIDs = Set<String>()
+        let assistantMessageIDsAtStart = Set(messages.compactMap { message in
+            message.role == .assistant && !message.id.hasPrefix("stream-") ? message.id : nil
+        })
+        func isVisibleAssistantReply(_ message: ChatMessage) -> Bool {
+            guard message.role == .assistant, !message.id.hasPrefix("stream-") else { return false }
+            return message.parts.contains { part in
+                (part.type == "text" && !(part.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    || (part.type == "data-card" && part.data != nil)
+            }
+        }
+        if let taskId {
+            currentReplyMessageIDs.formUnion(messages.compactMap { message in
+                isVisibleAssistantReply(message) && message.metadata?["taskId"]?.string == taskId ? message.id : nil
+            })
+        }
+        receivedCurrentReply = !currentReplyMessageIDs.isEmpty
         // A held poll waits on the server, so the loop is bounded by how long a
         // turn may legitimately take rather than by a count of ticks.
         let deadline = Date().addingTimeInterval(30 * 60)
@@ -4310,6 +4327,17 @@ final class AppModel {
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
                 if let nextCursor = updates.nextCursor { cursor = nextCursor }
                 let assistantAfter = messages.filter { !$0.id.hasPrefix("stream-") && $0.role == .assistant }.count
+                let assistantMessages = messages.filter { $0.role == .assistant && !$0.id.hasPrefix("stream-") }
+                if let taskId {
+                    currentReplyMessageIDs.formUnion(assistantMessages.compactMap { message in
+                        isVisibleAssistantReply(message) && message.metadata?["taskId"]?.string == taskId ? message.id : nil
+                    })
+                } else {
+                    currentReplyMessageIDs.formUnion(assistantMessages.compactMap { message in
+                        isVisibleAssistantReply(message) && !assistantMessageIDsAtStart.contains(message.id) ? message.id : nil
+                    })
+                }
+                receivedCurrentReply = !currentReplyMessageIDs.isEmpty
                 gapMilliseconds = PollingPolicy.gapMilliseconds(
                     elapsedMilliseconds: elapsedMilliseconds,
                     // `superseded` is optional on the wire — a server that sent
@@ -4321,8 +4349,7 @@ final class AppModel {
                     hasTaskID: taskId != nil
                 )
 
-                if taskId == nil, assistantAfter > assistantBefore {
-                    receivedCurrentReply = true
+                if taskId == nil, receivedCurrentReply {
                     messages.removeAll { $0.id == streamID }
                     break
                 }
@@ -4331,7 +4358,8 @@ final class AppModel {
                     if settled.contains(status) {
                         finalStatus = status
                         grace += 1
-                        if assistantAfter > assistantBefore || grace >= 4 { break }
+                        if receivedCurrentReply || grace >= 4 { break }
+                        if updates.hasMore { continue }
                     }
                 }
                 if updates.hasMore { continue }
@@ -4372,6 +4400,7 @@ final class AppModel {
             let durableReply = messages.reversed().first { message in
                 message.role == .assistant
                     && !message.id.hasPrefix("stream-")
+                    && currentReplyMessageIDs.contains(message.id)
                     && !turn.previousAssistantMessageIDs.contains(message.id)
             }
             if let durableReply { finishSpeaking(for: durableReply) }
@@ -4397,7 +4426,9 @@ final class AppModel {
         guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
 
-        let reply = messages.reversed().first(where: { $0.role == .assistant && !$0.text.isEmpty })?.text
+        let reply = messages.reversed().first(where: {
+            currentReplyMessageIDs.contains($0.id) && $0.role == .assistant && !$0.text.isEmpty
+        })?.text
         if let finalStatus, attention.contains(finalStatus) {
             let matchingApproval = finalStatus == "waiting_approval"
                 ? overview?.approvals.pending.first(where: { $0.approval.taskId == taskId })
@@ -4436,16 +4467,24 @@ final class AppModel {
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
             await syncNotificationBadge()
         } else {
-            let succeeded = finalStatus != "failed" && finalStatus != "cancelled"
-            let thought: AssistantThought = succeeded ? .finished : .stopped
-            let detail = finalStatus == "cancelled"
+            let completedWithoutReply = finalStatus == "done" && !receivedCurrentReply
+            let succeeded = finalStatus != "failed" && finalStatus != "cancelled" && !completedWithoutReply
+            let thought: AssistantThought = completedWithoutReply
+                ? .replyUnavailable
+                : succeeded ? .finished : .stopped
+            let detail = completedWithoutReply
+                ? "This task is marked complete, but its reply has not appeared yet."
+                : finalStatus == "cancelled"
                 ? "Task cancelled; external effects are not reversed"
                 : concise(reply ?? (succeeded ? "Your assistant finished the task." : "Open the conversation for details."))
+            if completedWithoutReply {
+                errorMessage = detail
+            }
             setActivityThought(thought, proposedDetail: detail)
             _ = await notifyOnce(
                 key: "\(taskId ?? streamID)-\(finalStatus ?? "reply")",
-                title: succeeded ? "\(agentName) finished" : "\(agentName) stopped",
-                body: succeeded ? "Your result is ready." : "Open the conversation for details.",
+                title: completedWithoutReply ? "Task complete; reply not yet available" : succeeded ? "\(agentName) finished" : "\(agentName) stopped",
+                body: succeeded ? "Your result is ready." : "Open the conversation to check the task.",
                 route: .chat
             )
             guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
