@@ -107,6 +107,9 @@ jobs:
       sha: ${{ steps.release.outputs.sha }}
       images: ${{ steps.matrix.outputs.entries }}
       modules: ${{ steps.modules.outputs.modules }}
+      browser: ${{ steps.modules.outputs.browser }}
+      code: ${{ steps.modules.outputs.code }}
+      processor: ${{ steps.modules.outputs.processor }}
       persistence: ${{ steps.persistence.outputs.driver }}
       components: ${{ steps.components.outputs.components }}
     steps:
@@ -364,7 +367,50 @@ jobs:
           project_id: ${{ vars.GCP_PROJECT }}
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - name: Resolve live release path
+        id: release_path
+        env:
+          RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
+        run: |
+          driver="$(gcloud run services describe assistant-agent \
+            --project "$GCP_PROJECT" --region "$GCP_REGION" --format=json |
+            node -e 'let data="";process.stdin.on("data",x=>data+=x);process.stdin.on("end",()=>{const s=JSON.parse(data);const e=s.spec?.template?.containers?.[0]?.env??s.spec?.template?.spec?.containers?.[0]?.env??[];process.stdout.write(e.find(x=>x.name==="PERSISTENCE_DRIVER")?.value??"")})')"
+          case "$driver" in
+            postgres|firestore) ;;
+            *) echo "live assistant-agent has an unknown persistence driver" >&2; exit 1 ;;
+          esac
+          if [[ "$driver" == firestore && "$RELEASE_COMPONENTS" == agent,web ]]; then
+            echo 'firestore_pair=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'firestore_pair=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Release Firestore pair with delivery guard
+        if: steps.release_path.outputs.firestore_pair == 'true'
+        env:
+          IMAGE_TAG: ${{ needs.plan.outputs.sha }}
+          ASSISTANT_MODULES: ${{ needs.plan.outputs.modules }}
+          RELEASE_PERSISTENCE_DRIVER: ${{ needs.plan.outputs.persistence }}
+          RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
+          RELEASE_SCHEMA_UNCHANGED: 'false'
+          RELEASE_EMAIL_OBSERVER_WORKER_ENABLED: ${{ vars.RELEASE_EMAIL_OBSERVER_WORKER_ENABLED }}
+          RELEASE_MANIFEST_PATH: ${{ runner.temp }}/assistant-release-${{ needs.plan.outputs.sha }}.json
+          SKIP_IMAGE_BUILD: 'true'
+          GUARD_WORKER_BROWSER: ${{ needs.plan.outputs.browser }}
+          GUARD_WORKER_CODE: ${{ needs.plan.outputs.code }}
+          GUARD_WORKER_PROCESSOR: ${{ needs.plan.outputs.processor }}
+        run: |
+          agent_url="$(gcloud run services describe assistant-agent \
+            --project "$GCP_PROJECT" --region "$GCP_REGION" --format='value(status.url)')"
+          python3 infra/gcp/firestore-delivery-guard.py run \
+            --project "$GCP_PROJECT" --location "$GCP_REGION" \
+            --agent-url "$agent_url" \
+            --worker-browser "$GUARD_WORKER_BROWSER" \
+            --worker-code "$GUARD_WORKER_CODE" \
+            --worker-processor "$GUARD_WORKER_PROCESSOR" \
+            --receipt "${RUNNER_TEMP}/assistant-firestore-delivery-guard-${IMAGE_TAG}.json" \
+            -- bash infra/gcp/release.sh
       - name: Release immutable images
+        if: steps.release_path.outputs.firestore_pair != 'true'
         env:
           IMAGE_TAG: ${{ needs.plan.outputs.sha }}
           ASSISTANT_MODULES: ${{ needs.plan.outputs.modules }}
@@ -375,6 +421,20 @@ jobs:
           RELEASE_MANIFEST_PATH: ${{ runner.temp }}/assistant-release-${{ needs.plan.outputs.sha }}.json
           SKIP_IMAGE_BUILD: 'true'
         run: bash infra/gcp/release.sh
+      - name: Restore Firestore delivery guard
+        if: always() && steps.release_path.outputs.firestore_pair == 'true'
+        run: >-
+          python3 infra/gcp/firestore-delivery-guard.py restore
+          --project "$GCP_PROJECT" --location "$GCP_REGION"
+          --receipt "${RUNNER_TEMP}/assistant-firestore-delivery-guard-${{ needs.plan.outputs.sha }}.json"
+      - name: Archive Firestore delivery guard receipt
+        if: always() && steps.release_path.outputs.firestore_pair == 'true'
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: firestore-delivery-guard-${{ needs.plan.outputs.sha }}
+          path: ${{ runner.temp }}/assistant-firestore-delivery-guard-${{ needs.plan.outputs.sha }}*.json
+          if-no-files-found: ignore
+          retention-days: 90
       - name: Archive the immutable release manifest
         if: always()
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
