@@ -79,6 +79,10 @@ if a[:3]==['run','services','update']:
  svc.setdefault('staged',[]).append({'revision':rev,'tag':val('--tag'),'image':val('--image'),'env':dict(svc['env'])}); svc.setdefault('revisions',{})[rev]={'env':dict(svc['env'])}; save(); sys.exit(0)
 if a[:3]==['run','services','update-traffic']:
  name=a[3]; mapping=val('--to-revisions'); svc=s[name]
+ if '--remove-tags' in a:
+  tags=set(val('--remove-tags').split(','))
+  svc['staged']=[stage for stage in svc.get('staged',[]) if stage.get('tag') not in tags]
+  save(); sys.exit(0)
  if name=='assistant-agent' and os.getenv('FAIL_AGENT_PROMOTE')=='1' and 'agent-new' in mapping: sys.exit(1)
  if name=='assistant-web' and os.getenv('FAIL_WEB_PROMOTE')=='1' and 'web-new' in mapping: sys.exit(1)
  if name=='assistant-web' and os.getenv('FAIL_REPAUSE')=='1' and 'assistant-web-new1=100' in mapping and 'assistant-web-new2' in svc.get('traffic',{}): sys.exit(1)
@@ -285,12 +289,19 @@ assert_old_traffic
 reset_case
 prepare_firestore_state
 release_preflight_compatibility agent,web || fail 'Firestore contract metadata should pass preflight'
+python3 - "$TEST_ROOT/state.json" <<'PY'
+import json,sys
+p=sys.argv[1]; s=json.load(open(p))
+s['assistant-web'].setdefault('staged',[]).append({'revision':'web-foreign','tag':'candidate-foreign','env':dict(s['assistant-web']['env'])})
+s['assistant-web'].setdefault('revisions',{})['web-foreign']={'env':dict(s['assistant-web']['env'])}
+open(p,'w').write(json.dumps(s))
+PY
 release_staged_services || fail 'Firestore compatible pair should promote'
 python3 - "$TEST_ROOT/manifest.json" <<'PY'
 import json,sys
 m=json.load(open(sys.argv[1])); assert m['storageDriver']=='firestore'; assert m['schemaVersion']==1
 PY
-python3 - "$STUB_SERVICE_UPDATE_CALLS" "$STUB_RELEASE_CALLS" "$STUB_DRAIN_CALLS" <<'PY'
+python3 - "$STUB_SERVICE_UPDATE_CALLS" "$STUB_RELEASE_CALLS" "$STUB_DRAIN_CALLS" "$TEST_ROOT/state.json" <<'PY'
 import json,sys
 updates=[json.loads(line) for line in open(sys.argv[1])]
 web_updates=[x[x.index('--update-env-vars')+1] for x in updates if x[3]=='assistant-web']
@@ -302,19 +313,35 @@ web_pause=next(i for i,x in enumerate(calls) if 'update-traffic assistant-web ' 
 agent=next(i for i,x in enumerate(calls) if 'update-traffic assistant-agent ' in x and 'assistant-agent-new1=100' in x)
 web_resume=next(i for i,x in enumerate(calls) if 'update-traffic assistant-web ' in x and 'assistant-web-new2=100' in x)
 assert web_pause<agent<web_resume, calls
+remove_calls=[x for x in calls if '--remove-tags' in x]
+assert len(remove_calls)==1 and 'update-traffic assistant-web' in remove_calls[0], remove_calls
+own_candidate=next(x[x.index('--tag')+1] for x in updates if x[3]=='assistant-web')
+resume_tag=next(x[x.index('--tag')+1] for x in updates if x[3]=='assistant-web' and 'ASSISTANT_RELEASE_WRITES_PAUSED=false' in x[x.index('--update-env-vars')+1])
+assert remove_calls[0].split('--remove-tags ',1)[1].split()[0]==own_candidate, remove_calls
+s=json.load(open(sys.argv[4]))
+web_tags={x['tag'] for x in s['assistant-web'].get('staged',[])}
+agent_tags={x['tag'] for x in s['assistant-agent'].get('staged',[])}
+assert own_candidate not in web_tags, web_tags
+assert {'candidate-foreign',resume_tag}.issubset(web_tags), web_tags
+assert own_candidate in agent_tags, agent_tags
 drains=[int(line.strip()) for line in open(sys.argv[3])]
 assert drains and all(0<=x<=30 for x in drains) and sum(drains)==310, drains
 PY
 reset_case; prepare_firestore_state; export RESUME_WEB_PROBE_FAIL=1
 if release_staged_services; then fail 'unpaused tagged revision failure must roll back without moving traffic to it'; fi
 assert_old_traffic
-python3 - "$STUB_RELEASE_CALLS" <<'PY'
-import sys
+python3 - "$STUB_RELEASE_CALLS" "$STUB_SERVICE_UPDATE_CALLS" "$TEST_ROOT/state.json" <<'PY'
+import json,sys
 calls=open(sys.argv[1]).read().splitlines()
 assert not any('assistant-web-new2=100' in x for x in calls), calls
+assert not any('--remove-tags' in x for x in calls), calls
 agent_rollback=next(i for i,x in enumerate(calls) if 'update-traffic assistant-agent ' in x and 'agent-old=100' in x)
 web_rollback=next(i for i,x in enumerate(calls) if 'update-traffic assistant-web ' in x and 'web-old=100' in x)
 assert agent_rollback<web_rollback, calls
+updates=[json.loads(line) for line in open(sys.argv[2])]
+own_candidate=next(x[x.index('--tag')+1] for x in updates if x[3]=='assistant-web')
+state=json.load(open(sys.argv[3]))
+assert own_candidate in {x['tag'] for x in state['assistant-web'].get('staged',[])}, state
 PY
 reset_case; prepare_firestore_state; export RESUME_LIVE_PROBE_FAIL=1
 if release_staged_services; then fail 'live unpaused probe failure must repause before rolling the agent back'; fi

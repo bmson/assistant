@@ -27,6 +27,61 @@ def version(number, state="ENABLED"):
 
 
 class CleanupTests(unittest.TestCase):
+    def test_cleanup_inventory_accepts_the_current_revision_after_owned_candidate_tag_is_removed(self):
+        current = "projects/test/locations/us-west1/services/assistant-web/revisions/web-current"
+        service = {
+            "name": "projects/test/locations/us-west1/services/assistant-web",
+            "latestReadyRevision": current,
+            "latestCreatedRevision": current,
+            "trafficStatuses": [{"revision": "web-current", "percent": 100}],
+        }
+
+        class InventoryCloud:
+            def listing(self, host, resource, key, params=None):
+                if resource.endswith("/services"):
+                    return [service]
+                if resource.endswith("/jobs"):
+                    return []
+                if resource.endswith("/revisions"):
+                    return []
+                raise AssertionError(f"unexpected inventory request: {resource}")
+
+            def request(self, host, resource, params=None):
+                self.assert_current = resource == f"v2/{current}"
+                return {"name": current, "containers": []}
+
+        specs, retired, _fingerprint = cleanup.runtime_inventory(InventoryCloud(), "test", "us-west1")
+        self.assertEqual(specs, [{"name": current, "containers": []}])
+        self.assertEqual(retired, [])
+
+    def test_cleanup_inventory_still_rejects_foreign_historical_tagged_url(self):
+        current = "projects/test/locations/us-west1/services/assistant-web/revisions/web-current"
+        service = {
+            "name": "projects/test/locations/us-west1/services/assistant-web",
+            "latestReadyRevision": current,
+            "latestCreatedRevision": current,
+            "trafficStatuses": [
+                {"revision": "web-current", "percent": 100},
+                {"revision": "web-foreign", "percent": 0, "tag": "candidate-foreign"},
+            ],
+        }
+
+        class InventoryCloud:
+            def listing(self, host, resource, key, params=None):
+                if resource.endswith("/services"):
+                    return [service]
+                if resource.endswith("/jobs"):
+                    return []
+                if resource.endswith("/revisions"):
+                    return []
+                raise AssertionError(f"unexpected inventory request: {resource}")
+
+            def request(self, host, resource, params=None):
+                return {"name": current, "containers": []}
+
+        with self.assertRaisesRegex(RuntimeError, "Traffic is split or a historical revision has a URL"):
+            cleanup.runtime_inventory(InventoryCloud(), "test", "us-west1")
+
     def test_keeps_deployed_digest_and_only_its_security_metadata(self):
         images = [image(digest) for digest in ("current", "old", "sig", "att", "oldsig")]
         tags = [tag("sha256-current.sig", "sig"), tag("sha256-current.att", "att"),
