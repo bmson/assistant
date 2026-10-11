@@ -116,6 +116,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+      - name: Verify isolated snapshot restore stays read-only and inert
+        timeout-minutes: 8
+        run: |
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          pnpm test --restore-snapshot-target apps/agent/src/postgres-restore-snapshot.test.ts
       - name: Remove owned PostgreSQL service
         if: always()
         run: bash infra/ci/postgres-service.sh cleanup
@@ -319,7 +324,7 @@ jobs:
             cat "$RUNNER_TEMP/assistant-web17-preview.log"
             exit 1
           fi
-          pnpm --filter @assistant/web exec tsx scripts/web17-delayed-old-poll.browser.ts
+          pnpm exec tsx scripts/web17-delayed-old-poll.browser.ts
       - name: Remove owned PostgreSQL service
         if: always()
         run: bash infra/ci/postgres-service.sh cleanup

@@ -1,4 +1,7 @@
+import { createHash } from 'node:crypto';
 import {
+  Behavior,
+  FunctionResponseScheduling,
   GoogleGenAI,
   type LiveConnectConfig,
   type LiveServerMessage,
@@ -30,6 +33,21 @@ const INPUT_RATE = 16_000;
 const OUTPUT_RATE = 24_000;
 
 type TokenDetail = { modality?: string; tokenCount?: number };
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+function fingerprintArgs(value: unknown): string {
+  return createHash('sha256').update(canonicalJson(value)).digest('hex');
+}
 
 function split(details: TokenDetail[] | undefined, total: number | undefined) {
   let audio = 0;
@@ -77,14 +95,112 @@ async function connectGeminiLive(
   let callerText = '';
   let assistantText = '';
   let closedByUs = false;
+  let transportEnded = false;
   let serverConfirmedInterruption = false;
   let fenceInterruptedOutput = false;
+
+  type AssistantTurn = {
+    emittedAudio: boolean;
+    complete: boolean;
+    pendingIfSilent: Set<string>;
+  };
+  type ToolCallState = {
+    name: string;
+    argsFingerprint: string | null;
+    turn: AssistantTurn;
+    result?: { value: unknown; followUp: 'respond' | 'if_silent' | 'none' };
+    submitted: boolean;
+    cancelled: boolean;
+  };
+  let currentTurn: AssistantTurn | null = null;
+  const toolCalls = new Map<string, ToolCallState>();
 
   const flush = () => {
     if (callerText.trim()) events.transcript('caller', callerText.trim());
     if (assistantText.trim()) events.transcript('assistant', assistantText.trim());
     callerText = '';
     assistantText = '';
+  };
+
+  const ensureTurn = (): AssistantTurn => {
+    currentTurn ??= { emittedAudio: false, complete: false, pendingIfSilent: new Set() };
+    return currentTurn;
+  };
+
+  const sendToolResponse = (
+    id: string,
+    state: ToolCallState,
+    scheduling: FunctionResponseScheduling,
+  ) => {
+    if (state.submitted || state.cancelled || !state.result || closedByUs || transportEnded) return;
+    const connection = active;
+    if (!connection || connection.retired || !connection.session) return;
+    const result = state.result;
+    // The SDK call has no acknowledgement. Mark it before sending so an
+    // ambiguous write is never submitted to a second connection.
+    state.submitted = true;
+    state.result = undefined;
+    try {
+      connection.session.sendToolResponse({
+        functionResponses: [
+          {
+            id,
+            name: state.name,
+            response: { output: result.value },
+            scheduling,
+          },
+        ],
+      });
+    } catch {
+      // SDK errors can echo request data; keep them out of owner diagnostics.
+      events.error(new Error('Gemini Live could not submit a tool response'));
+    }
+  };
+
+  const scheduleToolResponse = (id: string, state: ToolCallState) => {
+    if (!state.result || state.submitted || state.cancelled || closedByUs || transportEnded) return;
+    if (state.result.followUp === 'none') {
+      sendToolResponse(id, state, FunctionResponseScheduling.SILENT);
+      return;
+    }
+    if (state.result.followUp === 'respond') {
+      // Match the bridge's queued-response behavior: let active speech finish
+      // before making the tool result available for a requested follow-up.
+      sendToolResponse(id, state, FunctionResponseScheduling.WHEN_IDLE);
+      return;
+    }
+    if (!state.turn.complete) {
+      state.turn.pendingIfSilent.add(id);
+      return;
+    }
+    sendToolResponse(
+      id,
+      state,
+      state.turn.emittedAudio
+        ? FunctionResponseScheduling.SILENT
+        : FunctionResponseScheduling.WHEN_IDLE,
+    );
+  };
+
+  const completeTurn = () => {
+    const turn = currentTurn;
+    if (!turn) return;
+    turn.complete = true;
+    currentTurn = null;
+    for (const id of turn.pendingIfSilent) {
+      const state = toolCalls.get(id);
+      if (state) scheduleToolResponse(id, state);
+    }
+    turn.pendingIfSilent.clear();
+  };
+
+  const flushPendingToolResponses = () => {
+    for (const [id, state] of toolCalls) {
+      if (state.result && !state.submitted && state.result.followUp !== 'if_silent')
+        scheduleToolResponse(id, state);
+      else if (state.result && !state.submitted && state.turn.complete)
+        scheduleToolResponse(id, state);
+    }
   };
 
   const onMessage = (message: LiveServerMessage) => {
@@ -99,6 +215,7 @@ async function connectGeminiLive(
     }
     if (content?.inputTranscription?.text) callerText += content.inputTranscription.text;
     if (!fenceInterruptedOutput && content?.outputTranscription?.text) {
+      ensureTurn();
       // The model has started answering: the caller's turn is complete.
       if (callerText.trim()) {
         events.transcript('caller', callerText.trim());
@@ -108,19 +225,68 @@ async function connectGeminiLive(
     }
     for (const part of fenceInterruptedOutput ? [] : (content?.modelTurn?.parts ?? [])) {
       const data = part.inlineData?.data;
-      if (data && part.inlineData?.mimeType?.startsWith('audio/'))
-        events.audio(pcmToTelephone(new Uint8Array(Buffer.from(data, 'base64')), OUTPUT_RATE));
+      if (data && part.inlineData?.mimeType?.startsWith('audio/')) {
+        const audio = pcmToTelephone(new Uint8Array(Buffer.from(data, 'base64')), OUTPUT_RATE);
+        if (audio.length > 0) {
+          // This records adapter emission, not caller playback or audibility.
+          ensureTurn().emittedAudio = true;
+          events.audio(audio);
+        }
+      }
     }
-    if (content?.turnComplete) {
-      flush();
-      fenceInterruptedOutput = false;
-      // Do not carry an unused confirmation into a later, unrelated local
-      // clear when no playback was pending during the barge-in.
-      serverConfirmedInterruption = false;
+    const turnEnded = Boolean(content?.turnComplete || content?.interrupted);
+    for (const id of message.toolCallCancellation?.ids ?? []) {
+      if (!id) continue;
+      let state = toolCalls.get(id);
+      if (!state) {
+        state = {
+          name: '',
+          argsFingerprint: null,
+          turn: { emittedAudio: false, complete: true, pendingIfSilent: new Set() },
+          submitted: false,
+          cancelled: true,
+        };
+        toolCalls.set(id, state);
+      } else {
+        state.cancelled = true;
+        state.result = undefined;
+        state.turn.pendingIfSilent.delete(id);
+      }
     }
     for (const call of message.toolCall?.functionCalls ?? []) {
-      if (call.id && call.name)
-        events.toolCall({ id: call.id, name: call.name, args: call.args ?? {} });
+      if (call.id && call.name) {
+        // Calls emitted in one model turn share its audio state. Keep that
+        // reference across later turns and session resumption.
+        const argsFingerprint = fingerprintArgs(call.args ?? {});
+        const existing = toolCalls.get(call.id);
+        if (!existing) {
+          toolCalls.set(call.id, {
+            name: call.name,
+            argsFingerprint,
+            turn: ensureTurn(),
+            submitted: false,
+            cancelled: false,
+          });
+          events.toolCall({ id: call.id, name: call.name, args: call.args ?? {} });
+        } else if (
+          existing.name &&
+          (existing.name !== call.name || existing.argsFingerprint !== argsFingerprint)
+        ) {
+          events.error(new Error('Gemini Live received a conflicting tool call identity'));
+        }
+      } else {
+        events.error(new Error('Gemini Live returned a tool call without an identity'));
+      }
+    }
+    if (turnEnded) {
+      flush();
+      completeTurn();
+      // Preserve a standalone interruption confirmation for the bridge's
+      // synchronous interrupt() call. A separate turnComplete clears it.
+      if (content?.turnComplete) {
+        fenceInterruptedOutput = false;
+        serverConfirmedInterruption = false;
+      }
     }
     const metadata = message.usageMetadata;
     if (metadata) {
@@ -158,6 +324,7 @@ async function connectGeminiLive(
                 name: tool.name,
                 description: tool.description,
                 parametersJsonSchema: tool.parameters,
+                behavior: Behavior.NON_BLOCKING,
               })),
             },
           ],
@@ -249,6 +416,7 @@ async function connectGeminiLive(
               return;
             }
             connection.retired = true;
+            if (active === connection) completeTurn();
             // A GoAway handover may still be in flight; if it lands, this
             // connection is no longer the active one and there is nothing to do.
             void Promise.resolve(resuming).then(() =>
@@ -304,6 +472,7 @@ async function connectGeminiLive(
       if (message.goAway) void resume(false);
       onMessage(message);
     }
+    flushPendingToolResponses();
   };
 
   const sendPcm = (data: string) => {
@@ -370,6 +539,9 @@ async function connectGeminiLive(
       // After a GoAway the old connection still works until it closes, and
       // its close tries again. A lost connection with no way back is the end.
       if (lost && !closedByUs) {
+        transportEnded = true;
+        currentTurn = null;
+        toolCalls.clear();
         flush();
         events.closed();
       }
@@ -386,12 +558,23 @@ async function connectGeminiLive(
     sendAudio(mulaw) {
       sendPcm(Buffer.from(telephoneToPcm(mulaw, INPUT_RATE)).toString('base64'));
     },
-    sendToolResult(call: RealtimeToolCall, result: unknown) {
-      send((session) =>
-        session.sendToolResponse({
-          functionResponses: [{ id: call.id, name: call.name, response: { output: result } }],
-        }),
-      );
+    sendToolResult(call: RealtimeToolCall, result: unknown, followUp = 'respond') {
+      if (closedByUs || transportEnded) return;
+      const state = toolCalls.get(call.id);
+      if (!state) {
+        events.error(new Error('Gemini Live ignored a result for an unknown tool call'));
+        return;
+      }
+      if (state.cancelled) return;
+      if (state.name !== call.name || state.argsFingerprint !== fingerprintArgs(call.args)) {
+        events.error(
+          new Error('Gemini Live ignored a result with a conflicting tool call identity'),
+        );
+        return;
+      }
+      if (state.submitted || state.result) return;
+      state.result = { value: result, followUp };
+      scheduleToolResponse(call.id, state);
     },
     respond(instructions) {
       send((session) =>
@@ -414,6 +597,8 @@ async function connectGeminiLive(
     usage: () => ({ ...usage }),
     async close() {
       closedByUs = true;
+      currentTurn?.pendingIfSilent.clear();
+      toolCalls.clear();
       flush();
       if (active) {
         active.retired = true;

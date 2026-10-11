@@ -1,15 +1,15 @@
 /**
  * WEB-17 mounted client race acceptance against the production-shaped local web
  * app and its PostgreSQL-backed conversation/task actions. Task A is a real
- * persisted terminal task loaded through the chat page; only the old poll
- * response and task B's admission/status responses are scripted in Playwright.
- * This isolates the client ownership race without invoking a worker or model.
+ * persisted terminal task loaded through the chat page; poll responses and task
+ * B's admission/status responses are scripted in Playwright. This isolates the
+ * client ownership race without invoking a worker or model.
  */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createUIMessageStream, createUIMessageStreamResponse } from 'ai';
 import { chromium, type Page, type Route } from 'playwright';
-import { createWeb17Fixture } from '../../../scripts/web17-delayed-old-poll-fixture.js';
+import { createWeb17Fixture } from './web17-delayed-old-poll-fixture.js';
 
 const baseUrl = process.env.SMOKE_BASE_URL;
 assert(baseUrl, 'Set SMOKE_BASE_URL to the running loopback production web app');
@@ -21,6 +21,20 @@ assert(databaseUrl, 'Set DATABASE_URL to the isolated CI PostgreSQL database');
 
 function isPathOrChild(pathname: string, basePath: string): boolean {
   return pathname === basePath || pathname.startsWith(`${basePath}/`);
+}
+
+async function waitFor<T>(promise: Promise<T>, message: string, timeoutMs = 10_000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 const fixture = createWeb17Fixture(databaseUrl);
@@ -334,12 +348,287 @@ async function verifyDelayedTerminalPoll(status: 'done' | 'cancelled' | 'failed'
   }
 }
 
+async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
+  const page = await context.newPage();
+  const browserErrors: string[] = [];
+  const conversationId = await createConversation(page);
+  const taskId = await fixture.insertTerminalTask(conversationId, 'done');
+  const cursor = fixture.cursorAt(new Date(0));
+  const oldResult = 'WEB-17 stale result from the unmounted request';
+  const freshResult = 'WEB-17 result from the restored task poll';
+
+  let releaseOldRequest!: () => void;
+  const oldRequestGate = new Promise<void>((resolve) => {
+    releaseOldRequest = resolve;
+  });
+  let oldRequestStarted!: () => void;
+  const oldStarted = new Promise<void>((resolve) => {
+    oldRequestStarted = resolve;
+  });
+  let oldRouteSettled!: () => void;
+  const oldSettled = new Promise<void>((resolve) => {
+    oldRouteSettled = resolve;
+  });
+  let freshRouteSettled!: () => void;
+  const freshSettled = new Promise<void>((resolve) => {
+    freshRouteSettled = resolve;
+  });
+  let releaseFreshRequest!: () => void;
+  const freshRequestGate = new Promise<void>((resolve) => {
+    releaseFreshRequest = resolve;
+  });
+  let freshRequestStarted!: () => void;
+  const freshStarted = new Promise<void>((resolve) => {
+    freshRequestStarted = resolve;
+  });
+  let taskAPollCount = 0;
+  let oldRouteEntered = false;
+  let oldRouteCount = 0;
+  let oldRouteSettledCount = 0;
+  let oldGateReleased = false;
+  let freshRouteEntered = false;
+  let freshPollCount = 0;
+  let freshRouteSettledCount = 0;
+  let freshGateReleased = false;
+  let remounted = false;
+  const oldPollIds: string[] = [];
+  const freshPollIds: string[] = [];
+
+  const maybeSettleOldRoutes = () => {
+    if (oldGateReleased && oldRouteCount > 0 && oldRouteSettledCount === oldRouteCount) {
+      oldRouteSettled();
+    }
+  };
+  const maybeSettleFreshRoutes = () => {
+    if (freshGateReleased && freshPollCount > 0 && freshRouteSettledCount === freshPollCount) {
+      freshRouteSettled();
+    }
+  };
+
+  page.on('pageerror', (error) => browserErrors.push(error.message));
+  const pollTokenPrefix = randomUUID();
+  await page.addInitScript(
+    ({ expectedTaskId, tokenPrefix }: { expectedTaskId: string; tokenPrefix: string }) => {
+      const stateWindow = window as Window & { __web17TaskPollAborts?: string[] };
+      const aborts: string[] = [];
+      stateWindow.__web17TaskPollAborts = aborts;
+      const documentId = crypto.randomUUID();
+      let sequence = 0;
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        const requestUrl = new URL(
+          input instanceof Request ? input.url : input.toString(),
+          window.location.href,
+        );
+        const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+        if (
+          requestUrl.pathname === '/api/chat/status' &&
+          requestUrl.searchParams.get('taskId') === expectedTaskId
+        ) {
+          const pollId = `${tokenPrefix}-${documentId}-${++sequence}`;
+          signal?.addEventListener('abort', () => aborts.push(pollId), { once: true });
+          const headers = new Headers(input instanceof Request ? input.headers : undefined);
+          new Headers(init?.headers).forEach((value, name) => {
+            headers.set(name, value);
+          });
+          headers.set('x-web17-poll-id', pollId);
+          return originalFetch(input, { ...init, headers });
+        }
+        return originalFetch(input, init);
+      }) as typeof window.fetch;
+    },
+    { expectedTaskId: taskId, tokenPrefix: pollTokenPrefix },
+  );
+
+  const routeHandler = async (route: Route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.origin !== origin.origin) {
+      await route.abort('blockedbyclient');
+      return;
+    }
+    if (url.pathname === '/api/chat/status' && request.method() === 'GET') {
+      const requestedTaskId = url.searchParams.get('taskId');
+      if (requestedTaskId === taskId) {
+        const pollId = await request.headerValue('x-web17-poll-id');
+        assert.ok(pollId?.startsWith(`${pollTokenPrefix}-`));
+        taskAPollCount += 1;
+        if (!remounted) {
+          oldRouteCount += 1;
+          oldPollIds.push(pollId as string);
+          oldRouteEntered = true;
+          oldRequestStarted();
+          await oldRequestGate;
+          try {
+            // The component has unmounted and aborted this request. Attempting
+            // to answer it late must not publish into the remounted chat.
+            await route.fulfill({
+              json: statusPayload('done', {
+                message: {
+                  id: randomUUID(),
+                  role: 'assistant',
+                  parts: [{ type: 'text', text: oldResult }],
+                },
+              }),
+            });
+          } catch {
+            // Playwright may report that the browser already closed the route.
+          } finally {
+            oldRouteSettledCount += 1;
+            maybeSettleOldRoutes();
+          }
+          return;
+        }
+        freshRouteEntered = true;
+        freshPollCount += 1;
+        freshPollIds.push(pollId as string);
+        freshRequestStarted();
+        await freshRequestGate;
+        try {
+          await route.fulfill({
+            json: statusPayload('done', {
+              message: {
+                id: randomUUID(),
+                role: 'assistant',
+                parts: [{ type: 'text', text: freshResult }],
+              },
+            }),
+          });
+        } finally {
+          freshRouteSettledCount += 1;
+          maybeSettleFreshRoutes();
+        }
+        return;
+      }
+      assert.equal(requestedTaskId, null, 'No other task may be observed in this scenario');
+      await route.fulfill({ json: statusPayload(null) });
+      return;
+    }
+    if (
+      isPathOrChild(url.pathname, '/api/chat') ||
+      isPathOrChild(url.pathname, '/api/mobile/v1/chat')
+    ) {
+      await route.abort('blockedbyclient');
+      return;
+    }
+    await route.continue();
+  };
+  const isChatSafetyRoute = (url: URL) =>
+    isPathOrChild(url.pathname, '/api/chat') || isPathOrChild(url.pathname, '/api/mobile/v1/chat');
+  await context.route('**/*', async (route) => {
+    const requestUrl = new URL(route.request().url());
+    if (
+      (requestUrl.protocol === 'http:' || requestUrl.protocol === 'https:') &&
+      requestUrl.origin !== origin.origin
+    ) {
+      await route.abort('blockedbyclient');
+      return;
+    }
+    await route.continue();
+  });
+  await page.route(isChatSafetyRoute, routeHandler);
+
+  try {
+    const deepLink = () =>
+      new URL(
+        `/chat/${conversationId}?task=${taskId}&cursor=${encodeURIComponent(cursor)}`,
+        origin,
+      ).toString();
+    await page.goto(deepLink(), { waitUntil: 'domcontentloaded', timeout: 90_000 });
+    const composer = page.getByRole('combobox', { name: 'Message', exact: true });
+    await composer.waitFor({ timeout: 10_000 });
+    await page.getByRole('button', { name: 'Stop this task', exact: true }).waitFor();
+    await waitFor(oldStarted, 'Task A initial poll did not start');
+    const abortsBeforeUnmount = await page.evaluate(
+      () => (window as Window & { __web17TaskPollAborts?: string[] }).__web17TaskPollAborts ?? [],
+    );
+    const pollIdToAbort = oldPollIds
+      .slice()
+      .reverse()
+      .find((pollId) => !abortsBeforeUnmount.includes(pollId));
+    assert.ok(pollIdToAbort, 'Task A must have an outstanding request before unmount');
+
+    await page.getByRole('link', { name: 'All chats', exact: true }).click();
+    await page.waitForURL((url) => url.pathname === '/chat/all', { timeout: 20_000 });
+    await composer.waitFor({ state: 'detached', timeout: 10_000 });
+    await page.waitForFunction(
+      (expectedPollId) =>
+        (window as Window & { __web17TaskPollAborts?: string[] }).__web17TaskPollAborts?.includes(
+          expectedPollId,
+        ) ?? false,
+      pollIdToAbort,
+      { timeout: 10_000 },
+    );
+    const exactOldPollAborted = await page.evaluate(
+      (expectedPollId) =>
+        (window as Window & { __web17TaskPollAborts?: string[] }).__web17TaskPollAborts?.includes(
+          expectedPollId,
+        ) ?? false,
+      pollIdToAbort,
+    );
+    assert.equal(exactOldPollAborted, true, 'Unmounting the chat must abort the held Task A poll');
+
+    // The ordinary list link intentionally drops task/cursor query state. Use
+    // the same supported task deep link to restore the exact persisted A poll.
+    remounted = true;
+    await page.goto(deepLink(), { waitUntil: 'domcontentloaded', timeout: 90_000 });
+    await composer.waitFor({ timeout: 10_000 });
+    await page.getByRole('button', { name: 'Stop this task', exact: true }).waitFor();
+    await waitFor(freshStarted, 'Task A fresh poll did not start after remount');
+
+    // Keep the aborted response unresolved until the fresh poll is active. This
+    // proves a late completion from A cannot replace or disturb the remounted
+    // task controls while the new request is still waiting.
+    oldGateReleased = true;
+    releaseOldRequest();
+    maybeSettleOldRoutes();
+    await waitFor(oldSettled, 'Aborted task A route did not settle');
+    assert.equal(await page.getByText(oldResult, { exact: true }).count(), 0);
+    assert.equal(await page.getByText(freshResult, { exact: true }).count(), 0);
+    await page.getByRole('button', { name: 'Stop this task', exact: true }).waitFor();
+
+    freshGateReleased = true;
+    releaseFreshRequest();
+    maybeSettleFreshRoutes();
+    await waitFor(freshSettled, 'Fresh task A route did not settle');
+    await page.getByText(freshResult, { exact: true }).waitFor({ timeout: 20_000 });
+    await page.getByRole('button', { name: 'Send', exact: true }).waitFor();
+    assert.equal(await page.getByText(oldResult, { exact: true }).count(), 0);
+    assert.equal(await page.getByText(freshResult, { exact: true }).count(), 1);
+    assert.ok(oldRouteCount >= 1, 'The initial task A poll must reach the held route');
+    assert.equal(taskAPollCount, oldRouteCount + freshPollCount);
+    const abortedFreshPollIds = await page.evaluate(
+      () => (window as Window & { __web17TaskPollAborts?: string[] }).__web17TaskPollAborts ?? [],
+    );
+    const effectiveFreshPollIds = freshPollIds.filter(
+      (pollId) => !abortedFreshPollIds.includes(pollId),
+    );
+    assert.equal(effectiveFreshPollIds.length, 1, 'Exactly one fresh Task A poll must complete');
+    assert.deepEqual(browserErrors, []);
+  } finally {
+    oldGateReleased = true;
+    releaseOldRequest();
+    maybeSettleOldRoutes();
+    freshGateReleased = true;
+    releaseFreshRequest();
+    maybeSettleFreshRoutes();
+    try {
+      if (oldRouteEntered) await waitFor(oldSettled, 'Old task A route did not drain', 5_000);
+      if (freshRouteEntered) await waitFor(freshSettled, 'Fresh task A route did not drain', 5_000);
+    } finally {
+      await page.unroute(isChatSafetyRoute, routeHandler).catch(() => {});
+      await page.close();
+    }
+  }
+}
+
 try {
   for (const status of ['done', 'cancelled', 'failed'] as const) {
     await verifyDelayedTerminalPoll(status);
   }
+  await verifyUnmountedPollDoesNotPublishAfterRemount();
   console.log(
-    'WEB-17 mounted client ownership passed for delayed A done/cancelled/failed polls; B admission and status payloads were synthetic, with no model/provider or worker execution.',
+    'WEB-17 mounted client ownership passed for delayed A done/cancelled/failed polls and B-free task A abort/remount; B admission, status payloads and restored task response were synthetic, with no model/provider or worker execution.',
   );
 } finally {
   await context.close();

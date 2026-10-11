@@ -96,6 +96,7 @@
     "@biomejs/biome": "^2.5.14",
     "@google-cloud/firestore": "^9.2.0",
     "@types/node": "^26.6.3",
+    "ai": "^7.0.116",
     "drizzle-orm": "^0.45.3",
     "google-auth-library": "^10.9.1",
     "playwright": "^1.63.0",

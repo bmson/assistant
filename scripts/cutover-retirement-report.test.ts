@@ -337,7 +337,9 @@ describe('Firestore release path proof', () => {
       )
       .map((item) => item.path);
     expect(blocking).toEqual([]);
-  });
+    // This integration proof reads every tracked text file. Retain a bounded
+    // deadline without applying the unit-test default to repository-wide I/O.
+  }, 20_000);
 });
 
 describe('retirement evidence report', () => {
