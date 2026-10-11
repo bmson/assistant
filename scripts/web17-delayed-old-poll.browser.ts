@@ -103,6 +103,244 @@ async function syntheticAcceptedStream(
   });
 }
 
+async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
+  const page = await context.newPage();
+  const browserErrors: string[] = [];
+  const apiEvents: string[] = [];
+  page.on('pageerror', (error) => browserErrors.push(error.message));
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.startsWith('/api/')) apiEvents.push(`${request.method()} ${url.pathname}`);
+  });
+  page.on('requestfailed', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.startsWith('/api/')) {
+      apiEvents.push(`${request.method()} ${url.pathname} failed: ${request.failure()?.errorText}`);
+    }
+  });
+  const conversationId = await createConversation(page);
+  const userTranscript = page.locator('[data-message-block="true"][data-role="user"]');
+  const assistantTranscript = page.locator('[data-message-block="true"][data-role="assistant"]');
+  const taskId = randomUUID();
+  const firstMessage = 'WEB-17 first turn stays in admission';
+  const secondMessage = 'WEB-17 second prompt remains a draft';
+  const resultText = 'WEB-17 first turn completed';
+  const resultMessageId = randomUUID();
+  let releaseAdmission!: () => void;
+  const admissionRelease = new Promise<void>((resolve) => {
+    releaseAdmission = resolve;
+  });
+  let settleAdmission!: () => void;
+  const admissionSettled = new Promise<void>((resolve) => {
+    settleAdmission = resolve;
+  });
+  let admissionStarted!: () => void;
+  const admissionSeen = new Promise<void>((resolve) => {
+    admissionStarted = resolve;
+  });
+  let admissionCount = 0;
+  let admissionRouteError: unknown;
+  const admittedTexts: string[] = [];
+  const routeHandler = async (route: Route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.origin !== origin.origin) {
+      await route.abort('blockedbyclient');
+      return;
+    }
+    if (url.pathname === '/api/chat' && request.method() === 'POST') {
+      admissionCount += 1;
+      const requestBody = request.postDataJSON() as {
+        messages?: Array<{ parts?: Array<{ text?: string }> }>;
+      };
+      admittedTexts.push(
+        requestBody.messages
+          ?.at(-1)
+          ?.parts?.map((part) => part.text ?? '')
+          .join('') ?? '',
+      );
+      admissionStarted();
+      await admissionRelease;
+      const response = await syntheticAcceptedStream(
+        conversationId,
+        taskId,
+        fixture.cursorAt(new Date()),
+      );
+      try {
+        await route.fulfill({
+          status: response.status,
+          headers: Object.fromEntries(response.headers.entries()),
+          body: await response.text(),
+        });
+      } catch (error) {
+        if (!request.failure()) admissionRouteError = error;
+      } finally {
+        settleAdmission();
+      }
+      return;
+    }
+    if (url.pathname === '/api/chat/status' && request.method() === 'GET') {
+      const requestedTaskId = url.searchParams.get('taskId');
+      if (requestedTaskId !== taskId) {
+        await route.fulfill({ json: statusPayload(null) });
+        return;
+      }
+      await route.fulfill({
+        json: statusPayload('done', {
+          message: {
+            id: resultMessageId,
+            role: 'assistant',
+            parts: [{ type: 'text', text: resultText }],
+          },
+        }),
+      });
+      return;
+    }
+    if (
+      isPathOrChild(url.pathname, '/api/chat') ||
+      isPathOrChild(url.pathname, '/api/mobile/v1/chat')
+    ) {
+      await route.abort('blockedbyclient');
+      return;
+    }
+    await route.continue();
+  };
+  const isChatSafetyRoute = (url: URL) =>
+    isPathOrChild(url.pathname, '/api/chat') || isPathOrChild(url.pathname, '/api/mobile/v1/chat');
+  await context.route('**/*', async (route) => {
+    const requestUrl = new URL(route.request().url());
+    if (
+      (requestUrl.protocol === 'http:' || requestUrl.protocol === 'https:') &&
+      requestUrl.origin !== origin.origin
+    ) {
+      await route.abort('blockedbyclient');
+      return;
+    }
+    await route.continue();
+  });
+  await page.route(isChatSafetyRoute, routeHandler);
+
+  try {
+    await page.goto(new URL(`/chat/${conversationId}`, origin).toString(), {
+      waitUntil: 'domcontentloaded',
+      timeout: 90_000,
+    });
+    const networkIdle = await page.waitForLoadState('networkidle', { timeout: 15_000 }).then(
+      () => true,
+      () => false,
+    );
+    const composer = page.getByRole('combobox', { name: 'Message', exact: true });
+    await composer.waitFor({ timeout: 10_000 });
+    await composer.fill(firstMessage);
+    const initialSendButton = page.getByRole('button', { name: 'Send', exact: true });
+    const composerReady = await page
+      .waitForFunction(
+        (expectedText) => {
+          const input = document.querySelector<HTMLTextAreaElement>(
+            'textarea[aria-label="Message"]',
+          );
+          const button = document.querySelector<HTMLButtonElement>('button[aria-label="Send"]');
+          return input?.value === expectedText && button?.disabled === false;
+        },
+        firstMessage,
+        { timeout: 10_000 },
+      )
+      .then(
+        () => true,
+        () => false,
+      );
+    if (!composerReady) {
+      const pageState = await page.evaluate(() => ({
+        path: window.location.pathname,
+        readyState: document.readyState,
+        inputValue: document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')
+          ?.value,
+        sendDisabled: document.querySelector<HTMLButtonElement>('button[aria-label="Send"]')
+          ?.disabled,
+        visibleText: document.body.innerText.slice(-1200),
+      }));
+      throw new Error(
+        `WEB-17 fresh composer did not become ready: ${JSON.stringify({
+          networkIdle,
+          pageState,
+          browserErrors,
+          apiEvents,
+        })}`,
+      );
+    }
+    await initialSendButton.click({ timeout: 10_000 });
+    await waitFor(admissionSeen, 'The first turn did not reach the held admission route');
+
+    await composer.fill(secondMessage);
+    await composer.press('Enter');
+    const feedback = page.getByText('Still sending. Your next message stays here.', {
+      exact: true,
+    });
+    const feedbackShown = await feedback.waitFor({ timeout: 10_000 }).then(
+      () => true,
+      () => false,
+    );
+    if (!feedbackShown) {
+      const pageState = await page.evaluate(() => ({
+        path: window.location.pathname,
+        inputValue: document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')
+          ?.value,
+        sendDisabled: document.querySelector<HTMLButtonElement>('button[aria-label="Send"]')
+          ?.disabled,
+        visibleText: document.body.innerText.slice(-1200),
+      }));
+      throw new Error(
+        `WEB-17 second prompt feedback did not render: ${JSON.stringify({
+          pageState,
+          browserErrors,
+          apiEvents,
+          admissionCount,
+          admittedTexts,
+        })}`,
+      );
+    }
+    assert.equal(await composer.inputValue(), secondMessage);
+    assert.deepEqual(admittedTexts, [firstMessage]);
+    assert.equal(
+      admissionCount,
+      1,
+      'The second prompt must not be admitted while the first is held',
+    );
+    assert.equal(
+      await userTranscript.getByText(secondMessage, { exact: true }).count(),
+      0,
+      'The second prompt must stay in the composer rather than render as a user message',
+    );
+    assert.equal(await userTranscript.getByText(firstMessage, { exact: true }).count(), 1);
+
+    releaseAdmission();
+    await waitFor(admissionSettled, 'The held first admission did not settle');
+    if (admissionRouteError) throw admissionRouteError;
+    const resultBubble = assistantTranscript.getByText(resultText, { exact: true });
+    await resultBubble.waitFor({ timeout: 20_000 });
+    const settledSendButton = page.getByRole('button', { name: 'Send', exact: true });
+    await settledSendButton.waitFor();
+    assert.equal(await resultBubble.count(), 1);
+    assert.equal(await composer.inputValue(), secondMessage);
+    assert.equal(await settledSendButton.isEnabled(), true);
+    assert.equal(await userTranscript.getByText(firstMessage, { exact: true }).count(), 1);
+    assert.equal(await userTranscript.getByText(secondMessage, { exact: true }).count(), 0);
+    assert.deepEqual(admittedTexts, [firstMessage]);
+    assert.equal(admissionCount, 1);
+    assert.deepEqual(browserErrors, []);
+  } finally {
+    releaseAdmission();
+    if (admissionCount > 0) {
+      await waitFor(admissionSettled, 'The held first admission did not drain', 5_000).catch(
+        () => {},
+      );
+    }
+    await page.unroute(isChatSafetyRoute, routeHandler).catch(() => {});
+    await page.close();
+    await context.unroute('**/*').catch(() => {});
+  }
+}
+
 async function verifyDelayedTerminalPoll(status: 'done' | 'cancelled' | 'failed'): Promise<void> {
   const page = await context.newPage();
   const browserErrors: string[] = [];
@@ -623,12 +861,13 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
 }
 
 try {
+  await verifyDraftIsRetainedDuringHeldAdmission();
   for (const status of ['done', 'cancelled', 'failed'] as const) {
     await verifyDelayedTerminalPoll(status);
   }
   await verifyUnmountedPollDoesNotPublishAfterRemount();
   console.log(
-    'WEB-17 mounted client ownership passed for delayed A done/cancelled/failed polls and B-free task A abort/remount; B admission, status payloads and restored task response were synthetic, with no model/provider or worker execution.',
+    'WEB-17 mounted client acceptance passed for a retained second draft during held admission, delayed A done/cancelled/failed polls and task A abort/remount; admission/status payloads and responses were synthetic, with no model/provider or worker execution.',
   );
 } finally {
   await context.close();

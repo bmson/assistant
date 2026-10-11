@@ -219,6 +219,7 @@ export function ChatClient({
     [formSessionScope],
   );
   const [fallbackNote, setFallbackNote] = useState<string | null>(null);
+  const [draftSendNotice, setDraftSendNotice] = useState<string | null>(null);
   const [isSwitching, startTransition] = useTransition();
   const [selectedModel, setSelectedModel] = useState(modelOverride);
   const [modelError, setModelError] = useState<string | null>(null);
@@ -1275,7 +1276,12 @@ export function ChatClient({
       );
       return;
     }
-    if (busy || admittingTurnRef.current || !text.trim()) return;
+    if (!text.trim()) return;
+    if (busy || admittingTurnRef.current) {
+      setDraftSendNotice('Still sending. Your next message stays here.');
+      return;
+    }
+    setDraftSendNotice(null);
     admittingTurnRef.current = true;
     stickToBottomRef.current = true;
     setAtBottom(true);
@@ -1359,10 +1365,14 @@ export function ChatClient({
       setFormError('Review this form and its message, or clear the saved answers, before sending.');
       return;
     }
-    if (!text || busy) return;
+    if (!text) return;
     // Slash commands are local composer controls, never conversation messages.
     if (/^\/model(?:\s.*)?$/i.test(text)) return;
     if (commandPaletteOpen) return;
+    if (busy || admittingTurnRef.current) {
+      setDraftSendNotice('Still sending. Your next message stays here.');
+      return;
+    }
     const draft = formDraftRef.current;
     if (
       draft?.reviewed &&
@@ -2335,6 +2345,11 @@ export function ChatClient({
           </span>
           {fallbackNote ? (
             <p className="px-1 pt-1.5 text-right text-xs text-stage-muted">{fallbackNote}</p>
+          ) : null}
+          {draftSendNotice && busy ? (
+            <p role="status" aria-live="polite" className="px-1 pt-1.5 text-xs text-stage-muted">
+              {draftSendNotice}
+            </p>
           ) : null}
         </div>
       </form>
