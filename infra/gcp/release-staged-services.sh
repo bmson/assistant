@@ -145,6 +145,44 @@ release_traffic_map() {
   ' "$1"
 }
 
+release_retire_nonserving_candidate_tag() {
+  local service="$1" tag="$2" rollback_traffic="$3" service_json decision
+  service_json="$(release_service_json "$service")" || return 1
+  decision="$(node -e '
+    const s=JSON.parse(process.argv[1]);
+    const tag=process.argv[2];
+    const rollback=new Set(process.argv[3].split(",").map(x=>x.split("=")[0]).filter(Boolean));
+    const rows=s.status?.traffic??[];
+    const matches=rows.filter(x=>x.tag===tag && x.revisionName);
+    if (matches.length===0) { process.stdout.write("absent"); process.exit(0); }
+    if (matches.length!==1) process.exit(2);
+    const target=matches[0].revisionName;
+    const active=rows.filter(x=>Number(x.percent)>0);
+    const total=active.reduce((sum,x)=>sum+Number(x.percent),0);
+    const revisions=new Set(active.map(x=>x.revisionName).filter(Boolean));
+    // Require a settled single-revision 100% promotion, and never remove a
+    // tag whose revision is serving or remains in the captured rollback map.
+    if (total!==100 || revisions.size!==1 || !active.every(x=>x.revisionName)) process.exit(3);
+    if (revisions.has(target) || rollback.has(target)) { process.stdout.write("protected"); process.exit(0); }
+    process.stdout.write("remove");
+  ' "$service_json" "$tag" "$rollback_traffic")" || return 1
+  [[ "$decision" == remove ]] || return 0
+
+  if ! gcloud run services update-traffic "$service" --project "$PROJECT" --region "$REGION" \
+    --remove-tags "$tag" --quiet; then
+    echo "  warning: could not retire this release's non-serving ${service} tag ${tag}; preserving it for guarded cleanup." >&2
+    return 1
+  fi
+
+  service_json="$(release_service_json "$service")" || return 1
+  if node -e 'const s=JSON.parse(process.argv[1]);if((s.status?.traffic??[]).some(x=>x.tag===process.argv[2]))process.exit(1)' \
+    "$service_json" "$tag"; then
+    return 0
+  fi
+  echo "  warning: ${service} still reports this release's candidate tag ${tag} after removal." >&2
+  return 1
+}
+
 release_tag_url() {
   node -e 'const s=JSON.parse(process.argv[1]); const x=(s.status?.traffic??[]).find(t=>t.tag===process.argv[2]); if(!x?.url) process.exit(2); process.stdout.write(x.url)' "$1" "$2"
 }
@@ -512,6 +550,19 @@ release_staged_services() {
       echo '  previous service traffic was restored.' >&2
     fi
     return 1
+  fi
+
+  # Firestore pairs briefly promote a paused web revision before switching to
+  # its unpaused successor. Once the paired release and final probes succeed,
+  # that own candidate tag is no longer needed and would make historical
+  # cleanup treat the paused intermediate as a reachable URL. Retire only that
+  # run's tag, and only after confirming it is non-serving and outside the
+  # captured rollback map. Candidate/resume tags on live revisions remain.
+  if [[ "$selected" == agent,web && "$RELEASE_STORAGE_DRIVER" == firestore &&
+        "$web_resume_promotion_attempted" == true && -n "$web_paused_revision" ]]; then
+    if ! release_retire_nonserving_candidate_tag assistant-web "$staging_tag" "$web_old_traffic"; then
+      echo '  warning: staged release is healthy, but its retired candidate tag needs guarded cleanup.' >&2
+    fi
   fi
 
   echo "Release manifest saved at ${manifest_path}"
