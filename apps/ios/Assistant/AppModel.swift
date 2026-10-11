@@ -95,6 +95,13 @@ struct AssistantErrorNotice: Equatable {
     }
 }
 
+private struct MissingTaskReplyNotice: Equatable {
+    let ownerID: String
+    let conversationID: String
+    let taskID: String
+    let connectionVersion: Int
+}
+
 /// A message just taken out of the log, and where to put it back. Held only
 /// while the undo bar is on screen; hiding is otherwise a quiet action.
 struct HiddenMessageUndo: Identifiable, Equatable {
@@ -198,11 +205,15 @@ final class AppModel {
     /// `reportError(_:retry:)` sets the message first, then the retry.
     var errorMessage: String? {
         didSet {
+            if errorMessage != Self.completedTaskReplyUnavailableMessage {
+                missingTaskReplyNotice = nil
+            }
             errorRetry = nil
             errorSource = nil
             errorNotice = errorMessage.map { AssistantErrorNotice(message: $0) }
         }
     }
+    @ObservationIgnored private var missingTaskReplyNotice: MissingTaskReplyNotice?
     private(set) var errorNotice: AssistantErrorNotice?
     @ObservationIgnored private var errorSource: AssistantErrorSource?
     /// Offered by the banner when the failure was the network rather than the
@@ -330,6 +341,8 @@ final class AppModel {
     static let arrivalNudgesKey = "assistant.arrival-nudges"
     private static let cancelledTaskEffectNotice =
         "The task was cancelled. Any external action already started may still have taken effect."
+    private static let completedTaskReplyUnavailableMessage =
+        "This task is marked complete, but its reply has not appeared yet."
     /// One-time notification ask after a successful pairing (APNs opt-in).
     private let pushPromptedKey = "assistant.push-prompted"
     @ObservationIgnored private var lastLocationPostAt: Date?
@@ -4259,6 +4272,28 @@ final class AppModel {
         SpeechPlayer.shared.stop()
     }
 
+    /// A terminal task row can arrive before its durable assistant message.
+    /// Keep the notice tied to the exact session and task so an unrelated
+    /// later message cannot dismiss it.
+    func recordCompletedTaskWithoutReply(taskId: String) {
+        guard let conversationId, let ownerID = bootstrap?.identity.id else { return }
+        missingTaskReplyNotice = MissingTaskReplyNotice(
+            ownerID: ownerID,
+            conversationID: conversationId,
+            taskID: taskId,
+            connectionVersion: connectionVersion
+        )
+        errorMessage = Self.completedTaskReplyUnavailableMessage
+    }
+
+    private func isVisibleDurableAssistantReply(_ message: ChatMessage) -> Bool {
+        guard message.role == .assistant, !message.id.hasPrefix("stream-") else { return false }
+        return message.parts.contains { part in
+            (part.type == "text" && !(part.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                || (part.type == "data-card" && MessageResponseCard(part: part, formRendererAvailable: true) != nil)
+        }
+    }
+
     private func pollForReply(taskId: String?, streamID: String, ordinaryTurnToken: UUID? = nil) async {
         guard let client, let conversationId else { return }
         let version = connectionVersion
@@ -4271,16 +4306,9 @@ final class AppModel {
         let assistantMessageIDsAtStart = Set(messages.compactMap { message in
             message.role == .assistant && !message.id.hasPrefix("stream-") ? message.id : nil
         })
-        func isVisibleAssistantReply(_ message: ChatMessage) -> Bool {
-            guard message.role == .assistant, !message.id.hasPrefix("stream-") else { return false }
-            return message.parts.contains { part in
-                (part.type == "text" && !(part.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    || (part.type == "data-card" && MessageResponseCard(part: part, formRendererAvailable: true) != nil)
-            }
-        }
         func refreshCurrentReplyState() {
             currentReplyMessageIDs = Set(messages.compactMap { message in
-                guard isVisibleAssistantReply(message) else { return nil }
+                guard isVisibleDurableAssistantReply(message) else { return nil }
                 if let taskId {
                     return message.metadata?["taskId"]?.string == taskId ? message.id : nil
                 }
@@ -4473,7 +4501,11 @@ final class AppModel {
                 ? "Task cancelled; external effects are not reversed"
                 : concise(reply ?? (succeeded ? "Your assistant finished the task." : "Open the conversation for details."))
             if completedWithoutReply {
-                errorMessage = detail
+                if let taskId {
+                    recordCompletedTaskWithoutReply(taskId: taskId)
+                } else {
+                    errorMessage = detail
+                }
             }
             setActivityThought(thought, proposedDetail: detail)
             _ = await notifyOnce(
@@ -4579,6 +4611,7 @@ final class AppModel {
               !notificationTurnSettlements.isSettling,
               let client, let conversationId, let ownerID = bootstrap?.identity.id else { return nil }
         let version = idlePollingVersion
+        let connectionRevision = connectionVersion
         let requestCursor = cursor
         let notificationTitle = "\(agentName) replied"
         guard let updates = try? await client.updates(
@@ -4591,6 +4624,7 @@ final class AppModel {
         guard !Task.isCancelled, isSceneActive, !isSending,
               !notificationTurnSettlements.isSettling,
               idlePollingVersion == version,
+              connectionVersion == connectionRevision,
               self.client?.configuration == client.configuration,
               self.conversationId == conversationId,
               bootstrap?.identity.id == ownerID,
@@ -4598,26 +4632,48 @@ final class AppModel {
 
         let changed = !updates.messages.isEmpty || !updates.refreshed.isEmpty ||
             !(updates.superseded?.isEmpty ?? true)
-        let assistantBefore = messages.filter { $0.role == .assistant }.count
+        let visibleAssistantIDsBefore = Set(messages.compactMap { message in
+            isVisibleDurableAssistantReply(message) ? message.id : nil
+        })
         let decisionsBefore = openDecisionSignature
         merge(updates.messages)
         merge(updates.refreshed)
         removeSuperseded(updates.superseded)
         if let cursor = updates.nextCursor { self.cursor = cursor }
+        let visibleAssistantIDsAfter = Set(messages.compactMap { message in
+            isVisibleDurableAssistantReply(message) ? message.id : nil
+        })
+        let newlyVisibleAssistantIDs = visibleAssistantIDsAfter.subtracting(visibleAssistantIDsBefore)
+        if let notice = missingTaskReplyNotice,
+           notice.ownerID == ownerID,
+           notice.conversationID == conversationId,
+           notice.connectionVersion == connectionRevision,
+           errorMessage == Self.completedTaskReplyUnavailableMessage,
+           messages.contains(where: {
+               $0.metadata?["taskId"]?.string == notice.taskID
+                   && isVisibleDurableAssistantReply($0)
+           }) {
+            missingTaskReplyNotice = nil
+            errorMessage = nil
+        }
         // Decisions resolved elsewhere must refresh the Island, badge, and
         // inbox as well as the retained receipt in this conversation.
         if openDecisionSignature != decisionsBefore {
             Task { [weak self] in await self?.refreshOverview(reportFailure: false) }
         }
-        let assistantAfter = messages.filter { $0.role == .assistant }.count
-        if assistantAfter > assistantBefore,
-           messages.contains(where: { $0.role == .assistant && !$0.text.isEmpty }) {
-            await NotificationManager.shared.schedule(
-                title: notificationTitle,
-                body: "A new response is ready.",
-                route: .chat,
-                agentID: ownerID,
-                conversationID: conversationId
+        if !newlyVisibleAssistantIDs.isEmpty,
+           connectionVersion == connectionRevision,
+           idlePollingVersion == version,
+           self.client?.configuration == client.configuration,
+           self.conversationId == conversationId,
+           bootstrap?.identity.id == ownerID {
+            await scheduleLocalNotification(
+                notificationTitle,
+                "A new response is ready.",
+                .chat,
+                nil,
+                ownerID,
+                conversationId
             )
         }
         return changed
