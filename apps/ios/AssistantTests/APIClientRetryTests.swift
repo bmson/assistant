@@ -15,6 +15,7 @@ final class StubURLProtocol: URLProtocol {
         case delayed(after: TimeInterval, status: Int, body: Data)
         case stream(body: Data)
         case taskStream(body: Data, taskId: String)
+        case held(status: Int, body: Data)
         case operationCancellation(status: Int, outcome: String)
         case terminalOperationCancellation(status: Int, outcome: String, taskId: String, taskStatus: String, transitioned: Bool?)
         case delayedOperationCancellation(after: TimeInterval, status: Int, outcome: String)
@@ -29,6 +30,8 @@ final class StubURLProtocol: URLProtocol {
     private static var recordedURLs: [URL] = []
     private static var recordedBodies: [Data] = []
     private static var recordedHeaders: [[String: String]] = []
+    private static var heldResponses: [String: StubURLProtocol] = [:]
+    private static var completedPaths: Set<String> = []
     private static weak var activeStream: StubURLProtocol?
     private static var streamsByOperation: [String: StubURLProtocol] = [:]
     private static var streamsByIdentity: [String: StubURLProtocol] = [:]
@@ -45,6 +48,8 @@ final class StubURLProtocol: URLProtocol {
             recordedURLs = []
             recordedBodies = []
             recordedHeaders = []
+            heldResponses = [:]
+            completedPaths = []
             activeStream = nil
             streamsByOperation = [:]
             streamsByIdentity = [:]
@@ -76,6 +81,8 @@ final class StubURLProtocol: URLProtocol {
             recordedURLs = []
             recordedBodies = []
             recordedHeaders = []
+            heldResponses = [:]
+            completedPaths = []
             activeStream = nil
             streamsByOperation = [:]
             streamsByIdentity = [:]
@@ -104,6 +111,12 @@ final class StubURLProtocol: URLProtocol {
     /// stream rather than as `httpBody`, so it is drained here once.
     static var bodies: [Data] { lock.withLock { recordedBodies } }
     static var headers: [[String: String]] { lock.withLock { recordedHeaders } }
+    static var completedResponsePaths: Set<String> { lock.withLock { completedPaths } }
+    static func isHoldingResponse(path: String) -> Bool { lock.withLock { heldResponses[path] != nil } }
+    static func releaseHeldResponse(path: String) {
+        let protocolInstance = lock.withLock { heldResponses.removeValue(forKey: path) }
+        protocolInstance?.releaseHeldResponse()
+    }
     static var requests: [(String, URL, [String: String], Data)] {
         lock.withLock {
             (0..<recordedMethods.count).compactMap { index in
@@ -210,7 +223,14 @@ final class StubURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     private let stopped = NSLock()
     private var isStopped = false
+    private var heldResponse: (status: Int, body: Data)?
     override func stopLoading() { stopped.withLock { isStopped = true } }
+
+    private func releaseHeldResponse() {
+        guard let heldResponse else { return }
+        self.heldResponse = nil
+        respond(status: heldResponse.status, body: heldResponse.body)
+    }
 
     private func respond(status: Int, body: Data) {
         guard Self.isActiveTestCase(Self.testCaseID(in: request.allHTTPHeaderFields ?? [:])) else {
@@ -226,6 +246,7 @@ final class StubURLProtocol: URLProtocol {
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
+        if let path = request.url?.path { Self.lock.withLock { Self.completedPaths.insert(path) } }
     }
 
     override func startLoading() {
@@ -237,6 +258,14 @@ final class StubURLProtocol: URLProtocol {
             body: requestBody,
             headers: request.allHTTPHeaderFields ?? [:]
         ) {
+        case let .held(status, body):
+            guard Self.isActiveTestCase(Self.testCaseID(in: request.allHTTPHeaderFields ?? [:])),
+                  let path = request.url?.path else {
+                client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
+                return
+            }
+            heldResponse = (status, body)
+            Self.lock.withLock { Self.heldResponses[path] = self }
         case let .failure(error):
             client?.urlProtocol(self, didFailWithError: error)
         case let .stream(body):
@@ -3056,6 +3085,139 @@ extension APIClientRetryTests {
             StubURLProtocol.urls[$0.offset].path == "/api/mobile/v1/activity/task-stop-1"
         })?.element)
         XCTAssertEqual(try JSONSerialization.jsonObject(with: body) as? [String: String], ["action": "cancel"])
+    }
+
+    @MainActor
+    func testWaitingApprovalActivityCanBeCancelledThroughAppModelCommand() async throws {
+        let model = try await notificationModel()
+        let item = ActivityItem(
+            id: "approval-task-stop-1", type: "chat_turn", status: "waiting_approval",
+            title: "Review the transfer", progress: "Waiting for your approval.", trust: "owner",
+            spentUsd: "0.01", budgetUsdLimit: "0.50", updatedAt: "2026-10-11T12:00:00Z",
+            archivedAt: nil, hasPendingApproval: true
+        )
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/activity/approval-task-stop-1": [
+                .success(status: 200, body: Data(#"{"ok":true}"#.utf8)),
+            ],
+        ])
+
+        let updated = await model.updateActivity(item, action: "cancel")
+        XCTAssertTrue(updated)
+        let index = try XCTUnwrap(StubURLProtocol.urls.firstIndex(where: {
+            $0.path == "/api/mobile/v1/activity/approval-task-stop-1"
+        }))
+        XCTAssertEqual(StubURLProtocol.attempts[index], "POST")
+        let body = try XCTUnwrap(StubURLProtocol.bodies[index])
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: body) as? [String: String], ["action": "cancel"])
+    }
+
+    @MainActor
+    func testLateTaskCancellationResponseCannotClearNewerTurnOnSuccess() async throws {
+        try await assertLateTaskCancellationDoesNotAffectNewerTurn(responseStatus: 200)
+    }
+
+    @MainActor
+    func testLateTaskCancellationResponseCannotClearNewerTurnOnFailure() async throws {
+        try await assertLateTaskCancellationDoesNotAffectNewerTurn(responseStatus: 503)
+    }
+
+    @MainActor
+    private func assertLateTaskCancellationDoesNotAffectNewerTurn(responseStatus: Int) async throws {
+        let model = try await notificationModel()
+        let workingMessage = ChatMessage(id: "old-task-status-message", role: .assistant,
+            parts: [.init(type: "text", text: "The earlier task is still working.")])
+        let working = ChatUpdates(
+            taskStatus: "working", messages: [workingMessage], refreshed: [], superseded: nil,
+            nextCursor: nil, hasMore: false, activity: []
+        )
+        let cancelled = ChatUpdates(
+            taskStatus: "cancelled", messages: [workingMessage],
+            refreshed: [], superseded: nil, nextCursor: nil, hasMore: false, activity: []
+        )
+        let workingBody = try JSONEncoder().encode(working)
+        let terminalBody = try JSONEncoder().encode(cancelled)
+        let cancelBody = responseStatus == 200 ? Data(#"{"ok":true}"#.utf8) : Data()
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [
+                .taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: "task-old-stop"),
+                .stream(body: Data()),
+            ],
+            "/api/mobile/v1/chat/status": [
+                .delayed(after: 0.08, status: 200, body: workingBody),
+                .success(status: 200, body: terminalBody),
+                .success(status: 200, body: terminalBody),
+                .success(status: 200, body: terminalBody),
+                .success(status: 200, body: terminalBody),
+            ],
+            "/api/mobile/v1/activity/task-old-stop": [
+                .held(status: responseStatus, body: cancelBody),
+            ],
+        ])
+        defer { StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/activity/task-old-stop") }
+
+        model.send("Earlier task")
+        let receiptPollDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !StubURLProtocol.urls.contains(where: { url in
+            guard url.path == "/api/mobile/v1/chat/status",
+                  let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return false }
+            return queryItems.contains { $0.name == "taskId" && $0.value == "task-old-stop" }
+        }), ContinuousClock.now < receiptPollDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.urls.contains(where: { url in
+            guard url.path == "/api/mobile/v1/chat/status",
+                  let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return false }
+            return queryItems.contains { $0.name == "taskId" && $0.value == "task-old-stop" }
+        }), "The durable task receipt is parsed before issuing Stop")
+        let workingStatusDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !model.messages.contains(where: { $0.id == "old-task-status-message" }),
+              ContinuousClock.now < workingStatusDeadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(model.messages.contains(where: { $0.id == "old-task-status-message" }),
+            "Stop starts only after the task receipt and initial working status are observed")
+
+        model.cancelSend()
+        let cancelDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/activity/task-old-stop"),
+              ContinuousClock.now < cancelDeadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/activity/task-old-stop"))
+
+        let terminalDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while model.isSending, ContinuousClock.now < terminalDeadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(model.isSending, "Four matching cancelled statuses settle only the earlier task")
+        XCTAssertGreaterThanOrEqual(
+            StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat/status" }.count, 5
+        )
+
+        model.send("Newer task")
+        let newerSendDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while StubURLProtocol.urls.filter({ $0.path == "/api/mobile/v1/chat" }).count < 2,
+              ContinuousClock.now < newerSendDeadline {
+            if !model.isSending { model.send("Newer task") }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 2)
+        XCTAssertTrue(model.isSending)
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/activity/task-old-stop"),
+            "The prior task cancellation response is still unreleased as the new turn begins")
+
+        StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/activity/task-old-stop")
+        let responseDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !StubURLProtocol.completedResponsePaths.contains("/api/mobile/v1/activity/task-old-stop"),
+              ContinuousClock.now < responseDeadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(StubURLProtocol.completedResponsePaths.contains("/api/mobile/v1/activity/task-old-stop"))
+
+        XCTAssertTrue(model.isSending, "A late success or failure for the old task cannot settle the newer turn")
+        XCTAssertNil(model.errorMessage, "A late failure for the old task cannot replace newer-turn state")
+        XCTAssertTrue(model.messages.contains(where: { $0.role == .user && $0.text == "Newer task" }))
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/activity/task-old-stop" }.count, 1)
+        let sends = StubURLProtocol.bodies.enumerated().compactMap { index, body -> [String: Any]? in
+            guard StubURLProtocol.urls[index].path == "/api/mobile/v1/chat" else { return nil }
+            return try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+        }
+        XCTAssertEqual(sends.count, 2)
+        XCTAssertNotEqual(sends[0]["clientOperationId"] as? String, sends[1]["clientOperationId"] as? String)
+        StubURLProtocol.appendStream(Data("data: [DONE]\n\n".utf8))
     }
 
     @MainActor
