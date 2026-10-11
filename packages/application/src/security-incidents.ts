@@ -44,6 +44,23 @@ function safeEvidence(evidence: SecurityIncidentEvidence | null): SecurityIncide
   return Object.keys(safe).length > 0 ? safe : null;
 }
 
+function boundedDisplayText(value: unknown, maxLength: number, fallback: string): string {
+  if (typeof value !== 'string' || !value.trim()) return fallback;
+  const text = value.trim();
+  if (text.length <= maxLength) return text;
+  let prefix = '';
+  for (const character of text) {
+    if (prefix.length + character.length > maxLength - 1) break;
+    prefix += character;
+  }
+  return `${prefix}…`;
+}
+
+function optionalDisplayText(value: unknown, maxLength: number): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  return boundedDisplayText(value, maxLength, '');
+}
+
 export async function listOwnerSecurityReviews(
   repository: EmailSyncRepository,
   agentId: string,
@@ -55,14 +72,14 @@ export async function listOwnerSecurityReviews(
   return rows.map((row) => ({
     incidentId: row.incidentId,
     revision: row.revision,
-    confidence: row.confidence,
+    confidence: boundedDisplayText(row.confidence, 80, 'unknown'),
     disposition: row.disposition,
-    category: row.category,
+    category: boundedDisplayText(row.category, 120, 'Security activity'),
     importance: row.importance,
-    subject: row.subject,
-    fromName: row.fromName,
+    subject: boundedDisplayText(row.subject, 300, 'Security notice'),
+    fromName: optionalDisplayText(row.fromName, 200),
     observedAt: row.observedAt.toISOString(),
-    materialChangeReason: row.materialChangeReason,
+    materialChangeReason: optionalDisplayText(row.materialChangeReason, 300),
     evidence: safeEvidence(row.evidence),
   }));
 }

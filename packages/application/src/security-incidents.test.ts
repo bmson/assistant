@@ -71,6 +71,41 @@ describe('owner security incident review use cases', () => {
     expect(item?.evidence).toBeNull();
   });
 
+  it('keeps long source labels reviewable with bounded visible summaries', async () => {
+    const repository = {
+      listSecurityReviewItems: vi.fn().mockResolvedValue([
+        {
+          channelMessageId: 'private-source-key',
+          incidentId,
+          revision: 3,
+          confidence: 'C'.repeat(100),
+          disposition: 'unreviewed',
+          category: 'K'.repeat(140),
+          importance: 4,
+          subject: 'S'.repeat(350),
+          fromName: 'F'.repeat(240),
+          observedAt: new Date('2026-10-06T18:00:00Z'),
+          materialChangeReason: 'M'.repeat(330),
+          evidence: { eventType: 'Sign-in' },
+          rawBody: 'private raw content',
+        },
+      ]),
+    } as unknown as EmailSyncRepository;
+
+    const [item] = await listOwnerSecurityReviews(repository, 'owner');
+    expect(item).toMatchObject({
+      confidence: `${'C'.repeat(79)}…`,
+      category: `${'K'.repeat(119)}…`,
+      subject: `${'S'.repeat(299)}…`,
+      fromName: `${'F'.repeat(199)}…`,
+      materialChangeReason: `${'M'.repeat(299)}…`,
+      evidence: { eventType: 'Sign-in' },
+    });
+    expect(item?.subject).toHaveLength(300);
+    expect(item).not.toHaveProperty('channelMessageId');
+    expect(item).not.toHaveProperty('rawBody');
+  });
+
   it('uses the configured owner and existing revision-compare decision contract', async () => {
     const repository = {
       decideSecurityIncident: vi.fn().mockResolvedValue(false),

@@ -2,6 +2,53 @@ import type { OwnerSecurityReviewItem } from '@assistant/application/security-in
 
 const endpoint = '/api/mobile/v1/security-reviews';
 const incidentIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export const SECURITY_REVIEW_REQUEST_TIMEOUT_MS = 12_000;
+
+class RequestTimeoutError extends Error {
+  constructor() {
+    super('Security review request timed out');
+    this.name = 'TimeoutError';
+  }
+}
+
+function withRequestDeadline<T>(
+  parentSignal: AbortSignal | undefined,
+  operation: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const controller = new AbortController();
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timeout);
+      parentSignal?.removeEventListener('abort', onParentAbort);
+    };
+    const finish = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      action();
+    };
+    const onParentAbort = () => {
+      controller.abort(parentSignal?.reason);
+      finish(() => reject(parentSignal?.reason ?? new DOMException('Aborted', 'AbortError')));
+    };
+    const timeout = setTimeout(() => {
+      controller.abort();
+      finish(() => reject(new RequestTimeoutError()));
+    }, SECURITY_REVIEW_REQUEST_TIMEOUT_MS);
+    if (parentSignal?.aborted) {
+      onParentAbort();
+      return;
+    }
+    parentSignal?.addEventListener('abort', onParentAbort, { once: true });
+    Promise.resolve()
+      .then(() => operation(controller.signal))
+      .then(
+        (value) => finish(() => resolve(value)),
+        (error: unknown) => finish(() => reject(error)),
+      );
+  });
+}
 
 function boundedText(value: unknown, max: number): value is string {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= max;
@@ -34,7 +81,8 @@ function validReviewItem(value: unknown): value is OwnerSecurityReviewItem {
     incidentIdPattern.test(item.incidentId) &&
     Number.isSafeInteger(item.revision) &&
     (item.revision as number) >= 1 &&
-    ['unreviewed', 'expected', 'dismissed'].includes(String(item.disposition)) &&
+    typeof item.disposition === 'string' &&
+    ['unreviewed', 'expected', 'dismissed'].includes(item.disposition) &&
     boundedText(item.confidence, 80) &&
     boundedText(item.category, 120) &&
     Number.isFinite(item.importance) &&
@@ -52,14 +100,16 @@ function validReviewItem(value: unknown): value is OwnerSecurityReviewItem {
 export async function listSecurityReviews(
   signal?: AbortSignal,
 ): Promise<OwnerSecurityReviewItem[]> {
-  const response = await fetch(`${endpoint}?limit=50`, {
-    method: 'GET',
-    credentials: 'same-origin',
-    cache: 'no-store',
-    signal,
+  const payload: unknown = await withRequestDeadline(signal, async (requestSignal) => {
+    const response = await fetch(`${endpoint}?limit=50`, {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      signal: requestSignal,
+    });
+    if (!response.ok) throw new Error(`Security review list failed (${response.status})`);
+    return response.json();
   });
-  if (!response.ok) throw new Error(`Security review list failed (${response.status})`);
-  const payload: unknown = await response.json();
   if (
     !payload ||
     typeof payload !== 'object' ||
@@ -81,26 +131,23 @@ export async function decideSecurityReview(
   body: { expectedRevision: number; disposition: 'expected' | 'dismissed'; reason: string },
   signal?: AbortSignal,
 ): Promise<SecurityReviewDecisionResult> {
-  let response: Response;
   try {
-    response = await fetch(`${endpoint}/${encodeURIComponent(incidentId)}`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      cache: 'no-store',
-      signal,
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
+    return await withRequestDeadline(signal, async (requestSignal) => {
+      const response = await fetch(`${endpoint}/${encodeURIComponent(incidentId)}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        signal: requestSignal,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (response.status === 409) return 'stale';
+      if (!response.ok) return 'uncertain';
+      const payload: unknown = await response.json();
+      return payload && typeof payload === 'object' && (payload as { ok?: unknown }).ok === true
+        ? 'saved'
+        : 'uncertain';
     });
-  } catch {
-    return 'uncertain';
-  }
-  if (response.status === 409) return 'stale';
-  if (!response.ok) return 'uncertain';
-  try {
-    const payload: unknown = await response.json();
-    return payload && typeof payload === 'object' && (payload as { ok?: unknown }).ok === true
-      ? 'saved'
-      : 'uncertain';
   } catch {
     return 'uncertain';
   }

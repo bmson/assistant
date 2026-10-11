@@ -1,9 +1,19 @@
 import type { OwnerSecurityReviewItem } from '@assistant/application/security-incidents';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  decideSecurityReview,
+  listSecurityReviews,
+  SECURITY_REVIEW_REQUEST_TIMEOUT_MS,
+} from './security-notice-review-client';
 import {
   SecurityReviewSession,
   type SecurityReviewTransport,
 } from './security-notice-review-session';
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 const item: OwnerSecurityReviewItem = {
   incidentId: '4e95ac7f-d623-5c12-9c65-74b492a13e12',
@@ -173,5 +183,66 @@ describe('SecurityReviewSession', () => {
     expect(service.decide).toHaveBeenCalledTimes(1);
     response.resolve('saved');
     await Promise.all([first, second]);
+  });
+
+  it('leaves loading state when a never-settling list reaches its deadline', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+    const session = new SecurityReviewSession('owner-one', {
+      list: (signal) => listSecurityReviews(signal),
+      decide: async () => 'uncertain',
+    });
+    session.start();
+    await vi.advanceTimersByTimeAsync(SECURITY_REVIEW_REQUEST_TIMEOUT_MS);
+
+    expect(session.getSnapshot().loadState).toBe('unavailable');
+    expect(session.getSnapshot().refreshing).toBe(false);
+    expect(session.getSnapshot().message).toContain('could not be refreshed');
+  });
+
+  it('aborts the in-flight GET when the owning Activity session is disposed', async () => {
+    let requestSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init: RequestInit) => {
+        requestSignal = init.signal as AbortSignal;
+        return new Promise<Response>(() => {});
+      }),
+    );
+    const session = new SecurityReviewSession('owner-one', {
+      list: (signal) => listSecurityReviews(signal),
+      decide: async () => 'uncertain',
+    });
+    session.start();
+    await Promise.resolve();
+    await Promise.resolve();
+    session.dispose();
+
+    expect(requestSignal?.aborted).toBe(true);
+    expect(session.getSnapshot().refreshing).toBe(false);
+  });
+
+  it('reconciles a timed-out POST once without retrying it', async () => {
+    vi.useFakeTimers();
+    const fetch = vi.fn(() => new Promise<Response>(() => {}));
+    vi.stubGlobal('fetch', fetch);
+    const service = transport({
+      list: vi.fn(async () => [item]),
+      decide: (incidentId, body, signal) => decideSecurityReview(incidentId, body, signal),
+    });
+    const session = new SecurityReviewSession('owner-one', service);
+    session.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const decision = session.decide(item, 'dismissed');
+    await vi.advanceTimersByTimeAsync(SECURITY_REVIEW_REQUEST_TIMEOUT_MS);
+    await decision;
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(service.list).toHaveBeenCalledTimes(2);
+    expect(session.getSnapshot().message).toContain('decision response was unclear');
+    expect(session.getSnapshot().pendingId).toBeNull();
   });
 });

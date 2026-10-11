@@ -5,6 +5,14 @@ import { formatFriendlyDateTime } from '@/lib/format';
 import { btn, cardShellClass, cardTitleClass, focusRing } from '@/lib/ui';
 import { SecurityReviewSession } from './security-notice-review-session';
 
+function readableCategory(value: string): string {
+  return value
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
+}
+
 export function SecurityNoticeReview({ ownerId }: { ownerId: string }) {
   const session = useMemo(() => new SecurityReviewSession(ownerId), [ownerId]);
   const state = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
@@ -64,12 +72,14 @@ export function SecurityNoticeReview({ ownerId }: { ownerId: string }) {
       {items.length > 0 ? (
         <div className={`${cardShellClass} divide-y divide-edge/70`}>
           {items.map((item) => (
-            <article key={item.incidentId} className="grid gap-3 p-4 sm:p-5">
+            <article key={item.incidentId} className="grid min-w-0 gap-3 p-4 sm:p-5">
               <div className="min-w-0">
-                <h3 className={cardTitleClass}>{item.subject || 'Security activity'}</h3>
-                <p className="mt-1 text-sm text-muted">
+                <h3 className={`${cardTitleClass} [overflow-wrap:anywhere]`}>
+                  {item.subject || 'Security activity'}
+                </h3>
+                <p className="mt-1 text-sm text-muted [overflow-wrap:anywhere]">
                   {item.fromName ? `${item.fromName} · ` : ''}
-                  {item.category}
+                  {readableCategory(item.category)}
                 </p>
                 <time dateTime={item.observedAt} className="mt-1 block text-xs text-muted">
                   {formatFriendlyDateTime(new Date(item.observedAt))}
