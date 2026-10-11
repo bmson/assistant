@@ -1336,8 +1336,8 @@ describe.each(['postgres', 'firestore'] as const)(
             id: 'current-berlin-message',
             threadId: 'current-berlin-stay',
             subject: 'Berlin accommodation details',
-            snippet: 'Reservation dates: October 17–18, 2026.',
-            body: 'Reservation confirmed: Hotel Linden, Berlin. Dates: October 17–18, 2026.',
+            snippet: 'Reservation dates: October 16–18, 2026.',
+            body: 'Reservation confirmed: Hotel Linden, Berlin. Dates: October 16–18, 2026.',
           },
         ];
         const messageById = new Map(messages.map((message) => [message.id, message]));
@@ -1494,6 +1494,10 @@ describe.each(['postgres', 'firestore'] as const)(
         expect(assistant?.text).toContain('2 remain unopened');
         expect(assistant?.text).toContain('Hotel Linden');
         expect(assistant?.text).not.toContain('Hotel Oldtown');
+        expect(assistant?.text).not.toContain('October 17–18, 2026');
+        if (assistant?.text.includes('October')) {
+          expect(assistant.text).toContain('October 16–18, 2026');
+        }
       },
       driver === 'firestore' ? 60_000 : undefined,
     );

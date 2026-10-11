@@ -741,7 +741,17 @@ describe('detectPersonalReadRequest', () => {
             {
               threadId: 'dated-current-stay',
               subject: 'Berlin accommodation details',
-              snippet: 'Reservation dates: October 17–18, 2026.',
+              snippet: 'Reservation dates: October 16–18, 2026.',
+            },
+            {
+              threadId: 'nonoverlapping-future-stay',
+              subject: 'Berlin booking confirmation',
+              snippet: 'Reservation dates: October 20–21, 2026.',
+            },
+            {
+              threadId: 'malformed-date-confirmation',
+              subject: 'Berlin booking confirmation',
+              snippet: 'Reservation dates: October 32–35, 2026.',
             },
           ],
         },
@@ -749,6 +759,70 @@ describe('detectPersonalReadRequest', () => {
     ];
 
     expect(gmailThreadIdsToRead(evidence, request)[0]).toBe('dated-current-stay');
+  });
+
+  it('requires exact temporal words instead of matching a shorter word inside a longer one', () => {
+    const request = detectPersonalReadRequest(
+      turn('Where are we staying in Berlin Mitte this week?'),
+      { now: new Date('2026-10-11T12:00:00Z'), timeZone: 'UTC' },
+    );
+    if (!request) throw new Error('expected a lodging read request');
+
+    const evidence: ReadToolEvidence[] = [
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        args: { query: request.mailQuery },
+        result: {
+          results: [
+            {
+              threadId: 'weekly-marketing',
+              subject: 'Berlin Mitte booking confirmation',
+              snippet: 'This weekly hotel reservation offer is for subscribers.',
+            },
+            {
+              threadId: 'dated-current-stay',
+              subject: 'Berlin Mitte accommodation details',
+              snippet: 'Reservation dates: October 10–11, 2026.',
+            },
+          ],
+        },
+      },
+    ];
+
+    expect(gmailThreadIdsToRead(evidence, request)[0]).toBe('dated-current-stay');
+  });
+
+  it('matches an explicitly named cross-month date range without guessing a missing month', () => {
+    const request = detectPersonalReadRequest(
+      turn('Which hotel did we book in Berlin on November 2, 2026?'),
+      { now: new Date('2026-10-11T12:00:00Z'), timeZone: 'UTC' },
+    );
+    if (!request) throw new Error('expected a lodging read request');
+
+    const evidence: ReadToolEvidence[] = [
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        args: { query: request.mailQuery },
+        result: {
+          results: [
+            {
+              threadId: 'cross-month-overlap',
+              subject: 'Berlin stay details',
+              snippet: 'Booking dates: October 31–November 2, 2026.',
+            },
+            {
+              threadId: 'ambiguous-day-range',
+              subject: 'Berlin booking confirmation',
+              snippet: 'October 31–2, 2026.',
+            },
+          ],
+        },
+      },
+    ];
+
+    expect(gmailThreadIdsToRead(evidence, request)[0]).toBe('cross-month-overlap');
   });
 
   it('prioritizes the newest matching thread for current or upcoming mail questions', () => {

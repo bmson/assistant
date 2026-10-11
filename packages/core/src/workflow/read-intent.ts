@@ -1730,15 +1730,12 @@ function lodgingMetadataScore(
     /\b(?:reservation|booking|confirmation|itinerary|check[- ]?in|check[- ]?out)\b/i.test(snippet)
       ? 1
       : 0;
-  const temporalWords = temporalLabel
-    ?.toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .split(/\s+/)
-    .filter(Boolean);
-  const matchesTripPhrase = Boolean(
-    temporalWords?.length && temporalWords.every((word) => normalizedText.includes(word)),
+  const normalizedWords = normalizeMetadataWords(normalizedText);
+  const temporalWords = temporalLabel ? normalizeMetadataWords(temporalLabel) : [];
+  const matchesTripPhrase = containsWordSequence(normalizedWords, temporalWords);
+  const matchesTripDate = Boolean(
+    temporalLabel && metadataDateOverlapsWindow(normalizedText, timeWindow, timeZone),
   );
-  const matchesTripDate = metadataDateFallsWithinWindow(normalizedText, timeWindow, timeZone);
   const matchesTrip = matchesTripPhrase || matchesTripDate;
   if (scopeTerms.length === 0 && !temporalLabel) return hasBookingSignal + snippetBookingSignal;
   if (temporalLabel && !matchesTrip) {
@@ -1758,7 +1755,7 @@ function lodgingMetadataScore(
   );
 }
 
-function metadataDateFallsWithinWindow(
+function metadataDateOverlapsWindow(
   text: string,
   timeWindow?: PersonalReadTimeWindow,
   timeZone?: string,
@@ -1773,46 +1770,114 @@ function metadataDateFallsWithinWindow(
   ) {
     return false;
   }
-  const start = civilDateAt(new Date(startInstant), timeZone);
-  const endExclusive = civilDateAt(new Date(endInstant), timeZone);
-  const startKey = civilDateKey(start);
-  const endKey = civilDateKey(endExclusive);
-  const dates = [
-    ...text.matchAll(/\b(20\d{2})-(\d{2})-(\d{2})\b/g),
-    ...text.matchAll(
-      new RegExp(
-        `\\b(${Object.keys(MONTH_NUMBER).join('|')})\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:\\s*[-–—]\\s*\\d{1,2})?[,]?\\s+(20\\d{2})\\b`,
-        'gi',
-      ),
-    ),
-  ];
-  return dates.some((match) => {
-    let year: number;
-    let month: number;
-    let day: number;
-    if (match[1]?.startsWith('20')) {
-      year = Number(match[1]);
-      month = Number(match[2]);
-      day = Number(match[3]);
-    } else {
-      const monthName = match[1]?.toLowerCase();
-      const parsedMonth = monthName ? MONTH_NUMBER[monthName] : undefined;
-      if (!parsedMonth) return false;
-      month = parsedMonth;
-      day = Number(match[2]);
-      year = Number(match[3]);
-    }
+  const startKey = civilDateKey(civilDateAt(new Date(startInstant), timeZone));
+  const endKey = civilDateKey(civilDateAt(new Date(endInstant), timeZone));
+  const intervals = metadataDateIntervals(text);
+  return intervals.some(({ start, endExclusive }) => start < endKey && endExclusive > startKey);
+}
+
+function normalizeMetadataWords(value: string): string[] {
+  return value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function containsWordSequence(words: string[], sequence: string[]): boolean {
+  if (sequence.length === 0 || sequence.length > words.length) return false;
+  for (let index = 0; index <= words.length - sequence.length; index += 1) {
+    if (sequence.every((word, offset) => words[index + offset] === word)) return true;
+  }
+  return false;
+}
+
+function metadataDateIntervals(text: string): Array<{ start: string; endExclusive: string }> {
+  const monthPattern = Object.keys(MONTH_NUMBER)
+    .sort((left, right) => right.length - left.length)
+    .join('|');
+  const consumed: Array<{ start: number; end: number }> = [];
+  const intervals: Array<{ start: string; endExclusive: string }> = [];
+  const isConsumed = (index: number) =>
+    consumed.some((span) => index >= span.start && index < span.end);
+  const addRange = (
+    match: RegExpMatchArray,
+    startDate: CivilDate | undefined,
+    endDate: CivilDate | undefined,
+  ) => {
+    if (match.index !== undefined)
+      consumed.push({ start: match.index, end: match.index + match[0].length });
+    if (!startDate || !endDate || civilDateKey(endDate) < civilDateKey(startDate)) return;
+    intervals.push({
+      start: civilDateKey(startDate),
+      endExclusive: civilDateKey(addCivilDays(endDate, 1)),
+    });
+  };
+  const validDate = (year: number, month: number, day: number): CivilDate | undefined => {
+    if (year < 100 || year > 9999 || month < 1 || month > 12 || day < 1 || day > 31)
+      return undefined;
     const candidate = new Date(Date.UTC(year, month - 1, day));
     if (
       candidate.getUTCFullYear() !== year ||
       candidate.getUTCMonth() + 1 !== month ||
       candidate.getUTCDate() !== day
-    ) {
-      return false;
-    }
-    const key = civilDateKey({ year, month, day });
-    return key >= startKey && key < endKey;
-  });
+    )
+      return undefined;
+    return { year, month, day };
+  };
+  const monthValue = (value: string | undefined) =>
+    value ? MONTH_NUMBER[value.toLowerCase()] : undefined;
+
+  const isoRanges =
+    /\b(\d{4})-(\d{2})-(\d{2})\s*(?:[-–—]|to|through|until)\s*(?:(\d{4})-)?(\d{2})-(\d{2})\b/gi;
+  for (const match of text.matchAll(isoRanges)) {
+    const year = Number(match[1]);
+    const endYear = Number(match[4] ?? match[1]);
+    addRange(
+      match,
+      validDate(year, Number(match[2]), Number(match[3])),
+      validDate(endYear, Number(match[5]), Number(match[6])),
+    );
+  }
+
+  const namedRanges = new RegExp(
+    `\\b(${monthPattern})\\s+(\\d{1,2})(?:st|nd|rd|th)?\\s*(?:[-–—]|to|through|until)\\s*(?:(${monthPattern})\\s+)?(\\d{1,2})(?:st|nd|rd|th)?[,]?\\s+(\\d{4})\\b`,
+    'gi',
+  );
+  for (const match of text.matchAll(namedRanges)) {
+    const year = Number(match[5]);
+    const startMonth = monthValue(match[1]);
+    const endMonth = monthValue(match[3]) ?? startMonth;
+    addRange(
+      match,
+      startMonth ? validDate(year, startMonth, Number(match[2])) : undefined,
+      endMonth ? validDate(year, endMonth, Number(match[4])) : undefined,
+    );
+  }
+
+  const isoDates = /\b(\d{4})-(\d{2})-(\d{2})\b/g;
+  for (const match of text.matchAll(isoDates)) {
+    if (match.index !== undefined && isConsumed(match.index)) continue;
+    const date = validDate(Number(match[1]), Number(match[2]), Number(match[3]));
+    if (!date) continue;
+    const key = civilDateKey(date);
+    intervals.push({ start: key, endExclusive: civilDateKey(addCivilDays(date, 1)) });
+  }
+
+  const namedDates = new RegExp(
+    `\\b(${monthPattern})\\s+(\\d{1,2})(?:st|nd|rd|th)?[,]?\\s+(\\d{4})\\b`,
+    'gi',
+  );
+  for (const match of text.matchAll(namedDates)) {
+    if (match.index !== undefined && isConsumed(match.index)) continue;
+    const month = monthValue(match[1]);
+    const date = month ? validDate(Number(match[3]), month, Number(match[2])) : undefined;
+    if (!date) continue;
+    const key = civilDateKey(date);
+    intervals.push({ start: key, endExclusive: civilDateKey(addCivilDays(date, 1)) });
+  }
+  return intervals;
 }
 
 export const MAX_GMAIL_THREADS_TO_READ = 3;
