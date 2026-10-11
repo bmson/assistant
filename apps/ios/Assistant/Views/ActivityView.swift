@@ -265,7 +265,7 @@ struct ActivityView: View {
     private func activityCard(_ item: ActivityItem) -> some View {
         VStack(alignment: .leading, spacing: AssistantTheme.cardContentSpacing) {
             activityHeader(item)
-            DisclosureGroup("Record identity") {
+            DisclosureGroup("Details") {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Task \(item.id)")
                     if let source = item.source { Text("Source: \(source)") }
