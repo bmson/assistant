@@ -673,6 +673,70 @@ describe('Firestore migration preview', () => {
 });
 
 describe.skipIf(!enabled)('Firestore workspace migration import', () => {
+  it('round-trips opaque call voice tool receipts with the owned call record', async () => {
+    const store = emulatorStore();
+    const target = {
+      projectId: 'demo-assistant-test',
+      databaseId: '(default)',
+      installationId: store.installationId,
+    };
+    const source = completeV3Bundle(target);
+    const agentId = source.manifest.source.agentId;
+    const taskId = source.records.find((record) => record.table === 'tasks')?.id;
+    if (!taskId) throw new Error('migration task missing');
+    const parentToolCallId = randomUUID();
+    const callId = randomUUID();
+    const receipt = {
+      id: 'c'.repeat(64),
+      provider: 'openai',
+      kind: 'ask_owner',
+      argsDigest: 'd'.repeat(64),
+      effectId: randomUUID(),
+      committedAt: '2026-10-08T12:00:00.000Z',
+    };
+    addRecord(source, {
+      table: 'tool_calls',
+      collection: 'toolCalls',
+      id: parentToolCallId,
+      data: { id: parentToolCallId, taskId, toolName: 'phone.call' },
+      checksum: '',
+    });
+    addRecord(source, {
+      table: 'call_sessions',
+      collection: 'callSessions',
+      id: callId,
+      data: {
+        id: callId,
+        agentId,
+        taskId,
+        toolCallId: parentToolCallId,
+        status: 'in_progress',
+        voiceToolReceipts: [receipt],
+      },
+      checksum: '',
+    });
+    upgradeFixtureToV3(source);
+    try {
+      await importWorkspaceBundle(store, source, {
+        sourceAgentId: agentId,
+        target,
+        mode: 'write',
+      });
+      expect((await store.doc('callSessions', callId).get()).get('voiceToolReceipts')).toEqual([
+        receipt,
+      ]);
+      await expect(
+        importWorkspaceBundle(store, source, {
+          sourceAgentId: agentId,
+          target,
+          mode: 'verify',
+        }),
+      ).resolves.toMatchObject({ mode: 'verify' });
+    } finally {
+      await disposeStore(store);
+    }
+  });
+
   it('refuses a foreign installation owner before writing or verifying the destination', async () => {
     const store = emulatorStore();
     const target = {

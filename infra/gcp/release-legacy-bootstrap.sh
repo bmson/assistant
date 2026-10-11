@@ -7,7 +7,7 @@ LEGACY_BOOTSTRAP_WEB_REVISION='assistant-web-00506-sj8'
 LEGACY_BOOTSTRAP_AGENT_IMAGE='us-west1-docker.pkg.dev/bmson-assistant/assistant/agent@sha256:d471682171e71cbe996cb6e52936b6f7f2df54e17ca30cfdc7e120ecadf69e29'
 LEGACY_BOOTSTRAP_WEB_IMAGE='us-west1-docker.pkg.dev/bmson-assistant/assistant/web@sha256:2423faa280dd89fb31ce7c09dd64a64fcd30be1a8b121a0572f0e146b9f8cf4c'
 LEGACY_BOOTSTRAP_DATABASE='assistant-production'
-LEGACY_BOOTSTRAP_CONTRACT_SHA256='8319fc0dd0a793719338a4b0692320f8de1fc82510ef08af80c08a77379a8a41'
+LEGACY_BOOTSTRAP_CONTRACT_SHA256='10adc7fbc9be8965c86df71e6612b6fcd24f1b21a3f5fca048786bbac55c8261'
 LEGACY_BOOTSTRAP_AGENT_TEMPLATE='us-west1-docker.pkg.dev/bmson-assistant/assistant/agent:68e63fe7efc33789bb434d8a29ccfa2599c3b27e'
 LEGACY_BOOTSTRAP_WEB_TEMPLATE='us-west1-docker.pkg.dev/bmson-assistant/assistant/web:68e63fe7efc33789bb434d8a29ccfa2599c3b27e'
 

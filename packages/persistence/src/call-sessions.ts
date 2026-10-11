@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Records } from './records.js';
 
 export interface CallVoiceRouteSnapshot {
@@ -149,7 +150,7 @@ export function isCallLineRate(value: unknown): value is CallLineRate {
 
 export type CallSession = Omit<
   Records['callSessions'],
-  'voiceRoute' | 'lineRate' | 'capacityReleasedAt'
+  'voiceRoute' | 'lineRate' | 'capacityReleasedAt' | 'voiceToolReceipts'
 > & {
   /** Null for legacy sessions; those fail closed before connecting media. */
   voiceRoute: CallVoiceRouteSnapshot | null;
@@ -157,7 +158,89 @@ export type CallSession = Omit<
   lineRate: CallLineRate | null;
   /** Only a definite pre-dial/provider refusal releases its daily capacity. */
   capacityReleasedAt?: Date | null;
+  /** Optional on legacy Firestore documents; adapters normalize absent to []. */
+  voiceToolReceipts: CallVoiceToolReceipt[];
 };
+
+export const MAX_CALL_VOICE_TOOL_RECEIPTS = 256;
+
+export interface CallVoiceToolReceipt {
+  /** SHA-256 of call id, provider, and provider tool-call id; never the raw id. */
+  id: string;
+  provider: 'openai' | 'vertex';
+  kind: 'note' | 'ask_owner';
+  /** Digest for replay-conflict detection, not anonymization. */
+  argsDigest: string;
+  /** Check-in id for ask_owner; null for note. */
+  effectId: string | null;
+  committedAt: string;
+}
+
+export type CallVoiceToolEffect =
+  | { kind: 'note'; fact: string }
+  | { kind: 'ask_owner'; checkin: CallCheckin };
+
+export interface ApplyCallVoiceToolEffectInput {
+  callId: string;
+  agentId: string;
+  taskId: string;
+  parentToolCallId: string;
+  provider: 'openai' | 'vertex';
+  providerCallId: string;
+  effect: CallVoiceToolEffect;
+}
+
+export type ApplyCallVoiceToolEffectResult =
+  | { status: 'applied' | 'replay'; receipt: CallVoiceToolReceipt; checkin?: CallCheckin }
+  | { status: 'unavailable' | 'conflict' | 'limit' };
+
+/** Hashes canonical effect arguments; raw call text is never copied into receipts. */
+export function callVoiceToolEffectIdentity(
+  callId: string,
+  input: Pick<ApplyCallVoiceToolEffectInput, 'provider' | 'providerCallId' | 'effect'>,
+): Pick<CallVoiceToolReceipt, 'id' | 'kind' | 'argsDigest'> {
+  const kind = input.effect.kind;
+  const value = kind === 'note' ? input.effect.fact : input.effect.checkin.question;
+  return {
+    id: createHash('sha256')
+      .update(JSON.stringify(['call-voice-tool-v1', callId, input.provider, input.providerCallId]))
+      .digest('hex'),
+    kind,
+    argsDigest: createHash('sha256')
+      .update(JSON.stringify([kind, value]))
+      .digest('hex'),
+  };
+}
+
+export function parseCallVoiceToolReceipts(value: unknown): CallVoiceToolReceipt[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > MAX_CALL_VOICE_TOOL_RECEIPTS)
+    throw new Error('Malformed call voice tool receipts');
+  const ids = new Set<string>();
+  for (const item of value) {
+    const receipt = item as CallVoiceToolReceipt;
+    const keys = item && typeof item === 'object' ? Object.keys(item).sort() : [];
+    if (
+      !item ||
+      typeof item !== 'object' ||
+      Array.isArray(item) ||
+      keys.join(',') !== 'argsDigest,committedAt,effectId,id,kind,provider' ||
+      !/^[a-f0-9]{64}$/.test(receipt.id) ||
+      !['openai', 'vertex'].includes(receipt.provider) ||
+      !['note', 'ask_owner'].includes(receipt.kind) ||
+      !/^[a-f0-9]{64}$/.test(receipt.argsDigest) ||
+      !(receipt.kind === 'note'
+        ? receipt.effectId === null
+        : typeof receipt.effectId === 'string' && !!receipt.effectId) ||
+      ids.has(receipt.id) ||
+      typeof receipt.committedAt !== 'string' ||
+      !Number.isFinite(Date.parse(receipt.committedAt))
+    )
+      throw new Error('Malformed call voice tool receipt');
+    ids.add(receipt.id);
+  }
+  return value as CallVoiceToolReceipt[];
+}
 
 export interface CallAdmissionOptions {
   now: Date;
@@ -445,6 +528,7 @@ export type CallSessionCreate = Omit<
   | 'transcriptState'
   | 'notes'
   | 'checkins'
+  | 'voiceToolReceipts'
   | 'hangupRequested'
   | 'outcome'
   | 'summary'
@@ -523,6 +607,10 @@ export interface CallSessionRepository {
   appendTranscriptBatch(id: string, batch: CallTranscriptBatch): Promise<CallTranscriptBatchResult>;
   appendNote(id: string, note: string): Promise<void>;
   addCheckin(id: string, checkin: CallCheckin): Promise<CallCheckin | null>;
+  /** Atomically persist a note/check-in and its replay receipt on an exact live call. */
+  applyVoiceToolEffect(
+    input: ApplyCallVoiceToolEffectInput,
+  ): Promise<ApplyCallVoiceToolEffectResult>;
   markCheckinDelivery(
     id: string,
     checkinId: string,

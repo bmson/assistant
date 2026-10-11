@@ -7,11 +7,11 @@
     "apps/agent/src/index.ts": "6da57b60f853ca6622142a12b70bb31a73e8155eac30dd7d905218c19ca2fd56",
     "apps/web/lib/server.ts": "df2cd83f7c34ac905715baccbcca0e63a033bec34b0b58e65a22d01b5b1106f5",
     "apps/web/proxy.ts": "a310425a758a8794546989776ea540230a92b0e7ad694bbed036f64ef17b05d1",
-    "packages/db/drizzle/meta/_journal.json": "ec18e35a44da2424b10565655b4dbc21bd2ee4d9c5cbff957c100b521248074a",
-    "infra/gcp/release-contracts.json": "8319fc0dd0a793719338a4b0692320f8de1fc82510ef08af80c08a77379a8a41"
+    "packages/db/drizzle/meta/_journal.json": "cfb945af440bd5114b986fb9e85699ac41fedf97c754f2761b835d0dcbf3b9e1",
+    "infra/gcp/release-contracts.json": "10adc7fbc9be8965c86df71e6612b6fcd24f1b21a3f5fca048786bbac55c8261"
   },
-  "latestPostgresMigration": "0126_application_confirmation_notice_lineage",
-  "postgresSchemaVersion": 126,
+  "latestPostgresMigration": "0127_call_voice_effect_receipts",
+  "postgresSchemaVersion": 127,
   "releaseContracts": {
     "agent": {
       "apiContract": 1,
@@ -20,8 +20,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 125,
-        "max": 126
+        "min": 127,
+        "max": 127
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -32,8 +32,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 125,
-        "max": 126
+        "min": 127,
+        "max": 127
       },
       "currentPostgresSchemaCompatible": true
     },

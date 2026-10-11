@@ -97,6 +97,7 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
     message2: randomUUID(),
     sample: randomUUID(),
     activeToolCall: randomUUID(),
+    callSession: randomUUID(),
     compactToolCall: randomUUID(),
     failedReceipt: randomUUID(),
     completedReceipt: randomUUID(),
@@ -106,6 +107,7 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
 
   afterEach(async () => {
     if (!sql) return;
+    await sql`delete from call_sessions where id = ${ids.callSession}`;
     await sql`delete from gmail_sync_state where mailbox = ${ids.mailbox}`;
     await sql`delete from import_sources where id = ${ids.importSourceId}`;
     await sql`delete from occasions where id = ${ids.occasion}`;
@@ -191,6 +193,15 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
       const idempotencyHash = idempotencyIdentityDigest(idempotencyKey);
       if (!modelHash || !idempotencyHash) throw new Error('receipt identity fixture invalid');
       await client`insert into tool_calls (id, task_id, step, tool_name, args, risk, status, decision) values (${ids.activeToolCall}, ${ids.task}, 1, 'gmail.send', ${JSON.stringify({ to: 'private@example.test', body: 'private active payload' })}::jsonb, 'approval', 'approved', ${JSON.stringify({ modelToolCallId, privateContext: 'do not compact active row' })}::jsonb)`;
+      const voiceReceipt = {
+        id: 'c'.repeat(64),
+        provider: 'openai',
+        kind: 'note',
+        argsDigest: 'd'.repeat(64),
+        effectId: null,
+        committedAt: '2026-10-08T12:00:00.000Z',
+      };
+      await client`insert into call_sessions (id, agent_id, task_id, tool_call_id, status, "to", brief, voice_model, max_minutes, callback_token, voice_tool_receipts) values (${ids.callSession}, ${owner.id}, ${ids.task}, ${ids.activeToolCall}, 'in_progress', '+14155550123', ${JSON.stringify({ goal: 'Book dinner' })}::jsonb, 'openai:gpt-realtime', 10, 'opaque-callback-token', ${JSON.stringify([voiceReceipt])}::jsonb)`;
       await client`insert into tool_call_receipts (id, agent_id, task_id, tool_call_id, model_tool_call_id_hash, idempotency_key_hash, tool_name, effect_outcome, recorded_at) values (${ids.compactToolCall}, ${owner.id}, ${ids.task}, ${ids.compactToolCall}, ${modelHash}, ${idempotencyHash}, 'gmail.send', 'unknown', '2026-10-07 12:00:00+00'), (${ids.failedReceipt}, ${owner.id}, ${ids.task}, ${ids.failedReceipt}, null, null, 'gmail.send', 'failed', '2026-10-07 12:00:00+00'), (${ids.completedReceipt}, ${owner.id}, ${ids.task}, ${ids.completedReceipt}, null, null, 'gmail.send', 'completed', '2026-10-07 12:00:00+00')`;
       await client`insert into tool_call_receipt_keys (id, agent_id, task_id, receipt_id, kind, digest) values (${toolCallReceiptKeyId('model_tool_call', modelHash)}, ${owner.id}, ${ids.task}, ${ids.compactToolCall}, 'model_tool_call', ${modelHash}), (${toolCallReceiptKeyId('idempotency', idempotencyHash)}, ${owner.id}, ${ids.task}, ${ids.compactToolCall}, 'idempotency', ${idempotencyHash})`;
       await client`insert into mission_reports (id, agent_id, mission_id, outcome, text) values (${ids.missionReport}, ${owner.id}, ${ids.task}, 'completed', 'The mission report is part of the owner workspace.')`;
@@ -225,6 +236,11 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
       expect(exportedModel?.data).toHaveProperty('promptCostPerMTok');
       expect(exportedModel?.data).toHaveProperty('completionCostPerMTok');
       expect(exportedModel?.data).not.toHaveProperty('promptCostPerMtok');
+      expect(
+        complete.records.find(
+          (record) => record.table === 'call_sessions' && record.id === ids.callSession,
+        )?.data.voiceToolReceipts,
+      ).toEqual([voiceReceipt]);
       expect(complete.manifest.coverage).toEqual({
         complete: true,
         supportedTables: expect.arrayContaining([

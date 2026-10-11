@@ -13,7 +13,11 @@ import {
   type CallSessionRepository,
   type CallTranscriptLine,
   type CallVoiceRouteSnapshot,
+  callVoiceToolEffectIdentity,
+  MAX_CALL_VOICE_TOOL_RECEIPTS,
+  notificationDeliveryKey,
   notificationLeg,
+  parseCallVoiceToolReceipts,
 } from '@assistant/persistence';
 import type { VoiceDialer } from '@assistant/tools/calls';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -76,6 +80,7 @@ function memoryCalls(): CallSessionRepository & { rows: Map<string, CallSession>
         transcriptState: { nextSequence: 1, pending: [], acknowledged: [] },
         notes: [],
         checkins: [],
+        voiceToolReceipts: [],
         hangupRequested: false,
         outcome: null,
         summary: null,
@@ -232,9 +237,79 @@ function memoryCalls(): CallSessionRepository & { rows: Map<string, CallSession>
       });
       return created;
     },
+    async applyVoiceToolEffect(input) {
+      const row = rows.get(input.callId);
+      if (
+        !row ||
+        row.agentId !== input.agentId ||
+        row.taskId !== input.taskId ||
+        row.toolCallId !== input.parentToolCallId
+      )
+        return { status: 'unavailable' } as const;
+      if (row.hangupRequested || !active(row)) return { status: 'unavailable' } as const;
+      const identity = callVoiceToolEffectIdentity(input.callId, input);
+      const receipts = parseCallVoiceToolReceipts(row.voiceToolReceipts);
+      const previous = receipts.find((receipt) => receipt.id === identity.id);
+      if (previous) {
+        if (previous.kind !== identity.kind || previous.argsDigest !== identity.argsDigest)
+          return { status: 'conflict' } as const;
+        const checkin =
+          previous.kind === 'ask_owner'
+            ? ((row.checkins as CallCheckin[]).find((item) => item.id === previous.effectId) ??
+              null)
+            : null;
+        return previous.kind === 'ask_owner' && !checkin
+          ? ({ status: 'conflict' } as const)
+          : ({ status: 'replay', receipt: previous, ...(checkin ? { checkin } : {}) } as const);
+      }
+      if (receipts.length >= MAX_CALL_VOICE_TOOL_RECEIPTS) return { status: 'limit' } as const;
+      if (input.effect.kind === 'note') {
+        const fact = input.effect.fact.trim().slice(0, 500);
+        if (!fact) return { status: 'unavailable' } as const;
+        const receipt = {
+          ...identity,
+          provider: input.provider,
+          effectId: null,
+          committedAt: new Date().toISOString(),
+        } as const;
+        patch(input.callId, {
+          notes: [...((row.notes as string[]) ?? []), fact].slice(-100),
+          voiceToolReceipts: [...receipts, receipt],
+        });
+        return { status: 'applied', receipt } as const;
+      }
+      const checkins = (row.checkins as CallCheckin[]) ?? [];
+      const created = {
+        ...input.effect.checkin,
+        question: input.effect.checkin.question.slice(0, 300),
+        revision: checkins.reduce((max, current) => Math.max(max, current.revision ?? 0), 0) + 1,
+        deliveryStatus: 'pending' as const,
+      };
+      const receipt = {
+        ...identity,
+        provider: input.provider,
+        effectId: created.id,
+        committedAt: new Date().toISOString(),
+      } as const;
+      patch(input.callId, {
+        checkins: [
+          ...checkins.map((current) =>
+            current.answer === null &&
+            ['pending', 'delivered'].includes(current.deliveryStatus ?? 'pending')
+              ? { ...current, deliveryStatus: 'superseded' as const }
+              : current,
+          ),
+          created,
+        ],
+        voiceToolReceipts: [...receipts, receipt],
+      });
+      return { status: 'applied', receipt, checkin: created } as const;
+    },
     async markCheckinDelivery(id, checkinId, revision, delivered) {
       const checkins = (rows.get(id)?.checkins as CallCheckin[]) ?? [];
       const target = checkins.find((c) => c.id === checkinId && c.revision === revision);
+      if (target?.answer !== null && target?.answer !== undefined) return false;
+      if (delivered && target?.deliveryStatus === 'delivered') return true;
       if (target?.deliveryStatus !== 'pending') return false;
       const ok = delivered && Date.parse(target.expiresAt ?? '') > Date.now();
       patch(id, {
@@ -573,8 +648,9 @@ async function connectedBridge(
   const token = /name="token" value="([0-9a-f]+)"/.exec(twiml)?.[1] ?? '';
   const voice = fakeVoice(options.connectGate);
   const socket = fakeSocket();
-  const notifyOwner = vi.fn(async (_input: { text: string; taskId?: string }) =>
-    notificationLeg('dashboard', 'delivered'),
+  const notifyOwner = vi.fn(
+    async (_input: { deliveryKey?: string; text: string; taskId?: string }) =>
+      notificationLeg('dashboard', 'delivered'),
   );
   handleMediaStream(socket as unknown as MediaSocket, {
     calls,
@@ -949,6 +1025,162 @@ describe('live call bridge', () => {
     expect(finished.costs.ledger.components.modelTextInput.quantity).toBe(2_000);
     expect(calls.rows.get(CALL_ID)?.status).toBe('completed');
     expect(voice.session.close).toHaveBeenCalled();
+  });
+
+  it('replays note and owner-check-in callbacks without duplicating their durable effects', async () => {
+    const { calls, voice, socket, notifyOwner, token } = await connectedBridge();
+    const applyEffect = vi.spyOn(calls, 'applyVoiceToolEffect');
+    socket.emit('message', {
+      event: 'start',
+      start: { streamSid: 'MZ1', customParameters: { callId: CALL_ID, token } },
+    });
+    await vi.waitFor(() => expect(voice.config()).toBeDefined());
+
+    const emptyNote = { id: 'provider-note-empty', name: 'note', args: { fact: '  ' } };
+    voice.events().toolCall(emptyNote);
+    await vi.waitFor(() =>
+      expect(voice.session.sendToolResult).toHaveBeenLastCalledWith(
+        emptyNote,
+        expect.objectContaining({ error: 'A non-empty note is required.' }),
+        'respond',
+      ),
+    );
+    expect(calls.rows.get(CALL_ID)?.voiceToolReceipts ?? []).toHaveLength(0);
+    const emptyAsk = {
+      id: 'provider-ask-empty',
+      name: 'ask_owner',
+      args: { question: '   ' },
+    };
+    voice.events().toolCall(emptyAsk);
+    await vi.waitFor(() =>
+      expect(voice.session.sendToolResult).toHaveBeenLastCalledWith(
+        emptyAsk,
+        expect.objectContaining({ error: 'A non-empty question is required.' }),
+        'respond',
+      ),
+    );
+    expect(notifyOwner).not.toHaveBeenCalled();
+    expect(calls.rows.get(CALL_ID)?.voiceToolReceipts ?? []).toHaveLength(0);
+
+    const note = { id: 'provider-note-replay', name: 'note', args: { fact: 'Room at 7:30.' } };
+    voice.events().toolCall(note);
+    voice.events().toolCall(note);
+    await vi.waitFor(() => expect(calls.rows.get(CALL_ID)?.notes).toEqual(['Room at 7:30.']));
+    expect(calls.rows.get(CALL_ID)?.voiceToolReceipts).toHaveLength(1);
+
+    const ask = {
+      id: 'provider-ask-replay',
+      name: 'ask_owner',
+      args: { question: 'Can we accept 7:30?' },
+    };
+    voice.events().toolCall(ask);
+    await vi.waitFor(() => expect(notifyOwner).toHaveBeenCalledTimes(1));
+    voice.events().toolCall(ask);
+    const checkins = (calls.rows.get(CALL_ID)?.checkins ?? []) as CallCheckin[];
+    expect(checkins).toHaveLength(1);
+    expect(notifyOwner).toHaveBeenCalledTimes(1);
+    expect(notifyOwner.mock.calls[0]?.[0].deliveryKey).toBe(
+      notificationDeliveryKey('call-checkin', CALL_ID, checkins[0]?.id ?? ''),
+    );
+    expect(calls.rows.get(CALL_ID)?.voiceToolReceipts).toHaveLength(2);
+    const checkin = requiredRevision(checkins[0]);
+    expect(
+      await calls.answerCheckin(
+        calls.rows.get(CALL_ID)?.agentId ?? '',
+        CALL_ID,
+        checkin.id,
+        checkin.revision,
+        'Yes',
+        'web',
+      ),
+    ).toBe(true);
+    await vi.waitFor(() => expect(voice.session.sendToolResult).toHaveBeenCalled());
+    const longAsk = {
+      id: 'provider-ask-long-replay',
+      name: 'ask_owner',
+      args: { question: `${'q'.repeat(300)}A` },
+    };
+    voice.events().toolCall(longAsk);
+    await vi.waitFor(() => expect(notifyOwner).toHaveBeenCalledTimes(2));
+    const conflictingAsk = { ...longAsk, args: { question: `${'q'.repeat(300)}B` } };
+    voice.events().toolCall(conflictingAsk);
+    await vi.waitFor(() =>
+      expect(voice.session.sendToolResult).toHaveBeenLastCalledWith(
+        conflictingAsk,
+        expect.objectContaining({
+          error: 'This call action identity was already used with different content.',
+        }),
+        'respond',
+      ),
+    );
+    expect(notifyOwner).toHaveBeenCalledTimes(2);
+    expect(await calls.requestHangup('agent-1', CALL_ID)).toBe(true);
+    voice.events().toolCall(ask);
+    await vi.waitFor(() =>
+      expect(voice.session.sendToolResult).toHaveBeenLastCalledWith(
+        ask,
+        expect.objectContaining({ error: 'The call is no longer active.' }),
+        'respond',
+      ),
+    );
+    expect(notifyOwner).toHaveBeenCalledTimes(2);
+    await calls.finish(CALL_ID, { status: 'completed' });
+    const terminalApplyCount = applyEffect.mock.calls.length;
+    voice.events().toolCall(ask);
+    await vi.waitFor(() => expect(applyEffect).toHaveBeenCalledTimes(terminalApplyCount + 1));
+    await vi.waitFor(() =>
+      expect(voice.session.sendToolResult).toHaveBeenLastCalledWith(
+        ask,
+        expect.objectContaining({ error: 'The call is no longer active.' }),
+        'respond',
+      ),
+    );
+    expect(notifyOwner).toHaveBeenCalledTimes(2);
+    socket.emit('close');
+    await vi.waitFor(() => expect(voice.session.close).toHaveBeenCalled());
+  });
+
+  it('does not notify again when an unresolved replayed check-in has expired', async () => {
+    const { calls, voice, socket, notifyOwner, token } = await connectedBridge();
+    notifyOwner.mockResolvedValue(notificationLeg('dashboard', 'unknown'));
+    socket.emit('message', {
+      event: 'start',
+      start: { streamSid: 'MZ1', customParameters: { callId: CALL_ID, token } },
+    });
+    await vi.waitFor(() => expect(voice.config()).toBeDefined());
+
+    const ask = {
+      id: 'provider-ask-expired-replay',
+      name: 'ask_owner',
+      args: { question: 'Should I continue?' },
+    };
+    voice.events().toolCall(ask);
+    await vi.waitFor(() => expect(notifyOwner).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => {
+      const checkin = (calls.rows.get(CALL_ID)?.checkins as CallCheckin[] | undefined)?.[0];
+      expect(checkin?.deliveryStatus).toBe('failed');
+    });
+
+    const row = calls.rows.get(CALL_ID);
+    if (!row) throw new Error('call fixture missing');
+    calls.rows.set(CALL_ID, {
+      ...row,
+      checkins: ((row.checkins as CallCheckin[]) ?? []).map((checkin) => ({
+        ...checkin,
+        expiresAt: new Date(Date.now() - 1).toISOString(),
+      })),
+    });
+    voice.events().toolCall(ask);
+    await vi.waitFor(() =>
+      expect(voice.session.sendToolResult).toHaveBeenLastCalledWith(
+        ask,
+        expect.objectContaining({ error: 'This check-in has expired.' }),
+        'respond',
+      ),
+    );
+    expect(notifyOwner).toHaveBeenCalledTimes(1);
+    socket.emit('close');
+    await vi.waitFor(() => expect(core.recordCallResult).toHaveBeenCalled());
   });
 
   it('lets the model distinguish voicemail from screening before hanging up', async () => {

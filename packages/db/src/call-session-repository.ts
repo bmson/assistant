@@ -6,9 +6,12 @@ import {
   type CallCheckin,
   type CallSession,
   type CallSessionRepository,
+  callVoiceToolEffectIdentity,
   isCallFinishDelivery,
   isCallLineRate,
   isCallVoiceRouteSnapshot,
+  MAX_CALL_VOICE_TOOL_RECEIPTS,
+  parseCallVoiceToolReceipts,
 } from '@assistant/persistence';
 import { and, count, desc, eq, gte, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
@@ -20,6 +23,7 @@ function session(row: typeof callSessions.$inferSelect): CallSession {
     // Legacy or malformed persisted snapshots must be absent and fail closed.
     voiceRoute: isCallVoiceRouteSnapshot(row.voiceRoute) ? row.voiceRoute : null,
     lineRate: isCallLineRate(row.lineRate) ? row.lineRate : null,
+    voiceToolReceipts: parseCallVoiceToolReceipts(row.voiceToolReceipts),
   };
 }
 
@@ -355,6 +359,89 @@ export function createPostgresCallSessionRepository(db: Db): CallSessionReposito
         return created;
       });
     },
+    async applyVoiceToolEffect(input) {
+      return db.transaction(async (tx) => {
+        const [row] = await tx
+          .select()
+          .from(callSessions)
+          .where(and(eq(callSessions.id, input.callId), eq(callSessions.agentId, input.agentId)))
+          .for('update');
+        if (!row || row.taskId !== input.taskId || row.toolCallId !== input.parentToolCallId)
+          return { status: 'unavailable' } as const;
+        if (
+          row.hangupRequested ||
+          !(ACTIVE_CALL_STATUSES as readonly string[]).includes(row.status)
+        )
+          return { status: 'unavailable' } as const;
+        const identity = callVoiceToolEffectIdentity(input.callId, input);
+        const receipts = parseCallVoiceToolReceipts(row.voiceToolReceipts);
+        const prior = receipts.find((receipt) => receipt.id === identity.id);
+        if (prior) {
+          if (prior.kind !== identity.kind || prior.argsDigest !== identity.argsDigest)
+            return { status: 'conflict' } as const;
+          if (prior.kind === 'ask_owner') {
+            const checkin = ((row.checkins as CallCheckin[] | undefined) ?? []).find(
+              (item) => item.id === prior.effectId,
+            );
+            return checkin
+              ? ({ status: 'replay', receipt: prior, checkin } as const)
+              : ({ status: 'conflict' } as const);
+          }
+          return { status: 'replay', receipt: prior } as const;
+        }
+        if (receipts.length >= MAX_CALL_VOICE_TOOL_RECEIPTS) return { status: 'limit' } as const;
+        const checkinValues = (row.checkins as CallCheckin[] | undefined) ?? [];
+        if (input.effect.kind === 'note') {
+          const fact = input.effect.fact.trim().slice(0, 500);
+          if (!fact) return { status: 'unavailable' } as const;
+          const receipt = {
+            ...identity,
+            provider: input.provider,
+            effectId: null,
+            committedAt: new Date().toISOString(),
+          } as const;
+          await tx
+            .update(callSessions)
+            .set({
+              notes: [...((row.notes as string[] | undefined) ?? []), fact].slice(-100),
+              voiceToolReceipts: [...receipts, receipt],
+              updatedAt: sql`now()`,
+            })
+            .where(eq(callSessions.id, input.callId));
+          return { status: 'applied', receipt } as const;
+        }
+        const revision =
+          checkinValues.reduce((max, current) => Math.max(max, current.revision ?? 0), 0) + 1;
+        const createdCheckin: CallCheckin = {
+          ...input.effect.checkin,
+          question: input.effect.checkin.question.slice(0, 300),
+          revision,
+          deliveryStatus: 'pending',
+        };
+        const receipt = {
+          ...identity,
+          provider: input.provider,
+          effectId: createdCheckin.id,
+          committedAt: new Date().toISOString(),
+        } as const;
+        const nextCheckins = checkinValues.map((current) =>
+          current.answer === null &&
+          ['pending', 'delivered'].includes(current.deliveryStatus ?? 'pending')
+            ? { ...current, deliveryStatus: 'superseded' as const }
+            : current,
+        );
+        nextCheckins.push(createdCheckin);
+        await tx
+          .update(callSessions)
+          .set({
+            checkins: nextCheckins,
+            voiceToolReceipts: [...receipts, receipt],
+            updatedAt: sql`now()`,
+          })
+          .where(eq(callSessions.id, input.callId));
+        return { status: 'applied', receipt, checkin: createdCheckin } as const;
+      });
+    },
     async markCheckinDelivery(id, checkinId, revision, delivered) {
       return db.transaction(async (tx) => {
         const [row] = await tx
@@ -366,8 +453,9 @@ export function createPostgresCallSessionRepository(db: Db): CallSessionReposito
         const target = checkins.find(
           (checkin) => checkin.id === checkinId && checkin.revision === revision,
         );
-        if (!row || !target || target.deliveryStatus !== 'pending' || target.answer !== null)
-          return false;
+        if (!row || !target || target.answer !== null) return false;
+        if (delivered && target.deliveryStatus === 'delivered') return true;
+        if (target.deliveryStatus !== 'pending') return false;
         const live =
           (ACTIVE_CALL_STATUSES as readonly string[]).includes(row.status) &&
           (!target.expiresAt || Date.parse(target.expiresAt) > Date.now());

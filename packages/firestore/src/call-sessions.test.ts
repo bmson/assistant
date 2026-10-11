@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { CallCheckin } from '@assistant/persistence';
+import { type CallCheckin, MAX_CALL_VOICE_TOOL_RECEIPTS } from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FirestoreCallSessionRepository } from './call-sessions.js';
 import type { InstallationStore } from './store.js';
@@ -51,6 +51,186 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore call sessions',
     expect(claimed?.startedAt).toBeInstanceOf(Date);
     expect(await calls.claimStream(call.id, 'hash-1', new Date())).toBeNull();
     expect(await calls.activeCount(agentId)).toBe(1);
+  });
+
+  it('atomically deduplicates note/check-in effects across repository instances', async () => {
+    const call = await create();
+    const input = {
+      callId: call.id,
+      agentId,
+      taskId: call.taskId,
+      parentToolCallId: call.toolCallId,
+      provider: 'openai' as const,
+      providerCallId: 'provider-note-1',
+      effect: { kind: 'note' as const, fact: '  Dinner is at 7:30.  ' },
+    };
+    const [first, duplicate] = await Promise.all([
+      calls.applyVoiceToolEffect(input),
+      calls.applyVoiceToolEffect(input),
+    ]);
+    expect([first.status, duplicate.status].sort()).toEqual(['applied', 'replay']);
+    const restarted = new FirestoreCallSessionRepository(store, agentId);
+    expect(await restarted.applyVoiceToolEffect(input)).toMatchObject({ status: 'replay' });
+    expect((await restarted.get(call.id))?.notes).toEqual(['Dinner is at 7:30.']);
+    expect(JSON.stringify((await restarted.get(call.id))?.voiceToolReceipts)).not.toContain(
+      'Dinner is at 7:30',
+    );
+    expect(
+      await restarted.applyVoiceToolEffect({
+        ...input,
+        effect: { kind: 'note', fact: 'Changed payload' },
+      }),
+    ).toEqual({ status: 'conflict' });
+    const longNote = {
+      ...input,
+      providerCallId: 'long-note',
+      effect: { kind: 'note' as const, fact: `${'x'.repeat(500)}A` },
+    };
+    expect(await restarted.applyVoiceToolEffect(longNote)).toMatchObject({ status: 'applied' });
+    expect(
+      await restarted.applyVoiceToolEffect({
+        ...longNote,
+        effect: { kind: 'note', fact: `${'x'.repeat(500)}B` },
+      }),
+    ).toEqual({ status: 'conflict' });
+    expect(
+      await restarted.applyVoiceToolEffect({
+        ...input,
+        effect: {
+          kind: 'ask_owner',
+          checkin: {
+            id: randomUUID(),
+            question: 'Same provider id, different action',
+            askedAt: new Date().toISOString(),
+            answer: null,
+            answeredAt: null,
+            via: null,
+          },
+        },
+      }),
+    ).toEqual({ status: 'conflict' });
+    expect(
+      await new FirestoreCallSessionRepository(store, randomUUID()).applyVoiceToolEffect({
+        ...input,
+        providerCallId: 'foreign-owner',
+      }),
+    ).toEqual({ status: 'unavailable' });
+    expect(
+      await restarted.applyVoiceToolEffect({
+        ...input,
+        taskId: randomUUID(),
+        providerCallId: 'wrong-task',
+      }),
+    ).toEqual({ status: 'unavailable' });
+    expect(
+      await restarted.applyVoiceToolEffect({
+        ...input,
+        parentToolCallId: randomUUID(),
+        providerCallId: 'wrong-parent-tool',
+      }),
+    ).toEqual({ status: 'unavailable' });
+
+    const checkinInput = {
+      ...input,
+      providerCallId: 'provider-checkin-1',
+      effect: {
+        kind: 'ask_owner' as const,
+        checkin: {
+          id: randomUUID(),
+          question: 'Can we accept 7:30?',
+          askedAt: new Date().toISOString(),
+          answer: null,
+          answeredAt: null,
+          via: null,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          deliveryStatus: 'pending' as const,
+        },
+      },
+    };
+    const created = await restarted.applyVoiceToolEffect(checkinInput);
+    const replay = await new FirestoreCallSessionRepository(store, agentId).applyVoiceToolEffect(
+      checkinInput,
+    );
+    expect(created.status).toBe('applied');
+    expect(replay.status).toBe('replay');
+    if (
+      created.status !== 'applied' ||
+      replay.status !== 'replay' ||
+      !created.checkin ||
+      !replay.checkin
+    )
+      throw new Error('voice check-in receipt did not converge');
+    expect(replay.checkin.id).toBe(created.checkin.id);
+    expect((await restarted.get(call.id))?.checkins).toHaveLength(1);
+    expect(
+      await restarted.markCheckinDelivery(
+        call.id,
+        created.checkin.id,
+        created.checkin.revision ?? 0,
+        true,
+      ),
+    ).toBe(true);
+    expect(
+      await restarted.markCheckinDelivery(
+        call.id,
+        created.checkin.id,
+        created.checkin.revision ?? 0,
+        true,
+      ),
+    ).toBe(true);
+
+    expect(await restarted.requestHangup(agentId, call.id)).toBe(true);
+    expect(await restarted.applyVoiceToolEffect(input)).toEqual({ status: 'unavailable' });
+    expect(await restarted.applyVoiceToolEffect(checkinInput)).toEqual({ status: 'unavailable' });
+    await restarted.finish(call.id, { status: 'completed' });
+    const before = await restarted.get(call.id);
+    expect(await restarted.applyVoiceToolEffect(input)).toEqual({ status: 'unavailable' });
+    expect(await restarted.applyVoiceToolEffect(checkinInput)).toEqual({ status: 'unavailable' });
+    expect(
+      await restarted.applyVoiceToolEffect({ ...input, providerCallId: 'after-terminal' }),
+    ).toEqual({ status: 'unavailable' });
+    expect(await restarted.get(call.id)).toEqual(before);
+
+    const erasedCall = await create();
+    await store.doc('callSessions', erasedCall.id).delete();
+    expect(
+      await restarted.applyVoiceToolEffect({
+        ...input,
+        callId: erasedCall.id,
+        taskId: erasedCall.taskId,
+        parentToolCallId: erasedCall.toolCallId,
+        providerCallId: 'after-erasure',
+      }),
+    ).toEqual({ status: 'unavailable' });
+    expect(await restarted.get(erasedCall.id)).toBeNull();
+  });
+
+  it('fails closed at the receipt cap without evicting prior callback identities', async () => {
+    const call = await create();
+    const receipts = Array.from({ length: MAX_CALL_VOICE_TOOL_RECEIPTS }, (_, index) => ({
+      id: index.toString(16).padStart(64, '0'),
+      provider: 'openai',
+      kind: 'note',
+      argsDigest: 'a'.repeat(64),
+      effectId: null,
+      committedAt: new Date().toISOString(),
+    }));
+    await store.doc('callSessions', call.id).update({ voiceToolReceipts: receipts });
+    expect(
+      await calls.applyVoiceToolEffect({
+        callId: call.id,
+        agentId,
+        taskId: call.taskId,
+        parentToolCallId: call.toolCallId,
+        provider: 'openai',
+        providerCallId: 'cap-hit',
+        effect: { kind: 'note', fact: 'Must fail closed.' },
+      }),
+    ).toEqual({ status: 'limit' });
+    expect((await calls.get(call.id))?.notes).toEqual([]);
+    expect((await calls.get(call.id))?.voiceToolReceipts).toHaveLength(
+      MAX_CALL_VOICE_TOOL_RECEIPTS,
+    );
   });
 
   it('finishes a call exactly once and stops counting it as active', async () => {

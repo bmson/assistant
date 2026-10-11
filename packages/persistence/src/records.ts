@@ -96,6 +96,8 @@ export interface Records {
     notes: unknown;
     /** [{ id, question, askedAt, answer, answeredAt, via }] */
     checkins: unknown;
+    /** Opaque idempotency receipts for note/check-in tool effects. */
+    voiceToolReceipts: unknown;
     hangupRequested: boolean;
     outcome: string | null;
     summary: string | null;

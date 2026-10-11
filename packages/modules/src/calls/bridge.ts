@@ -220,7 +220,7 @@ export function handleMediaStream(socket: MediaSocket, deps: BridgeDeps): void {
   let activeTranscriptBatch: CallTranscriptBatch | null = null;
   let flushingTranscript: Promise<boolean> | null = null;
   const conversation: CallTranscriptLine[] = [];
-  const waiters = new Map<string, (answer: string | null) => void>();
+  const waiters = new Map<string, Array<(answer: string | null) => void>>();
   const timers: NodeJS.Timeout[] = [];
 
   // Only a matching Twilio mark confirms that an audio frame played. Pending
@@ -405,13 +405,25 @@ export function handleMediaStream(socket: MediaSocket, deps: BridgeDeps): void {
    * `owner` is the voice session that made the call. A reconnect can replace
    * it while a check-in waits; the new session has never seen that call id.
    */
-  const onToolCall = async (call: RealtimeToolCall, owner: RealtimeSession) => {
+  const onToolCall = async (
+    call: RealtimeToolCall,
+    owner: RealtimeSession,
+    provider: 'openai' | 'vertex',
+  ) => {
     if (!session) return;
     assistantSpoke = true;
     const args = (call.args ?? {}) as Record<string, unknown>;
     switch (call.name) {
       case 'ask_owner': {
-        const question = String(args.question ?? '').slice(0, 300);
+        const question = String(args.question ?? '').trim();
+        if (!question) {
+          owner.sendToolResult(
+            call,
+            { answer: null, error: 'A non-empty question is required.' },
+            'respond',
+          );
+          return;
+        }
         const draft: CallCheckin = {
           id: randomUUID(),
           question,
@@ -422,35 +434,86 @@ export function handleMediaStream(socket: MediaSocket, deps: BridgeDeps): void {
           expiresAt: new Date(now().getTime() + checkinWaitMs).toISOString(),
           deliveryStatus: 'pending',
         };
-        const checkin = await deps.calls.addCheckin(session.id, draft);
+        const effect = await deps.calls.applyVoiceToolEffect({
+          callId: session.id,
+          agentId: session.agentId,
+          taskId: session.taskId,
+          parentToolCallId: session.toolCallId,
+          provider,
+          providerCallId: call.id,
+          effect: { kind: 'ask_owner', checkin: draft },
+        });
+        if (effect.status !== 'applied' && effect.status !== 'replay') {
+          owner.sendToolResult(
+            call,
+            {
+              answer: null,
+              error:
+                effect.status === 'conflict'
+                  ? 'This call action identity was already used with different content.'
+                  : effect.status === 'limit'
+                    ? 'This call has reached its safe action limit.'
+                    : 'The call is no longer active.',
+            },
+            'respond',
+          );
+          return;
+        }
+        const checkin = effect.checkin;
         if (!checkin) {
           owner.sendToolResult(
             call,
-            { answer: null, error: 'The call is no longer active.' },
+            { answer: null, error: 'The check-in receipt is unavailable.' },
+            'respond',
+          );
+          return;
+        }
+        const persistedQuestion = checkin.question;
+        if (checkin.answer !== null) {
+          owner.sendToolResult(call, { answer: checkin.answer }, 'respond');
+          return;
+        }
+        if (['superseded', 'expired'].includes(checkin.deliveryStatus ?? 'pending')) {
+          owner.sendToolResult(
+            call,
+            { answer: null, error: 'This check-in is no longer active.' },
+            'respond',
+          );
+          return;
+        }
+        const expiry = checkin.expiresAt ? Date.parse(checkin.expiresAt) : undefined;
+        if (expiry !== undefined && (!Number.isFinite(expiry) || expiry <= now().getTime())) {
+          owner.sendToolResult(
+            call,
+            { answer: null, error: 'This check-in has expired.' },
             'respond',
           );
           return;
         }
         const who = session.contactName ?? session.to;
-        let delivered = false;
-        try {
-          const receipt = await deps.notifyOwner({
-            deliveryKey: notificationDeliveryKey('call-checkin', session.id, checkin.id),
-            taskId: session.taskId,
-            text: `On the phone with ${who}: "${question}" Answer here: ${deps.callUrl(session.id)}`,
-          });
-          delivered = hasEffectiveNotificationDelivery(receipt);
-        } catch (error) {
-          console.error('check-in notice failed', error);
+        let delivered = checkin.deliveryStatus === 'delivered';
+        if (!delivered) {
+          try {
+            const receipt = await deps.notifyOwner({
+              deliveryKey: notificationDeliveryKey('call-checkin', session.id, checkin.id),
+              taskId: session.taskId,
+              text: `On the phone with ${who}: "${persistedQuestion}" Answer here: ${deps.callUrl(session.id)}`,
+            });
+            delivered = hasEffectiveNotificationDelivery(receipt);
+          } catch (error) {
+            console.error('check-in notice failed', error);
+          }
         }
         const deliveryRecorded =
-          checkin.revision !== undefined &&
-          (await deps.calls
-            .markCheckinDelivery(session.id, checkin.id, checkin.revision, delivered)
-            .catch((error) => {
-              console.error('check-in delivery receipt failed', error);
-              return false;
-            }));
+          delivered && checkin.deliveryStatus === 'delivered'
+            ? true
+            : checkin.revision !== undefined &&
+              (await deps.calls
+                .markCheckinDelivery(session.id, checkin.id, checkin.revision, delivered)
+                .catch((error) => {
+                  console.error('check-in delivery receipt failed', error);
+                  return false;
+                }));
         if (!delivered || !deliveryRecorded) {
           owner.sendToolResult(
             call,
@@ -464,10 +527,20 @@ export function handleMediaStream(socket: MediaSocket, deps: BridgeDeps): void {
           return;
         }
         const answer = await new Promise<string | null>((resolve) => {
-          waiters.set(checkin.id, resolve);
+          const existing = waiters.get(checkin.id);
+          if (existing) {
+            existing.push(resolve);
+          } else {
+            waiters.set(checkin.id, [resolve]);
+          }
           timers.push(
             setTimeout(() => {
-              if (waiters.delete(checkin.id)) resolve(null);
+              const pending = waiters.get(checkin.id);
+              if (!pending) return;
+              const index = pending.indexOf(resolve);
+              if (index >= 0) pending.splice(index, 1);
+              if (pending.length === 0) waiters.delete(checkin.id);
+              resolve(null);
             }, checkinWaitMs),
           );
         });
@@ -511,7 +584,34 @@ export function handleMediaStream(socket: MediaSocket, deps: BridgeDeps): void {
       }
       case 'note': {
         const fact = String(args.fact ?? '').trim();
-        if (fact) await deps.calls.appendNote(session.id, fact);
+        if (!fact) {
+          owner.sendToolResult(call, { error: 'A non-empty note is required.' }, 'respond');
+          return;
+        }
+        const effect = await deps.calls.applyVoiceToolEffect({
+          callId: session.id,
+          agentId: session.agentId,
+          taskId: session.taskId,
+          parentToolCallId: session.toolCallId,
+          provider,
+          providerCallId: call.id,
+          effect: { kind: 'note', fact },
+        });
+        if (effect.status !== 'applied' && effect.status !== 'replay') {
+          owner.sendToolResult(
+            call,
+            {
+              error:
+                effect.status === 'conflict'
+                  ? 'This call action identity was already used with different content.'
+                  : effect.status === 'limit'
+                    ? 'This call has reached its safe action limit.'
+                    : 'The call is no longer active.',
+            },
+            'respond',
+          );
+          return;
+        }
         owner.sendToolResult(call, { noted: true }, 'if_silent');
         return;
       }
@@ -548,10 +648,10 @@ export function handleMediaStream(socket: MediaSocket, deps: BridgeDeps): void {
     }
     for (const checkin of (current.checkins as CallCheckin[]) ?? []) {
       if (checkin.answer === null) continue;
-      const resolve = waiters.get(checkin.id);
-      if (resolve) {
+      const resolvers = waiters.get(checkin.id);
+      if (resolvers) {
         waiters.delete(checkin.id);
-        resolve(checkin.answer);
+        for (const resolve of resolvers) resolve(checkin.answer);
       }
     }
     const elapsedMs = Date.now() - connectedAt;
@@ -572,7 +672,7 @@ export function handleMediaStream(socket: MediaSocket, deps: BridgeDeps): void {
       ended = true;
       for (const timer of timers) clearTimeout(timer);
       if (hangupTimer) clearTimeout(hangupTimer);
-      for (const resolve of waiters.values()) resolve(null);
+      for (const resolvers of waiters.values()) for (const resolve of resolvers) resolve(null);
       waiters.clear();
       // A reconnected call bills every session it used, not just the last.
       const usage = addUsage(droppedUsage, live?.usage() ?? emptyRealtimeUsage());
@@ -687,7 +787,9 @@ export function handleMediaStream(socket: MediaSocket, deps: BridgeDeps): void {
         },
         toolCall: (call) => {
           if (!isCurrent() || !self) return;
-          onToolCall(call, self).catch((error) => console.error('call tool failed', error));
+          onToolCall(call, self, resolved.provider.kind).catch((error) =>
+            console.error('call tool failed', error),
+          );
         },
         error: (error) => console.error('live voice session error', error.message),
         closed: () => {
