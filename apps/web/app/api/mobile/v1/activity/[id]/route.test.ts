@@ -276,6 +276,11 @@ describe.skipIf(!localEmulator)(
         ),
         { params: Promise.resolve({ id }) },
       );
+    const getChecklistCorrection = (id: string) =>
+      route.GET(
+        new Request(`http://localhost/api/mobile/v1/activity/${id}?checklistCorrection=1`),
+        { params: Promise.resolve({ id }) },
+      );
     const correct = (id: string, overrides: Record<string, unknown> = {}) =>
       post(id, 'correct-checklist', {
         itemId: correctionLookupItem.id,
@@ -398,6 +403,91 @@ describe.skipIf(!localEmulator)(
       expect(
         (await store.collection('outbox').where('taskId', '==', correctionId).get()).size,
       ).toBe(1);
+    });
+
+    it('projects only bounded pending lookup labels without changing compact status or audit reconciliation', async () => {
+      auth.allowed.mockResolvedValueOnce(false);
+      expect((await getChecklistCorrection(correctionId)).status).toBe(401);
+      const projection = await getChecklistCorrection(correctionId);
+      expect(projection.status).toBe(200);
+      expect(await projection.json()).toEqual({
+        id: correctionId,
+        eligible: true,
+        revision: 0,
+        items: [{ id: correctionLookupItem.id, label: correctionLookupItem.label }],
+      });
+
+      const compact = await get(correctionId);
+      expect(compact.status).toBe(200);
+      const compactBody = await compact.json();
+      expect(compactBody).toMatchObject({ id: correctionId, status: 'needs_attention' });
+      expect(compactBody).not.toHaveProperty('checklist');
+
+      const ineligible = await getChecklistCorrection(doneId);
+      expect(ineligible.status).toBe(200);
+      expect(await ineligible.json()).toEqual({
+        id: doneId,
+        eligible: false,
+        revision: null,
+        items: [],
+      });
+      expect((await getChecklistCorrection(foreignId)).status).toBe(404);
+
+      expect(
+        (
+          await route.GET(
+            new Request(
+              `http://localhost/api/mobile/v1/activity/${correctionId}?checklistCorrection=1&extra=1`,
+            ),
+            { params: Promise.resolve({ id: correctionId }) },
+          )
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await route.GET(
+            new Request(
+              `http://localhost/api/mobile/v1/activity/${correctionId}?checklistCorrection=1&checklistCorrection=1`,
+            ),
+            { params: Promise.resolve({ id: correctionId }) },
+          )
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await route.GET(
+            new Request(
+              `http://localhost/api/mobile/v1/activity/${correctionId}?checklistCorrection=1&correctionOwnerMessageId=${correctionOwnerMessageId}`,
+            ),
+            { params: Promise.resolve({ id: correctionId }) },
+          )
+        ).status,
+      ).toBe(400);
+    });
+
+    it('declines correction projection for exhausted revisions and malformed checklist identity', async () => {
+      const exhausted = { ...correctionChecklist, revision: 12 };
+      await store.doc('tasks', correctionId).update({ state: { requestChecklist: exhausted } });
+      expect(await (await getChecklistCorrection(correctionId)).json()).toEqual({
+        id: correctionId,
+        eligible: false,
+        revision: null,
+        items: [],
+      });
+
+      const duplicateItems = [
+        correctionChecklist.items[0]!,
+        { ...correctionLookupItem, status: 'pending' as const },
+      ];
+      await store.doc('tasks', correctionId).update({
+        state: { requestChecklist: { ...correctionChecklist, items: duplicateItems } },
+      });
+      expect(await (await getChecklistCorrection(correctionId)).json()).toEqual({
+        id: correctionId,
+        eligible: false,
+        revision: null,
+        items: [],
+      });
     });
 
     it('does not revise, append, or wake a correction with an unresolved effect journal', async () => {

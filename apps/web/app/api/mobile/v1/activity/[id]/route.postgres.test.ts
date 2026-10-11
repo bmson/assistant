@@ -78,6 +78,14 @@ describe('mobile Activity checklist correction in PostgreSQL mode', () => {
     );
   }
 
+  function getChecklistCorrection(id: string): Promise<Response> {
+    if (!route) throw new Error('Route fixture is not initialized');
+    return route.GET(
+      new Request(`http://localhost/api/mobile/v1/activity/${id}?checklistCorrection=1`),
+      { params: Promise.resolve({ id }) },
+    );
+  }
+
   it('rejects invalid, unauthorized, stale, and effect-ambiguous writes without mutation', async () => {
     auth.allowed.mockResolvedValueOnce(false);
     expect((await post(taskId)).status).toBe(401);
@@ -102,6 +110,19 @@ describe('mobile Activity checklist correction in PostgreSQL mode', () => {
 
   it('writes the selected revision, owner message, and one queue generation through the route', async () => {
     if (!route || !fixture) throw new Error('Route fixture is not initialized');
+    const projection = await getChecklistCorrection(taskId);
+    expect(projection.status).toBe(200);
+    expect(await projection.json()).toEqual({
+      id: taskId,
+      eligible: true,
+      revision: 0,
+      items: [
+        {
+          id: lookupItemId,
+          label: fixture.checklist.items.find((item) => item.id === lookupItemId)?.label,
+        },
+      ],
+    });
     const accepted = await post(taskId);
     expect(accepted.status).toBe(200);
     expect(await accepted.json()).toMatchObject({

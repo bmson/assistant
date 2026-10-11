@@ -1120,6 +1120,98 @@ struct ActivityList: Codable, Sendable {
     }
 }
 
+struct ChecklistCorrectionItem: Decodable, Sendable, Equatable, Identifiable {
+    let id: String
+    let label: String
+
+    var isValid: Bool {
+        !id.isEmpty && id.utf16.count <= 128 &&
+            !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && label.utf16.count <= 500
+    }
+}
+
+struct ChecklistCorrectionProjection: Decodable, Sendable, Equatable {
+    let id: String
+    let eligible: Bool
+    let revision: Int?
+    let items: [ChecklistCorrectionItem]
+
+    func isValid(for taskID: String) -> Bool {
+        guard id == taskID, items.count <= 12,
+              items.allSatisfy(\.isValid), Set(items.map(\.id)).count == items.count else { return false }
+        if eligible {
+            return hasAvailableRevision && !items.isEmpty
+        }
+        return revision == nil && items.isEmpty
+    }
+
+    private var hasAvailableRevision: Bool {
+        guard let revision else { return false }
+        return (0..<12).contains(revision)
+    }
+}
+
+struct ChecklistCorrectionBody: Encodable, Sendable, Equatable {
+    let action = "correct-checklist"
+    let itemId: String
+    let expectedRevision: Int
+    let ownerMessageId: String
+    let replacementKind = "lookup"
+    let replacementLabel: String
+}
+
+struct ChecklistCorrectionPostResponse: Decodable, Sendable {
+    let ok: Bool
+    let outcome: String
+    let transitioned: Bool
+    let queueGeneration: Int
+    let ownerMessageId: String
+    let taskId: String
+    let itemId: String
+    let revision: Int
+    let replacementLabel: String
+    let replacementKind: String
+
+    func confirms(_ body: ChecklistCorrectionBody, taskID: String) -> Bool {
+        (0..<12).contains(body.expectedRevision) &&
+            (0...9_007_199_254_740_991).contains(queueGeneration) &&
+            ok && taskId == taskID && itemId == body.itemId &&
+            ownerMessageId == body.ownerMessageId && revision == body.expectedRevision + 1 &&
+            replacementKind == "lookup" && replacementLabel == body.replacementLabel &&
+            ((outcome == "corrected" && transitioned) ||
+             (outcome == "already_applied" && !transitioned))
+    }
+}
+
+struct ChecklistCorrectionReconciliation: Decodable, Sendable {
+    struct Audit: Decodable, Sendable {
+        let revision: Int
+        let ownerMessageId: String
+        let itemId: String
+        let toLabel: String
+        let toKind: String?
+    }
+
+    let id: String
+    let revision: Int
+    let audit: Audit?
+
+    func confirms(_ body: ChecklistCorrectionBody, taskID: String) -> Bool {
+        guard (0..<12).contains(body.expectedRevision),
+              id == taskID, (body.expectedRevision + 1...12).contains(revision),
+              let audit else { return false }
+        return audit.revision == body.expectedRevision + 1 &&
+            audit.ownerMessageId == body.ownerMessageId && audit.itemId == body.itemId &&
+            audit.toLabel == body.replacementLabel && audit.toKind == "lookup"
+    }
+}
+
+enum ChecklistCorrectionSubmission: Sendable, Equatable {
+    case confirmed
+    case rejected
+    case uncertain
+}
+
 enum SecurityReviewDisposition: String, Codable, Sendable {
     case unreviewed
     case expected

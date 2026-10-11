@@ -41,6 +41,54 @@ export async function GET(
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid activity id' }, { status: 400 });
   try {
     const url = new URL(request.url);
+    const checklistCorrection = url.searchParams.get('checklistCorrection');
+    if (checklistCorrection !== null) {
+      if (
+        checklistCorrection !== '1' ||
+        url.searchParams.getAll('checklistCorrection').length !== 1 ||
+        [...url.searchParams.keys()].some((key) => key !== 'checklistCorrection')
+      )
+        return mobileJson(
+          { error: 'invalid checklist correction projection request' },
+          { status: 400 },
+        );
+      const detail = await getTaskActivityDetail(id);
+      if (!detail) return mobileJson({ error: 'activity not found' }, { status: 404 });
+      const checklist = detail.task.checklist;
+      const items = checklist?.items ?? [];
+      const revision = checklist?.revision;
+      const eligible =
+        detail.task.type === 'chat_turn' &&
+        detail.task.trust === 'owner' &&
+        detail.task.status === 'needs_attention' &&
+        detail.task.archivedAt === null &&
+        Number.isSafeInteger(revision) &&
+        Number(revision) >= 0 &&
+        Number(revision) < 12 &&
+        items.length <= 12 &&
+        new Set(items.map((item) => item.id)).size === items.length &&
+        items.every(
+          (item) => typeof item.id === 'string' && item.id.length > 0 && item.id.length <= 128,
+        ) &&
+        items.every(
+          (item) =>
+            typeof item.label === 'string' &&
+            item.label.trim().length > 0 &&
+            item.label.length <= 500,
+        );
+      const pendingLookups = eligible
+        ? items
+            .filter((item) => item.status === 'pending' && item.kind === 'lookup')
+            .map(({ id: itemId, label }) => ({ id: itemId, label }))
+        : [];
+      const correctionEligible = eligible && pendingLookups.length > 0;
+      return mobileJson({
+        id,
+        eligible: correctionEligible,
+        revision: correctionEligible ? revision : null,
+        items: correctionEligible ? pendingLookups : [],
+      });
+    }
     const correctionOwnerMessageId = url.searchParams.get('correctionOwnerMessageId');
     if (correctionOwnerMessageId !== null) {
       if (
