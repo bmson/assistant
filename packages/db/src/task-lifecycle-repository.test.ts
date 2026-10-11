@@ -97,6 +97,7 @@ it('redacts an arrival reference on terminal completion while retaining safe dai
     throw new Error('Requires isolated _test database');
   const db = createDb(url);
   const id = randomUUID();
+  const legacyId = randomUUID();
   const observationId = randomUUID();
   const agentId = (await db.select().from(agents).limit(1))[0]?.id;
   if (!agentId) throw new Error('Seed the test database');
@@ -139,8 +140,48 @@ it('redacts an arrival reference on terminal completion while retaining safe dai
     expect(JSON.stringify(row?.trigger)).not.toContain(observationId);
     expect(JSON.stringify(row?.trigger)).not.toContain('arrivalExpiresAt');
     expect(JSON.stringify(row?.trigger)).not.toContain('instruction');
+
+    const legacyExternalEventId = `arrival:${agentId}:2026-09-23:47.12,-122.57`;
+    await db.insert(tasks).values({
+      id: legacyId,
+      agentId,
+      type: 'adhoc',
+      trust: 'assistant',
+      externalEventId: legacyExternalEventId,
+      title: 'Private place arrival',
+      state: { contextWindow: [{ role: 'user', content: 'Harbour coordinates.' }] },
+      trigger: {
+        source: 'internal',
+        agentId,
+        trust: 'assistant',
+        externalEventId: legacyExternalEventId,
+        payload: {
+          instruction:
+            'Accurate location observations at least three minutes apart suggest the owner has stopped near a new area: an unlabeled place (lat 47.1234, lng -122.5678). Decide whether one proactive note is worth a push right now.',
+        },
+      },
+    });
+    const legacyLease = await repository.claim(legacyId);
+    if (!legacyLease) throw new Error('Could not claim legacy arrival task');
+    expect(
+      await repository.completeTask(legacyLease, {
+        status: 'cancelled',
+        progress:
+          'Retired a legacy arrival task because its short-lived observation is unavailable.',
+      }),
+    ).toBe(true);
+    const [legacyRow] = await db.select().from(tasks).where(eq(tasks.id, legacyId));
+    expect(legacyRow?.status).toBe('cancelled');
+    expect(legacyRow?.externalEventId).toBeNull();
+    expect(legacyRow?.title).toBeNull();
+    expect(legacyRow?.state).toEqual({});
+    expect(legacyRow?.trigger).toMatchObject({ payload: { kind: 'arrival' } });
+    expect(JSON.stringify(legacyRow?.trigger)).not.toContain('47.1234');
+    expect(JSON.stringify(legacyRow?.trigger)).not.toContain('-122.5678');
+    expect(JSON.stringify(legacyRow?.trigger)).not.toContain('47.12,-122.57');
+    expect(legacyRow?.progress).not.toContain('47.1234');
   } finally {
-    await db.delete(tasks).where(eq(tasks.id, id));
+    await db.delete(tasks).where(inArray(tasks.id, [id, legacyId]));
     await db.$client.end();
   }
 });

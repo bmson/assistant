@@ -9,9 +9,27 @@ import {
   FirestoreApplicationChatPersistence,
   FirestoreLocationPingRepository,
 } from '@assistant/firestore';
-import { chatAdmissionPayload } from '@assistant/persistence';
+import { chatAdmissionPayload, isLegacyArrivalTrigger } from '@assistant/persistence';
 import { type AgentDeps, agentServices } from './deps.js';
 import { executorDeps } from './executor-deps.js';
+
+function isLegacyArrivalTask(task: {
+  agentId: string;
+  type: string;
+  trust: string;
+  conversationId?: string | null;
+  parentTaskId?: string | null;
+  externalEventId?: string | null;
+  trigger: unknown;
+}): boolean {
+  return (
+    task.type === 'adhoc' &&
+    task.trust === 'assistant' &&
+    !task.conversationId &&
+    !task.parentTaskId &&
+    isLegacyArrivalTrigger(task.trigger, task.agentId, task.externalEventId)
+  );
+}
 
 /** Route deterministic internal workflows before the general model executor. */
 export async function executeAgentTask(deps: AgentDeps, taskId: string, generation?: number) {
@@ -25,6 +43,15 @@ export async function executeAgentTask(deps: AgentDeps, taskId: string, generati
   }
   const trigger = task?.trigger as { payload?: Record<string, unknown> } | undefined;
   const kind = typeof trigger?.payload?.kind === 'string' ? trigger.payload.kind : undefined;
+  if (task && isLegacyArrivalTask(task)) {
+    const lease = await taskRepository.claim(taskId, generation);
+    if (!lease) return { outcome: 'not_claimable' as const };
+    const progress =
+      'Retired a legacy arrival task because its short-lived observation is unavailable.';
+    const completed = await taskRepository.completeTask(lease, { status: 'cancelled', progress });
+    if (!completed) return { outcome: 'not_claimable' as const };
+    return { outcome: 'cancelled' as const, detail: progress };
+  }
   let arrivalObservationCheck:
     | ((agentId: string, observationId: string) => Promise<boolean>)
     | undefined;
