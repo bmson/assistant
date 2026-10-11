@@ -103,17 +103,14 @@ describe.skipIf(!enabled)('F19 Firestore chat Stop at tool boundaries', () => {
     risk: 'autonomous' | 'approval',
     invoke: () => Promise<Record<string, unknown>>,
   ) {
-    return new ToolRegistry().register(
-      {
-        name,
-        description: `Synthetic ${name}`,
-        inputSchema: z.object({ value: z.string() }),
-        risk,
-        acceptsUntrustedInput: true,
-        execute: invoke,
-      },
-      risk === 'approval' ? { outwardFacing: true } : undefined,
-    );
+    return new ToolRegistry().register({
+      name,
+      description: `Synthetic ${name}`,
+      inputSchema: z.object({ value: z.string() }),
+      risk,
+      acceptsUntrustedInput: true,
+      execute: invoke,
+    });
   }
 
   it('rejects a pre-handler call after real Firestore chat cancellation and suppresses replay', async () => {
