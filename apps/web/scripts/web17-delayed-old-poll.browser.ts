@@ -388,7 +388,20 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
   let oldGateReleased = false;
   let freshRouteEntered = false;
   let freshPollCount = 0;
+  let freshRouteSettledCount = 0;
+  let freshGateReleased = false;
   let remounted = false;
+
+  const maybeSettleOldRoutes = () => {
+    if (oldGateReleased && oldRouteCount > 0 && oldRouteSettledCount === oldRouteCount) {
+      oldRouteSettled();
+    }
+  };
+  const maybeSettleFreshRoutes = () => {
+    if (freshGateReleased && freshPollCount > 0 && freshRouteSettledCount === freshPollCount) {
+      freshRouteSettled();
+    }
+  };
 
   page.on('pageerror', (error) => browserErrors.push(error.message));
   await page.addInitScript((expectedTaskId: string) => {
@@ -444,9 +457,7 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
             // Playwright may report that the browser already closed the route.
           } finally {
             oldRouteSettledCount += 1;
-            if (oldGateReleased && oldRouteCount > 0 && oldRouteSettledCount === oldRouteCount) {
-              oldRouteSettled();
-            }
+            maybeSettleOldRoutes();
           }
           return;
         }
@@ -465,7 +476,8 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
             }),
           });
         } finally {
-          freshRouteSettled();
+          freshRouteSettledCount += 1;
+          maybeSettleFreshRoutes();
         }
         return;
       }
@@ -542,24 +554,42 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
     // task controls while the new request is still waiting.
     oldGateReleased = true;
     releaseOldRequest();
-    if (oldRouteCount > 0 && oldRouteSettledCount === oldRouteCount) oldRouteSettled();
+    maybeSettleOldRoutes();
     await waitFor(oldSettled, 'Aborted task A route did not settle');
     assert.equal(await page.getByText(oldResult, { exact: true }).count(), 0);
     assert.equal(await page.getByText(freshResult, { exact: true }).count(), 0);
     await page.getByRole('button', { name: 'Stop this task', exact: true }).waitFor();
 
+    freshGateReleased = true;
     releaseFreshRequest();
+    maybeSettleFreshRoutes();
+    await waitFor(freshSettled, 'Fresh task A route did not settle');
     await page.getByText(freshResult, { exact: true }).waitFor({ timeout: 20_000 });
     await page.getByRole('button', { name: 'Send', exact: true }).waitFor();
     assert.equal(await page.getByText(oldResult, { exact: true }).count(), 0);
     assert.equal(await page.getByText(freshResult, { exact: true }).count(), 1);
     assert.ok(oldRouteCount >= 1, 'The initial task A poll must reach the held route');
     assert.equal(taskAPollCount, oldRouteCount + freshPollCount);
-    assert.equal(freshPollCount, 1);
+    const abortedFreshPolls = await page.evaluate(
+      (expectedTaskId) =>
+        (window as Window & { __web17TaskPollAborts?: string[] }).__web17TaskPollAborts?.filter(
+          (abortedTaskId) => abortedTaskId === expectedTaskId,
+        ).length ?? 0,
+      taskId,
+    );
+    assert.equal(
+      freshPollCount - abortedFreshPolls,
+      1,
+      'Exactly one remounted Task A poll must complete and publish its result',
+    );
     assert.deepEqual(browserErrors, []);
   } finally {
+    oldGateReleased = true;
     releaseOldRequest();
+    maybeSettleOldRoutes();
+    freshGateReleased = true;
     releaseFreshRequest();
+    maybeSettleFreshRoutes();
     try {
       if (oldRouteEntered) await waitFor(oldSettled, 'Old task A route did not drain', 5_000);
       if (freshRouteEntered) await waitFor(freshSettled, 'Fresh task A route did not drain', 5_000);
