@@ -120,8 +120,6 @@ jobs:
         timeout-minutes: 8
         run: |
           export PATH="/usr/lib/postgresql/17/bin:$PATH"
-          pg_dump --version
-          pg_restore --version
           pnpm test --restore-snapshot-target apps/agent/src/postgres-restore-snapshot.test.ts
       - name: Remove owned PostgreSQL service
         if: always()
