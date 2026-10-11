@@ -30,7 +30,10 @@ final class StubURLProtocol: URLProtocol {
     private static var recordedURLs: [URL] = []
     private static var recordedBodies: [Data] = []
     private static var recordedHeaders: [[String: String]] = []
+    private static var recordedTimeouts: [TimeInterval] = []
     private static var heldResponses: [String: StubURLProtocol] = [:]
+    private static var stoppedPaths: Set<String> = []
+    private static var stopLoadingObservers: [String: [() -> Void]] = [:]
     private static var completedPaths: Set<String> = []
     private static weak var activeStream: StubURLProtocol?
     private static var streamsByOperation: [String: StubURLProtocol] = [:]
@@ -48,7 +51,10 @@ final class StubURLProtocol: URLProtocol {
             recordedURLs = []
             recordedBodies = []
             recordedHeaders = []
+            recordedTimeouts = []
             heldResponses = [:]
+            stoppedPaths = []
+            stopLoadingObservers = [:]
             completedPaths = []
             activeStream = nil
             streamsByOperation = [:]
@@ -81,7 +87,10 @@ final class StubURLProtocol: URLProtocol {
             recordedURLs = []
             recordedBodies = []
             recordedHeaders = []
+            recordedTimeouts = []
             heldResponses = [:]
+            stoppedPaths = []
+            stopLoadingObservers = [:]
             completedPaths = []
             activeStream = nil
             streamsByOperation = [:]
@@ -111,8 +120,23 @@ final class StubURLProtocol: URLProtocol {
     /// stream rather than as `httpBody`, so it is drained here once.
     static var bodies: [Data] { lock.withLock { recordedBodies } }
     static var headers: [[String: String]] { lock.withLock { recordedHeaders } }
+    static var timeouts: [TimeInterval] { lock.withLock { recordedTimeouts } }
     static var completedResponsePaths: Set<String> { lock.withLock { completedPaths } }
     static func isHoldingResponse(path: String) -> Bool { lock.withLock { heldResponses[path] != nil } }
+    static func observeStopLoading(path: String, testCaseID: String, onStop: @escaping () -> Void) {
+        let key = stopLoadingKey(path: path, testCaseID: testCaseID)
+        let alreadyStopped = lock.withLock {
+            if stoppedPaths.contains(key) { return true }
+            stopLoadingObservers[key, default: []].append(onStop)
+            return false
+        }
+        if alreadyStopped { onStop() }
+    }
+
+    private static func stopLoadingKey(path: String, testCaseID: String) -> String {
+        "\(testCaseID)\u{0}\(path)"
+    }
+
     static func releaseHeldResponse(path: String) {
         let protocolInstance = lock.withLock { heldResponses.removeValue(forKey: path) }
         protocolInstance?.releaseHeldResponse()
@@ -180,7 +204,7 @@ final class StubURLProtocol: URLProtocol {
         }
     }
 
-    private static func next(for method: String, url: URL?, body: Data, headers: [String: String]) -> Outcome {
+    private static func next(for method: String, url: URL?, body: Data, headers: [String: String], timeout: TimeInterval) -> Outcome {
         lock.withLock {
             guard let requestCaseID = testCaseID(in: headers), requestCaseID == activeTestCaseID else {
                 return .failure(URLError(.cancelled))
@@ -189,6 +213,7 @@ final class StubURLProtocol: URLProtocol {
             if let url { recordedURLs.append(url) }
             recordedBodies.append(body)
             recordedHeaders.append(headers)
+            recordedTimeouts.append(timeout)
             if let authorization = headers.first(where: { $0.key.caseInsensitiveCompare("authorization") == .orderedSame })?.value,
                var queued = tokenOutcomes[authorization], !queued.isEmpty {
                 let result = queued.removeFirst()
@@ -224,7 +249,21 @@ final class StubURLProtocol: URLProtocol {
     private let stopped = NSLock()
     private var isStopped = false
     private var heldResponse: (status: Int, body: Data)?
-    override func stopLoading() { stopped.withLock { isStopped = true } }
+    override func stopLoading() {
+        stopped.withLock { isStopped = true }
+        guard let path = request.url?.path,
+              let testCaseID = Self.testCaseID(in: request.allHTTPHeaderFields ?? [:]) else { return }
+        let key = Self.stopLoadingKey(path: path, testCaseID: testCaseID)
+        let observers = Self.lock.withLock { () -> [() -> Void] in
+            guard Self.activeTestCaseID == testCaseID else { return [] }
+            if let held = Self.heldResponses[path], held === self {
+                Self.heldResponses.removeValue(forKey: path)
+            }
+            Self.stoppedPaths.insert(key)
+            return Self.stopLoadingObservers.removeValue(forKey: key) ?? []
+        }
+        observers.forEach { $0() }
+    }
 
     private func releaseHeldResponse() {
         guard let heldResponse else { return }
@@ -256,16 +295,22 @@ final class StubURLProtocol: URLProtocol {
             for: method,
             url: request.url,
             body: requestBody,
-            headers: request.allHTTPHeaderFields ?? [:]
+            headers: request.allHTTPHeaderFields ?? [:],
+            timeout: request.timeoutInterval
         ) {
         case let .held(status, body):
-            guard Self.isActiveTestCase(Self.testCaseID(in: request.allHTTPHeaderFields ?? [:])),
+            guard let requestTestCaseID = Self.testCaseID(in: request.allHTTPHeaderFields ?? [:]),
+                  Self.isActiveTestCase(requestTestCaseID),
                   let path = request.url?.path else {
                 client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
                 return
             }
             heldResponse = (status, body)
-            Self.lock.withLock { Self.heldResponses[path] = self }
+            let key = Self.stopLoadingKey(path: path, testCaseID: requestTestCaseID)
+            Self.lock.withLock {
+                Self.stoppedPaths.remove(key)
+                Self.heldResponses[path] = self
+            }
         case let .failure(error):
             client?.urlProtocol(self, didFailWithError: error)
         case let .stream(body):
@@ -422,6 +467,24 @@ final class APIClientRetryTests: XCTestCase {
     private var testSessions: [URLSession] = []
     private var testCaseID = ""
 
+    @MainActor
+    private final class SecurityReviewTransportStub: SecurityReviewTransport {
+        var listCalls = 0
+        var decisionCalls = 0
+        var listHandler: @MainActor () async throws -> [SecurityReviewItem] = { [] }
+        var decisionHandler: @MainActor (SecurityReviewItem, SecurityReviewDisposition) async -> SecurityReviewDecisionResult = { _, _ in .saved }
+
+        func list() async throws -> [SecurityReviewItem] {
+            listCalls += 1
+            return try await listHandler()
+        }
+
+        func decide(_ item: SecurityReviewItem, as disposition: SecurityReviewDisposition) async -> SecurityReviewDecisionResult {
+            decisionCalls += 1
+            return await decisionHandler(item, disposition)
+        }
+    }
+
     override func setUp() {
         super.setUp()
         testCaseID = UUID().uuidString
@@ -473,6 +536,456 @@ final class APIClientRetryTests: XCTestCase {
         let deliveryBody = try XCTUnwrap(StubURLProtocol.bodies.last)
         let delivery = try XCTUnwrap(JSONSerialization.jsonObject(with: deliveryBody) as? [String: String])
         XCTAssertEqual(delivery, ["action": "delivered", "clientId": clientID])
+    }
+
+    func testSecurityReviewListUsesOneBoundedAuthenticatedAttempt() async throws {
+        let body = Data(#"{"items":[{"incidentId":"a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1","revision":3,"confidence":"high","disposition":"unreviewed","category":"new_device","importance":7,"subject":"New sign-in","fromName":"Provider","observedAt":"2026-10-11T18:00:00Z","materialChangeReason":"A new device was reported.","evidence":{"eventType":"login","evidenceQuote":"A sign-in needs review."}}]}"#.utf8)
+        StubURLProtocol.prime([.success(status: 200, body: body)])
+
+        let items = try await makeClient().securityReviews()
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items.first?.revision, 3)
+        XCTAssertEqual(items.first?.readableCategory, "New Device")
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        let url = try XCTUnwrap(StubURLProtocol.urls.first)
+        XCTAssertEqual(url.path, "/api/mobile/v1/security-reviews")
+        XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems, [URLQueryItem(name: "limit", value: "50")])
+        XCTAssertEqual(StubURLProtocol.timeouts, [12])
+        XCTAssertEqual(
+            StubURLProtocol.headers.first?.first { $0.key.caseInsensitiveCompare("authorization") == .orderedSame }?.value,
+            "Bearer t"
+        )
+    }
+
+    func testSecurityReviewListDoesNotRetryTransportFailure() async {
+        StubURLProtocol.prime([
+            .failure(URLError(.timedOut)),
+            .success(status: 200, body: Data(#"{"items":[]}"#.utf8)),
+        ])
+
+        do {
+            _ = try await makeClient().securityReviews()
+            XCTFail("A single failed review read must be reported rather than retried.")
+        } catch {
+            XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+            XCTAssertEqual(StubURLProtocol.timeouts, [12])
+        }
+    }
+
+    func testSecurityReviewRequestsEnforceAbsoluteDeadlineAndCancelHeldTransport() async throws {
+        let (client, session) = makeClient(requestScopeID: testCaseID, securityReviewDeadline: 0.2)
+        let getPath = "/api/mobile/v1/security-reviews"
+        StubURLProtocol.prime([.held(status: 200, body: Data(#"{"items":[]}"#.utf8))])
+        let getStopped = expectation(description: "Deadline cancels the held GET transport")
+        StubURLProtocol.observeStopLoading(path: getPath, testCaseID: testCaseID) {
+            getStopped.fulfill()
+        }
+
+        do {
+            _ = try await client.securityReviews()
+            XCTFail("A held response must not exceed the absolute deadline.")
+        } catch let APIError.transport(error) {
+            XCTAssertEqual(error.code, .timedOut)
+        } catch {
+            XCTFail("Expected a deadline transport error, got \(error).")
+        }
+
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        XCTAssertEqual(StubURLProtocol.timeouts, [12])
+        await fulfillment(of: [getStopped], timeout: 2)
+        XCTAssertFalse(StubURLProtocol.isHoldingResponse(path: getPath))
+        let getDrained = await cancelAndDrain(session)
+        XCTAssertTrue(getDrained)
+
+        let (postClient, postSession) = makeClient(requestScopeID: testCaseID, securityReviewDeadline: 0.2)
+        let postPath = "/api/mobile/v1/security-reviews/a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1"
+        StubURLProtocol.prime([.held(status: 200, body: Data(#"{"ok":true}"#.utf8))])
+        let postStopped = expectation(description: "Deadline cancels the held POST transport")
+        StubURLProtocol.observeStopLoading(path: postPath, testCaseID: testCaseID) {
+            postStopped.fulfill()
+        }
+        let outcome = await postClient.decideSecurityReview(
+            incidentId: "a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1",
+            expectedRevision: 5,
+            disposition: .dismissed
+        )
+        XCTAssertEqual(outcome, .uncertain)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        XCTAssertEqual(StubURLProtocol.timeouts, [12])
+        await fulfillment(of: [postStopped], timeout: 2)
+        XCTAssertFalse(StubURLProtocol.isHoldingResponse(path: postPath))
+        let postDrained = await cancelAndDrain(postSession)
+        XCTAssertTrue(postDrained)
+    }
+
+    func testSecurityReviewParentCancellationCancelsHeldTransport() async throws {
+        let (client, session) = makeClient(requestScopeID: testCaseID, securityReviewDeadline: 12)
+        let path = "/api/mobile/v1/security-reviews"
+        StubURLProtocol.prime([.held(status: 200, body: Data(#"{"items":[]}"#.utf8))])
+        let transportStopped = expectation(description: "Parent cancellation stops the held transport")
+        StubURLProtocol.observeStopLoading(path: path, testCaseID: testCaseID) {
+            transportStopped.fulfill()
+        }
+        let request = Task { try await client.securityReviews() }
+
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !StubURLProtocol.isHoldingResponse(path: path), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: path), "The request should reach its held response before cancellation.")
+        request.cancel()
+
+        do {
+            _ = try await request.value
+            XCTFail("Cancelling the parent operation must cancel its held network request.")
+        } catch {
+            XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        }
+        await fulfillment(of: [transportStopped], timeout: 2)
+        XCTAssertFalse(StubURLProtocol.isHoldingResponse(path: path))
+        XCTAssertEqual(StubURLProtocol.timeouts, [12])
+        let drained = await cancelAndDrain(session)
+        XCTAssertTrue(drained)
+    }
+
+    func testSecurityReviewListRejectsDuplicateAndMalformedRows() async throws {
+        let duplicate = #"{"items":[{"incidentId":"a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1","revision":3,"confidence":"high","disposition":"unreviewed","category":"login","importance":7,"subject":"One","observedAt":"2026-10-11T18:00:00Z"},{"incidentId":"a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1","revision":4,"confidence":"high","disposition":"unreviewed","category":"login","importance":7,"subject":"Two","observedAt":"2026-10-11T18:00:00Z"}]}"#
+        StubURLProtocol.prime([.success(status: 200, body: Data(duplicate.utf8))])
+        do {
+            _ = try await makeClient().securityReviews()
+            XCTFail("Duplicate incident identities must fail closed.")
+        } catch {
+            XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        }
+
+        StubURLProtocol.prime([.success(status: 200, body: Data(#"{"items":[{"incidentId":"not-an-id","revision":0,"confidence":"","disposition":"unreviewed","category":"login","importance":99,"subject":" ","observedAt":"invalid"}]}"#.utf8))])
+        do {
+            _ = try await makeClient().securityReviews()
+            XCTFail("Malformed review fields must fail closed.")
+        } catch {
+            XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        }
+
+        let supplementaryCharactersOverUtf16Bound = String(repeating: "😀", count: 41)
+        let oversizedUtf16 = try JSONSerialization.data(withJSONObject: ["items": [[
+            "incidentId": "a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1",
+            "revision": 3,
+            "confidence": supplementaryCharactersOverUtf16Bound,
+            "disposition": "unreviewed",
+            "category": "login",
+            "importance": 7,
+            "subject": "A bounded UTF-16 value",
+            "observedAt": "2026-10-11T18:00:00Z",
+        ]]])
+        StubURLProtocol.prime([.success(status: 200, body: oversizedUtf16)])
+        do {
+            _ = try await makeClient().securityReviews()
+            XCTFail("A supplementary character counts as two UTF-16 code units for server parity.")
+        } catch {
+            XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        }
+
+        let tooMany = (0..<51).map { index in
+            [
+                "incidentId": String(format: "a2f7d86c-29ce-5c48-9d57-%012x", index),
+                "revision": index + 1,
+                "confidence": "high",
+                "disposition": "unreviewed",
+                "category": "login",
+                "importance": 5,
+                "subject": "Review \(index)",
+                "observedAt": "2026-10-11T18:00:00Z",
+            ] as [String: Any]
+        }
+        let oversizedBody = try JSONSerialization.data(withJSONObject: ["items": tooMany])
+        StubURLProtocol.prime([.success(status: 200, body: oversizedBody)])
+        do {
+            _ = try await makeClient().securityReviews()
+            XCTFail("The native client must preserve the server's 50-item bound.")
+        } catch {
+            XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+            XCTAssertEqual(StubURLProtocol.timeouts, [12])
+        }
+    }
+
+    func testSecurityReviewDecisionUsesFixedReasonAndDoesNotRetry() async throws {
+        let incidentID = "a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1"
+        StubURLProtocol.prime([.success(status: 200, body: Data(#"{"ok":true}"#.utf8))])
+
+        let result = await makeClient().decideSecurityReview(incidentId: incidentID, expectedRevision: 5, disposition: .expected)
+
+        XCTAssertEqual(result, .saved)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        XCTAssertEqual(StubURLProtocol.timeouts, [12])
+        let url = try XCTUnwrap(StubURLProtocol.urls.first)
+        XCTAssertEqual(url.path, "/api/mobile/v1/security-reviews/\(incidentID)")
+        let bodyData = try XCTUnwrap(StubURLProtocol.bodies.first)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
+        XCTAssertEqual(body["expectedRevision"] as? Int, 5)
+        XCTAssertEqual(body["disposition"] as? String, "expected")
+        XCTAssertEqual(body["reason"] as? String, "Owner marked this activity as expected.")
+
+        StubURLProtocol.prime([.success(status: 409, body: Data(#"{"error":"stale"}"#.utf8))])
+        let stale = await makeClient().decideSecurityReview(incidentId: incidentID, expectedRevision: 5, disposition: .dismissed)
+        XCTAssertEqual(stale, .stale)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+
+        StubURLProtocol.prime([.failure(URLError(.timedOut)), .success(status: 200, body: Data(#"{"ok":true}"#.utf8))])
+        let uncertain = await makeClient().decideSecurityReview(incidentId: incidentID, expectedRevision: 5, disposition: .expected)
+        XCTAssertEqual(uncertain, .uncertain)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+
+        StubURLProtocol.prime([])
+        let invalid = await makeClient().decideSecurityReview(incidentId: incidentID, expectedRevision: 5, disposition: .unreviewed)
+        XCTAssertEqual(invalid, .uncertain)
+        XCTAssertTrue(StubURLProtocol.attempts.isEmpty)
+    }
+
+    @MainActor
+    func testSecurityReviewStaleDecisionReconcilesOnceWithoutOptimisticRemoval() async throws {
+        let item = try securityReviewItem()
+        let transport = SecurityReviewTransportStub()
+        transport.listHandler = { [item] }
+        transport.decisionHandler = { _, _ in .stale }
+        let client = makeClient()
+        let controller = SecurityReviewController(
+            context: SecurityReviewRequestContext(ownerID: "owner-a", connectionVersion: 1, client: client),
+            connectionIsCurrent: { true },
+            transport: transport
+        )
+        await controller.refresh()
+
+        await controller.decide(item, as: .dismissed)
+
+        XCTAssertEqual(transport.decisionCalls, 1)
+        XCTAssertEqual(transport.listCalls, 2)
+        XCTAssertEqual(controller.items, [item])
+        XCTAssertEqual(controller.message, "This review changed. The latest version is loaded.")
+        XCTAssertNil(controller.pendingIncidentID)
+    }
+
+    @MainActor
+    func testSecurityReviewUncertainDecisionReconcilesOnceAndNeverRetriesPost() async throws {
+        let item = try securityReviewItem()
+        let transport = SecurityReviewTransportStub()
+        transport.listHandler = { [item] }
+        transport.decisionHandler = { _, _ in .uncertain }
+        let controller = SecurityReviewController(
+            context: SecurityReviewRequestContext(ownerID: "owner-a", connectionVersion: 1, client: makeClient()),
+            connectionIsCurrent: { true },
+            transport: transport
+        )
+        await controller.refresh()
+
+        await controller.decide(item, as: .expected)
+
+        XCTAssertEqual(transport.decisionCalls, 1)
+        XCTAssertEqual(transport.listCalls, 2)
+        XCTAssertEqual(controller.items, [item])
+        XCTAssertTrue(controller.message.contains("decision response was unclear"))
+    }
+
+    @MainActor
+    func testSecurityReviewKeepsPriorRowsWhenPostDecisionRefreshFails() async throws {
+        let item = try securityReviewItem()
+        let transport = SecurityReviewTransportStub()
+        var listCalls = 0
+        transport.listHandler = {
+            listCalls += 1
+            if listCalls == 1 { return [item] }
+            throw APIError.invalidResponse
+        }
+        transport.decisionHandler = { _, _ in .saved }
+        let controller = SecurityReviewController(
+            context: SecurityReviewRequestContext(ownerID: "owner-a", connectionVersion: 1, client: makeClient()),
+            connectionIsCurrent: { true },
+            transport: transport
+        )
+        await controller.refresh()
+
+        await controller.decide(item, as: .expected)
+
+        XCTAssertEqual(transport.decisionCalls, 1)
+        XCTAssertEqual(transport.listCalls, 2)
+        XCTAssertEqual(controller.items, [item])
+        XCTAssertTrue(controller.staleList)
+        XCTAssertTrue(controller.message.contains("Decision saved."))
+        XCTAssertNil(controller.pendingIncidentID)
+    }
+
+    @MainActor
+    func testSecurityReviewDoesNotShowEmptyAfterInitialEmptyRefreshFails() async throws {
+        let transport = SecurityReviewTransportStub()
+        var listCalls = 0
+        transport.listHandler = {
+            listCalls += 1
+            if listCalls == 1 { return [] }
+            throw APIError.invalidResponse
+        }
+        let controller = SecurityReviewController(
+            context: SecurityReviewRequestContext(ownerID: "owner-a", connectionVersion: 1, client: makeClient()),
+            connectionIsCurrent: { true },
+            transport: transport
+        )
+        await controller.refresh()
+        XCTAssertEqual(controller.loadState, .ready)
+        XCTAssertTrue(controller.items.isEmpty)
+
+        await controller.refresh()
+
+        XCTAssertEqual(controller.loadState, .ready)
+        XCTAssertTrue(controller.items.isEmpty)
+        XCTAssertTrue(controller.staleList)
+        XCTAssertTrue(controller.message.contains("could not be refreshed"))
+        XCTAssertEqual(transport.listCalls, 2)
+    }
+
+    @MainActor
+    func testSecurityReviewDecisionIsBlockedDuringRefreshAndForStaleRows() async throws {
+        let item = try securityReviewItem()
+        let transport = SecurityReviewTransportStub()
+        var listCalls = 0
+        var releaseList: (@MainActor () -> Void)?
+        transport.listHandler = {
+            listCalls += 1
+            if listCalls == 1 { return [item] }
+            return await withCheckedContinuation { continuation in
+                releaseList = { continuation.resume(returning: [item]) }
+            }
+        }
+        let controller = SecurityReviewController(
+            context: SecurityReviewRequestContext(ownerID: "owner-a", connectionVersion: 1, client: makeClient()),
+            connectionIsCurrent: { true },
+            transport: transport
+        )
+        await controller.refresh()
+        await controller.decide(item, as: .unreviewed)
+        XCTAssertEqual(transport.decisionCalls, 0)
+        let refreshing = Task { await controller.refresh() }
+        for _ in 0..<50 {
+            if releaseList != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard let finishRefresh = releaseList else {
+            controller.dispose()
+            XCTFail("The held refresh did not start.")
+            return
+        }
+
+        await controller.decide(item, as: .dismissed)
+
+        XCTAssertEqual(transport.decisionCalls, 0)
+        finishRefresh()
+        await refreshing.value
+        XCTAssertFalse(controller.isRefreshing)
+        controller.dispose()
+
+        let staleTransport = SecurityReviewTransportStub()
+        var staleListCalls = 0
+        staleTransport.listHandler = {
+            staleListCalls += 1
+            if staleListCalls == 1 { return [item] }
+            throw APIError.invalidResponse
+        }
+        staleTransport.decisionHandler = { _, _ in .stale }
+        let staleController = SecurityReviewController(
+            context: SecurityReviewRequestContext(ownerID: "owner-a", connectionVersion: 2, client: makeClient()),
+            connectionIsCurrent: { true },
+            transport: staleTransport
+        )
+        await staleController.refresh()
+        await staleController.decide(item, as: .dismissed)
+        XCTAssertTrue(staleController.staleList)
+        await staleController.decide(item, as: .dismissed)
+        XCTAssertEqual(staleTransport.decisionCalls, 1)
+        staleController.dispose()
+    }
+
+    @MainActor
+    func testSecurityReviewLateDecisionAfterDisposeCannotReconcileOrPublish() async throws {
+        let item = try securityReviewItem()
+        let transport = SecurityReviewTransportStub()
+        transport.listHandler = { [item] }
+        var connectionCurrent = true
+        var resumeDecision: (@MainActor () -> Void)?
+        transport.decisionHandler = { _, _ in
+            await withCheckedContinuation { continuation in
+                resumeDecision = { continuation.resume(returning: .saved) }
+            }
+        }
+        let controller = SecurityReviewController(
+            context: SecurityReviewRequestContext(ownerID: "owner-a", connectionVersion: 7, client: makeClient()),
+            connectionIsCurrent: { connectionCurrent },
+            transport: transport
+        )
+        await controller.refresh()
+        let mutation = Task { await controller.decide(item, as: .dismissed) }
+        for _ in 0..<50 {
+            if resumeDecision != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard let finishDecision = resumeDecision else {
+            controller.dispose()
+            XCTFail("The held decision did not start.")
+            return
+        }
+        XCTAssertEqual(controller.pendingIncidentID, item.incidentId)
+        await controller.refresh()
+        XCTAssertEqual(transport.listCalls, 1)
+        connectionCurrent = false
+        controller.dispose()
+        finishDecision()
+        await mutation.value
+
+        XCTAssertEqual(transport.decisionCalls, 1)
+        XCTAssertEqual(transport.listCalls, 1)
+        XCTAssertTrue(controller.items.isEmpty)
+        XCTAssertNil(controller.pendingIncidentID)
+        XCTAssertEqual(controller.loadState, .loading)
+        XCTAssertTrue(controller.message.isEmpty)
+    }
+
+    @MainActor
+    func testSecurityReviewLateListAfterConnectionReplacementCannotPublish() async throws {
+        let item = try securityReviewItem()
+        let transport = SecurityReviewTransportStub()
+        var connectionCurrent = true
+        var releaseList: (@MainActor () -> Void)?
+        transport.listHandler = {
+            await withCheckedContinuation { continuation in
+                releaseList = { continuation.resume(returning: [item]) }
+            }
+        }
+        let controller = SecurityReviewController(
+            context: SecurityReviewRequestContext(ownerID: "owner-a", connectionVersion: 11, client: makeClient()),
+            connectionIsCurrent: { connectionCurrent },
+            transport: transport
+        )
+        let refresh = Task { await controller.refresh() }
+        for _ in 0..<50 {
+            if releaseList != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard let finishList = releaseList else {
+            controller.dispose()
+            XCTFail("The held list read did not start.")
+            return
+        }
+
+        connectionCurrent = false
+        controller.dispose()
+        finishList()
+        await refresh.value
+
+        XCTAssertTrue(controller.items.isEmpty)
+        XCTAssertEqual(controller.loadState, .loading)
+        XCTAssertFalse(controller.isRefreshing)
+    }
+
+    @MainActor
+    private func securityReviewItem() throws -> SecurityReviewItem {
+        try JSONDecoder().decode(SecurityReviewItem.self, from: Data(#"{"incidentId":"a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1","revision":3,"confidence":"high","disposition":"unreviewed","category":"new_device","importance":7,"subject":"New sign-in","fromName":"Provider","observedAt":"2026-10-11T18:00:00Z","materialChangeReason":"A new device was reported.","evidence":{"eventType":"login","evidenceQuote":"A sign-in needs review."}}"#.utf8))
     }
 
     func testCallCheckinAnswerForwardsServerIssuedRevision() async throws {
@@ -2766,7 +3279,8 @@ final class APIClientRetryTests: XCTestCase {
     }
 
     private func makeClient(clientID: String? = nil, token: String = "t",
-                            requestScopeID: String) -> (client: APIClient, session: URLSession) {
+                            requestScopeID: String,
+                            securityReviewDeadline: TimeInterval = 12) -> (client: APIClient, session: URLSession) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
         configuration.httpAdditionalHeaders = ["X-Assistant-Test-Case": requestScopeID]
@@ -2775,7 +3289,8 @@ final class APIClientRetryTests: XCTestCase {
         let client = APIClient(
             configuration: .init(baseURL: URL(string: "https://assistant.test")!, token: token),
             session: session,
-            clientID: clientID
+            clientID: clientID,
+            securityReviewDeadline: securityReviewDeadline
         )
         return (client, session)
     }
@@ -3324,8 +3839,9 @@ extension APIClientRetryTests {
 
         for scenario in scenarios {
             let recorder = LocalNotificationRecorder()
+            let notificationScheduled = expectation(description: "The \(scenario.status) notification for \(scenario.taskId) is scheduled")
             let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
-                await recorder.schedule(
+                let scheduled = await recorder.schedule(
                     title: title,
                     body: body,
                     route: route,
@@ -3333,7 +3849,10 @@ extension APIClientRetryTests {
                     agentID: agentID,
                     conversationID: conversationID
                 )
+                notificationScheduled.fulfill()
+                return scheduled
             })
+            defer { model.scenePhaseDidChange(.background) }
             let reply = ChatMessage(id: "reply-\(scenario.taskId)", role: .assistant,
                 parts: [.init(type: "text", text: "The task needs attention.")],
                 metadata: ["taskId": .string(scenario.taskId)])
@@ -3353,12 +3872,12 @@ extension APIClientRetryTests {
             ])
 
             model.send("Continue the task")
-            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-            while recorder.entries.isEmpty, ContinuousClock.now < deadline {
-                try await Task.sleep(for: .milliseconds(10))
-            }
+            // Wait for the event under test rather than racing repeated
+            // main-actor timer callbacks against the notification task.
+            await fulfillment(of: [notificationScheduled], timeout: 5)
 
-            let scheduled = try XCTUnwrap(recorder.entries.first, "Expected one task attention notification for \(scenario.status)")
+            let scheduled = try XCTUnwrap(recorder.entries.first,
+                "Expected one task attention notification for \(scenario.status), task \(scenario.taskId); sending=\(model.isSending), activity=\(model.activityDetail ?? "none")")
             XCTAssertEqual(recorder.entries.count, 1)
             XCTAssertEqual(scheduled.route, scenario.route)
             XCTAssertEqual(scheduled.approvalId, scenario.approvalId)

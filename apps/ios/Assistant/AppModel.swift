@@ -466,6 +466,19 @@ final class AppModel {
         activityConnectionRevision == version && client != nil
     }
 
+    func securityReviewRequestContext() -> SecurityReviewRequestContext? {
+        guard let client, let ownerID = bootstrap?.identity.id else { return nil }
+        return SecurityReviewRequestContext(
+            ownerID: ownerID,
+            connectionVersion: activityConnectionRevision,
+            client: client
+        )
+    }
+
+    func securityReviewConnectionIsCurrent(ownerID: String, version: Int) -> Bool {
+        activityConnectionRevision == version && client != nil && bootstrap?.identity.id == ownerID
+    }
+
     /// Cancellation prevents publishing a result, but does not mean the owner
     /// changed assistants. Keep those recovery explanations distinct.
     private func connectionIdentityIsCurrent(_ client: APIClient, version: Int) -> Bool {

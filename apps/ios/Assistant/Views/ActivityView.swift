@@ -33,6 +33,7 @@ struct ActivityView: View {
     @State private var activityStatuses: [String: ActivityStatusResponse] = [:]
     @State private var activityStatusAvailability = ActivityStatusAvailability()
     @State private var statusRefreshOffset = 0
+    @State private var securityReviewController: SecurityReviewController?
 
     var body: some View {
         ScrollView {
@@ -89,6 +90,9 @@ struct ActivityView: View {
                         }
                     }
                 }
+                if showsSecurityReviews, let securityReviewController {
+                    SecurityReviewSection(controller: securityReviewController)
+                }
                 if let discovery {
                     Text(discovery.searchIncomplete == true
                          ? "More records remain. Continue searching before concluding that a task is absent."
@@ -120,12 +124,14 @@ struct ActivityView: View {
             activityStatuses = [:]
             activityStatusAvailability.reset()
             statusRefreshOffset = 0
+            disposeSecurityReviews()
         }
         .onChange(of: filter) { _, _ in
             discoveryTask?.cancel()
             discoveryGeneration = UUID()
             discoveryInFlight = false
             if discovery != nil { loadDiscovery(reset: true) }
+            if !showsSecurityReviews { disposeSecurityReviews() }
         }
         .onChange(of: model.activityConnectionVersion) { _, _ in
             discoveryTask?.cancel()
@@ -135,12 +141,14 @@ struct ActivityView: View {
             activityStatuses = [:]
             activityStatusAvailability.reset()
             statusRefreshOffset = 0
+            disposeSecurityReviews()
         }
         .onDisappear {
             discoveryTask?.cancel()
             discoveryTask = nil
             discoveryGeneration = UUID()
             discoveryInFlight = false
+            disposeSecurityReviews()
         }
         .assistantSubmenuChrome()
         .toolbarBackground(.visible, for: .navigationBar)
@@ -181,6 +189,7 @@ struct ActivityView: View {
             if showingArchived { await model.refreshArchivedActivity() }
             else { await model.refreshOverview() }
             if discovery != nil { loadDiscovery(reset: true) }
+            if showsSecurityReviews { await securityReviewController?.refresh() }
         }
         .task(id: "\(scenePhase)-\(model.activityConnectionVersion)-\(showingArchived)-\(filter.rawValue)") {
             guard scenePhase == .active else { return }
@@ -193,6 +202,33 @@ struct ActivityView: View {
                     )
                 } catch { return }
             }
+        }
+        .task(id: "security-\(scenePhase)-\(model.activityConnectionVersion)-\(showingArchived)-\(filter.rawValue)") {
+            guard scenePhase == .active, showsSecurityReviews,
+                  let context = model.securityReviewRequestContext() else {
+                disposeSecurityReviews()
+                return
+            }
+
+            let controller: SecurityReviewController
+            if let existing = securityReviewController,
+               existing.ownerID == context.ownerID,
+               existing.connectionVersion == context.connectionVersion {
+                controller = existing
+            } else {
+                disposeSecurityReviews()
+                controller = SecurityReviewController(
+                    context: context,
+                    connectionIsCurrent: { [weak model] in
+                        model?.securityReviewConnectionIsCurrent(
+                            ownerID: context.ownerID,
+                            version: context.connectionVersion
+                        ) ?? false
+                    }
+                )
+                securityReviewController = controller
+            }
+            await controller.refresh()
         }
         .alert(
             "Raise task budget",
@@ -586,6 +622,14 @@ struct ActivityView: View {
 
     private var usesAccessibilityLayout: Bool { dynamicTypeSize.isAccessibilitySize }
     private var isLandscape: Bool { verticalSizeClass == .compact }
+    private var showsSecurityReviews: Bool {
+        !showingArchived && (filter == .all || filter == .needsYou)
+    }
+
+    private func disposeSecurityReviews() {
+        securityReviewController?.dispose()
+        securityReviewController = nil
+    }
 
     private func icon(for status: String) -> String {
         switch status {
