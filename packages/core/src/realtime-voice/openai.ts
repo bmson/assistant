@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import WebSocket from 'ws';
 import {
   emptyRealtimeUsage,
@@ -30,6 +31,7 @@ type ServerEvent = {
   type?: string;
   delta?: string;
   item_id?: string;
+  response_id?: string;
   transcript?: string;
   call_id?: string;
   name?: string;
@@ -41,6 +43,15 @@ type ServerEvent = {
   };
   error?: { message?: string };
   response?: {
+    id?: string;
+    status?: string;
+    output?: Array<{
+      type?: string;
+      status?: string;
+      call_id?: string;
+      name?: string;
+      arguments?: string;
+    }>;
     usage?: {
       input_token_details?: {
         audio_tokens?: number;
@@ -56,6 +67,42 @@ type ServerEvent = {
     };
   };
 };
+
+type ToolCallTurn = { spoke: boolean };
+type PendingToolCall = {
+  call?: RealtimeToolCall;
+  fingerprint: string;
+  turn: ToolCallTurn;
+  state: 'pending' | 'dispatched' | 'rejected';
+  resultSent: boolean;
+};
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
+}
+
+function parseToolArguments(argumentsJson: unknown): { args: unknown } | null {
+  if (typeof argumentsJson !== 'string') return null;
+  try {
+    const args = JSON.parse(argumentsJson) as unknown;
+    return { args };
+  } catch {
+    return null;
+  }
+}
+
+function toolFingerprint(name: string, args: unknown): string {
+  return createHash('sha256')
+    .update(`${name}\n${stableJson(args)}`)
+    .digest('hex');
+}
 
 const count = (value: unknown) =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
@@ -99,10 +146,17 @@ async function connectOpenAIRealtime(
   // request is a reply that never comes: the caller hears silence. A request
   // made while one is active waits for its `response.done` instead.
   let responseActive = false;
+  let activeResponseId: string | null = null;
   let responseRequested = false;
   let pendingResponse: { instructions?: string } | null = null;
-  let activeTurn: { spoke: boolean } | null = null;
-  const callTurns = new Map<string, { spoke: boolean }>();
+  let activeTurn: ToolCallTurn | null = null;
+  const startedResponseIds = new Set<string>();
+  const settledResponseIds = new Set<string>();
+  const turnsByResponse = new Map<string, ToolCallTurn>();
+  const pendingCallsByResponse = new Map<string, Set<string>>();
+  // Keep terminal IDs for this socket's lifetime: an event replay must not
+  // dispatch an action again or replace the turn that owns its follow-up.
+  const callsById = new Map<string, PendingToolCall>();
   let replyStallTimer: NodeJS.Timeout | null = null;
   let setupReady = false;
   let setupRetired = false;
@@ -184,13 +238,31 @@ async function connectOpenAIRealtime(
     }
     switch (event.type) {
       case 'response.created':
+        if (!event.response?.id) {
+          events.error(new Error('OpenAI Realtime created a response without its ID'));
+          break;
+        }
+        if (startedResponseIds.has(event.response.id) || settledResponseIds.has(event.response.id))
+          break;
         cancelReplyWatch();
         responseRequested = false;
         responseActive = true;
+        activeResponseId = event.response.id;
         activeTurn = { spoke: false };
+        startedResponseIds.add(event.response.id);
+        turnsByResponse.set(event.response.id, activeTurn);
         break;
       case 'response.output_audio.delta':
         if (event.delta) {
+          // Audio deltas belong to the response that generated them. A late
+          // event for a settled response must not mark the active turn spoken,
+          // reach the caller, or replace its truncation item/offset.
+          const responseId = event.response_id;
+          const turn = responseId ? turnsByResponse.get(responseId) : undefined;
+          if (!responseId || responseId !== activeResponseId || !turn) {
+            events.error(new Error('OpenAI Realtime audio delta referenced an inactive response'));
+            break;
+          }
           const audio = new Uint8Array(Buffer.from(event.delta, 'base64'));
           if (event.item_id && event.item_id !== currentAudioItem) {
             currentAudioItem = event.item_id;
@@ -198,7 +270,7 @@ async function connectOpenAIRealtime(
           }
           // μ-law at 8 kHz: one byte per sample, eight per millisecond.
           currentAudioItemMs += audio.length / 8;
-          if (activeTurn) activeTurn.spoke = true;
+          turn.spoke = true;
           events.audio(audio);
         }
         break;
@@ -230,19 +302,81 @@ async function connectOpenAIRealtime(
         if (event.transcript?.trim()) events.transcript('assistant', event.transcript.trim());
         break;
       case 'response.function_call_arguments.done': {
-        let args: unknown = {};
-        try {
-          args = event.arguments ? JSON.parse(event.arguments) : {};
-        } catch {
-          args = { _unparsed: event.arguments };
+        if (!event.call_id || !event.name || !event.response_id) {
+          events.error(new Error('OpenAI Realtime returned incomplete function-call metadata'));
+          break;
         }
-        if (event.call_id && event.name) {
-          callTurns.set(event.call_id, activeTurn ?? { spoke: false });
-          events.toolCall({ id: event.call_id, name: event.name, args });
+        const parsed = parseToolArguments(event.arguments);
+        const callFingerprint = parsed ? toolFingerprint(event.name, parsed.args) : '';
+        const previous = callsById.get(event.call_id);
+        if (previous) {
+          if (previous.fingerprint !== callFingerprint) {
+            if (previous.state === 'pending') {
+              previous.state = 'rejected';
+              previous.call = undefined;
+            }
+            events.error(
+              new Error('OpenAI Realtime reused a function-call ID with different content'),
+            );
+          }
+          break;
         }
+        const turn = turnsByResponse.get(event.response_id);
+        if (!turn) {
+          callsById.set(event.call_id, {
+            fingerprint: callFingerprint,
+            turn: { spoke: false },
+            state: 'rejected',
+            resultSent: false,
+          });
+          events.error(new Error('OpenAI Realtime function call referenced an unknown response'));
+          break;
+        }
+        if (!parsed) {
+          callsById.set(event.call_id, {
+            fingerprint: '',
+            turn,
+            state: 'rejected',
+            resultSent: false,
+          });
+          events.error(new Error('OpenAI Realtime returned invalid function-call arguments'));
+          break;
+        }
+        const record: PendingToolCall = {
+          call: { id: event.call_id, name: event.name, args: parsed.args },
+          fingerprint: callFingerprint,
+          turn,
+          state: 'pending',
+          resultSent: false,
+        };
+        callsById.set(event.call_id, record);
+        const pending = pendingCallsByResponse.get(event.response_id) ?? new Set<string>();
+        pending.add(event.call_id);
+        pendingCallsByResponse.set(event.response_id, pending);
         break;
       }
       case 'response.done': {
+        const responseId = event.response?.id;
+        if (!responseId) {
+          for (const pendingIds of pendingCallsByResponse.values()) {
+            for (const callId of pendingIds) {
+              const record = callsById.get(callId);
+              if (record?.state === 'pending') {
+                record.state = 'rejected';
+                record.call = undefined;
+              }
+            }
+          }
+          pendingCallsByResponse.clear();
+          events.error(new Error('OpenAI Realtime completed a response without its ID'));
+          break;
+        }
+        // Completion events can be replayed after a later response has begun.
+        // Settle a response once so its usage, tool output, and lifecycle do
+        // not affect a newer response.
+        if (settledResponseIds.has(responseId)) break;
+        settledResponseIds.add(responseId);
+        const ownsActiveResponse = activeResponseId === responseId;
         const input = event.response?.usage?.input_token_details;
         const output = event.response?.usage?.output_token_details;
         const cached = count(input?.cached_tokens);
@@ -260,9 +394,65 @@ async function connectOpenAIRealtime(
           usage.reasoningOutputTokens += count(output.reasoning_tokens);
           usage.reasoningUsageReported = true;
         }
-        responseActive = false;
-        activeTurn = null;
-        if (pendingResponse) {
+        const pending = responseId ? pendingCallsByResponse.get(responseId) : undefined;
+        if (pending) {
+          const outputItems = event.response?.output ?? [];
+          for (const callId of pending) {
+            const record = callsById.get(callId);
+            if (record?.state !== 'pending') continue;
+            const item = outputItems.find((candidate) => candidate.call_id === callId);
+            const itemArgs = item && parseToolArguments(item.arguments);
+            const itemFingerprint = itemArgs
+              ? toolFingerprint(item?.name ?? '', itemArgs.args)
+              : '';
+            if (
+              event.response?.status !== 'completed' ||
+              item?.type !== 'function_call' ||
+              item.status !== 'completed' ||
+              itemFingerprint !== record.fingerprint
+            ) {
+              record.state = 'rejected';
+              record.call = undefined;
+              events.error(
+                new Error(
+                  'OpenAI Realtime function call was not confirmed by a completed response',
+                ),
+              );
+              continue;
+            }
+            const call = record.call;
+            if (!call) {
+              record.state = 'rejected';
+              events.error(
+                new Error('OpenAI Realtime confirmed a function call without its arguments'),
+              );
+              continue;
+            }
+            record.state = 'dispatched';
+            record.call = undefined;
+            events.toolCall(call);
+          }
+          pendingCallsByResponse.delete(responseId as string);
+        }
+        if (
+          event.response?.output?.some(
+            (item) =>
+              item.type === 'function_call' && (!item.call_id || !pending?.has(item.call_id)),
+          )
+        ) {
+          events.error(
+            new Error(
+              'OpenAI Realtime completed a function call without matching streamed arguments',
+            ),
+          );
+        }
+        turnsByResponse.delete(responseId);
+        if (ownsActiveResponse) {
+          responseActive = false;
+          activeResponseId = null;
+          activeTurn = null;
+        }
+        if (ownsActiveResponse && pendingResponse) {
           const next = pendingResponse;
           pendingResponse = null;
           requestResponse(next.instructions);
@@ -356,16 +546,27 @@ async function connectOpenAIRealtime(
       send({ type: 'input_audio_buffer.append', audio: Buffer.from(mulaw).toString('base64') });
     },
     sendToolResult(call: RealtimeToolCall, result: unknown, followUp: ToolFollowUp = 'respond') {
+      const record = callsById.get(call.id);
+      if (
+        record?.state !== 'dispatched' ||
+        record.fingerprint !== toolFingerprint(call.name, call.args)
+      ) {
+        events.error(
+          new Error('OpenAI Realtime received a result for an unconfirmed function call'),
+        );
+        return;
+      }
+      if (record.resultSent) return;
+      record.resultSent = true;
       send({
         type: 'conversation.item.create',
         item: { type: 'function_call_output', call_id: call.id, output: JSON.stringify(result) },
       });
-      const turn = callTurns.get(call.id);
-      callTurns.delete(call.id);
       // Asking for a response after every result made the model restate
       // what it had just said alongside a `note`, and say goodbye twice
       // after `end_call`.
-      if (followUp === 'respond' || (followUp === 'if_silent' && !turn?.spoke)) requestResponse();
+      if (followUp === 'respond' || (followUp === 'if_silent' && !record.turn.spoke))
+        requestResponse();
     },
     respond(instructions) {
       requestResponse(instructions);
