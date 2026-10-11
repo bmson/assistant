@@ -3492,7 +3492,7 @@ extension APIClientRetryTests {
             ],
             "/api/mobile/v1/chat/status": [
                 .success(status: 200, body: try updates(status: "working", reply: nil, cursor: "working")),
-                .delayed(after: 0.2, status: 200, body: try updates(status: "done", reply: firstReply, cursor: "first-done")),
+                .held(status: 200, body: try updates(status: "done", reply: firstReply, cursor: "first-done")),
                 .success(status: 200, body: try updates(status: "done", reply: "The comparison is ready.", cursor: "second-done")),
             ],
             "/api/mobile/v1/overview": [
@@ -3501,6 +3501,7 @@ extension APIClientRetryTests {
             ],
             "/api/mobile/v1/workspace": [workspaceUnavailable, workspaceUnavailable],
         ])
+        defer { StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/chat/status") }
 
         model.saveComposerDraft("", in: scope)
         model.send("Find return flight options")
@@ -3517,15 +3518,21 @@ extension APIClientRetryTests {
         XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 1,
             "AppModel cannot admit the retained draft while the earlier task is active")
 
-        let delayedTerminalDeadline = ContinuousClock.now.advanced(by: .seconds(5))
-        while StubURLProtocol.urls.filter({ $0.path == "/api/mobile/v1/chat/status" }).count < 2,
-              ContinuousClock.now < delayedTerminalDeadline {
+        let heldTerminalDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/chat/status"),
+              ContinuousClock.now < heldTerminalDeadline {
             try await Task.sleep(for: .milliseconds(10))
         }
-        XCTAssertTrue(model.isSending, "The unresolved turn stays active while its terminal response is delayed")
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/chat/status"),
+            "The terminal status response is held until the pending-state assertions complete")
+        XCTAssertTrue(model.isSending, "The unresolved turn stays active while its terminal response is held")
         XCTAssertTrue(model.hasUnresolvedTurn)
         XCTAssertEqual(model.composerDraft(in: scope), followUp,
-            "Polling and the delayed terminal response cannot consume the second draft")
+            "Polling and the held terminal response cannot consume the second draft")
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 1,
+            "The retained draft cannot start a second task while the first terminal response is held")
+
+        StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/chat/status")
 
         let firstSettlementDeadline = ContinuousClock.now.advanced(by: .seconds(8))
         while model.hasUnresolvedTurn, ContinuousClock.now < firstSettlementDeadline {
@@ -3562,6 +3569,7 @@ extension APIClientRetryTests {
         }
         XCTAssertFalse(model.hasUnresolvedTurn)
         XCTAssertTrue(model.messages.contains(where: { $0.role == .assistant && $0.text == "The comparison is ready." }))
+        XCTAssertEqual(model.messages.filter { $0.role == .user && $0.text == followUp }.count, 1)
     }
 
     @MainActor
