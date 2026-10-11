@@ -1,7 +1,7 @@
 import type { ActivityTaskRecord, TaskActivityRepository } from '@assistant/persistence';
 import { describe, expect, it } from 'vitest';
 import { activityProgress } from './presentation.js';
-import { listActivityWithRepository } from './queries.js';
+import { getActivityStatusWithRepository, listActivityWithRepository } from './queries.js';
 
 describe('owner-facing Activity progress', () => {
   it('replaces persisted provider diagnostics without exposing provider URLs', () => {
@@ -42,6 +42,9 @@ describe('owner-facing Activity progress', () => {
     } satisfies ActivityTaskRecord;
     const repository: TaskActivityRepository = {
       kind: 'task-activity-repository',
+      async getStatus() {
+        return { task, hasPendingApproval: false };
+      },
       async list() {
         return { tasks: [task], archivedCount: 0, pendingApprovalTaskIds: [] };
       },
@@ -53,5 +56,47 @@ describe('owner-facing Activity progress', () => {
     });
 
     expect(result.items[0]?.progress).toBe('A service request failed.');
+  });
+
+  it('projects only live Activity fields as a task advances', async () => {
+    const base = {
+      id: 'task-live',
+      agentId: 'owner-1',
+      conversationId: null,
+      externalEventId: null,
+      type: 'adhoc',
+      status: 'pending',
+      title: 'Keep the original title',
+      progress: 'Queued',
+      trust: 'owner',
+      spentUsd: '0',
+      budgetUsdLimit: '1',
+      updatedAt: new Date('2026-10-11T12:00:00Z'),
+      archivedAt: null,
+      autonomyGrant: null,
+      trigger: { source: 'chat', payload: {} },
+    } satisfies ActivityTaskRecord;
+    let status = 'pending';
+    const repository: TaskActivityRepository = {
+      kind: 'task-activity-repository',
+      async getStatus() {
+        return {
+          task: { ...base, status, progress: status === 'done' ? 'Finished' : status },
+          hasPendingApproval: status === 'waiting_approval',
+        };
+      },
+      async list() {
+        return { tasks: [], archivedCount: 0, pendingApprovalTaskIds: [] };
+      },
+    };
+
+    for (const next of ['pending', 'running', 'done']) {
+      status = next;
+      const projection = await getActivityStatusWithRepository(repository, 'owner-1', 'task-live');
+      expect(projection?.status).toBe(next);
+      expect(projection?.progress).toBe(next === 'done' ? 'Finished' : next);
+      expect(projection).not.toHaveProperty('title');
+      expect(projection).not.toHaveProperty('conversationId');
+    }
   });
 });

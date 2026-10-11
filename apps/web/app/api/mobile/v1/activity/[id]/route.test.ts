@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { resetConfigForTest } from '@assistant/config';
 import { createInstallationStore } from '@assistant/firestore';
+import {
+  chatAdmissionCancellationTrigger,
+  chatAdmissionExternalEventId,
+} from '@assistant/persistence';
 import { taskFixture } from '@assistant/persistence/testing';
 import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -29,6 +33,8 @@ describe.skipIf(!localEmulator)(
     const retryId = randomUUID();
     const cancelId = randomUUID();
     const foreignId = randomUUID();
+    const canaryId = randomUUID();
+    const admissionCancellationId = randomUUID();
     const initial = new Date('2026-09-20T12:00:00Z');
     const store = createInstallationStore({
       projectId: 'demo-assistant-test',
@@ -106,6 +112,34 @@ describe.skipIf(!localEmulator)(
           leaseToken: randomUUID(),
           attempt: 3,
         }),
+        store.doc('tasks', canaryId).set({
+          ...taskFixture({ id: canaryId, agentId, conversationId: randomUUID(), reminderId: '' }),
+          trigger: { source: 'chat', payload: { canary: true } },
+        }),
+        (() => {
+          const conversationId = randomUUID();
+          const clientOperationId = randomUUID();
+          return store.doc('tasks', admissionCancellationId).set({
+            ...taskFixture({
+              id: admissionCancellationId,
+              agentId,
+              conversationId,
+              reminderId: '',
+            }),
+            type: 'chat_turn',
+            status: 'cancelled',
+            externalEventId: chatAdmissionExternalEventId({
+              agentId,
+              conversationId,
+              clientOperationId,
+            }),
+            trigger: chatAdmissionCancellationTrigger({
+              agentId,
+              conversationId,
+              clientOperationId,
+            }),
+          });
+        })(),
       ]);
     });
 
@@ -125,6 +159,43 @@ describe.skipIf(!localEmulator)(
         }),
         { params: Promise.resolve({ id }) },
       );
+    const get = (id: string) =>
+      route.GET(new Request(`http://localhost/api/mobile/v1/activity/${id}`), {
+        params: Promise.resolve({ id }),
+      });
+
+    it('returns only live owner status and rejects unauthenticated, malformed, foreign, and missing IDs', async () => {
+      const live = await get(runningId);
+      expect(live.status).toBe(200);
+      expect(await live.json()).toMatchObject({
+        id: runningId,
+        status: 'running',
+        progress: expect.any(String),
+        archivedAt: null,
+        hasPendingApproval: false,
+      });
+      expect((await get(foreignId)).status).toBe(404);
+      expect((await get(randomUUID())).status).toBe(404);
+      expect((await get(canaryId)).status).toBe(404);
+      expect((await get(admissionCancellationId)).status).toBe(404);
+      expect((await get('bad-id')).status).toBe(400);
+
+      auth.allowed.mockResolvedValueOnce(false);
+      expect((await get(runningId)).status).toBe(401);
+
+      await store.doc('tasks', runningId).update({
+        status: 'done',
+        archivedAt: initial,
+        updatedAt: initial,
+        progress: 'Finished safely.',
+      });
+      expect(await (await get(runningId)).json()).toMatchObject({
+        id: runningId,
+        status: 'done',
+        progress: 'Finished safely.',
+        archivedAt: initial.toISOString(),
+      });
+    });
 
     it('allows only the scoped POST route through the proxy', async () => {
       const { proxy } = await import('../../../../../../proxy.js');
@@ -132,6 +203,9 @@ describe.skipIf(!localEmulator)(
         proxy(
           new NextRequest(`http://localhost/api/mobile/v1/activity/${doneId}`, { method: 'POST' }),
         ).status,
+      ).toBe(200);
+      expect(
+        proxy(new NextRequest(`http://localhost/api/mobile/v1/activity/${doneId}`)).status,
       ).toBe(200);
       expect(
         proxy(new NextRequest(`http://localhost/api/mobile/v1/activity/${doneId}`)).status,

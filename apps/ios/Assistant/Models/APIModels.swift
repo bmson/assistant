@@ -1120,6 +1120,55 @@ struct ActivityList: Codable, Sendable {
     }
 }
 
+struct ActivityStatusResponse: Codable, Sendable {
+    let id: String
+    let status: String
+    let progress: String
+    let spentUsd: String
+    let budgetUsdLimit: String
+    let updatedAt: String
+    let archivedAt: String?
+    let hasPendingApproval: Bool
+    let hasActiveAutonomy: Bool
+    let stuckWaiting: Bool
+}
+
+extension ActivityItem {
+    func applying(_ status: ActivityStatusResponse) -> ActivityItem {
+        guard status.id == id,
+              let incomingDate = Self.activityDate(status.updatedAt),
+              let currentDate = Self.activityDate(updatedAt),
+              incomingDate >= currentDate else { return self }
+        return ActivityItem(
+            id: id,
+            type: type,
+            status: status.status,
+            title: title,
+            progress: status.progress,
+            trust: trust,
+            spentUsd: status.spentUsd,
+            budgetUsdLimit: status.budgetUsdLimit,
+            updatedAt: status.updatedAt,
+            archivedAt: status.archivedAt,
+            hasPendingApproval: status.hasPendingApproval,
+            hasActiveAutonomy: status.hasActiveAutonomy,
+            stuckWaiting: status.stuckWaiting,
+            createdAt: createdAt,
+            conversationId: conversationId,
+            source: source,
+            externalEventId: externalEventId
+        )
+    }
+
+    private static func activityDate(_ value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
+    }
+}
+
 struct ArchiveOldActivityProgress: Codable, Sendable {
     let operationId: String?
     let scannedThisBatch: Int

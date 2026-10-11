@@ -527,6 +527,106 @@ final class APIClientRetryTests: XCTestCase {
         XCTAssertEqual(result.captureStatus, "Unknown legacy evidence")
     }
 
+    func testActivityStatusReadsCompactLiveProjectionByTaskID() async throws {
+        let id = "11000000-0000-0000-0000-000000000001"
+        StubURLProtocol.prime([.success(status: 200, body: Data(#"{"id":"11000000-0000-0000-0000-000000000001","status":"running","progress":"Checking sources","spentUsd":"0.01","budgetUsdLimit":"0.50","updatedAt":"2026-10-11T12:00:00.000Z","archivedAt":null,"hasPendingApproval":false,"hasActiveAutonomy":false,"stuckWaiting":false}"#.utf8))])
+        let result = try await makeClient().activityStatus(id: id)
+        XCTAssertEqual(result.id, id)
+        XCTAssertEqual(result.status, "running")
+        XCTAssertNil(result.archivedAt)
+        XCTAssertEqual(StubURLProtocol.urls.first?.path, "/api/mobile/v1/activity/\(id)")
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+    }
+
+    @MainActor
+    func testActivityStatusFollowsPendingRunningDoneWithoutReplacingLoadedTitle() async throws {
+        let id = "11000000-0000-0000-0000-000000000002"
+        func body(_ status: String, _ progress: String) -> Data {
+            Data(#"{"id":"\#(id)","status":"\#(status)","progress":"\#(progress)","spentUsd":"0.01","budgetUsdLimit":"0.50","updatedAt":"2026-10-11T12:00:00.000Z","archivedAt":null,"hasPendingApproval":false,"hasActiveAutonomy":false,"stuckWaiting":false}"#.utf8)
+        }
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/activity/\(id)": [
+                .success(status: 200, body: body("pending", "Waiting to start")),
+                .success(status: 200, body: body("running", "Working")),
+                .success(status: 200, body: body("done", "Finished")),
+            ],
+        ])
+        let model = AppModel(apiClient: makeClient())
+        var loaded = ActivityItem(
+            id: id, type: "chat_turn", status: "pending", title: "Compare options",
+            progress: "Queued", trust: "owner", spentUsd: "0", budgetUsdLimit: "0.50",
+            updatedAt: "2026-10-11T11:00:00Z", archivedAt: nil, hasPendingApproval: false,
+            hasActiveAutonomy: false, stuckWaiting: false
+        )
+        for expected in ["pending", "running", "done"] {
+            let response = await model.fetchActivityStatus(id: id)
+            let status = try XCTUnwrap(response)
+            loaded = loaded.applying(status)
+            XCTAssertEqual(loaded.status, expected)
+            XCTAssertEqual(loaded.title, "Compare options")
+        }
+        XCTAssertEqual(loaded.progress, "Finished")
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/activity/\(id)" }.count, 3)
+    }
+
+    @MainActor
+    func testActivityStatusDiscardsResponseAfterOwnerReplacement() async throws {
+        let model = try await notificationModel()
+        let id = "11000000-0000-0000-0000-000000000003"
+        let path = "/api/mobile/v1/activity/\(id)"
+        let oldStatus = Data(#"{"id":"11000000-0000-0000-0000-000000000003","status":"running","progress":"Old owner","spentUsd":"0","budgetUsdLimit":"0.50","updatedAt":"2026-10-11T12:00:00.000Z","archivedAt":null,"hasPendingApproval":false,"hasActiveAutonomy":false,"stuckWaiting":false}"#.utf8)
+        let prior = try JSONDecoder().decode(BootstrapResponse.self, from: notificationBootstrap())
+        let replacement = BootstrapResponse(
+            generatedAt: "2026-10-03T00:00:01Z",
+            identity: .init(id: "replacement-owner", name: "Robin", avatarUrl: nil),
+            shell: prior.shell,
+            conversation: prior.conversation
+        )
+        StubURLProtocol.prime([], paths: [
+            path: [.held(status: 200, body: oldStatus)],
+            "/api/mobile/v1/bootstrap": [.success(status: 200, body: try JSONEncoder().encode(replacement))],
+            "/api/mobile/v1/overview": [.success(status: 401, body: Data())],
+        ])
+        let oldRequest = Task { await model.fetchActivityStatus(id: id) }
+        while !StubURLProtocol.isHoldingResponse(path: path) { await Task.yield() }
+        await model.refreshAll(reportFailure: false)
+        XCTAssertEqual(model.bootstrap?.identity.id, "replacement-owner")
+        StubURLProtocol.releaseHeldResponse(path: path)
+        let result = await oldRequest.value
+        XCTAssertNil(result)
+    }
+
+    @MainActor
+    func testCancelledActivityStatusRequestReturnsNoProjection() async throws {
+        let id = "11000000-0000-0000-0000-000000000004"
+        let path = "/api/mobile/v1/activity/\(id)"
+        let body = Data(#"{"id":"11000000-0000-0000-0000-000000000004","status":"done","progress":"Finished","spentUsd":"0.01","budgetUsdLimit":"0.50","updatedAt":"2026-10-11T12:00:00.000Z","archivedAt":null,"hasPendingApproval":false,"hasActiveAutonomy":false,"stuckWaiting":false}"#.utf8)
+        StubURLProtocol.prime([.held(status: 200, body: body)])
+        let model = AppModel(apiClient: makeClient())
+        let request = Task { await model.fetchActivityStatus(id: id) }
+        while !StubURLProtocol.isHoldingResponse(path: path) { await Task.yield() }
+        request.cancel()
+        StubURLProtocol.releaseHeldResponse(path: path)
+        let result = await request.value
+        XCTAssertNil(result)
+    }
+
+    @MainActor
+    func testMissingActivityStatusDoesNotCloseLoadedTask() async throws {
+        let id = "11000000-0000-0000-0000-000000000005"
+        StubURLProtocol.prime([.success(status: 404, body: Data(#"{"error":"activity not found"}"#.utf8))])
+        let model = AppModel(apiClient: makeClient())
+        let response = await model.fetchActivityStatus(id: id)
+        let loaded = ActivityItem(
+            id: id, type: "chat_turn", status: "running", title: "Still checking",
+            progress: "Looking for sources", trust: "owner", spentUsd: "0", budgetUsdLimit: "0.50",
+            updatedAt: "2026-10-11T11:00:00Z", archivedAt: nil, hasPendingApproval: false,
+            hasActiveAutonomy: false, stuckWaiting: false
+        )
+        XCTAssertNil(response)
+        XCTAssertEqual(response.map(loaded.applying)?.status ?? loaded.status, "running")
+    }
+
     func testWorkspaceAdvertisesTypedSectionAvailability() async {
         StubURLProtocol.prime([.success(status: 200, body: Data("{}".utf8))])
         _ = try? await makeClient().workspace()

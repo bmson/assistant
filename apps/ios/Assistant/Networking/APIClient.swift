@@ -198,6 +198,10 @@ struct APIClient: Sendable {
         return try await perform(makeRequest(url: url), as: ActivityList.self)
     }
 
+    func activityStatus(id: String) async throws -> ActivityStatusResponse {
+        try await get("api/mobile/v1/activity/\(id)")
+    }
+
     func updateActivity(id: String, action: String, budgetUsdLimit: Double? = nil) async throws {
         var request = makeRequest(
             url: configuration.baseURL.appending(path: "api/mobile/v1/activity/\(id)")
