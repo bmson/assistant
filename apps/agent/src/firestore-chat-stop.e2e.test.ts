@@ -264,11 +264,12 @@ describe.skipIf(!enabled)('F19 Firestore chat Stop at tool boundaries', () => {
     });
     expect(lateApproval).not.toHaveProperty('wake');
     expect((await store.doc('tasks', admitted.task.id).get()).get('status')).toBe('cancelled');
+    expect((await store.doc('toolCalls', parked.toolCallId).get()).get('status')).toBe('approved');
     await expect(run.executeApproved(parked.toolCallId, input.ctx)).resolves.toMatchObject({
       kind: 'failed',
     });
     expect(invocations).toBe(0);
     expect((await store.doc('tasks', admitted.task.id).get()).get('status')).toBe('cancelled');
-    expect((await store.doc('toolCalls', parked.toolCallId).get()).get('status')).toBe('approved');
+    expect((await store.doc('toolCalls', parked.toolCallId).get()).get('status')).toBe('failed');
   });
 });
