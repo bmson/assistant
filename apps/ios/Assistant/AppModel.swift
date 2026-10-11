@@ -1709,13 +1709,23 @@ final class AppModel {
     }
 
     func fetchActivityStatus(id: String) async -> ActivityStatusResponse? {
-        guard !Task.isCancelled, let client else { return nil }
+        guard case let .updated(status) = await fetchActivityStatusOutcome(id: id) else { return nil }
+        return status
+    }
+
+    func fetchActivityStatusOutcome(id: String) async -> ActivityStatusReadOutcome {
+        guard !Task.isCancelled, let client else { return .discarded }
         let version = connectionVersion
         do {
             let status = try await client.activityStatus(id: id)
-            guard status.id == id, connectionIsCurrent(client, version: version) else { return nil }
-            return status
-        } catch { return nil }
+            guard !Task.isCancelled, connectionIsCurrent(client, version: version) else { return .discarded }
+            guard status.id == id else { return .unavailable }
+            return .updated(status)
+        } catch {
+            guard !Task.isCancelled, connectionIsCurrent(client, version: version) else { return .discarded }
+            if isRequestCancellation(error) { return .discarded }
+            return .unavailable
+        }
     }
 
     func activityDiscoveryPage(archived: Bool, query: String, filter: String, cursor: String?) async -> ActivityList? {

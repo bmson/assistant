@@ -2333,6 +2333,36 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(unmatched.status, "running")
     }
 
+    func testActivityStatusAvailabilityIsScopedAndOnlyReflectsCurrentFailures() {
+        let key = ActivityStatusAvailabilityKey(ownerID: "owner-1", taskID: "task-1")
+        let otherOwner = ActivityStatusAvailabilityKey(ownerID: "owner-2", taskID: "task-1")
+        let unqueried = ActivityStatusAvailabilityKey(ownerID: "owner-1", taskID: "task-2")
+        var availability = ActivityStatusAvailability()
+
+        XCTAssertNil(availability.notice(for: key, savedStatus: "running"))
+        availability.record(.unavailable, for: key)
+        XCTAssertEqual(availability.notice(for: key, savedStatus: "running"),
+                       "Latest update unavailable. Showing saved status.")
+        XCTAssertNil(availability.notice(for: otherOwner, savedStatus: "running"))
+        XCTAssertNil(availability.notice(for: unqueried, savedStatus: "running"))
+        XCTAssertNil(availability.notice(for: key, savedStatus: "cancelled"),
+                     "A terminal saved status must not be presented as waiting for a fresh update")
+
+        availability.record(.discarded, for: unqueried)
+        XCTAssertNil(availability.notice(for: unqueried, savedStatus: "running"),
+                     "Canceled or stale reads do not create unavailable state")
+        XCTAssertEqual(availability.notice(for: key, savedStatus: "running"),
+                       "Latest update unavailable. Showing saved status.",
+                     "Discarding another read does not change this task's prior result")
+
+        availability.record(.updated(ActivityStatusResponse(
+            id: key.taskID, status: "running", progress: "Working", spentUsd: "0",
+            budgetUsdLimit: "0.50", updatedAt: "2026-10-11T12:00:00Z", archivedAt: nil,
+            hasPendingApproval: false, hasActiveAutonomy: false, stuckWaiting: false
+        )), for: key)
+        XCTAssertNil(availability.notice(for: key, savedStatus: "running"))
+    }
+
     func testGoalTitlesHideAutomationRunIdentifiers() {
         let generated = goalRecord(title: "gate-test-1787275766328-0.08720229193630735")
         let human = goalRecord(title: "Find a senior product role")

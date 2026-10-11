@@ -587,13 +587,15 @@ final class APIClientRetryTests: XCTestCase {
             "/api/mobile/v1/bootstrap": [.success(status: 200, body: try JSONEncoder().encode(replacement))],
             "/api/mobile/v1/overview": [.success(status: 401, body: Data())],
         ])
-        let oldRequest = Task { await model.fetchActivityStatus(id: id) }
+        let oldRequest = Task { await model.fetchActivityStatusOutcome(id: id) }
         while !StubURLProtocol.isHoldingResponse(path: path) { await Task.yield() }
         await model.refreshAll(reportFailure: false)
         XCTAssertEqual(model.bootstrap?.identity.id, "replacement-owner")
         StubURLProtocol.releaseHeldResponse(path: path)
         let result = await oldRequest.value
-        XCTAssertNil(result)
+        guard case .discarded = result else {
+            return XCTFail("A response from a replaced owner must be discarded, not shown as unavailable")
+        }
     }
 
     @MainActor
@@ -603,12 +605,31 @@ final class APIClientRetryTests: XCTestCase {
         let body = Data(#"{"id":"11000000-0000-0000-0000-000000000004","status":"done","progress":"Finished","spentUsd":"0.01","budgetUsdLimit":"0.50","updatedAt":"2026-10-11T12:00:00.000Z","archivedAt":null,"hasPendingApproval":false,"hasActiveAutonomy":false,"stuckWaiting":false}"#.utf8)
         StubURLProtocol.prime([.held(status: 200, body: body)])
         let model = AppModel(apiClient: makeClient())
-        let request = Task { await model.fetchActivityStatus(id: id) }
+        let request = Task { await model.fetchActivityStatusOutcome(id: id) }
         while !StubURLProtocol.isHoldingResponse(path: path) { await Task.yield() }
         request.cancel()
         StubURLProtocol.releaseHeldResponse(path: path)
         let result = await request.value
-        XCTAssertNil(result)
+        guard case .discarded = result else {
+            return XCTFail("A canceled status request must not create an availability warning")
+        }
+    }
+
+    @MainActor
+    func testURLSessionCancellationDoesNotMarkActivityStatusUnavailable() async throws {
+        let id = "11000000-0000-0000-0000-000000000007"
+        let path = "/api/mobile/v1/activity/\(id)"
+        StubURLProtocol.prime([], paths: [path: [.failure(URLError(.cancelled))]])
+        let model = AppModel(apiClient: makeClient())
+        let result = await model.fetchActivityStatusOutcome(id: id)
+        guard case .discarded = result else {
+            return XCTFail("URLSession cancellation is not a failed status refresh")
+        }
+
+        var availability = ActivityStatusAvailability()
+        let key = ActivityStatusAvailabilityKey(ownerID: "owner-1", taskID: id)
+        availability.record(result, for: key)
+        XCTAssertNil(availability.notice(for: key, savedStatus: "running"))
     }
 
     @MainActor
@@ -616,15 +637,43 @@ final class APIClientRetryTests: XCTestCase {
         let id = "11000000-0000-0000-0000-000000000005"
         StubURLProtocol.prime([.success(status: 404, body: Data(#"{"error":"activity not found"}"#.utf8))])
         let model = AppModel(apiClient: makeClient())
-        let response = await model.fetchActivityStatus(id: id)
+        let response = await model.fetchActivityStatusOutcome(id: id)
         let loaded = ActivityItem(
             id: id, type: "chat_turn", status: "running", title: "Still checking",
             progress: "Looking for sources", trust: "owner", spentUsd: "0", budgetUsdLimit: "0.50",
             updatedAt: "2026-10-11T11:00:00Z", archivedAt: nil, hasPendingApproval: false,
             hasActiveAutonomy: false, stuckWaiting: false
         )
-        XCTAssertNil(response)
-        XCTAssertEqual(response.map(loaded.applying)?.status ?? loaded.status, "running")
+        guard case .unavailable = response else { return XCTFail("A current 404 should be reported as an unavailable refresh") }
+        XCTAssertEqual(loaded.status, "running")
+    }
+
+    @MainActor
+    func testActivityStatusUnavailableNoticeClearsAfterSuccessfulRefresh() async throws {
+        let id = "11000000-0000-0000-0000-000000000006"
+        let path = "/api/mobile/v1/activity/\(id)"
+        let body = Data(#"{"id":"11000000-0000-0000-0000-000000000006","status":"running","progress":"Still checking","spentUsd":"0.01","budgetUsdLimit":"0.50","updatedAt":"2026-10-11T12:00:00.000Z","archivedAt":null,"hasPendingApproval":false,"hasActiveAutonomy":false,"stuckWaiting":false}"#.utf8)
+        StubURLProtocol.prime([], paths: [path: [
+            .success(status: 503, body: Data(#"{"error":"temporarily unavailable"}"#.utf8)),
+            .success(status: 200, body: body),
+        ]])
+        let model = AppModel(apiClient: makeClient())
+        let key = ActivityStatusAvailabilityKey(ownerID: "owner-1", taskID: id)
+        var availability = ActivityStatusAvailability()
+        XCTAssertNil(availability.notice(for: key, savedStatus: "running"), "Unqueried rows stay quiet")
+
+        let first = await model.fetchActivityStatusOutcome(id: id)
+        guard case .unavailable = first else { return XCTFail("A current 503 should be reported as unavailable") }
+        availability.record(first, for: key)
+        XCTAssertEqual(availability.notice(for: key, savedStatus: "running"),
+                       "Latest update unavailable. Showing saved status.")
+
+        let second = await model.fetchActivityStatusOutcome(id: id)
+        guard case let .updated(status) = second else { return XCTFail("The next successful refresh should restore current status") }
+        availability.record(second, for: key)
+        XCTAssertEqual(status.status, "running")
+        XCTAssertNil(availability.notice(for: key, savedStatus: "running"))
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == path }.count, 2)
     }
 
     func testWorkspaceAdvertisesTypedSectionAvailability() async {
@@ -3340,16 +3389,21 @@ extension APIClientRetryTests {
         })
         StubURLProtocol.prime([], paths: [
             "/api/mobile/v1/chat": [.stream(body: Data("data: [DONE]\n\n".utf8))],
-            "/api/mobile/v1/chat/status": Array(repeating: .failure(URLError(.timedOut)), count: 5),
+            // A status GET is retried once, so five failed polls need ten
+            // wire outcomes to reach the intended bounded unknown outcome.
+            "/api/mobile/v1/chat/status": Array(repeating: .failure(URLError(.timedOut)), count: 10),
         ])
 
         model.send("Check the task status")
-        let deadline = ContinuousClock.now.advanced(by: .seconds(6))
+        defer { if model.isSending { model.cancelSend() } }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
         while model.isSending, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
 
         XCTAssertFalse(model.isSending)
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat/status" }.count, 10,
+            "Each of five bounded status polls reaches both the original read and its single retry")
         XCTAssertTrue(model.errorMessage?.localizedCaseInsensitiveContains("outcome is unknown") == true)
         XCTAssertNotEqual(model.activityThought, .finished)
         XCTAssertTrue(recorder.entries.isEmpty, "An unknown outcome must not claim that the task result is ready")
@@ -4473,9 +4527,16 @@ extension APIClientRetryTests {
                 identity: .init(id: "replacement-owner", name: "Robin", avatarUrl: nil),
                 shell: try JSONDecoder().decode(BootstrapResponse.self, from: notificationBootstrap()).shell,
                 conversation: notificationConversation(notificationPrimaryID))
+            let mutationPath: String
+            switch action {
+            case "hide": mutationPath = "/api/mobile/v1/chats/\(notificationPrimaryID)/messages/\(original.id)"
+            case "create": mutationPath = "/api/mobile/v1/chats"
+            default: mutationPath = "/api/mobile/v1/chats/\(notificationPrimaryID)"
+            }
             StubURLProtocol.primeBootstrap(try JSONEncoder().encode(replacement),
                 overview: [.success(status: 401, body: Data()), .success(status: 401, body: Data())],
-                queued: [.delayed(after: 0.05, status: 200, body: oldBody)])
+                queued: [.held(status: 200, body: oldBody)])
+            defer { StubURLProtocol.releaseHeldResponse(path: mutationPath) }
             let mutation = Task {
                 switch action {
                 case "hide": await model.hideMessage(original)
@@ -4483,8 +4544,16 @@ extension APIClientRetryTests {
                 default: _ = await model.changeConversationModel("candidate-model")
                 }
             }
-            while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+            let heldDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !StubURLProtocol.isHoldingResponse(path: mutationPath), ContinuousClock.now < heldDeadline {
+                await Task.yield()
+            }
+            XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: mutationPath),
+                "The old-owner mutation stays pending until replacement bootstrap is applied")
             await model.refreshAll(reportFailure: false)
+            XCTAssertEqual(model.bootstrap?.identity.id, "replacement-owner")
+            XCTAssertEqual(model.conversationId, notificationPrimaryID)
+            StubURLProtocol.releaseHeldResponse(path: mutationPath)
             await mutation.value
             XCTAssertEqual(model.bootstrap?.identity.id, "replacement-owner")
             XCTAssertEqual(model.conversationId, notificationPrimaryID)
@@ -4496,6 +4565,9 @@ extension APIClientRetryTests {
             XCTAssertTrue((1...2).contains(reads.filter { $0.path == "/api/mobile/v1/overview" }.count))
             XCTAssertEqual(StubURLProtocol.attempts.count, reads.count + 1,
                 "The old result cannot issue a conversation read; a replaced owner needs a fresh overview")
+            XCTAssertFalse(StubURLProtocol.requests.contains(where: {
+                $0.0 == "GET" && $0.1.path.hasPrefix("/api/mobile/v1/chats/")
+            }), "A stale create/model result cannot load or publish a conversation for the replacement owner")
         }
     }
 

@@ -68,15 +68,23 @@ describe.skipIf(!localEmulator)(
       await store.db.recursiveDelete(store.root);
       await Promise.all([
         store.doc('agents', agentId).set({ id: agentId }),
-        store
-          .doc('tasks', doneId)
-          .set({ id: doneId, agentId, status: 'done', archivedAt: null, updatedAt: initial }),
-        store
-          .doc('tasks', runningId)
-          .set({ id: runningId, agentId, status: 'running', archivedAt: null, updatedAt: initial }),
+        store.doc('tasks', doneId).set({
+          ...taskFixture({ id: doneId, agentId, conversationId: randomUUID(), reminderId: '' }),
+          status: 'done',
+          updatedAt: initial,
+        }),
+        store.doc('tasks', runningId).set({
+          ...taskFixture({ id: runningId, agentId, conversationId: randomUUID(), reminderId: '' }),
+          status: 'running',
+          updatedAt: initial,
+        }),
         store.doc('tasks', foreignId).set({
-          id: foreignId,
-          agentId: foreignAgentId,
+          ...taskFixture({
+            id: foreignId,
+            agentId: foreignAgentId,
+            conversationId: randomUUID(),
+            reminderId: '',
+          }),
           status: 'done',
           archivedAt: null,
           updatedAt: initial,
@@ -214,7 +222,15 @@ describe.skipIf(!localEmulator)(
       );
     });
 
-    it('allows the scoped activity item GET and POST routes through the proxy', async () => {
+    it('reports malformed owner status as unavailable without changing the task', async () => {
+      await store.doc('tasks', runningId).update({ progress: null });
+      const response = await get(runningId);
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: 'activity status unavailable' });
+      expect((await store.doc('tasks', runningId).get()).get('progress')).toBeNull();
+    });
+
+    it('allows Activity collection and scoped item routes through the proxy', async () => {
       const { proxy } = await import('../../../../../../proxy.js');
       expect(
         proxy(
@@ -224,11 +240,14 @@ describe.skipIf(!localEmulator)(
       expect(
         proxy(new NextRequest(`http://localhost/api/mobile/v1/activity/${doneId}`)).status,
       ).toBe(200);
-      expect(proxy(new NextRequest('http://localhost/api/mobile/v1/activity')).status).toBe(503);
+      expect(proxy(new NextRequest('http://localhost/api/mobile/v1/activity')).status).toBe(200);
       expect(
         proxy(new NextRequest('http://localhost/api/mobile/v1/activity', { method: 'POST' }))
           .status,
       ).toBe(200);
+      expect(
+        proxy(new NextRequest('http://localhost/api/mobile/v1/activity/not-a-uuid')).status,
+      ).toBe(503);
       expect(
         proxy(
           new NextRequest('http://localhost/api/mobile/v1/activity/not-a-uuid', { method: 'POST' }),
@@ -321,8 +340,9 @@ describe.skipIf(!localEmulator)(
       expect((await store.doc('tasks', autonomyId).get()).get('autonomyGrant').revokedAt).toBe(
         revokedAt,
       );
+      const foreignBefore = (await store.doc('tasks', foreignId).get()).data();
       expect((await post(foreignId, 'revoke-autonomy')).status).toBe(404);
-      expect((await store.doc('tasks', foreignId).get()).get('autonomyGrant')).toBeUndefined();
+      expect((await store.doc('tasks', foreignId).get()).data()).toEqual(foreignBefore);
     });
 
     it('raises a stalled task budget with its runnable transition and queue intent atomically', async () => {
