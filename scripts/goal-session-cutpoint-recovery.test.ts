@@ -16,6 +16,7 @@ import {
 } from '@assistant/db';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { processGroupHasLiveMembers } from './goal-session-process-group.js';
 import { assertGoalSessionDatabaseOwnership } from './goal-session-reconciliation.js';
 import {
   GoalSessionEvidence,
@@ -72,6 +73,7 @@ function spawnCaptured(entry: string, args: string[], env: NodeJS.ProcessEnv) {
   let output = '';
   let outputTruncated = false;
   let spawnError: Error | undefined;
+  let lastProcessGroupStates: string[] = [];
   let finalized = false;
   let finalizing: Promise<void> | undefined;
   const append = (chunk: Buffer) => {
@@ -99,9 +101,26 @@ function spawnCaptured(entry: string, args: string[], env: NodeJS.ProcessEnv) {
     error: () => spawnError,
     finalized: () => finalized,
     finalizing: () => finalizing,
+    processGroupStates: () => [...lastProcessGroupStates],
+    setProcessGroupStates: (states: string[]) => {
+      lastProcessGroupStates = [...states];
+    },
     setFinalizing: (value: Promise<void>) => (finalizing = value),
     markFinalized: () => (finalized = true),
   };
+}
+
+function readProcessGroupStates(groupId: number): string[] {
+  return execFileSync('/bin/ps', ['-axo', 'pgid=,stat='], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: 1_000,
+  })
+    .split('\n')
+    .flatMap((line) => {
+      const [candidateGroup, state] = line.trim().split(/\s+/, 2);
+      return candidateGroup === String(groupId) ? [state || '?'] : [];
+    });
 }
 
 function processGroupExists(run: CapturedRun) {
@@ -109,30 +128,16 @@ function processGroupExists(run: CapturedRun) {
     return run.child.exitCode === null && run.child.signalCode === null;
   try {
     process.kill(-run.child.pid, 0);
-    return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
-    if ((error as NodeJS.ErrnoException).code === 'EPERM') {
-      // On macOS, kill(0) may report EPERM for an exited zombie that still
-      // appears in the process table. Treat the group as quiescent only after
-      // ps confirms every remaining member is a zombie or already exited.
-      const groupId = String(run.child.pid);
-      const states = execFileSync('/bin/ps', ['-axo', 'pgid=,stat='], {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-        timeout: 1_000,
-      })
-        .split('\n')
-        .flatMap((line) => {
-          const [candidateGroup, state] = line.trim().split(/\s+/, 2);
-          return candidateGroup === groupId && state ? [state] : [];
-        });
-      if (states.length === 0) return false;
-      if (states.every((state) => state.startsWith('Z') || state.startsWith('X'))) return false;
-      return true;
-    }
-    throw error;
+    if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error;
   }
+  // kill(0) is not uniform across platforms for zombie-only groups: macOS
+  // can report EPERM while Linux can report success. Inspect on both paths;
+  // only a complete snapshot containing no executable members is quiescent.
+  const states = readProcessGroupStates(run.child.pid);
+  run.setProcessGroupStates(states);
+  return processGroupHasLiveMembers(states);
 }
 
 async function waitForProcessGroupExit(run: CapturedRun) {
@@ -208,8 +213,9 @@ async function awaitChild(run: CapturedRun, timeoutMs = CHILD_TIMEOUT_MS): Promi
     if (run.error()) throw run.error();
     const leakedGroup = processGroupExists(run);
     if (leakedGroup) {
+      const states = run.processGroupStates().join(',') || 'unknown';
       await killChild(run);
-      throw new Error('Child leader closed while owned descendants remained');
+      throw new Error(`Child leader closed while owned descendants remained (states=${states})`);
     }
     run.markFinalized();
     return { ...result, output: run.output() };
