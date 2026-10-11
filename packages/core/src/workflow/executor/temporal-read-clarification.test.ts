@@ -139,6 +139,7 @@ async function runUnsupportedRequest(scenario: Scenario) {
 async function runFlightContinuation(
   history: Array<{ role: string; content: string }>,
   request: string,
+  options: { currentBookingFourth?: boolean } = {},
 ) {
   const rows: Array<Record<string, unknown>> = [];
   const router = {
@@ -177,11 +178,34 @@ async function runFlightContinuation(
         };
       } else if (toolName === 'gmail.search') {
         result = {
-          results: [
-            { threadId: 'current', subject: 'Berlin flight itinerary' },
-            { threadId: 'old', subject: 'Berlin flight itinerary' },
-            { threadId: 'newsletter', subject: 'Asiana newsletter' },
-          ],
+          results: options.currentBookingFourth
+            ? [
+                {
+                  threadId: 'stale-1',
+                  subject: 'Berlin flight update',
+                  snippet: 'Gate information for your earlier trip.',
+                },
+                {
+                  threadId: 'stale-2',
+                  subject: 'Berlin airport notice',
+                  snippet: 'Terminal information for your earlier trip.',
+                },
+                {
+                  threadId: 'stale-3',
+                  subject: 'Your Berlin travel details',
+                  snippet: 'Information from an earlier trip.',
+                },
+                {
+                  threadId: 'current',
+                  subject: 'Berlin flight confirmation',
+                  snippet: 'Your itinerary and departure details.',
+                },
+              ]
+            : [
+                { threadId: 'current', subject: 'Berlin flight itinerary' },
+                { threadId: 'old', subject: 'Berlin flight itinerary' },
+                { threadId: 'newsletter', subject: 'Asiana newsletter' },
+              ],
           mailboxSearched: 'all mail',
           complete: true,
         };
@@ -189,18 +213,29 @@ async function runFlightContinuation(
         const source =
           String(args.threadId) === 'current'
             ? {
-                subject: 'Berlin flight itinerary',
+                subject: options.currentBookingFourth
+                  ? 'Berlin flight confirmation'
+                  : 'Berlin flight itinerary',
                 text: 'Berlin flight itinerary\nDeparture\nOctober 9, 2026 at 1:45 PM',
               }
-            : String(args.threadId) === 'old'
+            : options.currentBookingFourth && String(args.threadId).startsWith('stale-')
               ? {
-                  subject: 'Berlin flight itinerary',
-                  text: 'Berlin flight itinerary\nDeparture\nJanuary 4, 2026 at 9:15 AM',
+                  subject: 'Berlin flight details from an earlier trip',
+                  text: `Berlin flight itinerary\nDeparture\n${
+                    String(args.threadId) === 'stale-1'
+                      ? 'January 4, 2026 at 9:15 AM'
+                      : 'February 12, 2026 at 8:30 AM'
+                  }`,
                 }
-              : {
-                  subject: 'Asiana newsletter',
-                  text: 'Asiana newsletter with flight offers and fare promotions.',
-                };
+              : String(args.threadId) === 'old'
+                ? {
+                    subject: 'Berlin flight itinerary',
+                    text: 'Berlin flight itinerary\nDeparture\nJanuary 4, 2026 at 9:15 AM',
+                  }
+                : {
+                    subject: 'Asiana newsletter',
+                    text: 'Asiana newsletter with flight offers and fare promotions.',
+                  };
         result = { messages: [source], complete: true };
       } else {
         throw new Error(`Unexpected tool dispatch: ${toolName}`);
@@ -409,6 +444,36 @@ describe('flight clarification through the actual executor step loop', () => {
     expect(rows).toHaveLength(5);
     expect(state.pendingFinal?.responseCards ?? []).toEqual([]);
     expect(router.step).toHaveBeenCalledTimes(1);
+  });
+
+  it('selects a fourth-result booking but reports incomplete coverage within the three-thread bound', async () => {
+    const { result, state, dispatch } = await runFlightContinuation(
+      [
+        { role: 'user', content: 'When is my flight to Berlin tomorrow?' },
+        { role: 'assistant', content: 'Your flight is at 9:15 AM.' },
+        { role: 'user', content: 'Are you sure?' },
+        { role: 'assistant', content: 'What is the date of the flight you want me to recheck?' },
+      ],
+      'October 9, 2026.',
+      { currentBookingFourth: true },
+    );
+
+    expect(result.outcome).toBe('done');
+    expect(dispatch.mock.calls.map(([call]) => call.toolName)).toEqual([
+      'calendar.search_events',
+      'gmail.search',
+      'gmail.read_thread',
+      'gmail.read_thread',
+      'gmail.read_thread',
+    ]);
+    const openedThreadIds = dispatch.mock.calls
+      .filter(([call]) => call.toolName === 'gmail.read_thread')
+      .map(([call]) => call.args.threadId);
+    expect(openedThreadIds).toEqual(['current', 'stale-1', 'stale-2']);
+    expect(openedThreadIds).toHaveLength(3);
+    expect(state.pendingFinal?.text).toMatch(/couldn't finish checking the booking emails/i);
+    expect(state.pendingFinal?.text).toMatch(/departure time is still unverified/i);
+    expect(state.pendingFinal?.text).not.toMatch(/9:15 AM|8:30 AM|January|February/);
   });
 
   it('does not inherit a quoted third-party flight request into private reads', async () => {
