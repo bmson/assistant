@@ -374,6 +374,33 @@ struct ChatComposerActionPolicy: Equatable {
     let showsSeparateStop: Bool
     let separateStopEnabled: Bool
 
+    static func followUpDraftNotice(
+        hasDraft: Bool,
+        isSending: Bool,
+        canCancel: Bool,
+        isCancelling: Bool,
+        formAdmissionPending: Bool,
+        hasUnresolvedTurn: Bool
+    ) -> String? {
+        guard hasDraft,
+              isSending || canCancel || isCancelling || formAdmissionPending || hasUnresolvedTurn
+        else { return nil }
+
+        if formAdmissionPending {
+            return "Your draft stays here. The form request is still being sent."
+        }
+        if isCancelling {
+            return "Your draft stays here. Wait for the stop result before sending."
+        }
+        if isSending {
+            return "Your draft stays here. Send it after this turn finishes."
+        }
+        if canCancel {
+            return "Your draft stays here. Stop this task or wait for it to finish before sending."
+        }
+        return "Your draft stays here. Check the earlier turn before sending."
+    }
+
     static func resolve(
         hasDraft: Bool,
         canSend: Bool,
@@ -2026,6 +2053,22 @@ struct ChatView: View {
                 .transition(.opacity)
             }
 
+            if let followUpDraftNotice {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    Image(systemName: "clock")
+                        .font(.caption2.weight(.semibold))
+                    Text(followUpDraftNotice)
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(AssistantTheme.stageSecondary)
+                .padding(.horizontal, 10)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("assistant.chat.follow-up-draft-status")
+                .transition(.opacity)
+            }
+
             composerInput
                 // The input itself is the bottom-edge grab region. Keeping
                 // this recognizer off the outer composer lets the quick-reply
@@ -2072,6 +2115,7 @@ struct ChatView: View {
             value: model.nextMessageAutonomous
         )
         .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: composerFocused)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: followUpDraftNotice != nil)
         // The quick-reply strip is gated on this too, so without it the
         // composer changed height in a hard step at the start and end of every
         // turn.
@@ -2895,6 +2939,17 @@ struct ChatView: View {
         ChatComposerActionPolicy.resolve(
             hasDraft: composerHasDraft,
             canSend: canSend,
+            isSending: model.isSending,
+            canCancel: model.canCancelCurrentSend,
+            isCancelling: model.isCancellingSend,
+            formAdmissionPending: model.isCardFormAdmissionPending,
+            hasUnresolvedTurn: model.hasUnresolvedTurn
+        )
+    }
+
+    private var followUpDraftNotice: String? {
+        ChatComposerActionPolicy.followUpDraftNotice(
+            hasDraft: composerHasDraft,
             isSending: model.isSending,
             canCancel: model.canCancelCurrentSend,
             isCancelling: model.isCancellingSend,

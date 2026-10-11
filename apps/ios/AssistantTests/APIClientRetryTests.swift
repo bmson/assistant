@@ -3230,6 +3230,13 @@ extension APIClientRetryTests {
         XCTAssertEqual(activeWithDraft.primary, .send(enabled: false))
         XCTAssertTrue(activeWithDraft.showsSeparateStop)
         XCTAssertTrue(activeWithDraft.separateStopEnabled)
+        XCTAssertEqual(
+            ChatComposerActionPolicy.followUpDraftNotice(
+                hasDraft: true, isSending: true, canCancel: true, isCancelling: false,
+                formAdmissionPending: false, hasUnresolvedTurn: true
+            ),
+            "Your draft stays here. Send it after this turn finishes."
+        )
 
         let stoppingWithDraft = ChatComposerActionPolicy.resolve(
             hasDraft: true, canSend: false, isSending: true,
@@ -3239,6 +3246,13 @@ extension APIClientRetryTests {
         XCTAssertEqual(stoppingWithDraft.primary, .send(enabled: false))
         XCTAssertTrue(stoppingWithDraft.showsSeparateStop)
         XCTAssertFalse(stoppingWithDraft.separateStopEnabled)
+        XCTAssertEqual(
+            ChatComposerActionPolicy.followUpDraftNotice(
+                hasDraft: true, isSending: true, canCancel: true, isCancelling: true,
+                formAdmissionPending: false, hasUnresolvedTurn: true
+            ),
+            "Your draft stays here. Wait for the stop result before sending."
+        )
 
         let activeWithoutDraft = ChatComposerActionPolicy.resolve(
             hasDraft: false, canSend: false, isSending: true,
@@ -3255,6 +3269,12 @@ extension APIClientRetryTests {
         )
         XCTAssertEqual(readyWithDraft.primary, .send(enabled: true))
         XCTAssertFalse(readyWithDraft.showsSeparateStop)
+        XCTAssertNil(
+            ChatComposerActionPolicy.followUpDraftNotice(
+                hasDraft: true, isSending: false, canCancel: false, isCancelling: false,
+                formAdmissionPending: false, hasUnresolvedTurn: false
+            )
+        )
 
         // A task can remain unresolved after its active-send flag clears, for
         // example while its durable status is being reconciled after reconnect.
@@ -3265,6 +3285,13 @@ extension APIClientRetryTests {
         )
         XCTAssertEqual(resumedUnknownWithDraft.primary, .send(enabled: false))
         XCTAssertFalse(resumedUnknownWithDraft.showsSeparateStop)
+        XCTAssertEqual(
+            ChatComposerActionPolicy.followUpDraftNotice(
+                hasDraft: true, isSending: false, canCancel: false, isCancelling: false,
+                formAdmissionPending: false, hasUnresolvedTurn: true
+            ),
+            "Your draft stays here. Check the earlier turn before sending."
+        )
 
         // Form admission owns its frozen operation. Even a transiently stale
         // can-cancel flag must not show a Stop control that AppModel will reject.
@@ -3283,6 +3310,13 @@ extension APIClientRetryTests {
         )
         XCTAssertEqual(draftDuringFormAdmission.primary, .send(enabled: false))
         XCTAssertFalse(draftDuringFormAdmission.showsSeparateStop)
+        XCTAssertEqual(
+            ChatComposerActionPolicy.followUpDraftNotice(
+                hasDraft: true, isSending: true, canCancel: true, isCancelling: false,
+                formAdmissionPending: true, hasUnresolvedTurn: true
+            ),
+            "Your draft stays here. The form request is still being sent."
+        )
     }
 
     @MainActor
