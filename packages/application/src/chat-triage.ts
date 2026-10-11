@@ -43,6 +43,9 @@ const TRAVEL_LOOKUP_REQUEST = new RegExp(
     '^\\s*(?:(?:can|could|would)\\s+you\\s+)?(?:please\\s+)?(?:find|look up|search for|check|tell me|show me)\\b[^.!?\\n]{0,180}\\b' +
       TRAVEL_LOOKUP_SUBJECT +
       '\\b',
+    '^\\s*(?:(?:can|could|would)\\s+you\\s+)?(?:please\\s+)?help me\\s+(?:find|look up|search for|check|figure out|work out)\\b[^.!?\\n]{0,180}\\b' +
+      TRAVEL_LOOKUP_SUBJECT +
+      '\\b',
     '^\\s*(?:(?:can|could)\\s+you\\s+)?(?:please\\s+)?(?:figure out how to get to|how (?:do|can|could) (?:i|we) get to)\\b[^.!?\\n]{0,180}\\b' +
       TRAVEL_LOOKUP_SUBJECT +
       '\\b',
@@ -196,7 +199,7 @@ export function looksLikeActionRequest(
     return true;
   }
   return (
-    TRAVEL_LOOKUP_REQUEST.test(text) ||
+    TRAVEL_LOOKUP_REQUEST.test(t) ||
     LEADING_ACTION.test(t) ||
     ACTION_PHRASE.test(t) ||
     READ_PHRASE.test(t) ||

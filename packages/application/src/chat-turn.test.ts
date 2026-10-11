@@ -974,8 +974,11 @@ describe('chat needs-action triage', () => {
 
   it.each([
     'Find my lounge and gate info',
+    'Hey, please find my lounge and gate info',
     'Figure out how to get to the lounge',
+    'Help me figure out how to get to the lounge',
     'How do I get to my hotel in Berlin?',
+    'Also check for me how I get from the Berlin airport to my hotel',
     'Could you tell me where the KLM lounge is?',
     'I have KLM lounge access in my layover, help me figure out how to get there, from my arrival gate and how far it is from my departure gate',
   ])(
