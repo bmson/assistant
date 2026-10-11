@@ -67,12 +67,16 @@ export interface PersonalReadRequest {
   scopeContext?: { kind: 'flight'; date?: string };
   /** Gmail query derived from the owner's words, not model-proposed narrowing. */
   mailQuery?: string;
+  /** Explicit trip period used only to rank returned lodging metadata. */
+  mailTemporalLabel?: string;
   /** Used only to render returned timestamps for the owner. */
   timeZone?: string;
   /** Bound for result sets whose wording asks for a single next item. */
   maxResults?: number;
   /** The owner is challenging a prior claim; prior prose remains hypothesis-only. */
   verification?: boolean;
+  /** Explicit owner-supplied lodging scope used only to rank returned mail metadata. */
+  mailRelevanceTerms?: string[];
   /** Specific question to answer, rather than turning every lookup into an agenda. */
   answerFocus?: 'lodging' | 'applications' | 'flight';
   /** Broad mail-history requests use a bounded metadata-page continuation. */
@@ -131,6 +135,58 @@ function contextualLodgingQuestion(latest: string, ownerTurns: string[]): boolea
     );
   }
   return false;
+}
+
+function lodgingRelevanceTerms(latest: string, ownerTurns: string[]): string[] {
+  let scope = LODGING_QUESTION.test(latest) ? latest : '';
+  if (!scope && DETAIL_FOLLOW_UP.test(latest)) {
+    for (const prior of [...ownerTurns].reverse()) {
+      if (/^\s*(?:thanks|thank you|ok|okay|great|got it)[.!]*\s*$/i.test(prior)) continue;
+      if (DETAIL_FOLLOW_UP.test(prior)) continue;
+      if (
+        LODGING_QUESTION.test(prior) ||
+        (LODGING_TOPIC.test(prior) && /\b(?:my|our|reservation|booking|staying)\b/i.test(prior))
+      ) {
+        scope = prior;
+      }
+      break;
+    }
+  }
+  if (!scope) return [];
+
+  const generic = new Set([
+    'airbnb',
+    'accommodation',
+    'are',
+    'booking',
+    'check',
+    'confirmation',
+    'did',
+    'hotel',
+    'in',
+    'is',
+    'it',
+    'lodging',
+    'my',
+    'near',
+    'next',
+    'our',
+    'reservation',
+    'stay',
+    'staying',
+    'trip',
+    'we',
+    'week',
+    'weekend',
+    'weekends',
+    'where',
+    'which',
+    'what',
+  ]);
+  const placeTerms = [...scope.matchAll(/\b(?:in|at|near|for|to)\s+([^?.,;!\n]+)/gi)]
+    .flatMap((match) => emailQueryTerms(match[1] ?? ''))
+    .filter((term) => !generic.has(term));
+  return [...new Set(placeTerms)].slice(0, 3);
 }
 
 const CALENDAR_SURFACE =
@@ -1264,6 +1320,10 @@ function detectPersonalReadRequestInternal(
     return {
       kind: lodging ? 'calendar_email' : 'email',
       queryTerms: [lodging ? 'hotel' : 'application'],
+      ...(lodging ? { mailRelevanceTerms: lodgingRelevanceTerms(latest, recentOwnerTurns) } : {}),
+      ...(lodging && temporal?.kind === 'resolved' && hasExplicitTemporalPhrase(latest)
+        ? { mailTemporalLabel: temporal.intent.window.label }
+        : {}),
       firstToolName: lodging ? 'calendar.search_events' : 'gmail.search',
       requiresThreadRead: true,
       mailQuery: lodging
@@ -1578,7 +1638,7 @@ export function gmailSearchThreadIds(
     }
   }
   const unique = [...new Set(ids)];
-  if (request?.answerFocus === 'flight') {
+  if (request?.answerFocus === 'flight' || request?.answerFocus === 'lodging') {
     const scores = new Map<string, number>();
     for (const row of evidence) {
       if (
@@ -1597,14 +1657,25 @@ export function gmailSearchThreadIds(
         const subject = typeof metadata.subject === 'string' ? metadata.subject : '';
         const snippet = typeof metadata.snippet === 'string' ? metadata.snippet : '';
         const score =
-          (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass)\b/i.test(subject)
-            ? 2
-            : 0) +
-          (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass|departure)\b/i.test(
-            snippet,
-          )
-            ? 1
-            : 0);
+          request.answerFocus === 'flight'
+            ? (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass)\b/i.test(
+                subject,
+              )
+                ? 2
+                : 0) +
+              (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass|departure)\b/i.test(
+                snippet,
+              )
+                ? 1
+                : 0)
+            : lodgingMetadataScore(
+                subject,
+                snippet,
+                request.mailRelevanceTerms ?? [],
+                request.mailTemporalLabel,
+                request.timeWindow,
+                request.timeZone,
+              );
         scores.set(metadata.threadId, Math.max(scores.get(metadata.threadId) ?? 0, score));
       }
     }
@@ -1634,6 +1705,179 @@ export function gmailSearchThreadIds(
     }
   }
   return unique.sort((a, b) => (dateByThread.get(b) ?? 0) - (dateByThread.get(a) ?? 0));
+}
+
+function lodgingMetadataScore(
+  subject: string,
+  snippet: string,
+  scopeTerms: string[],
+  temporalLabel?: string,
+  timeWindow?: PersonalReadTimeWindow,
+  timeZone?: string,
+): number {
+  const normalizedSubject = subject.toLowerCase();
+  const normalizedText = `${subject} ${snippet}`.toLowerCase();
+  const scopeMatches = scopeTerms.filter((term) => {
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`\\b${escaped}\\b`, 'i').test(normalizedText);
+  }).length;
+  const hasBookingSignal = /\b(?:reservation|booking|confirmation|itinerary)\b/i.test(
+    normalizedSubject,
+  )
+    ? 2
+    : 0;
+  const snippetBookingSignal =
+    /\b(?:reservation|booking|confirmation|itinerary|check[- ]?in|check[- ]?out)\b/i.test(snippet)
+      ? 1
+      : 0;
+  const normalizedWords = normalizeMetadataWords(normalizedText);
+  const temporalWords = temporalLabel ? normalizeMetadataWords(temporalLabel) : [];
+  const matchesTripPhrase = containsWordSequence(normalizedWords, temporalWords);
+  const matchesTripDate = Boolean(
+    temporalLabel && metadataDateOverlapsWindow(normalizedText, timeWindow, timeZone),
+  );
+  const matchesTrip = matchesTripPhrase || matchesTripDate;
+  if (scopeTerms.length === 0 && !temporalLabel) return hasBookingSignal + snippetBookingSignal;
+  if (temporalLabel && !matchesTrip) {
+    // A reservation keyword cannot make a same-city old stay look like the
+    // owner's explicitly dated trip. Keep metadata order unless the returned
+    // subject/snippet also names the requested period.
+    return scopeMatches > 0 ? 10 + scopeMatches : 0;
+  }
+  // An owner-named destination is a stronger match than a generic confirmation
+  // keyword; a matching explicit period distinguishes this trip from an older
+  // stay at the same destination.
+  return (
+    (scopeMatches > 0 ? 10 + scopeMatches : 0) +
+    (matchesTrip ? 4 : 0) +
+    hasBookingSignal +
+    snippetBookingSignal
+  );
+}
+
+function metadataDateOverlapsWindow(
+  text: string,
+  timeWindow?: PersonalReadTimeWindow,
+  timeZone?: string,
+): boolean {
+  if (!timeWindow || !timeZone) return false;
+  const startInstant = Date.parse(timeWindow.timeMin);
+  const endInstant = Date.parse(timeWindow.timeMax);
+  if (
+    !Number.isFinite(startInstant) ||
+    !Number.isFinite(endInstant) ||
+    endInstant <= startInstant
+  ) {
+    return false;
+  }
+  const startKey = civilDateKey(civilDateAt(new Date(startInstant), timeZone));
+  const endKey = civilDateKey(civilDateAt(new Date(endInstant), timeZone));
+  const intervals = metadataDateIntervals(text);
+  return intervals.some(({ start, endExclusive }) => start < endKey && endExclusive > startKey);
+}
+
+function normalizeMetadataWords(value: string): string[] {
+  return value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function containsWordSequence(words: string[], sequence: string[]): boolean {
+  if (sequence.length === 0 || sequence.length > words.length) return false;
+  for (let index = 0; index <= words.length - sequence.length; index += 1) {
+    if (sequence.every((word, offset) => words[index + offset] === word)) return true;
+  }
+  return false;
+}
+
+function metadataDateIntervals(text: string): Array<{ start: string; endExclusive: string }> {
+  const monthPattern = Object.keys(MONTH_NUMBER)
+    .sort((left, right) => right.length - left.length)
+    .join('|');
+  const consumed: Array<{ start: number; end: number }> = [];
+  const intervals: Array<{ start: string; endExclusive: string }> = [];
+  const isConsumed = (index: number) =>
+    consumed.some((span) => index >= span.start && index < span.end);
+  const addRange = (
+    match: RegExpMatchArray,
+    startDate: CivilDate | undefined,
+    endDate: CivilDate | undefined,
+  ) => {
+    if (match.index !== undefined)
+      consumed.push({ start: match.index, end: match.index + match[0].length });
+    if (!startDate || !endDate || civilDateKey(endDate) < civilDateKey(startDate)) return;
+    intervals.push({
+      start: civilDateKey(startDate),
+      endExclusive: civilDateKey(addCivilDays(endDate, 1)),
+    });
+  };
+  const validDate = (year: number, month: number, day: number): CivilDate | undefined => {
+    if (year < 100 || year > 9999 || month < 1 || month > 12 || day < 1 || day > 31)
+      return undefined;
+    const candidate = new Date(Date.UTC(year, month - 1, day));
+    if (
+      candidate.getUTCFullYear() !== year ||
+      candidate.getUTCMonth() + 1 !== month ||
+      candidate.getUTCDate() !== day
+    )
+      return undefined;
+    return { year, month, day };
+  };
+  const monthValue = (value: string | undefined) =>
+    value ? MONTH_NUMBER[value.toLowerCase()] : undefined;
+
+  const isoRanges =
+    /\b(\d{4})-(\d{2})-(\d{2})\s*(?:[-–—]|to|through|until)\s*(?:(\d{4})-)?(\d{2})-(\d{2})\b/gi;
+  for (const match of text.matchAll(isoRanges)) {
+    const year = Number(match[1]);
+    const endYear = Number(match[4] ?? match[1]);
+    addRange(
+      match,
+      validDate(year, Number(match[2]), Number(match[3])),
+      validDate(endYear, Number(match[5]), Number(match[6])),
+    );
+  }
+
+  const namedRanges = new RegExp(
+    `\\b(${monthPattern})\\s+(\\d{1,2})(?:st|nd|rd|th)?\\s*(?:[-–—]|to|through|until)\\s*(?:(${monthPattern})\\s+)?(\\d{1,2})(?:st|nd|rd|th)?[,]?\\s+(\\d{4})\\b`,
+    'gi',
+  );
+  for (const match of text.matchAll(namedRanges)) {
+    const year = Number(match[5]);
+    const startMonth = monthValue(match[1]);
+    const endMonth = monthValue(match[3]) ?? startMonth;
+    addRange(
+      match,
+      startMonth ? validDate(year, startMonth, Number(match[2])) : undefined,
+      endMonth ? validDate(year, endMonth, Number(match[4])) : undefined,
+    );
+  }
+
+  const isoDates = /\b(\d{4})-(\d{2})-(\d{2})\b/g;
+  for (const match of text.matchAll(isoDates)) {
+    if (match.index !== undefined && isConsumed(match.index)) continue;
+    const date = validDate(Number(match[1]), Number(match[2]), Number(match[3]));
+    if (!date) continue;
+    const key = civilDateKey(date);
+    intervals.push({ start: key, endExclusive: civilDateKey(addCivilDays(date, 1)) });
+  }
+
+  const namedDates = new RegExp(
+    `\\b(${monthPattern})\\s+(\\d{1,2})(?:st|nd|rd|th)?[,]?\\s+(\\d{4})\\b`,
+    'gi',
+  );
+  for (const match of text.matchAll(namedDates)) {
+    if (match.index !== undefined && isConsumed(match.index)) continue;
+    const month = monthValue(match[1]);
+    const date = month ? validDate(Number(match[3]), month, Number(match[2])) : undefined;
+    if (!date) continue;
+    const key = civilDateKey(date);
+    intervals.push({ start: key, endExclusive: civilDateKey(addCivilDays(date, 1)) });
+  }
+  return intervals;
 }
 
 export const MAX_GMAIL_THREADS_TO_READ = 3;
