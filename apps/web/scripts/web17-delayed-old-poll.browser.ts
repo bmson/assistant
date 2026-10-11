@@ -1,9 +1,9 @@
 /**
  * WEB-17 mounted client race acceptance against the production-shaped local web
  * app and its PostgreSQL-backed conversation/task actions. Task A is a real
- * persisted terminal task loaded through the chat page; only the old poll
- * response and task B's admission/status responses are scripted in Playwright.
- * This isolates the client ownership race without invoking a worker or model.
+ * persisted terminal task loaded through the chat page; poll responses and task
+ * B's admission/status responses are scripted in Playwright. This isolates the
+ * client ownership race without invoking a worker or model.
  */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -21,6 +21,20 @@ assert(databaseUrl, 'Set DATABASE_URL to the isolated CI PostgreSQL database');
 
 function isPathOrChild(pathname: string, basePath: string): boolean {
   return pathname === basePath || pathname.startsWith(`${basePath}/`);
+}
+
+async function waitFor<T>(promise: Promise<T>, message: string, timeoutMs = 10_000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 const fixture = createWeb17Fixture(databaseUrl);
@@ -334,12 +348,201 @@ async function verifyDelayedTerminalPoll(status: 'done' | 'cancelled' | 'failed'
   }
 }
 
+async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
+  const page = await context.newPage();
+  const browserErrors: string[] = [];
+  const conversationId = await createConversation(page);
+  const taskId = await fixture.insertTerminalTask(conversationId, 'done');
+  const cursor = fixture.cursorAt(new Date(0));
+  const oldResult = 'WEB-17 stale result from the unmounted request';
+  const freshResult = 'WEB-17 result from the restored task poll';
+
+  let releaseOldRequest!: () => void;
+  const oldRequestGate = new Promise<void>((resolve) => {
+    releaseOldRequest = resolve;
+  });
+  let oldRequestStarted!: () => void;
+  const oldStarted = new Promise<void>((resolve) => {
+    oldRequestStarted = resolve;
+  });
+  let oldRequestAborted!: () => void;
+  const oldAborted = new Promise<void>((resolve) => {
+    oldRequestAborted = resolve;
+  });
+  let oldRouteSettled!: () => void;
+  const oldSettled = new Promise<void>((resolve) => {
+    oldRouteSettled = resolve;
+  });
+  let freshRouteSettled!: () => void;
+  const freshSettled = new Promise<void>((resolve) => {
+    freshRouteSettled = resolve;
+  });
+  let releaseFreshRequest!: () => void;
+  const freshRequestGate = new Promise<void>((resolve) => {
+    releaseFreshRequest = resolve;
+  });
+  let freshRequestStarted!: () => void;
+  const freshStarted = new Promise<void>((resolve) => {
+    freshRequestStarted = resolve;
+  });
+  let taskAPollCount = 0;
+  let oldRouteEntered = false;
+  let freshRouteEntered = false;
+  let freshPollCount = 0;
+  let oldAbortReason: string | undefined;
+
+  page.on('pageerror', (error) => browserErrors.push(error.message));
+  page.on('requestfailed', (request) => {
+    const requestUrl = new URL(request.url());
+    if (
+      requestUrl.pathname === '/api/chat/status' &&
+      requestUrl.searchParams.get('taskId') === taskId &&
+      taskAPollCount === 1
+    ) {
+      oldAbortReason = request.failure()?.errorText;
+      oldRequestAborted();
+    }
+  });
+
+  const routeHandler = async (route: Route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.origin !== origin.origin) {
+      await route.abort('blockedbyclient');
+      return;
+    }
+    if (url.pathname === '/api/chat/status' && request.method() === 'GET') {
+      const requestedTaskId = url.searchParams.get('taskId');
+      if (requestedTaskId === taskId) {
+        taskAPollCount += 1;
+        if (taskAPollCount === 1) {
+          oldRouteEntered = true;
+          oldRequestStarted();
+          await oldRequestGate;
+          try {
+            // The component has unmounted and aborted this request. Attempting
+            // to answer it late must not publish into the remounted chat.
+            await route.fulfill({
+              json: statusPayload('done', {
+                message: {
+                  id: randomUUID(),
+                  role: 'assistant',
+                  parts: [{ type: 'text', text: oldResult }],
+                },
+              }),
+            });
+          } catch {
+            // Playwright may report that the browser already closed the route.
+          } finally {
+            oldRouteSettled();
+          }
+          return;
+        }
+        freshRouteEntered = true;
+        freshPollCount += 1;
+        freshRequestStarted();
+        await freshRequestGate;
+        try {
+          await route.fulfill({
+            json: statusPayload('done', {
+              message: {
+                id: randomUUID(),
+                role: 'assistant',
+                parts: [{ type: 'text', text: freshResult }],
+              },
+            }),
+          });
+        } finally {
+          freshRouteSettled();
+        }
+        return;
+      }
+      assert.equal(requestedTaskId, null, 'No other task may be observed in this scenario');
+      await route.fulfill({ json: statusPayload(null) });
+      return;
+    }
+    if (
+      isPathOrChild(url.pathname, '/api/chat') ||
+      isPathOrChild(url.pathname, '/api/mobile/v1/chat')
+    ) {
+      await route.abort('blockedbyclient');
+      return;
+    }
+    await route.continue();
+  };
+  const isChatSafetyRoute = (url: URL) =>
+    isPathOrChild(url.pathname, '/api/chat') || isPathOrChild(url.pathname, '/api/mobile/v1/chat');
+  await context.route('**/*', async (route) => {
+    const requestUrl = new URL(route.request().url());
+    if (
+      (requestUrl.protocol === 'http:' || requestUrl.protocol === 'https:') &&
+      requestUrl.origin !== origin.origin
+    ) {
+      await route.abort('blockedbyclient');
+      return;
+    }
+    await route.continue();
+  });
+  await page.route(isChatSafetyRoute, routeHandler);
+
+  try {
+    const deepLink = () =>
+      new URL(
+        `/chat/${conversationId}?task=${taskId}&cursor=${encodeURIComponent(cursor)}`,
+        origin,
+      ).toString();
+    await page.goto(deepLink(), { waitUntil: 'domcontentloaded', timeout: 90_000 });
+    const composer = page.getByRole('combobox', { name: 'Message', exact: true });
+    await composer.waitFor({ timeout: 10_000 });
+    await page.getByRole('button', { name: 'Stop this task', exact: true }).waitFor();
+    await waitFor(oldStarted, 'Task A initial poll did not start');
+
+    await page.getByRole('link', { name: 'All chats', exact: true }).click();
+    await page.waitForURL((url) => url.pathname === '/chat/all', { timeout: 20_000 });
+    await composer.waitFor({ state: 'detached', timeout: 10_000 });
+    await waitFor(oldAborted, 'Unmounting the chat did not abort task A polling');
+    assert.match(oldAbortReason ?? '', /abort|cancel/i);
+
+    // The ordinary list link intentionally drops task/cursor query state. Use
+    // the same supported task deep link to restore the exact persisted A poll.
+    releaseOldRequest();
+    await waitFor(oldSettled, 'Aborted task A route did not settle');
+    assert.equal(await page.getByText(oldResult, { exact: true }).count(), 0);
+    await page.goto(deepLink(), { waitUntil: 'domcontentloaded', timeout: 90_000 });
+    await composer.waitFor({ timeout: 10_000 });
+    await page.getByRole('button', { name: 'Stop this task', exact: true }).waitFor();
+    await waitFor(freshStarted, 'Task A fresh poll did not start after remount');
+    assert.equal(await page.getByText(oldResult, { exact: true }).count(), 0);
+    assert.equal(await page.getByText(freshResult, { exact: true }).count(), 0);
+
+    releaseFreshRequest();
+    await page.getByText(freshResult, { exact: true }).waitFor({ timeout: 20_000 });
+    await page.getByRole('button', { name: 'Send', exact: true }).waitFor();
+    assert.equal(await page.getByText(oldResult, { exact: true }).count(), 0);
+    assert.equal(await page.getByText(freshResult, { exact: true }).count(), 1);
+    assert.equal(taskAPollCount, 2);
+    assert.equal(freshPollCount, 1);
+    assert.deepEqual(browserErrors, []);
+  } finally {
+    releaseOldRequest();
+    releaseFreshRequest();
+    try {
+      if (oldRouteEntered) await waitFor(oldSettled, 'Old task A route did not drain', 5_000);
+      if (freshRouteEntered) await waitFor(freshSettled, 'Fresh task A route did not drain', 5_000);
+    } finally {
+      await page.unroute(isChatSafetyRoute, routeHandler).catch(() => {});
+      await page.close();
+    }
+  }
+}
+
 try {
   for (const status of ['done', 'cancelled', 'failed'] as const) {
     await verifyDelayedTerminalPoll(status);
   }
+  await verifyUnmountedPollDoesNotPublishAfterRemount();
   console.log(
-    'WEB-17 mounted client ownership passed for delayed A done/cancelled/failed polls; B admission and status payloads were synthetic, with no model/provider or worker execution.',
+    'WEB-17 mounted client ownership passed for delayed A done/cancelled/failed polls and B-free task A abort/remount; B admission, status payloads and restored task response were synthetic, with no model/provider or worker execution.',
   );
 } finally {
   await context.close();
