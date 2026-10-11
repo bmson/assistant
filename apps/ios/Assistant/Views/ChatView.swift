@@ -2571,10 +2571,10 @@ struct ChatView: View {
 
     private func sendDraft() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Return can still reach the field while a response is streaming.
-        // Preserve the owner's draft instead of clearing text that AppModel
-        // will correctly refuse to send during an active turn.
-        guard !text.isEmpty, !model.isSending,
+        // The keyboard Return path shares the visible Send button's gate. In
+        // particular, a retained unresolved operation can outlive isSending;
+        // do not clear a draft when AppModel will refuse a second turn.
+        guard !text.isEmpty, primarySendEnabled,
               draftScope == model.composerDraftScope, draftScope != nil else { return }
         // The message may already have been admitted. Keep the current text
         // unsent until the owner retries that exact encrypted form operation.
