@@ -319,6 +319,8 @@ final class AppModel {
     /// More → Assistant context owns this toggle; the model only reads it.
     static let shareLocationKey = "assistant.share-location"
     static let arrivalNudgesKey = "assistant.arrival-nudges"
+    private static let cancelledTaskEffectNotice =
+        "The task was cancelled. Any external action already started may still have taken effect."
     /// One-time notification ask after a successful pairing (APNs opt-in).
     private let pushPromptedKey = "assistant.push-prompted"
     @ObservationIgnored private var lastLocationPostAt: Date?
@@ -3977,7 +3979,7 @@ final class AppModel {
         let thought: AssistantThought
         switch (outcome, taskStatus) {
         case (.cancelled, "cancelled"), (.alreadyCancelled, "cancelled"):
-            notice = "The task was cancelled. Any external action already started may still have taken effect."
+            notice = Self.cancelledTaskEffectNotice
             detail = "Task cancelled; external effects are not reversed"
             thought = .stopped
         case (.alreadyTerminal, "done"):
@@ -4302,6 +4304,11 @@ final class AppModel {
             setActivityThought(.thinking, proposedDetail: "Task status unknown. Reconnect to check the outcome.")
             return
         }
+        if finalStatus == "cancelled" {
+            // A cancelled task status does not prove that an external handler
+            // rolled back work that had already started.
+            errorMessage = Self.cancelledTaskEffectNotice
+        }
         if let turn = spokenTurn {
             let durableReply = messages.reversed().first { message in
                 message.role == .assistant
@@ -4356,7 +4363,9 @@ final class AppModel {
         } else {
             let succeeded = finalStatus != "failed" && finalStatus != "cancelled"
             let thought: AssistantThought = succeeded ? .finished : .stopped
-            let detail = concise(reply ?? (succeeded ? "Your assistant finished the task." : "Open the conversation for details."))
+            let detail = finalStatus == "cancelled"
+                ? "Task cancelled; external effects are not reversed"
+                : concise(reply ?? (succeeded ? "Your assistant finished the task." : "Open the conversation for details."))
             setActivityThought(thought, proposedDetail: detail)
             _ = await notifyOnce(
                 key: "\(taskId ?? streamID)-\(finalStatus ?? "reply")",

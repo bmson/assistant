@@ -3045,14 +3045,16 @@ extension APIClientRetryTests {
     }
 
     @MainActor
-    func testStopRequestsServerCancellationAndWaitsForMatchingTaskStatus() async throws {
+    func testStopAfterToolStartsWaitsForTaskStatusAndWarnsEffectsMayRemain() async throws {
         let model = try await notificationModel()
         let working = ChatUpdates(taskStatus: "working", messages: [], refreshed: [], superseded: nil,
-            nextCursor: nil, hasMore: false, activity: [])
+            nextCursor: nil, hasMore: false,
+            activity: [ToolActivity(toolName: "gmail.send", status: "executing", step: 1)])
         let cancelled = ChatUpdates(taskStatus: "cancelled", messages: [], refreshed: [], superseded: nil,
             nextCursor: nil, hasMore: false, activity: [])
+        let taskId = "33333333-3333-4333-8333-333333333333"
         StubURLProtocol.prime([], paths: [
-            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: "task-stop-1")],
+            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: taskId)],
             "/api/mobile/v1/chat/status": [
                 .delayed(after: 0.08, status: 200, body: try JSONEncoder().encode(working)),
                 .success(status: 200, body: try JSONEncoder().encode(cancelled)),
@@ -3060,7 +3062,7 @@ extension APIClientRetryTests {
                 .success(status: 200, body: try JSONEncoder().encode(cancelled)),
                 .success(status: 200, body: try JSONEncoder().encode(cancelled)),
             ],
-            "/api/mobile/v1/activity/task-stop-1": [
+            "/api/mobile/v1/activity/\(taskId)": [
                 .success(status: 200, body: Data(#"{"ok":true,"cancelled":true,"effectStatus":"unknown"}"#.utf8)),
             ],
         ])
@@ -3068,21 +3070,36 @@ extension APIClientRetryTests {
         while !StubURLProtocol.urls.contains(where: { $0.path == "/api/mobile/v1/chat/status" }) {
             await Task.yield()
         }
+        let toolDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !model.toolActivity.contains(where: { $0.toolName == "gmail.send" }),
+              ContinuousClock.now < toolDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(model.toolActivity.first?.toolName, "gmail.send",
+                       "Stop is requested only after the task-status feed reports an entered tool handler")
+        XCTAssertTrue(model.isSending)
 
         model.cancelSend()
         XCTAssertTrue(model.isCancellingSend)
         XCTAssertNotEqual(model.activityDetail, "You stopped this turn")
-        while !StubURLProtocol.urls.contains(where: { $0.path == "/api/mobile/v1/activity/task-stop-1" }) {
+        while !StubURLProtocol.urls.contains(where: { $0.path == "/api/mobile/v1/activity/\(taskId)" }) {
             await Task.yield()
         }
-        for _ in 0..<1_000 where model.isSending { try await Task.sleep(for: .milliseconds(10)) }
+        let settlementDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while model.activityDetail != "Task cancelled; external effects are not reversed",
+              ContinuousClock.now < settlementDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
 
         XCTAssertFalse(model.isSending)
         XCTAssertFalse(model.isCancellingSend)
-        XCTAssertEqual(StubURLProtocol.urls.first(where: { $0.path == "/api/mobile/v1/activity/task-stop-1" })?.path,
-                       "/api/mobile/v1/activity/task-stop-1")
+        XCTAssertEqual(StubURLProtocol.urls.first(where: { $0.path == "/api/mobile/v1/activity/\(taskId)" })?.path,
+                       "/api/mobile/v1/activity/\(taskId)")
+        XCTAssertEqual(model.errorMessage,
+                       "The task was cancelled. Any external action already started may still have taken effect.")
+        XCTAssertEqual(model.activityDetail, "Task cancelled; external effects are not reversed")
         let body = try XCTUnwrap(StubURLProtocol.bodies.enumerated().first(where: {
-            StubURLProtocol.urls[$0.offset].path == "/api/mobile/v1/activity/task-stop-1"
+            StubURLProtocol.urls[$0.offset].path == "/api/mobile/v1/activity/\(taskId)"
         })?.element)
         XCTAssertEqual(try JSONSerialization.jsonObject(with: body) as? [String: String], ["action": "cancel"])
     }
