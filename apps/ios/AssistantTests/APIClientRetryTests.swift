@@ -3064,8 +3064,27 @@ extension APIClientRetryTests {
     }
 
     @MainActor
-    func testSamePushTokenRegistersAgainWhenAPNSEnvironmentChanges() async throws {
+    func testSamePushTokenRegistersForEachServerOwnerScope() async throws {
         let suite = "assistant.push-scope-tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let manager = NotificationManager(defaults: defaults)
+        var registrations: [(String, String)] = []
+        manager.deviceTokenHandler = { token, scope in registrations.append((token, scope)) }
+
+        manager.setRegistrationScope("https://a.test|owner-a")
+        manager.handleDeviceToken(Data([0x01, 0xab]))
+        while registrations.count < 1 { await Task.yield() }
+        manager.setRegistrationScope("https://b.test|owner-b")
+        while registrations.count < 2 { await Task.yield() }
+
+        XCTAssertEqual(registrations.map(\.0), ["01ab", "01ab"])
+        XCTAssertEqual(registrations.map(\.1), ["https://a.test|owner-a", "https://b.test|owner-b"])
+    }
+
+    @MainActor
+    func testSamePushTokenRegistersAgainWhenAPNSEnvironmentChanges() async throws {
+        let suite = "assistant.push-environment-tests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let manager = NotificationManager(defaults: defaults)
