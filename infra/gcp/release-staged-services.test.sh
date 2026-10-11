@@ -43,7 +43,15 @@ if a[:3]==['run','jobs','update']:
 if a[:3]==['run','services','describe']:
  name=a[3]; svc=s[name]
  if '--format=json' in a:
-  traffic=[{'revisionName':r,'percent':pct} for r,pct in svc['traffic'].items()]
+  traffic=[]
+  for revision,pct in svc['traffic'].items():
+   tags=[x for x in svc.get('tags',[]) if x['revision']==revision]
+   if tags:
+    traffic += [{'revisionName':revision,'tag':x['tag'],'percent':pct if index==0 else 0,'url':f"https://{x['tag']}-{name}.example"} for index,x in enumerate(tags)]
+   else:
+    traffic.append({'revisionName':revision,'percent':pct})
+  active_revisions=set(svc['traffic'])
+  traffic += [{'revisionName':x['revision'],'tag':x['tag'],'percent':0,'url':f"https://{x['tag']}-{name}.example"} for x in svc.get('tags',[]) if x['revision'] not in active_revisions]
   traffic += [{'revisionName':x['revision'],'tag':x['tag'],'percent':0,'url':f"https://{x['tag']}-{name}.example"} for x in svc.get('staged',[])]
   print(json.dumps({'spec':{'template':{'spec':{'containers':[{'env':[{'name':k,'value':v} for k,v in svc['env'].items()]}] }}},'status':{'url':f'https://{name}.example','traffic':traffic}})); sys.exit(0)
  if 'value(status.url)' in ' '.join(a): print(f'https://{name}.example'); sys.exit(0)
@@ -80,8 +88,11 @@ if a[:3]==['run','services','update']:
 if a[:3]==['run','services','update-traffic']:
  name=a[3]; mapping=val('--to-revisions'); svc=s[name]
  if '--remove-tags' in a:
+  if os.getenv('FAIL_TAG_REMOVAL')=='1': sys.exit(1)
   tags=set(val('--remove-tags').split(','))
   svc['staged']=[stage for stage in svc.get('staged',[]) if stage.get('tag') not in tags]
+  svc['tags']=[tag for tag in svc.get('tags',[]) if tag.get('tag') not in tags]
+  if os.getenv('MUTATE_TRAFFIC_AFTER_TAG_REMOVAL')=='1': svc['traffic']={'web-raced':100}
   save(); sys.exit(0)
  if name=='assistant-agent' and os.getenv('FAIL_AGENT_PROMOTE')=='1' and 'agent-new' in mapping: sys.exit(1)
  if name=='assistant-web' and os.getenv('FAIL_WEB_PROMOTE')=='1' and 'web-new' in mapping: sys.exit(1)
@@ -89,6 +100,9 @@ if a[:3]==['run','services','update-traffic']:
  svc['traffic']={}
  for item in mapping.split(','):
   r,pct=item.split('=',1); svc['traffic'][r]=int(pct)
+ if os.getenv('ADD_FOREIGN_TAG_TO_PROMOTED_REVISION')=='1' and name=='assistant-web':
+  revision=next(iter(svc['traffic']))
+  svc.setdefault('tags',[]).append({'revision':revision,'tag':'operator-canary'})
  save(); sys.exit(0)
 print('unexpected gcloud: '+' '.join(a),file=sys.stderr); sys.exit(90)
 PY
@@ -143,7 +157,8 @@ JSON
  unset FAIL_AGENT_BUILD FAIL_AGENT_STAGE UNHEALTHY_AGENT UNHEALTHY_WEB UNHEALTHY_LIVE_WEB \
     CANDIDATE_WEB_PROBE_FAIL FINAL_NEW_PAIR_PROBE_FAIL RESUME_WEB_PROBE_FAIL RESUME_LIVE_PROBE_FAIL \
     FAIL_AGENT_PROMOTE FAIL_WEB_PROMOTE FAIL_REPAUSE FAIL_RESUME_DRAIN STUB_WEB_TIMEOUT_SECONDS STUB_WEB_TIMEOUT_MISSING \
-    FAIL_WORKER_UPDATE STALE_WORKER_IMAGE
+    FAIL_WORKER_UPDATE STALE_WORKER_IMAGE FAIL_TAG_REMOVAL MUTATE_TRAFFIC_AFTER_TAG_REMOVAL \
+    ADD_FOREIGN_TAG_TO_PROMOTED_REVISION
  : >"$STUB_CURL_CALLS"
  : >"$STUB_RELEASE_CALLS"
  : >"$STUB_SERVICE_UPDATE_CALLS"
@@ -259,6 +274,101 @@ assert live and all(any('new' in revision for revision in x['web']) for x in liv
 assert any(x['url'].endswith('/api/release-probe') and 'new' not in next(iter(x['agent'])) for x in live), 'promoted web must be probed against old agent before agent promotion'
 assert any(x['url'].endswith('/api/release-probe') and any('new' in revision for revision in x['agent']) for x in live), 'promoted web must be probed again against new agent'
 PY
+reset_case
+python3 - "$TEST_ROOT/state.json" <<'PY'
+import json,sys
+p=sys.argv[1]; s=json.load(open(p))
+s['assistant-agent']['tags']=[
+    {'revision':'agent-old','tag':'candidate-12345-1'},
+    {'revision':'agent-old','tag':'candidate-foreign'},
+    {'revision':'agent-old','tag':'candidate-12345-x'},
+    {'revision':'agent-old','tag':'candidate-12345'},
+]
+s['assistant-web']['tags']=[
+    {'revision':'web-old','tag':'candidate-12345-1'},
+    {'revision':'web-old','tag':'resume-12345-1'},
+    {'revision':'web-old','tag':'candidate-foreign'},
+    {'revision':'web-old','tag':'manual-preview'},
+    {'revision':'web-old','tag':'resume-12345-1-extra'},
+]
+open(p,'w').write(json.dumps(s))
+PY
+export ADD_FOREIGN_TAG_TO_PROMOTED_REVISION=1
+release_staged_services || fail 'prior release-owned tags should retire after successful promotion'
+python3 - "$TEST_ROOT/state.json" "$STUB_RELEASE_CALLS" <<'PY'
+import json,sys
+s=json.load(open(sys.argv[1])); calls=open(sys.argv[2]).read().splitlines()
+for service in ('assistant-agent','assistant-web'):
+    tags={entry['tag'] for entry in s[service].get('tags',[])}
+    assert 'candidate-foreign' in tags, (service,tags)
+    if service=='assistant-web': assert 'manual-preview' in tags, (service,tags)
+    assert tags.intersection({'candidate-12345-x','candidate-12345','resume-12345-1-extra'}), (service,tags)
+    assert not tags.intersection({'candidate-12345-1','resume-12345-1'}), (service,tags)
+    assert any(stage['tag'].startswith('candidate-') for stage in s[service].get('staged',[])), (service,s[service].get('staged'))
+web_current=next(iter(s['assistant-web']['traffic']))
+assert any(entry['revision']==web_current and entry['tag']=='operator-canary' for entry in s['assistant-web'].get('tags',[])), s['assistant-web'].get('tags')
+removals=[line for line in calls if '--remove-tags' in line]
+assert len(removals)==3, removals
+assert sum('candidate-12345-1' in line for line in removals)==2, removals
+assert sum('resume-12345-1' in line for line in removals)==1, removals
+assert not any('candidate-foreign' in line for line in removals), removals
+PY
+reset_case
+python3 - "$TEST_ROOT/state.json" <<'PY'
+import json,sys
+p=sys.argv[1]; s=json.load(open(p))
+s['assistant-web']['traffic']={'web-current':100}
+s['assistant-web']['tags']=[{'revision':'web-reassigned','tag':'candidate-12345-1'}]
+open(p,'w').write(json.dumps(s))
+PY
+if release_retire_nonserving_candidate_tag assistant-web candidate-12345-1 '' web-current web-old; then
+  fail 'tag reassigned to a different revision must not be retired'
+fi
+[[ ! -s "$STUB_RELEASE_CALLS" ]] || fail 'reassigned tag reached a removal mutation'
+reset_case
+python3 - "$TEST_ROOT/state.json" <<'PY'
+import json,sys
+p=sys.argv[1]; s=json.load(open(p))
+s['assistant-web']['traffic']={'web-current':60,'web-foreign':40}
+s['assistant-web']['tags']=[{'revision':'web-old','tag':'candidate-12345-1'}]
+open(p,'w').write(json.dumps(s))
+PY
+if release_retire_nonserving_candidate_tag assistant-web candidate-12345-1 '' web-current web-old; then
+  fail 'split traffic must prevent tag retirement'
+fi
+[[ ! -s "$STUB_RELEASE_CALLS" ]] || fail 'split traffic reached a tag removal mutation'
+reset_case
+python3 - "$TEST_ROOT/state.json" <<'PY'
+import json,sys
+p=sys.argv[1]; s=json.load(open(p))
+s['assistant-web']['traffic']={'web-current':100}
+s['assistant-web']['tags']=[{'revision':'web-old','tag':'candidate-12345-1'}]
+open(p,'w').write(json.dumps(s))
+PY
+export FAIL_TAG_REMOVAL=1
+if release_retire_nonserving_candidate_tag assistant-web candidate-12345-1 '' web-current web-old; then
+  fail 'failed tag removal must be reported'
+fi
+python3 - "$TEST_ROOT/state.json" "$STUB_RELEASE_CALLS" <<'PY'
+import json,sys
+s=json.load(open(sys.argv[1])); calls=open(sys.argv[2]).read().splitlines()
+assert s['assistant-web']['tags']==[{'revision':'web-old','tag':'candidate-12345-1'}]
+assert len(calls)==1 and '--remove-tags candidate-12345-1 ' in calls[0], calls
+PY
+unset FAIL_TAG_REMOVAL
+reset_case
+python3 - "$TEST_ROOT/state.json" <<'PY'
+import json,sys
+p=sys.argv[1]; s=json.load(open(p))
+s['assistant-web']['traffic']={'web-current':100}
+s['assistant-web']['tags']=[{'revision':'web-old','tag':'candidate-12345-1'}]
+open(p,'w').write(json.dumps(s))
+PY
+export MUTATE_TRAFFIC_AFTER_TAG_REMOVAL=1
+if release_retire_nonserving_candidate_tag assistant-web candidate-12345-1 '' web-current web-old; then
+  fail 'serving traffic change after tag removal must fail post-removal verification'
+fi
+unset MUTATE_TRAFFIC_AFTER_TAG_REMOVAL
 reset_case; export FINAL_NEW_PAIR_PROBE_FAIL=1
 if release_staged_services; then fail 'new-web/new-agent probe failure must roll back both services'; fi
 assert_old_traffic

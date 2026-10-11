@@ -146,26 +146,29 @@ release_traffic_map() {
 }
 
 release_retire_nonserving_candidate_tag() {
-  local service="$1" tag="$2" rollback_traffic="$3" service_json decision
+  local service="$1" tag="$2" rollback_traffic="$3" expected_serving_revision="$4" expected_retired_revision="$5" service_json decision
   service_json="$(release_service_json "$service")" || return 1
   decision="$(node -e '
     const s=JSON.parse(process.argv[1]);
     const tag=process.argv[2];
     const rollback=new Set(process.argv[3].split(",").map(x=>x.split("=")[0]).filter(Boolean));
+    const expected=process.argv[4];
+    const expectedTarget=process.argv[5];
     const rows=s.status?.traffic??[];
     const matches=rows.filter(x=>x.tag===tag && x.revisionName);
     if (matches.length===0) { process.stdout.write("absent"); process.exit(0); }
     if (matches.length!==1) process.exit(2);
     const target=matches[0].revisionName;
+    if (!expectedTarget || target!==expectedTarget) process.exit(4);
     const active=rows.filter(x=>Number(x.percent)>0);
     const total=active.reduce((sum,x)=>sum+Number(x.percent),0);
     const revisions=new Set(active.map(x=>x.revisionName).filter(Boolean));
     // Require a settled single-revision 100% promotion, and never remove a
     // tag whose revision is serving or remains in the captured rollback map.
-    if (total!==100 || revisions.size!==1 || !active.every(x=>x.revisionName)) process.exit(3);
+    if (total!==100 || revisions.size!==1 || !active.every(x=>x.revisionName) || !expected || !revisions.has(expected)) process.exit(3);
     if (revisions.has(target) || rollback.has(target)) { process.stdout.write("protected"); process.exit(0); }
     process.stdout.write("remove");
-  ' "$service_json" "$tag" "$rollback_traffic")" || return 1
+  ' "$service_json" "$tag" "$rollback_traffic" "$expected_serving_revision" "$expected_retired_revision")" || return 1
   [[ "$decision" == remove ]] || return 0
 
   if ! gcloud run services update-traffic "$service" --project "$PROJECT" --region "$REGION" \
@@ -175,12 +178,29 @@ release_retire_nonserving_candidate_tag() {
   fi
 
   service_json="$(release_service_json "$service")" || return 1
-  if node -e 'const s=JSON.parse(process.argv[1]);if((s.status?.traffic??[]).some(x=>x.tag===process.argv[2]))process.exit(1)' \
-    "$service_json" "$tag"; then
+  if node -e '
+    const s=JSON.parse(process.argv[1]);const rows=s.status?.traffic??[];const tag=process.argv[2],expected=process.argv[3];
+    const active=rows.filter(x=>Number(x.percent)>0);
+    if(rows.some(x=>x.tag===tag)||active.length!==1||Number(active[0].percent)!==100||active[0].revisionName!==expected)process.exit(1);
+  ' "$service_json" "$tag" "$expected_serving_revision"; then
     return 0
   fi
   echo "  warning: ${service} still reports this release's candidate tag ${tag} after removal." >&2
   return 1
+}
+
+release_owned_tags_on_traffic() {
+  node -e '
+    const s=JSON.parse(process.argv[1]);
+    const active=new Set((s.status?.traffic??[]).filter(x=>Number(x.percent)>0).map(x=>x.revisionName).filter(Boolean));
+    const owned=/^(?:candidate|resume)-(?:[0-9]+-[0-9]+|[a-f0-9]{20})$/;
+    const rows=(s.status?.traffic??[]).filter(x=>x.tag&&owned.test(x.tag)&&active.has(x.revisionName));
+    const seen=new Set();
+    for(const row of rows) {
+      const key=`${row.tag}\t${row.revisionName}`;
+      if(!seen.has(key)){seen.add(key);process.stdout.write(`${key}\n`)}
+    }
+  ' "$1"
 }
 
 release_tag_url() {
@@ -279,6 +299,7 @@ release_staged_services() {
   local web_writes_paused=false
   local RELEASE_CHANGED_JOBS=''
   local agent_before='' web_before='' agent_old_traffic='' web_old_traffic=''
+  local agent_owned_tags='' web_owned_tags='' agent_serving_revision='' web_serving_revision=''
   local agent_candidate_url='' web_candidate_url='' agent_promotion_attempted=false web_promotion_attempted=false
   local live_agent_json live_agent_api live_agent_schema_driver live_agent_schema_min live_agent_schema_max
 
@@ -337,9 +358,11 @@ release_staged_services() {
   # Capture all rollback targets before the first mutation.
   web_before="$(release_service_json assistant-web)" || return 1
   web_old_traffic="$(release_traffic_map "$web_before")" || return 1
+  web_owned_tags="$(release_owned_tags_on_traffic "$web_before")" || return 1
   if [[ "$selected" == agent,web ]]; then
     agent_before="$(release_service_json assistant-agent)" || return 1
     agent_old_traffic="$(release_traffic_map "$agent_before")" || return 1
+    agent_owned_tags="$(release_owned_tags_on_traffic "$agent_before")" || return 1
   fi
 
   # Candidate revisions carry the manifest identity and compatibility contract.
@@ -426,6 +449,7 @@ release_staged_services() {
     if [[ -z "$staged_web_revision" ]]; then
       promoted_ok=false
     else
+      web_serving_revision="$staged_web_revision"
       if [[ "$web_writes_paused" == true ]]; then web_paused_revision="$staged_web_revision"; fi
       web_promotion_attempted=true
       if ! gcloud run services update-traffic assistant-web \
@@ -450,6 +474,7 @@ release_staged_services() {
     if [[ -z "$staged_agent_revision" ]]; then
       promoted_ok=false
     else
+      agent_serving_revision="$staged_agent_revision"
       agent_promotion_attempted=true
       if ! gcloud run services update-traffic assistant-agent \
         --project "$PROJECT" --region "$REGION" --to-revisions "${staged_agent_revision}=100" --quiet; then
@@ -488,6 +513,7 @@ release_staged_services() {
           if [[ -z "$web_resume_revision" ]]; then
             promoted_ok=false
           else
+            web_serving_revision="$web_resume_revision"
             web_resume_promotion_attempted=true
             if ! gcloud run services update-traffic assistant-web --project "$PROJECT" --region "$REGION" \
               --to-revisions "${web_resume_revision}=100" --quiet; then promoted_ok=false; fi
@@ -508,6 +534,7 @@ release_staged_services() {
     if [[ -z "$staged_web_revision" ]]; then
       promoted_ok=false
     else
+      web_serving_revision="$staged_web_revision"
       web_promotion_attempted=true
       if ! gcloud run services update-traffic assistant-web \
         --project "$PROJECT" --region "$REGION" --to-revisions "${staged_web_revision}=100" --quiet; then
@@ -560,9 +587,29 @@ release_staged_services() {
   # captured rollback map. Candidate/resume tags on live revisions remain.
   if [[ "$selected" == agent,web && "$RELEASE_STORAGE_DRIVER" == firestore &&
         "$web_resume_promotion_attempted" == true && -n "$web_paused_revision" ]]; then
-    if ! release_retire_nonserving_candidate_tag assistant-web "$staging_tag" "$web_old_traffic"; then
+    if ! release_retire_nonserving_candidate_tag assistant-web "$staging_tag" "$web_old_traffic" "$web_serving_revision" "$web_paused_revision"; then
       echo '  warning: staged release is healthy, but its retired candidate tag needs guarded cleanup.' >&2
     fi
+  fi
+
+  # Tags on the previously serving revisions become historical after this
+  # successful promotion. Retire only release-owned candidate/resume tags that
+  # were attached to those exact prior serving revisions. Arbitrary tags and
+  # tags on other revisions remain untouched.
+  local owned_tag owned_revision
+  while IFS=$'\t' read -r owned_tag owned_revision; do
+    [[ -n "$owned_tag" ]] || continue
+    if ! release_retire_nonserving_candidate_tag assistant-web "$owned_tag" '' "$web_serving_revision" "$owned_revision"; then
+      echo "  warning: release is healthy, but prior web tag ${owned_tag} needs guarded cleanup." >&2
+    fi
+  done <<<"$web_owned_tags"
+  if [[ "$selected" == agent,web ]]; then
+    while IFS=$'\t' read -r owned_tag owned_revision; do
+      [[ -n "$owned_tag" ]] || continue
+      if ! release_retire_nonserving_candidate_tag assistant-agent "$owned_tag" '' "$agent_serving_revision" "$owned_revision"; then
+        echo "  warning: release is healthy, but prior agent tag ${owned_tag} needs guarded cleanup." >&2
+      fi
+    done <<<"$agent_owned_tags"
   fi
 
   echo "Release manifest saved at ${manifest_path}"
