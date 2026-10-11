@@ -1,8 +1,34 @@
 import type { UIMessage } from 'ai';
 import { describe, expect, it } from 'vitest';
-import { mergeChatLog, nextPollDelayMs, unresolvedDecisionIds } from './use-chat-polling';
+import {
+  mergeChatLog,
+  nextPollDelayMs,
+  taskTimeoutNote,
+  unresolvedDecisionIds,
+} from './use-chat-polling';
 
 const NOT_STREAMING = { streaming: false, retracted: new Set<string>() };
+
+describe('task timeout copy', () => {
+  it('distinguishes queued work from an executing task', () => {
+    expect(taskTimeoutNote('pending')).toMatch(/queued and has not started yet/i);
+    expect(taskTimeoutNote('pending')).not.toMatch(/still running|still working/i);
+    expect(taskTimeoutNote('running')).toMatch(/still running/i);
+  });
+
+  it.each([
+    ['waiting_approval', /waiting for approval.*Activity/i],
+    ['waiting_budget', /waiting for a budget decision.*Activity/i],
+    ['needs_attention', /needs your attention.*Activity/i],
+  ])('keeps %s owner-gated state visible', (status, expected) => {
+    expect(taskTimeoutNote(status)).toMatch(expected);
+  });
+
+  it('does not infer execution when no saved status was observed', () => {
+    expect(taskTimeoutNote(null)).toMatch(/could not verify.*current status/i);
+    expect(taskTimeoutNote('unknown')).not.toMatch(/still running|still working/i);
+  });
+});
 
 it('refreshes saved cards in place and prioritizes an explicitly refreshed old card beyond the cap', () => {
   const log = Array.from(

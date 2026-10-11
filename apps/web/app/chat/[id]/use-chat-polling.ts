@@ -258,6 +258,35 @@ export interface TurnState {
   sawAssistant: boolean;
   sawDecision: boolean;
   graceTicks: number;
+  lastTaskStatus: string | null;
+}
+
+/** Timeout copy must reflect the last persisted status, never infer execution. */
+export function taskTimeoutNote(status: string | null): string {
+  switch (status) {
+    case 'pending':
+      return 'This task is queued and has not started yet. Check Activity for updates.';
+    case 'running':
+      return 'This task is still running. Its result will appear here when it finishes.';
+    case 'waiting_approval':
+      return 'This task is waiting for approval. Check Activity for its current approval status.';
+    case 'waiting_budget':
+      return 'This task is waiting for a budget decision. Check Activity.';
+    case 'needs_attention':
+      return 'This task needs your attention. Check Activity.';
+    case 'sleeping':
+      return 'This task is waiting until its next run. Check Activity for updates.';
+    case 'waiting_event':
+      return 'This task is waiting for an event. Check Activity for updates.';
+    case 'done':
+      return 'This task is marked complete, but its reply has not appeared yet. Check Activity.';
+    case 'failed':
+      return 'This task failed. Check Activity for details.';
+    case 'cancelled':
+      return 'This task was cancelled.';
+    default:
+      return 'I could not verify this task’s current status. Check Activity for the latest update.';
+  }
 }
 
 /**
@@ -377,6 +406,7 @@ export function useChatPolling({
           sawAssistant: false,
           sawDecision: false,
           graceTicks: PARK_GRACE_TICKS,
+          lastTaskStatus: null,
         };
       }
       const turnState = turn ? turnRef.current : null;
@@ -440,7 +470,10 @@ export function useChatPolling({
           if (cancelled) return;
           const sameTurn =
             !!turn && asyncTurnRef.current?.taskId === turn.taskId && turnRef.current === turnState;
-          if (sameTurn) setActivity(data.activity ?? []);
+          if (sameTurn && turnState) {
+            setActivity(data.activity ?? []);
+            turnState.lastTaskStatus = data.taskStatus;
+          }
           // `refreshed` is deliberately kept out of the settle checks below: a
           // re-read of a card already on screen is not this turn producing an
           // answer. `superseded` is likewise a removal, never new output.
@@ -511,7 +544,7 @@ export function useChatPolling({
         !keepPollingTaskRef.current?.(turnState.taskId) &&
         Date.now() - turnState.startedAt > TURN_TIMEOUT_MS
       ) {
-        settle(turnState.taskId, 'Still working. The result will appear here when it finishes.');
+        settle(turnState.taskId, taskTimeoutNote(turnState.lastTaskStatus));
         return schedule(null, { elapsedMs, carriedNews });
       }
       schedule(asyncTurnRef.current, { elapsedMs, carriedNews });
