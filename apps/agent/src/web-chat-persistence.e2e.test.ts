@@ -46,7 +46,7 @@ const SPACE: EmbeddingSpace = {
   dimensions: 1536,
   revision: '1',
 };
-const REQUEST_TEXT = 'What is on my calendar on October 9?';
+const REQUEST_TEXT = 'What is on my calendar on October 9, 2026?';
 const REPLY_TEXT = 'You have Planning review on your calendar.';
 
 function request(conversationId: string, operationId: string): Request {
@@ -111,7 +111,7 @@ function syntheticPreflightRoute(modelId: string) {
 
 function routerFor(
   interruptAfterCalendarRead = false,
-  planSummary = 'October 9 calendar request',
+  planSummary = 'October 9, 2026 calendar request',
 ): ModelRouter {
   const router = {
     route: async () => syntheticPreflightRoute('synthetic/web12'),
@@ -125,7 +125,7 @@ function routerFor(
             ? {
                 action: 'workflow',
                 reasoning: `Read the requested calendar day for ${planSummary}.`,
-                steps: ['Read the calendar for October 9.'],
+                steps: ['Read the calendar for October 9, 2026.'],
                 missingInfo: [],
               }
             : { decision: 'publish', reasons: [] },
