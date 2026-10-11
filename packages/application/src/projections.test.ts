@@ -196,7 +196,7 @@ describe('application projections', () => {
           id: liveId,
           status,
           progress,
-          updatedAt: new Date(now.getTime() + offset * 1000).toISOString(),
+          updatedAt: new Date(now.getTime() + offset * 1000),
         });
       }
       await expect(getActivityStatus(db, canaryId)).resolves.toBeNull();
