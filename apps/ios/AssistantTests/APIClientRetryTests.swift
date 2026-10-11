@@ -3441,16 +3441,21 @@ extension APIClientRetryTests {
     @MainActor
     func testDoneTaskUsesItsMatchingAssistantReply() async throws {
         let recorder = LocalNotificationRecorder()
-        let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
-            await recorder.schedule(
-                title: title,
-                body: body,
-                route: route,
-                approvalId: approvalId,
-                agentID: agentID,
-                conversationID: conversationID
-            )
-        })
+        var spokenReplies: [ChatMessage] = []
+        let model = try await notificationModel(
+            enqueueAutomaticSpeech: { spokenReplies.append($0) },
+            scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
+                await recorder.schedule(
+                    title: title,
+                    body: body,
+                    route: route,
+                    approvalId: approvalId,
+                    agentID: agentID,
+                    conversationID: conversationID
+                )
+            }
+        )
+        model.speechAlwaysOn = true
         let taskId = "33333333-3333-4333-8333-333333333333"
         let reply = ChatMessage(
             id: "reply-for-current-task",
@@ -3471,15 +3476,17 @@ extension APIClientRetryTests {
 
         model.send("Check the completed task")
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-        while recorder.entries.isEmpty, ContinuousClock.now < deadline {
+        while (recorder.entries.isEmpty || spokenReplies.isEmpty), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
 
         let notification = try XCTUnwrap(recorder.entries.first)
         XCTAssertEqual(notification.title, "Ada finished")
         XCTAssertEqual(notification.body, "Your result is ready.")
-        XCTAssertEqual(model.activityDetail, "The requested update is ready.")
+        XCTAssertEqual(model.activityDetail, "Your result is ready")
         XCTAssertEqual(model.activityThought, .finished)
+        XCTAssertEqual(spokenReplies.map(\.id), [reply.id])
+        XCTAssertEqual(spokenReplies.first?.text, "The requested update is ready.")
     }
 
     @MainActor

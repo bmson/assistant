@@ -319,7 +319,7 @@ final class AssistantMarkdownTests: XCTestCase {
     func testBriefingAgendaOmittedCountRejectsMalformedValues() throws {
         for (index, value) in ["0", "-1", "1.5", "\"2\"", "9007199254740992", "9223372036854775808"].enumerated() {
             let payload = """
-            {"id":"brief-\(index)","lead":"Schedule","sections":[{"type":"agenda","omittedCount":\(value),"items":[{"day":"Today","time":"9 AM","title":"Check-in"}]}]}
+            {"kind":"briefing","id":"brief-\(index)","lead":"Schedule","sections":[{"type":"agenda","omittedCount":\(value),"items":[{"day":"Today","time":"9 AM","title":"Check-in"}]}]}
             """
             let message = try JSONDecoder().decode(ChatMessage.self, from: Data(#"{"id":"message","role":"assistant","parts":[{"type":"data-card","data":\#(payload)}]}"#.utf8))
             let cards = message.parts.compactMap(MessageResponseCard.init(part:))
