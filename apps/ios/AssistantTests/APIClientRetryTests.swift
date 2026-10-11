@@ -384,6 +384,39 @@ final class StubURLProtocol: URLProtocol {
     }
 }
 
+@MainActor
+private final class LocalNotificationRecorder {
+    struct Entry {
+        let title: String
+        let body: String
+        let route: AssistantRoute?
+        let approvalId: String?
+        let agentID: String?
+        let conversationID: String?
+    }
+
+    private(set) var entries: [Entry] = []
+
+    func schedule(
+        title: String,
+        body: String,
+        route: AssistantRoute?,
+        approvalId: String?,
+        agentID: String?,
+        conversationID: String?
+    ) async -> Bool {
+        entries.append(.init(
+            title: title,
+            body: body,
+            route: route,
+            approvalId: approvalId,
+            agentID: agentID,
+            conversationID: conversationID
+        ))
+        return true
+    }
+}
+
 final class APIClientRetryTests: XCTestCase {
     private let sessionLock = NSLock()
     private var testSessions: [URLSession] = []
@@ -2996,13 +3029,18 @@ extension APIClientRetryTests {
 
     @MainActor
     private func notificationModel(
-        enqueueAutomaticSpeech: ((ChatMessage) -> Void)? = nil
+        enqueueAutomaticSpeech: ((ChatMessage) -> Void)? = nil,
+        scheduleLocalNotification: LocalNotificationScheduler? = nil
     ) async throws -> AppModel {
         let model: AppModel
         if let enqueueAutomaticSpeech {
-            model = AppModel(apiClient: makeClient(), enqueueAutomaticSpeech: enqueueAutomaticSpeech)
+            model = AppModel(
+                apiClient: makeClient(),
+                enqueueAutomaticSpeech: enqueueAutomaticSpeech,
+                scheduleLocalNotification: scheduleLocalNotification
+            )
         } else {
-            model = AppModel(apiClient: makeClient())
+            model = AppModel(apiClient: makeClient(), scheduleLocalNotification: scheduleLocalNotification)
         }
         model.scenePhaseDidChange(.background)
         StubURLProtocol.primeBootstrap(try notificationBootstrap())
@@ -3102,6 +3140,100 @@ extension APIClientRetryTests {
             StubURLProtocol.urls[$0.offset].path == "/api/mobile/v1/activity/\(taskId)"
         })?.element)
         XCTAssertEqual(try JSONSerialization.jsonObject(with: body) as? [String: String], ["action": "cancel"])
+    }
+
+    @MainActor
+    func testTaskAttentionNotificationUsesOnlyApprovalForThatTask() async throws {
+        let unrelated = pendingApproval(id: "unrelated", summary: "Approve a different task")
+        let matching = pendingApproval(id: "matching", summary: "Review this task")
+        let genericBody = "Open the chat to see what needs your attention."
+        let scenarios: [(status: String, taskId: String, pending: [PendingApproval], route: AssistantRoute, approvalId: String?, body: String)] = [
+            ("waiting_approval", "t-current", [unrelated], .chat, nil, genericBody),
+            ("waiting_approval", "t-matching", [unrelated, matching], .approvals, matching.id, "A decision is ready to review."),
+            ("waiting_budget", "t-current", [unrelated], .chat, nil, genericBody),
+            ("needs_attention", "t-current", [unrelated], .chat, nil, genericBody),
+        ]
+
+        for scenario in scenarios {
+            let recorder = LocalNotificationRecorder()
+            let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
+                await recorder.schedule(
+                    title: title,
+                    body: body,
+                    route: route,
+                    approvalId: approvalId,
+                    agentID: agentID,
+                    conversationID: conversationID
+                )
+            })
+            let reply = ChatMessage(id: "reply-\(scenario.taskId)", role: .assistant,
+                parts: [.init(type: "text", text: "The task needs attention.")])
+            let updates = ChatUpdates(taskStatus: scenario.status, messages: [reply], refreshed: [],
+                superseded: nil, nextCursor: nil, hasMore: false, activity: [])
+            StubURLProtocol.prime([], paths: [
+                "/api/mobile/v1/chat": [
+                    .taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: scenario.taskId),
+                ],
+                "/api/mobile/v1/chat/status": [
+                    .success(status: 200, body: try JSONEncoder().encode(updates)),
+                ],
+                "/api/mobile/v1/overview": [
+                    .success(status: 200, body: try overviewBody(pending: scenario.pending)),
+                ],
+                "/api/mobile/v1/workspace": [.success(status: 401, body: Data())],
+            ])
+
+            model.send("Continue the task")
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while recorder.entries.isEmpty, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+
+            let scheduled = try XCTUnwrap(recorder.entries.first, "Expected one task attention notification for \(scenario.status)")
+            XCTAssertEqual(recorder.entries.count, 1)
+            XCTAssertEqual(scheduled.route, scenario.route)
+            XCTAssertEqual(scheduled.approvalId, scenario.approvalId)
+            XCTAssertEqual(scheduled.body, scenario.body)
+            XCTAssertEqual(scheduled.agentID, notificationOwner)
+            XCTAssertEqual(scheduled.conversationID, notificationPrimaryID)
+            if scenario.route == .chat {
+                XCTAssertEqual(scheduled.title, "Ada needs attention")
+                XCTAssertEqual(model.activityDetail, "This task needs attention. Open the chat for details.")
+            } else {
+                XCTAssertEqual(scheduled.title, "Ada needs you")
+                XCTAssertEqual(model.activityDetail, "A decision is ready to review")
+            }
+        }
+    }
+
+    @MainActor
+    func testUnknownTaskStatusDoesNotSendACompletionNotification() async throws {
+        let recorder = LocalNotificationRecorder()
+        let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
+            await recorder.schedule(
+                title: title,
+                body: body,
+                route: route,
+                approvalId: approvalId,
+                agentID: agentID,
+                conversationID: conversationID
+            )
+        })
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.stream(body: Data("data: [DONE]\n\n".utf8))],
+            "/api/mobile/v1/chat/status": Array(repeating: .failure(URLError(.timedOut)), count: 5),
+        ])
+
+        model.send("Check the task status")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(6))
+        while model.isSending, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertFalse(model.isSending)
+        XCTAssertTrue(model.errorMessage?.localizedCaseInsensitiveContains("outcome is unknown") == true)
+        XCTAssertNotEqual(model.activityThought, .finished)
+        XCTAssertTrue(recorder.entries.isEmpty, "An unknown outcome must not claim that the task result is ready")
     }
 
     @MainActor
