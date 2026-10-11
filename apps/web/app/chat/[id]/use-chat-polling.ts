@@ -544,7 +544,11 @@ export function useChatPolling({
         !keepPollingTaskRef.current?.(turnState.taskId) &&
         Date.now() - turnState.startedAt > TURN_TIMEOUT_MS
       ) {
-        settle(turnState.taskId, taskTimeoutNote(turnState.lastTaskStatus));
+        // A failed poll cannot establish that the last saved status is still current.
+        settle(
+          turnState.taskId,
+          taskTimeoutNote(pollFailures === 0 ? turnState.lastTaskStatus : null),
+        );
         return schedule(null, { elapsedMs, carriedNews });
       }
       schedule(asyncTurnRef.current, { elapsedMs, carriedNews });
