@@ -303,6 +303,9 @@ final class LiveActivityManager {
             return "Your result is ready"
         case .failed:
             if thought == .stoppedByYou { return "You stopped this turn" }
+            if thought == .stopped, detail == "Task cancelled; external effects are not reversed" {
+                return detail
+            }
             return "Open Assistant for details"
         case .working:
             if detail.range(of: #"^Step \d+$"#, options: .regularExpression) != nil {
