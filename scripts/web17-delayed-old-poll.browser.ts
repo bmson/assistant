@@ -304,7 +304,27 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
       1,
       'The second prompt must not be admitted while the first is held',
     );
-    assert.equal(await page.getByText(secondMessage, { exact: true }).count(), 0);
+    const secondTextNodes = await page
+      .getByText(secondMessage, { exact: true })
+      .evaluateAll((elements) =>
+        elements.map((element) => ({
+          tag: element.tagName,
+          className: element.getAttribute('class'),
+          role: element.getAttribute('role'),
+          parent: element.parentElement?.outerHTML.slice(0, 800),
+        })),
+      );
+    assert.equal(
+      secondTextNodes.length,
+      0,
+      `Second prompt unexpectedly rendered despite one held admission: ${JSON.stringify({
+        secondTextNodes,
+        visibleText: (await page.locator('body').innerText()).slice(-2000),
+        apiEvents,
+        admissionCount,
+        admittedTexts,
+      })}`,
+    );
 
     releaseAdmission();
     await waitFor(admissionSettled, 'The held first admission did not settle');
