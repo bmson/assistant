@@ -294,7 +294,11 @@ describe.skipIf(!enabled)('F19 Firestore chat Stop at tool boundaries', () => {
             ...input,
             ctx: context(admitted.task.id, admitted.conversation.id),
           }),
-        ).resolves.toMatchObject({ kind: 'rejected' });
+        ).resolves.toMatchObject({
+          kind: 'executed',
+          toolCallId: result.toolCallId,
+          result: expectedResult,
+        });
         expect(invocations).toBe(1);
         const replayCalls = await store
           .collection('toolCalls')
