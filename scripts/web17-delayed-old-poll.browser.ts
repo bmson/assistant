@@ -119,6 +119,10 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
     }
   });
   const conversationId = await createConversation(page);
+  const userTranscript = page.locator('[data-message-block="true"][data-role="user"]');
+  const assistantTranscript = page.locator(
+    '[data-message-block="true"][data-role="assistant"]',
+  );
   const taskId = randomUUID();
   const firstMessage = 'WEB-17 first turn stays in admission';
   const secondMessage = 'WEB-17 second prompt remains a draft';
@@ -304,39 +308,25 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
       1,
       'The second prompt must not be admitted while the first is held',
     );
-    const secondTextNodes = await page
-      .getByText(secondMessage, { exact: true })
-      .evaluateAll((elements) =>
-        elements.map((element) => ({
-          tag: element.tagName,
-          className: element.getAttribute('class'),
-          role: element.getAttribute('role'),
-          parent: element.parentElement?.outerHTML.slice(0, 800),
-        })),
-      );
     assert.equal(
-      secondTextNodes.length,
+      await userTranscript.getByText(secondMessage, { exact: true }).count(),
       0,
-      `Second prompt unexpectedly rendered despite one held admission: ${JSON.stringify({
-        secondTextNodes,
-        visibleText: (await page.locator('body').innerText()).slice(-2000),
-        apiEvents,
-        admissionCount,
-        admittedTexts,
-      })}`,
+      'The second prompt must stay in the composer rather than render as a user message',
     );
+    assert.equal(await userTranscript.getByText(firstMessage, { exact: true }).count(), 1);
 
     releaseAdmission();
     await waitFor(admissionSettled, 'The held first admission did not settle');
     if (admissionRouteError) throw admissionRouteError;
-    await page.getByText(resultText, { exact: true }).waitFor({ timeout: 20_000 });
+    const resultBubble = assistantTranscript.getByText(resultText, { exact: true });
+    await resultBubble.waitFor({ timeout: 20_000 });
     const settledSendButton = page.getByRole('button', { name: 'Send', exact: true });
     await settledSendButton.waitFor();
-    assert.equal(await page.getByText(resultText, { exact: true }).count(), 1);
+    assert.equal(await resultBubble.count(), 1);
     assert.equal(await composer.inputValue(), secondMessage);
     assert.equal(await settledSendButton.isEnabled(), true);
-    assert.equal(await page.getByText(firstMessage, { exact: true }).count(), 1);
-    assert.equal(await page.getByText(secondMessage, { exact: true }).count(), 0);
+    assert.equal(await userTranscript.getByText(firstMessage, { exact: true }).count(), 1);
+    assert.equal(await userTranscript.getByText(secondMessage, { exact: true }).count(), 0);
     assert.deepEqual(admittedTexts, [firstMessage]);
     assert.equal(admissionCount, 1);
     assert.deepEqual(browserErrors, []);
