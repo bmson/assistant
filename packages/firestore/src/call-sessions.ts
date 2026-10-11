@@ -11,8 +11,11 @@ import {
   type CallSessionPatch,
   type CallSessionRepository,
   type CallTranscriptLine,
+  callVoiceToolEffectIdentity,
   isCallFinishDelivery,
   isCallLineRate,
+  MAX_CALL_VOICE_TOOL_RECEIPTS,
+  parseCallVoiceToolReceipts,
 } from '@assistant/persistence';
 import type { DocumentSnapshot, Transaction } from '@google-cloud/firestore';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
@@ -42,7 +45,11 @@ export class FirestoreCallSessionRepository implements CallSessionRepository {
     if (!snapshot?.exists) return null;
     const row = decodeRecord<CallSession>(snapshot.data());
     if (row?.agentId !== this.agentId || documentKey(row.id) !== snapshot.id) return null;
-    return { ...row, lineRate: isCallLineRate(row.lineRate) ? row.lineRate : null };
+    return {
+      ...row,
+      lineRate: isCallLineRate(row.lineRate) ? row.lineRate : null,
+      voiceToolReceipts: parseCallVoiceToolReceipts(row.voiceToolReceipts),
+    };
   }
 
   private async mutate(
@@ -76,6 +83,7 @@ export class FirestoreCallSessionRepository implements CallSessionRepository {
       transcriptState: { nextSequence: 1, pending: [], acknowledged: [] },
       notes: [],
       checkins: [],
+      voiceToolReceipts: [],
       hangupRequested: false,
       outcome: null,
       summary: null,
@@ -375,32 +383,127 @@ export class FirestoreCallSessionRepository implements CallSessionRepository {
     return updated ? ((updated.checkins as CallCheckin[]).at(-1) ?? null) : null;
   }
 
+  async applyVoiceToolEffect(
+    input: import('@assistant/persistence').ApplyCallVoiceToolEffectInput,
+  ) {
+    if (input.agentId !== this.agentId) return { status: 'unavailable' } as const;
+    const ref = this.store.doc(COLLECTION, input.callId);
+    return this.store.db.runTransaction(async (tx) => {
+      const row = this.owned(await tx.get(ref));
+      if (!row || row.taskId !== input.taskId || row.toolCallId !== input.parentToolCallId)
+        return { status: 'unavailable' } as const;
+      if (!(ACTIVE_CALL_STATUSES as readonly string[]).includes(row.status))
+        return { status: 'unavailable' } as const;
+      const identity = callVoiceToolEffectIdentity(input.callId, input);
+      const receipts = parseCallVoiceToolReceipts(row.voiceToolReceipts);
+      const prior = receipts.find((receipt) => receipt.id === identity.id);
+      if (prior) {
+        if (prior.kind !== identity.kind || prior.argsDigest !== identity.argsDigest)
+          return { status: 'conflict' } as const;
+        if (prior.kind === 'ask_owner') {
+          const checkin = ((row.checkins as CallCheckin[]) ?? []).find(
+            (item) => item.id === prior.effectId,
+          );
+          return checkin
+            ? ({ status: 'replay', receipt: prior, checkin } as const)
+            : ({ status: 'conflict' } as const);
+        }
+        return { status: 'replay', receipt: prior } as const;
+      }
+      if (receipts.length >= MAX_CALL_VOICE_TOOL_RECEIPTS) return { status: 'limit' } as const;
+      const now = this.store.now();
+      if (input.effect.kind === 'note') {
+        const fact = input.effect.fact.trim().slice(0, 500);
+        if (!fact) return { status: 'unavailable' } as const;
+        const receipt = {
+          ...identity,
+          provider: input.provider,
+          effectId: null,
+          committedAt: now.toISOString(),
+        } as const;
+        tx.set(
+          ref,
+          encodeRecord({
+            ...row,
+            notes: [...((row.notes as string[]) ?? []), fact].slice(-100),
+            voiceToolReceipts: [...receipts, receipt],
+            updatedAt: now,
+          }),
+        );
+        return { status: 'applied', receipt } as const;
+      }
+      const checkins = (row.checkins as CallCheckin[]) ?? [];
+      const revision =
+        checkins.reduce((max, current) => Math.max(max, current.revision ?? 0), 0) + 1;
+      const checkin: CallCheckin = {
+        ...input.effect.checkin,
+        question: input.effect.checkin.question.slice(0, 300),
+        revision,
+        deliveryStatus: 'pending',
+      };
+      const receipt = {
+        ...identity,
+        provider: input.provider,
+        effectId: checkin.id,
+        committedAt: now.toISOString(),
+      } as const;
+      tx.set(
+        ref,
+        encodeRecord({
+          ...row,
+          checkins: [
+            ...checkins.map((current) =>
+              current.answer === null &&
+              ['pending', 'delivered'].includes(current.deliveryStatus ?? 'pending')
+                ? { ...current, deliveryStatus: 'superseded' as const }
+                : current,
+            ),
+            checkin,
+          ],
+          voiceToolReceipts: [...receipts, receipt],
+          updatedAt: now,
+        }),
+      );
+      return { status: 'applied', receipt, checkin } as const;
+    });
+  }
+
   async markCheckinDelivery(
     id: string,
     checkinId: string,
     revision: number,
     delivered: boolean,
   ): Promise<boolean> {
-    let accepted = false;
-    const updated = await this.mutate(id, (row) => {
+    const ref = this.store.doc(COLLECTION, id);
+    const result = await this.store.db.runTransaction(async (tx) => {
+      const row = this.owned(await tx.get(ref));
+      if (!row) return false;
       const checkins = (row.checkins as CallCheckin[]) ?? [];
       const target = checkins.find(
         (checkin) => checkin.id === checkinId && checkin.revision === revision,
       );
+      if (!target || target.answer !== null) return false;
+      if (delivered && target.deliveryStatus === 'delivered') return true;
+      if (target.deliveryStatus !== 'pending') return false;
       const live =
         (ACTIVE_CALL_STATUSES as readonly string[]).includes(row.status) &&
-        (!target?.expiresAt || Date.parse(target.expiresAt) > this.store.now().getTime());
-      if (target?.deliveryStatus !== 'pending' || target.answer !== null) return null;
-      accepted = delivered && live;
-      return {
-        checkins: checkins.map((checkin) =>
-          checkin.id === checkinId
-            ? { ...checkin, deliveryStatus: accepted ? 'delivered' : 'failed' }
-            : checkin,
-        ),
-      };
+        (!target.expiresAt || Date.parse(target.expiresAt) > this.store.now().getTime());
+      const accepted = delivered && live;
+      tx.set(
+        ref,
+        encodeRecord({
+          ...row,
+          checkins: checkins.map((checkin) =>
+            checkin.id === checkinId
+              ? { ...checkin, deliveryStatus: accepted ? 'delivered' : 'failed' }
+              : checkin,
+          ),
+          updatedAt: this.store.now(),
+        }),
+      );
+      return accepted;
     });
-    return updated !== null && accepted;
+    return result;
   }
 
   async answerCheckin(

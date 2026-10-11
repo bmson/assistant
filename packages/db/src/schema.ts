@@ -759,6 +759,7 @@ export const callSessions = pgTable(
       .default({ nextSequence: 1, pending: [], acknowledged: [] }),
     notes: jsonb('notes').notNull().default([]),
     checkins: jsonb('checkins').notNull().default([]),
+    voiceToolReceipts: jsonb('voice_tool_receipts').notNull().default([]),
     hangupRequested: boolean('hangup_requested').notNull().default(false),
     outcome: text('outcome'),
     summary: text('summary'),

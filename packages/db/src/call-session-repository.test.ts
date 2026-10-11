@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { CallCheckin } from '@assistant/persistence';
+import { type CallCheckin, MAX_CALL_VOICE_TOOL_RECEIPTS } from '@assistant/persistence';
 import { eq } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createPostgresCallSessionRepository } from './call-session-repository.js';
@@ -107,6 +107,239 @@ describe('PostgreSQL call-session repository', () => {
       .set({ voiceRoute: { version: 1, modelId: 'wrong' } })
       .where(eq(callSessions.id, created.id));
     expect((await calls.get(input.id))?.voiceRoute).toBeNull();
+  });
+
+  it('atomically records and replays bounded opaque voice note/check-in receipts', async () => {
+    const calls = createPostgresCallSessionRepository(db);
+    const call = await calls.create({
+      id: randomUUID(),
+      agentId,
+      taskId,
+      toolCallId,
+      status: 'in_progress',
+      to: '+14155550123',
+      contactName: 'Nopa',
+      brief: { goal: 'Book dinner' },
+      voiceModel: 'openai:gpt-realtime-2.1',
+      voiceRoute: null,
+      maxMinutes: 10,
+      streamTokenHash: null,
+      callbackToken: 'wake',
+      reservationId: null,
+    });
+    const note = {
+      callId: call.id,
+      agentId,
+      taskId,
+      parentToolCallId: toolCallId,
+      provider: 'openai' as const,
+      providerCallId: 'provider-note-1',
+      effect: { kind: 'note' as const, fact: '  Dinner is at 7:30.  ' },
+    };
+    const concurrent = await Promise.all([
+      calls.applyVoiceToolEffect(note),
+      calls.applyVoiceToolEffect(note),
+    ]);
+    expect(concurrent.map((result) => result.status).sort()).toEqual(['applied', 'replay']);
+    const restarted = createPostgresCallSessionRepository(db);
+    expect(await restarted.applyVoiceToolEffect(note)).toMatchObject({ status: 'replay' });
+    expect((await restarted.get(call.id))?.notes).toEqual(['Dinner is at 7:30.']);
+    const receipts = (await restarted.get(call.id))?.voiceToolReceipts ?? [];
+    expect(receipts).toHaveLength(1);
+    expect(JSON.stringify(receipts)).not.toContain('Dinner is at 7:30');
+    expect(
+      await restarted.applyVoiceToolEffect({
+        ...note,
+        effect: { kind: 'note', fact: 'Different fact' },
+      }),
+    ).toEqual({ status: 'conflict' });
+    const longNote = {
+      ...note,
+      providerCallId: 'long-note',
+      effect: { kind: 'note' as const, fact: `${'x'.repeat(500)}A` },
+    };
+    expect(await restarted.applyVoiceToolEffect(longNote)).toMatchObject({ status: 'applied' });
+    expect(
+      await restarted.applyVoiceToolEffect({
+        ...longNote,
+        effect: { kind: 'note', fact: `${'x'.repeat(500)}B` },
+      }),
+    ).toEqual({ status: 'conflict' });
+    expect(
+      await restarted.applyVoiceToolEffect({
+        ...note,
+        effect: {
+          kind: 'ask_owner',
+          checkin: {
+            id: randomUUID(),
+            question: 'Same provider id, different action',
+            askedAt: new Date().toISOString(),
+            answer: null,
+            answeredAt: null,
+            via: null,
+          },
+        },
+      }),
+    ).toEqual({ status: 'conflict' });
+    expect(
+      await restarted.applyVoiceToolEffect({
+        ...note,
+        provider: 'vertex',
+        effect: { kind: 'note', fact: 'Dinner is at 7:30.' },
+      }),
+    ).toMatchObject({ status: 'applied' });
+    expect((await restarted.get(call.id))?.notes).toEqual([
+      'Dinner is at 7:30.',
+      'x'.repeat(500),
+      'Dinner is at 7:30.',
+    ]);
+
+    const checkinDraft: CallCheckin = {
+      id: randomUUID(),
+      question: 'Can we accept 7:30?',
+      askedAt: new Date().toISOString(),
+      answer: null,
+      answeredAt: null,
+      via: null,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      deliveryStatus: 'pending',
+    };
+    const checkinInput = {
+      ...note,
+      providerCallId: 'provider-ask-1',
+      effect: { kind: 'ask_owner' as const, checkin: checkinDraft },
+    };
+    const [firstCheckin, replayCheckin] = await Promise.all([
+      restarted.applyVoiceToolEffect(checkinInput),
+      restarted.applyVoiceToolEffect(checkinInput),
+    ]);
+    expect([firstCheckin.status, replayCheckin.status].sort()).toEqual(['applied', 'replay']);
+    if (
+      firstCheckin.status !== 'applied' ||
+      replayCheckin.status !== 'replay' ||
+      !firstCheckin.checkin ||
+      !replayCheckin.checkin
+    )
+      throw new Error('voice check-in receipt did not converge');
+    expect(replayCheckin.checkin.id).toBe(firstCheckin.checkin.id);
+    expect((await restarted.get(call.id))?.checkins).toHaveLength(1);
+    expect(
+      await restarted.markCheckinDelivery(
+        call.id,
+        firstCheckin.checkin.id,
+        firstCheckin.checkin.revision ?? 0,
+        true,
+      ),
+    ).toBe(true);
+    expect(
+      await restarted.markCheckinDelivery(
+        call.id,
+        firstCheckin.checkin.id,
+        firstCheckin.checkin.revision ?? 0,
+        true,
+      ),
+    ).toBe(true);
+    expect(
+      await restarted.applyVoiceToolEffect({
+        ...note,
+        agentId: randomUUID(),
+        providerCallId: 'foreign',
+      }),
+    ).toEqual({ status: 'unavailable' });
+    expect(
+      await restarted.applyVoiceToolEffect({
+        ...note,
+        taskId: randomUUID(),
+        providerCallId: 'wrong-task',
+      }),
+    ).toEqual({ status: 'unavailable' });
+    expect(
+      await restarted.applyVoiceToolEffect({
+        ...note,
+        parentToolCallId: randomUUID(),
+        providerCallId: 'wrong-parent-tool',
+      }),
+    ).toEqual({ status: 'unavailable' });
+    await restarted.finish(call.id, { status: 'completed' });
+    const before = await restarted.get(call.id);
+    expect(await restarted.applyVoiceToolEffect(note)).toEqual({ status: 'unavailable' });
+    expect(await restarted.applyVoiceToolEffect(checkinInput)).toEqual({ status: 'unavailable' });
+    expect(
+      await restarted.applyVoiceToolEffect({ ...note, providerCallId: 'after-terminal' }),
+    ).toEqual({ status: 'unavailable' });
+    expect(await restarted.get(call.id)).toEqual(before);
+
+    const erasedCall = await calls.create({
+      id: randomUUID(),
+      agentId,
+      taskId,
+      toolCallId,
+      status: 'in_progress',
+      to: '+14155550123',
+      contactName: null,
+      brief: {},
+      voiceModel: 'openai:gpt-realtime-2.1',
+      voiceRoute: null,
+      maxMinutes: 10,
+      streamTokenHash: null,
+      callbackToken: 'wake',
+      reservationId: null,
+    });
+    await db.delete(callSessions).where(eq(callSessions.id, erasedCall.id));
+    expect(
+      await restarted.applyVoiceToolEffect({
+        ...note,
+        callId: erasedCall.id,
+        providerCallId: 'after-erasure',
+      }),
+    ).toEqual({ status: 'unavailable' });
+    expect(await restarted.get(erasedCall.id)).toBeNull();
+  });
+
+  it('fails closed at the durable voice receipt cap without evicting replay identities', async () => {
+    const calls = createPostgresCallSessionRepository(db);
+    const call = await calls.create({
+      id: randomUUID(),
+      agentId,
+      taskId,
+      toolCallId,
+      status: 'in_progress',
+      to: '+14155550123',
+      contactName: null,
+      brief: {},
+      voiceModel: 'openai:gpt-realtime-2.1',
+      voiceRoute: null,
+      maxMinutes: 10,
+      streamTokenHash: null,
+      callbackToken: 'wake',
+      reservationId: null,
+    });
+    const receipts = Array.from({ length: MAX_CALL_VOICE_TOOL_RECEIPTS }, (_, index) => ({
+      id: index.toString(16).padStart(64, '0'),
+      provider: 'openai',
+      kind: 'note',
+      argsDigest: 'a'.repeat(64),
+      effectId: null,
+      committedAt: new Date().toISOString(),
+    }));
+    await db
+      .update(callSessions)
+      .set({ voiceToolReceipts: receipts })
+      .where(eq(callSessions.id, call.id));
+    const result = await calls.applyVoiceToolEffect({
+      callId: call.id,
+      agentId,
+      taskId,
+      parentToolCallId: toolCallId,
+      provider: 'openai',
+      providerCallId: 'cap-hit',
+      effect: { kind: 'note', fact: 'Must fail closed.' },
+    });
+    expect(result).toEqual({ status: 'limit' });
+    expect((await calls.get(call.id))?.notes).toEqual([]);
+    expect((await calls.get(call.id))?.voiceToolReceipts).toHaveLength(
+      MAX_CALL_VOICE_TOOL_RECEIPTS,
+    );
   });
 
   it('commits the winning terminal snapshot and acknowledges outbox legs independently', async () => {

@@ -85,3 +85,11 @@ requests, the machine verdict — lives on the call session (`call_sessions` /
 `callSessions`). The bridge or status webhook, whichever sees the call end
 first, settles cost and wakes the task;
 the sweep closes calls orphaned by a crash.
+
+The bridge commits each note and owner check-in together with an opaque
+provider-call receipt on the owner-scoped call session. Replayed note/check-in
+callbacks reuse that effect; a reused provider identity with different content
+fails closed. At 256 receipts, further note/check-in effects are refused rather
+than evicting replay history. These receipts cover database notes and the
+check-in's stable notification key; they do not certify a phone-key press or
+call completion.
