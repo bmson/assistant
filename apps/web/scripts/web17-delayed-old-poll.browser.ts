@@ -7,11 +7,9 @@
  */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { encodeMessageCursor } from '@assistant/core/chat';
-import { conversations, createDb, tasks } from '@assistant/db';
 import { createUIMessageStream, createUIMessageStreamResponse } from 'ai';
-import { eq, inArray } from 'drizzle-orm';
 import { chromium, type Page, type Route } from 'playwright';
+import { createWeb17Fixture } from '../../../scripts/web17-delayed-old-poll-fixture.js';
 
 const baseUrl = process.env.SMOKE_BASE_URL;
 assert(baseUrl, 'Set SMOKE_BASE_URL to the running loopback production web app');
@@ -25,9 +23,7 @@ function isPathOrChild(pathname: string, basePath: string): boolean {
   return pathname === basePath || pathname.startsWith(`${basePath}/`);
 }
 
-const db = createDb(databaseUrl, { max: 2, statementTimeoutMs: 10_000 });
-const createdConversations: string[] = [];
-const createdTasks: string[] = [];
+const fixture = createWeb17Fixture(databaseUrl);
 const browser = await chromium.launch({ channel: process.env.SMOKE_BROWSER_CHANNEL ?? 'chrome' });
 const context = await browser.newContext();
 
@@ -44,30 +40,8 @@ async function createConversation(page: Page): Promise<string> {
   });
   assert.equal(created.status, 201, 'The owner session should create an isolated chat');
   assert.match(created.body.conversationId, /^[0-9a-f-]{36}$/i);
-  createdConversations.push(created.body.conversationId as string);
+  fixture.registerConversation(created.body.conversationId as string);
   return created.body.conversationId as string;
-}
-
-async function insertTerminalTask(conversationId: string, status: string): Promise<string> {
-  const [conversation] = await db
-    .select({ agentId: conversations.agentId })
-    .from(conversations)
-    .where(eq(conversations.id, conversationId))
-    .limit(1);
-  assert(conversation, 'The server-created conversation must belong to the configured agent');
-  const id = randomUUID();
-  await db.insert(tasks).values({
-    id,
-    agentId: conversation.agentId,
-    conversationId,
-    type: 'chat_turn',
-    status,
-    trust: 'owner',
-    externalEventId: `web17-${id}`,
-    title: `WEB-17 delayed poll ${status}`,
-  });
-  createdTasks.push(id);
-  return id;
 }
 
 function statusPayload(
@@ -115,10 +89,10 @@ async function syntheticAcceptedStream(
 async function verifyDelayedTerminalPoll(status: 'done' | 'cancelled' | 'failed'): Promise<void> {
   const page = await context.newPage();
   const conversationId = await createConversation(page);
-  const oldTaskId = await insertTerminalTask(conversationId, status);
+  const oldTaskId = await fixture.insertTerminalTask(conversationId, status);
   const newTaskId = randomUUID();
-  const oldCursor = encodeMessageCursor({ createdAt: new Date(0), id: randomUUID() });
-  const newCursor = encodeMessageCursor({ createdAt: new Date(), id: randomUUID() });
+  const oldCursor = fixture.cursorAt(new Date(0));
+  const newCursor = fixture.cursorAt(new Date());
 
   let releaseOldPoll!: () => void;
   const oldPollRelease = new Promise<void>((resolve) => {
@@ -339,8 +313,5 @@ try {
 } finally {
   await context.close();
   await browser.close();
-  if (createdTasks.length) await db.delete(tasks).where(inArray(tasks.id, createdTasks));
-  if (createdConversations.length)
-    await db.delete(conversations).where(inArray(conversations.id, createdConversations));
-  await db.$client.end();
+  await fixture.cleanup();
 }
