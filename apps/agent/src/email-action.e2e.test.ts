@@ -1,5 +1,11 @@
 import type { InboundEvent, ModelRouter, StepCallOutcome } from '@assistant/core';
-import { enqueueTask, executeTask, getAgent, TruncatedObjectError } from '@assistant/core';
+import {
+  enqueueTask,
+  executeTask,
+  extractOwnerIntent,
+  getAgent,
+  TruncatedObjectError,
+} from '@assistant/core';
 import {
   approvals,
   conversations,
@@ -104,81 +110,124 @@ afterAll(async () => {
 });
 
 describe('approval notice with earlier completed work', () => {
-  it('names only the pending send when the same task already has a completed benign write', async () => {
+  it('keeps a completed synthetic write receipt separate from the pending send notice', async () => {
     if (!dbUp)
       throw new Error(
         'PostgreSQL test database is required for this same-task approval regression',
       );
+    const ownerText = 'Create the synthetic lunch record, and email its summary to Jordan.';
+    expect(extractOwnerIntent({ trust: 'owner', text: ownerText }).authorizedScopes).toContain(
+      'external_send',
+    );
     const { task } = await enqueueTask(db, {
       type: 'adhoc',
       event: {
         source: 'internal',
         agentId,
         trust: 'owner',
-        payload: { instruction: 'Create the lunch event, then send its details to Jordan.' },
+        payload: { instruction: ownerText },
       },
     });
     createdTaskIds.push(task.id);
 
-    const [completedWrite] = await db
-      .insert(toolCalls)
-      .values({
-        taskId: task.id,
-        step: 0,
-        toolName: 'calendar.create_event',
-        args: { summary: 'Lunch' },
+    const writes: unknown[] = [];
+    const sends: unknown[] = [];
+    const mixedRegistry = new ToolRegistry()
+      .register({
+        name: 'test.benign_write',
+        description: 'Create a synthetic, non-external record.',
+        inputSchema: z.object({ title: z.string() }),
         risk: 'autonomous',
-        status: 'succeeded',
-        result: { eventId: 'synthetic-lunch-event', created: true },
+        acceptsUntrustedInput: true,
+        idempotencyKey: () => `app05-write:${task.id}`,
+        execute: async (args) => {
+          writes.push(args);
+          return {
+            created: true,
+            receipt: 'synthetic-lunch-001',
+            title: (args as { title: string }).title,
+          };
+        },
       })
-      .returning();
-    const [pendingSend] = await db
-      .insert(toolCalls)
-      .values({
-        taskId: task.id,
-        step: 1,
-        toolName: 'gmail.send',
-        args: { to: 'jordan@example.test', subject: 'Lunch details' },
-        risk: 'approval',
-        status: 'awaiting_approval',
-      })
-      .returning();
-    if (!completedWrite || !pendingSend) throw new Error('Expected both durable tool rows');
-    const [pendingApproval] = await db
-      .insert(approvals)
-      .values({
-        taskId: task.id,
-        toolCallId: pendingSend.id,
-        shortCode: 'A7',
-        summary: 'Send lunch details to Jordan',
-        payload: { to: 'jordan@example.test', subject: 'Lunch details' },
-        status: 'pending',
-        expiresAt: new Date(Date.now() + 60 * 60_000),
-      })
-      .returning();
-    if (!pendingApproval) throw new Error('Expected a pending send approval');
-
-    const notice = approvalNoticeEmail([
-      { shortCode: pendingApproval.shortCode, summary: pendingApproval.summary },
-    ]);
-    const sameTaskRows = await db.select().from(toolCalls).where(eq(toolCalls.taskId, task.id));
-    expect(sameTaskRows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: completedWrite.id,
-          toolName: 'calendar.create_event',
-          status: 'succeeded',
-          result: { eventId: 'synthetic-lunch-event', created: true },
-        }),
-        expect.objectContaining({
-          id: pendingSend.id,
-          toolName: 'gmail.send',
-          status: 'awaiting_approval',
-        }),
-      ]),
+      .register(
+        {
+          name: 'test.outbound_send',
+          description: 'Send synthetic content to the named recipient.',
+          inputSchema: z.object({ to: z.string(), body: z.string() }),
+          risk: 'approval',
+          acceptsUntrustedInput: true,
+          idempotencyKey: () => `app05-send:${task.id}`,
+          approvalSummary: () => 'Send the lunch summary to Jordan',
+          execute: async (args) => {
+            sends.push(args);
+            return { sent: true };
+          },
+        },
+        { outwardFacing: true },
+      );
+    const router = {
+      async object() {
+        return { ok: true, modelId: 'synthetic/plan', degraded: false, object: workflowPlan };
+      },
+      async step(): Promise<StepCallOutcome> {
+        return {
+          ok: true,
+          modelId: 'synthetic/step',
+          degraded: false,
+          text: '',
+          toolCalls: [
+            {
+              toolCallId: `app05-write-${task.id}`,
+              toolName: 'test.benign_write',
+              input: { title: 'Lunch at noon' },
+            },
+            {
+              toolCallId: `app05-send-${task.id}`,
+              toolName: 'test.outbound_send',
+              input: { to: 'jordan@example.test', body: 'Lunch at noon' },
+            },
+          ],
+          finishReason: 'tool-calls',
+        };
+      },
+    } as unknown as ModelRouter;
+    let notice = '';
+    const run = await executeTask(
+      {
+        db,
+        router,
+        dispatcher: new ToolDispatcher(db, mixedRegistry),
+        notifyApproval: async (_task, pending) => {
+          notice = approvalNoticeEmail(pending);
+        },
+      },
+      task.id,
     );
-    expect(notice).toContain('[A7] Send lunch details to Jordan');
-    expect(notice).not.toContain('calendar.create_event');
+    expect(run.outcome).toBe('parked');
+    expect(writes).toHaveLength(1);
+    expect(sends).toHaveLength(0);
+
+    const sameTaskRows = await db.select().from(toolCalls).where(eq(toolCalls.taskId, task.id));
+    const completedWrite = sameTaskRows.find((row) => row.toolName === 'test.benign_write');
+    const pendingSend = sameTaskRows.find((row) => row.toolName === 'test.outbound_send');
+    expect(completedWrite).toMatchObject({
+      toolName: 'test.benign_write',
+      status: 'succeeded',
+      result: { created: true, receipt: 'synthetic-lunch-001', title: 'Lunch at noon' },
+    });
+    expect(pendingSend).toMatchObject({
+      toolName: 'test.outbound_send',
+      status: 'awaiting_approval',
+    });
+    const [pendingApproval] = await db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.taskId, task.id));
+    expect(pendingApproval).toBeDefined();
+    if (!pendingApproval) throw new Error('Expected the outbound send approval to be persisted');
+    expect(notice).toContain(`[${pendingApproval.shortCode}] Send the lunch summary to Jordan`);
+    expect(notice).not.toContain('test.benign_write');
+    expect(notice).not.toContain('Lunch at noon');
     expect(notice).not.toMatch(/nothing has happened|none of the actions have happened/i);
   });
 });
