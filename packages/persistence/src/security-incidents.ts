@@ -198,6 +198,9 @@ export interface SecurityIncidentAttentionCandidate {
   evidence: SecurityIncidentEvidence | null;
 }
 
+/** Safe owner-facing projection of the latest source for a current incident revision. */
+export type SecurityIncidentReviewItem = SecurityIncidentAttentionCandidate;
+
 export interface SecurityIncidentRepository {
   readonly kind: 'security-incident-repository';
   observe(input: SecurityIncidentObservation): Promise<{
@@ -211,6 +214,13 @@ export interface SecurityIncidentRepository {
     agentId: string,
     limit: number,
   ): Promise<SecurityIncidentAttentionCandidate[]>;
+  /** Current undecided revisions, including those already delivered by another producer. */
+  listReviewItems(agentId: string, limit: number): Promise<SecurityIncidentReviewItem[]>;
+  /**
+   * Compares the current material revision before recording a review. This is
+   * revision fencing, not a one-winner decision CAS: another decision against
+   * the same unchanged revision may replace the recorded disposition.
+   */
   decide(input: {
     agentId: string;
     incidentId: string;

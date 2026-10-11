@@ -5,6 +5,7 @@ import type {
   SecurityIncidentAttentionCandidate,
   SecurityIncidentObservation,
   SecurityIncidentRecord,
+  SecurityIncidentReviewItem,
   SecurityIncidentSourceRecord,
 } from './security-incidents.js';
 
@@ -635,6 +636,7 @@ export interface EmailSyncRepository {
     agentId: string,
     limit: number,
   ): Promise<SecurityIncidentAttentionCandidate[]>;
+  listSecurityReviewItems(agentId: string, limit: number): Promise<SecurityIncidentReviewItem[]>;
   /** One admission fence shared by arrival, pulse, and briefing. */
   claimSecurityAttention(input: {
     agentId: string;

@@ -1,4 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import {
+  decideOwnerSecurityIncident,
+  listOwnerSecurityReviews,
+} from '@assistant/application/security-incidents';
 import { decideSuggestion } from '@assistant/application/suggestions';
 import type { ModelRouter } from '@assistant/core';
 import { getAgent } from '@assistant/core/chat';
@@ -393,16 +397,19 @@ it('keeps one useful mixed-day incident across arrival, completion, briefing, pu
       pulseRows.some((row) => row.momentKey.startsWith(`security-incident:${incident.id}:`)),
     ).toBe(false);
     expect(JSON.stringify(pulse)).not.toMatch(/receipt|practice/u);
-    expect(
-      await sync.decideSecurityIncident({
-        agentId,
+    expect(await listOwnerSecurityReviews(sync, agentId, 10)).toEqual([
+      expect.objectContaining({ incidentId: incident.id, revision: incident.revision }),
+    ]);
+    await expect(
+      decideOwnerSecurityIncident(sync, agentId, {
         incidentId: incident.id,
         expectedRevision: incident.revision,
         disposition: 'dismissed',
         reason: 'owner reviewed this incident',
         now: later,
       }),
-    ).toBe(true);
+    ).resolves.toEqual({ ok: true });
+    expect(await listOwnerSecurityReviews(sync, agentId, 10)).toEqual([]);
     await processForwardedIngest(deps, {
       agentId,
       message: {
