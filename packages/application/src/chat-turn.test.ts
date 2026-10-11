@@ -972,6 +972,29 @@ describe('chat needs-action triage', () => {
     expect(result.completions[0]?.messages[0]?.text).not.toContain('Berlin directions');
   });
 
+  it.each([
+    'Find my lounge and gate info',
+    'Figure out how to get to the lounge',
+    'How do I get to my hotel in Berlin?',
+    'Could you tell me where the KLM lounge is?',
+    'I have KLM lounge access in my layover, help me figure out how to get there, from my arrival gate and how far it is from my departure gate',
+  ])(
+    'queues explicit travel request before a false conversational classifier: %s',
+    async (text) => {
+      const result = await turn(text, {
+        triage: { needsAction: false },
+        draft: 'I can’t lookup this turn. Please send a direct request.',
+      });
+
+      expect(result.object).not.toHaveBeenCalled();
+      expect(result.stream).not.toHaveBeenCalled();
+      expect(stubs.queueAdmission).toHaveBeenCalledOnce();
+      expect(queuedPayload()).toEqual({ [TRIAGED_ACTIONABLE]: true });
+      expect(result.response.headers.get('x-async-task')).toBe('task-1');
+      expect(result.completions).toHaveLength(0);
+    },
+  );
+
   it('skips the completed last-two continuation when a later status asks about original work', async () => {
     const now = Date.now();
     const result = await turn(

@@ -134,6 +134,33 @@ describe('looksLikeActionRequest', () => {
     }
   });
 
+  it('routes explicit lounge, gate, and hotel requests before conversational triage', () => {
+    for (const text of [
+      'Find my lounge and gate info',
+      'Please find my lounge and gate info',
+      'Figure out how to get to the lounge',
+      'How do I get to my hotel in Berlin?',
+      'Could you tell me where the KLM lounge is?',
+      'I have KLM lounge access in my layover, help me figure out how to get there, from my arrival gate and how far it is from my departure gate',
+    ]) {
+      expect(looksLikeActionRequest(text)).toBe(true);
+    }
+  });
+
+  it('keeps quoted, retrospective, prohibited, and idiomatic travel mentions conversational', () => {
+    for (const text of [
+      'The guide says: “Find my lounge and gate info.”',
+      'Yesterday I asked you to find my lounge and gate info.',
+      'Please do not find my lounge and gate info.',
+      'I found the hotel scene in that film funny.',
+      'Figure out how to get to the heart of the story.',
+      'I have KLM lounge access in my layover; the gate looked nice.',
+      '“I have KLM lounge access in my layover, help me figure out how to get there, from my arrival gate and how far it is from my departure gate.”',
+    ]) {
+      expect(looksLikeActionRequest(text)).toBe(false);
+    }
+  });
+
   it('catches calendar/inbox read requests', () => {
     for (const t of [
       'look at my calendar and tell me the flight schedule for the next 3 weeks', // the reported prod miss
