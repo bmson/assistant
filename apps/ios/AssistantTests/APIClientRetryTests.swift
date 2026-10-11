@@ -3340,16 +3340,21 @@ extension APIClientRetryTests {
         })
         StubURLProtocol.prime([], paths: [
             "/api/mobile/v1/chat": [.stream(body: Data("data: [DONE]\n\n".utf8))],
-            "/api/mobile/v1/chat/status": Array(repeating: .failure(URLError(.timedOut)), count: 5),
+            // A status GET is retried once, so five failed polls need ten
+            // wire outcomes to reach the intended bounded unknown outcome.
+            "/api/mobile/v1/chat/status": Array(repeating: .failure(URLError(.timedOut)), count: 10),
         ])
 
         model.send("Check the task status")
-        let deadline = ContinuousClock.now.advanced(by: .seconds(6))
+        defer { if model.isSending { model.cancelSend() } }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
         while model.isSending, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
 
         XCTAssertFalse(model.isSending)
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat/status" }.count, 10,
+            "Each of five bounded status polls reaches both the original read and its single retry")
         XCTAssertTrue(model.errorMessage?.localizedCaseInsensitiveContains("outcome is unknown") == true)
         XCTAssertNotEqual(model.activityThought, .finished)
         XCTAssertTrue(recorder.entries.isEmpty, "An unknown outcome must not claim that the task result is ready")
@@ -4473,9 +4478,16 @@ extension APIClientRetryTests {
                 identity: .init(id: "replacement-owner", name: "Robin", avatarUrl: nil),
                 shell: try JSONDecoder().decode(BootstrapResponse.self, from: notificationBootstrap()).shell,
                 conversation: notificationConversation(notificationPrimaryID))
+            let mutationPath: String
+            switch action {
+            case "hide": mutationPath = "/api/mobile/v1/chats/\(notificationPrimaryID)/messages/\(original.id)"
+            case "create": mutationPath = "/api/mobile/v1/chats"
+            default: mutationPath = "/api/mobile/v1/chats/\(notificationPrimaryID)"
+            }
             StubURLProtocol.primeBootstrap(try JSONEncoder().encode(replacement),
                 overview: [.success(status: 401, body: Data()), .success(status: 401, body: Data())],
-                queued: [.delayed(after: 0.05, status: 200, body: oldBody)])
+                queued: [.held(status: 200, body: oldBody)])
+            defer { StubURLProtocol.releaseHeldResponse(path: mutationPath) }
             let mutation = Task {
                 switch action {
                 case "hide": await model.hideMessage(original)
@@ -4483,8 +4495,16 @@ extension APIClientRetryTests {
                 default: _ = await model.changeConversationModel("candidate-model")
                 }
             }
-            while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+            let heldDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !StubURLProtocol.isHoldingResponse(path: mutationPath), ContinuousClock.now < heldDeadline {
+                await Task.yield()
+            }
+            XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: mutationPath),
+                "The old-owner mutation stays pending until replacement bootstrap is applied")
             await model.refreshAll(reportFailure: false)
+            XCTAssertEqual(model.bootstrap?.identity.id, "replacement-owner")
+            XCTAssertEqual(model.conversationId, notificationPrimaryID)
+            StubURLProtocol.releaseHeldResponse(path: mutationPath)
             await mutation.value
             XCTAssertEqual(model.bootstrap?.identity.id, "replacement-owner")
             XCTAssertEqual(model.conversationId, notificationPrimaryID)
@@ -4496,6 +4516,9 @@ extension APIClientRetryTests {
             XCTAssertTrue((1...2).contains(reads.filter { $0.path == "/api/mobile/v1/overview" }.count))
             XCTAssertEqual(StubURLProtocol.attempts.count, reads.count + 1,
                 "The old result cannot issue a conversation read; a replaced owner needs a fresh overview")
+            XCTAssertFalse(StubURLProtocol.requests.contains(where: {
+                $0.0 == "GET" && $0.1.path.hasPrefix("/api/mobile/v1/chats/")
+            }), "A stale create/model result cannot load or publish a conversation for the replacement owner")
         }
     }
 
