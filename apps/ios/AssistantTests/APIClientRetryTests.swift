@@ -32,6 +32,8 @@ final class StubURLProtocol: URLProtocol {
     private static var recordedHeaders: [[String: String]] = []
     private static var recordedTimeouts: [TimeInterval] = []
     private static var heldResponses: [String: StubURLProtocol] = [:]
+    private static var stoppedPaths: Set<String> = []
+    private static var stopLoadingObservers: [String: [() -> Void]] = [:]
     private static var completedPaths: Set<String> = []
     private static weak var activeStream: StubURLProtocol?
     private static var streamsByOperation: [String: StubURLProtocol] = [:]
@@ -51,6 +53,8 @@ final class StubURLProtocol: URLProtocol {
             recordedHeaders = []
             recordedTimeouts = []
             heldResponses = [:]
+            stoppedPaths = []
+            stopLoadingObservers = [:]
             completedPaths = []
             activeStream = nil
             streamsByOperation = [:]
@@ -85,6 +89,8 @@ final class StubURLProtocol: URLProtocol {
             recordedHeaders = []
             recordedTimeouts = []
             heldResponses = [:]
+            stoppedPaths = []
+            stopLoadingObservers = [:]
             completedPaths = []
             activeStream = nil
             streamsByOperation = [:]
@@ -117,6 +123,20 @@ final class StubURLProtocol: URLProtocol {
     static var timeouts: [TimeInterval] { lock.withLock { recordedTimeouts } }
     static var completedResponsePaths: Set<String> { lock.withLock { completedPaths } }
     static func isHoldingResponse(path: String) -> Bool { lock.withLock { heldResponses[path] != nil } }
+    static func observeStopLoading(path: String, testCaseID: String, onStop: @escaping () -> Void) {
+        let key = stopLoadingKey(path: path, testCaseID: testCaseID)
+        let alreadyStopped = lock.withLock {
+            if stoppedPaths.contains(key) { return true }
+            stopLoadingObservers[key, default: []].append(onStop)
+            return false
+        }
+        if alreadyStopped { onStop() }
+    }
+
+    private static func stopLoadingKey(path: String, testCaseID: String) -> String {
+        "\(testCaseID)\u{0}\(path)"
+    }
+
     static func releaseHeldResponse(path: String) {
         let protocolInstance = lock.withLock { heldResponses.removeValue(forKey: path) }
         protocolInstance?.releaseHeldResponse()
@@ -231,12 +251,18 @@ final class StubURLProtocol: URLProtocol {
     private var heldResponse: (status: Int, body: Data)?
     override func stopLoading() {
         stopped.withLock { isStopped = true }
-        guard let path = request.url?.path else { return }
-        Self.lock.withLock {
+        guard let path = request.url?.path,
+              let testCaseID = Self.testCaseID(in: request.allHTTPHeaderFields ?? [:]) else { return }
+        let key = Self.stopLoadingKey(path: path, testCaseID: testCaseID)
+        let observers = Self.lock.withLock { () -> [() -> Void] in
+            guard Self.activeTestCaseID == testCaseID else { return [] }
             if let held = Self.heldResponses[path], held === self {
                 Self.heldResponses.removeValue(forKey: path)
             }
+            Self.stoppedPaths.insert(key)
+            return Self.stopLoadingObservers.removeValue(forKey: key) ?? []
         }
+        observers.forEach { $0() }
     }
 
     private func releaseHeldResponse() {
@@ -273,13 +299,18 @@ final class StubURLProtocol: URLProtocol {
             timeout: request.timeoutInterval
         ) {
         case let .held(status, body):
-            guard Self.isActiveTestCase(Self.testCaseID(in: request.allHTTPHeaderFields ?? [:])),
+            guard let requestTestCaseID = Self.testCaseID(in: request.allHTTPHeaderFields ?? [:]),
+                  Self.isActiveTestCase(requestTestCaseID),
                   let path = request.url?.path else {
                 client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
                 return
             }
             heldResponse = (status, body)
-            Self.lock.withLock { Self.heldResponses[path] = self }
+            let key = Self.stopLoadingKey(path: path, testCaseID: requestTestCaseID)
+            Self.lock.withLock {
+                Self.stoppedPaths.remove(key)
+                Self.heldResponses[path] = self
+            }
         case let .failure(error):
             client?.urlProtocol(self, didFailWithError: error)
         case let .stream(body):
@@ -544,7 +575,12 @@ final class APIClientRetryTests: XCTestCase {
 
     func testSecurityReviewRequestsEnforceAbsoluteDeadlineAndCancelHeldTransport() async throws {
         let (client, session) = makeClient(requestScopeID: testCaseID, securityReviewDeadline: 0.2)
+        let getPath = "/api/mobile/v1/security-reviews"
         StubURLProtocol.prime([.held(status: 200, body: Data(#"{"items":[]}"#.utf8))])
+        let getStopped = expectation(description: "Deadline cancels the held GET transport")
+        StubURLProtocol.observeStopLoading(path: getPath, testCaseID: testCaseID) {
+            getStopped.fulfill()
+        }
 
         do {
             _ = try await client.securityReviews()
@@ -557,12 +593,18 @@ final class APIClientRetryTests: XCTestCase {
 
         XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
         XCTAssertEqual(StubURLProtocol.timeouts, [12])
-        XCTAssertFalse(StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/security-reviews"))
+        await fulfillment(of: [getStopped], timeout: 2)
+        XCTAssertFalse(StubURLProtocol.isHoldingResponse(path: getPath))
         let getDrained = await cancelAndDrain(session)
         XCTAssertTrue(getDrained)
 
         let (postClient, postSession) = makeClient(requestScopeID: testCaseID, securityReviewDeadline: 0.2)
+        let postPath = "/api/mobile/v1/security-reviews/a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1"
         StubURLProtocol.prime([.held(status: 200, body: Data(#"{"ok":true}"#.utf8))])
+        let postStopped = expectation(description: "Deadline cancels the held POST transport")
+        StubURLProtocol.observeStopLoading(path: postPath, testCaseID: testCaseID) {
+            postStopped.fulfill()
+        }
         let outcome = await postClient.decideSecurityReview(
             incidentId: "a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1",
             expectedRevision: 5,
@@ -571,7 +613,8 @@ final class APIClientRetryTests: XCTestCase {
         XCTAssertEqual(outcome, .uncertain)
         XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
         XCTAssertEqual(StubURLProtocol.timeouts, [12])
-        XCTAssertFalse(StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/security-reviews/a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1"))
+        await fulfillment(of: [postStopped], timeout: 2)
+        XCTAssertFalse(StubURLProtocol.isHoldingResponse(path: postPath))
         let postDrained = await cancelAndDrain(postSession)
         XCTAssertTrue(postDrained)
     }
@@ -580,6 +623,10 @@ final class APIClientRetryTests: XCTestCase {
         let (client, session) = makeClient(requestScopeID: testCaseID, securityReviewDeadline: 12)
         let path = "/api/mobile/v1/security-reviews"
         StubURLProtocol.prime([.held(status: 200, body: Data(#"{"items":[]}"#.utf8))])
+        let transportStopped = expectation(description: "Parent cancellation stops the held transport")
+        StubURLProtocol.observeStopLoading(path: path, testCaseID: testCaseID) {
+            transportStopped.fulfill()
+        }
         let request = Task { try await client.securityReviews() }
 
         let deadline = ContinuousClock.now + .seconds(2)
@@ -595,6 +642,7 @@ final class APIClientRetryTests: XCTestCase {
         } catch {
             XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
         }
+        await fulfillment(of: [transportStopped], timeout: 2)
         XCTAssertFalse(StubURLProtocol.isHoldingResponse(path: path))
         XCTAssertEqual(StubURLProtocol.timeouts, [12])
         let drained = await cancelAndDrain(session)
@@ -3791,6 +3839,7 @@ extension APIClientRetryTests {
 
         for scenario in scenarios {
             let recorder = LocalNotificationRecorder()
+            let notificationScheduled = expectation(description: "The \(scenario.status) notification for \(scenario.taskId) is scheduled")
             let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
                 await recorder.schedule(
                     title: title,
@@ -3800,7 +3849,9 @@ extension APIClientRetryTests {
                     agentID: agentID,
                     conversationID: conversationID
                 )
+                notificationScheduled.fulfill()
             })
+            defer { model.scenePhaseDidChange(.background) }
             let reply = ChatMessage(id: "reply-\(scenario.taskId)", role: .assistant,
                 parts: [.init(type: "text", text: "The task needs attention.")],
                 metadata: ["taskId": .string(scenario.taskId)])
@@ -3820,12 +3871,12 @@ extension APIClientRetryTests {
             ])
 
             model.send("Continue the task")
-            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-            while recorder.entries.isEmpty, ContinuousClock.now < deadline {
-                try await Task.sleep(for: .milliseconds(10))
-            }
+            // Wait for the event under test rather than racing repeated
+            // main-actor timer callbacks against the notification task.
+            await fulfillment(of: [notificationScheduled], timeout: 5)
 
-            let scheduled = try XCTUnwrap(recorder.entries.first, "Expected one task attention notification for \(scenario.status)")
+            let scheduled = try XCTUnwrap(recorder.entries.first,
+                "Expected one task attention notification for \(scenario.status), task \(scenario.taskId); sending=\(model.isSending), activity=\(model.activityDetail ?? "none")")
             XCTAssertEqual(recorder.entries.count, 1)
             XCTAssertEqual(scheduled.route, scenario.route)
             XCTAssertEqual(scheduled.approvalId, scenario.approvalId)
