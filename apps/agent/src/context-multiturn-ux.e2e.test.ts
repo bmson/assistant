@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import { createHash, randomUUID } from 'node:crypto';
 import { handleChatTurn } from '@assistant/application';
 import type { Config } from '@assistant/config';
@@ -1292,6 +1293,209 @@ describe.each(['postgres', 'firestore'] as const)(
         expect(accepted).toBe('London is currently 20°C, with a high of 27°C.');
       },
       driver === 'firestore' ? 30_000 : undefined,
+    );
+
+    it(
+      'ranks the requested lodging above generic and stale stays, then discloses unread matches',
+      async (ctx) => {
+        const runtime = await setupCase(ctx);
+        const conversationId = await runtime.createConversation();
+        const requestText = 'Where are we staying in Berlin next weekend?';
+        const openedThreads: string[] = [];
+        const apiCalls: string[] = [];
+        const messages = [
+          {
+            id: 'generic-berlin-guide-message',
+            threadId: 'generic-berlin-guide',
+            subject: 'Hotels in Berlin',
+            snippet: 'A guide to popular places to stay.',
+            body: 'A local guide to hotels in Berlin.',
+          },
+          {
+            id: 'generic-lodging-news-message',
+            threadId: 'generic-lodging-news',
+            subject: 'Hotel inspiration',
+            snippet: 'Ideas for your next city break.',
+            body: 'Ideas for a future city break.',
+          },
+          {
+            id: 'generic-berlin-news-message',
+            threadId: 'generic-berlin-news',
+            subject: 'Berlin travel news',
+            snippet: 'New restaurants and weekend events.',
+            body: 'News about restaurants and events in Berlin.',
+          },
+          {
+            id: 'stale-berlin-message',
+            threadId: 'stale-berlin-stay',
+            subject: 'Berlin reservation confirmation',
+            snippet: 'Confirmation for your earlier stay in Berlin last year.',
+            body: 'Your old Berlin stay was at Hotel Oldtown in 2024.',
+          },
+          {
+            id: 'current-berlin-message',
+            threadId: 'current-berlin-stay',
+            subject: 'Berlin accommodation details',
+            snippet: 'Reservation dates: October 17–18, 2026.',
+            body: 'Reservation confirmed: Hotel Linden, Berlin. Dates: October 17–18, 2026.',
+          },
+        ];
+        const messageById = new Map(messages.map((message) => [message.id, message]));
+        const messageByThread = new Map(messages.map((message) => [message.threadId, message]));
+        const fakeGoogleClient = {
+          async api<T>(url: string): Promise<T> {
+            apiCalls.push(url);
+            const messageMatch = url.match(/\/messages\/([^/?]+)\?format=metadata/);
+            if (messageMatch) {
+              const message = messageById.get(decodeURIComponent(messageMatch[1] ?? ''));
+              if (!message) throw new Error(`Unexpected synthetic Gmail message URL: ${url}`);
+              return {
+                id: message.id,
+                threadId: message.threadId,
+                snippet: message.snippet,
+                payload: {
+                  headers: [
+                    { name: 'From', value: 'bookings@example.test' },
+                    { name: 'To', value: 'owner@example.test' },
+                    { name: 'Subject', value: message.subject },
+                    { name: 'Date', value: 'Sat, 10 Oct 2026 10:00:00 +0000' },
+                  ],
+                },
+              } as T;
+            }
+            const threadMatch = url.match(/\/threads\/([^/?]+)\?format=full/);
+            if (threadMatch) {
+              const threadId = decodeURIComponent(threadMatch[1] ?? '');
+              const message = messageByThread.get(threadId);
+              if (!message) throw new Error(`Unexpected synthetic Gmail thread URL: ${url}`);
+              openedThreads.push(threadId);
+              return {
+                messages: [
+                  {
+                    id: message.id,
+                    threadId: message.threadId,
+                    snippet: message.snippet,
+                    payload: {
+                      mimeType: 'text/plain',
+                      headers: [
+                        { name: 'From', value: 'bookings@example.test' },
+                        { name: 'Subject', value: message.subject },
+                      ],
+                      body: { data: Buffer.from(message.body).toString('base64url') },
+                    },
+                  },
+                ],
+              } as T;
+            }
+            if (url.includes('/messages?')) {
+              return {
+                messages: messages.map(({ id }) => ({ id })),
+                resultSizeEstimate: messages.length,
+              } as T;
+            }
+            throw new Error(`Unexpected synthetic Google request: ${url}`);
+          },
+          configured: () => true,
+        } satisfies Partial<GoogleClient>;
+
+        const registry = new ToolRegistry();
+        registry.register(
+          {
+            name: 'calendar.search_events',
+            description: 'Search the synthetic calendar for lodging context.',
+            inputSchema: z.object({ query: z.string().min(1).max(200) }),
+            risk: 'autonomous',
+            acceptsUntrustedInput: true,
+            execute: async () => ({ complete: true, calendarsSearched: ['synthetic'], events: [] }),
+          },
+          { confidentialRead: true },
+        );
+        registerGmailTools(registry, {
+          client: fakeGoogleClient as GoogleClient,
+          botEmail: 'assistant@example.test',
+        });
+
+        const router = {
+          route: async () => syntheticPreflightRoute('synthetic/lodging'),
+          async object(role: string) {
+            return {
+              ok: true,
+              modelId: 'synthetic/lodging',
+              degraded: false,
+              object:
+                role === 'classify'
+                  ? { needsAction: true, trivial: false }
+                  : {
+                      action: 'workflow',
+                      reasoning: 'Check the owner’s calendar and relevant lodging messages.',
+                      steps: ['Search the calendar and read relevant lodging confirmations.'],
+                      missingInfo: [],
+                    },
+            };
+          },
+          async embeddingSpace() {
+            return SPACE;
+          },
+          async embed(values: string[]) {
+            return values.map(runtime.embeddingFor);
+          },
+          async step() {
+            return {
+              ok: true,
+              modelId: 'synthetic/lodging',
+              degraded: false,
+              text: 'Your Berlin booking is at Hotel Linden for October 17–18. The older Berlin confirmation says Hotel Oldtown.',
+              toolCalls: [],
+              finishReason: 'stop',
+            };
+          },
+        } as unknown as ModelRouter;
+        const response = await handleChatTurn(request(conversationId, requestText), {
+          config: runtime.config,
+          router,
+          chat: runtime.chat,
+          persistence: runtime.persistence,
+          ...(runtime.db ? { db: runtime.db } : {}),
+        });
+        expect(response.status).toBe(200);
+        const taskId = required(response.headers.get('x-async-task'), 'Lodging task ID');
+        const dispatcher = new ToolDispatcher(
+          runtime.db ?? unavailableDb,
+          registry,
+          runtime.persistence.toolExecution,
+          runtime.persistence.costs,
+          runtime.persistence.approvals,
+          runtime.persistence.approvalPolicies,
+        );
+        const result = await executeTask(
+          {
+            db: runtime.db ?? unavailableDb,
+            persistence: runtime.persistence,
+            router,
+            dispatcher,
+          } satisfies ExecutorDeps,
+          taskId,
+        );
+
+        expect(result.outcome, JSON.stringify(result)).toBe('done');
+        expect(openedThreads).toEqual([
+          'current-berlin-stay',
+          'generic-berlin-guide',
+          'generic-berlin-news',
+        ]);
+        expect(openedThreads).not.toContain('stale-berlin-stay');
+        expect(apiCalls.filter((url) => url.includes('/threads/'))).toHaveLength(3);
+
+        const listing = await runtime.chat.listMessages(runtime.ownerId, conversationId, {
+          limit: 10,
+        });
+        if (!listing) throw new Error('Lodging conversation disappeared after execution');
+        const assistant = [...listing.messages].reverse().find((row) => row.role === 'assistant');
+        expect(assistant?.text).toContain('2 remain unopened');
+        expect(assistant?.text).toContain('Hotel Linden');
+        expect(assistant?.text).not.toContain('Hotel Oldtown');
+      },
+      driver === 'firestore' ? 60_000 : undefined,
     );
 
     it(

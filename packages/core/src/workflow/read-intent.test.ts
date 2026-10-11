@@ -624,6 +624,133 @@ describe('detectPersonalReadRequest', () => {
     ]);
   });
 
+  it('prioritizes a lodging confirmation for the owner-requested trip over generic and stale stays', () => {
+    const request = detectPersonalReadRequest(
+      turn('Where are we staying in Berlin next weekend?'),
+      { now: new Date('2026-10-11T12:00:00Z'), timeZone: 'UTC' },
+    );
+    if (!request) throw new Error('expected a lodging read request');
+    expect(request).toMatchObject({ answerFocus: 'lodging', mailRelevanceTerms: ['berlin'] });
+
+    const evidence: ReadToolEvidence[] = [
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        args: { query: request.mailQuery },
+        result: {
+          results: [
+            {
+              threadId: 'generic-berlin-hotels',
+              subject: 'Hotels in Berlin',
+              snippet: 'A guide to popular places to stay.',
+            },
+            {
+              threadId: 'generic-lodging-newsletter',
+              subject: 'Hotel inspiration',
+              snippet: 'Ideas for your next city break.',
+            },
+            {
+              threadId: 'generic-travel-news',
+              subject: 'Berlin travel news',
+              snippet: 'New restaurants and weekend events.',
+            },
+            {
+              threadId: 'old-berlin-stay',
+              subject: 'Berlin reservation confirmation',
+              snippet: 'Confirmation for your earlier stay in Berlin last year.',
+            },
+            {
+              threadId: 'current-berlin-stay',
+              subject: 'Berlin booking confirmation',
+              snippet: 'Reservation for your Berlin stay next weekend.',
+            },
+          ],
+        },
+      },
+    ];
+
+    expect(gmailThreadIdsToRead(evidence, request)).toEqual([
+      'current-berlin-stay',
+      'generic-berlin-hotels',
+      'generic-travel-news',
+    ]);
+  });
+
+  it('does not promote confirmation keywords above a destination-matching lodging result', () => {
+    const request = detectPersonalReadRequest(
+      turn('Which hotel did we book for Berlin next weekend?'),
+      { now: new Date('2026-10-11T12:00:00Z'), timeZone: 'UTC' },
+    );
+    if (!request) throw new Error('expected a lodging read request');
+    expect(request.mailTemporalLabel).toBe('next weekend');
+
+    const evidence: ReadToolEvidence[] = [
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        args: { query: request.mailQuery },
+        result: {
+          results: [
+            {
+              threadId: 'stale-confirmation',
+              subject: 'Berlin booking confirmation',
+              snippet: 'Confirmation for a previous stay in Berlin last year.',
+            },
+            {
+              threadId: 'current-trip-details',
+              subject: 'Berlin stay details',
+              snippet: 'Your Berlin lodging information for next weekend.',
+            },
+            {
+              threadId: 'generic-one',
+              subject: 'Hotel newsletter one',
+              snippet: 'Generic hotel news.',
+            },
+            {
+              threadId: 'generic-two',
+              subject: 'Hotel newsletter two',
+              snippet: 'Generic hotel news.',
+            },
+          ],
+        },
+      },
+    ];
+
+    expect(gmailThreadIdsToRead(evidence, request)[0]).toBe('current-trip-details');
+  });
+
+  it('matches explicit booking dates against the resolved trip interval without relying on wording', () => {
+    const request = detectPersonalReadRequest(
+      turn('Which hotel did we book for Berlin next weekend?'),
+      { now: new Date('2026-10-11T12:00:00Z'), timeZone: 'UTC' },
+    );
+    if (!request) throw new Error('expected a lodging read request');
+
+    const evidence: ReadToolEvidence[] = [
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        args: { query: request.mailQuery },
+        result: {
+          results: [
+            {
+              threadId: 'old-same-city-confirmation',
+              subject: 'Berlin booking confirmation',
+              snippet: 'Hotel reservation, October 12–13, 2024.',
+            },
+            {
+              threadId: 'dated-current-stay',
+              subject: 'Berlin accommodation details',
+              snippet: 'Reservation dates: October 17–18, 2026.',
+            },
+          ],
+        },
+      },
+    ];
+
+    expect(gmailThreadIdsToRead(evidence, request)[0]).toBe('dated-current-stay');
+  });
+
   it('prioritizes the newest matching thread for current or upcoming mail questions', () => {
     const request = detectPersonalReadRequest(turn('What does the latest trip email say?'));
     expect(request).toMatchObject({

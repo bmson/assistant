@@ -67,12 +67,16 @@ export interface PersonalReadRequest {
   scopeContext?: { kind: 'flight'; date?: string };
   /** Gmail query derived from the owner's words, not model-proposed narrowing. */
   mailQuery?: string;
+  /** Explicit trip period used only to rank returned lodging metadata. */
+  mailTemporalLabel?: string;
   /** Used only to render returned timestamps for the owner. */
   timeZone?: string;
   /** Bound for result sets whose wording asks for a single next item. */
   maxResults?: number;
   /** The owner is challenging a prior claim; prior prose remains hypothesis-only. */
   verification?: boolean;
+  /** Explicit owner-supplied lodging scope used only to rank returned mail metadata. */
+  mailRelevanceTerms?: string[];
   /** Specific question to answer, rather than turning every lookup into an agenda. */
   answerFocus?: 'lodging' | 'applications' | 'flight';
   /** Broad mail-history requests use a bounded metadata-page continuation. */
@@ -131,6 +135,58 @@ function contextualLodgingQuestion(latest: string, ownerTurns: string[]): boolea
     );
   }
   return false;
+}
+
+function lodgingRelevanceTerms(latest: string, ownerTurns: string[]): string[] {
+  let scope = LODGING_QUESTION.test(latest) ? latest : '';
+  if (!scope && DETAIL_FOLLOW_UP.test(latest)) {
+    for (const prior of [...ownerTurns].reverse()) {
+      if (/^\s*(?:thanks|thank you|ok|okay|great|got it)[.!]*\s*$/i.test(prior)) continue;
+      if (DETAIL_FOLLOW_UP.test(prior)) continue;
+      if (
+        LODGING_QUESTION.test(prior) ||
+        (LODGING_TOPIC.test(prior) && /\b(?:my|our|reservation|booking|staying)\b/i.test(prior))
+      ) {
+        scope = prior;
+      }
+      break;
+    }
+  }
+  if (!scope) return [];
+
+  const generic = new Set([
+    'airbnb',
+    'accommodation',
+    'are',
+    'booking',
+    'check',
+    'confirmation',
+    'did',
+    'hotel',
+    'in',
+    'is',
+    'it',
+    'lodging',
+    'my',
+    'near',
+    'next',
+    'our',
+    'reservation',
+    'stay',
+    'staying',
+    'trip',
+    'we',
+    'week',
+    'weekend',
+    'weekends',
+    'where',
+    'which',
+    'what',
+  ]);
+  const placeTerms = [...scope.matchAll(/\b(?:in|at|near|for|to)\s+([^?.,;!\n]+)/gi)]
+    .flatMap((match) => emailQueryTerms(match[1] ?? ''))
+    .filter((term) => !generic.has(term));
+  return [...new Set(placeTerms)].slice(0, 3);
 }
 
 const CALENDAR_SURFACE =
@@ -1264,6 +1320,10 @@ function detectPersonalReadRequestInternal(
     return {
       kind: lodging ? 'calendar_email' : 'email',
       queryTerms: [lodging ? 'hotel' : 'application'],
+      ...(lodging ? { mailRelevanceTerms: lodgingRelevanceTerms(latest, recentOwnerTurns) } : {}),
+      ...(lodging && temporal?.kind === 'resolved' && hasExplicitTemporalPhrase(latest)
+        ? { mailTemporalLabel: temporal.intent.window.label }
+        : {}),
       firstToolName: lodging ? 'calendar.search_events' : 'gmail.search',
       requiresThreadRead: true,
       mailQuery: lodging
@@ -1578,7 +1638,7 @@ export function gmailSearchThreadIds(
     }
   }
   const unique = [...new Set(ids)];
-  if (request?.answerFocus === 'flight') {
+  if (request?.answerFocus === 'flight' || request?.answerFocus === 'lodging') {
     const scores = new Map<string, number>();
     for (const row of evidence) {
       if (
@@ -1597,14 +1657,25 @@ export function gmailSearchThreadIds(
         const subject = typeof metadata.subject === 'string' ? metadata.subject : '';
         const snippet = typeof metadata.snippet === 'string' ? metadata.snippet : '';
         const score =
-          (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass)\b/i.test(subject)
-            ? 2
-            : 0) +
-          (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass|departure)\b/i.test(
-            snippet,
-          )
-            ? 1
-            : 0);
+          request.answerFocus === 'flight'
+            ? (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass)\b/i.test(
+                subject,
+              )
+                ? 2
+                : 0) +
+              (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass|departure)\b/i.test(
+                snippet,
+              )
+                ? 1
+                : 0)
+            : lodgingMetadataScore(
+                subject,
+                snippet,
+                request.mailRelevanceTerms ?? [],
+                request.mailTemporalLabel,
+                request.timeWindow,
+                request.timeZone,
+              );
         scores.set(metadata.threadId, Math.max(scores.get(metadata.threadId) ?? 0, score));
       }
     }
@@ -1634,6 +1705,114 @@ export function gmailSearchThreadIds(
     }
   }
   return unique.sort((a, b) => (dateByThread.get(b) ?? 0) - (dateByThread.get(a) ?? 0));
+}
+
+function lodgingMetadataScore(
+  subject: string,
+  snippet: string,
+  scopeTerms: string[],
+  temporalLabel?: string,
+  timeWindow?: PersonalReadTimeWindow,
+  timeZone?: string,
+): number {
+  const normalizedSubject = subject.toLowerCase();
+  const normalizedText = `${subject} ${snippet}`.toLowerCase();
+  const scopeMatches = scopeTerms.filter((term) => {
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`\\b${escaped}\\b`, 'i').test(normalizedText);
+  }).length;
+  const hasBookingSignal = /\b(?:reservation|booking|confirmation|itinerary)\b/i.test(
+    normalizedSubject,
+  )
+    ? 2
+    : 0;
+  const snippetBookingSignal =
+    /\b(?:reservation|booking|confirmation|itinerary|check[- ]?in|check[- ]?out)\b/i.test(snippet)
+      ? 1
+      : 0;
+  const temporalWords = temporalLabel
+    ?.toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+  const matchesTripPhrase = Boolean(
+    temporalWords?.length && temporalWords.every((word) => normalizedText.includes(word)),
+  );
+  const matchesTripDate = metadataDateFallsWithinWindow(normalizedText, timeWindow, timeZone);
+  const matchesTrip = matchesTripPhrase || matchesTripDate;
+  if (scopeTerms.length === 0 && !temporalLabel) return hasBookingSignal + snippetBookingSignal;
+  if (temporalLabel && !matchesTrip) {
+    // A reservation keyword cannot make a same-city old stay look like the
+    // owner's explicitly dated trip. Keep metadata order unless the returned
+    // subject/snippet also names the requested period.
+    return scopeMatches > 0 ? 10 + scopeMatches : 0;
+  }
+  // An owner-named destination is a stronger match than a generic confirmation
+  // keyword; a matching explicit period distinguishes this trip from an older
+  // stay at the same destination.
+  return (
+    (scopeMatches > 0 ? 10 + scopeMatches : 0) +
+    (matchesTrip ? 4 : 0) +
+    hasBookingSignal +
+    snippetBookingSignal
+  );
+}
+
+function metadataDateFallsWithinWindow(
+  text: string,
+  timeWindow?: PersonalReadTimeWindow,
+  timeZone?: string,
+): boolean {
+  if (!timeWindow || !timeZone) return false;
+  const startInstant = Date.parse(timeWindow.timeMin);
+  const endInstant = Date.parse(timeWindow.timeMax);
+  if (
+    !Number.isFinite(startInstant) ||
+    !Number.isFinite(endInstant) ||
+    endInstant <= startInstant
+  ) {
+    return false;
+  }
+  const start = civilDateAt(new Date(startInstant), timeZone);
+  const endExclusive = civilDateAt(new Date(endInstant), timeZone);
+  const startKey = civilDateKey(start);
+  const endKey = civilDateKey(endExclusive);
+  const dates = [
+    ...text.matchAll(/\b(20\d{2})-(\d{2})-(\d{2})\b/g),
+    ...text.matchAll(
+      new RegExp(
+        `\\b(${Object.keys(MONTH_NUMBER).join('|')})\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:\\s*[-–—]\\s*\\d{1,2})?[,]?\\s+(20\\d{2})\\b`,
+        'gi',
+      ),
+    ),
+  ];
+  return dates.some((match) => {
+    let year: number;
+    let month: number;
+    let day: number;
+    if (match[1]?.startsWith('20')) {
+      year = Number(match[1]);
+      month = Number(match[2]);
+      day = Number(match[3]);
+    } else {
+      const monthName = match[1]?.toLowerCase();
+      const parsedMonth = monthName ? MONTH_NUMBER[monthName] : undefined;
+      if (!parsedMonth) return false;
+      month = parsedMonth;
+      day = Number(match[2]);
+      year = Number(match[3]);
+    }
+    const candidate = new Date(Date.UTC(year, month - 1, day));
+    if (
+      candidate.getUTCFullYear() !== year ||
+      candidate.getUTCMonth() + 1 !== month ||
+      candidate.getUTCDate() !== day
+    ) {
+      return false;
+    }
+    const key = civilDateKey({ year, month, day });
+    return key >= startKey && key < endKey;
+  });
 }
 
 export const MAX_GMAIL_THREADS_TO_READ = 3;
