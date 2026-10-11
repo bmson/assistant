@@ -106,6 +106,18 @@ async function syntheticAcceptedStream(
 async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
   const page = await context.newPage();
   const browserErrors: string[] = [];
+  const apiEvents: string[] = [];
+  page.on('pageerror', (error) => browserErrors.push(error.message));
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.startsWith('/api/')) apiEvents.push(`${request.method()} ${url.pathname}`);
+  });
+  page.on('requestfailed', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.startsWith('/api/')) {
+      apiEvents.push(`${request.method()} ${url.pathname} failed: ${request.failure()?.errorText}`);
+    }
+  });
   const conversationId = await createConversation(page);
   const taskId = randomUUID();
   const firstMessage = 'WEB-17 first turn stays in admission';
@@ -182,7 +194,6 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
   };
   const isChatSafetyRoute = (url: URL) =>
     isPathOrChild(url.pathname, '/api/chat') || isPathOrChild(url.pathname, '/api/mobile/v1/chat');
-  page.on('pageerror', (error) => browserErrors.push(error.message));
   await context.route('**/*', async (route) => {
     const requestUrl = new URL(route.request().url());
     if (
@@ -201,10 +212,50 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
       waitUntil: 'domcontentloaded',
       timeout: 90_000,
     });
+    const networkIdle = await page.waitForLoadState('networkidle', { timeout: 15_000 }).then(
+      () => true,
+      () => false,
+    );
     const composer = page.getByRole('combobox', { name: 'Message', exact: true });
     await composer.waitFor({ timeout: 10_000 });
     await composer.fill(firstMessage);
-    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    const initialSendButton = page.getByRole('button', { name: 'Send', exact: true });
+    const composerReady = await page
+      .waitForFunction(
+        (expectedText) => {
+          const input = document.querySelector<HTMLTextAreaElement>(
+            'textarea[aria-label="Message"]',
+          );
+          const button = document.querySelector<HTMLButtonElement>('button[aria-label="Send"]');
+          return input?.value === expectedText && button?.disabled === false;
+        },
+        firstMessage,
+        { timeout: 10_000 },
+      )
+      .then(
+        () => true,
+        () => false,
+      );
+    if (!composerReady) {
+      const pageState = await page.evaluate(() => ({
+        path: window.location.pathname,
+        readyState: document.readyState,
+        inputValue: document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')
+          ?.value,
+        sendDisabled: document.querySelector<HTMLButtonElement>('button[aria-label="Send"]')
+          ?.disabled,
+        visibleText: document.body.innerText.slice(-1200),
+      }));
+      throw new Error(
+        `WEB-17 fresh composer did not become ready: ${JSON.stringify({
+          networkIdle,
+          pageState,
+          browserErrors,
+          apiEvents,
+        })}`,
+      );
+    }
+    await initialSendButton.click({ timeout: 10_000 });
     await waitFor(admissionSeen, 'The first turn did not reach the held admission route');
 
     await composer.fill(secondMessage);
@@ -223,11 +274,11 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
 
     releaseAdmission();
     await page.getByText(resultText, { exact: true }).waitFor({ timeout: 20_000 });
-    const sendButton = page.getByRole('button', { name: 'Send', exact: true });
-    await sendButton.waitFor();
+    const settledSendButton = page.getByRole('button', { name: 'Send', exact: true });
+    await settledSendButton.waitFor();
     assert.equal(await page.getByText(resultText, { exact: true }).count(), 1);
     assert.equal(await composer.inputValue(), secondMessage);
-    assert.equal(await sendButton.isEnabled(), true);
+    assert.equal(await settledSendButton.isEnabled(), true);
     assert.equal(await page.getByText(firstMessage, { exact: true }).count(), 1);
     assert.equal(await page.getByText(secondMessage, { exact: true }).count(), 0);
     assert.deepEqual(admittedTexts, [firstMessage]);

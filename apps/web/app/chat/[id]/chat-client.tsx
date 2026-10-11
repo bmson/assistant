@@ -1365,10 +1365,14 @@ export function ChatClient({
       setFormError('Review this form and its message, or clear the saved answers, before sending.');
       return;
     }
-    if (!text || busy) return;
+    if (!text) return;
     // Slash commands are local composer controls, never conversation messages.
     if (/^\/model(?:\s.*)?$/i.test(text)) return;
     if (commandPaletteOpen) return;
+    if (busy || admittingTurnRef.current) {
+      setDraftSendNotice('Still sending. Your next message stays here.');
+      return;
+    }
     const draft = formDraftRef.current;
     if (
       draft?.reviewed &&
