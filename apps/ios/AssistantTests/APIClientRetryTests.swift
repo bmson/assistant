@@ -3028,6 +3028,39 @@ extension APIClientRetryTests {
     }
 
     @MainActor
+    func testComposerKeepsSendSeparateFromStopWhenDraftExists() {
+        let activeWithDraft = ChatComposerActionPolicy.resolve(
+            hasDraft: true, canSend: false, isSending: true,
+            canCancel: true, isCancelling: false, formAdmissionPending: false
+        )
+        XCTAssertEqual(activeWithDraft.primary, .send(enabled: false))
+        XCTAssertTrue(activeWithDraft.showsSeparateStop)
+        XCTAssertTrue(activeWithDraft.separateStopEnabled)
+
+        let stoppingWithDraft = ChatComposerActionPolicy.resolve(
+            hasDraft: true, canSend: false, isSending: true,
+            canCancel: true, isCancelling: true, formAdmissionPending: false
+        )
+        XCTAssertEqual(stoppingWithDraft.primary, .send(enabled: false))
+        XCTAssertTrue(stoppingWithDraft.showsSeparateStop)
+        XCTAssertFalse(stoppingWithDraft.separateStopEnabled)
+
+        let activeWithoutDraft = ChatComposerActionPolicy.resolve(
+            hasDraft: false, canSend: false, isSending: true,
+            canCancel: true, isCancelling: false, formAdmissionPending: false
+        )
+        XCTAssertEqual(activeWithoutDraft.primary, .stop)
+        XCTAssertFalse(activeWithoutDraft.showsSeparateStop)
+
+        let readyWithDraft = ChatComposerActionPolicy.resolve(
+            hasDraft: true, canSend: true, isSending: false,
+            canCancel: false, isCancelling: false, formAdmissionPending: false
+        )
+        XCTAssertEqual(readyWithDraft.primary, .send(enabled: true))
+        XCTAssertFalse(readyWithDraft.showsSeparateStop)
+    }
+
+    @MainActor
     func testStopBeforeTaskReceiptCancelsExactOperationAndIgnoresLateStream() async throws {
         let model = try await notificationModel()
         StubURLProtocol.prime([], paths: [
@@ -3040,6 +3073,8 @@ extension APIClientRetryTests {
         let send = try XCTUnwrap(JSONSerialization.jsonObject(with: sendBody) as? [String: Any])
         let operationId = try XCTUnwrap(send["clientOperationId"] as? String)
         let conversationId = try XCTUnwrap(send["conversationId"] as? String)
+        let scope = try XCTUnwrap(model.composerDraftScope)
+        model.saveComposerDraft("Follow up about the return flight", in: scope)
 
         model.cancelSend()
         while !StubURLProtocol.urls.contains(where: { $0.path == "/api/mobile/v1/chat/cancel" }) { await Task.yield() }
@@ -3053,6 +3088,7 @@ extension APIClientRetryTests {
         XCTAssertFalse(model.isSending)
         XCTAssertFalse(model.messages.contains(where: { $0.role == .user && $0.text == "A request whose receipt is delayed" }))
         XCTAssertEqual(model.restoreFailedDraft(), "A request whose receipt is delayed")
+        XCTAssertEqual(model.composerDraft(in: scope), "Follow up about the return flight")
         XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 1)
         XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat/cancel" }.count, 1)
 

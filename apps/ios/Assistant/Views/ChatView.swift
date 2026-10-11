@@ -363,6 +363,43 @@ struct ChatTranscriptRows: View, Equatable {
     }
 }
 
+enum ChatComposerPrimaryAction: Equatable {
+    case send(enabled: Bool)
+    case stop
+    case waiting
+}
+
+struct ChatComposerActionPolicy: Equatable {
+    let primary: ChatComposerPrimaryAction
+    let showsSeparateStop: Bool
+    let separateStopEnabled: Bool
+
+    static func resolve(
+        hasDraft: Bool,
+        canSend: Bool,
+        isSending: Bool,
+        canCancel: Bool,
+        isCancelling: Bool,
+        formAdmissionPending: Bool
+    ) -> Self {
+        if hasDraft {
+            let unresolved = isSending || canCancel || isCancelling || formAdmissionPending
+            return Self(
+                primary: .send(enabled: canSend && !unresolved),
+                showsSeparateStop: canCancel,
+                separateStopEnabled: canCancel && !isCancelling && !formAdmissionPending
+            )
+        }
+        if canCancel && !isCancelling {
+            return Self(primary: .stop, showsSeparateStop: false, separateStopEnabled: false)
+        }
+        if isSending || isCancelling || formAdmissionPending {
+            return Self(primary: .waiting, showsSeparateStop: false, separateStopEnabled: false)
+        }
+        return Self(primary: .send(enabled: canSend), showsSeparateStop: false, separateStopEnabled: false)
+    }
+}
+
 struct ChatView: View {
     let safeAreaTopInset: CGFloat
     let safeAreaBottomInset: CGFloat
@@ -2112,15 +2149,38 @@ struct ChatView: View {
 
                 pushToTalkButton
 
-                Button {
-                    if model.canCancelCurrentSend {
+                if composerActionPolicy.showsSeparateStop {
+                    Button {
                         model.cancelSend()
-                    } else if !model.isSending {
-                        sendDraft()
+                    } label: {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(AssistantTheme.stageDepth)
+                            .frame(width: 44, height: 44)
+                            .background(AssistantTheme.raised(for: colorScheme), in: Circle())
+                            .overlay {
+                                Circle().strokeBorder(composerTextColor.opacity(0.25), lineWidth: 0.7)
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!composerActionPolicy.separateStopEnabled)
+                    .accessibilityLabel(stopButtonLabel)
+                    .accessibilityHint("Requests cancellation for the current turn. Your draft stays in the composer.")
+                    .accessibilityIdentifier("assistant.chat.stop")
+                }
+
+                Button {
+                    switch composerActionPolicy.primary {
+                    case .stop:
+                        model.cancelSend()
+                    case let .send(enabled):
+                        if enabled { sendDraft() }
+                    case .waiting:
+                        break
                     }
                 } label: {
                     ZStack {
-                        if model.isSending || model.canCancelCurrentSend {
+                        if case .stop = composerActionPolicy.primary {
                             // A spinner in a button's position reads as a
                             // progress indicator, not a control. The square
                             // inside the arc says the turn can be stopped.
@@ -2131,6 +2191,10 @@ struct ChatView: View {
                                         .frame(width: 8, height: 8)
                                 }
                                 .transition(.scale(scale: 0.72).combined(with: .opacity))
+                        } else if case .waiting = composerActionPolicy.primary {
+                            ProgressView()
+                                .tint(composerTextColor)
+                                .controlSize(.small)
                         } else {
                             Image(systemName: "arrow.up")
                                 .font(.system(size: 16, weight: .bold))
@@ -2138,9 +2202,9 @@ struct ChatView: View {
                         }
                     }
                     .foregroundStyle(
-                        (model.isSending || model.canCancelCurrentSend)
+                        primaryIsStop || primaryIsWaiting
                             ? AssistantTheme.stageDepth
-                            : (canSend ? AssistantTheme.accent : composerPlaceholderColor)
+                            : (primarySendEnabled ? AssistantTheme.accent : composerPlaceholderColor)
                     )
                     .frame(width: 44, height: 44)
                     .background(
@@ -2150,54 +2214,32 @@ struct ChatView: View {
                         // the one bright object on the stage. Its arrow takes
                         // the brand green so the white circle stays connected
                         // to the rest of the conversation controls.
-                        (canSend && !model.isSending && !model.canCancelCurrentSend
-                            ? sendReadyFill : AssistantTheme.raised(for: colorScheme))
-                            .opacity(model.isSending || model.canCancelCurrentSend ? 0.28 : (!canSend ? 0.06 : 1)),
+                        (primarySendEnabled ? sendReadyFill : AssistantTheme.raised(for: colorScheme))
+                            .opacity(primaryIsStop || primaryIsWaiting
+                                ? 0.28 : (primarySendEnabled ? 1 : (composerHasDraft ? 0.28 : 0.06))),
                         in: Circle()
                     )
                     .overlay {
                         Circle().strokeBorder(
-                            composerTextColor.opacity(model.isSending || model.canCancelCurrentSend
-                                ? 0.25 : (canSend ? 0.3 : 0.1)),
+                            composerTextColor.opacity(primaryIsStop || primaryIsWaiting
+                                ? 0.25 : (primarySendEnabled ? 0.3 : (composerHasDraft ? 0.2 : 0.1))),
                             lineWidth: 0.7
                         )
                     }
-                    .scaleEffect(model.isSending || model.canCancelCurrentSend || canSend ? 1 : 0.92)
+                    .scaleEffect(primaryIsStop || primaryIsWaiting || composerHasDraft ? 1 : 0.92)
                     .shadow(
                         color: AssistantTheme.stageDepth.opacity(
-                            model.isSending || model.canCancelCurrentSend ? 0.08 : (canSend ? 0.16 : 0)
+                            primaryIsStop || primaryIsWaiting ? 0.08 : (primarySendEnabled ? 0.16 : 0)
                         ),
                         radius: 7,
                         y: 3
                     )
                 }
                 .buttonStyle(.plain)
-                .disabled((!canSend && !model.isSending && !model.canCancelCurrentSend)
-                    || (model.isSending && !model.canCancelCurrentSend)
-                    || model.isCancellingSend)
-                .accessibilityLabel(model.isCardFormAdmissionPending
-                    ? "Sending form"
-                    : model.isCancellingSend
-                    ? "Checking stop status"
-                    : model.canCancelCurrentSend
-                    ? (model.hasRequestedCancellationForCurrentSend
-                        ? "Retry stop"
-                        : (model.isSending ? "Stop the assistant" : "Stop pending turn"))
-                    : model.isSending ? "Stop the assistant" : "Send message")
+                .disabled(!primarySendEnabled && !primaryIsStop)
+                .accessibilityLabel(primaryButtonLabel)
                 .accessibilityIdentifier("assistant.chat.send")
-                .accessibilityHint(
-                    model.isCardFormAdmissionPending
-                        ? "The saved form request is being sent. Its status will be checked when the server replies."
-                        : model.isCancellingSend
-                        ? "The stop request is pending. The server status is being checked."
-                        : model.canCancelCurrentSend && model.hasRequestedCancellationForCurrentSend
-                        ? "Retries cancellation for the same pending turn without sending another message."
-                        : model.isSending
-                        ? "Stops this turn and keeps what has arrived so far"
-                        : model.canCancelCurrentSend
-                        ? "Requests cancellation for the same pending turn."
-                        : "Sends the current message"
-                )
+                .accessibilityHint(primaryButtonHint)
                 .animation(
                     reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.76),
                     value: canSend
@@ -2835,8 +2877,71 @@ struct ChatView: View {
         }
     }
 
-    private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !model.isSending
+    private var composerHasDraft: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var canSend: Bool { composerHasDraft && !model.isSending }
+
+    private var composerActionPolicy: ChatComposerActionPolicy {
+        ChatComposerActionPolicy.resolve(
+            hasDraft: composerHasDraft,
+            canSend: canSend,
+            isSending: model.isSending,
+            canCancel: model.canCancelCurrentSend,
+            isCancelling: model.isCancellingSend,
+            formAdmissionPending: model.isCardFormAdmissionPending
+        )
+    }
+
+    private var primarySendEnabled: Bool {
+        guard case let .send(enabled) = composerActionPolicy.primary else { return false }
+        return enabled
+    }
+
+    private var primaryIsStop: Bool {
+        if case .stop = composerActionPolicy.primary { return true }
+        return false
+    }
+
+    private var primaryIsWaiting: Bool {
+        if case .waiting = composerActionPolicy.primary { return true }
+        return false
+    }
+
+    private var primaryButtonLabel: String {
+        switch composerActionPolicy.primary {
+        case .send: "Send message"
+        case .stop: stopButtonLabel
+        case .waiting:
+            model.isCardFormAdmissionPending ? "Sending form"
+                : model.isCancellingSend ? "Checking stop status" : "Waiting for current turn"
+        }
+    }
+
+    private var primaryButtonHint: String {
+        switch composerActionPolicy.primary {
+        case let .send(enabled) where enabled:
+            "Sends the current message"
+        case .send:
+            model.isCardFormAdmissionPending
+                ? "The saved form request is being sent. Your draft stays in the composer."
+                : "Wait for the current turn to finish before sending. Your draft stays in the composer."
+        case .stop:
+            model.hasRequestedCancellationForCurrentSend
+                ? "Retries cancellation for this same pending turn."
+                : "Requests cancellation for the current turn."
+        case .waiting:
+            model.isCancellingSend
+                ? "The stop request is pending. The server status is being checked."
+                : "The current request is still being resolved."
+        }
+    }
+
+    private var stopButtonLabel: String {
+        if model.isCancellingSend { return "Checking stop status" }
+        if model.hasRequestedCancellationForCurrentSend { return "Retry stop" }
+        return model.isSending ? "Stop the assistant" : "Stop pending turn"
     }
 
 }
