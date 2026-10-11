@@ -2,37 +2,65 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import { ChatTurnFeedback } from './chat-turn-feedback';
 
-function renderWithTranscript(log: string[], note: string) {
+function renderFeedback({
+  showError = false,
+  error = null,
+  note = null,
+  canRetry = false,
+}: {
+  showError?: boolean;
+  error?: string | null;
+  note?: { text: string; retryable: boolean } | null;
+  canRetry?: boolean;
+} = {}) {
   return renderToStaticMarkup(
-    <div>
-      {log.length === 0 ? <p>What should we move forward?</p> : <p>{log.join('')}</p>}
-      <ChatTurnFeedback
-        showError
-        error="Stop is unconfirmed. Retry Stop to check the same message."
-        note={{ text: note, retryable: false }}
-        pollTrouble={null}
-        canRetry={false}
-        onRetry={vi.fn()}
-      />
-    </div>,
+    <ChatTurnFeedback
+      showError={showError}
+      error={error}
+      note={note}
+      pollTrouble={null}
+      canRetry={canRetry}
+      onRetry={vi.fn()}
+    />,
   );
 }
 
-describe('chat turn feedback placement', () => {
-  it.each([
-    { description: 'an empty transcript', log: [] },
-    { description: 'a populated transcript', log: ['Earlier message'] },
-  ])('keeps status and alert visible with $description', ({ log }) => {
-    const html = renderWithTranscript(
-      log,
-      'This message was stopped before it was admitted. No task started.',
-    );
+describe('chat turn feedback', () => {
+  it('renders an unknown-stop alert even when no durable note exists', () => {
+    const html = renderFeedback({
+      showError: true,
+      error: 'Stop is unconfirmed. Retry Stop to check the same message.',
+    });
 
-    expect(html).toContain('role="status"');
-    expect(html).toContain('This message was stopped before it was admitted. No task started.');
     expect(html).toContain('role="alert"');
     expect(html).toContain('Stop is unconfirmed. Retry Stop to check the same message.');
-    expect(html).toContain('href="/tasks"');
+    expect(html).not.toContain('role="status"');
+  });
+
+  it('keeps a nonretryable cancellation notice unique and offers no retry', () => {
+    const message = 'This message was stopped before it was admitted. No task started.';
+    const html = renderFeedback({
+      note: { text: message, retryable: false },
+      canRetry: true,
+    });
+
+    expect(html.match(/role="status"/g)).toHaveLength(1);
     expect(html.match(/This message was stopped before it was admitted/g)).toHaveLength(1);
+    expect(html).toContain('href="/tasks"');
+    expect(html).not.toContain('Try again');
+  });
+
+  it('offers retry only when the note and current turn both allow it', () => {
+    const blocked = renderFeedback({
+      note: { text: 'The task paused.', retryable: true },
+      canRetry: false,
+    });
+    const allowed = renderFeedback({
+      note: { text: 'The task paused.', retryable: true },
+      canRetry: true,
+    });
+
+    expect(blocked).not.toContain('Try again');
+    expect(allowed.match(/Try again/g)).toHaveLength(1);
   });
 });
