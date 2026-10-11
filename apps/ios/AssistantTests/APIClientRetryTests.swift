@@ -3612,10 +3612,16 @@ extension APIClientRetryTests {
             defer { pairing.cancel() }
             await fulfillment(of: [pairingFinished], timeout: 5)
             XCTAssertEqual(saved, true)
+            // The authenticated bootstrap replaces the old task notice,
+            // while this deliberately rejected supplementary overview
+            // publishes a new error for the replacement connection.
+            let currentConnectionError = "The access key was not accepted by this Assistant server."
+            XCTAssertEqual(model.errorMessage, currentConnectionError)
             StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/chat/status")
             await fulfillment(of: [oldReadFinished], timeout: 2)
             XCTAssertFalse(model.messages.contains(where: { $0.id == staleReply.id }))
-            XCTAssertNil(model.errorMessage, "Replacing the owner or connection clears its task-scoped notice")
+            XCTAssertEqual(model.errorMessage, currentConnectionError,
+                           "The old connection's reply must not clear the replacement connection's error")
             model.scenePhaseDidChange(.background)
         }
     }
