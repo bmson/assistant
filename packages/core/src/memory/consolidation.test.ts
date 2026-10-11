@@ -688,7 +688,9 @@ describe('compileOwnerCard pinning (integration)', () => {
   it('does not publish a paused consolidation after its contributing import is deleted', async () => {
     if (!dbUp) throw new Error('Local PostgreSQL qualification database is required');
     await withIsolatedConsolidationDatabase(async (db, isolatedAgentId) => {
-      const subject = `source-fence-${randomUUID()}`;
+      // Hyphenated UUID segments can resemble a year range (5678-4123),
+      // causing the temporal guard to skip the merge before the source fence.
+      const subject = `source-fence-${randomUUID().replaceAll('-', '')}`;
       const source = `source-fence-${randomUUID()}`;
       const sourceFactContent = `${MARKER}: ${subject} imported detail`;
       const ownerFactContent = `${MARKER}: ${subject} owner detail`;
@@ -749,6 +751,7 @@ describe('compileOwnerCard pinning (integration)', () => {
       const modelGate = new Promise<void>((resolve) => {
         resumeModel = resolve;
       });
+      let embeddingRequests = 0;
       const router = {
         async embeddingSpace() {
           return { provider: 'test', model: 'consolidation', dimensions: 1536, revision: '1' };
@@ -782,6 +785,7 @@ describe('compileOwnerCard pinning (integration)', () => {
           };
         },
         async embed(texts: string[]) {
+          embeddingRequests += 1;
           return texts.map(() => new Array(1536).fill(0.01));
         },
       } as unknown as ModelRouter;
@@ -793,6 +797,7 @@ describe('compileOwnerCard pinning (integration)', () => {
       await expect(consolidation).rejects.toThrow(
         'An imported source changed while consolidation was in flight',
       );
+      expect(embeddingRequests).toBe(1);
       expect(
         await db.select().from(memories).where(eq(memories.content, sourceFactContent)),
       ).toHaveLength(0);
