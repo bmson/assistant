@@ -52,6 +52,11 @@ class FakeApi:
     def request(self, method, url, payload=None):
         self.calls.append((method, url, payload))
         if url.endswith(":testIamPermissions"):
+            if url.startswith("https://cloudresourcemanager.googleapis.com/"):
+                valid = {"cloudscheduler.jobs.get", "cloudscheduler.jobs.pause", "cloudscheduler.jobs.enable"}
+                invalid = set(payload["permissions"]) - valid
+                if invalid:
+                    raise guard_module.GoogleApiError(400, "Invalid Scheduler permission")
             if url.startswith("https://iam.googleapis.com/v1/projects/"):
                 if self.service_account_permissions is not None:
                     return {"permissions": self.service_account_permissions}
@@ -99,6 +104,18 @@ class FakeApi:
 
 
 class DeliveryGuardTests(unittest.TestCase):
+    def test_scheduler_resume_permission_uses_enable_without_acquiring_holds(self):
+        api = FakeApi()
+        with tempfile.TemporaryDirectory() as directory:
+            guard = self.make_guard(api, directory)
+            guard.preflight()
+            probes = [payload for _, url, payload in api.calls
+                      if url.startswith("https://cloudresourcemanager.googleapis.com/")]
+            self.assertEqual(probes, [{"permissions": ["cloudscheduler.jobs.get", "cloudscheduler.jobs.pause", "cloudscheduler.jobs.enable"]}])
+            self.assertEqual(guard.receipt["owned"], [])
+            self.assertEqual(api.queue_state, "RUNNING")
+            self.assertTrue(all(state == "ENABLED" for state in api.scheduler_states.values()))
+
     def make_guard(self, api, directory, workers=None):
         return guard_module.DeliveryGuard(
             api,
