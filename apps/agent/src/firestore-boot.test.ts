@@ -56,7 +56,7 @@ describe.skipIf(!localEmulator)('Firestore agent process without PostgreSQL', ()
         ...(index === 0 ? { status: 'running', lockedUntil: new Date(0) } : {}),
       });
     }
-    const port = 20000 + Math.floor(Math.random() * 30000);
+    let port: number | undefined;
     const entry = fileURLToPath(new URL('./index.ts', import.meta.url));
     child = spawn(process.execPath, ['--import', 'tsx', entry], {
       cwd: process.cwd(),
@@ -74,13 +74,17 @@ describe.skipIf(!localEmulator)('Firestore agent process without PostgreSQL', ()
         QUEUE_DRIVER: 'local',
         CANARY_ENABLED: 'false',
         LOCATION_PING_SECRET: '',
-        AGENT_PORT: String(port),
-        PORT: String(port),
+        AGENT_PORT: '8787',
+        // The child binds a kernel-assigned port atomically. Randomly picking
+        // an ephemeral port can collide with the emulator's active clients.
+        PORT: '0',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     child.stdout?.on('data', (data) => {
       output += String(data);
+      const match = /^agent service listening on :([1-9]\d{0,4})$/m.exec(output);
+      if (match && Number(match[1]) <= 65535) port = Number(match[1]);
     });
     child.stderr?.on('data', (data) => {
       output += String(data);
@@ -89,13 +93,16 @@ describe.skipIf(!localEmulator)('Firestore agent process without PostgreSQL', ()
     let unavailable: Response | null = null;
     for (let attempt = 0; attempt < 60; attempt += 1) {
       if (child.exitCode !== null) throw new Error(`agent exited before ready: ${output}`);
-      const response = await fetch(`http://127.0.0.1:${port}/ready`).catch(() => null);
+      const response = port
+        ? await fetch(`http://127.0.0.1:${port}/ready`).catch(() => null)
+        : null;
       if (response) {
         unavailable = response;
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
+    expect(port, output).toBeGreaterThan(0);
     expect(unavailable?.status).toBe(503);
     // The local poller has ticked, but must not claim or reclaim while /ready is 503.
     await new Promise((resolve) => setTimeout(resolve, 2_300));
