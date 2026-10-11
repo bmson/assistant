@@ -118,7 +118,11 @@ jobs:
       - run: pnpm test
       - name: Verify isolated snapshot restore stays read-only and inert
         timeout-minutes: 8
-        run: pnpm test --restore-snapshot-target apps/agent/src/postgres-restore-snapshot.test.ts
+        run: |
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          pg_dump --version
+          pg_restore --version
+          pnpm test --restore-snapshot-target apps/agent/src/postgres-restore-snapshot.test.ts
       - name: Remove owned PostgreSQL service
         if: always()
         run: bash infra/ci/postgres-service.sh cleanup
