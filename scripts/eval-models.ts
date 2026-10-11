@@ -166,6 +166,7 @@ for (const path of [
 }
 const run = {
   mode: values.live ? 'live' : 'plan',
+  reasoningVariant: 'production-policy' as const,
   sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
   sourceDirty: !!execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim(),
   routerSha256: createHash('sha256')
@@ -174,6 +175,12 @@ const run = {
   providerSha256: createHash('sha256')
     .update(await readFile('packages/core/src/model-router/provider.ts'))
     .digest('hex'),
+  evaluationHarnessSha256: createHash('sha256')
+    .update(await readFile('scripts/eval-models.ts'))
+    .update('\0')
+    .update(await readFile('scripts/model-evaluation.ts'))
+    .digest('hex'),
+  runtime: { node: process.version, platform: process.platform, arch: process.arch },
   sdkVersions: Object.fromEntries(
     await Promise.all(
       ['ai', '@openrouter/ai-sdk-provider', 'zod'].map(async (name) => [
@@ -197,13 +204,15 @@ const run = {
   corpusSha256: createHash('sha256').update(JSON.stringify(MODEL_EVALUATION_CASES)).digest('hex'),
   catalogSha256: createHash('sha256').update(catalogText).digest('hex'),
   cases: cases.map((test) => test.id),
+  criticalCases: cases.filter((test) => test.critical).map((test) => test.id),
+  caseMetadata: cases.map(({ id, role, kind, critical }) => ({ id, role, kind, critical })),
   models: ids,
 };
 await save('run.json', JSON.stringify(run, null, 2));
 if (!values.live) {
   await save(
     'report.md',
-    `# Model evaluation plan\n\nNo model requests were made.\n\n${selected.map((model) => `- ${model.id}: reservation/provider ceilings $${model.ceilingRates.prompt.toFixed(4)} input / $${model.ceilingRates.completion.toFixed(4)} output per million tokens.`).join('\n')}\n\n${cases.length} synthetic cases × ${ids.length} models × ${repeats} repetitions, run budget $${budget}.\n\nThese are catalog capabilities and a test plan, not measured quality or latency. Use --live with an existing OPENROUTER_API_KEY to run the router against isolated accounting ports.\n`,
+    `# Model evaluation plan\n\nNo model requests were made.\n\n${selected.map((model) => `- ${model.id}: reservation/provider ceilings $${model.ceilingRates.prompt.toFixed(4)} input / $${model.ceilingRates.completion.toFixed(4)} output per million tokens.`).join('\n')}\n\n${cases.length} synthetic cases × ${ids.length} models × ${repeats} repetitions, run budget $${budget}.\n\nThis run uses the production provider/role reasoning policy. Its evidence cannot claim a default-versus-disabled reasoning comparison. These are catalog capabilities and a test plan, not measured quality or latency. Use --live with an existing OPENROUTER_API_KEY to run the router against isolated accounting ports.\n`,
   );
   console.log(
     `Prepared ${cases.length} cases for ${ids.length} models; no inference requests. ${output}`,
@@ -229,13 +238,20 @@ const results: {
   model: string;
   case: string;
   repeat: number;
+  role: (typeof cases)[number]['role'];
+  kind: (typeof cases)[number]['kind'];
   passed: boolean;
   status: EvaluationStatus;
   errors: string[];
   durationMs: number;
   firstTextMs: number | null;
   costUsd: number;
+  heldUsd: number;
   costEvidence: string[];
+  critical: boolean;
+  requestedReasoning: 'production-policy';
+  effectiveReasoningModes: Array<'enabled' | 'disabled' | 'unsupported' | 'unknown'>;
+  canDisableReasoning: boolean;
   calls: ModelCallWrite[];
   output: unknown;
 }[] = [];
@@ -283,14 +299,19 @@ const runners = selected.map((candidate) => {
     'off',
     provider,
   );
-  return { candidate, calls, router };
+  return {
+    candidate,
+    calls,
+    router,
+    canDisableReasoning: provider.canDisableReasoning?.(candidate.id) === true,
+  };
 });
 for (let repeat = 1; repeat <= repeats; repeat++) {
   for (const [caseIndex, test] of cases.entries()) {
     const offset = (caseIndex + repeat - 1) % runners.length;
     // Rotate model order for each case rather than exhausting the budget on
     // one model's complete corpus before the others get their first sample.
-    for (const { candidate, calls, router } of [
+    for (const { candidate, calls, router, canDisableReasoning } of [
       ...runners.slice(offset),
       ...runners.slice(0, offset),
     ]) {
@@ -298,6 +319,8 @@ for (let repeat = 1; repeat <= repeats; repeat++) {
       const spendBefore = ledger.spentUsd;
       const entriesBefore = ledger.entries.length;
       const callsBefore = calls.length;
+      const reasoningAttemptsBefore = ledger.reasoningAttempts.length;
+      const reservationsBefore = ledger.reservationsSince(0).length;
       let firstTextMs: number | null = null;
       let output: unknown = null;
       let errors: string[] = [];
@@ -381,18 +404,27 @@ for (let repeat = 1; repeat <= repeats; repeat++) {
       status = classifyEvaluationResult(
         status,
         errors,
-        ledger.entries.length > entriesBefore || calls.length > callsBefore,
+        ledger.reasoningAttempts.length > reasoningAttemptsBefore ||
+          ledger.entries.length > entriesBefore ||
+          calls.length > callsBefore,
       );
       const result = {
         model: candidate.id,
         case: test.id,
         repeat,
+        role: test.role,
+        kind: test.kind,
+        critical: test.critical,
         passed: status === 'passed',
         status,
         errors,
+        requestedReasoning: run.reasoningVariant,
+        effectiveReasoningModes: ledger.reasoningAttempts.slice(reasoningAttemptsBefore),
+        canDisableReasoning,
         durationMs: Math.round(performance.now() - started),
         firstTextMs,
         costUsd: ledger.spentUsd - spendBefore,
+        heldUsd: ledger.heldForReservations(ledger.reservationsSince(reservationsBefore)),
         costEvidence: ledger.entries.slice(entriesBefore).map((entry) => entry.basis),
         calls: calls.slice(callsBefore),
         output,
@@ -409,7 +441,13 @@ for (let repeat = 1; repeat <= repeats; repeat++) {
 await save(
   'results.json',
   JSON.stringify(
-    { ...run, accountedUsd: ledger.spentUsd, accounting: ledger.entries, results },
+    {
+      ...run,
+      accountedUsd: ledger.spentUsd,
+      heldUsd: ledger.heldUsd,
+      accounting: ledger.entries,
+      results,
+    },
     null,
     2,
   ),
@@ -433,7 +471,7 @@ for (const id of ids) {
 }
 report.push(
   '',
-  `Accounted total: $${ledger.spentUsd.toFixed(6)}. Failed/aborted requests retain their reservation ceiling; this can exceed eventual invoice cost. Missing usage is never reported as free.`,
+  `Accounted total: $${ledger.spentUsd.toFixed(6)}; unresolved held liability: $${ledger.heldUsd.toFixed(6)}. Failed/aborted requests retain their reservation ceiling; this can exceed eventual invoice cost. Missing usage is never reported as free.`,
   '',
   'The report checks narrow synthetic contracts. It does not establish conversational warmth, long-context recall, vision/speech quality, durable task correctness, provider-wide p95 latency, or real integration performance. A single repetition is a screening sample. All critical cases must pass repeatedly before proposing a role change; pair finalists with the question-regression harness and manual blind response review.',
   '',
@@ -444,9 +482,11 @@ await save(
   JSON.stringify(
     {
       completedAt: new Date().toISOString(),
-      status: results.some((row) => ['not_run', 'budget_interrupted'].includes(row.status))
-        ? 'partial'
-        : 'complete',
+      status:
+        ledger.heldUsd > 0 ||
+        results.some((row) => ['not_run', 'budget_interrupted'].includes(row.status))
+          ? 'partial'
+          : 'complete',
       attempted: results.filter((row) => row.status !== 'not_run').length,
       planned: ids.length * cases.length * repeats,
     },
