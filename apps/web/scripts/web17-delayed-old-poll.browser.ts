@@ -505,15 +505,19 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
 
     // The ordinary list link intentionally drops task/cursor query state. Use
     // the same supported task deep link to restore the exact persisted A poll.
-    releaseOldRequest();
-    await waitFor(oldSettled, 'Aborted task A route did not settle');
-    assert.equal(await page.getByText(oldResult, { exact: true }).count(), 0);
     await page.goto(deepLink(), { waitUntil: 'domcontentloaded', timeout: 90_000 });
     await composer.waitFor({ timeout: 10_000 });
     await page.getByRole('button', { name: 'Stop this task', exact: true }).waitFor();
     await waitFor(freshStarted, 'Task A fresh poll did not start after remount');
+
+    // Keep the aborted response unresolved until the fresh poll is active. This
+    // proves a late completion from A cannot replace or disturb the remounted
+    // task controls while the new request is still waiting.
+    releaseOldRequest();
+    await waitFor(oldSettled, 'Aborted task A route did not settle');
     assert.equal(await page.getByText(oldResult, { exact: true }).count(), 0);
     assert.equal(await page.getByText(freshResult, { exact: true }).count(), 0);
+    await page.getByRole('button', { name: 'Stop this task', exact: true }).waitFor();
 
     releaseFreshRequest();
     await page.getByText(freshResult, { exact: true }).waitFor({ timeout: 20_000 });
