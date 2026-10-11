@@ -22,6 +22,8 @@ import {
   restoreActivityWithRepository,
   retryActivity,
   retryActivityWithRepository,
+  revisePendingChecklistActivity,
+  revisePendingChecklistWithRepository,
   revokeTaskAutonomy,
   revokeTaskAutonomyWithRepository,
   type TaskDetail,
@@ -36,10 +38,17 @@ import {
 import type {
   PendingChecklistCancellationInput,
   PendingChecklistCancellationOutcome,
+  PendingChecklistCorrectionInput,
+  PendingChecklistCorrectionOutcome,
   TaskActivityCommandOutcome,
   TaskDiscoveryInput,
 } from '@assistant/persistence';
-import { getDb, getFirestoreInstallationStore, getTaskDiscoveryPorts } from '@/lib/server';
+import {
+  getAgentIdentity,
+  getDb,
+  getFirestoreInstallationStore,
+  getTaskDiscoveryPorts,
+} from '@/lib/server';
 
 function firestoreActivity() {
   const config = loadConfig();
@@ -162,6 +171,18 @@ export function raiseTaskActivityBudget(
   if (firestore)
     return raiseTaskBudgetWithRepository(firestore.repository, firestore.agentId, taskId, limit);
   return raiseTaskBudget(getDb(), taskId, limit);
+}
+
+/** Persist the Activity-selected private lookup correction through the active driver. */
+export async function reviseTaskActivityChecklistItem(
+  input: PendingChecklistCorrectionInput,
+): Promise<PendingChecklistCorrectionOutcome> {
+  const firestore = firestoreActivityCommands();
+  if (firestore)
+    return revisePendingChecklistWithRepository(firestore.repository, firestore.agentId, input);
+  const db = getDb();
+  const owner = await getAgentIdentity();
+  return revisePendingChecklistActivity(db, owner.id, input);
 }
 
 export async function discoverTaskActivity(input: TaskDiscoveryInput) {

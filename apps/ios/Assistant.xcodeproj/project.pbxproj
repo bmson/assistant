@@ -80,6 +80,7 @@
 		B000000000000000000000A9 /* NativeCardFormParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A9 /* NativeCardFormParser.swift */; };
 		B000000000000000000000B0 /* NativeCardFormParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B0 /* NativeCardFormParserTests.swift */; };
 		B000000000000000000000B1 /* NativeCardFormView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B1 /* NativeCardFormView.swift */; };
+		B000000000000000000000B2 /* SecurityReviewSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B2 /* SecurityReviewSection.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -191,6 +192,7 @@
 		C000000000000000000000A9 /* NativeCardFormParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCardFormParser.swift; sourceTree = "<group>"; };
 		C000000000000000000000B0 /* NativeCardFormParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCardFormParserTests.swift; sourceTree = "<group>"; };
 		C000000000000000000000B1 /* NativeCardFormView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCardFormView.swift; sourceTree = "<group>"; };
+		C000000000000000000000B2 /* SecurityReviewSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/SecurityReviewSection.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -252,6 +254,7 @@
 				C000000000000000000000A8 /* CardFormMobileSession.swift */,
 				C000000000000000000000A9 /* NativeCardFormParser.swift */,
 				C000000000000000000000B1 /* NativeCardFormView.swift */,
+				C000000000000000000000B2 /* SecurityReviewSection.swift */,
 				C00000000000000000000005 /* Networking/KeychainStore.swift */,
 				C00000000000000000000006 /* Networking/APIClient.swift */,
 				C00000000000000000000095 /* Components/CardActions.swift */,
@@ -475,6 +478,7 @@
 				B000000000000000000000A8 /* CardFormMobileSession.swift in Sources */,
 				B000000000000000000000A9 /* NativeCardFormParser.swift in Sources */,
 				B000000000000000000000B1 /* NativeCardFormView.swift in Sources */,
+				B000000000000000000000B2 /* SecurityReviewSection.swift in Sources */,
 				B00000000000000000000056 /* Components/MermaidDiagramView.swift in Sources */,
 				B00000000000000000000005 /* Networking/KeychainStore.swift in Sources */,
 				B00000000000000000000006 /* Networking/APIClient.swift in Sources */,

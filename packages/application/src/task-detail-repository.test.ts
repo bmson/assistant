@@ -96,7 +96,7 @@ describe('portable Activity task detail', () => {
       task: {
         id: taskId,
         plan: { text: '{\n  "summary": "Plan"\n}', truncated: false },
-        checklist: { items: [{ id: 'review' }] },
+        checklist: { items: [{ id: 'review' }], revision: 0, revisionAudit: [] },
       },
       toolCalls: [{ riskTier: 'low', policyId: 'owner-read', result: { truncated: true } }],
       messages: [{ text: `${'x'.repeat(200)}…` }],

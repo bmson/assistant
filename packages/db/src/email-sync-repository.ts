@@ -105,6 +105,7 @@ export function createPostgresEmailSyncRepository(
     observeSecurityIncident: securityIncidents.observe,
     securityIncidentForMessage: securityIncidents.getForMessage,
     listSecurityAttentionCandidates: securityIncidents.listAttentionCandidates,
+    listSecurityReviewItems: securityIncidents.listReviewItems,
     claimSecurityAttention: securityIncidents.claimAttention,
     completeSecurityAttention: securityIncidents.completeAttention,
     decideSecurityIncident: securityIncidents.decide,

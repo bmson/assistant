@@ -252,6 +252,7 @@ export async function listActivity(
 
 export interface TaskSnapshot {
   id: string;
+  agentId?: string;
   type: string;
   status: string;
   title: string | null;
@@ -264,7 +265,18 @@ export interface TaskSnapshot {
   progress: string;
   progressPercent: number | null;
   plan: RecordedValue | null;
-  checklist?: Pick<RequestChecklist, 'items'>;
+  checklist?: {
+    items: RequestChecklist['items'];
+    /** Defaults to zero for pre-correction v1 checklists. */
+    revision: number;
+    /** Bounded audit identifiers support exact Activity timeout reconciliation. */
+    revisionAudit: Array<
+      Pick<
+        NonNullable<RequestChecklist['revisionAudit']>[number],
+        'revision' | 'ownerMessageId' | 'itemId' | 'toLabel' | 'toKind'
+      >
+    >;
+  };
   archivedAt: Date | null;
 }
 
@@ -303,6 +315,22 @@ function record(value: unknown, budget: number): RecordedValue | null {
   return text.length <= budget
     ? { text, truncated: false, totalChars: text.length }
     : { text: text.slice(0, budget), truncated: true, totalChars: text.length };
+}
+
+function checklistSnapshot(checklist: RequestChecklist): NonNullable<TaskSnapshot['checklist']> {
+  return {
+    items: checklist.items,
+    revision: checklist.revision ?? 0,
+    revisionAudit: (checklist.revisionAudit ?? []).map(
+      ({ revision, ownerMessageId, itemId, toLabel, toKind }) => ({
+        revision,
+        ownerMessageId,
+        itemId,
+        toLabel,
+        ...(toKind ? { toKind } : {}),
+      }),
+    ),
+  };
 }
 
 /**
@@ -420,6 +448,7 @@ export async function getTaskDetail(
   const [task] = await db
     .select({
       id: tasks.id,
+      agentId: tasks.agentId,
       type: tasks.type,
       status: tasks.status,
       title: tasks.title,
@@ -565,9 +594,10 @@ export async function getTaskDetail(
   const parsedChecklist = RequestChecklistSchema.safeParse(checklist);
   const snapshot: TaskSnapshot = {
     ...rest,
+    agentId: agent.id,
     progress: activityProgress(task.status, task.progress),
     plan: record(plan, MAX_RECORDED_CHARS),
-    ...(parsedChecklist.success ? { checklist: { items: parsedChecklist.data.items } } : {}),
+    ...(parsedChecklist.success ? { checklist: checklistSnapshot(parsedChecklist.data) } : {}),
   };
   const taskApprovals = rawApprovals.filter((row) => onPage('approval', row.id)).reverse();
   // A parked task whose approval is gone is stuck. The page carries only one
@@ -655,9 +685,10 @@ export async function getTaskDetailWithRepository(
   const parsedChecklist = RequestChecklistSchema.safeParse(stateRecord.requestChecklist);
   const snapshot: TaskSnapshot = {
     ...task,
+    agentId,
     progress: activityProgress(task.status, task.progress),
     plan: record(plan, MAX_RECORDED_CHARS),
-    ...(parsedChecklist.success ? { checklist: { items: parsedChecklist.data.items } } : {}),
+    ...(parsedChecklist.success ? { checklist: checklistSnapshot(parsedChecklist.data) } : {}),
   };
   const decisionOf = (value: unknown) =>
     (value ?? {}) as { riskTier?: unknown; policyId?: unknown };

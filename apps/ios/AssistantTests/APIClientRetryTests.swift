@@ -30,7 +30,10 @@ final class StubURLProtocol: URLProtocol {
     private static var recordedURLs: [URL] = []
     private static var recordedBodies: [Data] = []
     private static var recordedHeaders: [[String: String]] = []
+    private static var recordedTimeouts: [TimeInterval] = []
     private static var heldResponses: [String: StubURLProtocol] = [:]
+    private static var stoppedPaths: Set<String> = []
+    private static var stopLoadingObservers: [String: [() -> Void]] = [:]
     private static var completedPaths: Set<String> = []
     private static weak var activeStream: StubURLProtocol?
     private static var streamsByOperation: [String: StubURLProtocol] = [:]
@@ -48,7 +51,10 @@ final class StubURLProtocol: URLProtocol {
             recordedURLs = []
             recordedBodies = []
             recordedHeaders = []
+            recordedTimeouts = []
             heldResponses = [:]
+            stoppedPaths = []
+            stopLoadingObservers = [:]
             completedPaths = []
             activeStream = nil
             streamsByOperation = [:]
@@ -81,7 +87,10 @@ final class StubURLProtocol: URLProtocol {
             recordedURLs = []
             recordedBodies = []
             recordedHeaders = []
+            recordedTimeouts = []
             heldResponses = [:]
+            stoppedPaths = []
+            stopLoadingObservers = [:]
             completedPaths = []
             activeStream = nil
             streamsByOperation = [:]
@@ -111,8 +120,23 @@ final class StubURLProtocol: URLProtocol {
     /// stream rather than as `httpBody`, so it is drained here once.
     static var bodies: [Data] { lock.withLock { recordedBodies } }
     static var headers: [[String: String]] { lock.withLock { recordedHeaders } }
+    static var timeouts: [TimeInterval] { lock.withLock { recordedTimeouts } }
     static var completedResponsePaths: Set<String> { lock.withLock { completedPaths } }
     static func isHoldingResponse(path: String) -> Bool { lock.withLock { heldResponses[path] != nil } }
+    static func observeStopLoading(path: String, testCaseID: String, onStop: @escaping () -> Void) {
+        let key = stopLoadingKey(path: path, testCaseID: testCaseID)
+        let alreadyStopped = lock.withLock {
+            if stoppedPaths.contains(key) { return true }
+            stopLoadingObservers[key, default: []].append(onStop)
+            return false
+        }
+        if alreadyStopped { onStop() }
+    }
+
+    private static func stopLoadingKey(path: String, testCaseID: String) -> String {
+        "\(testCaseID)\u{0}\(path)"
+    }
+
     static func releaseHeldResponse(path: String) {
         let protocolInstance = lock.withLock { heldResponses.removeValue(forKey: path) }
         protocolInstance?.releaseHeldResponse()
@@ -180,7 +204,7 @@ final class StubURLProtocol: URLProtocol {
         }
     }
 
-    private static func next(for method: String, url: URL?, body: Data, headers: [String: String]) -> Outcome {
+    private static func next(for method: String, url: URL?, body: Data, headers: [String: String], timeout: TimeInterval) -> Outcome {
         lock.withLock {
             guard let requestCaseID = testCaseID(in: headers), requestCaseID == activeTestCaseID else {
                 return .failure(URLError(.cancelled))
@@ -189,6 +213,7 @@ final class StubURLProtocol: URLProtocol {
             if let url { recordedURLs.append(url) }
             recordedBodies.append(body)
             recordedHeaders.append(headers)
+            recordedTimeouts.append(timeout)
             if let authorization = headers.first(where: { $0.key.caseInsensitiveCompare("authorization") == .orderedSame })?.value,
                var queued = tokenOutcomes[authorization], !queued.isEmpty {
                 let result = queued.removeFirst()
@@ -224,7 +249,21 @@ final class StubURLProtocol: URLProtocol {
     private let stopped = NSLock()
     private var isStopped = false
     private var heldResponse: (status: Int, body: Data)?
-    override func stopLoading() { stopped.withLock { isStopped = true } }
+    override func stopLoading() {
+        stopped.withLock { isStopped = true }
+        guard let path = request.url?.path,
+              let testCaseID = Self.testCaseID(in: request.allHTTPHeaderFields ?? [:]) else { return }
+        let key = Self.stopLoadingKey(path: path, testCaseID: testCaseID)
+        let observers = Self.lock.withLock { () -> [() -> Void] in
+            guard Self.activeTestCaseID == testCaseID else { return [] }
+            if let held = Self.heldResponses[path], held === self {
+                Self.heldResponses.removeValue(forKey: path)
+            }
+            Self.stoppedPaths.insert(key)
+            return Self.stopLoadingObservers.removeValue(forKey: key) ?? []
+        }
+        observers.forEach { $0() }
+    }
 
     private func releaseHeldResponse() {
         guard let heldResponse else { return }
@@ -256,16 +295,22 @@ final class StubURLProtocol: URLProtocol {
             for: method,
             url: request.url,
             body: requestBody,
-            headers: request.allHTTPHeaderFields ?? [:]
+            headers: request.allHTTPHeaderFields ?? [:],
+            timeout: request.timeoutInterval
         ) {
         case let .held(status, body):
-            guard Self.isActiveTestCase(Self.testCaseID(in: request.allHTTPHeaderFields ?? [:])),
+            guard let requestTestCaseID = Self.testCaseID(in: request.allHTTPHeaderFields ?? [:]),
+                  Self.isActiveTestCase(requestTestCaseID),
                   let path = request.url?.path else {
                 client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
                 return
             }
             heldResponse = (status, body)
-            Self.lock.withLock { Self.heldResponses[path] = self }
+            let key = Self.stopLoadingKey(path: path, testCaseID: requestTestCaseID)
+            Self.lock.withLock {
+                Self.stoppedPaths.remove(key)
+                Self.heldResponses[path] = self
+            }
         case let .failure(error):
             client?.urlProtocol(self, didFailWithError: error)
         case let .stream(body):
@@ -422,6 +467,24 @@ final class APIClientRetryTests: XCTestCase {
     private var testSessions: [URLSession] = []
     private var testCaseID = ""
 
+    @MainActor
+    private final class SecurityReviewTransportStub: SecurityReviewTransport {
+        var listCalls = 0
+        var decisionCalls = 0
+        var listHandler: @MainActor () async throws -> [SecurityReviewItem] = { [] }
+        var decisionHandler: @MainActor (SecurityReviewItem, SecurityReviewDisposition) async -> SecurityReviewDecisionResult = { _, _ in .saved }
+
+        func list() async throws -> [SecurityReviewItem] {
+            listCalls += 1
+            return try await listHandler()
+        }
+
+        func decide(_ item: SecurityReviewItem, as disposition: SecurityReviewDisposition) async -> SecurityReviewDecisionResult {
+            decisionCalls += 1
+            return await decisionHandler(item, disposition)
+        }
+    }
+
     override func setUp() {
         super.setUp()
         testCaseID = UUID().uuidString
@@ -473,6 +536,456 @@ final class APIClientRetryTests: XCTestCase {
         let deliveryBody = try XCTUnwrap(StubURLProtocol.bodies.last)
         let delivery = try XCTUnwrap(JSONSerialization.jsonObject(with: deliveryBody) as? [String: String])
         XCTAssertEqual(delivery, ["action": "delivered", "clientId": clientID])
+    }
+
+    func testSecurityReviewListUsesOneBoundedAuthenticatedAttempt() async throws {
+        let body = Data(#"{"items":[{"incidentId":"a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1","revision":3,"confidence":"high","disposition":"unreviewed","category":"new_device","importance":7,"subject":"New sign-in","fromName":"Provider","observedAt":"2026-10-11T18:00:00Z","materialChangeReason":"A new device was reported.","evidence":{"eventType":"login","evidenceQuote":"A sign-in needs review."}}]}"#.utf8)
+        StubURLProtocol.prime([.success(status: 200, body: body)])
+
+        let items = try await makeClient().securityReviews()
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items.first?.revision, 3)
+        XCTAssertEqual(items.first?.readableCategory, "New Device")
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        let url = try XCTUnwrap(StubURLProtocol.urls.first)
+        XCTAssertEqual(url.path, "/api/mobile/v1/security-reviews")
+        XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems, [URLQueryItem(name: "limit", value: "50")])
+        XCTAssertEqual(StubURLProtocol.timeouts, [12])
+        XCTAssertEqual(
+            StubURLProtocol.headers.first?.first { $0.key.caseInsensitiveCompare("authorization") == .orderedSame }?.value,
+            "Bearer t"
+        )
+    }
+
+    func testSecurityReviewListDoesNotRetryTransportFailure() async {
+        StubURLProtocol.prime([
+            .failure(URLError(.timedOut)),
+            .success(status: 200, body: Data(#"{"items":[]}"#.utf8)),
+        ])
+
+        do {
+            _ = try await makeClient().securityReviews()
+            XCTFail("A single failed review read must be reported rather than retried.")
+        } catch {
+            XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+            XCTAssertEqual(StubURLProtocol.timeouts, [12])
+        }
+    }
+
+    func testSecurityReviewRequestsEnforceAbsoluteDeadlineAndCancelHeldTransport() async throws {
+        let (client, session) = makeClient(requestScopeID: testCaseID, securityReviewDeadline: 0.2)
+        let getPath = "/api/mobile/v1/security-reviews"
+        StubURLProtocol.prime([.held(status: 200, body: Data(#"{"items":[]}"#.utf8))])
+        let getStopped = expectation(description: "Deadline cancels the held GET transport")
+        StubURLProtocol.observeStopLoading(path: getPath, testCaseID: testCaseID) {
+            getStopped.fulfill()
+        }
+
+        do {
+            _ = try await client.securityReviews()
+            XCTFail("A held response must not exceed the absolute deadline.")
+        } catch let APIError.transport(error) {
+            XCTAssertEqual(error.code, .timedOut)
+        } catch {
+            XCTFail("Expected a deadline transport error, got \(error).")
+        }
+
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        XCTAssertEqual(StubURLProtocol.timeouts, [12])
+        await fulfillment(of: [getStopped], timeout: 2)
+        XCTAssertFalse(StubURLProtocol.isHoldingResponse(path: getPath))
+        let getDrained = await cancelAndDrain(session)
+        XCTAssertTrue(getDrained)
+
+        let (postClient, postSession) = makeClient(requestScopeID: testCaseID, securityReviewDeadline: 0.2)
+        let postPath = "/api/mobile/v1/security-reviews/a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1"
+        StubURLProtocol.prime([.held(status: 200, body: Data(#"{"ok":true}"#.utf8))])
+        let postStopped = expectation(description: "Deadline cancels the held POST transport")
+        StubURLProtocol.observeStopLoading(path: postPath, testCaseID: testCaseID) {
+            postStopped.fulfill()
+        }
+        let outcome = await postClient.decideSecurityReview(
+            incidentId: "a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1",
+            expectedRevision: 5,
+            disposition: .dismissed
+        )
+        XCTAssertEqual(outcome, .uncertain)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        XCTAssertEqual(StubURLProtocol.timeouts, [12])
+        await fulfillment(of: [postStopped], timeout: 2)
+        XCTAssertFalse(StubURLProtocol.isHoldingResponse(path: postPath))
+        let postDrained = await cancelAndDrain(postSession)
+        XCTAssertTrue(postDrained)
+    }
+
+    func testSecurityReviewParentCancellationCancelsHeldTransport() async throws {
+        let (client, session) = makeClient(requestScopeID: testCaseID, securityReviewDeadline: 12)
+        let path = "/api/mobile/v1/security-reviews"
+        StubURLProtocol.prime([.held(status: 200, body: Data(#"{"items":[]}"#.utf8))])
+        let transportStopped = expectation(description: "Parent cancellation stops the held transport")
+        StubURLProtocol.observeStopLoading(path: path, testCaseID: testCaseID) {
+            transportStopped.fulfill()
+        }
+        let request = Task { try await client.securityReviews() }
+
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !StubURLProtocol.isHoldingResponse(path: path), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: path), "The request should reach its held response before cancellation.")
+        request.cancel()
+
+        do {
+            _ = try await request.value
+            XCTFail("Cancelling the parent operation must cancel its held network request.")
+        } catch {
+            XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        }
+        await fulfillment(of: [transportStopped], timeout: 2)
+        XCTAssertFalse(StubURLProtocol.isHoldingResponse(path: path))
+        XCTAssertEqual(StubURLProtocol.timeouts, [12])
+        let drained = await cancelAndDrain(session)
+        XCTAssertTrue(drained)
+    }
+
+    func testSecurityReviewListRejectsDuplicateAndMalformedRows() async throws {
+        let duplicate = #"{"items":[{"incidentId":"a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1","revision":3,"confidence":"high","disposition":"unreviewed","category":"login","importance":7,"subject":"One","observedAt":"2026-10-11T18:00:00Z"},{"incidentId":"a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1","revision":4,"confidence":"high","disposition":"unreviewed","category":"login","importance":7,"subject":"Two","observedAt":"2026-10-11T18:00:00Z"}]}"#
+        StubURLProtocol.prime([.success(status: 200, body: Data(duplicate.utf8))])
+        do {
+            _ = try await makeClient().securityReviews()
+            XCTFail("Duplicate incident identities must fail closed.")
+        } catch {
+            XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        }
+
+        StubURLProtocol.prime([.success(status: 200, body: Data(#"{"items":[{"incidentId":"not-an-id","revision":0,"confidence":"","disposition":"unreviewed","category":"login","importance":99,"subject":" ","observedAt":"invalid"}]}"#.utf8))])
+        do {
+            _ = try await makeClient().securityReviews()
+            XCTFail("Malformed review fields must fail closed.")
+        } catch {
+            XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        }
+
+        let supplementaryCharactersOverUtf16Bound = String(repeating: "😀", count: 41)
+        let oversizedUtf16 = try JSONSerialization.data(withJSONObject: ["items": [[
+            "incidentId": "a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1",
+            "revision": 3,
+            "confidence": supplementaryCharactersOverUtf16Bound,
+            "disposition": "unreviewed",
+            "category": "login",
+            "importance": 7,
+            "subject": "A bounded UTF-16 value",
+            "observedAt": "2026-10-11T18:00:00Z",
+        ]]])
+        StubURLProtocol.prime([.success(status: 200, body: oversizedUtf16)])
+        do {
+            _ = try await makeClient().securityReviews()
+            XCTFail("A supplementary character counts as two UTF-16 code units for server parity.")
+        } catch {
+            XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        }
+
+        let tooMany = (0..<51).map { index in
+            [
+                "incidentId": String(format: "a2f7d86c-29ce-5c48-9d57-%012x", index),
+                "revision": index + 1,
+                "confidence": "high",
+                "disposition": "unreviewed",
+                "category": "login",
+                "importance": 5,
+                "subject": "Review \(index)",
+                "observedAt": "2026-10-11T18:00:00Z",
+            ] as [String: Any]
+        }
+        let oversizedBody = try JSONSerialization.data(withJSONObject: ["items": tooMany])
+        StubURLProtocol.prime([.success(status: 200, body: oversizedBody)])
+        do {
+            _ = try await makeClient().securityReviews()
+            XCTFail("The native client must preserve the server's 50-item bound.")
+        } catch {
+            XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+            XCTAssertEqual(StubURLProtocol.timeouts, [12])
+        }
+    }
+
+    func testSecurityReviewDecisionUsesFixedReasonAndDoesNotRetry() async throws {
+        let incidentID = "a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1"
+        StubURLProtocol.prime([.success(status: 200, body: Data(#"{"ok":true}"#.utf8))])
+
+        let result = await makeClient().decideSecurityReview(incidentId: incidentID, expectedRevision: 5, disposition: .expected)
+
+        XCTAssertEqual(result, .saved)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        XCTAssertEqual(StubURLProtocol.timeouts, [12])
+        let url = try XCTUnwrap(StubURLProtocol.urls.first)
+        XCTAssertEqual(url.path, "/api/mobile/v1/security-reviews/\(incidentID)")
+        let bodyData = try XCTUnwrap(StubURLProtocol.bodies.first)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
+        XCTAssertEqual(body["expectedRevision"] as? Int, 5)
+        XCTAssertEqual(body["disposition"] as? String, "expected")
+        XCTAssertEqual(body["reason"] as? String, "Owner marked this activity as expected.")
+
+        StubURLProtocol.prime([.success(status: 409, body: Data(#"{"error":"stale"}"#.utf8))])
+        let stale = await makeClient().decideSecurityReview(incidentId: incidentID, expectedRevision: 5, disposition: .dismissed)
+        XCTAssertEqual(stale, .stale)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+
+        StubURLProtocol.prime([.failure(URLError(.timedOut)), .success(status: 200, body: Data(#"{"ok":true}"#.utf8))])
+        let uncertain = await makeClient().decideSecurityReview(incidentId: incidentID, expectedRevision: 5, disposition: .expected)
+        XCTAssertEqual(uncertain, .uncertain)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+
+        StubURLProtocol.prime([])
+        let invalid = await makeClient().decideSecurityReview(incidentId: incidentID, expectedRevision: 5, disposition: .unreviewed)
+        XCTAssertEqual(invalid, .uncertain)
+        XCTAssertTrue(StubURLProtocol.attempts.isEmpty)
+    }
+
+    @MainActor
+    func testSecurityReviewStaleDecisionReconcilesOnceWithoutOptimisticRemoval() async throws {
+        let item = try securityReviewItem()
+        let transport = SecurityReviewTransportStub()
+        transport.listHandler = { [item] }
+        transport.decisionHandler = { _, _ in .stale }
+        let client = makeClient()
+        let controller = SecurityReviewController(
+            context: SecurityReviewRequestContext(ownerID: "owner-a", connectionVersion: 1, client: client),
+            connectionIsCurrent: { true },
+            transport: transport
+        )
+        await controller.refresh()
+
+        await controller.decide(item, as: .dismissed)
+
+        XCTAssertEqual(transport.decisionCalls, 1)
+        XCTAssertEqual(transport.listCalls, 2)
+        XCTAssertEqual(controller.items, [item])
+        XCTAssertEqual(controller.message, "This review changed. The latest version is loaded.")
+        XCTAssertNil(controller.pendingIncidentID)
+    }
+
+    @MainActor
+    func testSecurityReviewUncertainDecisionReconcilesOnceAndNeverRetriesPost() async throws {
+        let item = try securityReviewItem()
+        let transport = SecurityReviewTransportStub()
+        transport.listHandler = { [item] }
+        transport.decisionHandler = { _, _ in .uncertain }
+        let controller = SecurityReviewController(
+            context: SecurityReviewRequestContext(ownerID: "owner-a", connectionVersion: 1, client: makeClient()),
+            connectionIsCurrent: { true },
+            transport: transport
+        )
+        await controller.refresh()
+
+        await controller.decide(item, as: .expected)
+
+        XCTAssertEqual(transport.decisionCalls, 1)
+        XCTAssertEqual(transport.listCalls, 2)
+        XCTAssertEqual(controller.items, [item])
+        XCTAssertTrue(controller.message.contains("decision response was unclear"))
+    }
+
+    @MainActor
+    func testSecurityReviewKeepsPriorRowsWhenPostDecisionRefreshFails() async throws {
+        let item = try securityReviewItem()
+        let transport = SecurityReviewTransportStub()
+        var listCalls = 0
+        transport.listHandler = {
+            listCalls += 1
+            if listCalls == 1 { return [item] }
+            throw APIError.invalidResponse
+        }
+        transport.decisionHandler = { _, _ in .saved }
+        let controller = SecurityReviewController(
+            context: SecurityReviewRequestContext(ownerID: "owner-a", connectionVersion: 1, client: makeClient()),
+            connectionIsCurrent: { true },
+            transport: transport
+        )
+        await controller.refresh()
+
+        await controller.decide(item, as: .expected)
+
+        XCTAssertEqual(transport.decisionCalls, 1)
+        XCTAssertEqual(transport.listCalls, 2)
+        XCTAssertEqual(controller.items, [item])
+        XCTAssertTrue(controller.staleList)
+        XCTAssertTrue(controller.message.contains("Decision saved."))
+        XCTAssertNil(controller.pendingIncidentID)
+    }
+
+    @MainActor
+    func testSecurityReviewDoesNotShowEmptyAfterInitialEmptyRefreshFails() async throws {
+        let transport = SecurityReviewTransportStub()
+        var listCalls = 0
+        transport.listHandler = {
+            listCalls += 1
+            if listCalls == 1 { return [] }
+            throw APIError.invalidResponse
+        }
+        let controller = SecurityReviewController(
+            context: SecurityReviewRequestContext(ownerID: "owner-a", connectionVersion: 1, client: makeClient()),
+            connectionIsCurrent: { true },
+            transport: transport
+        )
+        await controller.refresh()
+        XCTAssertEqual(controller.loadState, .ready)
+        XCTAssertTrue(controller.items.isEmpty)
+
+        await controller.refresh()
+
+        XCTAssertEqual(controller.loadState, .ready)
+        XCTAssertTrue(controller.items.isEmpty)
+        XCTAssertTrue(controller.staleList)
+        XCTAssertTrue(controller.message.contains("could not be refreshed"))
+        XCTAssertEqual(transport.listCalls, 2)
+    }
+
+    @MainActor
+    func testSecurityReviewDecisionIsBlockedDuringRefreshAndForStaleRows() async throws {
+        let item = try securityReviewItem()
+        let transport = SecurityReviewTransportStub()
+        var listCalls = 0
+        var releaseList: (@MainActor () -> Void)?
+        transport.listHandler = {
+            listCalls += 1
+            if listCalls == 1 { return [item] }
+            return await withCheckedContinuation { continuation in
+                releaseList = { continuation.resume(returning: [item]) }
+            }
+        }
+        let controller = SecurityReviewController(
+            context: SecurityReviewRequestContext(ownerID: "owner-a", connectionVersion: 1, client: makeClient()),
+            connectionIsCurrent: { true },
+            transport: transport
+        )
+        await controller.refresh()
+        await controller.decide(item, as: .unreviewed)
+        XCTAssertEqual(transport.decisionCalls, 0)
+        let refreshing = Task { await controller.refresh() }
+        for _ in 0..<50 {
+            if releaseList != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard let finishRefresh = releaseList else {
+            controller.dispose()
+            XCTFail("The held refresh did not start.")
+            return
+        }
+
+        await controller.decide(item, as: .dismissed)
+
+        XCTAssertEqual(transport.decisionCalls, 0)
+        finishRefresh()
+        await refreshing.value
+        XCTAssertFalse(controller.isRefreshing)
+        controller.dispose()
+
+        let staleTransport = SecurityReviewTransportStub()
+        var staleListCalls = 0
+        staleTransport.listHandler = {
+            staleListCalls += 1
+            if staleListCalls == 1 { return [item] }
+            throw APIError.invalidResponse
+        }
+        staleTransport.decisionHandler = { _, _ in .stale }
+        let staleController = SecurityReviewController(
+            context: SecurityReviewRequestContext(ownerID: "owner-a", connectionVersion: 2, client: makeClient()),
+            connectionIsCurrent: { true },
+            transport: staleTransport
+        )
+        await staleController.refresh()
+        await staleController.decide(item, as: .dismissed)
+        XCTAssertTrue(staleController.staleList)
+        await staleController.decide(item, as: .dismissed)
+        XCTAssertEqual(staleTransport.decisionCalls, 1)
+        staleController.dispose()
+    }
+
+    @MainActor
+    func testSecurityReviewLateDecisionAfterDisposeCannotReconcileOrPublish() async throws {
+        let item = try securityReviewItem()
+        let transport = SecurityReviewTransportStub()
+        transport.listHandler = { [item] }
+        var connectionCurrent = true
+        var resumeDecision: (@MainActor () -> Void)?
+        transport.decisionHandler = { _, _ in
+            await withCheckedContinuation { continuation in
+                resumeDecision = { continuation.resume(returning: .saved) }
+            }
+        }
+        let controller = SecurityReviewController(
+            context: SecurityReviewRequestContext(ownerID: "owner-a", connectionVersion: 7, client: makeClient()),
+            connectionIsCurrent: { connectionCurrent },
+            transport: transport
+        )
+        await controller.refresh()
+        let mutation = Task { await controller.decide(item, as: .dismissed) }
+        for _ in 0..<50 {
+            if resumeDecision != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard let finishDecision = resumeDecision else {
+            controller.dispose()
+            XCTFail("The held decision did not start.")
+            return
+        }
+        XCTAssertEqual(controller.pendingIncidentID, item.incidentId)
+        await controller.refresh()
+        XCTAssertEqual(transport.listCalls, 1)
+        connectionCurrent = false
+        controller.dispose()
+        finishDecision()
+        await mutation.value
+
+        XCTAssertEqual(transport.decisionCalls, 1)
+        XCTAssertEqual(transport.listCalls, 1)
+        XCTAssertTrue(controller.items.isEmpty)
+        XCTAssertNil(controller.pendingIncidentID)
+        XCTAssertEqual(controller.loadState, .loading)
+        XCTAssertTrue(controller.message.isEmpty)
+    }
+
+    @MainActor
+    func testSecurityReviewLateListAfterConnectionReplacementCannotPublish() async throws {
+        let item = try securityReviewItem()
+        let transport = SecurityReviewTransportStub()
+        var connectionCurrent = true
+        var releaseList: (@MainActor () -> Void)?
+        transport.listHandler = {
+            await withCheckedContinuation { continuation in
+                releaseList = { continuation.resume(returning: [item]) }
+            }
+        }
+        let controller = SecurityReviewController(
+            context: SecurityReviewRequestContext(ownerID: "owner-a", connectionVersion: 11, client: makeClient()),
+            connectionIsCurrent: { connectionCurrent },
+            transport: transport
+        )
+        let refresh = Task { await controller.refresh() }
+        for _ in 0..<50 {
+            if releaseList != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard let finishList = releaseList else {
+            controller.dispose()
+            XCTFail("The held list read did not start.")
+            return
+        }
+
+        connectionCurrent = false
+        controller.dispose()
+        finishList()
+        await refresh.value
+
+        XCTAssertTrue(controller.items.isEmpty)
+        XCTAssertEqual(controller.loadState, .loading)
+        XCTAssertFalse(controller.isRefreshing)
+    }
+
+    @MainActor
+    private func securityReviewItem() throws -> SecurityReviewItem {
+        try JSONDecoder().decode(SecurityReviewItem.self, from: Data(#"{"incidentId":"a2f7d86c-29ce-5c48-9d57-7fd5b2fd4ba1","revision":3,"confidence":"high","disposition":"unreviewed","category":"new_device","importance":7,"subject":"New sign-in","fromName":"Provider","observedAt":"2026-10-11T18:00:00Z","materialChangeReason":"A new device was reported.","evidence":{"eventType":"login","evidenceQuote":"A sign-in needs review."}}"#.utf8))
     }
 
     func testCallCheckinAnswerForwardsServerIssuedRevision() async throws {
@@ -2766,7 +3279,8 @@ final class APIClientRetryTests: XCTestCase {
     }
 
     private func makeClient(clientID: String? = nil, token: String = "t",
-                            requestScopeID: String) -> (client: APIClient, session: URLSession) {
+                            requestScopeID: String,
+                            securityReviewDeadline: TimeInterval = 12) -> (client: APIClient, session: URLSession) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
         configuration.httpAdditionalHeaders = ["X-Assistant-Test-Case": requestScopeID]
@@ -2775,7 +3289,8 @@ final class APIClientRetryTests: XCTestCase {
         let client = APIClient(
             configuration: .init(baseURL: URL(string: "https://assistant.test")!, token: token),
             session: session,
-            clientID: clientID
+            clientID: clientID,
+            securityReviewDeadline: securityReviewDeadline
         )
         return (client, session)
     }
@@ -3161,9 +3676,9 @@ extension APIClientRetryTests {
             models: [], goalTitle: nil, canArchive: id != notificationPrimaryID, cursor: nil, asyncTurn: nil)
     }
 
-    private func notificationBootstrap() throws -> Data {
+    private func notificationBootstrap(owner: String = "notification-owner") throws -> Data {
         try JSONEncoder().encode(BootstrapResponse(generatedAt: "2026-10-03T00:00:00Z",
-            identity: .init(id: notificationOwner, name: "Ada", avatarUrl: nil),
+            identity: .init(id: owner, name: "Ada", avatarUrl: nil),
             shell: .init(dashboard: .init(pendingApprovals: 0, needsAttention: 0, presence: .idle),
                 memoryHealth: .init(totalUsable: 0, notYetOrganized: 0, awaitingReview: 0, ownerConfirmed: 0, lastOrganizedAt: nil)),
             conversation: notificationConversation(notificationPrimaryID)))
@@ -3324,8 +3839,9 @@ extension APIClientRetryTests {
 
         for scenario in scenarios {
             let recorder = LocalNotificationRecorder()
+            let notificationScheduled = expectation(description: "The \(scenario.status) notification for \(scenario.taskId) is scheduled")
             let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
-                await recorder.schedule(
+                let scheduled = await recorder.schedule(
                     title: title,
                     body: body,
                     route: route,
@@ -3333,9 +3849,13 @@ extension APIClientRetryTests {
                     agentID: agentID,
                     conversationID: conversationID
                 )
+                notificationScheduled.fulfill()
+                return scheduled
             })
+            defer { model.scenePhaseDidChange(.background) }
             let reply = ChatMessage(id: "reply-\(scenario.taskId)", role: .assistant,
-                parts: [.init(type: "text", text: "The task needs attention.")])
+                parts: [.init(type: "text", text: "The task needs attention.")],
+                metadata: ["taskId": .string(scenario.taskId)])
             let updates = ChatUpdates(taskStatus: scenario.status, messages: [reply], refreshed: [],
                 superseded: nil, nextCursor: nil, hasMore: false, activity: [])
             StubURLProtocol.prime([], paths: [
@@ -3352,12 +3872,12 @@ extension APIClientRetryTests {
             ])
 
             model.send("Continue the task")
-            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-            while recorder.entries.isEmpty, ContinuousClock.now < deadline {
-                try await Task.sleep(for: .milliseconds(10))
-            }
+            // Wait for the event under test rather than racing repeated
+            // main-actor timer callbacks against the notification task.
+            await fulfillment(of: [notificationScheduled], timeout: 5)
 
-            let scheduled = try XCTUnwrap(recorder.entries.first, "Expected one task attention notification for \(scenario.status)")
+            let scheduled = try XCTUnwrap(recorder.entries.first,
+                "Expected one task attention notification for \(scenario.status), task \(scenario.taskId); sending=\(model.isSending), activity=\(model.activityDetail ?? "none")")
             XCTAssertEqual(recorder.entries.count, 1)
             XCTAssertEqual(scheduled.route, scenario.route)
             XCTAssertEqual(scheduled.approvalId, scenario.approvalId)
@@ -3372,6 +3892,416 @@ extension APIClientRetryTests {
                 XCTAssertEqual(model.activityDetail, "A decision is ready to review")
             }
         }
+    }
+
+    @MainActor
+    func testDoneTaskWithoutItsOwnReplyNeverUsesAnOlderOrForeignReply() async throws {
+        let recorder = LocalNotificationRecorder()
+        let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
+            await recorder.schedule(
+                title: title,
+                body: body,
+                route: route,
+                approvalId: approvalId,
+                agentID: agentID,
+                conversationID: conversationID
+            )
+        })
+        let taskId = "33333333-3333-4333-8333-333333333333"
+        let unrelated = ChatMessage(
+            id: "reply-from-another-task",
+            role: .assistant,
+            parts: [.init(type: "text", text: "This is another task's result.")],
+            metadata: ["taskId": .string("44444444-4444-4444-8444-444444444444")]
+        )
+        let intermediateToolRow = ChatMessage(
+            id: "tool-only-row-for-current-task",
+            role: .assistant,
+            parts: [.init(type: "tool-call")],
+            metadata: ["taskId": .string(taskId)]
+        )
+        let unsupportedCardRow = ChatMessage(
+            id: "unsupported-card-for-current-task",
+            role: .assistant,
+            parts: [.init(type: "data-card", data: .object(["kind": .string("unknown-card-kind")]))],
+            metadata: ["taskId": .string(taskId)]
+        )
+        let doneWithoutOwnReply = try JSONEncoder().encode(ChatUpdates(
+            taskStatus: "done", messages: [unrelated, intermediateToolRow, unsupportedCardRow], refreshed: [], superseded: nil,
+            nextCursor: nil, hasMore: false, activity: []
+        ))
+        let recorderUnavailable = StubURLProtocol.Outcome.success(status: 401, body: Data())
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: taskId)],
+            "/api/mobile/v1/chat/status": Array(repeating: .success(status: 200, body: doneWithoutOwnReply), count: 4),
+            "/api/mobile/v1/overview": [.success(status: 200, body: try overviewBody(pending: []))],
+            "/api/mobile/v1/workspace": [recorderUnavailable],
+        ])
+
+        model.send("Check the completed task")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+        while recorder.entries.isEmpty, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let notification = try XCTUnwrap(recorder.entries.first)
+        XCTAssertEqual(notification.title, "Task complete; reply not yet available")
+        XCTAssertEqual(notification.body, "Open the conversation to check the task.")
+        XCTAssertEqual(model.activityDetail, "This task is marked complete, but its reply has not appeared yet.")
+        XCTAssertEqual(model.activityThought, .replyUnavailable)
+        XCTAssertEqual(model.errorMessage, "This task is marked complete, but its reply has not appeared yet.")
+        XCTAssertFalse(model.isSending)
+        XCTAssertTrue(model.messages.contains(where: { $0.id == unrelated.id }))
+        XCTAssertTrue(model.messages.contains(where: { $0.id == intermediateToolRow.id }))
+        XCTAssertTrue(model.messages.contains(where: { $0.id == unsupportedCardRow.id }))
+        XCTAssertNotEqual(notification.body, "Your result is ready.")
+    }
+
+    @MainActor
+    func testLateExactTaskReplyClearsOnlyItsMissingReplyNotice() async throws {
+        let recorder = LocalNotificationRecorder()
+        let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
+            await recorder.schedule(
+                title: title,
+                body: body,
+                route: route,
+                approvalId: approvalId,
+                agentID: agentID,
+                conversationID: conversationID
+            )
+        })
+        let taskId = "33333333-3333-4333-8333-333333333333"
+        model.recordCompletedTaskWithoutReply(taskId: taskId)
+        model.scenePhaseDidChange(.active)
+        defer { model.scenePhaseDidChange(.background) }
+
+        let reply = ChatMessage(
+            id: "late-exact-task-reply",
+            role: .assistant,
+            parts: [.init(type: "text", text: "The completed task result arrived.")],
+            metadata: ["taskId": .string(taskId)]
+        )
+        let response = try JSONEncoder().encode(ChatUpdates(
+            taskStatus: "done", messages: [reply], refreshed: [], superseded: nil,
+            nextCursor: "late-reply", hasMore: false, activity: []
+        ))
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat/status": [.success(status: 200, body: response)],
+        ])
+
+        let changed = await model.refreshIdleConversation()
+        XCTAssertEqual(changed, true)
+        XCTAssertNil(model.errorMessage, "Only the exact task's newly visible durable reply clears the notice")
+        XCTAssertTrue(model.messages.contains(where: { $0.id == reply.id }))
+        XCTAssertEqual(recorder.entries.map(\.body), ["A new response is ready."])
+        XCTAssertNotEqual(model.activityThought, .finished, "Idle reconciliation does not fabricate task completion speech or activity")
+    }
+
+    @MainActor
+    func testIdleReconciliationIgnoresToolOnlyAndRetractedRepliesAndKeepsNewerErrors() async throws {
+        let taskId = "33333333-3333-4333-8333-333333333333"
+        let exactReply = ChatMessage(
+            id: "late-exact-task-reply",
+            role: .assistant,
+            parts: [.init(type: "text", text: "The task result arrived.")],
+            metadata: ["taskId": .string(taskId)]
+        )
+        let foreignReply = ChatMessage(
+            id: "unrelated-task-reply",
+            role: .assistant,
+            parts: [.init(type: "text", text: "A different task result arrived.")],
+            metadata: ["taskId": .string("44444444-4444-4444-8444-444444444444")]
+        )
+        let toolOnly = ChatMessage(
+            id: "late-tool-only-row",
+            role: .assistant,
+            parts: [.init(type: "tool-call")],
+            metadata: ["taskId": .string(taskId)]
+        )
+        let alreadyVisibleReply = ChatMessage(
+            id: "message-\(notificationPrimaryID)",
+            role: .assistant,
+            parts: [.init(type: "text", text: "The existing visible result is refreshed with task identity.")],
+            metadata: ["taskId": .string(taskId)]
+        )
+        let cases: [(String, [ChatMessage], [ChatMessage], [String]?, String?, Bool, Bool)] = [
+            // The bootstrap includes an older visible assistant message. A
+            // new tool-only row must not pair with it to announce a reply.
+            ("historical-text-plus-tool-only", [toolOnly], [], nil, nil, false, false),
+            ("retracted", [exactReply], [], [exactReply.id], nil, false, false),
+            ("foreign-task", [foreignReply], [], nil, nil, false, true),
+            ("newer-error", [exactReply], [], nil, "A newer connection issue.", false, true),
+            ("refreshed-existing-exact-reply", [], [alreadyVisibleReply], nil, nil, true, false),
+        ]
+
+        for (name, rows, refreshed, superseded, newerError, clearsNotice, expectNotification) in cases {
+            let recorder = LocalNotificationRecorder()
+            let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
+                await recorder.schedule(
+                    title: title,
+                    body: body,
+                    route: route,
+                    approvalId: approvalId,
+                    agentID: agentID,
+                    conversationID: conversationID
+                )
+            })
+            model.recordCompletedTaskWithoutReply(taskId: taskId)
+            if let newerError { model.errorMessage = newerError }
+            model.scenePhaseDidChange(.active)
+            let response = try JSONEncoder().encode(ChatUpdates(
+                taskStatus: nil, messages: rows, refreshed: refreshed, superseded: superseded,
+                nextCursor: name, hasMore: false, activity: []
+            ))
+            StubURLProtocol.prime([], paths: [
+                "/api/mobile/v1/chat/status": [.success(status: 200, body: response)],
+            ])
+
+            _ = await model.refreshIdleConversation()
+            if let newerError {
+                XCTAssertEqual(model.errorMessage, newerError, name)
+            } else if clearsNotice {
+                XCTAssertNil(model.errorMessage, name)
+            } else {
+                XCTAssertEqual(model.errorMessage, "This task is marked complete, but its reply has not appeared yet.", name)
+            }
+            XCTAssertEqual(!recorder.entries.isEmpty, expectNotification, name)
+            if name == "retracted" {
+                XCTAssertFalse(model.messages.contains(where: { $0.id == exactReply.id }))
+            }
+            model.scenePhaseDidChange(.background)
+        }
+    }
+
+    @MainActor
+    func testLateTaskReplyFromReplacedConnectionCannotClearCurrentNotice() async throws {
+        for (serverURL, newOwner) in [("https://candidate.test", notificationOwner), ("https://assistant.test", "new-notification-owner")] {
+            let suite = "assistant.late-reply-connection-tests.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            // This test replaces a connection, not the owner's notification
+            // consent. Pairing must not wait for an OS permission dialog or
+            // write a real Keychain token on an unattended test runner.
+            defaults.set(true, forKey: "assistant.push-prompted")
+            let model = AppModel(apiClient: makeClient(), defaults: defaults,
+                                 storeConnectionToken: { _ in })
+            model.scenePhaseDidChange(.background)
+            StubURLProtocol.primeBootstrap(try notificationBootstrap())
+            await model.refreshAll(reportFailure: false)
+            XCTAssertNotNil(model.bootstrap)
+            let taskId = "33333333-3333-4333-8333-333333333333"
+            model.recordCompletedTaskWithoutReply(taskId: taskId)
+            model.scenePhaseDidChange(.active)
+            let staleReply = ChatMessage(
+                id: "late-reply-from-old-connection",
+                role: .assistant,
+                parts: [.init(type: "text", text: "A delayed old-connection result.")],
+                metadata: ["taskId": .string(taskId)]
+            )
+            let staleResponse = try JSONEncoder().encode(ChatUpdates(
+                taskStatus: nil, messages: [staleReply], refreshed: [], superseded: nil,
+                nextCursor: "old-connection", hasMore: false, activity: []
+            ))
+            StubURLProtocol.prime([], paths: [
+                "/api/mobile/v1/chat/status": [.held(status: 200, body: staleResponse)],
+                "/api/mobile/v1/bootstrap": [.success(status: 200, body: try notificationBootstrap(owner: newOwner))],
+                "/api/mobile/v1/overview": [.success(status: 401, body: Data())],
+            ])
+            let oldReadFinished = expectation(description: "The held old-connection read finishes")
+            let oldRead = Task {
+                _ = await model.refreshIdleConversation()
+                oldReadFinished.fulfill()
+            }
+            defer {
+                StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/chat/status")
+                oldRead.cancel()
+                model.scenePhaseDidChange(.background)
+            }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while !StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/chat/status"),
+                  ContinuousClock.now < deadline { await Task.yield() }
+            XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/chat/status"))
+
+            let pairingFinished = expectation(description: "The replacement connection is verified")
+            var saved: Bool?
+            let pairing = Task {
+                saved = await model.saveConnection(serverURL: serverURL, token: "replacement-token")
+                pairingFinished.fulfill()
+            }
+            defer { pairing.cancel() }
+            await fulfillment(of: [pairingFinished], timeout: 5)
+            XCTAssertEqual(saved, true)
+            // The authenticated bootstrap replaces the old task notice,
+            // while this deliberately rejected supplementary overview
+            // publishes a new error for the replacement connection.
+            let currentConnectionError = "The access key was not accepted by this Assistant server."
+            XCTAssertEqual(model.errorMessage, currentConnectionError)
+            StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/chat/status")
+            await fulfillment(of: [oldReadFinished], timeout: 2)
+            XCTAssertFalse(model.messages.contains(where: { $0.id == staleReply.id }))
+            XCTAssertEqual(model.errorMessage, currentConnectionError,
+                           "The old connection's reply must not clear the replacement connection's error")
+            model.scenePhaseDidChange(.background)
+        }
+    }
+
+    @MainActor
+    func testDoneTaskUsesItsMatchingAssistantReply() async throws {
+        let recorder = LocalNotificationRecorder()
+        var spokenReplies: [ChatMessage] = []
+        let model = try await notificationModel(
+            enqueueAutomaticSpeech: { spokenReplies.append($0) },
+            scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
+                await recorder.schedule(
+                    title: title,
+                    body: body,
+                    route: route,
+                    approvalId: approvalId,
+                    agentID: agentID,
+                    conversationID: conversationID
+                )
+            }
+        )
+        model.speechAlwaysOn = true
+        let taskId = "33333333-3333-4333-8333-333333333333"
+        let reply = ChatMessage(
+            id: "reply-for-current-task",
+            role: .assistant,
+            parts: [.init(type: "text", text: "The requested update is ready.")],
+            metadata: ["taskId": .string(taskId)]
+        )
+        let doneWithReply = try JSONEncoder().encode(ChatUpdates(
+            taskStatus: "done", messages: [reply], refreshed: [], superseded: nil,
+            nextCursor: nil, hasMore: false, activity: []
+        ))
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: taskId)],
+            "/api/mobile/v1/chat/status": [.success(status: 200, body: doneWithReply)],
+            "/api/mobile/v1/overview": [.success(status: 200, body: try overviewBody(pending: []))],
+            "/api/mobile/v1/workspace": [.success(status: 401, body: Data())],
+        ])
+
+        model.send("Check the completed task")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while (recorder.entries.isEmpty || spokenReplies.isEmpty), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let notification = try XCTUnwrap(recorder.entries.first)
+        XCTAssertEqual(notification.title, "Ada finished")
+        XCTAssertEqual(notification.body, "Your result is ready.")
+        XCTAssertEqual(model.activityDetail, "Your result is ready")
+        XCTAssertEqual(model.activityThought, .finished)
+        XCTAssertEqual(spokenReplies.map(\.id), [reply.id])
+        XCTAssertEqual(spokenReplies.first?.text, "The requested update is ready.")
+    }
+
+    @MainActor
+    func testDoneTaskAcceptsARecognizedCardOnlyReply() async throws {
+        let recorder = LocalNotificationRecorder()
+        let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
+            await recorder.schedule(
+                title: title,
+                body: body,
+                route: route,
+                approvalId: approvalId,
+                agentID: agentID,
+                conversationID: conversationID
+            )
+        })
+        let taskId = "33333333-3333-4333-8333-333333333333"
+        let cardOnlyReply = ChatMessage(
+            id: "card-reply-for-current-task",
+            role: .assistant,
+            parts: [.init(type: "data-card", data: .object([
+                "kind": .string("status"),
+                "id": .string("status-current-task"),
+                "title": .string("Task result"),
+                "detail": .string("The result is available."),
+            ]))],
+            metadata: ["taskId": .string(taskId)]
+        )
+        let doneWithCard = try JSONEncoder().encode(ChatUpdates(
+            taskStatus: "done", messages: [cardOnlyReply], refreshed: [], superseded: nil,
+            nextCursor: nil, hasMore: false, activity: []
+        ))
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: taskId)],
+            "/api/mobile/v1/chat/status": [.success(status: 200, body: doneWithCard)],
+            "/api/mobile/v1/overview": [.success(status: 200, body: try overviewBody(pending: []))],
+            "/api/mobile/v1/workspace": [.success(status: 401, body: Data())],
+        ])
+
+        model.send("Check the completed task")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while recorder.entries.isEmpty, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let notification = try XCTUnwrap(recorder.entries.first)
+        XCTAssertEqual(notification.title, "Ada finished")
+        XCTAssertEqual(notification.body, "Your result is ready.")
+        XCTAssertEqual(model.activityThought, .finished)
+        XCTAssertNotEqual(model.errorMessage, "This task is marked complete, but its reply has not appeared yet.")
+    }
+
+    @MainActor
+    func testSupersededTaskReplyNoLongerQualifiesAsCurrentResult() async throws {
+        let recorder = LocalNotificationRecorder()
+        let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
+            await recorder.schedule(
+                title: title,
+                body: body,
+                route: route,
+                approvalId: approvalId,
+                agentID: agentID,
+                conversationID: conversationID
+            )
+        })
+        let taskId = "33333333-3333-4333-8333-333333333333"
+        let earlyReply = ChatMessage(
+            id: "early-reply-retracted-before-done",
+            role: .assistant,
+            parts: [.init(type: "text", text: "An early result that is later retracted.")],
+            metadata: ["taskId": .string(taskId)]
+        )
+        let running = try JSONEncoder().encode(ChatUpdates(
+            taskStatus: "running", messages: [earlyReply], refreshed: [], superseded: nil,
+            nextCursor: nil, hasMore: false, activity: []
+        ))
+        let retractedDone = try JSONEncoder().encode(ChatUpdates(
+            taskStatus: "done", messages: [], refreshed: [], superseded: [earlyReply.id],
+            nextCursor: nil, hasMore: false, activity: []
+        ))
+        let doneWithoutReply = try JSONEncoder().encode(ChatUpdates(
+            taskStatus: "done", messages: [], refreshed: [], superseded: nil,
+            nextCursor: nil, hasMore: false, activity: []
+        ))
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: taskId)],
+            "/api/mobile/v1/chat/status": [
+                .success(status: 200, body: running),
+                .success(status: 200, body: retractedDone),
+                .success(status: 200, body: doneWithoutReply),
+                .success(status: 200, body: doneWithoutReply),
+                .success(status: 200, body: doneWithoutReply),
+            ],
+            "/api/mobile/v1/overview": [.success(status: 200, body: try overviewBody(pending: []))],
+            "/api/mobile/v1/workspace": [.success(status: 401, body: Data())],
+        ])
+
+        model.send("Check the completed task")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+        while recorder.entries.isEmpty, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let notification = try XCTUnwrap(recorder.entries.first)
+        XCTAssertEqual(notification.title, "Task complete; reply not yet available")
+        XCTAssertEqual(model.activityThought, .replyUnavailable)
+        XCTAssertEqual(model.errorMessage, "This task is marked complete, but its reply has not appeared yet.")
+        XCTAssertFalse(model.isSending)
+        XCTAssertFalse(model.messages.contains(where: { $0.id == earlyReply.id }))
     }
 
     @MainActor
@@ -3649,7 +4579,7 @@ extension APIClientRetryTests {
         let secondTaskId = "44444444-4444-4444-8444-444444444444"
         func updates(status: String, reply: String?, cursor: String) throws -> Data {
             let messages = reply.map { [ChatMessage(id: "reply-\(cursor)", role: .assistant,
-                parts: [.init(type: "text", text: $0)])] } ?? []
+                parts: [.init(type: "text", text: $0)], metadata: ["taskId": .string(cursor == "first-done" ? firstTaskId : secondTaskId)])] } ?? []
             return try JSONEncoder().encode(ChatUpdates(
                 taskStatus: status, messages: messages, refreshed: [], superseded: nil,
                 nextCursor: cursor, hasMore: false, activity: []
@@ -4708,5 +5638,484 @@ extension APIClientRetryTests {
         XCTAssertEqual(failure, "Your connection changed. Check this suggestion on its original assistant.")
         XCTAssertTrue(model.messages.flatMap(\.suggestionParts).isEmpty,
             "An old assistant's receipt cannot enter the replacement owner's transcript")
+    }
+
+    func testChecklistCorrectionProjectionUsesExactBoundedQuery() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let itemID = "lookup-1"
+        StubURLProtocol.prime([.success(status: 200, body: Data(
+            #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":true,"revision":0,"items":[{"id":"lookup-1","label":"Find my flight from Berlin"}]}"#.utf8
+        ))])
+
+        let projection = try await makeClient().checklistCorrectionProjection(taskID: taskID)
+
+        XCTAssertTrue(projection.isValid(for: taskID))
+        XCTAssertEqual(projection.items, [.init(id: itemID, label: "Find my flight from Berlin")])
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        let url = try XCTUnwrap(StubURLProtocol.urls.first)
+        XCTAssertEqual(url.path, "/api/mobile/v1/activity/\(taskID)")
+        XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems, [
+            URLQueryItem(name: "checklistCorrection", value: "1")
+        ])
+    }
+
+    func testChecklistCorrectionProjectionDoesNotRetryAfterTransportFailure() async {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let projection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":true,"revision":0,"items":[{"id":"lookup-1","label":"Find my flight from Berlin"}]}"#
+        StubURLProtocol.prime([
+            .failure(URLError(.timedOut)),
+            .success(status: 200, body: Data(projection.utf8)),
+        ])
+
+        do {
+            _ = try await makeClient().checklistCorrectionProjection(taskID: taskID)
+            XCTFail("A failed projection read must not retry through the generic Activity GET policy.")
+        } catch {
+            XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        }
+    }
+
+    func testChecklistCorrectionAcceptsExactPostReceiptWithoutRetry() async {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let itemID = "lookup-1"
+        let operationID = "123e4567-e89b-12d3-a456-426614174001"
+        let label = "Find my flight from Berlin to Paris"
+        StubURLProtocol.prime([.success(status: 200, body: Data(
+            #"{"ok":true,"outcome":"corrected","transitioned":true,"queueGeneration":3,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","taskId":"123e4567-e89b-12d3-a456-426614174000","itemId":"lookup-1","revision":1,"replacementLabel":"Find my flight from Berlin to Paris","replacementKind":"lookup"}"#.utf8
+        ))])
+
+        let result = await makeClient().correctChecklistItem(
+            taskID: taskID,
+            itemID: itemID,
+            expectedRevision: 0,
+            ownerMessageID: operationID,
+            replacementLabel: label
+        )
+
+        XCTAssertEqual(result, .confirmed)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        let body = try? XCTUnwrap(StubURLProtocol.bodies.first)
+        let payload = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        XCTAssertEqual(payload?["action"] as? String, "correct-checklist")
+        XCTAssertEqual(payload?["itemId"] as? String, itemID)
+        XCTAssertEqual(payload?["expectedRevision"] as? Int, 0)
+        XCTAssertEqual(payload?["ownerMessageId"] as? String, operationID)
+        XCTAssertEqual(payload?["replacementKind"] as? String, "lookup")
+        XCTAssertEqual(payload?["replacementLabel"] as? String, label)
+    }
+
+    func testChecklistCorrectionUsesServerUtf16ItemIdentifierBound() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let operationID = "123e4567-e89b-12d3-a456-426614174001"
+        let itemID = String(repeating: "😀", count: 64)
+        let label = "Find my flight"
+        let response: [String: Any] = [
+            "ok": true,
+            "outcome": "corrected",
+            "transitioned": true,
+            "queueGeneration": 1,
+            "ownerMessageId": operationID,
+            "taskId": taskID,
+            "itemId": itemID,
+            "revision": 1,
+            "replacementLabel": label,
+            "replacementKind": "lookup",
+        ]
+        StubURLProtocol.prime([.success(
+            status: 200,
+            body: try JSONSerialization.data(withJSONObject: response)
+        )])
+
+        let result = await makeClient().correctChecklistItem(
+            taskID: taskID,
+            itemID: itemID,
+            expectedRevision: 0,
+            ownerMessageID: operationID,
+            replacementLabel: label
+        )
+
+        XCTAssertEqual(itemID.utf16.count, 128)
+        XCTAssertGreaterThan(itemID.utf8.count, 128)
+        XCTAssertEqual(result, .confirmed, "The native client must use the route's UTF-16 bound for IDs.")
+        let body = try XCTUnwrap(StubURLProtocol.bodies.first)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(payload["itemId"] as? String, itemID)
+    }
+
+    func testChecklistCorrectionReconcilesAmbiguousPostExactlyOnceWithSameOperationID() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let itemID = "lookup-1"
+        let operationID = "123e4567-e89b-12d3-a456-426614174001"
+        let label = "Find my flight from Berlin to Paris"
+        StubURLProtocol.prime([
+            .failure(URLError(.timedOut)),
+            .success(status: 200, body: Data(
+                #"{"id":"123e4567-e89b-12d3-a456-426614174000","revision":1,"audit":{"revision":1,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","itemId":"lookup-1","toLabel":"Find my flight from Berlin to Paris","toKind":"lookup"}}"#.utf8
+            )),
+        ])
+
+        let result = await makeClient().correctChecklistItem(
+            taskID: taskID,
+            itemID: itemID,
+            expectedRevision: 0,
+            ownerMessageID: operationID,
+            replacementLabel: label
+        )
+
+        XCTAssertEqual(result, .confirmed)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST", "GET"])
+        let getURL = try XCTUnwrap(StubURLProtocol.urls.last)
+        XCTAssertEqual(getURL.path, "/api/mobile/v1/activity/\(taskID)")
+        XCTAssertEqual(URLComponents(url: getURL, resolvingAgainstBaseURL: false)?.queryItems, [
+            URLQueryItem(name: "correctionOwnerMessageId", value: operationID)
+        ])
+        let sent = try XCTUnwrap(StubURLProtocol.bodies.first)
+        let sentJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: sent) as? [String: Any])
+        XCTAssertEqual(sentJSON["ownerMessageId"] as? String, operationID)
+    }
+
+    func testChecklistCorrectionUsesAuditReadbackAfterMalformedSuccessBody() async {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let operationID = "123e4567-e89b-12d3-a456-426614174001"
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(#"{"ok":true}"#.utf8)),
+            .success(status: 200, body: Data(
+                #"{"id":"123e4567-e89b-12d3-a456-426614174000","revision":1,"audit":{"revision":1,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","itemId":"lookup-1","toLabel":"Find my flight from Berlin","toKind":"lookup"}}"#.utf8
+            )),
+        ])
+
+        let result = await makeClient().correctChecklistItem(
+            taskID: taskID,
+            itemID: "lookup-1",
+            expectedRevision: 0,
+            ownerMessageID: operationID,
+            replacementLabel: "Find my flight from Berlin"
+        )
+
+        XCTAssertEqual(result, .confirmed)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST", "GET"])
+    }
+
+    func testChecklistCorrectionDoesNotConfirmUnsafeQueueGenerationOrInvalidRevision() async {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let operationID = "123e4567-e89b-12d3-a456-426614174001"
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(
+                #"{"ok":true,"outcome":"corrected","transitioned":true,"queueGeneration":9007199254740992,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","taskId":"123e4567-e89b-12d3-a456-426614174000","itemId":"lookup-1","revision":1,"replacementLabel":"Find my flight from Berlin","replacementKind":"lookup"}"#.utf8
+            )),
+            .success(status: 200, body: Data(
+                #"{"id":"123e4567-e89b-12d3-a456-426614174000","revision":1,"audit":{"revision":1,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","itemId":"lookup-1","toLabel":"Find my flight from Berlin","toKind":"lookup"}}"#.utf8
+            )),
+        ])
+
+        let result = await makeClient().correctChecklistItem(
+            taskID: taskID,
+            itemID: "lookup-1",
+            expectedRevision: 0,
+            ownerMessageID: operationID,
+            replacementLabel: "Find my flight from Berlin"
+        )
+
+        XCTAssertEqual(result, .confirmed, "The unsafe POST receipt must be reconciled against the exact audit.")
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST", "GET"])
+
+        let invalidBody = ChecklistCorrectionBody(
+            itemId: "lookup-1",
+            expectedRevision: Int.max,
+            ownerMessageId: operationID,
+            replacementLabel: "Find my flight from Berlin"
+        )
+        let impossiblePost = ChecklistCorrectionPostResponse(
+            ok: true,
+            outcome: "corrected",
+            transitioned: true,
+            queueGeneration: 0,
+            ownerMessageId: operationID,
+            taskId: taskID,
+            itemId: "lookup-1",
+            revision: 1,
+            replacementLabel: "Find my flight from Berlin",
+            replacementKind: "lookup"
+        )
+        XCTAssertFalse(impossiblePost.confirms(invalidBody, taskID: taskID))
+        let impossibleReadback = ChecklistCorrectionReconciliation(
+            id: taskID,
+            revision: 1,
+            audit: .init(
+                revision: 1,
+                ownerMessageId: operationID,
+                itemId: "lookup-1",
+                toLabel: "Find my flight from Berlin",
+                toKind: "lookup"
+            )
+        )
+        XCTAssertFalse(impossibleReadback.confirms(invalidBody, taskID: taskID))
+    }
+
+    func testChecklistCorrectionRejectsStalePostWithoutReadbackAndUnmatchedAuditStaysUnknown() async {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let operationID = "123e4567-e89b-12d3-a456-426614174001"
+        StubURLProtocol.prime([.success(status: 409, body: Data(#"{"error":"stale"}"#.utf8))])
+        let rejected = await makeClient().correctChecklistItem(
+            taskID: taskID,
+            itemID: "lookup-1",
+            expectedRevision: 0,
+            ownerMessageID: operationID,
+            replacementLabel: "Find my flight from Berlin"
+        )
+        XCTAssertEqual(rejected, .rejected)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(#"{"ok":true,"outcome":"corrected","transitioned":true,"queueGeneration":3,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174002","taskId":"123e4567-e89b-12d3-a456-426614174000","itemId":"lookup-1","revision":1,"replacementLabel":"Find my flight from Berlin","replacementKind":"lookup"}"#.utf8)),
+            .success(status: 200, body: Data(#"{"id":"123e4567-e89b-12d3-a456-426614174000","revision":2,"audit":{"revision":2,"ownerMessageId":"other-operation","itemId":"lookup-1","toLabel":"Find my flight from Berlin","toKind":"lookup"}}"#.utf8)),
+        ])
+        let uncertain = await makeClient().correctChecklistItem(
+            taskID: taskID,
+            itemID: "lookup-1",
+            expectedRevision: 0,
+            ownerMessageID: operationID,
+            replacementLabel: "Find my flight from Berlin"
+        )
+        XCTAssertEqual(uncertain, .uncertain)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST", "GET"])
+    }
+
+    func testChecklistCorrectionHeldPostAndReadbackShareOneDeadline() async {
+        StubURLProtocol.prime([
+            .held(status: 200, body: Data()),
+            .held(status: 200, body: Data()),
+        ])
+        let start = ContinuousClock.now
+        let result = await makeClient().correctChecklistItem(
+            taskID: "123e4567-e89b-12d3-a456-426614174000",
+            itemID: "lookup-1",
+            expectedRevision: 0,
+            ownerMessageID: "123e4567-e89b-12d3-a456-426614174001",
+            replacementLabel: "Find my flight from Berlin",
+            totalDeadline: .milliseconds(220),
+            postDeadline: .milliseconds(100)
+        )
+        XCTAssertEqual(result, .uncertain)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST", "GET"])
+        XCTAssertLessThan(ContinuousClock.now - start, .milliseconds(700))
+    }
+
+    @MainActor
+    func testChecklistCorrectionManualRetryKeepsExactOperationAndDoesNotRetryAutomatically() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let itemID = "lookup-1"
+        let projection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":true,"revision":0,"items":[{"id":"lookup-1","label":"Find my flight from Berlin"}]}"#
+        let unmatchedAudit = #"{"id":"123e4567-e89b-12d3-a456-426614174000","revision":1,"audit":{"revision":1,"ownerMessageId":"other-operation","itemId":"lookup-1","toLabel":"Find my flight from Berlin to Paris","toKind":"lookup"}}"#
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(projection.utf8)),
+            .failure(URLError(.timedOut)),
+            .success(status: 200, body: Data(unmatchedAudit.utf8)),
+            .failure(URLError(.timedOut)),
+            .success(status: 200, body: Data(unmatchedAudit.utf8)),
+        ])
+        let controller = ChecklistCorrectionController(
+            context: ChecklistCorrectionRequestContext(
+                ownerID: "owner-a",
+                connectionVersion: 4,
+                client: makeClient()
+            ),
+            taskID: taskID,
+            connectionIsCurrent: { true }
+        )
+        await controller.load()
+        XCTAssertEqual(controller.loadState, .ready)
+        controller.select(.init(id: itemID, label: "Find my flight from Berlin"))
+        controller.updateDraft("Find my flight from Berlin to Paris")
+
+        let first = await controller.submit()
+        let operationID = try XCTUnwrap(controller.operationID)
+        XCTAssertEqual(first, .uncertain)
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET", "POST", "GET"],
+            "An unclear result must not trigger a second POST automatically.")
+
+        let manualRetry = await controller.submit()
+        XCTAssertEqual(manualRetry, .uncertain)
+        XCTAssertEqual(controller.operationID, operationID)
+        XCTAssertEqual(controller.draft, "Find my flight from Berlin to Paris")
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET", "POST", "GET", "POST", "GET"])
+
+        let postBodies = StubURLProtocol.requests.filter { $0.0 == "POST" }.map { $0.3 }
+        let retryOperationIDs = try postBodies.map { data -> String in
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            return try XCTUnwrap(object["ownerMessageId"] as? String)
+        }
+        XCTAssertEqual(operationID, operationID.lowercased(), "The durable owner message id must match PostgreSQL UUID canonicalization.")
+        XCTAssertEqual(retryOperationIDs, [operationID, operationID])
+        let retryPayloads = try postBodies.map { data in
+            try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        }
+        XCTAssertEqual(retryPayloads[0] as NSDictionary, retryPayloads[1] as NSDictionary)
+
+        StubURLProtocol.prime([.success(status: 200, body: Data(
+            #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":false,"revision":null,"items":[]}"#.utf8
+        ))])
+        await controller.load()
+        XCTAssertTrue(StubURLProtocol.attempts.isEmpty, "An uncertain operation cannot be cleared by an unrelated projection refresh.")
+        XCTAssertEqual(controller.selectedItemID, itemID)
+        XCTAssertEqual(controller.operationID, operationID)
+        XCTAssertEqual(controller.draft, "Find my flight from Berlin to Paris")
+        controller.dispose()
+    }
+
+    @MainActor
+    func testChecklistCorrectionOwnerTaskAndConnectionFencesPreventStalePublication() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let path = "/api/mobile/v1/activity/\(taskID)"
+        let projection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":true,"revision":0,"items":[{"id":"lookup-1","label":"Find my flight"}]}"#
+        var activeOwner = "owner-a"
+        var activeVersion = 4
+        let context = ChecklistCorrectionRequestContext(
+            ownerID: "owner-a",
+            connectionVersion: 4,
+            client: makeClient()
+        )
+        let isCurrent: @MainActor () -> Bool = {
+            activeOwner == context.ownerID && activeVersion == context.connectionVersion
+        }
+
+        StubURLProtocol.prime([])
+        activeOwner = "owner-b"
+        let replacementOwnerController = ChecklistCorrectionController(
+            context: context,
+            taskID: taskID,
+            connectionIsCurrent: isCurrent
+        )
+        await replacementOwnerController.load()
+        XCTAssertTrue(StubURLProtocol.attempts.isEmpty, "A replaced owner cannot even read the saved correction projection.")
+        replacementOwnerController.dispose()
+
+        activeOwner = "owner-a"
+        activeVersion += 1
+        let replacementConnectionController = ChecklistCorrectionController(
+            context: context,
+            taskID: taskID,
+            connectionIsCurrent: isCurrent
+        )
+        await replacementConnectionController.load()
+        XCTAssertTrue(StubURLProtocol.attempts.isEmpty, "A new connection version cannot use an old API client.")
+        replacementConnectionController.dispose()
+
+        activeVersion = context.connectionVersion
+        StubURLProtocol.prime([.held(status: 200, body: Data(projection.utf8))])
+        let controller = ChecklistCorrectionController(
+            context: context,
+            taskID: taskID,
+            connectionIsCurrent: isCurrent
+        )
+        defer {
+            controller.dispose()
+            StubURLProtocol.releaseHeldResponse(path: path)
+        }
+        let loading = Task { await controller.load() }
+        let heldDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !StubURLProtocol.isHoldingResponse(path: path), ContinuousClock.now < heldDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: path), "The projection must be in flight before replacing its owner.")
+
+        activeOwner = "owner-b"
+        activeVersion += 1
+        controller.dispose()
+        StubURLProtocol.releaseHeldResponse(path: path)
+        await loading.value
+
+        XCTAssertNil(controller.projection)
+        XCTAssertNil(controller.selectedItemID)
+        XCTAssertEqual(controller.loadState, .loading)
+        XCTAssertFalse(controller.isWorking)
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+
+        StubURLProtocol.prime([.success(status: 200, body: Data(
+            #"{"id":"123e4567-e89b-12d3-a456-426614174001","eligible":true,"revision":0,"items":[{"id":"lookup-1","label":"Find my flight"}]}"#.utf8
+        ))])
+        activeOwner = "owner-a"
+        activeVersion = context.connectionVersion
+        let wrongTaskController = ChecklistCorrectionController(
+            context: context,
+            taskID: taskID,
+            connectionIsCurrent: isCurrent
+        )
+        await wrongTaskController.load()
+        XCTAssertNil(wrongTaskController.projection)
+        XCTAssertEqual(wrongTaskController.loadState, .unavailable,
+            "A response for another task must not populate this task's selected item.")
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        wrongTaskController.dispose()
+    }
+
+    @MainActor
+    func testChecklistCorrectionTaskEligibilityFencesPendingPostAndPreservesManualRetry() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let path = "/api/mobile/v1/activity/\(taskID)"
+        let projection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":true,"revision":0,"items":[{"id":"lookup-1","label":"Find my flight"}]}"#
+        StubURLProtocol.prime([.success(status: 200, body: Data(projection.utf8))])
+        let controller = ChecklistCorrectionController(
+            context: ChecklistCorrectionRequestContext(
+                ownerID: "owner-a",
+                connectionVersion: 1,
+                client: makeClient()
+            ),
+            taskID: taskID,
+            connectionIsCurrent: { true }
+        )
+        await controller.load()
+        controller.select(.init(id: "lookup-1", label: "Find my flight"))
+        controller.updateDraft("Find my flight from Berlin")
+
+        StubURLProtocol.prime([.held(status: 200, body: Data())])
+        let pending = Task { await controller.submit() }
+        let heldDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !StubURLProtocol.isHoldingResponse(path: path), ContinuousClock.now < heldDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: path), "The correction POST must be in flight before eligibility changes.")
+        let operationID = try XCTUnwrap(controller.operationID)
+        XCTAssertEqual(operationID, operationID.lowercased())
+
+        controller.updateTaskEligibility(false)
+        XCTAssertFalse(controller.canPublishResult)
+        XCTAssertEqual(controller.submission, .uncertain)
+        StubURLProtocol.releaseHeldResponse(path: path)
+        let pendingResult = await pending.value
+        XCTAssertEqual(pendingResult, .uncertain)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"], "An ineligible task cannot start reconciliation or another POST.")
+        XCTAssertEqual(controller.operationID, operationID)
+        XCTAssertEqual(controller.draft, "Find my flight from Berlin")
+
+        let blockedRetry = await controller.submit()
+        XCTAssertNil(blockedRetry, "A task that is no longer eligible must not send the saved attempt.")
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+
+        controller.updateTaskEligibility(true)
+        let receipt: [String: Any] = [
+            "ok": true,
+            "outcome": "already_applied",
+            "transitioned": false,
+            "queueGeneration": 2,
+            "ownerMessageId": operationID,
+            "taskId": taskID,
+            "itemId": "lookup-1",
+            "revision": 1,
+            "replacementLabel": "Find my flight from Berlin",
+            "replacementKind": "lookup",
+        ]
+        StubURLProtocol.prime([.success(
+            status: 200,
+            body: try JSONSerialization.data(withJSONObject: receipt)
+        )])
+        let confirmedRetry = await controller.submit()
+        XCTAssertEqual(confirmedRetry, .confirmed)
+        XCTAssertTrue(controller.canPublishResult)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        let retry = try XCTUnwrap(StubURLProtocol.bodies.first)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: retry) as? [String: Any])
+        XCTAssertEqual(payload["ownerMessageId"] as? String, operationID)
+        controller.dispose()
     }
 }

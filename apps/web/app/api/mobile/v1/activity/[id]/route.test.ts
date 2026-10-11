@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { buildRequestChecklist } from '@assistant/application/test-support';
 import { resetConfigForTest } from '@assistant/config';
 import { createInstallationStore } from '@assistant/firestore';
 import {
@@ -35,6 +36,20 @@ describe.skipIf(!localEmulator)(
     const foreignId = randomUUID();
     const canaryId = randomUUID();
     const admissionCancellationId = randomUUID();
+    const correctionId = randomUUID();
+    const correctionConversationId = randomUUID();
+    const correctionOriginalMessageId = randomUUID();
+    const correctionOwnerMessageId = randomUUID();
+    const correctionUnsafeId = randomUUID();
+    const correctionUnsafeConversationId = randomUUID();
+    const correctionUnsafeOriginalMessageId = randomUUID();
+    const correctionUnsafeOwnerMessageId = randomUUID();
+    const correctionRequest = 'Find my hotel and remind me about the hotel';
+    const correctionChecklist = buildRequestChecklist(correctionRequest);
+    if (!correctionChecklist) throw new Error('correction test checklist is invalid');
+    const correctionLookupItem = correctionChecklist.items.find((item) => item.kind === 'lookup');
+    if (!correctionLookupItem) throw new Error('correction test lookup item is missing');
+    const replacementLookup = 'Find my flight from Berlin to Paris';
     const initial = new Date('2026-09-20T12:00:00Z');
     const store = createInstallationStore({
       projectId: 'demo-assistant-test',
@@ -148,6 +163,89 @@ describe.skipIf(!localEmulator)(
             }),
           });
         })(),
+        store.doc('conversations', correctionConversationId).set({
+          id: correctionConversationId,
+          agentId,
+          channel: 'chat',
+          archivedAt: null,
+        }),
+        store.doc('tasks', correctionId).set({
+          ...taskFixture({
+            id: correctionId,
+            agentId,
+            conversationId: correctionConversationId,
+            reminderId: '',
+          }),
+          type: 'chat_turn',
+          trust: 'owner',
+          status: 'needs_attention',
+          queueGeneration: 4,
+          state: { requestChecklist: correctionChecklist },
+          trigger: {
+            source: 'chat',
+            agentId,
+            conversationId: correctionConversationId,
+            trust: 'owner',
+            payload: {
+              text: correctionRequest,
+              triggerMessageId: correctionOriginalMessageId,
+            },
+          },
+        }),
+        store.doc('messages', correctionOriginalMessageId).set({
+          id: correctionOriginalMessageId,
+          taskId: correctionId,
+          conversationId: correctionConversationId,
+          role: 'user',
+          origin: 'owner',
+          text: correctionRequest,
+          parts: [{ type: 'text', text: correctionRequest }],
+          createdAt: initial,
+          appendSequence: '00000000000000000001',
+        }),
+        store.doc('conversations', correctionUnsafeConversationId).set({
+          id: correctionUnsafeConversationId,
+          agentId,
+          channel: 'chat',
+          archivedAt: null,
+        }),
+        store.doc('tasks', correctionUnsafeId).set({
+          ...taskFixture({
+            id: correctionUnsafeId,
+            agentId,
+            conversationId: correctionUnsafeConversationId,
+            reminderId: '',
+          }),
+          type: 'chat_turn',
+          trust: 'owner',
+          status: 'needs_attention',
+          queueGeneration: 2,
+          state: {
+            requestChecklist: correctionChecklist,
+            pendingToolBatch: { calls: [{ toolCallId: 'not-yet-ledgered' }] },
+          },
+          trigger: {
+            source: 'chat',
+            agentId,
+            conversationId: correctionUnsafeConversationId,
+            trust: 'owner',
+            payload: {
+              text: correctionRequest,
+              triggerMessageId: correctionUnsafeOriginalMessageId,
+            },
+          },
+        }),
+        store.doc('messages', correctionUnsafeOriginalMessageId).set({
+          id: correctionUnsafeOriginalMessageId,
+          taskId: correctionUnsafeId,
+          conversationId: correctionUnsafeConversationId,
+          role: 'user',
+          origin: 'owner',
+          text: correctionRequest,
+          parts: [{ type: 'text', text: correctionRequest }],
+          createdAt: initial,
+          appendSequence: '00000000000000000001',
+        }),
       ]);
     });
 
@@ -171,6 +269,249 @@ describe.skipIf(!localEmulator)(
       route.GET(new Request(`http://localhost/api/mobile/v1/activity/${id}`), {
         params: Promise.resolve({ id }),
       });
+    const getCorrection = (id: string, ownerMessageId: string) =>
+      route.GET(
+        new Request(
+          `http://localhost/api/mobile/v1/activity/${id}?correctionOwnerMessageId=${ownerMessageId}`,
+        ),
+        { params: Promise.resolve({ id }) },
+      );
+    const getChecklistCorrection = (id: string) =>
+      route.GET(
+        new Request(`http://localhost/api/mobile/v1/activity/${id}?checklistCorrection=1`),
+        { params: Promise.resolve({ id }) },
+      );
+    const correct = (id: string, overrides: Record<string, unknown> = {}) =>
+      post(id, 'correct-checklist', {
+        itemId: correctionLookupItem.id,
+        expectedRevision: 0,
+        ownerMessageId: correctionOwnerMessageId,
+        replacementKind: 'lookup',
+        replacementLabel: replacementLookup,
+        ...overrides,
+      });
+
+    it('accepts only an authenticated, exact pending lookup correction and reconciles its persisted audit', async () => {
+      auth.allowed.mockResolvedValueOnce(false);
+      expect((await correct(correctionId)).status).toBe(401);
+      expect((await store.doc('tasks', correctionId).get()).get('state')).toMatchObject({
+        requestChecklist: correctionChecklist,
+      });
+      expect((await store.doc('messages', correctionOwnerMessageId).get()).exists).toBe(false);
+
+      expect((await correct(correctionId, { unrecognized: true })).status).toBe(400);
+      expect((await correct(correctionId, { replacementKind: 'reminder' })).status).toBe(400);
+      expect((await correct('bad-id')).status).toBe(400);
+      const foreign = await correct(foreignId);
+      expect(foreign.status).toBe(404);
+      expect(await foreign.json()).toMatchObject({ outcome: 'not_found' });
+      expect((await store.doc('messages', correctionOwnerMessageId).get()).exists).toBe(false);
+
+      const stale = await correct(correctionId, { expectedRevision: 1 });
+      expect(stale.status).toBe(409);
+      expect(await stale.json()).toMatchObject({ outcome: 'stale_revision' });
+      expect((await store.doc('tasks', correctionId).get()).get('queueGeneration')).toBe(4);
+      expect((await store.doc('messages', correctionOwnerMessageId).get()).exists).toBe(false);
+      expect(
+        (await store.collection('outbox').where('taskId', '==', correctionId).get()).size,
+      ).toBe(0);
+
+      const response = await correct(correctionId);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        outcome: 'corrected',
+        transitioned: true,
+        ownerMessageId: correctionOwnerMessageId,
+        queueGeneration: 5,
+        taskId: correctionId,
+        itemId: correctionLookupItem.id,
+        revision: 1,
+        replacementLabel: replacementLookup,
+        replacementKind: 'lookup',
+      });
+      const task = await store.doc('tasks', correctionId).get();
+      expect(task.data()).toMatchObject({ status: 'pending', queueGeneration: 5, plan: null });
+      expect(task.get('state')).toMatchObject({
+        requestChecklist: {
+          request: correctionRequest,
+          revision: 1,
+          revisionAudit: [
+            {
+              revision: 1,
+              taskId: correctionId,
+              conversationId: correctionConversationId,
+              ownerTaskId: correctionId,
+              ownerMessageId: correctionOwnerMessageId,
+              itemId: correctionLookupItem.id,
+              toLabel: replacementLookup,
+              toKind: 'lookup',
+            },
+          ],
+        },
+      });
+      expect((await store.doc('messages', correctionOwnerMessageId).get()).data()).toMatchObject({
+        id: correctionOwnerMessageId,
+        taskId: correctionId,
+        conversationId: correctionConversationId,
+        role: 'user',
+        origin: 'owner',
+        text: replacementLookup,
+      });
+      expect(
+        (await store.collection('outbox').where('taskId', '==', correctionId).get()).size,
+      ).toBe(1);
+      const readback = await getCorrection(correctionId, correctionOwnerMessageId);
+      expect(readback.status).toBe(200);
+      expect(await readback.json()).toMatchObject({
+        id: correctionId,
+        revision: 1,
+        audit: {
+          revision: 1,
+          ownerMessageId: correctionOwnerMessageId,
+          itemId: correctionLookupItem.id,
+          toLabel: replacementLookup,
+          toKind: 'lookup',
+        },
+      });
+      expect(
+        (
+          await route.GET(
+            new Request(
+              `http://localhost/api/mobile/v1/activity/${correctionId}?correctionOwnerMessageId=${correctionOwnerMessageId}&correctionOwnerMessageId=${correctionOwnerMessageId}`,
+            ),
+            { params: Promise.resolve({ id: correctionId }) },
+          )
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await route.GET(
+            new Request(
+              `http://localhost/api/mobile/v1/activity/${correctionId}?correctionOwnerMessageId=${correctionOwnerMessageId}&extra=1`,
+            ),
+            { params: Promise.resolve({ id: correctionId }) },
+          )
+        ).status,
+      ).toBe(400);
+      const replay = await correct(correctionId);
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toMatchObject({
+        outcome: 'already_applied',
+        transitioned: false,
+        ownerMessageId: correctionOwnerMessageId,
+      });
+      expect(
+        (await store.collection('outbox').where('taskId', '==', correctionId).get()).size,
+      ).toBe(1);
+    });
+
+    it('projects only bounded pending lookup labels without changing compact status or audit reconciliation', async () => {
+      auth.allowed.mockResolvedValueOnce(false);
+      expect((await getChecklistCorrection(correctionId)).status).toBe(401);
+      const projection = await getChecklistCorrection(correctionId);
+      expect(projection.status).toBe(200);
+      expect(await projection.json()).toEqual({
+        id: correctionId,
+        eligible: true,
+        revision: 0,
+        items: [{ id: correctionLookupItem.id, label: correctionLookupItem.label }],
+      });
+
+      const compact = await get(correctionId);
+      expect(compact.status).toBe(200);
+      const compactBody = await compact.json();
+      expect(compactBody).toMatchObject({ id: correctionId, status: 'needs_attention' });
+      expect(compactBody).not.toHaveProperty('checklist');
+
+      const ineligible = await getChecklistCorrection(doneId);
+      expect(ineligible.status).toBe(200);
+      expect(await ineligible.json()).toEqual({
+        id: doneId,
+        eligible: false,
+        revision: null,
+        items: [],
+      });
+      expect((await getChecklistCorrection(foreignId)).status).toBe(404);
+
+      expect(
+        (
+          await route.GET(
+            new Request(
+              `http://localhost/api/mobile/v1/activity/${correctionId}?checklistCorrection=1&extra=1`,
+            ),
+            { params: Promise.resolve({ id: correctionId }) },
+          )
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await route.GET(
+            new Request(
+              `http://localhost/api/mobile/v1/activity/${correctionId}?checklistCorrection=1&checklistCorrection=1`,
+            ),
+            { params: Promise.resolve({ id: correctionId }) },
+          )
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await route.GET(
+            new Request(
+              `http://localhost/api/mobile/v1/activity/${correctionId}?checklistCorrection=1&correctionOwnerMessageId=${correctionOwnerMessageId}`,
+            ),
+            { params: Promise.resolve({ id: correctionId }) },
+          )
+        ).status,
+      ).toBe(400);
+    });
+
+    it('declines correction projection for exhausted revisions and malformed checklist identity', async () => {
+      const exhausted = { ...correctionChecklist, revision: 12 };
+      await store.doc('tasks', correctionId).update({ state: { requestChecklist: exhausted } });
+      expect(await (await getChecklistCorrection(correctionId)).json()).toEqual({
+        id: correctionId,
+        eligible: false,
+        revision: null,
+        items: [],
+      });
+
+      const duplicateItems = [
+        correctionChecklist.items[0]!,
+        { ...correctionLookupItem, status: 'pending' as const },
+      ];
+      await store.doc('tasks', correctionId).update({
+        state: { requestChecklist: { ...correctionChecklist, items: duplicateItems } },
+      });
+      expect(await (await getChecklistCorrection(correctionId)).json()).toEqual({
+        id: correctionId,
+        eligible: false,
+        revision: null,
+        items: [],
+      });
+    });
+
+    it('does not revise, append, or wake a correction with an unresolved effect journal', async () => {
+      const response = await correct(correctionUnsafeId, {
+        ownerMessageId: correctionUnsafeOwnerMessageId,
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        outcome: 'unsafe_evidence',
+        transitioned: false,
+      });
+      const task = await store.doc('tasks', correctionUnsafeId).get();
+      expect(task.data()).toMatchObject({ status: 'needs_attention', queueGeneration: 2 });
+      expect(task.get('state')).toMatchObject({
+        pendingToolBatch: { calls: [{ toolCallId: 'not-yet-ledgered' }] },
+        requestChecklist: correctionChecklist,
+      });
+      expect((await store.doc('messages', correctionUnsafeOwnerMessageId).get()).exists).toBe(
+        false,
+      );
+      expect(
+        (await store.collection('outbox').where('taskId', '==', correctionUnsafeId).get()).size,
+      ).toBe(0);
+    });
 
     it('returns only live owner status and rejects unauthenticated, malformed, foreign, and missing IDs', async () => {
       const live = await get(runningId);

@@ -20,7 +20,11 @@ import {
 } from '@assistant/firestore';
 import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getDb } from '@/lib/server';
-import { getTaskActivityStatus } from '@/lib/task-activity';
+import {
+  getTaskActivityDetail,
+  getTaskActivityStatus,
+  reviseTaskActivityChecklistItem,
+} from '@/lib/task-activity';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
 export const dynamic = 'force-dynamic';
@@ -36,6 +40,76 @@ export async function GET(
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid activity id' }, { status: 400 });
   try {
+    const url = new URL(request.url);
+    const checklistCorrection = url.searchParams.get('checklistCorrection');
+    if (checklistCorrection !== null) {
+      if (
+        checklistCorrection !== '1' ||
+        url.searchParams.getAll('checklistCorrection').length !== 1 ||
+        [...url.searchParams.keys()].some((key) => key !== 'checklistCorrection')
+      )
+        return mobileJson(
+          { error: 'invalid checklist correction projection request' },
+          { status: 400 },
+        );
+      const detail = await getTaskActivityDetail(id);
+      if (!detail) return mobileJson({ error: 'activity not found' }, { status: 404 });
+      const checklist = detail.task.checklist;
+      const items = checklist?.items ?? [];
+      const revision = checklist?.revision;
+      const eligible =
+        detail.task.type === 'chat_turn' &&
+        detail.task.trust === 'owner' &&
+        detail.task.status === 'needs_attention' &&
+        detail.task.archivedAt === null &&
+        Number.isSafeInteger(revision) &&
+        Number(revision) >= 0 &&
+        Number(revision) < 12 &&
+        items.length <= 12 &&
+        new Set(items.map((item) => item.id)).size === items.length &&
+        items.every(
+          (item) => typeof item.id === 'string' && item.id.length > 0 && item.id.length <= 128,
+        ) &&
+        items.every(
+          (item) =>
+            typeof item.label === 'string' &&
+            item.label.trim().length > 0 &&
+            item.label.length <= 500,
+        );
+      const pendingLookups = eligible
+        ? items
+            .filter((item) => item.status === 'pending' && item.kind === 'lookup')
+            .map(({ id: itemId, label }) => ({ id: itemId, label }))
+        : [];
+      const correctionEligible = eligible && pendingLookups.length > 0;
+      return mobileJson({
+        id,
+        eligible: correctionEligible,
+        revision: correctionEligible ? revision : null,
+        items: correctionEligible ? pendingLookups : [],
+      });
+    }
+    const correctionOwnerMessageId = url.searchParams.get('correctionOwnerMessageId');
+    if (correctionOwnerMessageId !== null) {
+      if (
+        !UUID_RE.test(correctionOwnerMessageId) ||
+        url.searchParams.getAll('correctionOwnerMessageId').length !== 1 ||
+        [...url.searchParams.keys()].some((key) => key !== 'correctionOwnerMessageId')
+      )
+        return mobileJson({ error: 'invalid correction reconciliation request' }, { status: 400 });
+      const detail = await getTaskActivityDetail(id);
+      if (!detail) return mobileJson({ error: 'activity not found' }, { status: 404 });
+      const checklist = detail.task.checklist;
+      const audit =
+        checklist?.revisionAudit.find(
+          (entry) => entry.ownerMessageId === correctionOwnerMessageId,
+        ) ?? null;
+      return mobileJson({
+        id,
+        revision: checklist?.revision ?? 0,
+        audit,
+      });
+    }
     const status = await getTaskActivityStatus(id);
     return status
       ? mobileJson(status)
@@ -43,6 +117,42 @@ export async function GET(
   } catch {
     return mobileJson({ error: 'activity status unavailable' }, { status: 500 });
   }
+}
+
+function checklistCorrectionResponse(
+  result: Awaited<ReturnType<typeof reviseTaskActivityChecklistItem>>,
+  request: {
+    taskId: string;
+    itemId: string;
+    expectedRevision: number;
+    ownerMessageId: string;
+    replacementLabel: string;
+  },
+): Response {
+  const status =
+    result.outcome === 'not_found'
+      ? 404
+      : result.outcome === 'corrected' || result.outcome === 'already_applied'
+        ? 200
+        : result.outcome === 'invalid'
+          ? 400
+          : 409;
+  return mobileJson(
+    {
+      ok: status === 200,
+      ...result,
+      ...(status === 200
+        ? {
+            taskId: request.taskId,
+            itemId: request.itemId,
+            revision: request.expectedRevision + 1,
+            replacementLabel: request.replacementLabel,
+            replacementKind: 'lookup',
+          }
+        : {}),
+    },
+    { status },
+  );
 }
 
 function activityOutcomeResponse(
@@ -76,12 +186,74 @@ export async function POST(
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const { id } = await params;
   if (!UUID_RE.test(id)) return mobileJson({ error: 'invalid activity id' }, { status: 400 });
-  const mutationBody = await readMobileMutationBody(request, ['action', 'budgetUsdLimit']);
+  const mutationBody = await readMobileMutationBody(request, [
+    'action',
+    'budgetUsdLimit',
+    'itemId',
+    'expectedRevision',
+    'ownerMessageId',
+    'replacementKind',
+    'replacementLabel',
+  ]);
   if (!mutationBody.ok) return mutationBody.response;
   const body = mutationBody.value as {
     action?: unknown;
     budgetUsdLimit?: unknown;
+    itemId?: unknown;
+    expectedRevision?: unknown;
+    ownerMessageId?: unknown;
+    replacementKind?: unknown;
+    replacementLabel?: unknown;
   } | null;
+  if (body?.action === 'correct-checklist') {
+    const allowed = new Set([
+      'action',
+      'itemId',
+      'expectedRevision',
+      'ownerMessageId',
+      'replacementKind',
+      'replacementLabel',
+    ]);
+    if (Object.keys(body).some((key) => !allowed.has(key)))
+      return mobileJson({ error: 'Request body contains an unsupported field.' }, { status: 400 });
+    if (
+      typeof body.itemId !== 'string' ||
+      body.itemId.length < 1 ||
+      body.itemId.length > 128 ||
+      !Number.isSafeInteger(body.expectedRevision) ||
+      Number(body.expectedRevision) < 0 ||
+      Number(body.expectedRevision) > 12 ||
+      typeof body.ownerMessageId !== 'string' ||
+      !UUID_RE.test(body.ownerMessageId) ||
+      body.replacementKind !== 'lookup' ||
+      typeof body.replacementLabel !== 'string' ||
+      body.replacementLabel.length < 3 ||
+      body.replacementLabel.length > 500 ||
+      body.replacementLabel.trim() !== body.replacementLabel
+    )
+      return mobileJson({ error: 'Invalid lookup correction.' }, { status: 400 });
+    try {
+      const result = await reviseTaskActivityChecklistItem({
+        taskId: id,
+        itemId: body.itemId,
+        expectedRevision: Number(body.expectedRevision),
+        ownerMessageId: body.ownerMessageId,
+        replacementKind: 'lookup',
+        replacementLabel: body.replacementLabel,
+      });
+      return checklistCorrectionResponse(result, {
+        taskId: id,
+        itemId: body.itemId,
+        expectedRevision: Number(body.expectedRevision),
+        ownerMessageId: body.ownerMessageId,
+        replacementLabel: body.replacementLabel,
+      });
+    } catch {
+      return mobileJson({ error: 'The lookup change could not be confirmed.' }, { status: 503 });
+    }
+  }
+  if (Object.keys(body ?? {}).some((key) => key !== 'action' && key !== 'budgetUsdLimit'))
+    return mobileJson({ error: 'Request body contains an unsupported field.' }, { status: 400 });
   try {
     const config = loadConfig();
     if (config.PERSISTENCE_DRIVER === 'firestore') {

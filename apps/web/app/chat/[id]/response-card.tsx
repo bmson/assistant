@@ -525,6 +525,12 @@ function BriefingHeading({ children }: { children: ReactNode }) {
 function BriefingAgenda({ section }: { section: Raw }) {
   const items = recs(section.items).filter((item) => validAgendaItem(item, true));
   const days = [...new Set(items.map((item) => str(item.day)))];
+  const omittedCount =
+    typeof section.omittedCount === 'number' &&
+    Number.isSafeInteger(section.omittedCount) &&
+    section.omittedCount > 0
+      ? section.omittedCount
+      : 0;
   return (
     <>
       {days.map((day) => (
@@ -574,6 +580,11 @@ function BriefingAgenda({ section }: { section: Raw }) {
           </ul>
         </div>
       ))}
+      {omittedCount > 0 ? (
+        <p className="text-xs text-muted">
+          {omittedCount} additional {omittedCount === 1 ? 'event is' : 'events are'} not shown.
+        </p>
+      ) : null}
       {section.complete === false ? (
         <p className="text-xs text-muted">
           Some calendars could not be read, so this may be incomplete.

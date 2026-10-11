@@ -922,6 +922,7 @@ describe('ResponseCards', () => {
           type: 'agenda',
           title: 'Schedule',
           complete: true,
+          omittedCount: 2,
           items: [
             {
               day: 'Today',
@@ -956,6 +957,30 @@ describe('ResponseCards', () => {
     expect(html).toContain('Overlaps another event');
     expect(html).toContain('A128DY');
     expect(html).toContain('14–21°C');
+    expect(html).toContain('2 additional events are not shown.');
+  });
+
+  it('shows only valid positive agenda omission counts', () => {
+    const renderOmitted = (omittedCount: unknown) =>
+      render({
+        kind: 'briefing',
+        id: 'brief-count',
+        lead: 'Your schedule is ready.',
+        sections: [
+          {
+            type: 'agenda',
+            title: 'Schedule',
+            complete: true,
+            omittedCount,
+            items: [{ day: 'Today', time: '9 AM', title: 'Check-in' }],
+          },
+        ],
+      });
+
+    expect(renderOmitted(1)).toContain('1 additional event is not shown.');
+    for (const malformed of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '2', null]) {
+      expect(renderOmitted(malformed)).not.toMatch(/additional events? (?:is|are) not shown/);
+    }
   });
 
   it('draws each sky with its own icon and falls back for an unknown one', () => {

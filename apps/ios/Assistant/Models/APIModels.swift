@@ -1120,6 +1120,214 @@ struct ActivityList: Codable, Sendable {
     }
 }
 
+struct ChecklistCorrectionItem: Decodable, Sendable, Equatable, Identifiable {
+    let id: String
+    let label: String
+
+    var isValid: Bool {
+        !id.isEmpty && id.utf16.count <= 128 &&
+            !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && label.utf16.count <= 500
+    }
+}
+
+struct ChecklistCorrectionProjection: Decodable, Sendable, Equatable {
+    let id: String
+    let eligible: Bool
+    let revision: Int?
+    let items: [ChecklistCorrectionItem]
+
+    func isValid(for taskID: String) -> Bool {
+        guard id == taskID, items.count <= 12,
+              items.allSatisfy(\.isValid), Set(items.map(\.id)).count == items.count else { return false }
+        if eligible {
+            return hasAvailableRevision && !items.isEmpty
+        }
+        return revision == nil && items.isEmpty
+    }
+
+    private var hasAvailableRevision: Bool {
+        guard let revision else { return false }
+        return (0..<12).contains(revision)
+    }
+}
+
+struct ChecklistCorrectionBody: Encodable, Sendable, Equatable {
+    let action = "correct-checklist"
+    let itemId: String
+    let expectedRevision: Int
+    let ownerMessageId: String
+    let replacementKind = "lookup"
+    let replacementLabel: String
+}
+
+struct ChecklistCorrectionPostResponse: Decodable, Sendable {
+    let ok: Bool
+    let outcome: String
+    let transitioned: Bool
+    let queueGeneration: Int
+    let ownerMessageId: String
+    let taskId: String
+    let itemId: String
+    let revision: Int
+    let replacementLabel: String
+    let replacementKind: String
+
+    func confirms(_ body: ChecklistCorrectionBody, taskID: String) -> Bool {
+        (0..<12).contains(body.expectedRevision) &&
+            (0...9_007_199_254_740_991).contains(queueGeneration) &&
+            ok && taskId == taskID && itemId == body.itemId &&
+            ownerMessageId == body.ownerMessageId && revision == body.expectedRevision + 1 &&
+            replacementKind == "lookup" && replacementLabel == body.replacementLabel &&
+            ((outcome == "corrected" && transitioned) ||
+             (outcome == "already_applied" && !transitioned))
+    }
+}
+
+struct ChecklistCorrectionReconciliation: Decodable, Sendable {
+    struct Audit: Decodable, Sendable {
+        let revision: Int
+        let ownerMessageId: String
+        let itemId: String
+        let toLabel: String
+        let toKind: String?
+    }
+
+    let id: String
+    let revision: Int
+    let audit: Audit?
+
+    func confirms(_ body: ChecklistCorrectionBody, taskID: String) -> Bool {
+        guard (0..<12).contains(body.expectedRevision),
+              id == taskID, (body.expectedRevision + 1...12).contains(revision),
+              let audit else { return false }
+        return audit.revision == body.expectedRevision + 1 &&
+            audit.ownerMessageId == body.ownerMessageId && audit.itemId == body.itemId &&
+            audit.toLabel == body.replacementLabel && audit.toKind == "lookup"
+    }
+}
+
+enum ChecklistCorrectionSubmission: Sendable, Equatable {
+    case confirmed
+    case rejected
+    case uncertain
+}
+
+enum SecurityReviewDisposition: String, Codable, Sendable {
+    case unreviewed
+    case expected
+    case dismissed
+}
+
+struct SecurityReviewEvidence: Decodable, Sendable, Equatable {
+    let providerIncidentRef: String?
+    let eventType: String?
+    let affectedAccount: String?
+    let eventAt: String?
+    let device: String?
+    let location: String?
+    let recoveryCopyOf: String?
+    let evidenceQuote: String?
+
+    var isValid: Bool {
+        Self.isBounded(providerIncidentRef, maximum: 200) &&
+            Self.isBounded(eventType, maximum: 200) &&
+            Self.isBounded(affectedAccount, maximum: 200) &&
+            Self.isBounded(eventAt, maximum: 200) &&
+            Self.isBounded(device, maximum: 200) &&
+            Self.isBounded(location, maximum: 200) &&
+            Self.isBounded(recoveryCopyOf, maximum: 200) &&
+            Self.isBounded(evidenceQuote, maximum: 600)
+    }
+
+    private static func isBounded(_ value: String?, maximum: Int) -> Bool {
+        guard let value else { return true }
+        return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && value.utf16.count <= maximum
+    }
+}
+
+struct SecurityReviewItem: Decodable, Identifiable, Sendable, Equatable {
+    let incidentId: String
+    let revision: Int
+    let confidence: String
+    let disposition: SecurityReviewDisposition
+    let category: String
+    let importance: Double
+    let subject: String
+    let fromName: String?
+    let observedAt: String
+    let materialChangeReason: String?
+    let evidence: SecurityReviewEvidence?
+
+    var id: String { incidentId }
+
+    var observedDate: Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: observedAt) { return date }
+        let wholeSeconds = ISO8601DateFormatter()
+        wholeSeconds.formatOptions = [.withInternetDateTime]
+        return wholeSeconds.date(from: observedAt)
+    }
+
+    var readableCategory: String {
+        category
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(whereSeparator: \.isWhitespace)
+            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+            .joined(separator: " ")
+    }
+
+    var isValid: Bool {
+        Self.hasValidIdentifier(incidentId) && revision > 0 && disposition == .unreviewed &&
+            Self.isBounded(confidence, maximum: 80) &&
+            Self.isBounded(category, maximum: 120) &&
+            importance.isFinite && (0...10).contains(importance) &&
+            Self.isBounded(subject, maximum: 300) &&
+            Self.isOptionalBounded(fromName, maximum: 200) &&
+            observedDate != nil &&
+            Self.isOptionalBounded(materialChangeReason, maximum: 300) &&
+            (evidence?.isValid ?? true)
+    }
+
+    private static func isOptionalBounded(_ value: String?, maximum: Int) -> Bool {
+        guard let value else { return true }
+        return isBounded(value, maximum: maximum)
+    }
+
+    private static func isBounded(_ value: String, maximum: Int) -> Bool {
+        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && value.utf16.count <= maximum
+    }
+
+    static func hasValidIdentifier(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        guard bytes.count == 36,
+              [8, 13, 18, 23].allSatisfy({ bytes[$0] == 45 }),
+              bytes[14] == 53,
+              [56, 57, 97, 98].contains(bytes[19]) else { return false }
+        return bytes.enumerated().allSatisfy { index, byte in
+            if [8, 13, 18, 23].contains(index) { return true }
+            return (48...57).contains(byte) || (65...70).contains(byte) || (97...102).contains(byte)
+        }
+    }
+}
+
+struct SecurityReviewList: Decodable, Sendable {
+    let items: [SecurityReviewItem]
+}
+
+struct SecurityReviewDecisionBody: Encodable, Sendable {
+    let expectedRevision: Int
+    let disposition: SecurityReviewDisposition
+    let reason: String
+}
+
+enum SecurityReviewDecisionResult: Sendable, Equatable {
+    case saved
+    case stale
+    case uncertain
+}
+
 struct ActivityStatusResponse: Codable, Sendable {
     let id: String
     let status: String
