@@ -189,15 +189,32 @@ describe.skipIf(!localEmulator)(
         updatedAt: initial,
         progress: 'Finished safely.',
       });
-      expect(await (await get(runningId)).json()).toMatchObject({
+      const liveProjectionResponse = await get(runningId);
+      expect(liveProjectionResponse.status).toBe(200);
+      const liveProjection = await liveProjectionResponse.json();
+      expect(liveProjection).toMatchObject({
         id: runningId,
         status: 'done',
         progress: 'Finished safely.',
         archivedAt: initial.toISOString(),
       });
+      expect(Object.keys(liveProjection).sort()).toEqual(
+        [
+          'id',
+          'status',
+          'progress',
+          'spentUsd',
+          'budgetUsdLimit',
+          'updatedAt',
+          'archivedAt',
+          'hasPendingApproval',
+          'hasActiveAutonomy',
+          'stuckWaiting',
+        ].sort(),
+      );
     });
 
-    it('allows only the scoped POST route through the proxy', async () => {
+    it('allows the scoped activity item GET and POST routes through the proxy', async () => {
       const { proxy } = await import('../../../../../../proxy.js');
       expect(
         proxy(
@@ -207,9 +224,7 @@ describe.skipIf(!localEmulator)(
       expect(
         proxy(new NextRequest(`http://localhost/api/mobile/v1/activity/${doneId}`)).status,
       ).toBe(200);
-      expect(
-        proxy(new NextRequest(`http://localhost/api/mobile/v1/activity/${doneId}`)).status,
-      ).toBe(503);
+      expect(proxy(new NextRequest('http://localhost/api/mobile/v1/activity')).status).toBe(503);
       expect(
         proxy(new NextRequest('http://localhost/api/mobile/v1/activity', { method: 'POST' }))
           .status,

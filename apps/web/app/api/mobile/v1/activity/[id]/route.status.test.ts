@@ -48,7 +48,22 @@ describe('mobile Activity status route', () => {
     stubs.status.mockResolvedValueOnce(projection);
     const response = await GET(request, context(id));
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual(projection);
+    const body = await response.json();
+    expect(body).toEqual(projection);
+    expect(Object.keys(body).sort()).toEqual(
+      [
+        'id',
+        'status',
+        'progress',
+        'spentUsd',
+        'budgetUsdLimit',
+        'updatedAt',
+        'archivedAt',
+        'hasPendingApproval',
+        'hasActiveAutonomy',
+        'stuckWaiting',
+      ].sort(),
+    );
     expect(stubs.status).toHaveBeenCalledWith(id);
 
     stubs.status.mockResolvedValueOnce(null);
