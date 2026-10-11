@@ -1657,19 +1657,30 @@ struct LocationPingBody: Encodable {
     let arrivalOptIn: Bool
 }
 
+/// The environment comes from the app's packaging configuration, which must
+/// match the signed `aps-environment` entitlement. Build configuration alone
+/// does not determine the APNs environment (for example, a development-signed
+/// Release archive still receives sandbox tokens).
+enum APNSEnvironment: String, Codable, Sendable {
+    case sandbox
+    case production
+
+    init?(configuredValue: Any?) {
+        guard let value = configuredValue as? String else { return nil }
+        self.init(rawValue: value)
+    }
+
+    init?(bundle: Bundle) {
+        self.init(configuredValue: bundle.infoDictionary?["AssistantAPNSEnvironment"])
+    }
+}
+
 /// Matches the server's DeviceTokenRegistrationSchema
-/// (packages/core/src/push/devices.ts). Development-signed builds mint sandbox
-/// tokens; TestFlight/App Store builds mint production ones.
+/// (packages/core/src/push/devices.ts).
 struct DeviceTokenBody: Encodable {
     let token: String
     let platform: String = "ios"
-    let environment: String = {
-        #if DEBUG
-        return "sandbox"
-        #else
-        return "production"
-        #endif
-    }()
+    let environment: APNSEnvironment
 }
 
 struct GoalMutation: Encodable, Sendable {

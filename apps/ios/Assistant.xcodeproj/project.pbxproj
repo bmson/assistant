@@ -604,6 +604,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSISTANT_APNS_ENVIRONMENT = sandbox;
 				CODE_SIGN_ENTITLEMENTS = Assistant/Assistant.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -631,6 +632,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSISTANT_APNS_ENVIRONMENT = production;
 				CODE_SIGN_ENTITLEMENTS = Assistant/Assistant.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;

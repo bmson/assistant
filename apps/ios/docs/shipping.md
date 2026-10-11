@@ -32,11 +32,18 @@ pass. It produces nothing installable.
   Xcode provisions both targets on first archive.
 
 The app registers for remote notifications and declares the `aps-environment` entitlement.
+The app's `AssistantAPNSEnvironment` Info.plist value is set from the
+`ASSISTANT_APNS_ENVIRONMENT` build setting (`sandbox` for Debug and `production` for
+Release). A development-signed export must set that build setting to `sandbox`; App Store,
+TestFlight, and ad hoc distribution must use the environment in the final distribution
+signature (normally `production`). Before delivery, inspect the exported IPA and confirm
+its packaged `AssistantAPNSEnvironment` value matches its signed `aps-environment`
+entitlement; checking the archive alone does not validate the exported app. The app fails
+closed and skips token upload if the packaged value is missing or unrecognized.
 The server has an APNs provider, enabled when `APNS_KEY_ID`, `APNS_TEAM_ID`,
 `APNS_PRIVATE_KEY`, and `APNS_BUNDLE_ID` are configured. Set the bundle ID to the app's
-registered identifier and use the matching Apple key and team. Confirm that the archived
-app's signed entitlements contain the production APNs environment before release; the checked-in
-entitlements file says `development` and is not proof of the archive's final signing value.
+registered identifier and use the matching Apple key and team. The checked-in entitlements
+file says `development` and is not proof of the exported IPA's final signing value.
 Notification permission is still requested from the owner in the app. The payloads use generic
 lock-screen copy and open the authenticated app for details.
 

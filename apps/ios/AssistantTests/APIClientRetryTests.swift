@@ -3083,6 +3083,25 @@ extension APIClientRetryTests {
     }
 
     @MainActor
+    func testSamePushTokenRegistersAgainWhenAPNSEnvironmentChanges() async throws {
+        let suite = "assistant.push-environment-tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let manager = NotificationManager(defaults: defaults)
+        var registrations: [(String, String)] = []
+        manager.deviceTokenHandler = { token, scope in registrations.append((token, scope)) }
+
+        manager.setRegistrationScope("https://a.test|owner-a|sandbox")
+        manager.handleDeviceToken(Data([0x01, 0xab]))
+        while registrations.count < 1 { await Task.yield() }
+        manager.setRegistrationScope("https://a.test|owner-a|production")
+        while registrations.count < 2 { await Task.yield() }
+
+        XCTAssertEqual(registrations.map(\.0), ["01ab", "01ab"])
+        XCTAssertEqual(registrations.map(\.1), ["https://a.test|owner-a|sandbox", "https://a.test|owner-a|production"])
+    }
+
+    @MainActor
     func testStopAfterToolStartsWaitsForTaskStatusAndWarnsEffectsMayRemain() async throws {
         let model = try await notificationModel()
         let working = ChatUpdates(taskStatus: "working", messages: [], refreshed: [], superseded: nil,
