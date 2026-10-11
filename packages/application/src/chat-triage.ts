@@ -107,6 +107,22 @@ const ACCEPT_ACTION_OFFER =
 const ACTION_OFFER =
   /\b(?:would you like me to|shall i|should i|i can|i will|i['’]ll|let me)\s+(?:(?:also|now|first)\s+)?(?:check|search|look up|read|find|verify|add|send|create|save|schedule|book|apply|submit|update|cancel|remind)\b/i;
 
+/**
+ * A request to report progress on earlier work needs persisted task evidence.
+ * It must never reach the tool-less stream, which can only repeat an earlier
+ * claim about whether work is happening.
+ */
+const TASK_PROGRESS_QUESTIONS = [
+  /^\s*(?:(?:hey|so|and|also|just)\s+)*(?:is|are|was|were|has|have|did)\s+(?:it|that|this|you|the task|my request|that request)\s+(?:still\s+)?(?:working|running|queued|done|finished|completed|complete|failed|started|moving|happening|in progress)\b[^.!?]{0,100}[.!?]*\s*$/i,
+  /^\s*(?:any|what(?:'|’)?s|what is|give me)\s+(?:the\s+)?(?:status|progress|update)\s*(?:on\s+(?:it|that|this|my request|the task))?\s*[?.!]*\s*$/i,
+  /^\s*(?:how(?:'|’)s|how is)\s+(?:it|that|this|the task|my request)\s+(?:going|progressing)\s*[?.!]*\s*$/i,
+  /^\s*(?:did you|have you)\s+(?:finish|complete|start|work on|do|handle)\s+(?:it|that|this|my request|the task)\s*[?.!]*\s*$/i,
+];
+
+export function isTaskProgressQuestion(text: string): boolean {
+  return TASK_PROGRESS_QUESTIONS.some((pattern) => pattern.test(text));
+}
+
 export function looksLikeActionRequest(
   text: string,
   priorAssistantText = '',
@@ -114,6 +130,7 @@ export function looksLikeActionRequest(
 ): boolean {
   let t = text.trim().toLowerCase();
   if (!t) return false;
+  if (isTaskProgressQuestion(text)) return true;
   if (isRepairFeedback(text)) return true;
   if (
     detectLiveLookups([

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { looksLikeActionRequest } from './chat-triage.js';
+import { isTaskProgressQuestion, looksLikeActionRequest } from './chat-triage.js';
 
 it('routes memory saves and receipt questions through the executor', () => {
   for (const text of [
@@ -11,6 +11,30 @@ it('routes memory saves and receipt questions through the executor', () => {
 });
 
 describe('looksLikeActionRequest', () => {
+  it('routes task progress questions to the authoritative status path', () => {
+    for (const text of [
+      'Is it working?',
+      'Are you still working on that?',
+      'What is the status on my request?',
+      'Any progress on it?',
+      'How is that going?',
+      'Did you finish the task?',
+    ]) {
+      expect(isTaskProgressQuestion(text), text).toBe(true);
+      expect(looksLikeActionRequest(text), text).toBe(true);
+    }
+  });
+
+  it('does not route general conversation as a task progress question', () => {
+    for (const text of [
+      'How is your day going?',
+      'Any update on the weather?',
+      'What is your status?',
+    ]) {
+      expect(isTaskProgressQuestion(text), text).toBe(false);
+    }
+  });
+
   it('routes short follow-ups with owner context to the executor', () => {
     expect(looksLikeActionRequest('Where are we staying')).toBe(true);
     expect(looksLikeActionRequest('What companies have I applied for?')).toBe(true);

@@ -18,6 +18,7 @@ const stubs = vi.hoisted(() => ({
   queueAdmission: vi.fn(),
   getAmbientBlock: vi.fn(async () => undefined),
   getOwnerCard: vi.fn(async () => undefined),
+  createPostgresTaskRepository: vi.fn(),
 }));
 
 vi.mock('@assistant/core/workflow/machine', async (importOriginal) => ({
@@ -33,6 +34,10 @@ vi.mock('@assistant/core/memory/consolidation', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@assistant/core/memory/consolidation')>()),
   getOwnerCard: stubs.getOwnerCard,
 }));
+vi.mock('@assistant/db', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@assistant/db')>()),
+  createPostgresTaskRepository: stubs.createPostgresTaskRepository,
+}));
 
 const { handleChatTurn, resumeAdmittedChatTask } = await import('./chat-turn.js');
 
@@ -42,17 +47,22 @@ const CONVERSATION = '00000000-0000-4000-8000-00000000000c';
 type Completion = {
   status: 'done' | 'failed';
   progress?: string;
+  privacyObservationGeneration?: string | null;
   messages: Array<{ text: string; parts: unknown[]; channelMessageId?: string }>;
 };
 
 type StoreScript = {
   history?: Array<Record<string, unknown>>;
+  tasks?: Record<string, Record<string, unknown>>;
   laterMessages?: Array<Record<string, unknown>>;
   evidence?: ActionEvidence[];
   unavailableConversation?: boolean;
   cancellationWon?: boolean;
   archivedConversation?: boolean;
   emptyConversationTitle?: boolean;
+  privacyObservationGeneration?: string | null;
+  completionWon?: boolean;
+  taskReadFailure?: boolean;
 };
 
 function chatStore(script: StoreScript = {}) {
@@ -60,7 +70,7 @@ function chatStore(script: StoreScript = {}) {
     id: `00000000-0000-4000-8000-${String(index + 100).padStart(12, '0')}`,
     taskId: null,
     parts: [{ type: 'text', text: message.text ?? '' }],
-    createdAt: new Date(Date.UTC(2026, 8, 23, 11, 0, index)),
+    createdAt: new Date(Date.now() + index * 1_000),
     ...message,
   }));
   const completions: Completion[] = [];
@@ -109,7 +119,7 @@ function chatStore(script: StoreScript = {}) {
       const row = {
         id: `00000000-0000-4000-8000-${String(messages.length + 1).padStart(12, '0')}`,
         taskId: `task-${++taskCount}`,
-        createdAt: new Date(Date.UTC(2026, 8, 23, 12, 0, messages.length)),
+        createdAt: new Date(Date.now() + messages.length * 1_000),
         conversationId: CONVERSATION,
         role: 'user',
         origin: 'owner',
@@ -122,7 +132,11 @@ function chatStore(script: StoreScript = {}) {
         id: taskId,
         conversationId: CONVERSATION,
         agentId: AGENT,
+        trust: 'owner',
+        type: 'chat_turn',
+        title: input.text,
         status: 'running',
+        createdAt: row.createdAt,
         trigger: {
           source: 'chat',
           payload: { text: input.text, chatAdmission: { phase: 'classifying' } },
@@ -137,7 +151,7 @@ function chatStore(script: StoreScript = {}) {
       admittedByOperation.set(operationId, admitted);
       return { kind: 'admitted', created: true, ...admitted };
     },
-    privacyObservationGeneration: async () => null,
+    privacyObservationGeneration: async () => script.privacyObservationGeneration ?? null,
     listMessages: async () => ({
       messages: [...messages, ...(script.laterMessages ?? [])],
       hasMore: false,
@@ -152,7 +166,7 @@ function chatStore(script: StoreScript = {}) {
     markChatTurnStreaming: async () => true,
     completeDirectChatTask: async (input: Completion) => {
       completions.push(input);
-      return true;
+      return script.completionWon ?? true;
     },
     listConversationEvidence: async () => script.evidence ?? [],
     createConversation: vi.fn(),
@@ -246,6 +260,7 @@ beforeEach(() => {
   stubs.queueAdmission.mockReset();
   stubs.getAmbientBlock.mockReset().mockResolvedValue(undefined);
   stubs.getOwnerCard.mockReset().mockResolvedValue(undefined);
+  stubs.createPostgresTaskRepository.mockReset();
   stubs.enqueueTask.mockResolvedValue({ task: { id: 'queued-task' } });
 });
 afterEach(() => resetConfigForTest());
@@ -255,14 +270,48 @@ async function turn(
   script: RouterScript,
   extra: Record<string, unknown> = {},
   stored: StoreScript = {},
+  postgres = false,
 ) {
   const store = chatStore(stored);
   const scripted = scriptedRouter(script);
+  const taskRepository = {
+    records: stored.tasks ?? {},
+    async getTask(taskId: string) {
+      return this.records[taskId] ?? null;
+    },
+    async precedingOwnerTasks(input: {
+      agentId: string;
+      conversationId: string;
+      taskType: string;
+      createdBefore: Date;
+      limit?: number;
+    }) {
+      if (stored.taskReadFailure) throw new Error('task status read failed');
+      return Object.values(this.records)
+        .filter(
+          (task) =>
+            task.agentId === input.agentId &&
+            task.conversationId === input.conversationId &&
+            task.trust === 'owner' &&
+            task.type === input.taskType &&
+            task.createdAt instanceof Date &&
+            task.createdAt < input.createdBefore,
+        )
+        .sort(
+          (left, right) => (right.createdAt as Date).getTime() - (left.createdAt as Date).getTime(),
+        )
+        .slice(0, input.limit ?? 10)
+        .map(({ id, trigger, status }) => ({ id, trigger, status }));
+    },
+  };
+  if (postgres) stubs.createPostgresTaskRepository.mockReturnValue(taskRepository);
   const response = await handleChatTurn(send(text, extra), {
     config: config(),
     router: scripted.router,
     chat: store.chat,
-    persistence: { tasks: {}, ownerContext: {} } as never,
+    ...(postgres
+      ? { db: {} as never }
+      : { persistence: { tasks: taskRepository, ownerContext: {} } as never }),
   });
   return { response, ...store, ...scripted };
 }
@@ -275,6 +324,279 @@ function queuedPayload() {
 }
 
 describe('chat needs-action triage', () => {
+  it('answers a status question from the nearest owner task and ignores a foreign task', async () => {
+    const createdAt = new Date(Date.now() - 20 * 60 * 60 * 1000);
+    const result = await turn(
+      'Is it working?',
+      { triage: { needsAction: false }, draft: 'Yes, it is working.' },
+      {},
+      {
+        privacyObservationGeneration: 'erase-generation-7',
+        tasks: {
+          'prior-status-task': {
+            id: 'prior-status-task',
+            agentId: AGENT,
+            conversationId: CONVERSATION,
+            trust: 'owner',
+            type: 'chat_turn',
+            status: 'done',
+            title: 'Is it working?',
+            progress: 'Status reply completed.',
+            createdAt: new Date(Date.now() - 10 * 60 * 1000),
+            updatedAt: new Date(Date.now() - 10 * 60 * 1000),
+            state: {},
+            trigger: { payload: { text: 'Is it working?' } },
+          },
+          'older-task': {
+            id: 'older-task',
+            agentId: AGENT,
+            conversationId: CONVERSATION,
+            trust: 'owner',
+            type: 'chat_turn',
+            status: 'pending',
+            title: 'KLM lounge and gate',
+            progress: 'Queued for execution.',
+            createdAt,
+            updatedAt: createdAt,
+            state: {
+              requestChecklist: {
+                version: 1,
+                request: 'Find the KLM lounge and gate information.',
+                items: [
+                  {
+                    id: 'lookup-1',
+                    label: 'Find the KLM lounge',
+                    kind: 'lookup',
+                    targetTerms: ['klm', 'lounge'],
+                    status: 'pending',
+                    evidence: [],
+                  },
+                ],
+                savedCards: [],
+              },
+            },
+            trigger: { payload: { text: 'Find the KLM lounge and gate information.' } },
+          },
+          'foreign-task': {
+            id: 'foreign-task',
+            agentId: AGENT,
+            conversationId: '00000000-0000-4000-8000-0000000000ff',
+            trust: 'owner',
+            type: 'chat_turn',
+            status: 'done',
+            title: 'Berlin directions',
+            progress: 'Completed.',
+            createdAt,
+            updatedAt: createdAt,
+            state: {},
+            trigger: { payload: { text: 'Find directions from Berlin airport to the hotel.' } },
+          },
+        },
+      },
+    );
+
+    expect(result.object).not.toHaveBeenCalled();
+    expect(result.stream).not.toHaveBeenCalled();
+    expect(stubs.queueAdmission).not.toHaveBeenCalled();
+    expect(result.response.headers.get('x-async-task')).toBe('task-1');
+    expect(result.completions[0]?.status).toBe('done');
+    expect(result.completions[0]?.messages[0]?.text).toContain('KLM lounge and gate');
+    expect(result.completions[0]?.messages[0]?.text).toContain('marked queued');
+    expect(result.completions[0]?.messages[0]?.text).toContain('20 hours ago');
+    expect(result.completions[0]?.messages[0]?.text).toContain('not complete: Find the KLM lounge');
+    expect(result.completions[0]?.privacyObservationGeneration).toBe('erase-generation-7');
+    expect(result.completions[0]?.messages[0]?.text).not.toContain('Berlin directions');
+  });
+
+  it.each([
+    ['running', 'running'],
+    ['needs_attention', 'needs your attention'],
+    ['done', 'completed'],
+    ['failed', 'failed'],
+  ])('reports persisted %s status without model generation', async (status, label) => {
+    const createdAt = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    const result = await turn(
+      'Is it working?',
+      { triage: { needsAction: false }, draft: 'It is working.' },
+      {},
+      {
+        tasks: {
+          'prior-task': {
+            id: 'prior-task',
+            agentId: AGENT,
+            conversationId: CONVERSATION,
+            trust: 'owner',
+            type: 'chat_turn',
+            status,
+            title: 'KLM gate',
+            progress: 'Recorded progress.',
+            createdAt,
+            updatedAt: createdAt,
+            state: {},
+            trigger: { payload: { text: 'Find the KLM gate.' } },
+          },
+        },
+      },
+    );
+    expect(result.object).not.toHaveBeenCalled();
+    expect(result.stream).not.toHaveBeenCalled();
+    expect(result.completions[0]?.messages[0]?.text).toContain(`marked ${label}`);
+    expect(result.completions[0]?.messages[0]?.text).toContain('3 hours ago');
+  });
+
+  it('asks which request when no prior owner task can be bound', async () => {
+    const result = await turn(
+      'Is it working?',
+      { triage: { needsAction: false }, draft: 'Yes, it is working.' },
+      {},
+      {
+        tasks: {
+          'prior-chat': {
+            id: 'prior-chat',
+            agentId: AGENT,
+            conversationId: CONVERSATION,
+            trust: 'owner',
+            type: 'chat_turn',
+            status: 'done',
+            title: 'Thanks, that helps.',
+            progress: '',
+            createdAt: new Date(Date.now() - 3 * 60 * 60 * 1000),
+            updatedAt: new Date(Date.now() - 3 * 60 * 60 * 1000),
+            trigger: { payload: { text: 'Thanks, that helps.' } },
+            state: {},
+          },
+        },
+      },
+    );
+    expect(result.object).not.toHaveBeenCalled();
+    expect(result.stream).not.toHaveBeenCalled();
+    expect(stubs.queueAdmission).not.toHaveBeenCalled();
+    expect(result.completions[0]?.messages[0]?.text).toContain('Which request do you mean?');
+  });
+
+  it('reports a task read failure without claiming any status', async () => {
+    const result = await turn('Is it working?', {}, {}, { taskReadFailure: true });
+    const responseText = result.completions[0]?.messages[0]?.text ?? '';
+    expect(responseText).toContain('could not read the saved task status');
+    expect(responseText).not.toContain('marked running');
+    expect(responseText).not.toContain('marked queued');
+    expect(result.object).not.toHaveBeenCalled();
+    expect(result.stream).not.toHaveBeenCalled();
+  });
+
+  it('uses the PostgreSQL task repository when chat composition omits portable persistence', async () => {
+    const createdAt = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const result = await turn(
+      'Is it working?',
+      { triage: { needsAction: false }, draft: 'Yes.' },
+      {},
+      {
+        tasks: {
+          'prior-task': {
+            id: 'prior-task',
+            agentId: AGENT,
+            conversationId: CONVERSATION,
+            trust: 'owner',
+            type: 'chat_turn',
+            status: 'pending',
+            title: 'Find the KLM gate',
+            progress: 'Queued.',
+            createdAt,
+            updatedAt: createdAt,
+            state: {},
+            trigger: { payload: { text: 'Find the KLM gate.' } },
+          },
+        },
+      },
+      true,
+    );
+
+    expect(stubs.createPostgresTaskRepository).toHaveBeenCalledOnce();
+    expect(result.object).not.toHaveBeenCalled();
+    expect(result.stream).not.toHaveBeenCalled();
+    expect(result.completions[0]?.messages[0]?.text).toContain('marked queued');
+  });
+
+  it('bounds long checklists to three short unfinished items', async () => {
+    const createdAt = new Date(Date.now() - 20 * 60 * 60 * 1000);
+    const labels = Array.from(
+      { length: 12 },
+      (_, index) => `Outcome ${index + 1}: ${'x'.repeat(480)}`,
+    );
+    const result = await turn(
+      'Is it working?',
+      {},
+      {},
+      {
+        tasks: {
+          'prior-task': {
+            id: 'prior-task',
+            agentId: AGENT,
+            conversationId: CONVERSATION,
+            trust: 'owner',
+            type: 'chat_turn',
+            status: 'pending',
+            title: 'Compound request',
+            progress: '',
+            createdAt,
+            updatedAt: createdAt,
+            trigger: { payload: { text: 'Find the KLM gate.' } },
+            state: {
+              requestChecklist: {
+                version: 1,
+                request: 'Find the KLM gate.',
+                items: labels.map((label, index) => ({
+                  id: `item-${index}`,
+                  label,
+                  kind: 'lookup',
+                  targetTerms: ['klm'],
+                  status: 'pending',
+                  evidence: [],
+                })),
+                savedCards: [],
+              },
+            },
+          },
+        },
+      },
+    );
+    const responseText = result.completions[0]?.messages[0]?.text ?? '';
+    expect(responseText.match(/- not complete:/g)).toHaveLength(3);
+    expect(responseText).toContain('9 more unfinished items remain in Activity.');
+    expect(responseText.length).toBeLessThan(1_500);
+    expect(responseText).not.toContain('Outcome 4:');
+  });
+
+  it('does not return an accepted status reply when completion loses its fence', async () => {
+    const createdAt = new Date(Date.now() - 5 * 60 * 60 * 1000);
+    const result = await turn(
+      'Is it working?',
+      {},
+      {},
+      {
+        completionWon: false,
+        tasks: {
+          'prior-task': {
+            id: 'prior-task',
+            agentId: AGENT,
+            conversationId: CONVERSATION,
+            trust: 'owner',
+            type: 'chat_turn',
+            status: 'running',
+            title: 'Find the KLM gate',
+            progress: 'Still checking.',
+            createdAt,
+            updatedAt: createdAt,
+            trigger: { payload: { text: 'Find the KLM gate.' } },
+            state: {},
+          },
+        },
+      },
+    );
+    expect(result.response.status).toBe(409);
+    expect(await result.response.json()).toMatchObject({ code: 'chat_turn_fenced' });
+  });
+
   it('recovers a stale direct reply using the persisted conversational triage outcome', async () => {
     const operationId = '00000000-0000-4000-8000-0000000000d3';
     const messageId = '00000000-0000-4000-8000-0000000000d4';

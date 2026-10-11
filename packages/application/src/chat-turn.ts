@@ -34,6 +34,7 @@ import { isSituationRequest } from '@assistant/core/situations-schema';
 import { buildAutonomyGrant } from '@assistant/core/workflow/autonomy';
 import { explicitlyOptsOutOfRecall } from '@assistant/core/workflow/owner-intent';
 import { detectPersonalReadRequest } from '@assistant/core/workflow/read-intent';
+import { RequestChecklistSchema } from '@assistant/core/workflow/request-checklist-schema';
 import {
   clearGoalBlockedOnOwnerReply,
   goalIdForConversation,
@@ -42,6 +43,7 @@ import { isRepairFeedback, reportRepair } from '@assistant/core/workflow/self-re
 import {
   createPostgresApplicationChatPersistence,
   createPostgresSelfRepairRepository,
+  createPostgresTaskRepository,
   type Db,
 } from '@assistant/db';
 import type {
@@ -63,7 +65,7 @@ import { requestSavedCardRefresh, savedCardRefreshId } from './cards.js';
 import { budgetReplyTarget, isApprovalReply } from './chat-budget-reply.js';
 import { pumpWithCues, type StreamChunk } from './chat-cue-stream.js';
 import { guardDraft } from './chat-guard.js';
-import { looksLikeActionRequest } from './chat-triage.js';
+import { isTaskProgressQuestion, looksLikeActionRequest } from './chat-triage.js';
 import { readBoundedJson } from './http-body.js';
 
 const MAX_REQUEST_BYTES = 32 * 1024;
@@ -202,6 +204,155 @@ function textOf(message: UIMessage): string {
     })
     .map((part) => part.text)
     .join('\n');
+}
+
+function ageText(since: Date, now: Date): string | undefined {
+  if (!Number.isFinite(since.getTime())) return undefined;
+  const seconds = Math.max(0, Math.floor((now.getTime() - since.getTime()) / 1000));
+  if (seconds < 60) return 'less than a minute';
+  const units: Array<[number, string]> = [
+    [86_400, 'day'],
+    [3_600, 'hour'],
+    [60, 'minute'],
+  ];
+  for (const [size, name] of units) {
+    const count = Math.floor(seconds / size);
+    if (count > 0) return `${count} ${name}${count === 1 ? '' : 's'}`;
+  }
+  return 'less than a minute';
+}
+
+function taskStatusLabel(status: string): string {
+  switch (status) {
+    case 'pending':
+      return 'queued';
+    case 'running':
+      return 'running';
+    case 'needs_attention':
+      return 'needs your attention';
+    case 'done':
+      return 'completed';
+    case 'failed':
+      return 'failed';
+    case 'waiting_approval':
+      return 'waiting for approval';
+    case 'waiting_budget':
+      return 'waiting for a budget decision';
+    case 'sleeping':
+      return 'scheduled for later';
+    case 'waiting_event':
+      return 'waiting for an event';
+    case 'cancelled':
+      return 'cancelled';
+    default:
+      return `marked ${status}`;
+  }
+}
+
+function taskRequestChecklist(
+  state: unknown,
+): ReturnType<typeof RequestChecklistSchema.parse> | undefined {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) return undefined;
+  const value = (state as Record<string, unknown>).requestChecklist;
+  const parsed = RequestChecklistSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+async function taskProgressReply(
+  dependencies: ChatTurnDependencies,
+  agentId: string,
+  conversationId: string,
+  currentTask: TaskLease,
+): Promise<string> {
+  const repository =
+    dependencies.persistence?.tasks ??
+    (dependencies.db ? createPostgresTaskRepository(dependencies.db) : undefined);
+  if (!repository?.getTask || !repository.precedingOwnerTasks)
+    return 'I cannot verify task status from this chat right now. Please check Activity for the saved status.';
+
+  let task: Awaited<ReturnType<typeof repository.getTask>> | null = null;
+  try {
+    const priorTasks = await repository.precedingOwnerTasks({
+      agentId,
+      conversationId,
+      taskType: currentTask.type,
+      createdBefore: currentTask.createdAt,
+      limit: 10,
+    });
+    for (const prior of priorTasks) {
+      const payload =
+        prior.trigger && typeof prior.trigger === 'object'
+          ? (prior.trigger as Record<string, unknown>).payload
+          : undefined;
+      const request =
+        payload && typeof payload === 'object'
+          ? (payload as Record<string, unknown>).text
+          : undefined;
+      if (
+        typeof request !== 'string' ||
+        isTaskProgressQuestion(request) ||
+        !looksLikeActionRequest(request)
+      )
+        continue;
+      const candidate = await repository.getTask(prior.id);
+      if (
+        !candidate ||
+        candidate.id !== prior.id ||
+        candidate.agentId !== agentId ||
+        candidate.conversationId !== conversationId ||
+        candidate.trust !== 'owner' ||
+        candidate.type !== currentTask.type
+      )
+        continue;
+      task = candidate;
+      break;
+    }
+  } catch {
+    return 'I could not read the saved task status just now. Please check Activity for the current status.';
+  }
+
+  if (!task)
+    return 'I could not match that question to an earlier task in this chat, so I cannot verify its status. Which request do you mean?';
+
+  const now = new Date();
+  const createdAt = task.createdAt instanceof Date ? task.createdAt : new Date(task.createdAt);
+  const updatedAt = task.updatedAt instanceof Date ? task.updatedAt : new Date(task.updatedAt);
+  const title = task.title?.trim();
+  const subject = title ? `“${title.slice(0, 120)}”` : 'Your latest matching request';
+  const lines = [`${subject} is marked ${taskStatusLabel(task.status)}.`];
+  const createdAge = ageText(createdAt, now);
+  const updatedAge = ageText(updatedAt, now);
+  if (createdAge && updatedAge)
+    lines.push(`It was created ${createdAge} ago; its last recorded update was ${updatedAge} ago.`);
+  else if (createdAge)
+    lines.push(`It was created ${createdAge} ago; the last update time is unavailable.`);
+  else if (updatedAge)
+    lines.push(`Its last recorded update was ${updatedAge} ago; the creation time is unavailable.`);
+  else lines.push('The task age and last update time are unavailable.');
+  if (task.progress.trim())
+    lines.push(`Latest recorded progress: ${task.progress.trim().slice(0, 300)}`);
+  const checklist = taskRequestChecklist(task.state);
+  if (checklist?.items.length) {
+    const unfinished = checklist.items.filter(
+      (item) => item.status !== 'completed' && item.status !== 'cancelled',
+    );
+    const completed = checklist.items.filter((item) => item.status === 'completed').length;
+    lines.push(`Checklist: ${completed} of ${checklist.items.length} outcomes completed.`);
+    for (const item of unfinished.slice(0, 3)) {
+      const status =
+        item.status === 'awaiting_approval'
+          ? 'awaiting approval'
+          : item.status === 'blocked'
+            ? 'blocked'
+            : 'not complete';
+      lines.push(`- ${status}: ${item.label.slice(0, 160)}`);
+    }
+    if (unfinished.length > 3)
+      lines.push(`${unfinished.length - 3} more unfinished items remain in Activity.`);
+    const cancelled = checklist.items.filter((item) => item.status === 'cancelled').length;
+    if (cancelled > 0) lines.push(`${cancelled} item${cancelled === 1 ? '' : 's'} cancelled.`);
+  }
+  return lines.join('\n');
 }
 
 /**
@@ -671,6 +822,39 @@ export async function handleChatTurn(
     return acceptedStreamResponse(replyTask.id, {
       'x-conversation-id': conversation.id,
       'x-async-task': replyTask.id,
+      'x-message-cursor': messageCursor,
+      'x-owner-message-id': persistedUser.id,
+    });
+  }
+
+  // A status question is answered from the linked owner task record. The
+  // classifier and tool-less stream have no authoritative task state, and a
+  // status read must never be interpreted as permission to resume the task.
+  if (isTaskProgressQuestion(userText)) {
+    const responseText = await taskProgressReply(
+      dependencies,
+      agent.id,
+      conversation.id,
+      admittedTask,
+    );
+    const completed = await finishApplicationChatTask(chat, agent.id, admittedTask, {
+      status: 'done',
+      progress: responseText.slice(0, 200),
+      responseText,
+      privacyObservationGeneration,
+    });
+    if (!completed)
+      return Response.json(
+        {
+          error:
+            'This chat turn changed before its status reply could be saved. Reload the chat to check its current state.',
+          code: 'chat_turn_fenced',
+        },
+        { status: 409 },
+      );
+    return acceptedStreamResponse(admittedTask.id, {
+      'x-conversation-id': conversation.id,
+      'x-async-task': admittedTask.id,
       'x-message-cursor': messageCursor,
       'x-owner-message-id': persistedUser.id,
     });
