@@ -34,6 +34,17 @@ describe('ToolDispatcher task scope', () => {
         { privateWrite: true },
       );
     let sequence = 0;
+    const taskId = 'task-1';
+    const task = {
+      id: taskId,
+      agentId: 'agent-1',
+      type: 'chat_turn',
+      trust: 'owner',
+      status: 'running',
+      leaseToken: 'scope-test-lease',
+      lockedUntil: new Date(Date.now() + 60_000),
+      trigger: { source: 'chat', payload: { text: 'Tell me if Alex emails me.' } },
+    } as never;
     const dispatcher = new ToolDispatcher(
       {} as Db,
       registry,
@@ -43,19 +54,16 @@ describe('ToolDispatcher task scope', () => {
         underRateLimit: async () => true,
         findIdempotent: async () => null,
         start: async () => ({ id: `call-${++sequence}` }),
+        load: async (agentId: string, requestedTaskId: string, toolCallId: string) =>
+          agentId === 'agent-1' && requestedTaskId === taskId
+            ? { toolCall: { id: toolCallId }, task, approval: null }
+            : null,
         outcome: async () => true,
       } as never,
       undefined,
       undefined,
       { kind: 'approval-policy-repository', list: async () => [] } as never,
     );
-    const task = {
-      id: 'task-1',
-      agentId: 'agent-1',
-      type: 'chat_turn',
-      trust: 'owner',
-      trigger: { source: 'chat', payload: { text: 'Tell me if Alex emails me.' } },
-    } as never;
     const ctx: ToolContext = {
       taskId: 'task-1',
       agentId: 'agent-1',
@@ -325,8 +333,18 @@ describe('ToolDispatcher task scope', () => {
       },
       findIdempotent: async () => null,
       start: async () => ({ id: `call-${++callSequence}` }),
+      load: async (agentId: string, taskId: string, toolCallId: string) => {
+        const task = currentTasks.get(taskId);
+        return task && task.agentId === agentId
+          ? { toolCall: { id: toolCallId }, task, approval: null }
+          : null;
+      },
       outcome: async () => true,
     };
+    const currentTasks = new Map<
+      string,
+      { id: string; agentId: string; status: string; leaseToken: string }
+    >();
     const dispatcher = new ToolDispatcher(
       {} as Db,
       registry,
@@ -336,15 +354,20 @@ describe('ToolDispatcher task scope', () => {
       { kind: 'approval-policy-repository', list: async () => [] } as never,
     );
 
-    const dispatchFor = async (agentId: string, taskId: string) =>
-      dispatcher.dispatch({
-        task: {
-          id: taskId,
-          agentId,
-          type: 'chat_turn',
-          trust: 'owner',
-          trigger: { source: 'chat', payload: { text: 'Read the private result.' } },
-        } as never,
+    const dispatchFor = async (agentId: string, taskId: string) => {
+      const task = {
+        id: taskId,
+        agentId,
+        type: 'chat_turn',
+        trust: 'owner',
+        status: 'running',
+        leaseToken: `lease-${agentId}`,
+        lockedUntil: new Date(Date.now() + 60_000),
+        trigger: { source: 'chat', payload: { text: 'Read the private result.' } },
+      } as const;
+      currentTasks.set(taskId, task);
+      return dispatcher.dispatch({
+        task: task as never,
         step: 1,
         modelToolCallId: `model-${agentId}`,
         toolName: 'fixture.cached_read',
@@ -361,6 +384,7 @@ describe('ToolDispatcher task scope', () => {
         },
         provenance: { plannerVersion: 1, promptVersion: 1, model: 'test' },
       });
+    };
 
     await dispatchFor('agent-one', 'task-one');
     await dispatchFor('agent-two', 'task-two');

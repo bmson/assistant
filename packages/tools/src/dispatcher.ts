@@ -1740,6 +1740,48 @@ export class ToolDispatcher {
       return { kind: 'rejected', reason: 'identical call already in flight' };
     }
 
+    // Cancellation or lease replacement can commit after the durable call
+    // row is created but before this worker enters the tool. Re-read the
+    // owner-linked task at that boundary; the initial dispatch snapshot is
+    // not enough authority to start an effect.
+    let beforeExecution: Awaited<ReturnType<ToolExecutionRepository['load']>>;
+    try {
+      beforeExecution = await this.executionRepository.load(
+        input.task.agentId,
+        input.task.id,
+        row.id,
+      );
+    } catch {
+      if (reserved?.ok) await this.costRepository.release(reserved.reservationId).catch(() => {});
+      return {
+        kind: 'rejected',
+        reason: 'task authority could not be confirmed; tool was not invoked',
+      };
+    }
+    const taskAuthorityIntact =
+      beforeExecution?.task.id === input.task.id &&
+      beforeExecution.task.agentId === input.task.agentId &&
+      beforeExecution.task.status === 'running' &&
+      beforeExecution.task.leaseToken === input.task.leaseToken;
+    if (input.ctx.signal.aborted || !taskAuthorityIntact) {
+      const error = input.ctx.signal.aborted
+        ? 'task was cancelled before tool execution'
+        : 'task was cancelled or its lease changed before tool execution';
+      const persisted = await this.executionRepository.outcome({
+        agentId: input.task.agentId,
+        taskId: input.task.id,
+        toolCallId: row.id,
+        status: 'failed',
+        fromStatus: 'executing',
+        error,
+      });
+      if (reserved?.ok) await this.costRepository.release(reserved.reservationId).catch(() => {});
+      return {
+        kind: 'rejected',
+        reason: persisted ? error : 'tool claim was lost before invocation; retry suppressed',
+      };
+    }
+
     let providerCompleted = false;
     let completedResult: unknown;
     try {

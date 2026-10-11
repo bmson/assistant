@@ -12,9 +12,11 @@ import {
   agents,
   approvalPolicies,
   approvals,
+  conversations,
   costEvents,
   costReservations,
   createDb,
+  createPostgresApplicationChatPersistence,
   createPostgresApprovalPolicyRepository,
   createPostgresApprovalRepository,
   createPostgresCostRepository,
@@ -23,6 +25,7 @@ import {
   type Db,
   goals,
   mcpConnections,
+  messages,
   rateLimits,
   type TaskRow,
   tasks,
@@ -62,6 +65,7 @@ let dbUp = false;
 let agentId: string;
 const cleanupTaskIds: string[] = [];
 const cleanupGoalIds: string[] = [];
+const cleanupConversationIds: string[] = [];
 let executions: Record<string, number> = {};
 
 function makeTool(name: string, overrides: Partial<AssistantTool> = {}): AssistantTool {
@@ -196,7 +200,12 @@ afterAll(async () => {
   if (dbUp) {
     await purgeTestResidue();
     if (cleanupTaskIds.length) {
+      await db.delete(messages).where(inArray(messages.taskId, cleanupTaskIds));
       await db.delete(tasks).where(inArray(tasks.id, cleanupTaskIds));
+    }
+    if (cleanupConversationIds.length) {
+      await db.delete(messages).where(inArray(messages.conversationId, cleanupConversationIds));
+      await db.delete(conversations).where(inArray(conversations.id, cleanupConversationIds));
     }
     if (cleanupGoalIds.length) {
       await db.delete(goals).where(inArray(goals.id, cleanupGoalIds));
@@ -218,6 +227,96 @@ describe('approvalFallbackSummary', () => {
 });
 
 describe('ToolDispatcher (integration)', () => {
+  it('does not enter an ordinary tool after chat cancellation commits between start and handler', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const chat = createPostgresApplicationChatPersistence(db);
+    const owner = await chat.resolveAgent();
+    const conversation = await chat.createConversation(owner.id);
+    cleanupConversationIds.push(conversation.id);
+    const clientOperationId = randomUUID();
+    const admission = await chat.admitChatTurn({
+      agentId: owner.id,
+      conversationId: conversation.id,
+      clientOperationId,
+      requestHash: 'a'.repeat(64),
+      text: 'Run the synthetic action.',
+      autonomous: false,
+      force: false,
+      spoken: false,
+    });
+    if (admission.kind !== 'admitted' || !admission.lease)
+      throw new Error('expected an admitted chat turn with a lease');
+    cleanupTaskIds.push(admission.task.id);
+
+    const name = 'test.cancel-at-ordinary-tool-boundary';
+    let invocations = 0;
+    const registry = new ToolRegistry().register(
+      makeTool(name, {
+        execute: async () => {
+          invocations += 1;
+          return { completed: true };
+        },
+      }),
+    );
+    const base = createPostgresToolExecutionRepository(db);
+    let signalStart!: () => void;
+    let releaseStart!: () => void;
+    const startEntered = new Promise<void>((resolve) => {
+      signalStart = resolve;
+    });
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const executionRepository: ToolExecutionRepository = {
+      ...base,
+      start: async (...args) => {
+        const row = await base.start(...args);
+        signalStart();
+        await startGate;
+        return row;
+      },
+    };
+    const dispatcher = new ToolDispatcher(db, registry, executionRepository);
+    const input = {
+      task: admission.task,
+      step: 1,
+      toolName: name,
+      args: { value: 'must not run' },
+      modelToolCallId: randomUUID(),
+      ctx: ctxFor(admission.task),
+      provenance,
+    };
+
+    try {
+      const execution = dispatcher.dispatch(input);
+      await startEntered;
+      const cancellation = await chat.cancelChatTurn({
+        agentId: owner.id,
+        conversationId: conversation.id,
+        clientOperationId,
+      });
+      expect(cancellation).toMatchObject({
+        kind: 'admitted_task',
+        status: 'cancelled',
+        transitioned: true,
+        effectStatus: 'unknown',
+      });
+      releaseStart();
+
+      await expect(execution).resolves.toMatchObject({ kind: 'rejected' });
+      expect(invocations).toBe(0);
+      const [persistedTask] = await db.select().from(tasks).where(eq(tasks.id, admission.task.id));
+      expect(persistedTask?.status).toBe('cancelled');
+      const [call] = await db
+        .select()
+        .from(toolCalls)
+        .where(eq(toolCalls.taskId, admission.task.id));
+      expect(call?.status).toBe('failed');
+    } finally {
+      releaseStart();
+    }
+  });
+
   it('preserves an effect receipt through retention and replays it without re-execution', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const name = 'test.r6-retention-replay';

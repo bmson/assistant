@@ -16,7 +16,6 @@ import {
   Square,
   Zap,
 } from 'lucide-react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   useCallback,
@@ -70,6 +69,7 @@ import {
 } from './card-form-operations';
 import { ChatErrorBanner } from './chat-error-banner';
 import { ChatLog } from './chat-log';
+import { ChatTurnFeedback } from './chat-turn-feedback';
 import {
   type ChatErrorInfo,
   type ChatLogOrder,
@@ -1890,67 +1890,21 @@ export function ChatClient({
                 onCarryForm={handleFormCarry}
                 onDiscardForm={handleFormDiscard}
               />
-              {/* Nothing transient is written here any more.
-               *
-               * "Thinking…", "Working…" and the live work trail all used to
-               * land in the log, and every one of them was a line that existed
-               * for a few seconds and then meant nothing — pushing the reply
-               * you were waiting for up the screen as it went. The island at
-               * the top of the screen reports all of it now, in the place the
-               * phone already uses for "something is happening", and announces
-               * it to a screen reader from there (notch-companion.tsx). What
-               * is left in the log is what stays true after the work ends.
-               *
-               * An error is one of those things, so it still lands here. */}
-              {(asyncTurn && asyncActionError) ||
-              (operationCancellation?.turn.conversationId === conversationId &&
-                operationCancellation.phase === 'unknown') ? (
-                <p
-                  role="alert"
-                  className="chat-action-error mt-6 rounded-xl border px-4 py-3 text-sm leading-6"
-                >
-                  {asyncActionError}
-                </p>
-              ) : null}
-              {asyncNote ? (
-                <p role="status" className="mt-3 text-xs text-stage-muted">
-                  {asyncNote.text}{' '}
-                  <Link href="/tasks" className="font-medium underline underline-offset-2">
-                    Open Activity
-                  </Link>
-                  {asyncNote.retryable && !busy && lastSubmittedText.trim() !== '' ? (
-                    <>
-                      {' · '}
-                      <button
-                        type="button"
-                        onClick={retryLastTurn}
-                        className={`font-medium underline underline-offset-2 hover:no-underline ${focusRing}`}
-                      >
-                        Try again
-                      </button>
-                    </>
-                  ) : null}
-                </p>
-              ) : null}
-              {pollTrouble === 'expired' ? (
-                <p role="alert" className="mt-3 text-xs text-stage-muted">
-                  Your session expired — live updates are off.{' '}
-                  <button
-                    type="button"
-                    onClick={() => window.location.reload()}
-                    className={`font-medium underline underline-offset-2 hover:no-underline ${focusRing}`}
-                  >
-                    Reload to sign in again
-                  </button>
-                </p>
-              ) : pollTrouble === 'stale' ? (
-                <p role="status" className="mt-3 text-xs text-stage-muted">
-                  Live updates paused — retrying.
-                </p>
-              ) : null}
-              {liveRecall ? <RecallNote sources={liveRecall} /> : null}
             </div>
           )}
+          <ChatTurnFeedback
+            showError={
+              (!!asyncTurn && !!asyncActionError) ||
+              (operationCancellation?.turn.conversationId === conversationId &&
+                operationCancellation.phase === 'unknown')
+            }
+            error={asyncActionError}
+            note={asyncNote}
+            pollTrouble={pollTrouble}
+            canRetry={!busy && lastSubmittedText.trim() !== ''}
+            onRetry={retryLastTurn}
+          />
+          {log.length > 0 && liveRecall ? <RecallNote sources={liveRecall} /> : null}
         </div>
       </div>
 
