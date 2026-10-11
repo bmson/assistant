@@ -120,9 +120,7 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
   });
   const conversationId = await createConversation(page);
   const userTranscript = page.locator('[data-message-block="true"][data-role="user"]');
-  const assistantTranscript = page.locator(
-    '[data-message-block="true"][data-role="assistant"]',
-  );
+  const assistantTranscript = page.locator('[data-message-block="true"][data-role="assistant"]');
   const taskId = randomUUID();
   const firstMessage = 'WEB-17 first turn stays in admission';
   const secondMessage = 'WEB-17 second prompt remains a draft';
