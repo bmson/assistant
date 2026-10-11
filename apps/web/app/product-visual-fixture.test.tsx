@@ -170,7 +170,14 @@ vi.mock('@/app/chat/[id]/chat-client', async () => {
 });
 vi.mock('@/lib/approval-store', () => ({ getApprovalStore: () => ({}) }));
 vi.mock('@/lib/server', () => ({
-  getEmailObligationRepository: () => ({ listEmailObligations: async () => [] }),
+  getEmailObligationRepository: () => ({
+    mailbox: async () => ({
+      agentId: 'fixture-agent',
+      name: 'Fixture',
+      email: 'fixture@example.test',
+    }),
+    listEmailObligations: async () => [],
+  }),
   // Page query seams receive an opaque handle; any unexpected actual query fails closed.
   getDb: () =>
     new Proxy(
