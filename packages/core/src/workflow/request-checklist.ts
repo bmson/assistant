@@ -1,14 +1,29 @@
 import { createHash } from 'node:crypto';
 import { communicationReceipt } from '../communication-receipt.js';
 import { effectiveReminders, reminderIdentity } from './reminder-state.js';
-import type { RequestChecklist } from './request-checklist-schema.js';
+import { type RequestChecklist, RequestChecklistSchema } from './request-checklist-schema.js';
 import { isDurableSave } from './saved-work.js';
 
 type Kind = RequestChecklist['items'][number]['kind'];
+const CHECKLIST_KINDS: Kind[] = [
+  'lookup',
+  'save',
+  'card',
+  'reminder',
+  'send',
+  'draft',
+  'document',
+  'calendar',
+];
+const MAX_CHECKLIST_CORRECTIONS = 12;
+const MAX_SUPERSEDED_EVIDENCE_IDS = 256;
+
 export interface ChecklistEvidence {
   id: string;
   toolName: string;
   status: string;
+  /** Caller-provided durable effect outcome; only not_executed is safe to ignore. */
+  effectOutcome?: 'completed' | 'failed' | 'unknown' | 'not_executed';
   args?: unknown;
   result?: unknown;
 }
@@ -200,7 +215,13 @@ export function reconcileRequestChecklist(
         status: 'cancelled',
         detail: 'Cancelled by the owner; no completion is claimed.',
       };
+    const supersededEvidenceIds = new Set(
+      (checklist.revisionAudit ?? [])
+        .filter((revision) => revision.itemId === item.id)
+        .flatMap((revision) => revision.excludedEvidenceIds),
+    );
     const matching = rows.filter((row) => {
+      if (supersededEvidenceIds.has(row.id)) return false;
       if (used.has(row.id) || !candidates(item.kind, row.toolName)) return false;
       const corpus = new Set(words(JSON.stringify([row.args, row.result])));
       return item.targetTerms.every((term) => corpus.has(term));
@@ -247,6 +268,286 @@ export function reconcileRequestChecklist(
     };
   });
   return { ...checklist, items };
+}
+
+export interface ChecklistCorrectionTaskIdentity {
+  id: string;
+  agentId: string;
+  conversationId: string;
+}
+
+/** A persisted, explicitly selected correction binding supplied by the caller. */
+export interface ChecklistCorrectionBinding {
+  taskId: string;
+  itemId: string;
+  expectedRevision: number;
+  ownerTaskId: string;
+  ownerMessageId: string;
+}
+
+/** Owner message row already authenticated and bound to its admitted owner task. */
+export interface ChecklistCorrectionOwnerMessage {
+  id: string;
+  taskId: string;
+  agentId: string;
+  conversationId: string;
+  role: 'user';
+  origin: 'owner';
+  text: string;
+}
+
+/** The caller must obtain this from a complete, owner/task-scoped evidence read. */
+export interface CompleteChecklistCorrectionEvidence {
+  complete: true;
+  rows: ChecklistEvidence[];
+}
+
+export interface ChecklistCorrectionReplacement {
+  kind: Kind;
+  /** A single direct request clause selected by the owner, not a model summary. */
+  label: string;
+}
+
+/**
+ * Pure core for an explicitly selected pending-item correction. This function
+ * does not infer authority from the text: callers must load and verify the
+ * target task, authenticated owner message, and durable selected-task/item
+ * binding before calling it, pass the complete task evidence snapshot, and
+ * hold an atomic task-lease/state fence through persistence. This pure helper
+ * cannot itself establish authority, snapshot completeness, or concurrency.
+ * Production chat/admission code does not call this API yet.
+ */
+export function revisePendingRequestChecklistItem(
+  checklist: RequestChecklist,
+  input: {
+    task: ChecklistCorrectionTaskIdentity;
+    ownerMessage: ChecklistCorrectionOwnerMessage;
+    binding: ChecklistCorrectionBinding;
+    evidence: CompleteChecklistCorrectionEvidence;
+    replacement: ChecklistCorrectionReplacement;
+  },
+): RequestChecklist {
+  // Check the persisted value before inspecting nested audit fields. The type
+  // is compile-time only; callers can still pass malformed historical JSON.
+  if (!RequestChecklistSchema.safeParse(checklist).success) return checklist;
+  const { task, ownerMessage, binding, evidence, replacement } = input;
+  if (
+    !task.id ||
+    task.id.length > 128 ||
+    !task.agentId ||
+    task.agentId.length > 128 ||
+    !task.conversationId ||
+    task.conversationId.length > 128 ||
+    ownerMessage.role !== 'user' ||
+    ownerMessage.origin !== 'owner' ||
+    !ownerMessage.id ||
+    ownerMessage.id.length > 128 ||
+    !ownerMessage.taskId ||
+    ownerMessage.taskId.length > 128 ||
+    typeof ownerMessage.text !== 'string' ||
+    ownerMessage.text.length === 0 ||
+    ownerMessage.text.length > 8_000 ||
+    ownerMessage.agentId !== task.agentId ||
+    ownerMessage.conversationId !== task.conversationId ||
+    binding.taskId !== task.id ||
+    binding.taskId.length > 128 ||
+    binding.ownerTaskId !== ownerMessage.taskId ||
+    binding.ownerTaskId.length > 128 ||
+    binding.ownerMessageId !== ownerMessage.id ||
+    binding.ownerMessageId.length > 128 ||
+    binding.expectedRevision !== (checklist.revision ?? 0) ||
+    !Number.isSafeInteger(binding.expectedRevision) ||
+    binding.expectedRevision < 0 ||
+    !evidence ||
+    evidence.complete !== true ||
+    !Array.isArray(evidence.rows) ||
+    evidence.rows.length > MAX_SUPERSEDED_EVIDENCE_IDS ||
+    !evidence.rows.every(
+      (row) =>
+        row !== null &&
+        typeof row === 'object' &&
+        typeof row.id === 'string' &&
+        typeof row.toolName === 'string' &&
+        row.toolName.length <= 128 &&
+        typeof row.status === 'string' &&
+        (row.effectOutcome === undefined ||
+          ['completed', 'failed', 'unknown', 'not_executed'].includes(row.effectOutcome)),
+    ) ||
+    !replacement ||
+    typeof replacement.label !== 'string' ||
+    !CHECKLIST_KINDS.includes(replacement.kind)
+  )
+    return checklist;
+
+  const audit = checklist.revisionAudit ?? [];
+  const currentRevision = checklist.revision ?? 0;
+  const itemsById = new Map(checklist.items.map((item) => [item.id, item]));
+  const latestAuditByItem = new Map<(typeof audit)[number]['itemId'], (typeof audit)[number]>();
+  let auditConsistent = true;
+  for (const [index, entry] of audit.entries()) {
+    const prior = latestAuditByItem.get(entry.itemId);
+    if (
+      entry.revision !== index + 1 ||
+      entry.taskId !== task.id ||
+      entry.conversationId !== task.conversationId ||
+      !itemsById.has(entry.itemId) ||
+      entry.excludedEvidenceIds.some((id) => !id || id.length > 128) ||
+      new Set(entry.excludedEvidenceIds).size !== entry.excludedEvidenceIds.length ||
+      (prior &&
+        (entry.fromLabel !== prior.toLabel ||
+          JSON.stringify(entry.fromTargetTerms) !== JSON.stringify(prior.toTargetTerms)))
+    ) {
+      auditConsistent = false;
+      break;
+    }
+    latestAuditByItem.set(entry.itemId, entry);
+  }
+  for (const [itemId, entry] of latestAuditByItem) {
+    const currentItem = itemsById.get(itemId);
+    if (
+      !currentItem ||
+      entry.toLabel !== currentItem.label ||
+      JSON.stringify(entry.toTargetTerms) !== JSON.stringify(currentItem.targetTerms)
+    ) {
+      auditConsistent = false;
+      break;
+    }
+  }
+  if (
+    !Number.isSafeInteger(currentRevision) ||
+    currentRevision < 0 ||
+    currentRevision > MAX_CHECKLIST_CORRECTIONS ||
+    audit.length !== currentRevision ||
+    !auditConsistent ||
+    new Set(audit.map((entry) => entry.ownerMessageId)).size !== audit.length ||
+    new Set(audit.flatMap((entry) => entry.excludedEvidenceIds)).size > MAX_SUPERSEDED_EVIDENCE_IDS
+  )
+    return checklist;
+  // A replay is a no-op, including when it arrives with conflicting payload.
+  if (audit.some((entry) => entry.ownerMessageId === ownerMessage.id)) return checklist;
+  if (audit.length >= MAX_CHECKLIST_CORRECTIONS || currentRevision >= MAX_CHECKLIST_CORRECTIONS)
+    return checklist;
+
+  const itemIndex = checklist.items.findIndex((item) => item.id === binding.itemId);
+  if (itemIndex < 0) return checklist;
+  const item = checklist.items[itemIndex];
+  if (!item) return checklist;
+  if (item.status !== 'pending' || item.ownerCancellation || item.kind !== replacement.kind)
+    return checklist;
+  // Duplicate same-kind outcomes are deliberately not guessed, even with an
+  // item selector, because the selected target can still share a receipt path.
+  if (checklist.items.filter((candidate) => candidate.kind === item.kind).length !== 1)
+    return checklist;
+
+  const label = replacement.label
+    .trim()
+    .replace(/[.!?]+$/, '')
+    .trim();
+  const ownerClause = ownerMessage.text
+    .trim()
+    .replace(/[.!?]+$/, '')
+    .trim();
+  const actions = [...label.matchAll(new RegExp(CLAUSE.source, 'gi'))];
+  if (
+    !label ||
+    ownerClause !== label ||
+    label.length > 500 ||
+    actions.length !== 1 ||
+    kindOf(label) !== item.kind ||
+    /["“”`]/.test(label) ||
+    /\b(?:if|unless|maybe|might|could|would|or|either|don't|do not|never)\b/i.test(label)
+  )
+    return checklist;
+  const targetTerms = [
+    ...new Set(words(label).filter((word) => word.length > 2 && !STOP.has(word))),
+  ];
+  if (
+    targetTerms.length === 0 ||
+    targetTerms.length > 8 ||
+    targetTerms.some((term) => term.length > 100) ||
+    item.id.length > 128 ||
+    item.label.length > 500 ||
+    item.targetTerms.length > 8 ||
+    item.targetTerms.some((term) => !term || term.length > 100) ||
+    item.evidence.some(
+      (receipt) =>
+        !receipt.id ||
+        receipt.id.length > 128 ||
+        !receipt.toolName ||
+        receipt.toolName.length > 128,
+    )
+  )
+    return checklist;
+
+  const evidenceIds = evidence.rows.map((row) => row.id);
+  if (
+    evidenceIds.some((id) => typeof id !== 'string' || !id || id.length > 128) ||
+    new Set(evidenceIds).size !== evidenceIds.length
+  )
+    return checklist;
+  // Unknown outcomes and unrecognized tools may still have changed the world.
+  // Any matching same-kind call may have crossed dispatch; only a durable
+  // failed-before-execution proof is safe to ignore.
+  if (
+    evidence.rows.some((row) => {
+      const safeNoEffect = row.status === 'failed' && row.effectOutcome === 'not_executed';
+      const knownTool = CHECKLIST_KINDS.some((kind) => candidates(kind, row.toolName));
+      return (
+        row.effectOutcome === 'unknown' ||
+        (!knownTool && !safeNoEffect) ||
+        (candidates(item.kind, row.toolName) && !safeNoEffect)
+      );
+    })
+  )
+    return checklist;
+
+  const priorEvidenceIds = [
+    ...evidenceIds,
+    ...item.evidence.map((receipt) => receipt.id),
+    ...(checklist.savedCards ?? []).map((card) => `card:${card.revisionId}`),
+  ];
+  const newlyExcludedEvidenceIds = [...new Set(priorEvidenceIds)];
+  if (newlyExcludedEvidenceIds.some((id) => !id || id.length > 128)) return checklist;
+  const allExcludedEvidenceIds = [
+    ...new Set([...audit.flatMap((entry) => entry.excludedEvidenceIds), ...priorEvidenceIds]),
+  ];
+  if (allExcludedEvidenceIds.length > MAX_SUPERSEDED_EVIDENCE_IDS) return checklist;
+
+  const revision = currentRevision + 1;
+  const items = checklist.items.map((candidate, index) =>
+    index === itemIndex
+      ? {
+          ...candidate,
+          label,
+          targetTerms,
+          evidence: [],
+          detail: 'Pending after an explicitly selected owner correction.',
+        }
+      : candidate,
+  );
+  const revised: RequestChecklist = {
+    ...checklist,
+    savedCards: checklist.savedCards ?? [],
+    revision,
+    revisionAudit: [
+      ...audit,
+      {
+        revision,
+        taskId: task.id,
+        conversationId: task.conversationId,
+        ownerTaskId: ownerMessage.taskId,
+        ownerMessageId: ownerMessage.id,
+        itemId: item.id,
+        fromLabel: item.label,
+        fromTargetTerms: item.targetTerms,
+        toLabel: label,
+        toTargetTerms: targetTerms,
+        excludedEvidenceIds: newlyExcludedEvidenceIds,
+      },
+    ],
+    items,
+  };
+  return RequestChecklistSchema.safeParse(revised).success ? revised : checklist;
 }
 
 export function requestChecklistDirective(checklist: RequestChecklist | undefined): string {
