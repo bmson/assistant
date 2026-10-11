@@ -2245,7 +2245,7 @@ struct WorkspaceView: View {
         isLoading = true
         let refreshed: Bool
         if area == .documents {
-            async let overviewRefresh: Void = model.refreshOverview()
+            async let overviewRefresh: Bool = model.refreshOverview()
             async let workspaceRefresh: Bool = model.refreshWorkspace()
             let (_, workspaceLoaded) = await (overviewRefresh, workspaceRefresh)
             refreshed = workspaceLoaded && model.overview?.documents != nil

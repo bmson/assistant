@@ -236,7 +236,7 @@ export function proxy(request: NextRequest) {
       path,
     ) &&
       ['GET', 'PATCH', 'POST'].includes(request.method)) ||
-    (activityIdPath.test(path) && request.method === 'POST') ||
+    (activityIdPath.test(path) && ['GET', 'POST'].includes(request.method)) ||
     (anomalyIdPath.test(path) && request.method === 'POST') ||
     (path === '/api/mobile/v1/skills' && request.method === 'POST') ||
     (skillIdPath.test(path) && ['POST', 'PATCH', 'DELETE'].includes(request.method)) ||

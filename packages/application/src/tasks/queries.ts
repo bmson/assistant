@@ -57,6 +57,20 @@ export interface ActivityItem {
   stuckWaiting: boolean;
 }
 
+export type ActivityStatus = Pick<
+  ActivityItem,
+  | 'id'
+  | 'status'
+  | 'progress'
+  | 'spentUsd'
+  | 'budgetUsdLimit'
+  | 'updatedAt'
+  | 'archivedAt'
+  | 'hasPendingApproval'
+  | 'hasActiveAutonomy'
+  | 'stuckWaiting'
+>;
+
 export interface ActivityList {
   items: ActivityItem[];
   archivedCount: number;
@@ -75,6 +89,75 @@ function activityItem(
     hasActiveAutonomy: activeAutonomyGrant({ ...task, autonomyGrant }, Date.now()) !== null,
     stuckWaiting: task.status === 'waiting_approval' && !hasPendingApproval,
   };
+}
+
+function activityStatus(task: ActivityTaskRecord, hasPendingApproval: boolean): ActivityStatus {
+  const item = activityItem(task, new Set(hasPendingApproval ? [task.id] : []));
+  return {
+    id: item.id,
+    status: item.status,
+    progress: item.progress,
+    spentUsd: item.spentUsd,
+    budgetUsdLimit: item.budgetUsdLimit,
+    updatedAt: item.updatedAt,
+    archivedAt: item.archivedAt,
+    hasPendingApproval: item.hasPendingApproval,
+    hasActiveAutonomy: item.hasActiveAutonomy,
+    stuckWaiting: item.stuckWaiting,
+  };
+}
+
+/** Read only the live fields needed to update an already-loaded Activity row. */
+export async function getActivityStatusWithRepository(
+  repository: TaskActivityRepository,
+  agentId: string,
+  taskId: string,
+): Promise<ActivityStatus | null> {
+  const result = await repository.getStatus(agentId, taskId);
+  return result ? activityStatus(result.task, result.hasPendingApproval) : null;
+}
+
+/** Owner-scoped Activity status read without loading the task audit timeline. */
+export async function getActivityStatus(db: Db, taskId: string): Promise<ActivityStatus | null> {
+  const agent = await getAgent(db);
+  const [task] = await db
+    .select({
+      id: tasks.id,
+      agentId: tasks.agentId,
+      conversationId: tasks.conversationId,
+      externalEventId: tasks.externalEventId,
+      type: tasks.type,
+      status: tasks.status,
+      title: tasks.title,
+      progress: tasks.progress,
+      trust: tasks.trust,
+      spentUsd: tasks.spentUsd,
+      budgetUsdLimit: tasks.budgetUsdLimit,
+      updatedAt: tasks.updatedAt,
+      archivedAt: tasks.archivedAt,
+      autonomyGrant: tasks.autonomyGrant,
+      trigger: tasks.trigger,
+    })
+    .from(tasks)
+    .where(
+      and(
+        eq(tasks.id, taskId),
+        eq(tasks.agentId, agent.id),
+        notChatAdmissionCancellationSql(),
+        sql`${tasks.trigger}->'payload'->>'canary' IS DISTINCT FROM 'true'`,
+      ),
+    )
+    .limit(1);
+  if (!task) return null;
+  const [pending] =
+    task.status === 'waiting_approval'
+      ? await db
+          .select({ id: approvals.id })
+          .from(approvals)
+          .where(and(eq(approvals.taskId, taskId), eq(approvals.status, 'pending')))
+          .limit(1)
+      : [];
+  return activityStatus(task, pending !== undefined);
 }
 
 /** Portable owner Activity projection for a bounded persistence read. */

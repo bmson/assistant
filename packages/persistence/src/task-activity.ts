@@ -30,6 +30,10 @@ export interface TaskActivityRepository {
     archivedCount: number;
     pendingApprovalTaskIds: string[];
   }>;
+  getStatus(
+    agentId: string,
+    taskId: string,
+  ): Promise<{ task: ActivityTaskRecord; hasPendingApproval: boolean } | null>;
 }
 
 type Timed<T> = T & { timelineAt?: string };

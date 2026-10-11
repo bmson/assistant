@@ -4,6 +4,17 @@ import Foundation
 /// AppModel makes the user-visible state owner smaller and lets tests lock down
 /// network behavior without constructing an API client or a SwiftUI view.
 enum PollingPolicy {
+    /// Activity is visible for a while; poll conservatively and back off after
+    /// transient failures without stopping the screen from recovering.
+    static func activityIntervalSeconds(consecutiveFailures: Int) -> Double {
+        switch consecutiveFailures {
+        case ...0: return 30
+        case 1: return 60
+        case 2: return 120
+        default: return 180
+        }
+    }
+
     /// A visible call needs fresh questions; a failing connection needs room to
     /// recover. Screens stop after three failures and offer an explicit retry.
     static func callIntervalSeconds(consecutiveFailures: Int) -> Double {
