@@ -972,6 +972,54 @@ describe('chat needs-action triage', () => {
     expect(result.completions[0]?.messages[0]?.text).not.toContain('Berlin directions');
   });
 
+  it('skips the completed last-two continuation when a later status asks about original work', async () => {
+    const now = Date.now();
+    const result = await turn(
+      'Is it working?',
+      { triage: { needsAction: false }, draft: 'Yes, it is working.' },
+      {},
+      {
+        tasks: {
+          'original-task': {
+            id: 'original-task',
+            agentId: AGENT,
+            conversationId: CONVERSATION,
+            trust: 'owner',
+            type: 'chat_turn',
+            status: 'waiting_approval',
+            title: 'Berlin airport route',
+            progress: 'Waiting for approval on web search.',
+            createdAt: new Date(now - 20 * 60 * 1000),
+            updatedAt: new Date(now - 10 * 60 * 1000),
+            state: {},
+            trigger: { payload: { text: 'Look up the Berlin airport route.' } },
+          },
+          'continuation-task': {
+            id: 'continuation-task',
+            agentId: AGENT,
+            conversationId: CONVERSATION,
+            trust: 'owner',
+            type: 'chat_turn',
+            status: 'done',
+            title: 'Continuation status reply',
+            progress: 'The two prior tasks were checked.',
+            createdAt: new Date(now - 5 * 60 * 1000),
+            updatedAt: new Date(now - 5 * 60 * 1000),
+            state: {},
+            trigger: { payload: { text: 'Can you solve my last two wuestions?' } },
+          },
+        },
+      },
+    );
+
+    const responseText = result.completions[0]?.messages[0]?.text ?? '';
+    expect(responseText).toContain('Berlin airport route');
+    expect(responseText).toContain('waiting for approval');
+    expect(responseText).not.toContain('Continuation status reply');
+    expect(result.object).not.toHaveBeenCalled();
+    expect(result.stream).not.toHaveBeenCalled();
+  });
+
   it('queues a status check that also asks for an action', async () => {
     const result = await turn(
       'Is it working and send me the result?',

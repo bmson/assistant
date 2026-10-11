@@ -295,6 +295,7 @@ async function taskProgressReply(
       if (
         typeof request !== 'string' ||
         isTaskProgressQuestion(request) ||
+        isLastTwoRequestsContinuation(request) ||
         !looksLikeActionRequest(request)
       )
         continue;
