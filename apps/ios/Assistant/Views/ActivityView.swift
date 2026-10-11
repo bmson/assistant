@@ -558,31 +558,7 @@ struct ActivityView: View {
             }
         }
         .task(id: "security-\(scenePhase)-\(model.activityConnectionVersion)-\(showingArchived)-\(filter.rawValue)") {
-            guard scenePhase == .active, showsSecurityReviews,
-                  let context = model.securityReviewRequestContext() else {
-                disposeSecurityReviews()
-                return
-            }
-
-            let controller: SecurityReviewController
-            if let existing = securityReviewController,
-               existing.ownerID == context.ownerID,
-               existing.connectionVersion == context.connectionVersion {
-                controller = existing
-            } else {
-                disposeSecurityReviews()
-                controller = SecurityReviewController(
-                    context: context,
-                    connectionIsCurrent: { [weak model] in
-                        model?.securityReviewConnectionIsCurrent(
-                            ownerID: context.ownerID,
-                            version: context.connectionVersion
-                        ) ?? false
-                    }
-                )
-                securityReviewController = controller
-            }
-            await controller.refresh()
+            await refreshSecurityReviews()
         }
         .alert(
             "Raise task budget",
@@ -941,6 +917,41 @@ struct ActivityView: View {
         )
         checklistCorrectionControllers[item.id] = controller
         Task { await controller.load() }
+    }
+
+    private func refreshSecurityReviews() async {
+        guard scenePhase == .active else {
+            disposeSecurityReviews()
+            return
+        }
+        guard showsSecurityReviews else {
+            disposeSecurityReviews()
+            return
+        }
+        guard let context = model.securityReviewRequestContext() else {
+            disposeSecurityReviews()
+            return
+        }
+
+        let controller: SecurityReviewController
+        if let existing = securityReviewController,
+           existing.ownerID == context.ownerID,
+           existing.connectionVersion == context.connectionVersion {
+            controller = existing
+        } else {
+            disposeSecurityReviews()
+            controller = SecurityReviewController(
+                context: context,
+                connectionIsCurrent: { [weak model] in
+                    model?.securityReviewConnectionIsCurrent(
+                        ownerID: context.ownerID,
+                        version: context.connectionVersion
+                    ) ?? false
+                }
+            )
+            securityReviewController = controller
+        }
+        await controller.refresh()
     }
 
     private func pauseChecklistCorrections() {
