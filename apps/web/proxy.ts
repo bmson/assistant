@@ -1,3 +1,4 @@
+import { isSecurityIncidentId } from '@assistant/application/security-incidents';
 import { loadConfig } from '@assistant/config';
 import { type NextRequest, NextResponse } from 'next/server';
 
@@ -133,6 +134,7 @@ export function proxy(request: NextRequest) {
     /^\/api\/mobile\/v1\/cards\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const chatMessagePath =
     /^\/api\/mobile\/v1\/chats\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/messages\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const securityReviewIdPath = /^\/api\/mobile\/v1\/security-reviews\/([^/]+)$/;
   if (
     path.startsWith('/api/auth/') ||
     // Passkey owner auth; each route returns 404 unless OWNER_AUTH_MODE=passkey.
@@ -290,6 +292,10 @@ export function proxy(request: NextRequest) {
     (path === '/api/mobile/v1/people' && request.method === 'GET') ||
     (path === '/api/mobile/v1/memory/commitments' && ['GET', 'POST'].includes(request.method)) ||
     (path === '/api/mobile/v1/email-obligations' && ['GET', 'POST'].includes(request.method)) ||
+    (path === '/api/mobile/v1/security-reviews' && request.method === 'GET') ||
+    (securityReviewIdPath.test(path) &&
+      isSecurityIncidentId(path.slice('/api/mobile/v1/security-reviews/'.length)) &&
+      request.method === 'POST') ||
     (path === '/api/mobile/v1/settings' && request.method === 'PATCH') ||
     (/^\/api\/mobile\/v1\/settings\/reminders\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
       path,

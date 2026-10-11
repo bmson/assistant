@@ -1,11 +1,12 @@
-import { decideOwnerSecurityIncident } from '@assistant/application/security-incidents';
+import {
+  decideOwnerSecurityIncident,
+  isSecurityIncidentId,
+} from '@assistant/application/security-incidents';
 import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getEmailObligationRepository } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
 export const dynamic = 'force-dynamic';
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export async function POST(
   request: Request,
@@ -19,7 +20,7 @@ export async function POST(
   ]);
   if (!mutationBody.ok) return mutationBody.response;
   const { id } = await params;
-  if (!UUID_RE.test(id))
+  if (!isSecurityIncidentId(id))
     return mobileJson({ error: 'invalid security incident id' }, { status: 400 });
   const body = mutationBody.value;
   if (
