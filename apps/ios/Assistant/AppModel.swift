@@ -1723,6 +1723,7 @@ final class AppModel {
             return .updated(status)
         } catch {
             guard !Task.isCancelled, connectionIsCurrent(client, version: version) else { return .discarded }
+            if isRequestCancellation(error) { return .discarded }
             return .unavailable
         }
     }

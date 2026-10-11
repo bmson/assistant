@@ -616,6 +616,23 @@ final class APIClientRetryTests: XCTestCase {
     }
 
     @MainActor
+    func testURLSessionCancellationDoesNotMarkActivityStatusUnavailable() async throws {
+        let id = "11000000-0000-0000-0000-000000000007"
+        let path = "/api/mobile/v1/activity/\(id)"
+        StubURLProtocol.prime([], paths: [path: [.failure(URLError(.cancelled))]])
+        let model = AppModel(apiClient: makeClient())
+        let result = await model.fetchActivityStatusOutcome(id: id)
+        guard case .discarded = result else {
+            return XCTFail("URLSession cancellation is not a failed status refresh")
+        }
+
+        var availability = ActivityStatusAvailability()
+        let key = ActivityStatusAvailabilityKey(ownerID: "owner-1", taskID: id)
+        availability.record(result, for: key)
+        XCTAssertNil(availability.notice(for: key, savedStatus: "running"))
+    }
+
+    @MainActor
     func testMissingActivityStatusDoesNotCloseLoadedTask() async throws {
         let id = "11000000-0000-0000-0000-000000000005"
         StubURLProtocol.prime([.success(status: 404, body: Data(#"{"error":"activity not found"}"#.utf8))])
