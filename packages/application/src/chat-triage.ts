@@ -32,6 +32,30 @@ const LEADING_ACTION =
 const ACTION_PHRASE =
   /(remind me\b|(?:on|to) (?:my|the) calendar|to (?:my|the) (?:to-?do|todo|task|shopping|grocery) list|set (?:a|an|up) (?:reminder|meeting|event|alarm|timer|call|appointment)|(?:book|schedule|set up) (?:a|an|me|us|my)\b|send (?:a|an|the|him|her|them)\b|look up\b|search for\b|check (?:my|the) (?:calendar|inbox|e-?mail|mail|schedule|messages|texts|dms)\b|move (?:my|the) [\w\s]*?(?:meeting|call|appointment|event)|find (?:me |us )?(?:a|an|the)\b)/;
 
+// Explicit travel lookup questions can be phrased without the generic action
+// verbs above ("find my lounge", "how do I get to my hotel") and are not
+// personal calendar reads. Route those to the executor before the cheap
+// classifier can send them to the tool-less stream. Keep this limited to
+// request-shaped clauses and travel subjects; recaps and idioms stay chat.
+const TRAVEL_LOOKUP_SUBJECT = '(?:lounges?|gates?|hotels?|lodging|airports?|layovers?|flights?)';
+const TRAVEL_LOOKUP_REQUEST = new RegExp(
+  [
+    '^\\s*(?:(?:can|could|would)\\s+you\\s+)?(?:please\\s+)?(?:find|look up|search for|check|tell me|show me)\\b[^.!?\\n]{0,180}\\b' +
+      TRAVEL_LOOKUP_SUBJECT +
+      '\\b',
+    '^\\s*(?:(?:can|could|would)\\s+you\\s+)?(?:please\\s+)?help me\\s+(?:find|look up|search for|check|figure out|work out)\\b[^.!?\\n]{0,180}\\b' +
+      TRAVEL_LOOKUP_SUBJECT +
+      '\\b',
+    '^\\s*(?:(?:can|could)\\s+you\\s+)?(?:please\\s+)?(?:figure out how to get to|how (?:do|can|could) (?:i|we) get to)\\b[^.!?\\n]{0,180}\\b' +
+      TRAVEL_LOOKUP_SUBJECT +
+      '\\b',
+    '^\\s*i\\b[^.!?\\n]{0,180},\\s*(?:please\\s+)?(?:help me|can you help me|could you help me)\\s+(?:figure out|work out|find|look up|check)\\b[^.!?\\n]{0,180}\\b' +
+      TRAVEL_LOOKUP_SUBJECT +
+      '\\b',
+  ].join('|'),
+  'i',
+);
+
 // Surfaces the assistant can actually open with tools.
 const READ_TARGET =
   '(?:calendars?|schedule|agenda|inbox|e-?mails?|mail|messages|texts|dms|appointments|events|meetings|reminders|to-?dos?|tasks?)';
@@ -175,6 +199,7 @@ export function looksLikeActionRequest(
     return true;
   }
   return (
+    TRAVEL_LOOKUP_REQUEST.test(t) ||
     LEADING_ACTION.test(t) ||
     ACTION_PHRASE.test(t) ||
     READ_PHRASE.test(t) ||
