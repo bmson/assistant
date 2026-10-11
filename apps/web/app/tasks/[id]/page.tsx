@@ -33,6 +33,7 @@ import {
   retryTask,
   revokeAutonomyGrant,
 } from '../actions';
+import { ChecklistCorrectionEntry } from './checklist-correction-entry';
 
 export const dynamic = 'force-dynamic';
 
@@ -87,7 +88,7 @@ export default async function TaskDetailPage({
   params: Promise<{ id: string }>;
   searchParams: Promise<{ before?: string; cursor?: string }>;
 }) {
-  await requireOwner();
+  const ownerSession = await requireOwner();
   const [{ id }, { before, cursor: timelineCursor }] = await Promise.all([params, searchParams]);
   if (!UUID_RE.test(id)) notFound();
 
@@ -210,6 +211,12 @@ export default async function TaskDetailPage({
   const stoppedForTaskBudget =
     task.status === 'needs_attention' && task.progress.startsWith('budget: task budget');
   const terminal = TERMINAL_TASK_STATUSES.has(task.status);
+  const correctableLookups =
+    task.status === 'needs_attention' && task.type === 'chat_turn' && task.trust === 'owner'
+      ? (task.checklist?.items ?? [])
+          .filter((item) => item.kind === 'lookup' && item.status === 'pending')
+          .map(({ id: itemId, label }) => ({ id: itemId, label }))
+      : [];
 
   return (
     <PageShell size="reading">
@@ -309,6 +316,14 @@ export default async function TaskDetailPage({
           </p>
         </form>
       ) : null}
+
+      <ChecklistCorrectionEntry
+        key={`${task.agentId ?? 'unknown'}:${task.id}:${task.checklist?.revision ?? 0}:${ownerSession.formSessionScope ?? ownerSession.user.email}`}
+        taskId={task.id}
+        ownerScope={`${task.agentId ?? 'unknown'}:${ownerSession.formSessionScope ?? ownerSession.user.email}`}
+        revision={task.checklist?.revision ?? 0}
+        items={correctableLookups}
+      />
 
       <InfoGrid className="mt-5 sm:grid-cols-3">
         <InfoItem label="Started by">{trustLabel(task.trust)}</InfoItem>

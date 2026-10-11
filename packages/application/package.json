@@ -38,6 +38,7 @@
     "./shell": "./src/shell.ts",
     "./suggestions": "./src/suggestions.ts",
     "./tasks": "./src/tasks.ts",
+    "./test-support": "./src/test-support.test.ts",
     "./provider-billing": "./src/provider-billing.ts",
     "./public-web": "./src/public-web.ts",
     "./audit-investigation": "./src/audit-investigation.ts",
