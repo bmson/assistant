@@ -103,6 +103,143 @@ async function syntheticAcceptedStream(
   });
 }
 
+async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
+  const page = await context.newPage();
+  const browserErrors: string[] = [];
+  const conversationId = await createConversation(page);
+  const taskId = randomUUID();
+  const firstMessage = 'WEB-17 first turn stays in admission';
+  const secondMessage = 'WEB-17 second prompt remains a draft';
+  const resultText = 'WEB-17 first turn completed';
+  let releaseAdmission!: () => void;
+  const admissionRelease = new Promise<void>((resolve) => {
+    releaseAdmission = resolve;
+  });
+  let admissionStarted!: () => void;
+  const admissionSeen = new Promise<void>((resolve) => {
+    admissionStarted = resolve;
+  });
+  let admissionCount = 0;
+  const admittedTexts: string[] = [];
+  const routeHandler = async (route: Route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.origin !== origin.origin) {
+      await route.abort('blockedbyclient');
+      return;
+    }
+    if (url.pathname === '/api/chat' && request.method() === 'POST') {
+      admissionCount += 1;
+      const requestBody = request.postDataJSON() as {
+        messages?: Array<{ parts?: Array<{ text?: string }> }>;
+      };
+      admittedTexts.push(
+        requestBody.messages
+          ?.at(-1)
+          ?.parts?.map((part) => part.text ?? '')
+          .join('') ?? '',
+      );
+      admissionStarted();
+      await admissionRelease;
+      const response = await syntheticAcceptedStream(
+        conversationId,
+        taskId,
+        fixture.cursorAt(new Date()),
+      );
+      await route.fulfill({
+        status: response.status,
+        headers: Object.fromEntries(response.headers.entries()),
+        body: await response.text(),
+      });
+      return;
+    }
+    if (url.pathname === '/api/chat/status' && request.method() === 'GET') {
+      const requestedTaskId = url.searchParams.get('taskId');
+      if (requestedTaskId !== taskId) {
+        await route.fulfill({ json: statusPayload(null) });
+        return;
+      }
+      await route.fulfill({
+        json: statusPayload('done', {
+          message: {
+            id: randomUUID(),
+            role: 'assistant',
+            parts: [{ type: 'text', text: resultText }],
+          },
+        }),
+      });
+      return;
+    }
+    if (
+      isPathOrChild(url.pathname, '/api/chat') ||
+      isPathOrChild(url.pathname, '/api/mobile/v1/chat')
+    ) {
+      await route.abort('blockedbyclient');
+      return;
+    }
+    await route.continue();
+  };
+  const isChatSafetyRoute = (url: URL) =>
+    isPathOrChild(url.pathname, '/api/chat') || isPathOrChild(url.pathname, '/api/mobile/v1/chat');
+  page.on('pageerror', (error) => browserErrors.push(error.message));
+  await context.route('**/*', async (route) => {
+    const requestUrl = new URL(route.request().url());
+    if (
+      (requestUrl.protocol === 'http:' || requestUrl.protocol === 'https:') &&
+      requestUrl.origin !== origin.origin
+    ) {
+      await route.abort('blockedbyclient');
+      return;
+    }
+    await route.continue();
+  });
+  await page.route(isChatSafetyRoute, routeHandler);
+
+  try {
+    await page.goto(new URL(`/chat/${conversationId}`, origin).toString(), {
+      waitUntil: 'domcontentloaded',
+      timeout: 90_000,
+    });
+    const composer = page.getByRole('combobox', { name: 'Message', exact: true });
+    await composer.waitFor({ timeout: 10_000 });
+    await composer.fill(firstMessage);
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    await waitFor(admissionSeen, 'The first turn did not reach the held admission route');
+
+    await composer.fill(secondMessage);
+    await composer.press('Enter');
+    await page
+      .getByText(
+        'This turn is still being sent. Your message stays in the composer until the current turn finishes.',
+        { exact: true },
+      )
+      .waitFor({ timeout: 10_000 });
+    assert.equal(await composer.inputValue(), secondMessage);
+    assert.deepEqual(admittedTexts, [firstMessage]);
+    assert.equal(
+      admissionCount,
+      1,
+      'The second prompt must not be admitted while the first is held',
+    );
+    assert.equal(await page.getByText(secondMessage, { exact: true }).count(), 0);
+
+    releaseAdmission();
+    await page.getByText(resultText, { exact: true }).waitFor({ timeout: 20_000 });
+    await page.getByRole('button', { name: 'Send', exact: true }).waitFor();
+    assert.equal(await composer.inputValue(), secondMessage);
+    assert.equal(await page.getByText(firstMessage, { exact: true }).count(), 1);
+    assert.equal(await page.getByText(secondMessage, { exact: true }).count(), 0);
+    assert.deepEqual(admittedTexts, [firstMessage]);
+    assert.equal(admissionCount, 1);
+    assert.deepEqual(browserErrors, []);
+  } finally {
+    releaseAdmission();
+    await page.unroute(isChatSafetyRoute, routeHandler).catch(() => {});
+    await page.close();
+    await context.unroute('**/*').catch(() => {});
+  }
+}
+
 async function verifyDelayedTerminalPoll(status: 'done' | 'cancelled' | 'failed'): Promise<void> {
   const page = await context.newPage();
   const browserErrors: string[] = [];
@@ -623,12 +760,13 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
 }
 
 try {
+  await verifyDraftIsRetainedDuringHeldAdmission();
   for (const status of ['done', 'cancelled', 'failed'] as const) {
     await verifyDelayedTerminalPoll(status);
   }
   await verifyUnmountedPollDoesNotPublishAfterRemount();
   console.log(
-    'WEB-17 mounted client ownership passed for delayed A done/cancelled/failed polls and B-free task A abort/remount; B admission, status payloads and restored task response were synthetic, with no model/provider or worker execution.',
+    'WEB-17 mounted client acceptance passed for a retained second draft during held admission, delayed A done/cancelled/failed polls and task A abort/remount; admission/status payloads and responses were synthetic, with no model/provider or worker execution.',
   );
 } finally {
   await context.close();
