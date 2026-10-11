@@ -72,7 +72,10 @@ const disabledActions = vi.hoisted(
     ),
 );
 vi.mock('@/auth', () => ({
-  requireOwner: async () => ({}),
+  requireOwner: async () => ({
+    user: { name: 'Synthetic owner', email: 'owner@example.test' },
+    formSessionScope: 'synthetic-owner-session',
+  }),
   isAuthed: async () => ({ user: { name: 'Synthetic owner', email: 'owner@example.test' } }),
   authMode: 'passkey',
 }));
