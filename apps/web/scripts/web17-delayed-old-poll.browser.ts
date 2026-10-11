@@ -391,6 +391,8 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
   let freshRouteSettledCount = 0;
   let freshGateReleased = false;
   let remounted = false;
+  const oldPollIds: string[] = [];
+  const freshPollIds: string[] = [];
 
   const maybeSettleOldRoutes = () => {
     if (oldGateReleased && oldRouteCount > 0 && oldRouteSettledCount === oldRouteCount) {
@@ -404,26 +406,39 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
   };
 
   page.on('pageerror', (error) => browserErrors.push(error.message));
-  await page.addInitScript((expectedTaskId: string) => {
-    const stateWindow = window as Window & { __web17TaskPollAborts?: string[] };
-    const aborts: string[] = [];
-    stateWindow.__web17TaskPollAborts = aborts;
-    const originalFetch = window.fetch.bind(window);
-    window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
-      const requestUrl = new URL(
-        input instanceof Request ? input.url : input.toString(),
-        window.location.href,
-      );
-      const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
-      if (
-        requestUrl.pathname === '/api/chat/status' &&
-        requestUrl.searchParams.get('taskId') === expectedTaskId
-      ) {
-        signal?.addEventListener('abort', () => aborts.push(expectedTaskId), { once: true });
-      }
-      return originalFetch(input, init);
-    }) as typeof window.fetch;
-  }, taskId);
+  const pollTokenPrefix = randomUUID();
+  await page.addInitScript(
+    ({ expectedTaskId, tokenPrefix }: { expectedTaskId: string; tokenPrefix: string }) => {
+      const stateWindow = window as Window & { __web17TaskPollAborts?: string[] };
+      const aborts: string[] = [];
+      stateWindow.__web17TaskPollAborts = aborts;
+      const documentId = crypto.randomUUID();
+      let sequence = 0;
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        const requestUrl = new URL(
+          input instanceof Request ? input.url : input.toString(),
+          window.location.href,
+        );
+        const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+        if (
+          requestUrl.pathname === '/api/chat/status' &&
+          requestUrl.searchParams.get('taskId') === expectedTaskId
+        ) {
+          const pollId = `${tokenPrefix}-${documentId}-${++sequence}`;
+          signal?.addEventListener('abort', () => aborts.push(pollId), { once: true });
+          const headers = new Headers(input instanceof Request ? input.headers : undefined);
+          new Headers(init?.headers).forEach((value, name) => {
+            headers.set(name, value);
+          });
+          headers.set('x-web17-poll-id', pollId);
+          return originalFetch(input, { ...init, headers });
+        }
+        return originalFetch(input, init);
+      }) as typeof window.fetch;
+    },
+    { expectedTaskId: taskId, tokenPrefix: pollTokenPrefix },
+  );
 
   const routeHandler = async (route: Route) => {
     const request = route.request();
@@ -435,9 +450,12 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
     if (url.pathname === '/api/chat/status' && request.method() === 'GET') {
       const requestedTaskId = url.searchParams.get('taskId');
       if (requestedTaskId === taskId) {
+        const pollId = await request.headerValue('x-web17-poll-id');
+        assert.ok(pollId?.startsWith(`${pollTokenPrefix}-`));
         taskAPollCount += 1;
         if (!remounted) {
           oldRouteCount += 1;
+          oldPollIds.push(pollId as string);
           oldRouteEntered = true;
           oldRequestStarted();
           await oldRequestGate;
@@ -463,6 +481,7 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
         }
         freshRouteEntered = true;
         freshPollCount += 1;
+        freshPollIds.push(pollId as string);
         freshRequestStarted();
         await freshRequestGate;
         try {
@@ -520,26 +539,34 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
     await composer.waitFor({ timeout: 10_000 });
     await page.getByRole('button', { name: 'Stop this task', exact: true }).waitFor();
     await waitFor(oldStarted, 'Task A initial poll did not start');
+    const abortsBeforeUnmount = await page.evaluate(
+      () => (window as Window & { __web17TaskPollAborts?: string[] }).__web17TaskPollAborts ?? [],
+    );
+    const pollIdToAbort = oldPollIds
+      .slice()
+      .reverse()
+      .find((pollId) => !abortsBeforeUnmount.includes(pollId));
+    assert.ok(pollIdToAbort, 'Task A must have an outstanding request before unmount');
 
     await page.getByRole('link', { name: 'All chats', exact: true }).click();
     await page.waitForURL((url) => url.pathname === '/chat/all', { timeout: 20_000 });
     await composer.waitFor({ state: 'detached', timeout: 10_000 });
     await page.waitForFunction(
-      (expectedTaskId) =>
+      (expectedPollId) =>
         (window as Window & { __web17TaskPollAborts?: string[] }).__web17TaskPollAborts?.includes(
-          expectedTaskId,
+          expectedPollId,
         ) ?? false,
-      taskId,
+      pollIdToAbort,
       { timeout: 10_000 },
     );
-    const abortedPolls = await page.evaluate(
-      (expectedTaskId) =>
-        (window as Window & { __web17TaskPollAborts?: string[] }).__web17TaskPollAborts?.filter(
-          (abortedTaskId) => abortedTaskId === expectedTaskId,
-        ).length ?? 0,
-      taskId,
+    const exactOldPollAborted = await page.evaluate(
+      (expectedPollId) =>
+        (window as Window & { __web17TaskPollAborts?: string[] }).__web17TaskPollAborts?.includes(
+          expectedPollId,
+        ) ?? false,
+      pollIdToAbort,
     );
-    assert.ok(abortedPolls > 0, 'Unmounting the chat must abort task A polling');
+    assert.equal(exactOldPollAborted, true, 'Unmounting the chat must abort the held Task A poll');
 
     // The ordinary list link intentionally drops task/cursor query state. Use
     // the same supported task deep link to restore the exact persisted A poll.
@@ -570,18 +597,13 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
     assert.equal(await page.getByText(freshResult, { exact: true }).count(), 1);
     assert.ok(oldRouteCount >= 1, 'The initial task A poll must reach the held route');
     assert.equal(taskAPollCount, oldRouteCount + freshPollCount);
-    const abortedFreshPolls = await page.evaluate(
-      (expectedTaskId) =>
-        (window as Window & { __web17TaskPollAborts?: string[] }).__web17TaskPollAborts?.filter(
-          (abortedTaskId) => abortedTaskId === expectedTaskId,
-        ).length ?? 0,
-      taskId,
+    const abortedFreshPollIds = await page.evaluate(
+      () => (window as Window & { __web17TaskPollAborts?: string[] }).__web17TaskPollAborts ?? [],
     );
-    assert.equal(
-      freshPollCount - abortedFreshPolls,
-      1,
-      'Exactly one remounted Task A poll must complete and publish its result',
+    const effectiveFreshPollIds = freshPollIds.filter(
+      (pollId) => !abortedFreshPollIds.includes(pollId),
     );
+    assert.equal(effectiveFreshPollIds.length, 1, 'Exactly one fresh Task A poll must complete');
     assert.deepEqual(browserErrors, []);
   } finally {
     oldGateReleased = true;
