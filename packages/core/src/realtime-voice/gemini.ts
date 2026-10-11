@@ -20,6 +20,8 @@ import {
 export interface GeminiLiveOptions {
   project: string;
   location: string;
+  /** Bounds both the initial setup handshake and every resume attempt. */
+  connectTimeoutMs?: number;
   /** Injected for tests. */
   client?: Pick<GoogleGenAI, 'live'>;
 }
@@ -58,7 +60,7 @@ export function createGeminiLiveProvider(options: GeminiLiveOptions): RealtimeVo
       const client =
         options.client ??
         new GoogleGenAI({ vertexai: true, project: options.project, location: options.location });
-      return connectGeminiLive(client, config, events);
+      return connectGeminiLive(client, config, events, options.connectTimeoutMs);
     },
   };
 }
@@ -67,6 +69,7 @@ async function connectGeminiLive(
   client: Pick<GoogleGenAI, 'live'>,
   request: RealtimeSessionConfig,
   events: RealtimeSessionEvents,
+  connectTimeoutMs = 10_000,
 ): Promise<RealtimeSession> {
   if (!/^[A-Za-z0-9][A-Za-z0-9._@-]*$/.test(request.model))
     throw new Error(`Not a Vertex live model name: ${request.model}`);
@@ -171,40 +174,140 @@ async function connectGeminiLive(
   // the next one so words said during the handover are not lost.
   let heldAudio: string[] = [];
 
-  type Connection = { session: Session; retired: boolean };
-  let active: Connection;
+  type Connection = {
+    session?: Session;
+    retired: boolean;
+    ready: boolean;
+    activated: boolean;
+    queuedMessages: LiveServerMessage[];
+    closeCalled: boolean;
+    close(): void;
+  };
+  let active: Connection | null = null;
 
   const open = async (handle?: string): Promise<Connection> => {
-    const connection = { retired: false } as Connection;
-    connection.session = await client.live.connect({
-      model: request.model,
-      config: { ...liveConfig, sessionResumption: handle ? { handle } : {} },
-      callbacks: {
-        onmessage: (message: LiveServerMessage) => {
-          if (connection.retired) return;
-          const update = message.sessionResumptionUpdate;
-          if (update?.resumable && update.newHandle) resumeHandle = update.newHandle;
-          if (message.goAway) void resume(false);
-          onMessage(message);
-        },
-        onerror: (event) =>
-          events.error(new Error(`Gemini Live error: ${String(event.message ?? event)}`)),
-        onclose: () => {
-          if (connection.retired || closedByUs) return;
-          connection.retired = true;
-          // A GoAway handover may still be in flight; if it lands, this
-          // connection is no longer the active one and there is nothing to do.
-          void Promise.resolve(resuming).then(() =>
-            active === connection ? resume(true) : undefined,
-          );
-        },
+    const connection: Connection = {
+      retired: false,
+      ready: false,
+      activated: false,
+      queuedMessages: [],
+      closeCalled: false,
+      close() {
+        if (connection.closeCalled || !connection.session) return;
+        connection.closeCalled = true;
+        try {
+          connection.session.close();
+        } catch (error) {
+          events.error(error instanceof Error ? error : new Error(String(error)));
+        }
       },
+    };
+    let rejectSetup!: (error: Error) => void;
+    let setupSettled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const setupFailure = new Promise<never>((_, reject) => {
+      rejectSetup = reject;
     });
-    return connection;
+    const failSetup = (error: Error) => {
+      if (setupSettled || connection.retired) return;
+      setupSettled = true;
+      connection.retired = true;
+      if (timer) clearTimeout(timer);
+      rejectSetup(error);
+      connection.close();
+    };
+    const deliver = (message: LiveServerMessage) => {
+      if (connection.retired) return;
+      const update = message.sessionResumptionUpdate;
+      if (update?.resumable && update.newHandle) resumeHandle = update.newHandle;
+      if (message.goAway) void resume(false);
+      onMessage(message);
+    };
+    const pending = Promise.resolve().then(() =>
+      client.live.connect({
+        model: request.model,
+        config: { ...liveConfig, sessionResumption: handle ? { handle } : {} },
+        callbacks: {
+          onmessage: (message: LiveServerMessage) => {
+            if (connection.retired) return;
+            if (!connection.ready || !connection.activated) {
+              connection.queuedMessages.push(message);
+              return;
+            }
+            deliver(message);
+          },
+          onerror: (event) => {
+            if (connection.retired) return;
+            const error = new Error(`Gemini Live error: ${String(event.message ?? event)}`);
+            if (!connection.ready) failSetup(error);
+            else events.error(error);
+          },
+          onclose: () => {
+            if (connection.retired || closedByUs) return;
+            if (!connection.ready) {
+              failSetup(new Error('Gemini Live closed before setup completed'));
+              return;
+            }
+            connection.retired = true;
+            // A GoAway handover may still be in flight; if it lands, this
+            // connection is no longer the active one and there is nothing to do.
+            void Promise.resolve(resuming).then(() =>
+              active === connection ? resume(true) : undefined,
+            );
+          },
+        },
+      }),
+    );
+    // Consume a late rejection too: Promise.race settles at the first setup
+    // failure, but the SDK's connect promise may reject afterward.
+    pending.then(
+      (session) => {
+        connection.session = session;
+        if (connection.retired) connection.close();
+      },
+      () => {},
+    );
+
+    try {
+      timer = setTimeout(
+        () => failSetup(new Error(`Gemini Live setup timed out after ${connectTimeoutMs} ms`)),
+        connectTimeoutMs,
+      );
+      const session = await Promise.race([pending, setupFailure]);
+      if (connection.retired) {
+        connection.session = session;
+        connection.close();
+        throw new Error('Gemini Live setup was retired before becoming ready');
+      }
+      connection.session = session;
+      connection.ready = true;
+      setupSettled = true;
+      if (timer) clearTimeout(timer);
+      return connection;
+    } catch (error) {
+      connection.retired = true;
+      connection.close();
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
+  const activate = (connection: Connection) => {
+    connection.activated = true;
+    const queued = connection.queuedMessages;
+    connection.queuedMessages = [];
+    for (const message of queued) {
+      if (connection.retired) break;
+      const update = message.sessionResumptionUpdate;
+      if (update?.resumable && update.newHandle) resumeHandle = update.newHandle;
+      if (message.goAway) void resume(false);
+      onMessage(message);
+    }
   };
 
   const sendPcm = (data: string) => {
-    if (active.retired) {
+    if (!active || active.retired) {
       heldAudio.push(data);
       // Five seconds of 16 kHz audio at 20 ms a chunk.
       if (heldAudio.length > 250) heldAudio.shift();
@@ -221,7 +324,7 @@ async function connectGeminiLive(
    * a handover the message is dropped; the resumed session carries on.
    */
   const send = (write: (session: Session) => void) => {
-    if (active.retired) return;
+    if (!active || active.retired || !active.session) return;
     try {
       write(active.session);
     } catch (error) {
@@ -237,24 +340,31 @@ async function connectGeminiLive(
           const next = await open(resumeHandle);
           if (closedByUs) {
             next.retired = true;
-            next.session.close();
+            next.close();
+            return;
+          }
+          if (!active) {
+            next.retired = true;
+            next.close();
             return;
           }
           const previous = active;
           previous.retired = true;
           active = next;
+          activate(next);
           serverConfirmedInterruption = false;
-          if (!lost) previous.session.close();
+          if (!lost) previous.close();
           const held = heldAudio;
           heldAudio = [];
           for (const data of held) sendPcm(data);
           return;
         } catch (error) {
-          events.error(
-            new Error(
-              `Gemini Live could not resume: ${error instanceof Error ? error.message : String(error)}`,
-            ),
-          );
+          if (!closedByUs)
+            events.error(
+              new Error(
+                `Gemini Live could not resume: ${error instanceof Error ? error.message : String(error)}`,
+              ),
+            );
         }
       }
       // After a GoAway the old connection still works until it closes, and
@@ -270,6 +380,7 @@ async function connectGeminiLive(
   };
 
   active = await open();
+  activate(active);
 
   return {
     sendAudio(mulaw) {
@@ -304,8 +415,10 @@ async function connectGeminiLive(
     async close() {
       closedByUs = true;
       flush();
-      active.retired = true;
-      active.session.close();
+      if (active) {
+        active.retired = true;
+        active.close();
+      }
     },
   };
 }

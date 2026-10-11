@@ -14,6 +14,7 @@ import { type ToolContext, ToolDispatcher, ToolRegistry } from '@assistant/tools
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
+import { AmbiguousGoogleMutationError } from '../../../packages/tools/src/google/client.js';
 
 const enabled = /^(?:127\.0\.0\.1|localhost):\d+$/.test(process.env.FIRESTORE_EMULATOR_HOST ?? '');
 
@@ -203,6 +204,114 @@ describe.skipIf(!enabled)('F19 Firestore chat Stop at tool boundaries', () => {
       await pending.catch(() => {});
     }
   });
+
+  it.each(['completed', 'unknown'] as const)(
+    'retains an entered tool %s receipt after Stop without reviving or repeating the task',
+    async (effect) => {
+      const admitted = await admittedTurn('Run the synthetic action.');
+      let invocations = 0;
+      let signalEntered!: () => void;
+      let releaseHandler!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        signalEntered = resolve;
+      });
+      const handlerGate = new Promise<void>((resolve) => {
+        releaseHandler = resolve;
+      });
+      const name = `test.firestore-stop-entered-${randomUUID()}`;
+      const run = dispatcher(
+        tools,
+        registryFor(name, 'autonomous', async () => {
+          invocations += 1;
+          signalEntered();
+          await handlerGate;
+          // No provider is called. This models an already-entered mutation
+          // returning after Stop, including a lost acceptance response.
+          if (effect === 'unknown')
+            throw new AmbiguousGoogleMutationError('Synthetic response lost after acceptance');
+          return { completed: true, receiptId: 'synthetic-completed-effect' };
+        }),
+      );
+      const controller = new AbortController();
+      const input = {
+        task: admitted.task,
+        step: 1,
+        toolName: name,
+        args: { value: 'one entered action' },
+        modelToolCallId: randomUUID(),
+        ctx: {
+          ...context(admitted.task.id, admitted.conversation.id),
+          signal: controller.signal,
+        },
+        provenance: { plannerVersion: 1, promptVersion: 1, model: 'synthetic/no-provider' },
+      };
+      const pending = run.dispatch(input);
+      try {
+        await Promise.race([
+          entered,
+          pending.then(() => {
+            throw new Error('Dispatcher settled before entering the synthetic handler');
+          }),
+        ]);
+        expect(invocations).toBe(1);
+        const executing = await store
+          .collection('toolCalls')
+          .where('taskId', '==', admitted.task.id)
+          .get();
+        expect(executing.size).toBe(1);
+        expect(executing.docs[0]?.get('status')).toBe('executing');
+
+        await expect(
+          chat.cancelChatTurn({
+            agentId,
+            conversationId: admitted.conversation.id,
+            clientOperationId: admitted.clientOperationId,
+          }),
+        ).resolves.toMatchObject({
+          kind: 'admitted_task',
+          status: 'cancelled',
+          transitioned: true,
+          effectStatus: 'unknown',
+        });
+        controller.abort();
+        releaseHandler();
+
+        const result = await pending;
+        expect(result.kind).toBe('executed');
+        if (result.kind !== 'executed') throw new Error('Expected retained entered-tool outcome');
+        const expectedResult =
+          effect === 'completed'
+            ? { completed: true, receiptId: 'synthetic-completed-effect' }
+            : { deliveryStatus: 'unknown', retrySuppressed: true };
+        expect(result.result).toMatchObject(expectedResult);
+        const retained = await tools.load(agentId, admitted.task.id, result.toolCallId);
+        expect(retained?.task.status).toBe('cancelled');
+        expect(retained?.toolCall.status).toBe('succeeded');
+        expect(retained?.toolCall.result).toMatchObject(expectedResult);
+
+        await expect(
+          run.dispatch({
+            ...input,
+            ctx: context(admitted.task.id, admitted.conversation.id),
+          }),
+        ).resolves.toMatchObject({
+          kind: 'executed',
+          toolCallId: result.toolCallId,
+          result: expectedResult,
+        });
+        expect(invocations).toBe(1);
+        const replayCalls = await store
+          .collection('toolCalls')
+          .where('taskId', '==', admitted.task.id)
+          .get();
+        expect(replayCalls.size).toBe(1);
+        expect((await store.doc('tasks', admitted.task.id).get()).get('status')).toBe('cancelled');
+      } finally {
+        releaseHandler();
+        await pending.catch(() => {});
+      }
+    },
+  );
 
   it('keeps a cancelled waiting-approval chat stopped after a late approval and execution attempt', async () => {
     const admitted = await admittedTurn('Run the synthetic action only with owner approval.');

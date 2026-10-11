@@ -2589,6 +2589,13 @@ final class APIModelsTests: XCTestCase {
             LiveActivityManager.safeDetail(for: .stopped, proposed: "Anything private"),
             "Open Assistant for details"
         )
+        XCTAssertEqual(
+            LiveActivityManager.safeDetail(
+                for: .stopped,
+                proposed: "Task cancelled; external effects are not reversed"
+            ),
+            "Task cancelled; external effects are not reversed"
+        )
     }
 
     func testToolProgressNeverPublishesATerminalTurnState() {

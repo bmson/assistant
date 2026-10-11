@@ -10,13 +10,15 @@ afterEach(async () => {
   server = undefined;
 });
 
-async function fakeRealtime(): Promise<{
+async function fakeRealtime(options: { setup?: 'ack' | 'reject' | 'hold' | 'late' } = {}): Promise<{
   url: string;
   received: Array<Record<string, unknown>>;
   headers: Promise<Record<string, string | string[] | undefined>>;
   client: Promise<WebSocket>;
+  closed: () => number;
 }> {
   const received: Array<Record<string, unknown>> = [];
+  let closeCount = 0;
   let resolveClient: (socket: WebSocket) => void = () => {};
   let resolveHeaders: (headers: Record<string, string | string[] | undefined>) => void = () => {};
   const client = new Promise<WebSocket>((resolve) => {
@@ -28,12 +30,38 @@ async function fakeRealtime(): Promise<{
   server = new WebSocketServer({ port: 0, host: '127.0.0.1' });
   server.on('connection', (socket, request) => {
     resolveHeaders(request.headers);
-    socket.on('message', (raw) => received.push(JSON.parse(raw.toString())));
+    socket.on('close', () => closeCount++);
+    socket.on('message', (raw) => {
+      const event = JSON.parse(raw.toString()) as Record<string, unknown>;
+      received.push(event);
+      if (event.type === 'session.update') {
+        const setup = options.setup ?? 'ack';
+        if (setup === 'ack')
+          socket.send(JSON.stringify({ type: 'session.updated', session: { type: 'realtime' } }));
+        else if (setup === 'reject')
+          socket.send(
+            JSON.stringify({ type: 'error', error: { message: 'invalid session config' } }),
+          );
+        else if (setup === 'late')
+          setTimeout(() => {
+            if (socket.readyState === socket.OPEN)
+              socket.send(
+                JSON.stringify({ type: 'session.updated', session: { type: 'realtime' } }),
+              );
+          }, 80);
+      }
+    });
     resolveClient(socket);
   });
   await new Promise<void>((resolve) => server?.once('listening', () => resolve()));
   const address = server.address() as { port: number };
-  return { url: `ws://127.0.0.1:${address.port}`, received, headers, client };
+  return {
+    url: `ws://127.0.0.1:${address.port}`,
+    received,
+    headers,
+    client,
+    closed: () => closeCount,
+  };
 }
 
 function recorder(): RealtimeSessionEvents & { log: unknown[] } {
@@ -53,7 +81,7 @@ const until = (check: () => boolean) => vi.waitFor(() => expect(check()).toBe(tr
 
 describe('OpenAI Realtime adapter', () => {
   it('configures a μ-law phone session with the brief, voice and tools', async () => {
-    const fake = await fakeRealtime();
+    const fake = await fakeRealtime({ setup: 'ack' });
     const session = await createOpenAIRealtimeProvider({
       apiKey: 'sk-test',
       url: fake.url,
@@ -92,6 +120,72 @@ describe('OpenAI Realtime adapter', () => {
       response: { instructions: 'Greet them.' },
     });
     await session.close();
+  });
+
+  it('does not return a session until the server confirms configuration', async () => {
+    const fake = await fakeRealtime({ setup: 'hold' });
+    let settled = false;
+    const opening = createOpenAIRealtimeProvider({ apiKey: 'sk-test', url: fake.url }).connect(
+      { model: 'gpt-realtime', instructions: 'Test setup.', tools: [] },
+      recorder(),
+    );
+    void opening.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await until(() => fake.received.some((event) => event.type === 'session.update'));
+    expect(settled).toBe(false);
+    (await fake.client).send(
+      JSON.stringify({ type: 'session.updated', session: { type: 'realtime' } }),
+    );
+    const session = await opening;
+    expect(session).toBeDefined();
+    await session.close();
+  });
+
+  it('rejects a server setup error and retires the fake socket', async () => {
+    const fake = await fakeRealtime({ setup: 'reject' });
+    const events = recorder();
+    const opening = createOpenAIRealtimeProvider({
+      apiKey: 'sk-test',
+      url: fake.url,
+      connectTimeoutMs: 100,
+    }).connect({ model: 'gpt-realtime', instructions: '', tools: [] }, events);
+    await expect(opening).rejects.toThrow('invalid session config');
+    await until(() => fake.closed() === 1);
+    expect(events.log).toEqual([]);
+  });
+
+  it('times out without setup acknowledgment and retires a late fake acknowledgment', async () => {
+    const fake = await fakeRealtime({ setup: 'late' });
+    const events = recorder();
+    const opening = createOpenAIRealtimeProvider({
+      apiKey: 'sk-test',
+      url: fake.url,
+      connectTimeoutMs: 10,
+    }).connect({ model: 'gpt-realtime', instructions: '', tools: [] }, events);
+    await expect(opening).rejects.toThrow('OpenAI Realtime setup timed out');
+    await until(() => fake.closed() === 1);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(events.log).toEqual([]);
+    expect(fake.received.map((event) => event.type)).toEqual(['session.update']);
+  });
+
+  it('makes close idempotent after successful setup', async () => {
+    const fake = await fakeRealtime();
+    const session = await createOpenAIRealtimeProvider({ apiKey: 'k', url: fake.url }).connect(
+      { model: 'gpt-realtime', instructions: '', tools: [] },
+      recorder(),
+    );
+    const firstClose = session.close();
+    expect(session.close()).toBe(firstClose);
+    await firstClose;
+    await until(() => fake.closed() === 1);
+    expect(fake.closed()).toBe(1);
   });
 
   it('relays audio, barge-in, transcripts, tool calls and usage', async () => {
