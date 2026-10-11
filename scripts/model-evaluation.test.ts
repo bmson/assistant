@@ -364,16 +364,56 @@ describe('offline paired reasoning evidence', () => {
       [(run: PairedReasoningRun) => (run.budgetUsd = 0), 'Run budget must be finite and positive'],
       [
         (run: PairedReasoningRun) => (run.repeats = 0),
-        'Run repetitions must be a positive integer',
+        'Run repetitions must be an integer from 1 to 5',
       ],
       [
         (run: PairedReasoningRun) => (run.repeats = 1.5),
-        'Run repetitions must be a positive integer',
+        'Run repetitions must be an integer from 1 to 5',
+      ],
+      [
+        (run: PairedReasoningRun) => (run.repeats = Number.POSITIVE_INFINITY),
+        'Run repetitions must be an integer from 1 to 5',
+      ],
+      [
+        (run: PairedReasoningRun) => (run.repeats = Number.MAX_SAFE_INTEGER),
+        'Run repetitions must be an integer from 1 to 5',
       ],
     ] as const) {
       const { defaultRun, disabledRun } = pairedFixture();
       mutate(disabledRun);
       expect(comparePairedReasoningRuns(defaultRun, disabledRun).blockers).toContain(blocker);
+    }
+  });
+
+  it('bounds repeat enumeration before building the expected pair set', () => {
+    for (const repeats of [Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER]) {
+      const { defaultRun, disabledRun } = pairedFixture();
+      defaultRun.repeats = repeats;
+      disabledRun.repeats = repeats;
+      const comparison = comparePairedReasoningRuns(defaultRun, disabledRun);
+      expect(comparison.recommendationAllowed).toBe(false);
+      expect(comparison.coverage.planned).toBe(0);
+      expect(comparison.blockers).toContain('Run repetitions must be an integer from 1 to 5');
+    }
+  });
+
+  it('bounds and rejects duplicate model and case plans before enumerating pairs', () => {
+    for (const mutate of [
+      (run: PairedReasoningRun) => (run.models = Array.from({ length: 13 }, (_, i) => `m${i}`)),
+      (run: PairedReasoningRun) =>
+        (run.models = ['optional-reasoning-model', 'optional-reasoning-model']),
+      (run: PairedReasoningRun) => (run.cases = Array.from({ length: 15 }, (_, i) => `c${i}`)),
+      (run: PairedReasoningRun) => (run.cases = ['safe-draft', 'safe-draft']),
+    ]) {
+      const { defaultRun, disabledRun } = pairedFixture();
+      mutate(defaultRun);
+      mutate(disabledRun);
+      const comparison = comparePairedReasoningRuns(defaultRun, disabledRun);
+      expect(comparison.recommendationAllowed).toBe(false);
+      expect(comparison.coverage.planned).toBe(0);
+      expect(comparison.blockers).toContain(
+        'Captured model/case plan is empty, duplicated, or exceeds harness limits',
+      );
     }
   });
 

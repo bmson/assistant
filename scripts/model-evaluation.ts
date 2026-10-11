@@ -104,6 +104,9 @@ export interface PairedReasoningRun {
   results: PairedReasoningResult[];
 }
 
+const MAX_EVALUATION_REPEATS = 5;
+const MAX_EVALUATION_MODELS = 12;
+
 export interface PairedReasoningComparison {
   eligible: boolean;
   recommendationAllowed: boolean;
@@ -179,10 +182,12 @@ export function comparePairedReasoningRuns(
   if (
     !Number.isSafeInteger(defaultRun.repeats) ||
     defaultRun.repeats <= 0 ||
+    defaultRun.repeats > MAX_EVALUATION_REPEATS ||
     !Number.isSafeInteger(disabledRun.repeats) ||
-    disabledRun.repeats <= 0
+    disabledRun.repeats <= 0 ||
+    disabledRun.repeats > MAX_EVALUATION_REPEATS
   ) {
-    blockers.add('Run repetitions must be a positive integer');
+    blockers.add(`Run repetitions must be an integer from 1 to ${MAX_EVALUATION_REPEATS}`);
   }
   if (
     !Number.isFinite(defaultRun.heldUsd) ||
@@ -221,21 +226,42 @@ export function comparePairedReasoningRuns(
   }
 
   const repeats =
-    Number.isSafeInteger(defaultRun.repeats) && defaultRun.repeats > 0 ? defaultRun.repeats : 0;
-  const planned = defaultRun.models.length * defaultRun.cases.length * repeats;
+    Number.isSafeInteger(defaultRun.repeats) &&
+    defaultRun.repeats > 0 &&
+    defaultRun.repeats <= MAX_EVALUATION_REPEATS
+      ? defaultRun.repeats
+      : 0;
+  const validModels =
+    defaultRun.models.length > 0 &&
+    defaultRun.models.length <= MAX_EVALUATION_MODELS &&
+    new Set(defaultRun.models).size === defaultRun.models.length;
+  const validCases =
+    defaultRun.cases.length > 0 &&
+    defaultRun.cases.length <= MODEL_EVALUATION_CASES.length &&
+    new Set(defaultRun.cases).size === defaultRun.cases.length;
+  if (!validModels || !validCases)
+    blockers.add('Captured model/case plan is empty, duplicated, or exceeds harness limits');
+  const validMetadata = defaultRun.caseMetadata.length <= MODEL_EVALUATION_CASES.length;
+  if (!validMetadata) blockers.add('Captured corpus metadata exceeds harness limits');
+  const planned =
+    validModels && validCases ? defaultRun.models.length * defaultRun.cases.length * repeats : 0;
   const expectedKeys = new Set<string>();
   const caseMetadata = new Map<string, PairedReasoningRun['caseMetadata'][number]>();
-  for (const metadata of defaultRun.caseMetadata) {
-    if (caseMetadata.has(metadata.id)) blockers.add('Captured corpus has duplicate case metadata');
-    caseMetadata.set(metadata.id, metadata);
+  if (validMetadata) {
+    for (const metadata of defaultRun.caseMetadata) {
+      if (caseMetadata.has(metadata.id))
+        blockers.add('Captured corpus has duplicate case metadata');
+      caseMetadata.set(metadata.id, metadata);
+    }
   }
   if (
-    caseMetadata.size !== defaultRun.cases.length ||
-    defaultRun.cases.some((id) => !caseMetadata.has(id))
+    (validMetadata && caseMetadata.size !== defaultRun.cases.length) ||
+    (validMetadata && defaultRun.cases.some((id) => !caseMetadata.has(id)))
   ) {
     blockers.add('Captured corpus metadata does not cover the selected cases');
   }
   if (
+    !validMetadata ||
     canonicalJson(defaultRun.caseMetadata.map(({ id }) => id)) !==
       canonicalJson(defaultRun.cases) ||
     canonicalJson(
@@ -244,10 +270,12 @@ export function comparePairedReasoningRuns(
   ) {
     blockers.add('Captured corpus case list or critical-case list is inconsistent');
   }
-  for (const model of defaultRun.models) {
-    for (const testCase of defaultRun.cases) {
-      for (let repeat = 1; repeat <= defaultRun.repeats; repeat++) {
-        expectedKeys.add(pairKey({ model, case: testCase, repeat }));
+  if (validModels && validCases) {
+    for (const model of defaultRun.models) {
+      for (const testCase of defaultRun.cases) {
+        for (let repeat = 1; repeat <= repeats; repeat++) {
+          expectedKeys.add(pairKey({ model, case: testCase, repeat }));
+        }
       }
     }
   }
