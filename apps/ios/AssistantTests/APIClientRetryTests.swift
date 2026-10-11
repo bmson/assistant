@@ -3085,7 +3085,11 @@ extension APIClientRetryTests {
         while !StubURLProtocol.urls.contains(where: { $0.path == "/api/mobile/v1/activity/\(taskId)" }) {
             await Task.yield()
         }
-        for _ in 0..<1_000 where model.isSending { try await Task.sleep(for: .milliseconds(10)) }
+        let settlementDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while model.activityDetail != "Task cancelled; external effects are not reversed",
+              ContinuousClock.now < settlementDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
 
         XCTAssertFalse(model.isSending)
         XCTAssertFalse(model.isCancellingSend)
