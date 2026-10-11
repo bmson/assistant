@@ -111,6 +111,7 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
   const firstMessage = 'WEB-17 first turn stays in admission';
   const secondMessage = 'WEB-17 second prompt remains a draft';
   const resultText = 'WEB-17 first turn completed';
+  const resultMessageId = randomUUID();
   let releaseAdmission!: () => void;
   const admissionRelease = new Promise<void>((resolve) => {
     releaseAdmission = resolve;
@@ -162,7 +163,7 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
       await route.fulfill({
         json: statusPayload('done', {
           message: {
-            id: randomUUID(),
+            id: resultMessageId,
             role: 'assistant',
             parts: [{ type: 'text', text: resultText }],
           },
@@ -209,10 +210,7 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
     await composer.fill(secondMessage);
     await composer.press('Enter');
     await page
-      .getByText(
-        'This turn is still being sent. Your message stays in the composer until the current turn finishes.',
-        { exact: true },
-      )
+      .getByText('Still sending. Your next message stays here.', { exact: true })
       .waitFor({ timeout: 10_000 });
     assert.equal(await composer.inputValue(), secondMessage);
     assert.deepEqual(admittedTexts, [firstMessage]);
@@ -225,8 +223,11 @@ async function verifyDraftIsRetainedDuringHeldAdmission(): Promise<void> {
 
     releaseAdmission();
     await page.getByText(resultText, { exact: true }).waitFor({ timeout: 20_000 });
-    await page.getByRole('button', { name: 'Send', exact: true }).waitFor();
+    const sendButton = page.getByRole('button', { name: 'Send', exact: true });
+    await sendButton.waitFor();
+    assert.equal(await page.getByText(resultText, { exact: true }).count(), 1);
     assert.equal(await composer.inputValue(), secondMessage);
+    assert.equal(await sendButton.isEnabled(), true);
     assert.equal(await page.getByText(firstMessage, { exact: true }).count(), 1);
     assert.equal(await page.getByText(secondMessage, { exact: true }).count(), 0);
     assert.deepEqual(admittedTexts, [firstMessage]);

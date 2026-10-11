@@ -1278,9 +1278,7 @@ export function ChatClient({
     }
     if (!text.trim()) return;
     if (busy || admittingTurnRef.current) {
-      setDraftSendNotice(
-        'This turn is still being sent. Your message stays in the composer until the current turn finishes.',
-      );
+      setDraftSendNotice('Still sending. Your next message stays here.');
       return;
     }
     setDraftSendNotice(null);
