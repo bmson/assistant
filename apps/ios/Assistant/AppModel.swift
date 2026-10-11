@@ -4275,15 +4275,20 @@ final class AppModel {
             guard message.role == .assistant, !message.id.hasPrefix("stream-") else { return false }
             return message.parts.contains { part in
                 (part.type == "text" && !(part.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    || (part.type == "data-card" && part.data != nil)
+                    || (part.type == "data-card" && MessageResponseCard(part: part, formRendererAvailable: true) != nil)
             }
         }
-        if let taskId {
-            currentReplyMessageIDs.formUnion(messages.compactMap { message in
-                isVisibleAssistantReply(message) && message.metadata?["taskId"]?.string == taskId ? message.id : nil
+        func refreshCurrentReplyState() {
+            currentReplyMessageIDs = Set(messages.compactMap { message in
+                guard isVisibleAssistantReply(message) else { return nil }
+                if let taskId {
+                    return message.metadata?["taskId"]?.string == taskId ? message.id : nil
+                }
+                return !assistantMessageIDsAtStart.contains(message.id) ? message.id : nil
             })
+            receivedCurrentReply = !currentReplyMessageIDs.isEmpty
         }
-        receivedCurrentReply = !currentReplyMessageIDs.isEmpty
+        refreshCurrentReplyState()
         // A held poll waits on the server, so the loop is bounded by how long a
         // turn may legitimately take rather than by a count of ticks.
         let deadline = Date().addingTimeInterval(30 * 60)
@@ -4312,7 +4317,6 @@ final class AppModel {
                 guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
                 let elapsedMilliseconds = Int64(Date().timeIntervalSince(startedAt) * 1_000)
-                let assistantBefore = messages.filter { !$0.id.hasPrefix("stream-") && $0.role == .assistant }.count
                 merge(updates.messages)
                 merge(updates.refreshed)
                 removeSuperseded(updates.superseded)
@@ -4326,24 +4330,13 @@ final class AppModel {
                 guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
                 if let nextCursor = updates.nextCursor { cursor = nextCursor }
-                let assistantAfter = messages.filter { !$0.id.hasPrefix("stream-") && $0.role == .assistant }.count
-                let assistantMessages = messages.filter { $0.role == .assistant && !$0.id.hasPrefix("stream-") }
-                if let taskId {
-                    currentReplyMessageIDs.formUnion(assistantMessages.compactMap { message in
-                        isVisibleAssistantReply(message) && message.metadata?["taskId"]?.string == taskId ? message.id : nil
-                    })
-                } else {
-                    currentReplyMessageIDs.formUnion(assistantMessages.compactMap { message in
-                        isVisibleAssistantReply(message) && !assistantMessageIDsAtStart.contains(message.id) ? message.id : nil
-                    })
-                }
-                receivedCurrentReply = !currentReplyMessageIDs.isEmpty
+                refreshCurrentReplyState()
                 gapMilliseconds = PollingPolicy.gapMilliseconds(
                     elapsedMilliseconds: elapsedMilliseconds,
                     // `superseded` is optional on the wire — a server that sent
                     // no retractions omits it entirely.
-                    carriedNews: assistantAfter > assistantBefore
-                        || !updates.messages.isEmpty
+                    carriedNews: !updates.messages.isEmpty
+                        || !updates.refreshed.isEmpty
                         || !(updates.superseded?.isEmpty ?? true),
                     attempt: attempt,
                     hasTaskID: taskId != nil
@@ -4383,6 +4376,7 @@ final class AppModel {
         }
         guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
+        refreshCurrentReplyState()
         if finalStatus == nil && (!receivedCurrentReply || cancelRequestedWithoutTaskID) {
             spokenTurn = nil
             isSending = false
@@ -4395,16 +4389,6 @@ final class AppModel {
             // A cancelled task status does not prove that an external handler
             // rolled back work that had already started.
             errorMessage = Self.cancelledTaskEffectNotice
-        }
-        if let turn = spokenTurn {
-            let durableReply = messages.reversed().first { message in
-                message.role == .assistant
-                    && !message.id.hasPrefix("stream-")
-                    && currentReplyMessageIDs.contains(message.id)
-                    && !turn.previousAssistantMessageIDs.contains(message.id)
-            }
-            if let durableReply { finishSpeaking(for: durableReply) }
-            else { spokenTurn = nil }
         }
         toolActivity = []
         if let taskId, let finalStatus, ["done", "failed", "cancelled"].contains(finalStatus) {
@@ -4425,6 +4409,17 @@ final class AppModel {
         await refreshWorkspace(reportFailure: false)
         guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
+        refreshCurrentReplyState()
+        if let turn = spokenTurn {
+            let durableReply = messages.reversed().first { message in
+                message.role == .assistant
+                    && !message.id.hasPrefix("stream-")
+                    && currentReplyMessageIDs.contains(message.id)
+                    && !turn.previousAssistantMessageIDs.contains(message.id)
+            }
+            if let durableReply { finishSpeaking(for: durableReply) }
+            else { spokenTurn = nil }
+        }
 
         let reply = messages.reversed().first(where: {
             currentReplyMessageIDs.contains($0.id) && $0.role == .assistant && !$0.text.isEmpty
