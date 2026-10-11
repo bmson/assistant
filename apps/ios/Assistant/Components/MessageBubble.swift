@@ -1200,7 +1200,7 @@ enum MessageResponseCard: Identifiable {
             let meta: String
         }
         enum Section: Hashable {
-            case agenda(title: String, complete: Bool, items: [AgendaItem])
+            case agenda(title: String, complete: Bool, omittedCount: Int?, items: [AgendaItem])
             case weather(title: String, location: String, temperature: String, condition: String, symbol: String, detail: String)
             case list(kind: String, title: String, items: [ListItem])
         }
@@ -1226,7 +1226,11 @@ enum MessageResponseCard: Identifiable {
                                                           location: text($0, "location"), flag: text($0, "flag"), note: text($0, "note")) }
                             .filter { !$0.title.isEmpty }
                         if !rows.isEmpty {
-                            sections.append(.agenda(title: text(section, "title"), complete: section["complete"] != .bool(false), items: rows))
+                            let omittedCount = section["omittedCount"]?.integerValue.flatMap {
+                                $0 > 0 && $0 <= 9_007_199_254_740_991 ? $0 : nil
+                            }
+                            sections.append(.agenda(title: text(section, "title"), complete: section["complete"] != .bool(false),
+                                                    omittedCount: omittedCount, items: rows))
                         }
                     case "weather":
                         guard !text(section, "temperature").isEmpty else { continue }

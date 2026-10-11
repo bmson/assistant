@@ -298,6 +298,7 @@ final class LiveActivityManager {
         case .thinking:
             return "Preparing a response"
         case .waiting:
+            if thought == .replyUnavailable { return detail }
             if detail == "This task needs attention. Open the chat for details." { return detail }
             return "A decision is ready to review"
         case .done:

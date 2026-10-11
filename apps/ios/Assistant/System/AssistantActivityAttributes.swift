@@ -18,6 +18,7 @@ struct AssistantThought: Codable, Hashable, Sendable {
     static let startingWork = Self(label: "Starting the work", tone: .working)
     static let backgroundWork = Self(label: "Working in the background", tone: .working)
     static let needsYou = Self(label: "Needs you", tone: .waiting)
+    static let replyUnavailable = Self(label: "Reply not available", tone: .waiting)
     static let finished = Self(label: "Finished", tone: .done)
     static let stopped = Self(label: "Task stopped", tone: .failed)
     /// A turn the owner ended from the composer, as distinct from one that
