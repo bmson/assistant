@@ -3557,7 +3557,19 @@ extension APIClientRetryTests {
     @MainActor
     func testLateTaskReplyFromReplacedConnectionCannotClearCurrentNotice() async throws {
         for (serverURL, newOwner) in [("https://candidate.test", notificationOwner), ("https://assistant.test", "new-notification-owner")] {
-            let model = try await notificationModel()
+            let suite = "assistant.late-reply-connection-tests.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            // This test replaces a connection, not the owner's notification
+            // consent. Pairing must not wait for an OS permission dialog or
+            // write a real Keychain token on an unattended test runner.
+            defaults.set(true, forKey: "assistant.push-prompted")
+            let model = AppModel(apiClient: makeClient(), defaults: defaults,
+                                 storeConnectionToken: { _ in })
+            model.scenePhaseDidChange(.background)
+            StubURLProtocol.primeBootstrap(try notificationBootstrap())
+            await model.refreshAll(reportFailure: false)
+            XCTAssertNotNil(model.bootstrap)
             let taskId = "33333333-3333-4333-8333-333333333333"
             model.recordCompletedTaskWithoutReply(taskId: taskId)
             model.scenePhaseDidChange(.active)
@@ -3576,16 +3588,32 @@ extension APIClientRetryTests {
                 "/api/mobile/v1/bootstrap": [.success(status: 200, body: try notificationBootstrap(owner: newOwner))],
                 "/api/mobile/v1/overview": [.success(status: 401, body: Data())],
             ])
-            let oldRead = Task { await model.refreshIdleConversation() }
+            let oldReadFinished = expectation(description: "The held old-connection read finishes")
+            let oldRead = Task {
+                _ = await model.refreshIdleConversation()
+                oldReadFinished.fulfill()
+            }
+            defer {
+                StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/chat/status")
+                oldRead.cancel()
+                model.scenePhaseDidChange(.background)
+            }
             let deadline = ContinuousClock.now.advanced(by: .seconds(2))
             while !StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/chat/status"),
                   ContinuousClock.now < deadline { await Task.yield() }
             XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/chat/status"))
 
-            let saved = await model.saveConnection(serverURL: serverURL, token: "replacement-token")
-            XCTAssertTrue(saved)
+            let pairingFinished = expectation(description: "The replacement connection is verified")
+            var saved: Bool?
+            let pairing = Task {
+                saved = await model.saveConnection(serverURL: serverURL, token: "replacement-token")
+                pairingFinished.fulfill()
+            }
+            defer { pairing.cancel() }
+            await fulfillment(of: [pairingFinished], timeout: 5)
+            XCTAssertEqual(saved, true)
             StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/chat/status")
-            _ = await oldRead.value
+            await fulfillment(of: [oldReadFinished], timeout: 2)
             XCTAssertFalse(model.messages.contains(where: { $0.id == staleReply.id }))
             XCTAssertNil(model.errorMessage, "Replacing the owner or connection clears its task-scoped notice")
             model.scenePhaseDidChange(.background)
