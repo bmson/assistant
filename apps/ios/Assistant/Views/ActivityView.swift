@@ -31,6 +31,7 @@ struct ActivityView: View {
     @State private var discoveryGeneration = UUID()
     @State private var discoveryTask: Task<Void, Never>?
     @State private var activityStatuses: [String: ActivityStatusResponse] = [:]
+    @State private var activityStatusAvailability = ActivityStatusAvailability()
     @State private var statusRefreshOffset = 0
 
     var body: some View {
@@ -117,6 +118,7 @@ struct ActivityView: View {
             discoveryInFlight = false
             discovery = nil
             activityStatuses = [:]
+            activityStatusAvailability.reset()
             statusRefreshOffset = 0
         }
         .onChange(of: filter) { _, _ in
@@ -131,6 +133,7 @@ struct ActivityView: View {
             discoveryInFlight = false
             discovery = nil
             activityStatuses = [:]
+            activityStatusAvailability.reset()
             statusRefreshOffset = 0
         }
         .onDisappear {
@@ -290,6 +293,10 @@ struct ActivityView: View {
             : await model.refreshOverview(reportFailure: false)
         guard isCurrentActivityRefresh(generation, connectionVersion, archived) else { return false }
 
+        let ownerID = model.bootstrap?.identity.id ?? ""
+        for item in storedItems where ["done", "failed", "cancelled"].contains(item.status) {
+            activityStatusAvailability.clear(ActivityStatusAvailabilityKey(ownerID: ownerID, taskID: item.id))
+        }
         let candidates = storedItems.filter { !["done", "failed", "cancelled"].contains($0.status) }
         guard !candidates.isEmpty else { return refreshed }
         let cap = 12
@@ -298,32 +305,39 @@ struct ActivityView: View {
         let batch = Array(rotated.prefix(cap))
         statusRefreshOffset = (start + batch.count) % candidates.count
 
-        let statuses = await withTaskGroup(of: ActivityStatusResponse?.self) { group in
+        let outcomes = await withTaskGroup(of: (String, ActivityStatusReadOutcome).self) { group in
             var next = 0
             let initialCount = min(4, batch.count)
             while next < initialCount {
                 let id = batch[next].id
-                group.addTask { await model.fetchActivityStatus(id: id) }
+                group.addTask { (id, await model.fetchActivityStatusOutcome(id: id)) }
                 next += 1
             }
-            var collected: [ActivityStatusResponse] = []
+            var collected: [(String, ActivityStatusReadOutcome)] = []
             while let result = await group.next() {
                 guard !Task.isCancelled else {
                     group.cancelAll()
                     break
                 }
-                if let result { collected.append(result) }
+                collected.append(result)
                 if !Task.isCancelled, next < batch.count {
                     let id = batch[next].id
-                    group.addTask { await model.fetchActivityStatus(id: id) }
+                    group.addTask { (id, await model.fetchActivityStatusOutcome(id: id)) }
                     next += 1
                 }
             }
             return collected
         }
         guard isCurrentActivityRefresh(generation, connectionVersion, archived) else { return false }
-        for status in statuses { activityStatuses[status.id] = status }
-        return refreshed && statuses.count == batch.count
+        for (id, outcome) in outcomes {
+            let key = ActivityStatusAvailabilityKey(ownerID: ownerID, taskID: id)
+            activityStatusAvailability.record(outcome, for: key)
+            if case let .updated(status) = outcome { activityStatuses[status.id] = status }
+        }
+        return refreshed && outcomes.count == batch.count && outcomes.allSatisfy {
+            if case .updated = $0.1 { return true }
+            return false
+        }
     }
 
     private func isCurrentActivityRefresh(_ generation: UUID, _ connectionVersion: Int, _ archived: Bool) -> Bool {
@@ -359,6 +373,16 @@ struct ActivityView: View {
     private func activityCard(_ item: ActivityItem) -> some View {
         VStack(alignment: .leading, spacing: AssistantTheme.cardContentSpacing) {
             activityHeader(item)
+            if let ownerID = model.bootstrap?.identity.id,
+               let notice = activityStatusAvailability.notice(
+                   for: ActivityStatusAvailabilityKey(ownerID: ownerID, taskID: item.id),
+                   savedStatus: item.status
+               ) {
+                Text(notice)
+                    .font(.footnote)
+                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .accessibilityIdentifier("activity-status-unavailable-\(item.id)")
+            }
             DisclosureGroup("Details") {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Task \(item.id)")
