@@ -385,6 +385,93 @@ describe('OpenAI Realtime adapter', () => {
     await session.close();
   });
 
+  it('ignores late audio from a settled response without binding it to the active turn', async () => {
+    const fake = await fakeRealtime();
+    const events = recorder();
+    const session = await createOpenAIRealtimeProvider({ apiKey: 'k', url: fake.url }).connect(
+      { model: 'gpt-realtime', instructions: '', tools: [] },
+      events,
+    );
+    const socket = await fake.client;
+    const push = (event: Record<string, unknown>) => socket.send(JSON.stringify(event));
+    const call = (responseId: string, callId: string) =>
+      push({
+        type: 'response.function_call_arguments.done',
+        response_id: responseId,
+        call_id: callId,
+        name: 'note',
+        arguments: '{}',
+      });
+    const finish = (responseId: string, callId: string) =>
+      push({
+        type: 'response.done',
+        response: {
+          id: responseId,
+          status: 'completed',
+          output: [responseItem(callId, 'note', '{}')],
+        },
+      });
+    const audio = () => events.log.filter((entry) => Array.isArray(entry) && entry[0] === 'audio');
+
+    push({ type: 'response.created', response: { id: 'resp_a' } });
+    push({
+      type: 'response.output_audio.delta',
+      response_id: 'resp_a',
+      item_id: 'audio_a',
+      delta: 'AQI=',
+    });
+    call('resp_a', 'call_a');
+    finish('resp_a', 'call_a');
+    await until(() => events.log.some((entry) => JSON.stringify(entry).includes('call_a')));
+
+    push({ type: 'response.created', response: { id: 'resp_b' } });
+    push({ type: 'response.output_audio.delta', item_id: 'unowned_audio', delta: 'AwQ=' });
+    push({
+      type: 'response.output_audio.delta',
+      response_id: 'resp_a',
+      item_id: 'late_audio_a',
+      delta: 'AwQ=',
+    });
+    call('resp_b', 'call_b');
+    finish('resp_b', 'call_b');
+    await until(() => events.log.some((entry) => JSON.stringify(entry).includes('call_b')));
+    session.sendToolResult({ id: 'call_b', name: 'note', args: {} }, { noted: true }, 'if_silent');
+    await until(() => fake.received.some((event) => event.type === 'response.create'));
+    expect(audio()).toEqual([['audio', [1, 2]]]);
+
+    push({ type: 'response.created', response: { id: 'resp_c' } });
+    push({
+      type: 'response.output_audio.delta',
+      response_id: 'resp_c',
+      item_id: 'audio_c',
+      delta: 'AQIDBAUGBwg=',
+    });
+    await until(() => audio().length === 2);
+    push({
+      type: 'response.output_audio.delta',
+      response_id: 'resp_a',
+      item_id: 'late_audio_a_2',
+      delta: 'AwQ=',
+    });
+    session.interrupt(1);
+    await until(() => fake.received.some((event) => event.type === 'conversation.item.truncate'));
+
+    expect(audio()).toEqual([
+      ['audio', [1, 2]],
+      ['audio', [1, 2, 3, 4, 5, 6, 7, 8]],
+    ]);
+    expect(
+      fake.received.find((event) => event.type === 'conversation.item.truncate'),
+    ).toMatchObject({
+      item_id: 'audio_c',
+      audio_end_ms: 0,
+    });
+    expect(events.log.filter((entry) => Array.isArray(entry) && entry[0] === 'error')).toHaveLength(
+      3,
+    );
+    await session.close();
+  });
+
   it('speaks after a tool result only when the turn needs a reply', async () => {
     const fake = await fakeRealtime();
     const events = recorder();

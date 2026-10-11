@@ -254,6 +254,15 @@ async function connectOpenAIRealtime(
         break;
       case 'response.output_audio.delta':
         if (event.delta) {
+          // Audio deltas belong to the response that generated them. A late
+          // event for a settled response must not mark the active turn spoken,
+          // reach the caller, or replace its truncation item/offset.
+          const responseId = event.response_id;
+          const turn = responseId ? turnsByResponse.get(responseId) : undefined;
+          if (!responseId || responseId !== activeResponseId || !turn) {
+            events.error(new Error('OpenAI Realtime audio delta referenced an inactive response'));
+            break;
+          }
           const audio = new Uint8Array(Buffer.from(event.delta, 'base64'));
           if (event.item_id && event.item_id !== currentAudioItem) {
             currentAudioItem = event.item_id;
@@ -261,8 +270,7 @@ async function connectOpenAIRealtime(
           }
           // μ-law at 8 kHz: one byte per sample, eight per millisecond.
           currentAudioItemMs += audio.length / 8;
-          const turn = (event.response_id && turnsByResponse.get(event.response_id)) || activeTurn;
-          if (turn) turn.spoke = true;
+          turn.spoke = true;
           events.audio(audio);
         }
         break;
