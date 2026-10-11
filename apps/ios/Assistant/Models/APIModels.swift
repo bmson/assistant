@@ -1049,7 +1049,12 @@ struct ActivityItem: Codable, Identifiable, Sendable {
         return candidate.isMachineIdentifier ? candidate.sentenceCaseIdentifier : candidate
     }
 
+    var displayStatus: String {
+        status == "waiting_approval" && stuckWaiting == true ? "stuck" : status
+    }
+
     var displayProgress: String {
+        if status == "cancelled" { return "This task was cancelled." }
         let humanized = Self.progressPrefixes.reduce(progress) { result, replacement in
             result.replacingOccurrences(of: replacement.technical, with: replacement.human)
         }
@@ -1057,6 +1062,9 @@ struct ActivityItem: Codable, Identifiable, Sendable {
         // progress message. Hiding them here keeps Activity readable while
         // preserving the raw value in the task record for diagnostics.
         let lower = humanized.lowercased()
+        if lower.range(of: #"\bai_(?:apicallerror|retryerror)\b|^attempt\s+\d+\s+failed:"#, options: .regularExpression) != nil {
+            return "A service request failed."
+        }
         if lower.hasPrefix("pulse:") || lower.hasPrefix("document processor:") ||
             lower.contains("no-candidates") || lower.contains("segmentation") {
             return ""
@@ -2855,6 +2863,8 @@ extension String {
             return "Waiting for an event"
         case "needs_attention":
             return "Needs attention"
+        case "stuck":
+            return "Stuck — nothing to approve"
         default:
             break
         }

@@ -174,6 +174,7 @@ final class AppModel {
     }
     private(set) var isCancellingSend = false
     private(set) var isCardFormAdmissionPending = false
+    var hasUnresolvedTurn: Bool { ordinaryTurn != nil || resumableTurn != nil }
     var canCancelCurrentSend: Bool {
         (isSending && !isCardFormAdmissionPending && (ordinaryTurn != nil || resumableTurn?.taskId != nil))
             || (ordinaryTurn != nil && !isCardFormAdmissionPending)

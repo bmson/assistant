@@ -211,6 +211,7 @@ export async function cancelActivity(db: Db, taskId: string): Promise<TaskActivi
       .update(tasks)
       .set({
         status: 'cancelled',
+        progress: 'This task was cancelled.',
         lockedUntil: null,
         leaseToken: null,
         runAfter: null,

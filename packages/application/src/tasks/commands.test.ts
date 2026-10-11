@@ -113,6 +113,7 @@ describe('owner task activity commands', () => {
           agentId: owner.id,
           type: 'chat_turn',
           status: 'running',
+          progress: 'attempt 1 failed: AI_APICallError https://provider.example/private',
           lockedUntil: new Date(Date.now() + 60_000),
           leaseToken: randomUUID(),
         },
@@ -148,6 +149,7 @@ describe('owner task activity commands', () => {
       });
       expect(await db.query.tasks.findFirst({ where: eq(tasks.id, runningId) })).toMatchObject({
         status: 'cancelled',
+        progress: 'This task was cancelled.',
         leaseToken: null,
         lockedUntil: null,
       });

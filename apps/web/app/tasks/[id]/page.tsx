@@ -9,6 +9,7 @@ import { getTaskActivityDetail } from '@/lib/task-activity';
 import {
   BackLink,
   Badge,
+  btnSm,
   cardShellClass,
   InfoGrid,
   InfoItem,
@@ -16,7 +17,14 @@ import {
   PageShell,
 } from '@/lib/ui';
 import { ConfirmButton, SubmitButton } from '@/lib/ui-client';
-import { actionLabel, displayTaskStatus, StatusChip, taskTypeLabel, trustLabel } from '@/lib/views';
+import {
+  actionLabel,
+  displayTaskStatus,
+  hasReviewableApproval,
+  StatusChip,
+  taskTypeLabel,
+  trustLabel,
+} from '@/lib/views';
 import {
   archiveTask,
   cancelTask,
@@ -230,6 +238,11 @@ export default async function TaskDetailPage({
             <form action={revokeAutonomyGrant.bind(null, task.id)}>
               <SubmitButton pendingLabel="Revoking…">Revoke free-range</SubmitButton>
             </form>
+          ) : null}
+          {hasReviewableApproval(task.status, stuckWaiting) ? (
+            <Link href="/approvals" className={btnSm.outline}>
+              Review approval
+            </Link>
           ) : null}
           {(task.status === 'needs_attention' && !stoppedForTaskBudget) || stuckWaiting ? (
             <form action={retryTask.bind(null, task.id)}>

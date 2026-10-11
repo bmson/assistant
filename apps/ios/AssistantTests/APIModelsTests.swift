@@ -2300,6 +2300,38 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(humanTask.displayProgress, "Three options are ready to compare")
     }
 
+    func testActivityHidesProviderDiagnosticsAndUsesNeutralCancelledProgress() {
+        let diagnostic = activityItem(
+            title: "Provider retry",
+            status: "needs_attention",
+            progress: "attempt 4 failed: AI_APICallError https://provider.example/private"
+        )
+        let cancelled = activityItem(
+            title: "Cancelled request",
+            status: "cancelled",
+            progress: "AI_APICallError https://provider.example/private"
+        )
+        let usefulLink = activityItem(
+            title: "Draft ready",
+            status: "done",
+            progress: "The draft is ready: https://docs.example.test/draft"
+        )
+
+        XCTAssertEqual(diagnostic.displayProgress, "A service request failed.")
+        XCTAssertFalse(diagnostic.displayProgress.contains("provider.example"))
+        XCTAssertEqual(cancelled.displayProgress, "This task was cancelled.")
+        XCTAssertEqual(usefulLink.displayProgress, "The draft is ready: https://docs.example.test/draft")
+    }
+
+    func testActivityDisplaysStaleApprovalWaitAsStuck() {
+        let stuck = activityItem(title: "Approval task", status: "waiting_approval", stuckWaiting: true)
+        let waiting = activityItem(title: "Approval task", status: "waiting_approval", stuckWaiting: false)
+
+        XCTAssertEqual(stuck.displayStatus, "stuck")
+        XCTAssertEqual(stuck.displayStatus.sentenceCaseIdentifier, "Stuck — nothing to approve")
+        XCTAssertEqual(waiting.displayStatus, "waiting_approval")
+    }
+
     func testActivityBudgetSummaryUsesGlanceableCurrencyPrecision() {
         let task = activityItem(
             title: "Background refresh",
@@ -2961,6 +2993,8 @@ final class APIModelsTests: XCTestCase {
     private func activityItem(
         title: String?,
         type: String = "scheduled",
+        status: String = "done",
+        stuckWaiting: Bool? = nil,
         progress: String = "",
         spentUsd: String = "0",
         budgetUsdLimit: String = "1"
@@ -2968,7 +3002,7 @@ final class APIModelsTests: XCTestCase {
         .init(
             id: "activity",
             type: type,
-            status: "done",
+            status: status,
             title: title,
             progress: progress,
             trust: "owner",
@@ -2976,7 +3010,8 @@ final class APIModelsTests: XCTestCase {
             budgetUsdLimit: budgetUsdLimit,
             updatedAt: "2026-01-01T00:00:00Z",
             archivedAt: nil,
-            hasPendingApproval: false
+            hasPendingApproval: false,
+            stuckWaiting: stuckWaiting
         )
     }
 
