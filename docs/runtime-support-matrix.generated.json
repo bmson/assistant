@@ -6,7 +6,7 @@
     "apps/agent/src/deps.ts": "269bdf806704651db85e1d1e9233308e7509c3716e59cbaf7892a9f9c9249d39",
     "apps/agent/src/index.ts": "6da57b60f853ca6622142a12b70bb31a73e8155eac30dd7d905218c19ca2fd56",
     "apps/web/lib/server.ts": "df2cd83f7c34ac905715baccbcca0e63a033bec34b0b58e65a22d01b5b1106f5",
-    "apps/web/proxy.ts": "708be56f1df88bd57d2a3b5f13b39d0d4917d8750d077177098c17e5fd0970b2",
+    "apps/web/proxy.ts": "762caf74d375907425ab4f5f6af40fb8f09e8c1d86cea4b6264361a64b6c3215",
     "packages/db/drizzle/meta/_journal.json": "cfb945af440bd5114b986fb9e85699ac41fedf97c754f2761b835d0dcbf3b9e1",
     "infra/gcp/release-contracts.json": "10adc7fbc9be8965c86df71e6612b6fcd24f1b21a3f5fca048786bbac55c8261"
   },
@@ -359,7 +359,7 @@
     },
     "apps/web/app/api/mobile/v1/security-reviews/[id]/route.ts": {
       "methods": ["POST"],
-      "sha256": "db6147806512e3d543bdb5e8e76419fffbb0a1c40bea061cd87d747de930678d"
+      "sha256": "7b7418f521218eb12fee8c581cff9f6b05c5bbf3a681d408dc18a25a7cc6a073"
     },
     "apps/web/app/api/mobile/v1/security-reviews/route.ts": {
       "methods": ["GET"],

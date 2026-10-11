@@ -89,6 +89,10 @@ export type OwnerSecurityDecision = 'expected' | 'dismissed';
 const SECURITY_INCIDENT_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+export function isSecurityIncidentId(value: string): boolean {
+  return SECURITY_INCIDENT_ID_RE.test(value);
+}
+
 export async function decideOwnerSecurityIncident(
   repository: EmailSyncRepository,
   agentId: string,
@@ -101,7 +105,7 @@ export async function decideOwnerSecurityIncident(
   },
 ): Promise<{ ok: boolean }> {
   if (
-    !SECURITY_INCIDENT_ID_RE.test(input.incidentId) ||
+    !isSecurityIncidentId(input.incidentId) ||
     !Number.isSafeInteger(input.expectedRevision) ||
     input.expectedRevision < 1 ||
     (input.disposition !== 'expected' && input.disposition !== 'dismissed') ||
