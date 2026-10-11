@@ -1,4 +1,11 @@
-import type { GoogleGenAI, LiveConnectParameters, LiveServerMessage, Session } from '@google/genai';
+import {
+  Behavior,
+  FunctionResponseScheduling,
+  type GoogleGenAI,
+  type LiveConnectParameters,
+  type LiveServerMessage,
+  type Session,
+} from '@google/genai';
 import { describe, expect, it, vi } from 'vitest';
 import { pcm16ToBytes } from './audio-codec.js';
 import { createGeminiLiveProvider } from './gemini.js';
@@ -83,7 +90,13 @@ describe('Gemini Live adapter', () => {
         speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Aoede' } } },
         tools: [
           {
-            functionDeclarations: [{ name: 'end_call', parametersJsonSchema: { type: 'object' } }],
+            functionDeclarations: [
+              {
+                name: 'end_call',
+                parametersJsonSchema: { type: 'object' },
+                behavior: Behavior.NON_BLOCKING,
+              },
+            ],
           },
         ],
       },
@@ -312,10 +325,25 @@ describe('Gemini Live adapter', () => {
       transcriptionInputAudioMilliseconds: 0,
     });
 
-    session.sendToolResult({ id: 't1', name: 'end_call', args: {} }, { ok: true });
+    session.sendToolResult({ id: 't1', name: 'end_call', args: { outcome: 'done' } }, { ok: true });
     expect(fake.session.sendToolResponse).toHaveBeenCalledWith({
-      functionResponses: [{ id: 't1', name: 'end_call', response: { output: { ok: true } } }],
+      functionResponses: [
+        {
+          id: 't1',
+          name: 'end_call',
+          response: { output: { ok: true } },
+          scheduling: FunctionResponseScheduling.WHEN_IDLE,
+        },
+      ],
     });
+    session.sendToolResult(
+      { id: 't1', name: 'end_call', args: { outcome: 'done' } },
+      { ok: false, duplicate: true },
+    );
+    expect(fake.session.sendToolResponse).toHaveBeenCalledTimes(1);
+    expect(events.log.filter((entry) => Array.isArray(entry) && entry[0] === 'error')).toHaveLength(
+      0,
+    );
     session.respond('Greet them.');
     expect(fake.session.sendClientContent).toHaveBeenCalledWith({
       turns: [{ role: 'user', parts: [{ text: 'Greet them.' }] }],
@@ -355,8 +383,10 @@ describe('Gemini Live adapter', () => {
       spokenOffset: 'unknown',
     });
 
-    // The interruption message ends the cancelled turn. Only output on the
-    // following turn is allowed through the adapter.
+    // Stale model output remains fenced until the server closes the cancelled
+    // turn; only output after that completion is allowed through.
+    fake.emit({ serverContent: { modelTurn: { parts: [audio] } } });
+    expect(events.log).toEqual([['speechStarted']]);
     fake.emit({ serverContent: { turnComplete: true } });
     fake.emit({ serverContent: { modelTurn: { parts: [audio] } } });
     expect(events.log).toEqual([['speechStarted'], ['audio', 160]]);
@@ -368,6 +398,294 @@ describe('Gemini Live adapter', () => {
       providerState: 'unknown',
       spokenOffset: 'unknown',
     });
+    await session.close();
+  });
+
+  it('maps none, respond, and interrupted if_silent results to SDK scheduling', async () => {
+    const fake = fakeClient();
+    const events = recorder();
+    const session = await createGeminiLiveProvider({
+      project: 'p',
+      location: 'us-central1',
+      client: fake.client,
+    }).connect({ model: 'gemini-live', instructions: '', tools: [] }, events);
+    const audio = {
+      inlineData: {
+        mimeType: 'audio/pcm;rate=24000',
+        data: Buffer.from(pcm16ToBytes(new Int16Array(480))).toString('base64'),
+      },
+    };
+
+    fake.emit({
+      serverContent: { modelTurn: { parts: [audio] } },
+      toolCall: {
+        functionCalls: [
+          { id: 'silent-1', name: 'checkin', args: { private: 'one' } },
+          { id: 'silent-2', name: 'checkin', args: { private: 'two' } },
+        ],
+      },
+    });
+    session.sendToolResult(
+      { id: 'silent-1', name: 'checkin', args: { private: 'one' } },
+      { ok: true },
+      'if_silent',
+    );
+    session.sendToolResult(
+      { id: 'silent-2', name: 'checkin', args: { private: 'two' } },
+      { ok: true },
+      'if_silent',
+    );
+    expect(fake.session.sendToolResponse).not.toHaveBeenCalled();
+    fake.emit({ serverContent: { interrupted: true } });
+    expect(fake.session.sendToolResponse).toHaveBeenNthCalledWith(1, {
+      functionResponses: [
+        {
+          id: 'silent-1',
+          name: 'checkin',
+          response: { output: { ok: true } },
+          scheduling: FunctionResponseScheduling.SILENT,
+        },
+      ],
+    });
+    expect(fake.session.sendToolResponse).toHaveBeenNthCalledWith(2, {
+      functionResponses: [
+        {
+          id: 'silent-2',
+          name: 'checkin',
+          response: { output: { ok: true } },
+          scheduling: FunctionResponseScheduling.SILENT,
+        },
+      ],
+    });
+
+    fake.emit({ toolCall: { functionCalls: [{ id: 'explicit-none', name: 'note', args: {} }] } });
+    fake.emit({
+      toolCall: { functionCalls: [{ id: 'explicit-respond', name: 'note', args: {} }] },
+    });
+    session.sendToolResult({ id: 'explicit-none', name: 'note', args: {} }, { ok: true }, 'none');
+    session.sendToolResult(
+      { id: 'explicit-respond', name: 'note', args: {} },
+      { ok: true },
+      'respond',
+    );
+    expect(fake.session.sendToolResponse).toHaveBeenNthCalledWith(3, {
+      functionResponses: [
+        {
+          id: 'explicit-none',
+          name: 'note',
+          response: { output: { ok: true } },
+          scheduling: FunctionResponseScheduling.SILENT,
+        },
+      ],
+    });
+    expect(fake.session.sendToolResponse).toHaveBeenNthCalledWith(4, {
+      functionResponses: [
+        {
+          id: 'explicit-respond',
+          name: 'note',
+          response: { output: { ok: true } },
+          scheduling: FunctionResponseScheduling.WHEN_IDLE,
+        },
+      ],
+    });
+    await session.close();
+  });
+
+  it('settles an outstanding if_silent result on interruption and resume without writing to the retired session', async () => {
+    const fake = fakeClient();
+    const events = recorder();
+    const session = await createGeminiLiveProvider({
+      project: 'p',
+      location: 'us-central1',
+      client: fake.client,
+    }).connect({ model: 'gemini-live', instructions: '', tools: [] }, events);
+    fake.emit({ sessionResumptionUpdate: { resumable: true, newHandle: 'resume-if-silent' } });
+    fake.emit({ toolCall: { functionCalls: [{ id: 'pending', name: 'checkin', args: {} }] } });
+    session.sendToolResult({ id: 'pending', name: 'checkin', args: {} }, { ok: true }, 'if_silent');
+    expect(fake.session.sendToolResponse).not.toHaveBeenCalled();
+
+    fake.connections[0]?.callbacks.onclose?.({} as CloseEvent);
+    await vi.waitFor(() => expect(fake.connections).toHaveLength(2));
+    await vi.waitFor(() => expect(fake.sessions[1]?.sendToolResponse).toHaveBeenCalledTimes(1));
+    expect(fake.session.sendToolResponse).not.toHaveBeenCalled();
+    expect(fake.sessions[1]?.sendToolResponse).toHaveBeenCalledWith({
+      functionResponses: [
+        {
+          id: 'pending',
+          name: 'checkin',
+          response: { output: { ok: true } },
+          scheduling: FunctionResponseScheduling.WHEN_IDLE,
+        },
+      ],
+    });
+    await session.close();
+  });
+
+  it('uses the originating turn audio state after later turns have completed', async () => {
+    const fake = fakeClient();
+    const session = await createGeminiLiveProvider({
+      project: 'p',
+      location: 'us-central1',
+      client: fake.client,
+    }).connect({ model: 'gemini-live', instructions: '', tools: [] }, recorder());
+    const audio = {
+      inlineData: {
+        mimeType: 'audio/pcm;rate=24000',
+        data: Buffer.from(pcm16ToBytes(new Int16Array(480))).toString('base64'),
+      },
+    };
+
+    fake.emit({
+      serverContent: { modelTurn: { parts: [audio] } },
+      toolCall: { functionCalls: [{ id: 'origin-spoke', name: 'checkin', args: {} }] },
+    });
+    fake.emit({ serverContent: { turnComplete: true } });
+    fake.emit({
+      toolCall: { functionCalls: [{ id: 'origin-silent', name: 'checkin', args: {} }] },
+    });
+    fake.emit({ serverContent: { turnComplete: true } });
+
+    // Resolve the old results after both originating turns are complete.
+    // Audio from a later turn cannot change either call's follow-up policy.
+    session.sendToolResult({ id: 'origin-spoke', name: 'checkin', args: {} }, {}, 'if_silent');
+    session.sendToolResult({ id: 'origin-silent', name: 'checkin', args: {} }, {}, 'if_silent');
+    expect(fake.session.sendToolResponse).toHaveBeenNthCalledWith(1, {
+      functionResponses: [
+        {
+          id: 'origin-spoke',
+          name: 'checkin',
+          response: { output: {} },
+          scheduling: FunctionResponseScheduling.SILENT,
+        },
+      ],
+    });
+    expect(fake.session.sendToolResponse).toHaveBeenNthCalledWith(2, {
+      functionResponses: [
+        {
+          id: 'origin-silent',
+          name: 'checkin',
+          response: { output: {} },
+          scheduling: FunctionResponseScheduling.WHEN_IDLE,
+        },
+      ],
+    });
+    await session.close();
+  });
+
+  it('drops deferred if_silent results when explicitly closed before turn completion', async () => {
+    const fake = fakeClient();
+    const events = recorder();
+    const session = await createGeminiLiveProvider({
+      project: 'p',
+      location: 'us-central1',
+      client: fake.client,
+    }).connect({ model: 'gemini-live', instructions: '', tools: [] }, events);
+    fake.emit({ toolCall: { functionCalls: [{ id: 'pending', name: 'checkin', args: {} }] } });
+    session.sendToolResult({ id: 'pending', name: 'checkin', args: {} }, { ok: true }, 'if_silent');
+    await session.close();
+    session.sendToolResult({ id: 'pending', name: 'checkin', args: {} }, { ok: true }, 'if_silent');
+    fake.emit({ serverContent: { turnComplete: true } });
+    expect(fake.session.sendToolResponse).not.toHaveBeenCalled();
+  });
+
+  it('retires cancelled call IDs and ignores late results and replayed tool calls', async () => {
+    const fake = fakeClient();
+    const events = recorder();
+    const session = await createGeminiLiveProvider({
+      project: 'p',
+      location: 'us-central1',
+      client: fake.client,
+    }).connect({ model: 'gemini-live', instructions: '', tools: [] }, events);
+
+    fake.emit({
+      toolCall: {
+        functionCalls: [{ id: 'cancelled-call', name: 'checkin', args: { day: 'today' } }],
+      },
+    });
+    session.sendToolResult(
+      { id: 'cancelled-call', name: 'checkin', args: { day: 'today' } },
+      { noted: true },
+      'if_silent',
+    );
+    fake.emit({ toolCallCancellation: { ids: ['cancelled-call'] } });
+    fake.emit({ serverContent: { turnComplete: true } });
+    session.sendToolResult(
+      { id: 'cancelled-call', name: 'checkin', args: { day: 'today' } },
+      { noted: true },
+      'respond',
+    );
+    fake.emit({
+      toolCall: {
+        functionCalls: [{ id: 'cancelled-call', name: 'checkin', args: { day: 'today' } }],
+      },
+    });
+
+    expect(fake.session.sendToolResponse).not.toHaveBeenCalled();
+    expect(
+      events.log.filter((entry) => Array.isArray(entry) && entry[0] === 'toolCall'),
+    ).toHaveLength(1);
+    await session.close();
+  });
+
+  it('fails closed on unknown results and reports changed call identity without exposing arguments', async () => {
+    const fake = fakeClient();
+    const events = recorder();
+    const session = await createGeminiLiveProvider({
+      project: 'p',
+      location: 'us-central1',
+      client: fake.client,
+    }).connect({ model: 'gemini-live', instructions: '', tools: [] }, events);
+    fake.emit({
+      toolCall: {
+        functionCalls: [{ id: 'stable-id', name: 'checkin', args: { private: 'first' } }],
+      },
+    });
+    fake.emit({
+      toolCall: {
+        functionCalls: [{ id: 'stable-id', name: 'checkin', args: { private: 'changed' } }],
+      },
+    });
+    session.sendToolResult({ id: 'unknown-id', name: 'checkin', args: {} }, { ok: true });
+    session.sendToolResult({ id: 'stable-id', name: 'different-tool', args: {} }, { ok: true });
+    session.sendToolResult(
+      { id: 'stable-id', name: 'checkin', args: { private: 'changed' } },
+      { ok: true },
+    );
+
+    const errors = events.log.filter((entry) => Array.isArray(entry) && entry[0] === 'error');
+    expect(errors).toEqual([
+      ['error', 'Gemini Live received a conflicting tool call identity'],
+      ['error', 'Gemini Live ignored a result for an unknown tool call'],
+      ['error', 'Gemini Live ignored a result with a conflicting tool call identity'],
+      ['error', 'Gemini Live ignored a result with a conflicting tool call identity'],
+    ]);
+    expect(JSON.stringify(errors)).not.toContain('private');
+    expect(fake.session.sendToolResponse).not.toHaveBeenCalled();
+    await session.close();
+  });
+
+  it('does not forward SDK tool-response errors into owner diagnostics', async () => {
+    const fake = fakeClient();
+    const events = recorder();
+    const session = await createGeminiLiveProvider({
+      project: 'p',
+      location: 'us-central1',
+      client: fake.client,
+    }).connect({ model: 'gemini-live', instructions: '', tools: [] }, events);
+    fake.session.sendToolResponse.mockImplementation(() => {
+      throw new Error('private function arguments');
+    });
+    events.log.length = 0;
+
+    fake.emit({ toolCall: { functionCalls: [{ id: 'sensitive-id', name: 'checkin', args: {} }] } });
+    session.sendToolResult({ id: 'sensitive-id', name: 'checkin', args: {} }, {}, 'none');
+
+    expect(events.log.filter((entry) => Array.isArray(entry) && entry[0] === 'error')).toEqual([
+      ['error', 'Gemini Live could not submit a tool response'],
+    ]);
+    expect(
+      events.log.filter((entry) => Array.isArray(entry) && entry[0] === 'error'),
+    ).not.toContainEqual(expect.arrayContaining(['error', 'private function arguments']));
     await session.close();
   });
 
