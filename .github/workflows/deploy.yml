@@ -110,6 +110,9 @@ jobs:
       browser: ${{ steps.modules.outputs.browser }}
       code: ${{ steps.modules.outputs.code }}
       processor: ${{ steps.modules.outputs.processor }}
+      browser: ${{ steps.modules.outputs.browser }}
+      code: ${{ steps.modules.outputs.code }}
+      processor: ${{ steps.modules.outputs.processor }}
       persistence: ${{ steps.persistence.outputs.driver }}
       components: ${{ steps.components.outputs.components }}
     steps:

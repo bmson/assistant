@@ -333,6 +333,35 @@ class DeliveryGuardTests(unittest.TestCase):
         self.assertIn("if: always() && steps.release_path.outputs.firestore_pair == 'true'", workflow)
         self.assertIn("-- bash infra/gcp/release.sh", workflow)
 
+    def test_guard_worker_flags_are_forwarded_from_module_plan_outputs(self):
+        workflow = (SCRIPT.parents[2] / ".github/workflows/deploy.yml").read_text()
+        plan = workflow.split("  plan:\n", 1)[1].split("\n  image:\n", 1)[0]
+        outputs = plan.split("    outputs:\n", 1)[1].split("    steps:\n", 1)[0]
+        guard = workflow.split("- name: Release Firestore pair with delivery guard", 1)[1].split(
+            "- name: Release immutable images", 1
+        )[0]
+        for module in ("browser", "code", "processor"):
+            with self.subTest(module=module):
+                self.assertRegex(
+                    outputs,
+                    rf"(?m)^\s+{module}: \$\{{\{{ steps\.modules\.outputs\.{module} \}}\}}$",
+                )
+                self.assertIn(
+                    f"GUARD_WORKER_{module.upper()}: ${{{{ needs.plan.outputs.{module} }}}}",
+                    guard,
+                )
+
+    def test_unknown_task_attempt_cannot_be_treated_as_drained(self):
+        api = FakeApi()
+        api.active_tasks = [{"dispatchCount": 1, "responseCount": 0}]
+        with tempfile.TemporaryDirectory() as directory:
+            guard = self.make_guard(api, directory)
+            with self.assertRaisesRegex(guard_module.GuardError, "unknown attempt metadata"):
+                guard.execute(["release-command"])
+            self.assertEqual(api.queue_state, "RUNNING")
+            self.assertEqual(api.scheduler_states, {name: "ENABLED" for name in SCHEDULERS})
+            self.assertEqual(api.push_config, PUSH)
+
     def test_workflow_live_driver_script_defaults_missing_or_empty_value_to_postgres(self):
         workflow = (SCRIPT.parents[2] / ".github/workflows/deploy.yml").read_text()
         match = re.search(r"node -e '([^']+)'\)", workflow)

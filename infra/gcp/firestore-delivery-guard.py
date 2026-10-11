@@ -163,6 +163,11 @@ class DeliveryGuard:
                 attempt = task.get("lastAttempt", {})
                 if (
                     int(task.get("dispatchCount") or 0) > int(task.get("responseCount") or 0)
+                    and not attempt.get("dispatchTime")
+                ):
+                    raise GuardError("Cloud Tasks execution has unknown attempt metadata")
+                if (
+                    int(task.get("dispatchCount") or 0) > int(task.get("responseCount") or 0)
                     and attempt.get("dispatchTime")
                     and not attempt.get("responseTime")
                 ):
