@@ -19,6 +19,7 @@ const stubs = vi.hoisted(() => ({
   getAmbientBlock: vi.fn(async () => undefined),
   getOwnerCard: vi.fn(async () => undefined),
   createPostgresTaskRepository: vi.fn(),
+  notifyTask: vi.fn(),
 }));
 
 vi.mock('@assistant/core/workflow/machine', async (importOriginal) => ({
@@ -37,6 +38,9 @@ vi.mock('@assistant/core/memory/consolidation', async (importOriginal) => ({
 vi.mock('@assistant/db', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@assistant/db')>()),
   createPostgresTaskRepository: stubs.createPostgresTaskRepository,
+}));
+vi.mock('@assistant/core/queue', () => ({
+  getQueueNotifier: () => ({ notify: stubs.notifyTask }),
 }));
 
 const { handleChatTurn, resumeAdmittedChatTask } = await import('./chat-turn.js');
@@ -245,12 +249,23 @@ function send(text: string, extra: Record<string, unknown> = {}) {
   });
 }
 
-function config() {
+function config(queueDriver: 'local' | 'cloudtasks' = 'local') {
   return loadConfig({
     OPENROUTER_API_KEY: 'test-key',
-    QUEUE_DRIVER: 'local',
+    QUEUE_DRIVER: queueDriver,
     CHAT_RECALL_ENABLED: 'false',
     GRAPH_RAG_ENABLED: 'false',
+    ...(queueDriver === 'cloudtasks'
+      ? {
+          INTERNAL_AUTH_MODE: 'oidc',
+          AGENT_URL: 'https://agent.example',
+          GCP_PROJECT: 'test-project',
+          CLOUD_TASKS_QUEUE: 'test-queue',
+          INTERNAL_OIDC_AUDIENCE: 'https://agent.example',
+          INTERNAL_OIDC_SERVICE_ACCOUNT: 'invoker@test-project.iam.gserviceaccount.com',
+          PUBLIC_URL: 'https://agent.example',
+        }
+      : {}),
   });
 }
 
@@ -261,6 +276,7 @@ beforeEach(() => {
   stubs.getAmbientBlock.mockReset().mockResolvedValue(undefined);
   stubs.getOwnerCard.mockReset().mockResolvedValue(undefined);
   stubs.createPostgresTaskRepository.mockReset();
+  stubs.notifyTask.mockReset();
   stubs.enqueueTask.mockResolvedValue({ task: { id: 'queued-task' } });
 });
 afterEach(() => resetConfigForTest());
@@ -271,6 +287,7 @@ async function turn(
   extra: Record<string, unknown> = {},
   stored: StoreScript = {},
   postgres = false,
+  queueDriver: 'local' | 'cloudtasks' = 'local',
 ) {
   const store = chatStore(stored);
   const scripted = scriptedRouter(script);
@@ -306,7 +323,7 @@ async function turn(
   };
   if (postgres) stubs.createPostgresTaskRepository.mockReturnValue(taskRepository);
   const response = await handleChatTurn(send(text, extra), {
-    config: config(),
+    config: config(queueDriver),
     router: scripted.router,
     chat: store.chat,
     ...(postgres
@@ -324,6 +341,432 @@ function queuedPayload() {
 }
 
 describe('chat needs-action triage', () => {
+  it('continues the last two linked owner requests through their existing task records', async () => {
+    const now = Date.now();
+    const requests = [
+      {
+        id: 'owner-klm',
+        taskId: 'klm-task',
+        role: 'user',
+        origin: 'owner',
+        text: 'Look up the KLM lounge and gate information.',
+        createdAt: new Date(now - 60 * 60 * 1000),
+      },
+      {
+        id: 'owner-status',
+        taskId: 'status-task',
+        role: 'user',
+        origin: 'owner',
+        text: 'Is it working?',
+        createdAt: new Date(now - 10 * 60 * 1000),
+      },
+      {
+        id: 'owner-ber',
+        taskId: 'ber-task',
+        role: 'user',
+        origin: 'owner',
+        text: 'Look up the route from BER airport to NH Collection Mitte Checkpoint Charlie.',
+        createdAt: new Date(now - 5 * 60 * 1000),
+      },
+      {
+        id: 'quoted-third-party',
+        taskId: 'quoted-task',
+        role: 'user',
+        origin: 'known_contact',
+        text: 'Look up this route.',
+        createdAt: new Date(now - 2 * 60 * 1000),
+      },
+    ];
+    const task = (
+      id: string,
+      text: string,
+      status: string,
+      createdAt: Date,
+      extra: Record<string, unknown> = {},
+    ) => ({
+      id,
+      agentId: AGENT,
+      conversationId: CONVERSATION,
+      trust: 'owner',
+      type: 'chat_turn',
+      status,
+      title: text,
+      progress: '',
+      createdAt,
+      updatedAt: createdAt,
+      queueGeneration: 7,
+      runAfter: null,
+      lockedUntil: null,
+      trigger: { source: 'chat', payload: { text } },
+      state: {},
+      ...extra,
+    });
+    const result = await turn(
+      'Can you solve my last two questions?',
+      { triage: { needsAction: false }, draft: 'Yes, I can.' },
+      {},
+      {
+        history: requests,
+        tasks: {
+          'klm-task': task(
+            'klm-task',
+            requests[0]?.text ?? '',
+            'pending',
+            requests[0]?.createdAt as Date,
+          ),
+          'status-task': task(
+            'status-task',
+            requests[1]?.text ?? '',
+            'done',
+            requests[1]?.createdAt as Date,
+          ),
+          'ber-task': task(
+            'ber-task',
+            requests[2]?.text ?? '',
+            'waiting_approval',
+            requests[2]?.createdAt as Date,
+          ),
+          'quoted-task': task(
+            'quoted-task',
+            requests[3]?.text ?? '',
+            'pending',
+            requests[3]?.createdAt as Date,
+          ),
+        },
+      },
+      false,
+      'cloudtasks',
+    );
+    const responseText = result.completions[0]?.messages[0]?.text ?? '';
+
+    expect(result.object).not.toHaveBeenCalled();
+    expect(result.stream).not.toHaveBeenCalled();
+    expect(stubs.queueAdmission).not.toHaveBeenCalled();
+    expect(stubs.notifyTask).toHaveBeenCalledOnce();
+    expect(stubs.notifyTask).toHaveBeenCalledWith('klm-task', 7);
+    expect(responseText).toContain('Look up the KLM lounge');
+    expect(responseText).toContain('still queued');
+    expect(responseText).toContain('NH Collection Mitte Checkpoint Charlie');
+    expect(responseText).toContain('waiting for your approval');
+    expect(responseText).toContain('Approvals');
+    expect(responseText).not.toContain('quoted-third-party');
+    expect(responseText).not.toContain('recorded as completed');
+  });
+
+  it('does not re-notify completed or cancelled target tasks', async () => {
+    const now = Date.now();
+    const history = [
+      {
+        id: 'owner-one',
+        taskId: 'done-task',
+        role: 'user',
+        origin: 'owner',
+        text: 'Look up the KLM lounge.',
+        createdAt: new Date(now - 20 * 60 * 1000),
+      },
+      {
+        id: 'owner-two',
+        taskId: 'cancelled-task',
+        role: 'user',
+        origin: 'owner',
+        text: 'Look up the Berlin route.',
+        createdAt: new Date(now - 10 * 60 * 1000),
+      },
+    ];
+    const makeTask = (id: string, text: string, status: string, createdAt: Date) => ({
+      id,
+      agentId: AGENT,
+      conversationId: CONVERSATION,
+      trust: 'owner',
+      type: 'chat_turn',
+      status,
+      title: text,
+      progress: '',
+      createdAt,
+      updatedAt: createdAt,
+      queueGeneration: 3,
+      runAfter: null,
+      lockedUntil: null,
+      trigger: { source: 'chat', payload: { text } },
+      state: {},
+    });
+    const result = await turn(
+      'Finish my last two requests.',
+      {},
+      {},
+      {
+        history,
+        tasks: {
+          'done-task': makeTask(
+            'done-task',
+            history[0]?.text ?? '',
+            'done',
+            history[0]?.createdAt as Date,
+          ),
+          'cancelled-task': makeTask(
+            'cancelled-task',
+            history[1]?.text ?? '',
+            'cancelled',
+            history[1]?.createdAt as Date,
+          ),
+        },
+      },
+    );
+    const responseText = result.completions[0]?.messages[0]?.text ?? '';
+    expect(stubs.notifyTask).not.toHaveBeenCalled();
+    expect(responseText).toContain('recorded as completed');
+    expect(responseText).toContain('cancelled');
+  });
+
+  it('does not notify one task when two linked requests cannot be resolved', async () => {
+    const createdAt = new Date(Date.now() - 5 * 60 * 1000);
+    const result = await turn(
+      'Solve my last two questions.',
+      {},
+      {},
+      {
+        history: [
+          {
+            id: 'owner-one',
+            taskId: 'one-task',
+            role: 'user',
+            origin: 'owner',
+            text: 'Look up the KLM lounge.',
+            createdAt,
+          },
+        ],
+        tasks: {
+          'one-task': {
+            id: 'one-task',
+            agentId: AGENT,
+            conversationId: CONVERSATION,
+            trust: 'owner',
+            type: 'chat_turn',
+            status: 'pending',
+            title: 'KLM lounge',
+            progress: '',
+            createdAt,
+            updatedAt: createdAt,
+            queueGeneration: 1,
+            runAfter: null,
+            lockedUntil: null,
+            trigger: { source: 'chat', payload: { text: 'Look up the KLM lounge.' } },
+            state: {},
+          },
+        },
+      },
+    );
+    const responseText = result.completions[0]?.messages[0]?.text ?? '';
+    expect(stubs.notifyTask).not.toHaveBeenCalled();
+    expect(responseText).toContain('could only match 1 of the last two requests');
+    expect(responseText).toContain('left earlier tasks unchanged');
+  });
+
+  it('does not substitute older work when the newer owner request has no task link', async () => {
+    const now = Date.now();
+    const history = [
+      {
+        id: 'older-one',
+        taskId: 'older-one-task',
+        role: 'user',
+        origin: 'owner',
+        text: 'Look up the KLM lounge.',
+        createdAt: new Date(now - 30 * 60 * 1000),
+      },
+      {
+        id: 'older-two',
+        taskId: 'older-two-task',
+        role: 'user',
+        origin: 'owner',
+        text: 'Look up the Berlin airport route.',
+        createdAt: new Date(now - 20 * 60 * 1000),
+      },
+      {
+        id: 'newer-unlinked',
+        role: 'user',
+        origin: 'owner',
+        text: 'Find a restaurant near the hotel.',
+        createdAt: new Date(now - 10 * 60 * 1000),
+      },
+    ];
+    const makeTask = (id: string, messageIndex: number) => {
+      const message = history[messageIndex];
+      return {
+        id,
+        agentId: AGENT,
+        conversationId: CONVERSATION,
+        trust: 'owner',
+        type: 'chat_turn',
+        status: 'pending',
+        title: message?.text,
+        progress: '',
+        createdAt: message?.createdAt,
+        updatedAt: message?.createdAt,
+        queueGeneration: 3,
+        runAfter: null,
+        lockedUntil: null,
+        trigger: { source: 'chat', payload: { text: message?.text } },
+        state: {},
+      };
+    };
+    const result = await turn(
+      'Can you solve my last two questions?',
+      {},
+      {},
+      {
+        history,
+        tasks: {
+          'older-one-task': makeTask('older-one-task', 0),
+          'older-two-task': makeTask('older-two-task', 1),
+        },
+      },
+      false,
+      'cloudtasks',
+    );
+    const responseText = result.completions[0]?.messages[0]?.text ?? '';
+    expect(stubs.notifyTask).not.toHaveBeenCalled();
+    expect(responseText).toContain('could only match 1 of the last two requests');
+    expect(responseText).toContain('left earlier tasks unchanged');
+  });
+
+  it('rejects a last request linked to another conversation instead of falling back', async () => {
+    const now = Date.now();
+    const history = [
+      {
+        id: 'older-owner-request',
+        taskId: 'older-task',
+        role: 'user',
+        origin: 'owner',
+        text: 'Look up the KLM lounge.',
+        createdAt: new Date(now - 20 * 60 * 1000),
+      },
+      {
+        id: 'newer-owner-request',
+        taskId: 'foreign-task',
+        role: 'user',
+        origin: 'owner',
+        text: 'Look up the Berlin route.',
+        createdAt: new Date(now - 10 * 60 * 1000),
+      },
+    ];
+    const makeTask = (
+      id: string,
+      text: string,
+      createdAt: Date,
+      conversationId = CONVERSATION,
+    ) => ({
+      id,
+      agentId: AGENT,
+      conversationId,
+      trust: 'owner',
+      type: 'chat_turn',
+      status: 'pending',
+      title: text,
+      progress: '',
+      createdAt,
+      updatedAt: createdAt,
+      queueGeneration: 3,
+      runAfter: null,
+      lockedUntil: null,
+      trigger: { source: 'chat', payload: { text } },
+      state: {},
+    });
+    const result = await turn(
+      'Can you solve my last two questions?',
+      {},
+      {},
+      {
+        history,
+        tasks: {
+          'older-task': makeTask(
+            'older-task',
+            history[0]?.text ?? '',
+            history[0]?.createdAt as Date,
+          ),
+          'foreign-task': makeTask(
+            'foreign-task',
+            history[1]?.text ?? '',
+            history[1]?.createdAt as Date,
+            '00000000-0000-4000-8000-0000000000ff',
+          ),
+        },
+      },
+      false,
+      'cloudtasks',
+    );
+    const responseText = result.completions[0]?.messages[0]?.text ?? '';
+    expect(stubs.notifyTask).not.toHaveBeenCalled();
+    expect(responseText).toContain('could only match 1 of the last two requests');
+    expect(responseText).toContain('left earlier tasks unchanged');
+  });
+
+  it('reports failed and attention-needed statuses without claiming resolution', async () => {
+    const now = Date.now();
+    const history = [
+      {
+        id: 'failed-request',
+        taskId: 'failed-task',
+        role: 'user',
+        origin: 'owner',
+        text: 'Look up the KLM lounge.',
+        createdAt: new Date(now - 20 * 60 * 1000),
+      },
+      {
+        id: 'attention-request',
+        taskId: 'attention-task',
+        role: 'user',
+        origin: 'owner',
+        text: 'Look up the Berlin airport route.',
+        createdAt: new Date(now - 10 * 60 * 1000),
+      },
+    ];
+    const makeTask = (id: string, text: string, status: string, createdAt: Date) => ({
+      id,
+      agentId: AGENT,
+      conversationId: CONVERSATION,
+      trust: 'owner',
+      type: 'chat_turn',
+      status,
+      title: text,
+      progress: 'Details are available in Activity.',
+      createdAt,
+      updatedAt: createdAt,
+      queueGeneration: 3,
+      runAfter: null,
+      lockedUntil: null,
+      trigger: { source: 'chat', payload: { text } },
+      state: {},
+    });
+    const result = await turn(
+      'Finish my last two requests.',
+      {},
+      {},
+      {
+        history,
+        tasks: {
+          'failed-task': makeTask(
+            'failed-task',
+            history[0]?.text ?? '',
+            'failed',
+            history[0]?.createdAt as Date,
+          ),
+          'attention-task': makeTask(
+            'attention-task',
+            history[1]?.text ?? '',
+            'needs_attention',
+            history[1]?.createdAt as Date,
+          ),
+        },
+      },
+    );
+    const responseText = result.completions[0]?.messages[0]?.text ?? '';
+    expect(responseText).toContain('recorded as failed');
+    expect(responseText).toContain('needs your attention in Activity');
+    expect(responseText).not.toContain('recorded as completed');
+    expect(responseText).not.toContain('resolved');
+    expect(stubs.notifyTask).not.toHaveBeenCalled();
+  });
+
   it('answers a status question from the nearest owner task and ignores a foreign task', async () => {
     const createdAt = new Date(Date.now() - 20 * 60 * 60 * 1000);
     const result = await turn(

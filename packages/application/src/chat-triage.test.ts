@@ -1,5 +1,31 @@
 import { describe, expect, it } from 'vitest';
-import { isTaskProgressQuestion, looksLikeActionRequest } from './chat-triage.js';
+import {
+  isLastTwoRequestsContinuation,
+  isTaskProgressQuestion,
+  looksLikeActionRequest,
+} from './chat-triage.js';
+
+describe('last-two continuation intent', () => {
+  it('recognizes only a direct request to continue the last two items', () => {
+    for (const text of [
+      'Can you solve my last two questions?',
+      'Please finish the last two requests.',
+      'Could you please handle the last two questions',
+    ])
+      expect(isLastTwoRequestsContinuation(text), text).toBe(true);
+  });
+
+  it('rejects quoted, ambiguous, and compound variants', () => {
+    for (const text of [
+      '"Solve my last two questions"',
+      'The email says: solve my last two questions.',
+      'Solve the last two.',
+      'Solve my last two questions and email the hotel.',
+      'Solve my last three questions.',
+    ])
+      expect(isLastTwoRequestsContinuation(text), text).toBe(false);
+  });
+});
 
 it('routes memory saves and receipt questions through the executor', () => {
   for (const text of [

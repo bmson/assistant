@@ -65,7 +65,11 @@ import { requestSavedCardRefresh, savedCardRefreshId } from './cards.js';
 import { budgetReplyTarget, isApprovalReply } from './chat-budget-reply.js';
 import { pumpWithCues, type StreamChunk } from './chat-cue-stream.js';
 import { guardDraft } from './chat-guard.js';
-import { isTaskProgressQuestion, looksLikeActionRequest } from './chat-triage.js';
+import {
+  isLastTwoRequestsContinuation,
+  isTaskProgressQuestion,
+  looksLikeActionRequest,
+} from './chat-triage.js';
 import { readBoundedJson } from './http-body.js';
 
 const MAX_REQUEST_BYTES = 32 * 1024;
@@ -351,6 +355,154 @@ async function taskProgressReply(
     if (cancelled > 0) lines.push(`${cancelled} item${cancelled === 1 ? '' : 's'} cancelled.`);
   }
   return lines.join('\n');
+}
+
+/**
+ * Resolve an explicit "last two" follow-up only to prior owner messages that
+ * already have their own task IDs. Existing tasks keep their checkpoint and
+ * safety gates; this path never creates replacement work.
+ */
+async function taskContinuationReply(
+  dependencies: ChatTurnDependencies,
+  agentId: string,
+  conversationId: string,
+  currentTask: TaskLease,
+  historyRows: ApplicationChatMessage[],
+): Promise<string> {
+  const repository =
+    dependencies.persistence?.tasks ??
+    (dependencies.db ? createPostgresTaskRepository(dependencies.db) : undefined);
+  if (!repository?.getTask)
+    return 'I cannot verify the saved requests from this chat right now. Please check Activity.';
+
+  const targets: Array<{
+    task: NonNullable<Awaited<ReturnType<typeof repository.getTask>>>;
+    request: string;
+  }> = [];
+  const candidates: ApplicationChatMessage[] = [];
+  const seen = new Set<string>();
+  try {
+    // First bind the phrase to the two nearest owner action messages, before
+    // validating their records. If a recent request has no safe task link, do
+    // not silently substitute an older request and call it "last two".
+    for (let index = historyRows.length - 2; index >= 0 && candidates.length < 2; index -= 1) {
+      const message = historyRows[index];
+      if (message?.role !== 'user' || message.origin !== 'owner' || message.hiddenAt != null)
+        continue;
+      const request = typeof message.text === 'string' ? message.text.trim() : '';
+      if (
+        !request ||
+        isTaskProgressQuestion(request) ||
+        isLastTwoRequestsContinuation(request) ||
+        !looksLikeActionRequest(request)
+      )
+        continue;
+
+      if (typeof message.taskId === 'string' && message.taskId) {
+        if (seen.has(message.taskId)) continue;
+        seen.add(message.taskId);
+      }
+      candidates.push(message);
+    }
+
+    for (const message of candidates) {
+      if (typeof message.taskId !== 'string' || !message.taskId) continue;
+      const request = typeof message.text === 'string' ? message.text.trim() : '';
+      const task = await repository.getTask(message.taskId);
+      if (
+        !task ||
+        task.id !== message.taskId ||
+        task.agentId !== agentId ||
+        task.conversationId !== conversationId ||
+        task.trust !== 'owner' ||
+        task.type !== currentTask.type ||
+        !['chat_turn', 'sms_turn'].includes(task.type)
+      )
+        continue;
+      const trigger = task.trigger as { payload?: { text?: unknown } } | null;
+      if (trigger?.payload?.text !== message.text) continue;
+      const createdAt = task.createdAt instanceof Date ? task.createdAt : new Date(task.createdAt);
+      if (!Number.isFinite(createdAt.getTime()) || createdAt >= currentTask.createdAt) continue;
+      targets.push({ task, request });
+    }
+  } catch {
+    return 'I could not read the saved requests just now. No earlier task was changed; please check Activity.';
+  }
+
+  if (targets.length !== 2) {
+    const found = targets.length;
+    return `I could only match ${found} of the last two requests to saved owner tasks in this chat. I left earlier tasks unchanged. Which requests should I continue?`;
+  }
+
+  // Only re-notify an already-pending task when its stored generation is
+  // currently runnable. The deterministic task/generation queue identity makes
+  // this safe to repeat; terminal and owner-waiting states are never woken here.
+  const now = Date.now();
+  const nudged = new Set<string>();
+  for (const { task } of targets) {
+    if (
+      dependencies.config.QUEUE_DRIVER !== 'cloudtasks' ||
+      task.status !== 'pending' ||
+      !Number.isSafeInteger(task.queueGeneration)
+    )
+      continue;
+    const runAfter = task.runAfter == null ? null : new Date(task.runAfter).getTime();
+    const lockedUntil = task.lockedUntil == null ? null : new Date(task.lockedUntil).getTime();
+    if (
+      (runAfter !== null && (!Number.isFinite(runAfter) || runAfter > now)) ||
+      (lockedUntil !== null && (!Number.isFinite(lockedUntil) || lockedUntil > now))
+    )
+      continue;
+    try {
+      getQueueNotifier().notify(task.id, task.queueGeneration);
+      nudged.add(task.id);
+    } catch (err) {
+      console.error('prior chat task notification failed', { taskId: task.id }, err);
+    }
+  }
+
+  const rows = targets.map(({ task, request }) => {
+    const subject = request.length > 160 ? `${request.slice(0, 157)}…` : request;
+    let state: string;
+    switch (task.status) {
+      case 'pending':
+        state = nudged.has(task.id)
+          ? 'still queued; I requested a wake-up for this same task, but delivery is not confirmed'
+          : 'still queued';
+        break;
+      case 'running':
+        state = 'already running';
+        break;
+      case 'waiting_approval':
+        state = 'waiting for your approval; review the existing request in Approvals';
+        break;
+      case 'waiting_budget':
+        state = 'waiting for a budget decision';
+        break;
+      case 'needs_attention':
+        state = 'needs your attention in Activity';
+        break;
+      case 'sleeping':
+        state = 'scheduled for later';
+        break;
+      case 'waiting_event':
+        state = 'waiting for an event';
+        break;
+      case 'done':
+        state = 'recorded as completed';
+        break;
+      case 'failed':
+        state = 'recorded as failed';
+        break;
+      case 'cancelled':
+        state = 'cancelled';
+        break;
+      default:
+        state = `marked ${task.status}`;
+    }
+    return `- **${subject}** — ${state}.`;
+  });
+  return `I matched your last two requests to their existing tasks. Current recorded status:\n\n${rows.join('\n')}\n\nI did not replay terminal or approval-gated tasks.`;
 }
 
 /**
@@ -828,6 +980,37 @@ export async function handleChatTurn(
   // A status question is answered from the linked owner task record. The
   // classifier and tool-less stream have no authoritative task state, and a
   // status read must never be interpreted as permission to resume the task.
+  if (isLastTwoRequestsContinuation(userText)) {
+    const responseText = await taskContinuationReply(
+      dependencies,
+      agent.id,
+      conversation.id,
+      admittedTask,
+      historyRows,
+    );
+    const completed = await finishApplicationChatTask(chat, agent.id, admittedTask, {
+      status: 'done',
+      progress: responseText.slice(0, 200),
+      responseText,
+      privacyObservationGeneration,
+    });
+    if (!completed)
+      return Response.json(
+        {
+          error:
+            'This chat turn changed before its continuation reply could be saved. Reload the chat to check its current state.',
+          code: 'chat_turn_fenced',
+        },
+        { status: 409 },
+      );
+    return acceptedStreamResponse(admittedTask.id, {
+      'x-conversation-id': conversation.id,
+      'x-async-task': admittedTask.id,
+      'x-message-cursor': messageCursor,
+      'x-owner-message-id': persistedUser.id,
+    });
+  }
+
   if (isTaskProgressQuestion(userText)) {
     const responseText = await taskProgressReply(
       dependencies,

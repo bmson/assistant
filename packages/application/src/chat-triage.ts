@@ -126,6 +126,13 @@ export function isTaskProgressQuestion(text: string): boolean {
   return TASK_PROGRESS_QUESTIONS.some((pattern) => pattern.test(text));
 }
 
+/** Explicit continuation of the two latest linked owner requests in this chat. */
+export function isLastTwoRequestsContinuation(text: string): boolean {
+  return /^\s*(?:(?:can|could) you\s+|please\s+)?(?:please\s+)?(?:solve|finish|complete|handle|answer|take care of)\s+(?:(?:my|the)\s+)?last\s+two\s+(?:questions?|requests?)\s*[?.!]*\s*$/i.test(
+    text,
+  );
+}
+
 export function looksLikeActionRequest(
   text: string,
   priorAssistantText = '',
