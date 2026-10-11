@@ -1,4 +1,4 @@
-import type { GoogleGenAI, LiveConnectParameters, LiveServerMessage } from '@google/genai';
+import type { GoogleGenAI, LiveConnectParameters, LiveServerMessage, Session } from '@google/genai';
 import { describe, expect, it, vi } from 'vitest';
 import { pcm16ToBytes } from './audio-codec.js';
 import { createGeminiLiveProvider } from './gemini.js';
@@ -47,6 +47,16 @@ function recorder(): RealtimeSessionEvents & { log: unknown[] } {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('Gemini Live adapter', () => {
   it('opens an audio session with the brief, voice, transcription and tools', async () => {
     const fake = fakeClient();
@@ -78,6 +88,152 @@ describe('Gemini Live adapter', () => {
         ],
       },
     });
+  });
+
+  it('rejects a setup callback error and closes a late SDK session once', async () => {
+    const fake = fakeClient();
+    const pending = deferred<Session>();
+    let parameters: LiveConnectParameters | undefined;
+    const connect = vi.fn((input: LiveConnectParameters) => {
+      parameters = input;
+      return pending.promise;
+    });
+    (fake.client.live.connect as unknown as typeof connect) = connect;
+    const events = recorder();
+    const opening = createGeminiLiveProvider({
+      project: 'p',
+      location: 'us-central1',
+      client: fake.client,
+      connectTimeoutMs: 100,
+    }).connect({ model: 'gemini-live', instructions: '', tools: [] }, events);
+
+    await vi.waitFor(() => expect(connect).toHaveBeenCalledTimes(1));
+    parameters?.callbacks.onerror?.({ message: 'configuration rejected' } as ErrorEvent);
+    await expect(opening).rejects.toThrow('configuration rejected');
+
+    pending.resolve(fake.session as unknown as Session);
+    await vi.waitFor(() => expect(fake.session.close).toHaveBeenCalledTimes(1));
+    parameters?.callbacks.onmessage({ serverContent: { turnComplete: true } } as LiveServerMessage);
+    parameters?.callbacks.onerror?.({ message: 'late error' } as ErrorEvent);
+    expect(events.log).toEqual([]);
+  });
+
+  it('times out a hung initial handshake and retires its late session', async () => {
+    const fake = fakeClient();
+    const pending = deferred<Session>();
+    let parameters: LiveConnectParameters | undefined;
+    const connect = vi.fn((input: LiveConnectParameters) => {
+      parameters = input;
+      return pending.promise;
+    });
+    (fake.client.live.connect as unknown as typeof connect) = connect;
+    const events = recorder();
+    const opening = createGeminiLiveProvider({
+      project: 'p',
+      location: 'us-central1',
+      client: fake.client,
+      connectTimeoutMs: 5,
+    }).connect({ model: 'gemini-live', instructions: '', tools: [] }, events);
+
+    await expect(opening).rejects.toThrow('Gemini Live setup timed out');
+    pending.resolve(fake.session as unknown as Session);
+    await vi.waitFor(() => expect(fake.session.close).toHaveBeenCalledTimes(1));
+    parameters?.callbacks.onclose?.({} as CloseEvent);
+    expect(events.log).toEqual([]);
+  });
+
+  it('bounds resume handshakes and closes sessions that complete after retirement', async () => {
+    const first = fakeClient();
+    const initialSession = first.session as unknown as Session;
+    const pending: Array<ReturnType<typeof deferred<Session>>> = [];
+    const connections: LiveConnectParameters[] = [];
+    const client = {
+      live: {
+        connect: vi.fn((input: LiveConnectParameters) => {
+          connections.push(input);
+          if (connections.length === 1) return Promise.resolve(initialSession);
+          const wait = deferred<Session>();
+          pending.push(wait);
+          return wait.promise;
+        }),
+      },
+    } as unknown as Pick<GoogleGenAI, 'live'>;
+    const events = recorder();
+    const session = await createGeminiLiveProvider({
+      project: 'p',
+      location: 'us-central1',
+      client,
+      connectTimeoutMs: 5,
+    }).connect({ model: 'gemini-live', instructions: '', tools: [] }, events);
+    connections[0]?.callbacks.onmessage({
+      sessionResumptionUpdate: { resumable: true, newHandle: 'resume-1' },
+    } as LiveServerMessage);
+    connections[0]?.callbacks.onclose?.({} as CloseEvent);
+
+    await vi.waitFor(() => expect(events.log).toContainEqual(['closed']), { timeout: 1_000 });
+    expect(connections).toHaveLength(3);
+    expect(events.log.filter((entry) => (entry as string[])[0] === 'error')).toHaveLength(2);
+
+    for (const [index, late] of pending.entries()) {
+      const resumedSession = {
+        sendRealtimeInput: vi.fn(),
+        sendToolResponse: vi.fn(),
+        sendClientContent: vi.fn(),
+        close: vi.fn(),
+      };
+      late.resolve(resumedSession as unknown as Session);
+      await vi.waitFor(() => expect(resumedSession.close).toHaveBeenCalledTimes(1));
+      connections[index + 1]?.callbacks.onmessage({
+        serverContent: { turnComplete: true },
+      } as LiveServerMessage);
+    }
+    expect(events.log.filter((entry) => (entry as string[])[0] === 'closed')).toHaveLength(1);
+    await session.close();
+    expect(first.session.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('retires an in-flight resume when the caller closes and ignores late callbacks', async () => {
+    const first = fakeClient();
+    const initialSession = first.session as unknown as Session;
+    const pending = deferred<Session>();
+    const connections: LiveConnectParameters[] = [];
+    const client = {
+      live: {
+        connect: vi.fn((input: LiveConnectParameters) => {
+          connections.push(input);
+          return connections.length === 1 ? Promise.resolve(initialSession) : pending.promise;
+        }),
+      },
+    } as unknown as Pick<GoogleGenAI, 'live'>;
+    const events = recorder();
+    const session = await createGeminiLiveProvider({
+      project: 'p',
+      location: 'us-central1',
+      client,
+      connectTimeoutMs: 100,
+    }).connect({ model: 'gemini-live', instructions: '', tools: [] }, events);
+    connections[0]?.callbacks.onmessage({
+      sessionResumptionUpdate: { resumable: true, newHandle: 'resume-1' },
+    } as LiveServerMessage);
+    connections[0]?.callbacks.onmessage({ goAway: { timeLeft: '10s' } } as LiveServerMessage);
+    await vi.waitFor(() => expect(connections).toHaveLength(2));
+
+    await Promise.all([session.close(), session.close()]);
+    expect(first.session.close).toHaveBeenCalledTimes(1);
+    const resumedSession = {
+      sendRealtimeInput: vi.fn(),
+      sendToolResponse: vi.fn(),
+      sendClientContent: vi.fn(),
+      close: vi.fn(),
+    };
+    pending.resolve(resumedSession as unknown as Session);
+    await vi.waitFor(() => expect(resumedSession.close).toHaveBeenCalledTimes(1));
+    connections[1]?.callbacks.onmessage({
+      serverContent: { turnComplete: true },
+    } as LiveServerMessage);
+    connections[1]?.callbacks.onerror?.({ message: 'late error' } as ErrorEvent);
+    connections[1]?.callbacks.onclose?.({} as CloseEvent);
+    expect(events.log).toEqual([]);
   });
 
   it('transcodes phone audio both ways and relays turns, tools and usage', async () => {
@@ -165,7 +321,8 @@ describe('Gemini Live adapter', () => {
       turns: [{ role: 'user', parts: [{ text: 'Greet them.' }] }],
       turnComplete: true,
     });
-    await session.close();
+    await Promise.all([session.close(), session.close()]);
+    expect(fake.session.close).toHaveBeenCalledTimes(1);
     fake.params().callbacks.onclose?.({} as CloseEvent);
     expect(events.log.at(-1)).toEqual(['toolCall', expect.anything()]);
   });

@@ -87,6 +87,7 @@ async function connectOpenAIRealtime(
   const url =
     options.url ?? `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(config.model)}`;
   const socket = new WebSocket(url, { headers: { Authorization: `Bearer ${options.apiKey}` } });
+  const connectTimeoutMs = options.connectTimeoutMs ?? 10_000;
   const usage: RealtimeUsage = emptyRealtimeUsage();
   // The item whose speech is on its way to the line, and how many ms of it
   // have been generated — a truncation past that length is rejected.
@@ -103,6 +104,37 @@ async function connectOpenAIRealtime(
   let activeTurn: { spoke: boolean } | null = null;
   const callTurns = new Map<string, { spoke: boolean }>();
   let replyStallTimer: NodeJS.Timeout | null = null;
+  let setupReady = false;
+  let setupRetired = false;
+  let setupTimer: NodeJS.Timeout | null = null;
+  let closePromise: Promise<void> | null = null;
+  let setupResolve!: () => void;
+  let setupReject!: (error: Error) => void;
+  const setupPromise = new Promise<void>((resolve, reject) => {
+    setupResolve = resolve;
+    setupReject = reject;
+  });
+  let terminationStarted = false;
+
+  const terminateOnce = () => {
+    if (terminationStarted || socket.readyState === WebSocket.CLOSED) return;
+    terminationStarted = true;
+    socket.terminate();
+  };
+
+  const failSetup = (error: Error) => {
+    if (setupReady || setupRetired) return;
+    setupRetired = true;
+    if (setupTimer) clearTimeout(setupTimer);
+    setupTimer = null;
+    setupReject(error);
+    terminateOnce();
+  };
+
+  setupTimer = setTimeout(
+    () => failSetup(new Error(`OpenAI Realtime setup timed out after ${connectTimeoutMs} ms`)),
+    connectTimeoutMs,
+  );
 
   const cancelReplyWatch = () => {
     if (replyStallTimer) clearTimeout(replyStallTimer);
@@ -110,7 +142,8 @@ async function connectOpenAIRealtime(
   };
 
   const send = (event: Record<string, unknown>) => {
-    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event));
+    if (!closedByUs && !setupRetired && socket.readyState === WebSocket.OPEN)
+      socket.send(JSON.stringify(event));
   };
 
   const requestResponse = (instructions?: string) => {
@@ -122,36 +155,31 @@ async function connectOpenAIRealtime(
     send({ type: 'response.create', ...(instructions ? { response: { instructions } } : {}) });
   };
 
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      socket.terminate();
-      reject(new Error('OpenAI Realtime did not connect in time'));
-    }, options.connectTimeoutMs ?? 10_000);
-    socket.once('open', () => {
-      clearTimeout(timer);
-      resolve();
-    });
-    socket.once('unexpected-response', (_request, response) => {
-      clearTimeout(timer);
-      reject(
-        new Error(
-          response.statusCode === 401
-            ? 'OpenAI rejected the API key'
-            : `OpenAI Realtime refused the connection (HTTP ${response.statusCode})`,
-        ),
-      );
-    });
-    socket.once('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-  });
-
   socket.on('message', (raw) => {
+    if (setupRetired || closedByUs) return;
     let event: ServerEvent;
     try {
       event = JSON.parse(raw.toString()) as ServerEvent;
     } catch {
+      return;
+    }
+    if (!setupReady) {
+      if (event.type === 'session.updated') {
+        if (socket.readyState !== WebSocket.OPEN) {
+          failSetup(new Error('OpenAI Realtime closed before setup completed'));
+          return;
+        }
+        setupReady = true;
+        if (setupTimer) clearTimeout(setupTimer);
+        setupTimer = null;
+        setupResolve();
+      } else if (event.type === 'error') {
+        failSetup(
+          new Error(
+            `OpenAI Realtime rejected session setup: ${event.error?.message ?? 'unknown error'}`,
+          ),
+        );
+      }
       return;
     }
     switch (event.type) {
@@ -249,53 +277,79 @@ async function connectOpenAIRealtime(
         break;
     }
   });
-  socket.on('error', (error) => events.error(error));
+  socket.once('open', () => {
+    if (setupRetired) return;
+    try {
+      socket.send(
+        JSON.stringify({
+          type: 'session.update',
+          session: {
+            type: 'realtime',
+            model: config.model,
+            output_modalities: ['audio'],
+            instructions: config.instructions,
+            audio: {
+              input: {
+                format: { type: 'audio/pcmu' },
+                // Line hiss, traffic and a TV in the background otherwise register
+                // as speech: each false start cancels the reply mid-sentence, and
+                // the model then says it again from the top.
+                noise_reduction: { type: 'near_field' },
+                // Semantic VAD waits for the other person to finish a thought, not
+                // just a pause — fewer interruptions of someone reading out a date.
+                // On narrowband phone audio its end-of-turn confidence is low, so
+                // the default eagerness sat out its full four-second ceiling after
+                // most turns. `high` caps that wait at two seconds.
+                turn_detection: {
+                  type: 'semantic_vad',
+                  eagerness: 'high',
+                  create_response: true,
+                  interrupt_response: true,
+                },
+                transcription: { model: options.transcriptionModel ?? 'gpt-live-transcribe' },
+              },
+              output: {
+                format: { type: 'audio/pcmu' },
+                ...(config.voice ? { voice: config.voice } : {}),
+              },
+            },
+            tools: config.tools.map((tool) => ({
+              type: 'function',
+              name: tool.name,
+              description: tool.description,
+              parameters: tool.parameters,
+            })),
+            tool_choice: 'auto',
+          },
+        }),
+      );
+    } catch (error) {
+      failSetup(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+  socket.once('unexpected-response', (_request, response) => {
+    failSetup(
+      new Error(
+        response.statusCode === 401
+          ? 'OpenAI rejected the API key'
+          : `OpenAI Realtime refused the connection (HTTP ${response.statusCode})`,
+      ),
+    );
+  });
+  socket.on('error', (error) => {
+    if (!setupReady) failSetup(error);
+    else if (!closedByUs) events.error(error);
+  });
   socket.on('close', () => {
+    if (!setupReady) {
+      failSetup(new Error('OpenAI Realtime closed before setup completed'));
+      return;
+    }
     cancelReplyWatch();
     if (!closedByUs) events.closed();
   });
 
-  send({
-    type: 'session.update',
-    session: {
-      type: 'realtime',
-      model: config.model,
-      output_modalities: ['audio'],
-      instructions: config.instructions,
-      audio: {
-        input: {
-          format: { type: 'audio/pcmu' },
-          // Line hiss, traffic and a TV in the background otherwise register
-          // as speech: each false start cancels the reply mid-sentence, and
-          // the model then says it again from the top.
-          noise_reduction: { type: 'near_field' },
-          // Semantic VAD waits for the other person to finish a thought, not
-          // just a pause — fewer interruptions of someone reading out a date.
-          // On narrowband phone audio its end-of-turn confidence is low, so
-          // the default eagerness sat out its full four-second ceiling after
-          // most turns. `high` caps that wait at two seconds.
-          turn_detection: {
-            type: 'semantic_vad',
-            eagerness: 'high',
-            create_response: true,
-            interrupt_response: true,
-          },
-          transcription: { model: options.transcriptionModel ?? 'gpt-live-transcribe' },
-        },
-        output: {
-          format: { type: 'audio/pcmu' },
-          ...(config.voice ? { voice: config.voice } : {}),
-        },
-      },
-      tools: config.tools.map((tool) => ({
-        type: 'function',
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters,
-      })),
-      tool_choice: 'auto',
-    },
-  });
+  await setupPromise;
 
   return {
     sendAudio(mulaw) {
@@ -332,18 +386,23 @@ async function connectOpenAIRealtime(
       return { providerState: 'requested', spokenOffset: 'estimated' };
     },
     usage: () => ({ ...usage }),
-    async close() {
+    close() {
+      if (closePromise) return closePromise;
       closedByUs = true;
       cancelReplyWatch();
-      if (socket.readyState === WebSocket.CLOSED) return;
-      await new Promise<void>((resolve) => {
+      if (socket.readyState === WebSocket.CLOSED) {
+        closePromise = Promise.resolve();
+        return closePromise;
+      }
+      closePromise = new Promise<void>((resolve) => {
         socket.once('close', () => resolve());
         socket.close();
         setTimeout(() => {
-          socket.terminate();
+          terminateOnce();
           resolve();
         }, 2_000).unref();
       });
+      return closePromise;
     },
   };
 }
