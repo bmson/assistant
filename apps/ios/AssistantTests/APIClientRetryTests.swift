@@ -3841,7 +3841,7 @@ extension APIClientRetryTests {
             let recorder = LocalNotificationRecorder()
             let notificationScheduled = expectation(description: "The \(scenario.status) notification for \(scenario.taskId) is scheduled")
             let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
-                await recorder.schedule(
+                let scheduled = await recorder.schedule(
                     title: title,
                     body: body,
                     route: route,
@@ -3850,6 +3850,7 @@ extension APIClientRetryTests {
                     conversationID: conversationID
                 )
                 notificationScheduled.fulfill()
+                return scheduled
             })
             defer { model.scenePhaseDidChange(.background) }
             let reply = ChatMessage(id: "reply-\(scenario.taskId)", role: .assistant,
