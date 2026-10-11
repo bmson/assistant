@@ -3064,7 +3064,7 @@ extension APIClientRetryTests {
     }
 
     @MainActor
-    func testSamePushTokenRegistersForEachServerOwnerScope() async throws {
+    func testSamePushTokenRegistersAgainWhenAPNSEnvironmentChanges() async throws {
         let suite = "assistant.push-scope-tests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -3072,14 +3072,14 @@ extension APIClientRetryTests {
         var registrations: [(String, String)] = []
         manager.deviceTokenHandler = { token, scope in registrations.append((token, scope)) }
 
-        manager.setRegistrationScope("https://a.test|owner-a")
+        manager.setRegistrationScope("https://a.test|owner-a|sandbox")
         manager.handleDeviceToken(Data([0x01, 0xab]))
         while registrations.count < 1 { await Task.yield() }
-        manager.setRegistrationScope("https://b.test|owner-b")
+        manager.setRegistrationScope("https://a.test|owner-a|production")
         while registrations.count < 2 { await Task.yield() }
 
         XCTAssertEqual(registrations.map(\.0), ["01ab", "01ab"])
-        XCTAssertEqual(registrations.map(\.1), ["https://a.test|owner-a", "https://b.test|owner-b"])
+        XCTAssertEqual(registrations.map(\.1), ["https://a.test|owner-a|sandbox", "https://a.test|owner-a|production"])
     }
 
     @MainActor

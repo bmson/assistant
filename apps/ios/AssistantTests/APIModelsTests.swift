@@ -4,6 +4,20 @@ import CoreLocation
 @testable import Assistant
 
 extension APIModelsTests {
+    func testAPNSEnvironmentUsesOnlyExplicitPackagingValues() throws {
+        XCTAssertEqual(APNSEnvironment(configuredValue: "sandbox"), .sandbox)
+        XCTAssertEqual(APNSEnvironment(configuredValue: "production"), .production)
+        XCTAssertNil(APNSEnvironment(configuredValue: nil))
+        XCTAssertNil(APNSEnvironment(configuredValue: ""))
+        XCTAssertNil(APNSEnvironment(configuredValue: "development"))
+        XCTAssertNil(APNSEnvironment(configuredValue: 1))
+
+        let body = DeviceTokenBody(token: "abc123", environment: .sandbox)
+        let encoded = try JSONEncoder().encode(body)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: String])
+        XCTAssertEqual(json["environment"], "sandbox")
+    }
+
     func testCallCheckinDecodesExactRevisionAndLeavesLegacyRevisionUnknown() throws {
         let current = try JSONDecoder().decode(PhoneCallCheckin.self, from: Data(#"{"id":"c1","revision":3,"question":"Proceed?","answer":null}"#.utf8))
         let legacy = try JSONDecoder().decode(PhoneCallCheckin.self, from: Data(#"{"id":"c2","question":"Proceed?","answer":null}"#.utf8))

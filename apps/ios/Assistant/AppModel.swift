@@ -125,6 +125,10 @@ struct NotificationTurnSettlements {
 @MainActor
 @Observable
 final class AppModel {
+    /// Frozen from the packaged app metadata so the token's declared APNs
+    /// environment is the same one included in its signed build.
+    private let apnsEnvironment = APNSEnvironment(bundle: .main)
+
     var navigationPath: [AssistantDestination] = [] {
         didSet {
             // Includes page selection, person links, and native back gestures.
@@ -385,8 +389,9 @@ final class AppModel {
         // a failure is retried on the next launch's registration callback.
         NotificationManager.shared.deviceTokenHandler = { [weak self] token, scope in
             guard let self, self.pushRegistrationScope == scope,
+                  let apnsEnvironment = self.apnsEnvironment,
                   let client = self.client else { throw APIError.invalidResponse }
-            try await client.postDeviceToken(DeviceTokenBody(token: token))
+            try await client.postDeviceToken(DeviceTokenBody(token: token, environment: apnsEnvironment))
         }
     }
 
@@ -398,8 +403,9 @@ final class AppModel {
 
     var agentName: String { bootstrap?.identity.name ?? "Assistant" }
     private var pushRegistrationScope: String? {
-        guard let client, let ownerID = bootstrap?.identity.id else { return nil }
-        return "\(client.configuration.baseURL.absoluteString)|\(ownerID)"
+        guard let client, let ownerID = bootstrap?.identity.id,
+              let apnsEnvironment else { return nil }
+        return "\(client.configuration.baseURL.absoluteString)|\(ownerID)|\(apnsEnvironment.rawValue)"
     }
     var presence: AssistantPresence {
         if isSending { return .working }
