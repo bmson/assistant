@@ -35,6 +35,28 @@ describe('looksLikeActionRequest', () => {
     }
   });
 
+  it('keeps status checks with action clauses on the action path', () => {
+    for (const text of [
+      'Is it working and send me the result?',
+      'Is it working and check the gate?',
+    ]) {
+      expect(isTaskProgressQuestion(text), text).toBe(false);
+      expect(looksLikeActionRequest(text), text).toBe(true);
+    }
+  });
+
+  it('does not treat quoted status text as a live status question', () => {
+    for (const text of [
+      '"Is it working?"',
+      '“Is it working?”',
+      '“Is it working and send me the result?”',
+      'The guide said hello and send me the result',
+    ]) {
+      expect(isTaskProgressQuestion(text), text).toBe(false);
+      expect(looksLikeActionRequest(text), text).toBe(false);
+    }
+  });
+
   it('routes short follow-ups with owner context to the executor', () => {
     expect(looksLikeActionRequest('Where are we staying')).toBe(true);
     expect(looksLikeActionRequest('What companies have I applied for?')).toBe(true);

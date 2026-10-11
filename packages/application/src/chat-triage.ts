@@ -113,11 +113,14 @@ const ACTION_OFFER =
  * claim about whether work is happening.
  */
 const TASK_PROGRESS_QUESTIONS = [
-  /^\s*(?:(?:hey|so|and|also|just)\s+)*(?:is|are|was|were|has|have|did)\s+(?:it|that|this|you|the task|my request|that request)\s+(?:still\s+)?(?:working|running|queued|done|finished|completed|complete|failed|started|moving|happening|in progress)\b[^.!?]{0,100}[.!?]*\s*$/i,
+  /^\s*(?:(?:hey|so|and|also|just)\s+)*(?:is|are|was|were|has|have|did)\s+(?:it|that|this|you|the task|my request|that request)\s+(?:still\s+)?(?:working|running|queued|done|finished|completed|complete|failed|started|moving|happening|in progress)\b(?:\s+(?:properly|correctly|yet|now|right now|on (?:it|that|this|my request|the task|that request)|the task|my request|that request))?[.!?]*\s*$/i,
   /^\s*(?:any|what(?:'|’)?s|what is|give me)\s+(?:the\s+)?(?:status|progress|update)\s*(?:on\s+(?:it|that|this|my request|the task))?\s*[?.!]*\s*$/i,
   /^\s*(?:how(?:'|’)s|how is)\s+(?:it|that|this|the task|my request)\s+(?:going|progressing)\s*[?.!]*\s*$/i,
   /^\s*(?:did you|have you)\s+(?:finish|complete|start|work on|do|handle)\s+(?:it|that|this|my request|the task)\s*[?.!]*\s*$/i,
 ];
+
+const TASK_PROGRESS_ACTION_CONTINUATION =
+  /^([\s\S]*?)\b(?:and|then|also)\s+((?:(?:please|can you|could you)\s+)*(?:add|schedule|book|remind|send|email|e-?mail|text|dm|invite|check|look up|search|find|read|show|open|review|verify|update|change|fix|save|create|cancel)\b[\s\S]*)$/i;
 
 export function isTaskProgressQuestion(text: string): boolean {
   return TASK_PROGRESS_QUESTIONS.some((pattern) => pattern.test(text));
@@ -130,6 +133,10 @@ export function looksLikeActionRequest(
 ): boolean {
   let t = text.trim().toLowerCase();
   if (!t) return false;
+  // Only treat a continuation as an action when the part before it is itself
+  // a standalone status check. Recaps and quoted text must not become actions.
+  const statusAction = TASK_PROGRESS_ACTION_CONTINUATION.exec(text);
+  if (statusAction?.[1] && isTaskProgressQuestion(statusAction[1])) return true;
   if (isTaskProgressQuestion(text)) return true;
   if (isRepairFeedback(text)) return true;
   if (

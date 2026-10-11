@@ -408,6 +408,38 @@ describe('chat needs-action triage', () => {
     expect(result.completions[0]?.messages[0]?.text).not.toContain('Berlin directions');
   });
 
+  it('queues a status check that also asks for an action', async () => {
+    const result = await turn(
+      'Is it working and send me the result?',
+      { triage: { needsAction: false }, draft: 'It is working.' },
+      {},
+      {
+        tasks: {
+          'prior-task': {
+            id: 'prior-task',
+            agentId: AGENT,
+            conversationId: CONVERSATION,
+            trust: 'owner',
+            type: 'chat_turn',
+            status: 'pending',
+            title: 'KLM gate lookup',
+            progress: 'Queued.',
+            createdAt: new Date(Date.now() - 20 * 60 * 60 * 1000),
+            updatedAt: new Date(Date.now() - 20 * 60 * 60 * 1000),
+            state: {},
+            trigger: { payload: { text: 'Find the KLM gate.' } },
+          },
+        },
+      },
+    );
+
+    expect(result.object).not.toHaveBeenCalled();
+    expect(stubs.queueAdmission).toHaveBeenCalledOnce();
+    expect(queuedPayload()).toEqual({ [TRIAGED_ACTIONABLE]: true });
+    expect(result.response.headers.get('x-async-task')).toBe('task-1');
+    expect(result.completions).toHaveLength(0);
+  });
+
   it.each([
     ['running', 'running'],
     ['needs_attention', 'needs your attention'],
