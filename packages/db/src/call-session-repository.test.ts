@@ -209,14 +209,17 @@ describe('PostgreSQL call-session repository', () => {
       providerCallId: 'provider-ask-1',
       effect: { kind: 'ask_owner' as const, checkin: checkinDraft },
     };
-    const [firstCheckin, replayCheckin] = await Promise.all([
+    const concurrentCheckins = await Promise.all([
       restarted.applyVoiceToolEffect(checkinInput),
       restarted.applyVoiceToolEffect(checkinInput),
     ]);
-    expect([firstCheckin.status, replayCheckin.status].sort()).toEqual(['applied', 'replay']);
+    expect(concurrentCheckins.map((result) => result.status).sort()).toEqual(['applied', 'replay']);
+    // Concurrent transactions may acquire the row lock in either order.
+    const firstCheckin = concurrentCheckins.find((result) => result.status === 'applied');
+    const replayCheckin = concurrentCheckins.find((result) => result.status === 'replay');
     if (
-      firstCheckin.status !== 'applied' ||
-      replayCheckin.status !== 'replay' ||
+      firstCheckin?.status !== 'applied' ||
+      replayCheckin?.status !== 'replay' ||
       !firstCheckin.checkin ||
       !replayCheckin.checkin
     )
