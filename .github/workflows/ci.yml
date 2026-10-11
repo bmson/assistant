@@ -271,6 +271,11 @@ jobs:
             exit 1
           fi
           pnpm smoke:mobile
+          # A committed old status poll can return after Stop and a newer send.
+          # The browser fixture uses real persisted terminal task rows and the
+          # real Stop action, while scripting only task B's admission/status so
+          # no model or provider is contacted.
+          pnpm --filter @assistant/web exec tsx scripts/web17-delayed-old-poll.browser.ts
       - name: Remove owned PostgreSQL service
         if: always()
         run: bash infra/ci/postgres-service.sh cleanup
