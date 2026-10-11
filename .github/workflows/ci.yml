@@ -271,10 +271,54 @@ jobs:
             exit 1
           fi
           pnpm smoke:mobile
-          # A committed old status poll can return after Stop and a newer send.
-          # The browser fixture uses real persisted terminal task rows and the
-          # real Stop action, while scripting only task B's admission/status so
-          # no model or provider is contacted.
+      # The mounted chat UI is intentionally available only through the
+      # loopback development preview. Keep that preview separate from the
+      # shipping standalone/mobile smoke above; no provider key is supplied.
+      - name: Verify WEB-17 in the loopback development preview
+        env:
+          AUTH_DEV_BYPASS: 'false'
+          AUTH_LOCALHOST_BYPASS: 'true'
+          AUTH_URL: http://127.0.0.1:3001
+          PERSISTENCE_DRIVER: postgres
+          QUEUE_DRIVER: local
+          WEB_APP_PREVIEW_ENABLED: 'true'
+          SMOKE_BASE_URL: http://127.0.0.1:3001
+          SMOKE_BROWSER_CHANNEL: chrome
+          HOSTNAME: 127.0.0.1
+          PORT: '3001'
+        shell: bash
+        run: |
+          set -euo pipefail
+          setsid pnpm --filter @assistant/web exec next dev --webpack --hostname 127.0.0.1 --port 3001 > "$RUNNER_TEMP/assistant-web17-preview.log" 2>&1 &
+          assistant_web17_pgid=$!
+          cleanup_web17_preview() {
+            kill -TERM -- "-$assistant_web17_pgid" 2>/dev/null || true
+            for assistant_attempt in {1..10}; do
+              if ! kill -0 -- "-$assistant_web17_pgid" 2>/dev/null; then
+                break
+              fi
+              sleep 1
+            done
+            kill -KILL -- "-$assistant_web17_pgid" 2>/dev/null || true
+            wait "$assistant_web17_pgid" 2>/dev/null || true
+          }
+          trap cleanup_web17_preview EXIT
+          assistant_web17_ready=false
+          for assistant_attempt in {1..60}; do
+            if curl --fail --silent --output /dev/null http://127.0.0.1:3001/api/health; then
+              assistant_web17_ready=true
+              break
+            fi
+            if ! kill -0 "$assistant_web17_pgid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/assistant-web17-preview.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          if [ "$assistant_web17_ready" != true ]; then
+            cat "$RUNNER_TEMP/assistant-web17-preview.log"
+            exit 1
+          fi
           pnpm --filter @assistant/web exec tsx scripts/web17-delayed-old-poll.browser.ts
       - name: Remove owned PostgreSQL service
         if: always()
