@@ -131,7 +131,7 @@
     },
     "apps/web/app/api/mobile/v1/activity/[id]/route.ts": {
       "methods": ["GET", "POST"],
-      "sha256": "873fcae9fde1d726a7a48b271055d6d1b76e120634893c41f5f4d8e7940264c9"
+      "sha256": "fc50a7932668f6c45e8120a0e3fa598c9ab7f17f99e26bef47b3b2d8f8c7be2b"
     },
     "apps/web/app/api/mobile/v1/activity/foreground/route.ts": {
       "methods": ["POST"],

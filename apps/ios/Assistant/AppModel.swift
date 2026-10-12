@@ -466,6 +466,19 @@ final class AppModel {
         activityConnectionRevision == version && client != nil
     }
 
+    func checklistCorrectionRequestContext() -> ChecklistCorrectionRequestContext? {
+        guard let client, let ownerID = bootstrap?.identity.id else { return nil }
+        return ChecklistCorrectionRequestContext(
+            ownerID: ownerID,
+            connectionVersion: activityConnectionRevision,
+            client: client
+        )
+    }
+
+    func checklistCorrectionConnectionIsCurrent(ownerID: String, version: Int) -> Bool {
+        activityConnectionRevision == version && client != nil && bootstrap?.identity.id == ownerID
+    }
+
     func securityReviewRequestContext() -> SecurityReviewRequestContext? {
         guard let client, let ownerID = bootstrap?.identity.id else { return nil }
         return SecurityReviewRequestContext(

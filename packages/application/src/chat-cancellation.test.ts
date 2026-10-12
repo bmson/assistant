@@ -1,6 +1,7 @@
 import type { ApplicationChatPersistence } from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import { cancelChatTurn } from './chat.js';
+import { taskActivityComposerChecklistCancellationPolicy } from './tasks/commands.js';
 
 const AGENT_ID = '00000000-0000-4000-8000-00000000000a';
 const identity = {
@@ -9,7 +10,7 @@ const identity = {
 };
 
 describe('application chat cancellation', () => {
-  it('resolves the configured owner and forwards only the stable request identity', async () => {
+  it('resolves the configured owner and supplies the fixed composer receipt validator', async () => {
     const receipt = {
       kind: 'cancelled_before_admission' as const,
       task: { id: '00000000-0000-4000-8000-00000000000e' },
@@ -26,6 +27,10 @@ describe('application chat cancellation', () => {
 
     await expect(cancelChatTurn(persistence, identity)).resolves.toBe(receipt);
     expect(persistence.resolveAgent).toHaveBeenCalledOnce();
-    expect(cancel).toHaveBeenCalledWith({ agentId: AGENT_ID, ...identity });
+    expect(cancel).toHaveBeenCalledWith({
+      agentId: AGENT_ID,
+      ...identity,
+      composerCancellationPolicy: taskActivityComposerChecklistCancellationPolicy,
+    });
   });
 });

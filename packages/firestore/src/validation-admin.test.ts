@@ -296,6 +296,8 @@ it('keeps deployable composite indexes and field overrides in their correct sect
       'agentId:ASCENDING,status:ASCENDING,lockedUntil:ASCENDING',
       'agentId:ASCENDING,status:ASCENDING,updatedAt:ASCENDING,runAfter:ASCENDING',
       'agentId:ASCENDING,runAfter:ASCENDING,status:ASCENDING,updatedAt:ASCENDING',
+      // Composer cancellation inventories bounded nonterminal owner turns by owner/conversation/status.
+      'agentId:ASCENDING,conversationId:ASCENDING,status:ASCENDING',
     ]),
   );
   const commitmentIndexes = spec.indexes

@@ -5639,4 +5639,483 @@ extension APIClientRetryTests {
         XCTAssertTrue(model.messages.flatMap(\.suggestionParts).isEmpty,
             "An old assistant's receipt cannot enter the replacement owner's transcript")
     }
+
+    func testChecklistCorrectionProjectionUsesExactBoundedQuery() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let itemID = "lookup-1"
+        StubURLProtocol.prime([.success(status: 200, body: Data(
+            #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":true,"revision":0,"items":[{"id":"lookup-1","label":"Find my flight from Berlin"}]}"#.utf8
+        ))])
+
+        let projection = try await makeClient().checklistCorrectionProjection(taskID: taskID)
+
+        XCTAssertTrue(projection.isValid(for: taskID))
+        XCTAssertEqual(projection.items, [.init(id: itemID, label: "Find my flight from Berlin")])
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        let url = try XCTUnwrap(StubURLProtocol.urls.first)
+        XCTAssertEqual(url.path, "/api/mobile/v1/activity/\(taskID)")
+        XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems, [
+            URLQueryItem(name: "checklistCorrection", value: "1")
+        ])
+    }
+
+    func testChecklistCorrectionProjectionDoesNotRetryAfterTransportFailure() async {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let projection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":true,"revision":0,"items":[{"id":"lookup-1","label":"Find my flight from Berlin"}]}"#
+        StubURLProtocol.prime([
+            .failure(URLError(.timedOut)),
+            .success(status: 200, body: Data(projection.utf8)),
+        ])
+
+        do {
+            _ = try await makeClient().checklistCorrectionProjection(taskID: taskID)
+            XCTFail("A failed projection read must not retry through the generic Activity GET policy.")
+        } catch {
+            XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        }
+    }
+
+    func testChecklistCorrectionAcceptsExactPostReceiptWithoutRetry() async {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let itemID = "lookup-1"
+        let operationID = "123e4567-e89b-12d3-a456-426614174001"
+        let label = "Find my flight from Berlin to Paris"
+        StubURLProtocol.prime([.success(status: 200, body: Data(
+            #"{"ok":true,"outcome":"corrected","transitioned":true,"queueGeneration":3,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","taskId":"123e4567-e89b-12d3-a456-426614174000","itemId":"lookup-1","revision":1,"replacementLabel":"Find my flight from Berlin to Paris","replacementKind":"lookup"}"#.utf8
+        ))])
+
+        let result = await makeClient().correctChecklistItem(
+            taskID: taskID,
+            itemID: itemID,
+            expectedRevision: 0,
+            ownerMessageID: operationID,
+            replacementLabel: label
+        )
+
+        XCTAssertEqual(result, .confirmed)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        let body = try? XCTUnwrap(StubURLProtocol.bodies.first)
+        let payload = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        XCTAssertEqual(payload?["action"] as? String, "correct-checklist")
+        XCTAssertEqual(payload?["itemId"] as? String, itemID)
+        XCTAssertEqual(payload?["expectedRevision"] as? Int, 0)
+        XCTAssertEqual(payload?["ownerMessageId"] as? String, operationID)
+        XCTAssertEqual(payload?["replacementKind"] as? String, "lookup")
+        XCTAssertEqual(payload?["replacementLabel"] as? String, label)
+    }
+
+    func testChecklistCorrectionUsesServerUtf16ItemIdentifierBound() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let operationID = "123e4567-e89b-12d3-a456-426614174001"
+        let itemID = String(repeating: "😀", count: 64)
+        let label = "Find my flight"
+        let response: [String: Any] = [
+            "ok": true,
+            "outcome": "corrected",
+            "transitioned": true,
+            "queueGeneration": 1,
+            "ownerMessageId": operationID,
+            "taskId": taskID,
+            "itemId": itemID,
+            "revision": 1,
+            "replacementLabel": label,
+            "replacementKind": "lookup",
+        ]
+        StubURLProtocol.prime([.success(
+            status: 200,
+            body: try JSONSerialization.data(withJSONObject: response)
+        )])
+
+        let result = await makeClient().correctChecklistItem(
+            taskID: taskID,
+            itemID: itemID,
+            expectedRevision: 0,
+            ownerMessageID: operationID,
+            replacementLabel: label
+        )
+
+        XCTAssertEqual(itemID.utf16.count, 128)
+        XCTAssertGreaterThan(itemID.utf8.count, 128)
+        XCTAssertEqual(result, .confirmed, "The native client must use the route's UTF-16 bound for IDs.")
+        let body = try XCTUnwrap(StubURLProtocol.bodies.first)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(payload["itemId"] as? String, itemID)
+    }
+
+    func testChecklistCorrectionReconcilesAmbiguousPostExactlyOnceWithSameOperationID() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let itemID = "lookup-1"
+        let operationID = "123e4567-e89b-12d3-a456-426614174001"
+        let label = "Find my flight from Berlin to Paris"
+        StubURLProtocol.prime([
+            .failure(URLError(.timedOut)),
+            .success(status: 200, body: Data(
+                #"{"id":"123e4567-e89b-12d3-a456-426614174000","revision":1,"audit":{"revision":1,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","itemId":"lookup-1","toLabel":"Find my flight from Berlin to Paris","toKind":"lookup"}}"#.utf8
+            )),
+        ])
+
+        let result = await makeClient().correctChecklistItem(
+            taskID: taskID,
+            itemID: itemID,
+            expectedRevision: 0,
+            ownerMessageID: operationID,
+            replacementLabel: label
+        )
+
+        XCTAssertEqual(result, .confirmed)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST", "GET"])
+        let getURL = try XCTUnwrap(StubURLProtocol.urls.last)
+        XCTAssertEqual(getURL.path, "/api/mobile/v1/activity/\(taskID)")
+        XCTAssertEqual(URLComponents(url: getURL, resolvingAgainstBaseURL: false)?.queryItems, [
+            URLQueryItem(name: "correctionOwnerMessageId", value: operationID)
+        ])
+        let sent = try XCTUnwrap(StubURLProtocol.bodies.first)
+        let sentJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: sent) as? [String: Any])
+        XCTAssertEqual(sentJSON["ownerMessageId"] as? String, operationID)
+    }
+
+    func testChecklistCorrectionUsesAuditReadbackAfterMalformedSuccessBody() async {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let operationID = "123e4567-e89b-12d3-a456-426614174001"
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(#"{"ok":true}"#.utf8)),
+            .success(status: 200, body: Data(
+                #"{"id":"123e4567-e89b-12d3-a456-426614174000","revision":1,"audit":{"revision":1,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","itemId":"lookup-1","toLabel":"Find my flight from Berlin","toKind":"lookup"}}"#.utf8
+            )),
+        ])
+
+        let result = await makeClient().correctChecklistItem(
+            taskID: taskID,
+            itemID: "lookup-1",
+            expectedRevision: 0,
+            ownerMessageID: operationID,
+            replacementLabel: "Find my flight from Berlin"
+        )
+
+        XCTAssertEqual(result, .confirmed)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST", "GET"])
+    }
+
+    func testChecklistCorrectionDoesNotConfirmUnsafeQueueGenerationOrInvalidRevision() async {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let operationID = "123e4567-e89b-12d3-a456-426614174001"
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(
+                #"{"ok":true,"outcome":"corrected","transitioned":true,"queueGeneration":9007199254740992,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","taskId":"123e4567-e89b-12d3-a456-426614174000","itemId":"lookup-1","revision":1,"replacementLabel":"Find my flight from Berlin","replacementKind":"lookup"}"#.utf8
+            )),
+            .success(status: 200, body: Data(
+                #"{"id":"123e4567-e89b-12d3-a456-426614174000","revision":1,"audit":{"revision":1,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","itemId":"lookup-1","toLabel":"Find my flight from Berlin","toKind":"lookup"}}"#.utf8
+            )),
+        ])
+
+        let result = await makeClient().correctChecklistItem(
+            taskID: taskID,
+            itemID: "lookup-1",
+            expectedRevision: 0,
+            ownerMessageID: operationID,
+            replacementLabel: "Find my flight from Berlin"
+        )
+
+        XCTAssertEqual(result, .confirmed, "The unsafe POST receipt must be reconciled against the exact audit.")
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST", "GET"])
+
+        let invalidBody = ChecklistCorrectionBody(
+            itemId: "lookup-1",
+            expectedRevision: Int.max,
+            ownerMessageId: operationID,
+            replacementLabel: "Find my flight from Berlin"
+        )
+        let impossiblePost = ChecklistCorrectionPostResponse(
+            ok: true,
+            outcome: "corrected",
+            transitioned: true,
+            queueGeneration: 0,
+            ownerMessageId: operationID,
+            taskId: taskID,
+            itemId: "lookup-1",
+            revision: 1,
+            replacementLabel: "Find my flight from Berlin",
+            replacementKind: "lookup"
+        )
+        XCTAssertFalse(impossiblePost.confirms(invalidBody, taskID: taskID))
+        let impossibleReadback = ChecklistCorrectionReconciliation(
+            id: taskID,
+            revision: 1,
+            audit: .init(
+                revision: 1,
+                ownerMessageId: operationID,
+                itemId: "lookup-1",
+                toLabel: "Find my flight from Berlin",
+                toKind: "lookup"
+            )
+        )
+        XCTAssertFalse(impossibleReadback.confirms(invalidBody, taskID: taskID))
+    }
+
+    func testChecklistCorrectionRejectsStalePostWithoutReadbackAndUnmatchedAuditStaysUnknown() async {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let operationID = "123e4567-e89b-12d3-a456-426614174001"
+        StubURLProtocol.prime([.success(status: 409, body: Data(#"{"error":"stale"}"#.utf8))])
+        let rejected = await makeClient().correctChecklistItem(
+            taskID: taskID,
+            itemID: "lookup-1",
+            expectedRevision: 0,
+            ownerMessageID: operationID,
+            replacementLabel: "Find my flight from Berlin"
+        )
+        XCTAssertEqual(rejected, .rejected)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(#"{"ok":true,"outcome":"corrected","transitioned":true,"queueGeneration":3,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174002","taskId":"123e4567-e89b-12d3-a456-426614174000","itemId":"lookup-1","revision":1,"replacementLabel":"Find my flight from Berlin","replacementKind":"lookup"}"#.utf8)),
+            .success(status: 200, body: Data(#"{"id":"123e4567-e89b-12d3-a456-426614174000","revision":2,"audit":{"revision":2,"ownerMessageId":"other-operation","itemId":"lookup-1","toLabel":"Find my flight from Berlin","toKind":"lookup"}}"#.utf8)),
+        ])
+        let uncertain = await makeClient().correctChecklistItem(
+            taskID: taskID,
+            itemID: "lookup-1",
+            expectedRevision: 0,
+            ownerMessageID: operationID,
+            replacementLabel: "Find my flight from Berlin"
+        )
+        XCTAssertEqual(uncertain, .uncertain)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST", "GET"])
+    }
+
+    func testChecklistCorrectionHeldPostAndReadbackShareOneDeadline() async {
+        StubURLProtocol.prime([
+            .held(status: 200, body: Data()),
+            .held(status: 200, body: Data()),
+        ])
+        let start = ContinuousClock.now
+        let result = await makeClient().correctChecklistItem(
+            taskID: "123e4567-e89b-12d3-a456-426614174000",
+            itemID: "lookup-1",
+            expectedRevision: 0,
+            ownerMessageID: "123e4567-e89b-12d3-a456-426614174001",
+            replacementLabel: "Find my flight from Berlin",
+            totalDeadline: .milliseconds(220),
+            postDeadline: .milliseconds(100)
+        )
+        XCTAssertEqual(result, .uncertain)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST", "GET"])
+        XCTAssertLessThan(ContinuousClock.now - start, .milliseconds(700))
+    }
+
+    @MainActor
+    func testChecklistCorrectionManualRetryKeepsExactOperationAndDoesNotRetryAutomatically() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let itemID = "lookup-1"
+        let projection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":true,"revision":0,"items":[{"id":"lookup-1","label":"Find my flight from Berlin"}]}"#
+        let unmatchedAudit = #"{"id":"123e4567-e89b-12d3-a456-426614174000","revision":1,"audit":{"revision":1,"ownerMessageId":"other-operation","itemId":"lookup-1","toLabel":"Find my flight from Berlin to Paris","toKind":"lookup"}}"#
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(projection.utf8)),
+            .failure(URLError(.timedOut)),
+            .success(status: 200, body: Data(unmatchedAudit.utf8)),
+            .failure(URLError(.timedOut)),
+            .success(status: 200, body: Data(unmatchedAudit.utf8)),
+        ])
+        let controller = ChecklistCorrectionController(
+            context: ChecklistCorrectionRequestContext(
+                ownerID: "owner-a",
+                connectionVersion: 4,
+                client: makeClient()
+            ),
+            taskID: taskID,
+            connectionIsCurrent: { true }
+        )
+        await controller.load()
+        XCTAssertEqual(controller.loadState, .ready)
+        controller.select(.init(id: itemID, label: "Find my flight from Berlin"))
+        controller.updateDraft("Find my flight from Berlin to Paris")
+
+        let first = await controller.submit()
+        let operationID = try XCTUnwrap(controller.operationID)
+        XCTAssertEqual(first, .uncertain)
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET", "POST", "GET"],
+            "An unclear result must not trigger a second POST automatically.")
+
+        let manualRetry = await controller.submit()
+        XCTAssertEqual(manualRetry, .uncertain)
+        XCTAssertEqual(controller.operationID, operationID)
+        XCTAssertEqual(controller.draft, "Find my flight from Berlin to Paris")
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET", "POST", "GET", "POST", "GET"])
+
+        let postBodies = StubURLProtocol.requests.filter { $0.0 == "POST" }.map { $0.3 }
+        let retryOperationIDs = try postBodies.map { data -> String in
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            return try XCTUnwrap(object["ownerMessageId"] as? String)
+        }
+        XCTAssertEqual(operationID, operationID.lowercased(), "The durable owner message id must match PostgreSQL UUID canonicalization.")
+        XCTAssertEqual(retryOperationIDs, [operationID, operationID])
+        let retryPayloads = try postBodies.map { data in
+            try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        }
+        XCTAssertEqual(retryPayloads[0] as NSDictionary, retryPayloads[1] as NSDictionary)
+
+        StubURLProtocol.prime([.success(status: 200, body: Data(
+            #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":false,"revision":null,"items":[]}"#.utf8
+        ))])
+        await controller.load()
+        XCTAssertTrue(StubURLProtocol.attempts.isEmpty, "An uncertain operation cannot be cleared by an unrelated projection refresh.")
+        XCTAssertEqual(controller.selectedItemID, itemID)
+        XCTAssertEqual(controller.operationID, operationID)
+        XCTAssertEqual(controller.draft, "Find my flight from Berlin to Paris")
+        controller.dispose()
+    }
+
+    @MainActor
+    func testChecklistCorrectionOwnerTaskAndConnectionFencesPreventStalePublication() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let path = "/api/mobile/v1/activity/\(taskID)"
+        let projection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":true,"revision":0,"items":[{"id":"lookup-1","label":"Find my flight"}]}"#
+        var activeOwner = "owner-a"
+        var activeVersion = 4
+        let context = ChecklistCorrectionRequestContext(
+            ownerID: "owner-a",
+            connectionVersion: 4,
+            client: makeClient()
+        )
+        let isCurrent: @MainActor () -> Bool = {
+            activeOwner == context.ownerID && activeVersion == context.connectionVersion
+        }
+
+        StubURLProtocol.prime([])
+        activeOwner = "owner-b"
+        let replacementOwnerController = ChecklistCorrectionController(
+            context: context,
+            taskID: taskID,
+            connectionIsCurrent: isCurrent
+        )
+        await replacementOwnerController.load()
+        XCTAssertTrue(StubURLProtocol.attempts.isEmpty, "A replaced owner cannot even read the saved correction projection.")
+        replacementOwnerController.dispose()
+
+        activeOwner = "owner-a"
+        activeVersion += 1
+        let replacementConnectionController = ChecklistCorrectionController(
+            context: context,
+            taskID: taskID,
+            connectionIsCurrent: isCurrent
+        )
+        await replacementConnectionController.load()
+        XCTAssertTrue(StubURLProtocol.attempts.isEmpty, "A new connection version cannot use an old API client.")
+        replacementConnectionController.dispose()
+
+        activeVersion = context.connectionVersion
+        StubURLProtocol.prime([.held(status: 200, body: Data(projection.utf8))])
+        let controller = ChecklistCorrectionController(
+            context: context,
+            taskID: taskID,
+            connectionIsCurrent: isCurrent
+        )
+        defer {
+            controller.dispose()
+            StubURLProtocol.releaseHeldResponse(path: path)
+        }
+        let loading = Task { await controller.load() }
+        let heldDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !StubURLProtocol.isHoldingResponse(path: path), ContinuousClock.now < heldDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: path), "The projection must be in flight before replacing its owner.")
+
+        activeOwner = "owner-b"
+        activeVersion += 1
+        controller.dispose()
+        StubURLProtocol.releaseHeldResponse(path: path)
+        await loading.value
+
+        XCTAssertNil(controller.projection)
+        XCTAssertNil(controller.selectedItemID)
+        XCTAssertEqual(controller.loadState, .loading)
+        XCTAssertFalse(controller.isWorking)
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+
+        StubURLProtocol.prime([.success(status: 200, body: Data(
+            #"{"id":"123e4567-e89b-12d3-a456-426614174001","eligible":true,"revision":0,"items":[{"id":"lookup-1","label":"Find my flight"}]}"#.utf8
+        ))])
+        activeOwner = "owner-a"
+        activeVersion = context.connectionVersion
+        let wrongTaskController = ChecklistCorrectionController(
+            context: context,
+            taskID: taskID,
+            connectionIsCurrent: isCurrent
+        )
+        await wrongTaskController.load()
+        XCTAssertNil(wrongTaskController.projection)
+        XCTAssertEqual(wrongTaskController.loadState, .unavailable,
+            "A response for another task must not populate this task's selected item.")
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        wrongTaskController.dispose()
+    }
+
+    @MainActor
+    func testChecklistCorrectionTaskEligibilityFencesPendingPostAndPreservesManualRetry() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let path = "/api/mobile/v1/activity/\(taskID)"
+        let projection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":true,"revision":0,"items":[{"id":"lookup-1","label":"Find my flight"}]}"#
+        StubURLProtocol.prime([.success(status: 200, body: Data(projection.utf8))])
+        let controller = ChecklistCorrectionController(
+            context: ChecklistCorrectionRequestContext(
+                ownerID: "owner-a",
+                connectionVersion: 1,
+                client: makeClient()
+            ),
+            taskID: taskID,
+            connectionIsCurrent: { true }
+        )
+        await controller.load()
+        controller.select(.init(id: "lookup-1", label: "Find my flight"))
+        controller.updateDraft("Find my flight from Berlin")
+
+        StubURLProtocol.prime([.held(status: 200, body: Data())])
+        let pending = Task { await controller.submit() }
+        let heldDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !StubURLProtocol.isHoldingResponse(path: path), ContinuousClock.now < heldDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: path), "The correction POST must be in flight before eligibility changes.")
+        let operationID = try XCTUnwrap(controller.operationID)
+        XCTAssertEqual(operationID, operationID.lowercased())
+
+        controller.updateTaskEligibility(false)
+        XCTAssertFalse(controller.canPublishResult)
+        XCTAssertEqual(controller.submission, .uncertain)
+        StubURLProtocol.releaseHeldResponse(path: path)
+        let pendingResult = await pending.value
+        XCTAssertEqual(pendingResult, .uncertain)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"], "An ineligible task cannot start reconciliation or another POST.")
+        XCTAssertEqual(controller.operationID, operationID)
+        XCTAssertEqual(controller.draft, "Find my flight from Berlin")
+
+        let blockedRetry = await controller.submit()
+        XCTAssertNil(blockedRetry, "A task that is no longer eligible must not send the saved attempt.")
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+
+        controller.updateTaskEligibility(true)
+        let receipt: [String: Any] = [
+            "ok": true,
+            "outcome": "already_applied",
+            "transitioned": false,
+            "queueGeneration": 2,
+            "ownerMessageId": operationID,
+            "taskId": taskID,
+            "itemId": "lookup-1",
+            "revision": 1,
+            "replacementLabel": "Find my flight from Berlin",
+            "replacementKind": "lookup",
+        ]
+        StubURLProtocol.prime([.success(
+            status: 200,
+            body: try JSONSerialization.data(withJSONObject: receipt)
+        )])
+        let confirmedRetry = await controller.submit()
+        XCTAssertEqual(confirmedRetry, .confirmed)
+        XCTAssertTrue(controller.canPublishResult)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        let retry = try XCTUnwrap(StubURLProtocol.bodies.first)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: retry) as? [String: Any])
+        XCTAssertEqual(payload["ownerMessageId"] as? String, operationID)
+        controller.dispose()
+    }
 }

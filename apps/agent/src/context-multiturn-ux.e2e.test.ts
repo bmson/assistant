@@ -1459,6 +1459,19 @@ describe.each(['postgres', 'firestore'] as const)(
         });
         expect(response.status).toBe(200);
         const taskId = required(response.headers.get('x-async-task'), 'Lodging task ID');
+        // “Next weekend” is relative to this synthetic task's creation time;
+        // keep the fixed Oct 16–18 booking in the requested weekend on every CI date.
+        const lodgingReferenceAt = new Date('2026-10-11T12:00:00.000Z');
+        if (driver === 'postgres') {
+          if (!runtime.db) throw new Error('PostgreSQL lodging fixture has no database');
+          await runtime.db
+            .update(tasks)
+            .set({ createdAt: lodgingReferenceAt })
+            .where(eq(tasks.id, taskId));
+        } else {
+          if (!fsStore) throw new Error('Firestore lodging fixture has no emulator store');
+          await fsStore.doc('tasks', taskId).update({ createdAt: lodgingReferenceAt });
+        }
         const dispatcher = new ToolDispatcher(
           runtime.db ?? unavailableDb,
           registry,

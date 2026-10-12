@@ -26,6 +26,10 @@ import {
   type DocumentReadIntent,
   documentReadDispatchFailure,
 } from '../artifact-intent.js';
+import type {
+  ChecklistCancellationResumeProjection,
+  ChecklistCorrectionResumeProjection,
+} from '../checklist-correction-resume.js';
 import {
   checkpointTask,
   completeTask,
@@ -120,6 +124,10 @@ export interface RunContext {
   window: ModelMessage[];
   artifactIntent?: ArtifactIntent;
   documentReadIntent?: DocumentReadIntent;
+  /** Validated, exact-owner correction mode. Never populated from chat recency. */
+  checklistCorrection?: ChecklistCorrectionResumeProjection;
+  /** Exact Activity-selected cancellation; permits only remaining private reads. */
+  checklistCancellation?: ChecklistCancellationResumeProjection;
 }
 
 const PLANNING_RECALL_MARKER = '[[assistant:owner-context-recall:v1]]';

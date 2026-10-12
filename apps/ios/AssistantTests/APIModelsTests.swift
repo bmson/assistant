@@ -4,6 +4,66 @@ import CoreLocation
 @testable import Assistant
 
 extension APIModelsTests {
+    func testChecklistCorrectionProjectionRequiresBoundedUniquePendingItemsAndRevision() throws {
+        let valid = try JSONDecoder().decode(
+            ChecklistCorrectionProjection.self,
+            from: Data(#"{"id":"task-id","eligible":true,"revision":2,"items":[{"id":"lookup-1","label":"Find my flight"}]}"#.utf8)
+        )
+        XCTAssertTrue(valid.isValid(for: "task-id"))
+
+        let duplicate = try JSONDecoder().decode(
+            ChecklistCorrectionProjection.self,
+            from: Data(#"{"id":"task-id","eligible":true,"revision":2,"items":[{"id":"lookup-1","label":"Find my flight"},{"id":"lookup-1","label":"Find my hotel"}]}"#.utf8)
+        )
+        XCTAssertFalse(duplicate.isValid(for: "task-id"))
+
+        let exhausted = try JSONDecoder().decode(
+            ChecklistCorrectionProjection.self,
+            from: Data(#"{"id":"task-id","eligible":true,"revision":12,"items":[{"id":"lookup-1","label":"Find my flight"}]}"#.utf8)
+        )
+        XCTAssertFalse(exhausted.isValid(for: "task-id"))
+
+        let tooManyItems = (0...12).map { #"{"id":"lookup-\#($0)","label":"Find lookup \#($0)"}"# }
+            .joined(separator: ",")
+        let oversized = try JSONDecoder().decode(
+            ChecklistCorrectionProjection.self,
+            from: Data(#"{"id":"task-id","eligible":true,"revision":2,"items":[\#(tooManyItems)]}"#.utf8)
+        )
+        XCTAssertFalse(oversized.isValid(for: "task-id"))
+
+        let longID = try JSONDecoder().decode(
+            ChecklistCorrectionProjection.self,
+            from: Data(#"{"id":"task-id","eligible":true,"revision":2,"items":[{"id":"\#(String(repeating: "x", count: 129))","label":"Find my flight"}]}"#.utf8)
+        )
+        XCTAssertFalse(longID.isValid(for: "task-id"))
+
+        let longLabel = try JSONDecoder().decode(
+            ChecklistCorrectionProjection.self,
+            from: Data(#"{"id":"task-id","eligible":true,"revision":2,"items":[{"id":"lookup-1","label":"\#(String(repeating: "x", count: 501))"}]}"#.utf8)
+        )
+        XCTAssertFalse(longLabel.isValid(for: "task-id"))
+
+        let unicodeBoundaryLabel = String(repeating: "😀", count: 250)
+        let unicodeBoundary = try JSONDecoder().decode(
+            ChecklistCorrectionProjection.self,
+            from: Data(#"{"id":"task-id","eligible":true,"revision":2,"items":[{"id":"lookup-1","label":"\#(unicodeBoundaryLabel)"}]}"#.utf8)
+        )
+        XCTAssertTrue(unicodeBoundary.isValid(for: "task-id"), "The server and native projection both bound labels by UTF-16 length.")
+
+        let notEligible = try JSONDecoder().decode(
+            ChecklistCorrectionProjection.self,
+            from: Data(#"{"id":"task-id","eligible":false,"revision":null,"items":[]}"#.utf8)
+        )
+        XCTAssertTrue(notEligible.isValid(for: "task-id"))
+        XCTAssertFalse(notEligible.isValid(for: "another-task"))
+
+        let contradictoryIneligible = try JSONDecoder().decode(
+            ChecklistCorrectionProjection.self,
+            from: Data(#"{"id":"task-id","eligible":false,"revision":2,"items":[{"id":"lookup-1","label":"Find my flight"}]}"#.utf8)
+        )
+        XCTAssertFalse(contradictoryIneligible.isValid(for: "task-id"))
+    }
+
     func testAPNSEnvironmentUsesOnlyExplicitPackagingValues() throws {
         XCTAssertEqual(APNSEnvironment(configuredValue: "sandbox"), .sandbox)
         XCTAssertEqual(APNSEnvironment(configuredValue: "production"), .production)

@@ -19,6 +19,8 @@
     "google-auth-library": "^10.9.1"
   },
   "devDependencies": {
+    "@assistant/application": "workspace:*",
+    "@assistant/core": "workspace:*",
     "tsx": "^4.23.15"
   }
 }

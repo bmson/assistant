@@ -16,6 +16,7 @@ const stubs = vi.hoisted(() => ({
   enqueueTask: vi.fn(),
   admission: vi.fn(),
   queueAdmission: vi.fn(),
+  composerCancellation: vi.fn(),
   getAmbientBlock: vi.fn(async () => undefined),
   getOwnerCard: vi.fn(async () => undefined),
   createPostgresTaskRepository: vi.fn(),
@@ -67,6 +68,7 @@ type StoreScript = {
   privacyObservationGeneration?: string | null;
   completionWon?: boolean;
   taskReadFailure?: boolean;
+  composerCancellationResult?: Record<string, unknown>;
 };
 
 function chatStore(script: StoreScript = {}) {
@@ -155,6 +157,10 @@ function chatStore(script: StoreScript = {}) {
       admittedByOperation.set(operationId, admitted);
       return { kind: 'admitted', created: true, ...admitted };
     },
+    admitComposerChecklistCancellation: async (input: Record<string, unknown>) => {
+      stubs.composerCancellation(input);
+      return script.composerCancellationResult ?? { kind: 'not_applicable' };
+    },
     privacyObservationGeneration: async () => script.privacyObservationGeneration ?? null,
     listMessages: async () => ({
       messages: [...messages, ...(script.laterMessages ?? [])],
@@ -192,13 +198,17 @@ function chatStore(script: StoreScript = {}) {
 type RouterScript = {
   triage?: { needsAction: boolean } | Error;
   draft?: string;
+  routeError?: Error;
   budgetBlocked?: boolean;
   triageUnavailable?: boolean;
   streamError?: Error;
 };
 
 function scriptedRouter(script: RouterScript) {
-  const route = vi.fn(async () => ({ ok: true as const, modelId: 'test/model' }));
+  const route = vi.fn(async () => {
+    if (script.routeError) throw script.routeError;
+    return { ok: true as const, modelId: 'test/model' };
+  });
   const object = vi.fn(async () => {
     if (script.triage instanceof Error) throw script.triage;
     if (script.triageUnavailable) return { ok: false, decision: { mode: 'park', reason: 'cap' } };
@@ -272,6 +282,7 @@ function config(queueDriver: 'local' | 'cloudtasks' = 'local') {
 beforeEach(() => {
   stubs.enqueueTask.mockReset();
   stubs.admission.mockReset();
+  stubs.composerCancellation.mockReset();
   stubs.queueAdmission.mockReset();
   stubs.getAmbientBlock.mockReset().mockResolvedValue(undefined);
   stubs.getOwnerCard.mockReset().mockResolvedValue(undefined);
@@ -341,6 +352,122 @@ function queuedPayload() {
 }
 
 describe('chat needs-action triage', () => {
+  it('routes a uniquely selected internal cancellation through durable persistence without model work', async () => {
+    const store = chatStore({
+      composerCancellationResult: {
+        kind: 'applied',
+        task: { id: 'paused-task' },
+        message: {
+          id: '00000000-0000-4000-8000-0000000000c1',
+          conversationId: CONVERSATION,
+          taskId: 'paused-task',
+          role: 'user',
+          origin: 'owner',
+          text: 'Cancel the hotel lookup.',
+          createdAt: new Date('2026-01-01T00:00:00.000Z'),
+          appendSequence: '00000000000000000002',
+        },
+        queueGeneration: 4,
+      },
+    });
+    const scripted = scriptedRouter({ triage: { needsAction: true }, draft: 'should not run' });
+    const response = await handleChatTurn(send('Cancel the hotel lookup.'), {
+      config: config(),
+      router: scripted.router,
+      chat: store.chat,
+      persistence: { tasks: {}, ownerContext: {} } as never,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-async-task')).toBe('paused-task');
+    expect(response.headers.get('x-owner-message-id')).toBe('00000000-0000-4000-8000-0000000000c1');
+    expect(stubs.composerCancellation).toHaveBeenCalledOnce();
+    expect(stubs.admission).not.toHaveBeenCalled();
+    expect(scripted.object).not.toHaveBeenCalled();
+    expect(scripted.stream).not.toHaveBeenCalled();
+    expect(stubs.notifyTask).toHaveBeenCalledWith('paused-task', 4);
+  });
+
+  it('clarifies ambiguous internal cancellation without creating another task', async () => {
+    const store = chatStore({ composerCancellationResult: { kind: 'ambiguous' } });
+    const scripted = scriptedRouter({ triage: { needsAction: true }, draft: 'should not run' });
+    const response = await handleChatTurn(send('Cancel the hotel lookup.'), {
+      config: config(),
+      router: scripted.router,
+      chat: store.chat,
+      persistence: { tasks: {}, ownerContext: {} } as never,
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: 'owner_action_ambiguous' });
+    expect(stubs.admission).not.toHaveBeenCalled();
+    expect(scripted.object).not.toHaveBeenCalled();
+    expect(scripted.stream).not.toHaveBeenCalled();
+  });
+
+  it('handles an existing-task cancellation before draft-route preflight but keeps the gate for business cancellation', async () => {
+    const internalStore = chatStore({
+      composerCancellationResult: {
+        kind: 'applied',
+        task: { id: 'paused-task' },
+        message: {
+          id: '00000000-0000-4000-8000-0000000000c2',
+          conversationId: CONVERSATION,
+          taskId: 'paused-task',
+          role: 'user',
+          origin: 'owner',
+          text: 'Cancel the hotel lookup.',
+          createdAt: new Date('2026-01-01T00:00:00.000Z'),
+          appendSequence: '00000000000000000002',
+        },
+        queueGeneration: 4,
+      },
+    });
+    const unavailableRoute = scriptedRouter({ routeError: new Error('no configured route') });
+    const internalResponse = await handleChatTurn(send('Cancel the hotel lookup.'), {
+      config: config(),
+      router: unavailableRoute.router,
+      chat: internalStore.chat,
+      persistence: { tasks: {}, ownerContext: {} } as never,
+    });
+    expect(internalResponse.status).toBe(200);
+    expect(stubs.composerCancellation).toHaveBeenCalledOnce();
+    expect(unavailableRoute.route).not.toHaveBeenCalled();
+    expect(stubs.admission).not.toHaveBeenCalled();
+
+    const businessStore = chatStore();
+    const businessRoute = scriptedRouter({ routeError: new Error('no configured route') });
+    const businessResponse = await handleChatTurn(send('Cancel my reminder after arrival.'), {
+      config: config(),
+      router: businessRoute.router,
+      chat: businessStore.chat,
+      persistence: { tasks: {}, ownerContext: {} } as never,
+    });
+    expect(businessResponse.status).toBe(503);
+    expect(businessRoute.route).toHaveBeenCalledOnce();
+    expect(stubs.composerCancellation).toHaveBeenCalledTimes(2);
+    expect(stubs.admission).not.toHaveBeenCalled();
+
+    const admittedBusinessStore = chatStore();
+    const availableRoute = scriptedRouter({ draft: 'I can help with that.' });
+    const admittedBusinessResponse = await handleChatTurn(
+      send('Cancel my reminder after arrival.'),
+      {
+        config: config(),
+        router: availableRoute.router,
+        chat: admittedBusinessStore.chat,
+        persistence: { tasks: {}, ownerContext: {} } as never,
+      },
+    );
+    expect(admittedBusinessResponse.status).toBe(200);
+    expect(availableRoute.route).toHaveBeenCalledOnce();
+    expect(stubs.composerCancellation).toHaveBeenCalledTimes(3);
+    expect(stubs.admission).toHaveBeenCalledOnce();
+    expect(stubs.admission.mock.calls[0]?.[0]).toMatchObject({
+      text: 'Cancel my reminder after arrival.',
+    });
+  });
+
   it('continues the last two linked owner requests through their existing task records', async () => {
     const now = Date.now();
     const requests = [

@@ -1,3 +1,4 @@
+import Observation
 import SwiftUI
 
 private enum ActivityFilter: String, CaseIterable, Identifiable {
@@ -9,6 +10,343 @@ private enum ActivityFilter: String, CaseIterable, Identifiable {
     var id: Self { self }
     var requestValue: String {
         switch self { case .all: "all"; case .needsYou: "needs-you"; case .working: "working"; case .scheduled: "scheduled"; case .completed: "completed" }
+    }
+}
+
+struct ChecklistCorrectionRequestContext: Sendable {
+    let ownerID: String
+    let connectionVersion: Int
+    let client: APIClient
+}
+
+enum ChecklistCorrectionLoadState: Equatable {
+    case loading
+    case ready
+    case unavailable
+}
+
+@MainActor
+@Observable
+final class ChecklistCorrectionController {
+    let ownerID: String
+    let taskID: String
+    let connectionVersion: Int
+    private(set) var projection: ChecklistCorrectionProjection?
+    private(set) var loadState: ChecklistCorrectionLoadState = .loading
+    private(set) var selectedItemID: String?
+    private(set) var operationID: String?
+    private(set) var submission: ChecklistCorrectionSubmission?
+    private(set) var isWorking = false
+    var draft = ""
+
+    @ObservationIgnored private let client: APIClient
+    @ObservationIgnored private let connectionIsCurrent: @MainActor () -> Bool
+    @ObservationIgnored private var active = true
+    @ObservationIgnored private var taskIsEligible = true
+    @ObservationIgnored private var generation = UUID()
+    @ObservationIgnored private var requestTask: Task<Void, Never>?
+
+    init(
+        context: ChecklistCorrectionRequestContext,
+        taskID: String,
+        connectionIsCurrent: @escaping @MainActor () -> Bool
+    ) {
+        ownerID = context.ownerID
+        connectionVersion = context.connectionVersion
+        client = context.client
+        self.taskID = taskID
+        self.connectionIsCurrent = connectionIsCurrent
+    }
+
+    var selectedItem: ChecklistCorrectionItem? {
+        projection?.items.first(where: { $0.id == selectedItemID })
+    }
+
+    var canPublishResult: Bool { isCurrent }
+
+    func load() async {
+        guard isCurrent, !isWorking, submission != .uncertain else { return }
+        let requestGeneration = UUID()
+        generation = requestGeneration
+        isWorking = true
+        requestTask = Task {
+            do {
+                let loaded = try await client.checklistCorrectionProjection(taskID: taskID)
+                guard isCurrent, generation == requestGeneration else { return }
+                guard loaded.isValid(for: taskID) else { throw APIError.invalidResponse }
+                projection = loaded
+                loadState = .ready
+                if let selectedItemID, !loaded.items.contains(where: { $0.id == selectedItemID }) {
+                    self.selectedItemID = nil
+                    draft = ""
+                    operationID = nil
+                    submission = nil
+                }
+            } catch {
+                guard isCurrent, generation == requestGeneration else { return }
+                loadState = .unavailable
+            }
+            guard isCurrent, generation == requestGeneration else { return }
+            isWorking = false
+            requestTask = nil
+        }
+        await requestTask?.value
+    }
+
+    func select(_ item: ChecklistCorrectionItem) {
+        guard isCurrent, !isWorking, submission != .uncertain, submission != .confirmed,
+              projection?.items.contains(item) == true else { return }
+        guard selectedItemID != item.id else { return }
+        selectedItemID = item.id
+        draft = ""
+        operationID = nil
+        submission = nil
+    }
+
+    func updateDraft(_ value: String) {
+        guard isCurrent, !isWorking, submission != .uncertain, submission != .confirmed else { return }
+        var bounded = ""
+        for character in value {
+            let next = bounded + String(character)
+            guard next.utf16.count <= 500 else { break }
+            bounded = next
+        }
+        if submission == .rejected, bounded != draft {
+            operationID = nil
+            submission = nil
+        }
+        draft = bounded
+    }
+
+    func submit() async -> ChecklistCorrectionSubmission? {
+        guard isCurrent, !isWorking, let item = selectedItem,
+              submission != .confirmed,
+              projection?.eligible == true, let revision = projection?.revision,
+              !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              draft.trimmingCharacters(in: .whitespacesAndNewlines) == draft else { return nil }
+        let operationID = self.operationID ?? UUID().uuidString.lowercased()
+        self.operationID = operationID
+        isWorking = true
+        submission = nil
+        let requestGeneration = UUID()
+        generation = requestGeneration
+        requestTask = Task {
+            let result = await client.correctChecklistItem(
+                taskID: taskID,
+                itemID: item.id,
+                expectedRevision: revision,
+                ownerMessageID: operationID,
+                replacementLabel: draft
+            )
+            guard isCurrent, generation == requestGeneration else { return }
+            submission = result
+            if result == .confirmed { loadState = .ready }
+            isWorking = false
+            requestTask = nil
+        }
+        await requestTask?.value
+        return submission
+    }
+
+    func checkStatus() async -> ChecklistCorrectionSubmission? {
+        guard isCurrent, !isWorking, let item = selectedItem,
+              let revision = projection?.revision, let operationID else { return nil }
+        isWorking = true
+        let requestGeneration = UUID()
+        generation = requestGeneration
+        requestTask = Task {
+            let result = await client.checkChecklistCorrection(
+                taskID: taskID,
+                itemID: item.id,
+                expectedRevision: revision,
+                ownerMessageID: operationID,
+                replacementLabel: draft
+            )
+            guard isCurrent, generation == requestGeneration else { return }
+            submission = result
+            isWorking = false
+            requestTask = nil
+        }
+        await requestTask?.value
+        return submission
+    }
+
+    func cancelInFlight() {
+        generation = UUID()
+        requestTask?.cancel()
+        requestTask = nil
+        if isWorking {
+            if operationID != nil {
+                submission = .uncertain
+            } else {
+                loadState = .unavailable
+            }
+        }
+        isWorking = false
+    }
+
+    func updateTaskEligibility(_ eligible: Bool) {
+        guard active, taskIsEligible != eligible else { return }
+        taskIsEligible = eligible
+        if !eligible { cancelInFlight() }
+    }
+
+    func dispose() {
+        guard active else { return }
+        active = false
+        cancelInFlight()
+        projection = nil
+        selectedItemID = nil
+        draft = ""
+        operationID = nil
+        submission = nil
+        loadState = .loading
+    }
+
+    private var isCurrent: Bool {
+        active && taskIsEligible && connectionIsCurrent()
+    }
+}
+
+struct ChecklistCorrectionSection: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Bindable var controller: ChecklistCorrectionController
+    let onSaved: () async -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Change a lookup")
+                .font(.headline)
+            switch controller.loadState {
+            case .loading:
+                ProgressView("Loading lookup requests…")
+                    .font(.subheadline)
+            case .unavailable:
+                Text("Lookup requests aren’t available right now. Try again.")
+                    .font(.subheadline)
+                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                button("Try again", identifier: "checklist-correction-load") {
+                    await controller.load()
+                }
+            case .ready:
+                if controller.projection?.eligible != true {
+                    Text("No lookup can be changed right now.")
+                        .font(.subheadline)
+                        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                } else {
+                    lookupItems
+                    if let selected = controller.selectedItem {
+                        Text("Current lookup: \(selected.label)")
+                            .font(.subheadline)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text("Replacement lookup")
+                            .font(.subheadline.weight(.medium))
+                        TextEditor(text: Binding(
+                            get: { controller.draft },
+                            set: { controller.updateDraft($0) }
+                        ))
+                        .frame(minHeight: 88)
+                        .overlay(alignment: .topLeading) {
+                            if controller.draft.isEmpty {
+                                Text("Describe the new lookup")
+                                    .font(.body)
+                                    .foregroundStyle(.tertiary)
+                                    .padding(.top, 8)
+                                    .padding(.leading, 5)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                        .padding(6)
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.secondary.opacity(0.35)))
+                        .accessibilityLabel("Replacement lookup")
+                        .accessibilityIdentifier("checklist-correction-draft")
+                        Text("\(controller.draft.utf16.count)/500")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                        if controller.submission == .uncertain {
+                            Text("I couldn’t confirm whether this change was saved. Your text is still here.")
+                                .font(.subheadline)
+                                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                                button("Check status", identifier: "checklist-correction-check-status") {
+                                    if await controller.checkStatus() == .confirmed,
+                                       controller.canPublishResult { await onSaved() }
+                                }
+                                button("Try the same change again", identifier: "checklist-correction-retry") {
+                                    if await controller.submit() == .confirmed,
+                                       controller.canPublishResult { await onSaved() }
+                                }
+                        } else if controller.submission == .rejected {
+                            Text("This lookup can’t be changed right now. Review Activity before trying again.")
+                                .font(.subheadline)
+                                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                            button("Try again", identifier: "checklist-correction-retry") {
+                                if await controller.submit() == .confirmed,
+                                   controller.canPublishResult { await onSaved() }
+                            }
+                        } else if controller.submission == .confirmed {
+                            Text("Lookup change saved.")
+                                .font(.subheadline)
+                                .foregroundStyle(AssistantTheme.success(for: colorScheme))
+                        } else {
+                            button("Save lookup change", identifier: "checklist-correction-save") {
+                                if await controller.submit() == .confirmed,
+                                   controller.canPublishResult { await onSaved() }
+                            }
+                            .disabled((3...500).contains(
+                                controller.draft.trimmingCharacters(in: .whitespacesAndNewlines).utf16.count
+                            ) == false)
+                        }
+                    }
+                }
+            }
+            if controller.isWorking { ProgressView() }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .assistantCard(in: colorScheme)
+        .accessibilityIdentifier("checklist-correction-section-\(controller.taskID)")
+    }
+
+    private var lookupItems: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(controller.projection?.items ?? []) { item in
+                Button {
+                    controller.select(item)
+                } label: {
+                    Text(item.label)
+                        .font(.body)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(
+                            controller.selectedItemID == item.id
+                                ? AssistantTheme.accent(for: colorScheme).opacity(0.12)
+                                : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 10)
+                        )
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.secondary.opacity(0.3)))
+                }
+                .buttonStyle(.plain)
+                .disabled(controller.isWorking || controller.submission == .uncertain)
+                .accessibilityLabel("Select lookup: \(item.label)")
+                .accessibilityAddTraits(controller.selectedItemID == item.id ? .isSelected : [])
+                .accessibilityIdentifier("checklist-correction-item-\(item.id)")
+            }
+        }
+    }
+
+    private func button(
+        _ title: String,
+        identifier: String,
+        action: @escaping () async -> Void
+    ) -> some View {
+        Button(title) { Task { await action() } }
+            .buttonStyle(AssistantActionButtonStyle(kind: .primary, compact: false))
+            .frame(minHeight: 44)
+            .accessibilityIdentifier(identifier)
     }
 }
 
@@ -34,6 +372,7 @@ struct ActivityView: View {
     @State private var activityStatusAvailability = ActivityStatusAvailability()
     @State private var statusRefreshOffset = 0
     @State private var securityReviewController: SecurityReviewController?
+    @State private var checklistCorrectionControllers: [String: ChecklistCorrectionController] = [:]
 
     var body: some View {
         ScrollView {
@@ -116,6 +455,7 @@ struct ActivityView: View {
             .frame(maxWidth: isLandscape ? 760 : .infinity, alignment: .leading)
         }
         .navigationTitle("Activity")
+        .onAppear { updateChecklistCorrectionEligibility() }
         .onChange(of: showingArchived) { _, _ in
             discoveryTask?.cancel()
             discoveryGeneration = UUID()
@@ -125,6 +465,7 @@ struct ActivityView: View {
             activityStatusAvailability.reset()
             statusRefreshOffset = 0
             disposeSecurityReviews()
+            updateChecklistCorrectionEligibility()
         }
         .onChange(of: filter) { _, _ in
             discoveryTask?.cancel()
@@ -132,6 +473,7 @@ struct ActivityView: View {
             discoveryInFlight = false
             if discovery != nil { loadDiscovery(reset: true) }
             if !showsSecurityReviews { disposeSecurityReviews() }
+            updateChecklistCorrectionEligibility()
         }
         .onChange(of: model.activityConnectionVersion) { _, _ in
             discoveryTask?.cancel()
@@ -142,6 +484,17 @@ struct ActivityView: View {
             activityStatusAvailability.reset()
             statusRefreshOffset = 0
             disposeSecurityReviews()
+            disposeChecklistCorrections()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active {
+                pauseChecklistCorrections()
+            } else {
+                updateChecklistCorrectionEligibility()
+            }
+        }
+        .onChange(of: correctionEligibilitySnapshot) { _, _ in
+            updateChecklistCorrectionEligibility()
         }
         .onDisappear {
             discoveryTask?.cancel()
@@ -149,6 +502,7 @@ struct ActivityView: View {
             discoveryGeneration = UUID()
             discoveryInFlight = false
             disposeSecurityReviews()
+            pauseChecklistCorrections()
         }
         .assistantSubmenuChrome()
         .toolbarBackground(.visible, for: .navigationBar)
@@ -191,44 +545,11 @@ struct ActivityView: View {
             if discovery != nil { loadDiscovery(reset: true) }
             if showsSecurityReviews { await securityReviewController?.refresh() }
         }
-        .task(id: "\(scenePhase)-\(model.activityConnectionVersion)-\(showingArchived)-\(filter.rawValue)") {
-            guard scenePhase == .active else { return }
-            var failures = 0
-            while !Task.isCancelled, scenePhase == .active {
-                failures = await refreshVisibleActivity() ? 0 : failures + 1
-                do {
-                    try await Task.sleep(
-                        for: .seconds(PollingPolicy.activityIntervalSeconds(consecutiveFailures: failures))
-                    )
-                } catch { return }
-            }
+        .task(id: activityPollingTaskID) {
+            await pollVisibleActivity()
         }
-        .task(id: "security-\(scenePhase)-\(model.activityConnectionVersion)-\(showingArchived)-\(filter.rawValue)") {
-            guard scenePhase == .active, showsSecurityReviews,
-                  let context = model.securityReviewRequestContext() else {
-                disposeSecurityReviews()
-                return
-            }
-
-            let controller: SecurityReviewController
-            if let existing = securityReviewController,
-               existing.ownerID == context.ownerID,
-               existing.connectionVersion == context.connectionVersion {
-                controller = existing
-            } else {
-                disposeSecurityReviews()
-                controller = SecurityReviewController(
-                    context: context,
-                    connectionIsCurrent: { [weak model] in
-                        model?.securityReviewConnectionIsCurrent(
-                            ownerID: context.ownerID,
-                            version: context.connectionVersion
-                        ) ?? false
-                    }
-                )
-                securityReviewController = controller
-            }
-            await controller.refresh()
+        .task(id: securityReviewTaskID) {
+            await refreshSecurityReviews()
         }
         .alert(
             "Raise task budget",
@@ -436,6 +757,8 @@ struct ActivityView: View {
                     .lineLimit(usesAccessibilityLayout ? nil : 3)
             }
 
+            checklistCorrectionEntry(item)
+
             Divider()
             HStack(alignment: .bottom, spacing: AssistantTheme.actionSpacing) {
                 VStack(alignment: .leading, spacing: AssistantTheme.actionSpacing) {
@@ -552,6 +875,124 @@ struct ActivityView: View {
         }
         .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: true))
         .disabled(activityActionInFlight != nil)
+    }
+
+    @ViewBuilder
+    private func checklistCorrectionEntry(_ item: ActivityItem) -> some View {
+        if isChecklistCorrectionEligible(item) {
+            if let controller = checklistCorrectionControllers[item.id] {
+                ChecklistCorrectionSection(controller: controller) {
+                    await model.refreshOverview()
+                }
+            } else {
+                Button("Change a lookup") { beginChecklistCorrection(for: item) }
+                    .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: false))
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("checklist-correction-open-\(item.id)")
+            }
+        }
+    }
+
+    private func beginChecklistCorrection(for item: ActivityItem) {
+        guard isChecklistCorrectionEligible(item),
+              let context = model.checklistCorrectionRequestContext() else { return }
+        let controller = ChecklistCorrectionController(
+            context: context,
+            taskID: item.id,
+            connectionIsCurrent: { [weak model] in
+                model?.checklistCorrectionConnectionIsCurrent(
+                    ownerID: context.ownerID,
+                    version: context.connectionVersion
+                ) ?? false
+            }
+        )
+        checklistCorrectionControllers[item.id] = controller
+        Task { await controller.load() }
+    }
+
+    private func refreshSecurityReviews() async {
+        guard scenePhase == .active else {
+            disposeSecurityReviews()
+            return
+        }
+        guard showsSecurityReviews else {
+            disposeSecurityReviews()
+            return
+        }
+        guard let context = model.securityReviewRequestContext() else {
+            disposeSecurityReviews()
+            return
+        }
+
+        let controller: SecurityReviewController
+        if let existing = securityReviewController,
+           existing.ownerID == context.ownerID,
+           existing.connectionVersion == context.connectionVersion {
+            controller = existing
+        } else {
+            disposeSecurityReviews()
+            controller = SecurityReviewController(
+                context: context,
+                connectionIsCurrent: { [weak model] in
+                    model?.securityReviewConnectionIsCurrent(
+                        ownerID: context.ownerID,
+                        version: context.connectionVersion
+                    ) ?? false
+                }
+            )
+            securityReviewController = controller
+        }
+        await controller.refresh()
+    }
+
+    private var activityPollingTaskID: String {
+        "\(scenePhase)-\(model.activityConnectionVersion)-\(showingArchived)-\(filter.rawValue)"
+    }
+
+    private var securityReviewTaskID: String {
+        "security-\(scenePhase)-\(model.activityConnectionVersion)-\(showingArchived)-\(filter.rawValue)"
+    }
+
+    private func pollVisibleActivity() async {
+        guard scenePhase == .active else { return }
+        var failures = 0
+        while !Task.isCancelled, scenePhase == .active {
+            let refreshed = await refreshVisibleActivity()
+            failures = refreshed ? 0 : failures + 1
+            let interval = PollingPolicy.activityIntervalSeconds(consecutiveFailures: failures)
+            do {
+                try await Task.sleep(for: .seconds(interval))
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func pauseChecklistCorrections() {
+        checklistCorrectionControllers.values.forEach { $0.updateTaskEligibility(false) }
+    }
+
+    private func updateChecklistCorrectionEligibility() {
+        let eligibleIDs = Set(filteredItems.filter(isChecklistCorrectionEligible).map(\.id))
+        checklistCorrectionControllers.forEach { id, controller in
+            controller.updateTaskEligibility(eligibleIDs.contains(id))
+        }
+    }
+
+    private func disposeChecklistCorrections() {
+        checklistCorrectionControllers.values.forEach { $0.dispose() }
+        checklistCorrectionControllers = [:]
+    }
+
+    private var correctionEligibilitySnapshot: [String] {
+        filteredItems.map {
+            "\($0.id)|\($0.status)|\($0.archivedAt != nil)|\($0.hasPendingApproval)|\($0.trust)|\($0.type)"
+        }
+    }
+
+    private func isChecklistCorrectionEligible(_ item: ActivityItem) -> Bool {
+        !showingArchived && item.archivedAt == nil && item.type == "chat_turn" &&
+            item.trust == "owner" && item.status == "needs_attention" && !item.hasPendingApproval
     }
 
     private func suggestedBudget(for item: ActivityItem) -> String {

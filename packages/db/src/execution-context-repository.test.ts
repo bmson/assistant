@@ -70,11 +70,13 @@ describe('PostgreSQL execution context repository', () => {
     origin?: 'owner' | 'known_contact';
     text: string;
     channelMessageId?: string;
+    taskId?: string | null;
   }): Promise<string> {
     const id = input.id ?? randomUUID();
     await db.insert(messages).values({
       id,
       conversationId: input.conversationId,
+      taskId: input.taskId ?? null,
       role: input.role ?? 'user',
       origin:
         input.origin ??
@@ -213,6 +215,92 @@ describe('PostgreSQL execution context repository', () => {
         throughMessageId: trigger,
       }),
     ).toEqual([]);
+  });
+
+  it('loads an exact owner message and the latest owner message without confusing assistant head rows', async () => {
+    const repository = createPostgresExecutionContextRepository(db);
+    const chatId = await makeConversation('chat');
+    const otherId = await makeConversation('chat');
+    const at = new Date('2026-09-12T10:00:00Z');
+    const taskId = randomUUID();
+    taskIds.push(taskId);
+    await db.insert(tasks).values({
+      id: taskId,
+      agentId,
+      type: 'chat_turn',
+      trust: 'owner',
+    });
+    const pinned = await addMessage({
+      conversationId: chatId,
+      // Deliberately future-dated: createdAt is not append order.
+      at: new Date(at.getTime() + 60_000),
+      text: 'Find my flight tomorrow',
+      taskId,
+    });
+    await addMessage({
+      conversationId: chatId,
+      at: new Date(at.getTime() - 60_000),
+      text: 'assistant response',
+      role: 'assistant',
+    });
+    const latestOwnerId = await addMessage({
+      conversationId: chatId,
+      // This later append must win despite a backdated timestamp and UUID.
+      at: new Date(at.getTime() - 120_000),
+      text: 'Actually find my flight today instead',
+      taskId,
+    });
+    const foreignTaskOwnerId = await addMessage({
+      conversationId: chatId,
+      at: new Date(at.getTime() + 3_000),
+      text: 'known contact message',
+      role: 'user',
+      origin: 'known_contact',
+    });
+    const foreignConversationId = await addMessage({
+      conversationId: otherId,
+      at: new Date(at.getTime() + 4_000),
+      text: 'other chat request',
+    });
+
+    await expect(
+      repository.getOwnerMessage({ agentId, conversationId: chatId, messageId: pinned }),
+    ).resolves.toMatchObject({
+      id: pinned,
+      taskId,
+      conversationId: chatId,
+      role: 'user',
+      origin: 'owner',
+      text: 'Find my flight tomorrow',
+    });
+    await expect(
+      repository.getOwnerMessage({
+        agentId,
+        conversationId: otherId,
+        messageId: pinned,
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      repository.getOwnerMessage({
+        agentId: randomUUID(),
+        conversationId: chatId,
+        messageId: pinned,
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      repository.getOwnerMessage({
+        agentId,
+        conversationId: chatId,
+        messageId: foreignTaskOwnerId,
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      repository.getLatestOwnerMessage({ agentId, conversationId: chatId }),
+    ).resolves.toMatchObject({ id: latestOwnerId, text: 'Actually find my flight today instead' });
+    await expect(
+      repository.getLatestOwnerMessage({ agentId: randomUUID(), conversationId: chatId }),
+    ).resolves.toBeNull();
+    expect(foreignConversationId).not.toBe(pinned);
   });
 
   it('uses a stable timestamp/id cursor and refuses email folding', async () => {

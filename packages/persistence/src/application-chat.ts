@@ -1,6 +1,7 @@
 import type { AppendMessageInput, TaskLease } from './contracts.js';
 import type { ExecutionEvidenceRecord } from './execution-evidence.js';
 import type { Records } from './records.js';
+import type { ChecklistCancellationPolicy } from './task-activity-commands.js';
 
 export const DEFAULT_CHAT_MESSAGE_LIMIT = 100;
 export const MAX_CHAT_MESSAGE_LIMIT = 200;
@@ -29,6 +30,72 @@ export interface ChatTurnAdmissionInput {
   goalId?: string;
   autonomyGrant?: unknown;
 }
+
+/** Pure domain resolution supplied while a persistence transaction owns its candidate snapshot. */
+export type OwnerChecklistCancellationResolution =
+  | { kind: 'not_cancellation' }
+  | { kind: 'no_match' }
+  | { kind: 'ambiguous' }
+  | {
+      kind: 'matched';
+      itemId: string;
+      expectedRevision: number;
+      expectedCancellationRevision: number;
+    };
+
+export type OwnerChecklistCancellationResolver = (
+  checklistValue: unknown,
+  rawText: string,
+) => OwnerChecklistCancellationResolution;
+
+export interface ComposerChecklistCancellationPolicy {
+  resolve: OwnerChecklistCancellationResolver;
+  cancel: ChecklistCancellationPolicy['cancel'];
+  matchesReplay: ChecklistCancellationPolicy['matchesReplay'];
+  matchesComposerReplay(input: {
+    checklist: unknown;
+    ownerMessageId: string;
+    ownerMessageText: string;
+    requestHash: string;
+    task: { id: string; conversationId: string };
+    priorMessage: {
+      id: string;
+      taskId: string | null;
+      conversationId: string | null;
+      role: string;
+      origin: string;
+      text: string;
+    };
+  }): boolean;
+}
+
+export interface ComposerChecklistCancellationInput {
+  agentId: string;
+  conversationId: string;
+  /** Stable client operation ID; persisted as the owner-message primary key. */
+  clientOperationId: string;
+  /** Server-computed hash of action kind and exact owner text. */
+  requestHash: string;
+  /** Preserved verbatim in the owner message and checked on replay. */
+  rawText: string;
+  /** Pure matcher/mutation/replay rules shared by both storage adapters. */
+  policy: ComposerChecklistCancellationPolicy;
+  clientId?: string;
+}
+
+export type ComposerChecklistCancellationResult =
+  | { kind: 'not_applicable' | 'ambiguous' | 'no_match' }
+  | {
+      kind: 'unsafe';
+      reason: 'candidate_changed' | 'not_paused' | 'unknown_effect' | 'invalid_history';
+    }
+  | { kind: 'conflict' }
+  | {
+      kind: 'applied' | 'replayed';
+      task: Records['tasks'];
+      message: ApplicationChatMessage;
+      queueGeneration: number;
+    };
 
 export type ChatTurnAdmissionResult =
   | {
@@ -249,6 +316,10 @@ export interface ApplicationChatPersistence {
   ): Promise<ApplicationChatMessage | undefined>;
   /** Atomically records the owner message and its leased task admission receipt. */
   admitChatTurn(input: ChatTurnAdmissionInput): Promise<ChatTurnAdmissionResult>;
+  /** Resolves and applies one bounded internal cancellation under the conversation fence. */
+  admitComposerChecklistCancellation(
+    input: ComposerChecklistCancellationInput,
+  ): Promise<ComposerChecklistCancellationResult>;
   /**
    * Idempotently stops a send by operation ID, including before admission has a
    * task receipt. An admitted task reports effect status as unknown.
@@ -257,6 +328,8 @@ export interface ApplicationChatPersistence {
     agentId: string;
     conversationId: string;
     clientOperationId: string;
+    /** Validates the narrow composer-cancellation receipt when Stop races its response. */
+    composerCancellationPolicy?: Pick<ComposerChecklistCancellationPolicy, 'matchesComposerReplay'>;
   }): Promise<ChatTurnCancellationResult>;
   /** Fences the current admission lease and queues that same task for the executor. */
   queueAdmittedChatTurn(input: {

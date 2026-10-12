@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Records } from './records.js';
 
 export const CHAT_ADMISSION_PROTOCOL = 'owner-chat-v1';
@@ -17,6 +18,12 @@ export function chatAdmissionExternalEventId(input: {
   clientOperationId: string;
 }): string {
   return `chat-admission:${input.agentId}:${input.conversationId}:${input.clientOperationId}`;
+}
+
+export function composerChecklistCancellationRequestHash(rawText: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify(['owner-checklist-cancellation-v1', rawText]))
+    .digest('hex');
 }
 
 export function chatAdmissionPayload(task: Pick<Records['tasks'], 'trigger'>): {

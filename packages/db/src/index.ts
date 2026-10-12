@@ -45,6 +45,7 @@ export { createPostgresNotificationOutboxRepository } from './notification-outbo
 export { createPostgresNotificationsConversationRepository } from './notifications-conversation-repository.js';
 export { createPostgresNudgePolicyRepository } from './nudge-policy-repository.js';
 export { createPostgresOwnerCardCompilationRepository } from './owner-card-compilation-repository.js';
+export { lockPostgresOwnerChatAction } from './owner-chat-action-lock.js';
 export {
   createPostgresOwnerContextRepository,
   listEligibleOwnerCommitments,

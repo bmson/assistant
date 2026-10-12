@@ -9,8 +9,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
   () => {
     let store: InstallationStore;
     let repository: FirestoreExecutionContextRepository;
+    let appendOrder = 0;
 
     beforeEach(() => {
+      appendOrder = 0;
       store = emulatorStore(() => new Date('2026-09-12T12:00:00Z'));
       repository = new FirestoreExecutionContextRepository(store);
     });
@@ -42,6 +44,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       role?: string;
       origin?: string;
       channelMessageId?: string | null;
+      taskId?: string | null;
     }) {
       return {
         id: input.id,
@@ -49,11 +52,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         role: input.role ?? 'user',
         text: input.text,
         parts: [],
-        taskId: null,
+        taskId: input.taskId ?? null,
         origin: input.origin ?? (input.role === 'assistant' ? 'assistant' : 'owner'),
         channelMessageId: input.channelMessageId ?? null,
         embedding: null,
         createdAt: input.at,
+        appendedAt: Timestamp.fromMillis(1_790_000_000_000 + appendOrder++),
+        hiddenAt: null,
       };
     }
 
@@ -106,6 +111,136 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           channelMessageId: 'gmail:event-1',
         }),
       ).resolves.toBeNull();
+    });
+
+    it('loads exact and latest owner messages by authenticated chat scope, excluding non-owner rows', async () => {
+      await addConversation('owner-read-chat', 'agent-a', 'chat');
+      await addConversation('owner-read-other', 'agent-a', 'chat');
+      const at = new Date('2026-09-12T10:00:00Z');
+      const taskId = 'owner-read-task';
+      const pinned = message({
+        id: 'owner-read-original',
+        conversationId: 'owner-read-chat',
+        at: new Date(at.getTime() + 60_000),
+        text: 'Find my flight tomorrow',
+        taskId,
+      });
+      const assistant = message({
+        id: 'owner-read-assistant',
+        conversationId: 'owner-read-chat',
+        at: new Date(at.getTime() - 60_000),
+        text: 'assistant response',
+        role: 'assistant',
+      });
+      const latestOwner = message({
+        id: 'owner-read-correction',
+        conversationId: 'owner-read-chat',
+        at: new Date(at.getTime() - 120_000),
+        text: 'Actually find my flight today instead',
+        taskId,
+      });
+      const knownContact = message({
+        id: 'owner-read-contact',
+        conversationId: 'owner-read-chat',
+        at: new Date(at.getTime() + 3_000),
+        text: 'known contact',
+        origin: 'known_contact',
+      });
+      await writeMessages([pinned, assistant, latestOwner, knownContact]);
+
+      await expect(
+        repository.getOwnerMessage({
+          agentId: 'agent-a',
+          conversationId: 'owner-read-chat',
+          messageId: 'owner-read-original',
+        }),
+      ).resolves.toMatchObject({
+        id: 'owner-read-original',
+        taskId,
+        role: 'user',
+        origin: 'owner',
+        text: 'Find my flight tomorrow',
+      });
+      await expect(
+        repository.getOwnerMessage({
+          agentId: 'agent-b',
+          conversationId: 'owner-read-chat',
+          messageId: 'owner-read-original',
+        }),
+      ).resolves.toBeNull();
+      await expect(
+        repository.getOwnerMessage({
+          agentId: 'agent-a',
+          conversationId: 'owner-read-other',
+          messageId: 'owner-read-original',
+        }),
+      ).resolves.toBeNull();
+      await expect(
+        repository.getOwnerMessage({
+          agentId: 'agent-a',
+          conversationId: 'owner-read-chat',
+          messageId: 'owner-read-contact',
+        }),
+      ).resolves.toBeNull();
+      await expect(
+        repository.getLatestOwnerMessage({ agentId: 'agent-a', conversationId: 'owner-read-chat' }),
+      ).resolves.toMatchObject({ id: 'owner-read-correction' });
+      await expect(
+        repository.getLatestOwnerMessage({ agentId: 'agent-b', conversationId: 'owner-read-chat' }),
+      ).resolves.toBeNull();
+    });
+
+    it('uses append order, then the canonical ID tie-break, for the visible owner head', async () => {
+      await addConversation('head-chat', 'agent-a', 'chat');
+      const base = Timestamp.fromDate(new Date('2026-09-12T10:00:00Z'));
+      const at = (millis: number) => Timestamp.fromMillis(base.toMillis() + millis);
+      const rows = [
+        {
+          ...message({
+            id: 'owner-backdated',
+            conversationId: 'head-chat',
+            at: new Date('2010-01-01T00:00:00Z'),
+            text: 'original request',
+          }),
+          hiddenAt: null,
+          appendedAt: at(1),
+        },
+        {
+          ...message({
+            id: 'owner-newer-created',
+            conversationId: 'head-chat',
+            at: new Date('2035-01-01T00:00:00Z'),
+            text: 'late createdAt',
+          }),
+          hiddenAt: null,
+          appendedAt: at(2),
+        },
+        {
+          ...message({
+            id: 'owner-tie-a',
+            conversationId: 'head-chat',
+            at: new Date('2000-01-01T00:00:00Z'),
+            text: 'same append time, lower ID',
+          }),
+          hiddenAt: null,
+          appendedAt: at(3),
+        },
+        {
+          ...message({
+            id: 'owner-tie-z',
+            conversationId: 'head-chat',
+            at: new Date('1990-01-01T00:00:00Z'),
+            text: 'same append time, higher ID',
+          }),
+          hiddenAt: null,
+          appendedAt: at(3),
+        },
+      ];
+      for (const row of rows) await store.doc('messages', row.id).set(row);
+
+      await expect(
+        repository.getLatestOwnerMessage({ agentId: 'agent-a', conversationId: 'head-chat' }),
+      ).resolves.toMatchObject({ id: 'owner-tie-z', text: 'same append time, higher ID' });
     });
 
     it('returns the latest 20 eligible messages before the cutoff from an owned email thread', async () => {
