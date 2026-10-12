@@ -5675,6 +5675,130 @@ extension APIClientRetryTests {
         }
     }
 
+    func testChecklistCancellationUsesExactBoundPayloadAndAuditReconciliation() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let itemID = "reminder-1"
+        let operationID = "123e4567-e89b-12d3-a456-426614174001"
+        StubURLProtocol.prime([.success(status: 200, body: Data(
+            #"{"ok":true,"outcome":"cancelled","transitioned":true,"queueGeneration":7,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","taskId":"123e4567-e89b-12d3-a456-426614174000","itemId":"reminder-1","checklistRevision":4,"cancellationRevision":2}"#.utf8
+        ))])
+
+        let result = await makeClient().cancelChecklistItem(
+            taskID: taskID,
+            itemID: itemID,
+            expectedRevision: 4,
+            expectedCancellationRevision: 1,
+            ownerMessageID: operationID,
+            itemLabel: "Remind me to pack"
+        )
+
+        XCTAssertEqual(result, .confirmed)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        let body = try XCTUnwrap(StubURLProtocol.bodies.first)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(payload["action"] as? String, "cancel-checklist")
+        XCTAssertEqual(payload["itemId"] as? String, itemID)
+        XCTAssertEqual(payload["expectedRevision"] as? Int, 4)
+        XCTAssertEqual(payload["expectedCancellationRevision"] as? Int, 1)
+        XCTAssertEqual(payload["ownerMessageId"] as? String, operationID)
+        XCTAssertEqual(Set(payload.keys), ["action", "itemId", "expectedRevision", "expectedCancellationRevision", "ownerMessageId"])
+    }
+
+    func testChecklistCancellationConfirmsOnlyExactOwnerAuditAfterAmbiguousPost() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let itemID = "lookup-1"
+        let operationID = "123e4567-e89b-12d3-a456-426614174001"
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(#"{"ok":true}"#.utf8)),
+            .success(status: 200, body: Data(
+                #"{"id":"123e4567-e89b-12d3-a456-426614174000","checklistRevision":4,"cancellationRevision":2,"audit":{"revision":2,"checklistRevision":4,"taskId":"123e4567-e89b-12d3-a456-426614174000","conversationId":"conversation-1","ownerTaskId":"123e4567-e89b-12d3-a456-426614174000","ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","itemIds":["lookup-1"],"requestSpans":["Find my flight"]}}"#.utf8
+            )),
+        ])
+
+        let confirmed = await makeClient().cancelChecklistItem(
+            taskID: taskID,
+            itemID: itemID,
+            expectedRevision: 4,
+            expectedCancellationRevision: 1,
+            ownerMessageID: operationID,
+            itemLabel: "Find my flight"
+        )
+        XCTAssertEqual(confirmed, .confirmed)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST", "GET"])
+        let readbackURL = try XCTUnwrap(StubURLProtocol.urls.last)
+        XCTAssertEqual(URLComponents(url: readbackURL, resolvingAgainstBaseURL: false)?.queryItems, [
+            URLQueryItem(name: "cancellationOwnerMessageId", value: operationID)
+        ])
+
+        let body = ChecklistCancellationBody(
+            itemId: itemID,
+            expectedRevision: 4,
+            expectedCancellationRevision: 1,
+            ownerMessageId: operationID
+        )
+        let wrongItemAudit = ChecklistCancellationReconciliation(
+            id: taskID,
+            checklistRevision: 4,
+            cancellationRevision: 2,
+            audit: .init(
+                revision: 2,
+                checklistRevision: 4,
+                taskId: taskID,
+                ownerTaskId: taskID,
+                ownerMessageId: operationID,
+                itemIds: ["hotel-lookup"],
+                requestSpans: ["Find my flight"]
+            )
+        )
+        XCTAssertFalse(wrongItemAudit.confirms(body, taskID: taskID, itemLabel: "Find my flight"))
+        let laterRevisionAudit = ChecklistCancellationReconciliation(
+            id: taskID,
+            checklistRevision: 5,
+            cancellationRevision: 2,
+            audit: .init(
+                revision: 2,
+                checklistRevision: 4,
+                taskId: taskID,
+                ownerTaskId: taskID,
+                ownerMessageId: operationID,
+                itemIds: [itemID],
+                requestSpans: ["Find my flight"]
+            )
+        )
+        XCTAssertTrue(laterRevisionAudit.confirms(body, taskID: taskID, itemLabel: "Find my flight"),
+            "An exact audit remains proof when later checklist edits advance the outer revisions.")
+        let foreignOwnerAudit = ChecklistCancellationReconciliation(
+            id: taskID,
+            checklistRevision: 5,
+            cancellationRevision: 3,
+            audit: .init(
+                revision: 2,
+                checklistRevision: 4,
+                taskId: taskID,
+                ownerTaskId: "another-task",
+                ownerMessageId: operationID,
+                itemIds: [itemID],
+                requestSpans: ["Find my flight"]
+            )
+        )
+        XCTAssertFalse(foreignOwnerAudit.confirms(body, taskID: taskID, itemLabel: "Find my flight"))
+        let mismatchedLabelAudit = ChecklistCancellationReconciliation(
+            id: taskID,
+            checklistRevision: 5,
+            cancellationRevision: 3,
+            audit: .init(
+                revision: 2,
+                checklistRevision: 4,
+                taskId: taskID,
+                ownerTaskId: taskID,
+                ownerMessageId: operationID,
+                itemIds: [itemID],
+                requestSpans: ["Find my hotel"]
+            )
+        )
+        XCTAssertFalse(mismatchedLabelAudit.confirms(body, taskID: taskID, itemLabel: "Find my flight"))
+    }
+
     func testChecklistCorrectionAcceptsExactPostReceiptWithoutRetry() async {
         let taskID = "123e4567-e89b-12d3-a456-426614174000"
         let itemID = "lookup-1"
@@ -5961,6 +6085,355 @@ extension APIClientRetryTests {
         XCTAssertEqual(controller.operationID, operationID)
         XCTAssertEqual(controller.draft, "Find my flight from Berlin to Paris")
         controller.dispose()
+    }
+
+    @MainActor
+    func testChecklistCancellationKeepsItemAndExactOperationUntilConfirmed() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let expectedOperationID = "123e4567-e89b-12d3-a456-426614174001"
+        let projection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":false,"revision":null,"items":[],"cancellationEligible":true,"cancellationChecklistRevision":4,"cancellationRevision":1,"cancellableItems":[{"id":"lookup-1","label":"Find my flight","status":"blocked"},{"id":"reminder-1","label":"Remind me to pack","status":"pending"}]}"#
+        let unmatchedAudit = #"{"id":"123e4567-e89b-12d3-a456-426614174000","checklistRevision":4,"cancellationRevision":2,"audit":{"revision":2,"checklistRevision":4,"taskId":"123e4567-e89b-12d3-a456-426614174000","conversationId":"conversation-1","ownerTaskId":"123e4567-e89b-12d3-a456-426614174000","ownerMessageId":"other-operation","itemIds":["lookup-1"],"requestSpans":["Find my flight"]}}"#
+        let exactReceipt = #"{"ok":true,"outcome":"cancelled","transitioned":true,"queueGeneration":8,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","taskId":"123e4567-e89b-12d3-a456-426614174000","itemId":"lookup-1","checklistRevision":4,"cancellationRevision":2}"#
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(projection.utf8)),
+            .success(status: 200, body: Data(#"{"ok":true}"#.utf8)),
+            .success(status: 200, body: Data(unmatchedAudit.utf8)),
+            .success(status: 200, body: Data(unmatchedAudit.utf8)),
+            .success(status: 200, body: Data(exactReceipt.utf8)),
+        ])
+        let controller = ChecklistCorrectionController(
+            context: ChecklistCorrectionRequestContext(
+                ownerID: "owner-a",
+                connectionVersion: 1,
+                client: makeClient()
+            ),
+            taskID: taskID,
+            connectionIsCurrent: { true },
+            operationIDFactory: { expectedOperationID }
+        )
+        await controller.load()
+        let selected = try XCTUnwrap(controller.cancellableItems.first(where: { $0.id == "lookup-1" }))
+        XCTAssertEqual(controller.requestItems.map(\.id), ["lookup-1", "reminder-1"])
+        XCTAssertEqual(Set(controller.requestItems.map(\.id)).count, controller.requestItems.count,
+            "An editable lookup must not appear twice in the combined request list.")
+        XCTAssertFalse(controller.requestItems.first(where: { $0.id == "lookup-1" })?.canChangeLookup == true,
+            "A blocked lookup is cancellable but is not in the editable lookup projection.")
+        XCTAssertTrue(controller.requestItems.first(where: { $0.id == "lookup-1" })?.canCancel == true)
+        XCTAssertTrue(controller.requestItems.first(where: { $0.id == "reminder-1" })?.canCancel == true)
+        controller.selectCancellationItem(selected)
+        let selection = ChecklistCancellationSelection(
+            itemID: selected.id,
+            label: selected.label,
+            checklistRevision: 4,
+            cancellationRevision: 1
+        )
+
+        let firstResult = await controller.cancelSelectedItem(selection: selection)
+        XCTAssertEqual(firstResult, .uncertain)
+        let operationID = try XCTUnwrap(controller.cancellationOperationID)
+        XCTAssertEqual(controller.selectedCancellationItem?.id, selected.id,
+            "An unclear response must leave the selected item visible.")
+        XCTAssertEqual(controller.cancellationTargetLabel, selected.label)
+        await controller.load()
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET", "POST", "GET"],
+            "A projection refresh must not clear or repeat an uncertain cancellation.")
+
+        let statusResult = await controller.checkCancellationStatus()
+        XCTAssertEqual(statusResult, .uncertain)
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET", "POST", "GET", "GET"])
+        let statusURL = try XCTUnwrap(StubURLProtocol.urls.last)
+        XCTAssertEqual(URLComponents(url: statusURL, resolvingAgainstBaseURL: false)?.queryItems, [
+            URLQueryItem(name: "cancellationOwnerMessageId", value: operationID)
+        ])
+
+        let retryResult = await controller.cancelSelectedItem()
+        XCTAssertEqual(retryResult, .confirmed)
+        XCTAssertEqual(controller.cancellationOperationID, operationID)
+        XCTAssertEqual(operationID, expectedOperationID)
+        XCTAssertEqual(controller.selectedCancellationItem?.id, selected.id,
+            "The item is not optimistically removed from the saved projection.")
+        let cancellationPayloads = try StubURLProtocol.requests.filter { $0.0 == "POST" }.map { request in
+            let data = try XCTUnwrap(request.3)
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        }
+        XCTAssertEqual(cancellationPayloads.count, 2)
+        XCTAssertEqual(cancellationPayloads[0] as NSDictionary, cancellationPayloads[1] as NSDictionary,
+            "A manual repeat must preserve the same operation ID and revision fences.")
+        let expectedPayload: [String: Any] = [
+            "action": "cancel-checklist",
+            "itemId": selected.id,
+            "expectedRevision": 4,
+            "expectedCancellationRevision": 1,
+            "ownerMessageId": expectedOperationID,
+        ]
+        XCTAssertEqual(cancellationPayloads[0] as NSDictionary, expectedPayload as NSDictionary)
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET", "POST", "GET", "GET", "POST"])
+        controller.dispose()
+    }
+
+    @MainActor
+    func testChecklistCancellationConfirmationCannotFollowChangedSelection() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let projection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":false,"revision":null,"items":[],"cancellationEligible":true,"cancellationChecklistRevision":4,"cancellationRevision":1,"cancellableItems":[{"id":"lookup-1","label":"Find my flight","status":"pending"},{"id":"reminder-1","label":"Remind me to pack","status":"blocked"}]}"#
+        StubURLProtocol.prime([.success(status: 200, body: Data(projection.utf8))])
+        let controller = ChecklistCorrectionController(
+            context: ChecklistCorrectionRequestContext(
+                ownerID: "owner-a",
+                connectionVersion: 1,
+                client: makeClient()
+            ),
+            taskID: taskID,
+            connectionIsCurrent: { true }
+        )
+        await controller.load()
+        let first = try XCTUnwrap(controller.cancellableItems.first)
+        controller.selectCancellationItem(first)
+        let confirmation = ChecklistCancellationSelection(
+            itemID: first.id,
+            label: first.label,
+            checklistRevision: 4,
+            cancellationRevision: 1
+        )
+        let second = try XCTUnwrap(controller.cancellableItems.last)
+        controller.selectCancellationItem(second)
+
+        let staleSelectionResult = await controller.cancelSelectedItem(selection: confirmation)
+        XCTAssertNil(staleSelectionResult)
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"],
+            "A confirmation for an old selection must never send a cancellation for the new item.")
+        controller.dispose()
+    }
+
+    @MainActor
+    func testCorrectionAndCancellationCannotPassEachOthersUncertainFence() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let projection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":true,"revision":4,"items":[{"id":"lookup-1","label":"Find my flight"}],"cancellationEligible":true,"cancellationChecklistRevision":4,"cancellationRevision":1,"cancellableItems":[{"id":"lookup-1","label":"Find my flight","status":"pending"}]}"#
+        let unknownCancellation = #"{"id":"123e4567-e89b-12d3-a456-426614174000","checklistRevision":4,"cancellationRevision":2,"audit":{"revision":2,"checklistRevision":4,"taskId":"123e4567-e89b-12d3-a456-426614174000","conversationId":"conversation-1","ownerTaskId":"123e4567-e89b-12d3-a456-426614174000","ownerMessageId":"other-operation","itemIds":["lookup-1"],"requestSpans":["Find my flight"]}}"#
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(projection.utf8)),
+            .success(status: 200, body: Data(#"{"ok":true}"#.utf8)),
+            .success(status: 200, body: Data(unknownCancellation.utf8)),
+        ])
+        let controller = ChecklistCorrectionController(
+            context: ChecklistCorrectionRequestContext(
+                ownerID: "owner-a",
+                connectionVersion: 1,
+                client: makeClient()
+            ),
+            taskID: taskID,
+            connectionIsCurrent: { true }
+        )
+        await controller.load()
+        controller.select(.init(id: "lookup-1", label: "Find my flight"))
+        controller.updateDraft("Find my flight from Berlin")
+        let cancellable = try XCTUnwrap(controller.cancellableItems.first)
+        XCTAssertTrue(controller.selectCancellationItem(cancellable))
+        let cancellationResult = await controller.cancelSelectedItem(selection: .init(
+            itemID: cancellable.id,
+            label: cancellable.label,
+            checklistRevision: 4,
+            cancellationRevision: 1
+        ))
+        XCTAssertEqual(cancellationResult, .uncertain)
+
+        let correctionResult = await controller.submit()
+        let correctionStatus = await controller.checkStatus()
+        XCTAssertNil(correctionResult, "An uncertain cancellation must block a new correction POST.")
+        XCTAssertNil(correctionStatus, "An uncertain cancellation must block correction status traffic too.")
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET", "POST", "GET"])
+        controller.dispose()
+
+        let unknownCorrection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","revision":5,"audit":{"revision":5,"ownerMessageId":"other-operation","itemId":"lookup-1","toLabel":"Find my flight from Berlin","toKind":"lookup"}}"#
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(projection.utf8)),
+            .success(status: 200, body: Data(#"{"ok":true}"#.utf8)),
+            .success(status: 200, body: Data(unknownCorrection.utf8)),
+        ])
+        let reverse = ChecklistCorrectionController(
+            context: ChecklistCorrectionRequestContext(
+                ownerID: "owner-a",
+                connectionVersion: 1,
+                client: makeClient()
+            ),
+            taskID: taskID,
+            connectionIsCurrent: { true }
+        )
+        await reverse.load()
+        reverse.select(.init(id: "lookup-1", label: "Find my flight"))
+        reverse.updateDraft("Find my flight from Berlin")
+        let reverseCorrectionResult = await reverse.submit()
+        XCTAssertEqual(reverseCorrectionResult, .uncertain)
+        let blockedCancellation = try XCTUnwrap(reverse.cancellableItems.first)
+        XCTAssertFalse(reverse.selectCancellationItem(blockedCancellation))
+        let blockedCancellationResult = await reverse.cancelSelectedItem()
+        XCTAssertNil(blockedCancellationResult)
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET", "POST", "GET"],
+            "An uncertain correction cannot be overtaken by a cancellation POST.")
+        reverse.dispose()
+    }
+
+    @MainActor
+    func testConfirmedCorrectionStaysConfirmedWhenCancellationIsInterrupted() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let correctionID = "123e4567-e89b-12d3-a456-426614174001"
+        let cancellationID = "123e4567-e89b-12d3-a456-426614174002"
+        let firstProjection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":true,"revision":0,"items":[{"id":"lookup-1","label":"Find my flight"}],"cancellationEligible":true,"cancellationChecklistRevision":0,"cancellationRevision":0,"cancellableItems":[{"id":"lookup-1","label":"Find my flight","status":"pending"},{"id":"reminder-1","label":"Remind me to pack","status":"pending"}]}"#
+        let refreshedProjection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":true,"revision":1,"items":[{"id":"lookup-1","label":"Find my flight from Berlin"}],"cancellationEligible":true,"cancellationChecklistRevision":1,"cancellationRevision":0,"cancellableItems":[{"id":"lookup-1","label":"Find my flight from Berlin","status":"pending"},{"id":"reminder-1","label":"Remind me to pack","status":"pending"}]}"#
+        var generatedIDs = [correctionID, cancellationID]
+        let controller = ChecklistCorrectionController(
+            context: ChecklistCorrectionRequestContext(ownerID: "owner-a", connectionVersion: 1, client: makeClient()),
+            taskID: taskID,
+            connectionIsCurrent: { true },
+            operationIDFactory: { generatedIDs.removeFirst() }
+        )
+        let path = "/api/mobile/v1/activity/\(taskID)"
+        defer {
+            controller.dispose()
+            StubURLProtocol.releaseHeldResponse(path: path)
+        }
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(firstProjection.utf8)),
+            .success(status: 200, body: Data(#"{"ok":true,"outcome":"corrected","transitioned":true,"queueGeneration":2,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","taskId":"123e4567-e89b-12d3-a456-426614174000","itemId":"lookup-1","revision":1,"replacementLabel":"Find my flight from Berlin","replacementKind":"lookup"}"#.utf8)),
+            .success(status: 200, body: Data(refreshedProjection.utf8)),
+            .held(status: 200, body: Data()),
+        ])
+        await controller.load()
+        controller.select(.init(id: "lookup-1", label: "Find my flight"))
+        controller.updateDraft("Find my flight from Berlin")
+        let correctionResult = await controller.submit()
+        XCTAssertEqual(correctionResult, .confirmed)
+        await controller.load()
+        XCTAssertEqual(controller.submission, .confirmed)
+
+        let reminder = try XCTUnwrap(controller.cancellableItems.first(where: { $0.id == "reminder-1" }))
+        XCTAssertTrue(controller.selectCancellationItem(reminder))
+        let selection = ChecklistCancellationSelection(
+            itemID: reminder.id,
+            label: reminder.label,
+            checklistRevision: 1,
+            cancellationRevision: 0
+        )
+        let cancellation = Task { await controller.cancelSelectedItem(selection: selection) }
+        let heldDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !StubURLProtocol.isHoldingResponse(path: path), ContinuousClock.now < heldDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: path))
+
+        controller.cancelInFlight()
+        _ = await cancellation.value
+        XCTAssertEqual(controller.submission, .confirmed,
+            "Interrupting a later cancellation must preserve the completed correction.")
+        XCTAssertEqual(controller.cancellationSubmission, .uncertain)
+        controller.cancelInFlight()
+        XCTAssertEqual(controller.submission, .confirmed)
+        XCTAssertEqual(controller.cancellationSubmission, .uncertain)
+    }
+
+    @MainActor
+    func testConfirmedCancellationStaysConfirmedWhenCorrectionIsInterrupted() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let cancellationID = "123e4567-e89b-12d3-a456-426614174001"
+        let correctionID = "123e4567-e89b-12d3-a456-426614174002"
+        let projection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":true,"revision":4,"items":[{"id":"lookup-1","label":"Find my flight"}],"cancellationEligible":true,"cancellationChecklistRevision":4,"cancellationRevision":1,"cancellableItems":[{"id":"lookup-1","label":"Find my flight","status":"pending"}]}"#
+        var generatedIDs = [cancellationID, correctionID]
+        let controller = ChecklistCorrectionController(
+            context: ChecklistCorrectionRequestContext(ownerID: "owner-a", connectionVersion: 1, client: makeClient()),
+            taskID: taskID,
+            connectionIsCurrent: { true },
+            operationIDFactory: { generatedIDs.removeFirst() }
+        )
+        let path = "/api/mobile/v1/activity/\(taskID)"
+        defer {
+            controller.dispose()
+            StubURLProtocol.releaseHeldResponse(path: path)
+        }
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(projection.utf8)),
+            .success(status: 200, body: Data(#"{"ok":true,"outcome":"cancelled","transitioned":true,"queueGeneration":5,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","taskId":"123e4567-e89b-12d3-a456-426614174000","itemId":"lookup-1","checklistRevision":4,"cancellationRevision":2}"#.utf8)),
+            .held(status: 200, body: Data()),
+        ])
+        await controller.load()
+        let lookup = try XCTUnwrap(controller.cancellableItems.first)
+        XCTAssertTrue(controller.selectCancellationItem(lookup))
+        let cancellationResult = await controller.cancelSelectedItem(selection: .init(
+            itemID: lookup.id,
+            label: lookup.label,
+            checklistRevision: 4,
+            cancellationRevision: 1
+        ))
+        XCTAssertEqual(cancellationResult, .confirmed)
+
+        controller.selectLookupItem(id: lookup.id)
+        controller.updateDraft("Find my flight from Berlin")
+        let correction = Task { await controller.submit() }
+        let heldDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !StubURLProtocol.isHoldingResponse(path: path), ContinuousClock.now < heldDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: path))
+
+        controller.cancelInFlight()
+        _ = await correction.value
+        XCTAssertEqual(controller.cancellationSubmission, .confirmed,
+            "Interrupting a later correction must preserve the completed cancellation.")
+        XCTAssertEqual(controller.submission, .uncertain)
+    }
+
+    @MainActor
+    func testInterruptedReloadPreservesBothConfirmedOperations() async throws {
+        let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let correctionID = "123e4567-e89b-12d3-a456-426614174001"
+        let cancellationID = "123e4567-e89b-12d3-a456-426614174002"
+        let firstProjection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":true,"revision":0,"items":[{"id":"lookup-1","label":"Find my flight"}],"cancellationEligible":true,"cancellationChecklistRevision":0,"cancellationRevision":0,"cancellableItems":[{"id":"lookup-1","label":"Find my flight","status":"pending"},{"id":"reminder-1","label":"Remind me to pack","status":"pending"}]}"#
+        let refreshedProjection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":true,"revision":1,"items":[{"id":"lookup-1","label":"Find my flight from Berlin"}],"cancellationEligible":true,"cancellationChecklistRevision":1,"cancellationRevision":0,"cancellableItems":[{"id":"lookup-1","label":"Find my flight from Berlin","status":"pending"},{"id":"reminder-1","label":"Remind me to pack","status":"pending"}]}"#
+        var generatedIDs = [correctionID, cancellationID]
+        let controller = ChecklistCorrectionController(
+            context: ChecklistCorrectionRequestContext(ownerID: "owner-a", connectionVersion: 1, client: makeClient()),
+            taskID: taskID,
+            connectionIsCurrent: { true },
+            operationIDFactory: { generatedIDs.removeFirst() }
+        )
+        let path = "/api/mobile/v1/activity/\(taskID)"
+        defer {
+            controller.dispose()
+            StubURLProtocol.releaseHeldResponse(path: path)
+        }
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(firstProjection.utf8)),
+            .success(status: 200, body: Data(#"{"ok":true,"outcome":"corrected","transitioned":true,"queueGeneration":2,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","taskId":"123e4567-e89b-12d3-a456-426614174000","itemId":"lookup-1","revision":1,"replacementLabel":"Find my flight from Berlin","replacementKind":"lookup"}"#.utf8)),
+            .success(status: 200, body: Data(refreshedProjection.utf8)),
+            .success(status: 200, body: Data(#"{"ok":true,"outcome":"cancelled","transitioned":true,"queueGeneration":3,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174002","taskId":"123e4567-e89b-12d3-a456-426614174000","itemId":"reminder-1","checklistRevision":1,"cancellationRevision":1}"#.utf8)),
+            .held(status: 200, body: Data(refreshedProjection.utf8)),
+        ])
+        await controller.load()
+        controller.select(.init(id: "lookup-1", label: "Find my flight"))
+        controller.updateDraft("Find my flight from Berlin")
+        let correctionResult = await controller.submit()
+        XCTAssertEqual(correctionResult, .confirmed)
+        await controller.load()
+        let reminder = try XCTUnwrap(controller.cancellableItems.first(where: { $0.id == "reminder-1" }))
+        XCTAssertTrue(controller.selectCancellationItem(reminder))
+        let cancellationResult = await controller.cancelSelectedItem(selection: .init(
+            itemID: reminder.id,
+            label: reminder.label,
+            checklistRevision: 1,
+            cancellationRevision: 0
+        ))
+        XCTAssertEqual(cancellationResult, .confirmed)
+
+        let reload = Task { await controller.load() }
+        let heldDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !StubURLProtocol.isHoldingResponse(path: path), ContinuousClock.now < heldDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: path))
+
+        controller.cancelInFlight()
+        await reload.value
+        XCTAssertEqual(controller.submission, .confirmed)
+        XCTAssertEqual(controller.cancellationSubmission, .confirmed)
+        XCTAssertEqual(controller.loadState, .unavailable)
     }
 
     @MainActor

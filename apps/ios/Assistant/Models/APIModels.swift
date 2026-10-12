@@ -1135,19 +1135,60 @@ struct ChecklistCorrectionProjection: Decodable, Sendable, Equatable {
     let eligible: Bool
     let revision: Int?
     let items: [ChecklistCorrectionItem]
+    let cancellationEligible: Bool?
+    let cancellationChecklistRevision: Int?
+    let cancellationRevision: Int?
+    let cancellableItems: [ChecklistCancellableItem]?
 
     func isValid(for taskID: String) -> Bool {
         guard id == taskID, items.count <= 12,
               items.allSatisfy(\.isValid), Set(items.map(\.id)).count == items.count else { return false }
+        guard cancellationProjectionIsValid else { return false }
         if eligible {
             return hasAvailableRevision && !items.isEmpty
         }
         return revision == nil && items.isEmpty
     }
 
+    var canCancelItems: Bool {
+        cancellationEligible == true &&
+            cancellationChecklistRevision.map((0...12).contains) == true &&
+            cancellationRevision.map((0..<12).contains) == true &&
+            !(cancellableItems ?? []).isEmpty
+    }
+
+    private var cancellationProjectionIsValid: Bool {
+        switch (cancellationEligible, cancellationChecklistRevision, cancellationRevision, cancellableItems) {
+        case (nil, nil, nil, nil):
+            return true
+        case (true, let checklistRevision?, let cancellationRevision?, let items?):
+            return (0...12).contains(checklistRevision) && (0..<12).contains(cancellationRevision) &&
+                !items.isEmpty && items.count <= 12 &&
+                items.allSatisfy(\.isValid) && Set(items.map(\.id)).count == items.count
+        case (false, let checklistRevision, let cancellationRevision, let items?):
+            return items.isEmpty &&
+                (checklistRevision.map { (0...12).contains($0) } ?? true) &&
+                (cancellationRevision.map { (0...12).contains($0) } ?? true)
+        default:
+            return false
+        }
+    }
+
     private var hasAvailableRevision: Bool {
         guard let revision else { return false }
         return (0..<12).contains(revision)
+    }
+}
+
+struct ChecklistCancellableItem: Decodable, Sendable, Equatable, Identifiable {
+    let id: String
+    let label: String
+    let status: String
+
+    var isValid: Bool {
+        !id.isEmpty && id.utf16.count <= 128 &&
+            !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && label.utf16.count <= 500 &&
+            (status == "pending" || status == "blocked")
     }
 }
 
@@ -1158,6 +1199,67 @@ struct ChecklistCorrectionBody: Encodable, Sendable, Equatable {
     let ownerMessageId: String
     let replacementKind = "lookup"
     let replacementLabel: String
+}
+
+struct ChecklistCancellationBody: Encodable, Sendable, Equatable {
+    let action = "cancel-checklist"
+    let itemId: String
+    let expectedRevision: Int
+    let expectedCancellationRevision: Int
+    let ownerMessageId: String
+}
+
+struct ChecklistCancellationPostResponse: Decodable, Sendable {
+    let ok: Bool
+    let outcome: String
+    let transitioned: Bool
+    let queueGeneration: Int
+    let ownerMessageId: String
+    let taskId: String
+    let itemId: String
+    let checklistRevision: Int
+    let cancellationRevision: Int
+
+    func confirms(_ body: ChecklistCancellationBody, taskID: String) -> Bool {
+        (0...12).contains(body.expectedRevision) &&
+            (0..<12).contains(body.expectedCancellationRevision) &&
+            (0...9_007_199_254_740_991).contains(queueGeneration) &&
+            ok && taskId == taskID && itemId == body.itemId &&
+            ownerMessageId == body.ownerMessageId && checklistRevision == body.expectedRevision &&
+            cancellationRevision == body.expectedCancellationRevision + 1 &&
+            ((outcome == "cancelled" && transitioned) ||
+             (outcome == "already_cancelled" && !transitioned))
+    }
+}
+
+struct ChecklistCancellationReconciliation: Decodable, Sendable {
+    struct Audit: Decodable, Sendable {
+        let revision: Int
+        let checklistRevision: Int?
+        let taskId: String
+        let ownerTaskId: String
+        let ownerMessageId: String
+        let itemIds: [String]
+        let requestSpans: [String]
+    }
+
+    let id: String
+    let checklistRevision: Int
+    let cancellationRevision: Int
+    let audit: Audit?
+
+    func confirms(_ body: ChecklistCancellationBody, taskID: String, itemLabel: String) -> Bool {
+        guard (0...12).contains(body.expectedRevision),
+              (0..<12).contains(body.expectedCancellationRevision),
+              id == taskID,
+              (body.expectedRevision...12).contains(checklistRevision),
+              (body.expectedCancellationRevision + 1...12).contains(cancellationRevision),
+              let audit else { return false }
+        return audit.revision == body.expectedCancellationRevision + 1 &&
+            audit.checklistRevision == body.expectedRevision && audit.taskId == taskID &&
+            audit.ownerTaskId == taskID && audit.ownerMessageId == body.ownerMessageId &&
+            audit.itemIds == [body.itemId] && audit.requestSpans == [itemLabel]
+    }
 }
 
 struct ChecklistCorrectionPostResponse: Decodable, Sendable {

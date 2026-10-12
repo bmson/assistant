@@ -217,6 +217,12 @@ export default async function TaskDetailPage({
           .filter((item) => item.kind === 'lookup' && item.status === 'pending')
           .map(({ id: itemId, label }) => ({ id: itemId, label }))
       : [];
+  const cancellableItems =
+    task.status === 'needs_attention' && task.type === 'chat_turn' && task.trust === 'owner'
+      ? (task.checklist?.items ?? [])
+          .filter((item) => item.status === 'pending' || item.status === 'blocked')
+          .map(({ id: itemId, label }) => ({ id: itemId, label }))
+      : [];
 
   return (
     <PageShell size="reading">
@@ -318,11 +324,13 @@ export default async function TaskDetailPage({
       ) : null}
 
       <ChecklistCorrectionEntry
-        key={`${task.agentId ?? 'unknown'}:${task.id}:${task.checklist?.revision ?? 0}:${ownerSession.formSessionScope ?? ownerSession.user.email}`}
+        key={`${task.agentId ?? 'unknown'}:${task.id}:${task.checklist?.revision ?? 0}:${task.checklist?.cancellationRevision ?? 0}:${ownerSession.formSessionScope ?? ownerSession.user.email}`}
         taskId={task.id}
         ownerScope={`${task.agentId ?? 'unknown'}:${ownerSession.formSessionScope ?? ownerSession.user.email}`}
         revision={task.checklist?.revision ?? 0}
+        cancellationRevision={task.checklist?.cancellationRevision ?? 0}
         items={correctableLookups}
+        cancellableItems={cancellableItems}
       />
 
       <InfoGrid className="mt-5 sm:grid-cols-3">

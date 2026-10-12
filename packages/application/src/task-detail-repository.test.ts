@@ -106,6 +106,77 @@ describe('portable Activity task detail', () => {
     });
   });
 
+  it('projects only validated, bounded checklist cancellation audit fields', async () => {
+    const getDetail = vi.fn().mockResolvedValue(
+      detail({
+        task: {
+          ...detail().task,
+          state: {
+            requestChecklist: {
+              version: 1,
+              request: 'Find a hotel and remind me to check in',
+              revision: 2,
+              cancellationRevision: 1,
+              cancellationAudit: [
+                {
+                  revision: 1,
+                  checklistRevision: 2,
+                  taskId,
+                  conversationId: 'conversation-1',
+                  ownerTaskId: taskId,
+                  ownerMessageId: 'owner-message-1',
+                  requestHash: 'a'.repeat(64),
+                  itemIds: ['hotel-lookup'],
+                  requestSpans: ['Find a hotel'],
+                },
+              ],
+              items: [
+                {
+                  id: 'hotel-lookup',
+                  label: 'Find a hotel',
+                  kind: 'lookup',
+                  targetTerms: ['hotel'],
+                  status: 'cancelled',
+                  evidence: [],
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+    const result = await getTaskDetailWithRepository({ getDetail }, 'owner-agent', taskId);
+
+    expect(result?.task.checklist).toEqual({
+      items: [
+        {
+          id: 'hotel-lookup',
+          label: 'Find a hotel',
+          kind: 'lookup',
+          targetTerms: ['hotel'],
+          status: 'cancelled',
+          evidence: [],
+        },
+      ],
+      revision: 2,
+      revisionAudit: [],
+      cancellationRevision: 1,
+      cancellationAudit: [
+        {
+          revision: 1,
+          checklistRevision: 2,
+          taskId,
+          conversationId: 'conversation-1',
+          ownerTaskId: taskId,
+          ownerMessageId: 'owner-message-1',
+          itemIds: ['hotel-lookup'],
+          requestSpans: ['Find a hotel'],
+        },
+      ],
+    });
+    expect(JSON.stringify(result?.task.checklist)).not.toContain('requestHash');
+  });
+
   it('uses one total-order cursor across mixed equal-time streams', async () => {
     const all = detail({
       toolCalls: Array.from({ length: 101 }, (_, index) => ({

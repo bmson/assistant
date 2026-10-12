@@ -64,6 +64,55 @@ extension APIModelsTests {
         XCTAssertFalse(contradictoryIneligible.isValid(for: "task-id"))
     }
 
+    func testChecklistCancellationProjectionSupportsPendingAndBlockedItemsWithoutLookupEdits() throws {
+        let projection = try JSONDecoder().decode(
+            ChecklistCorrectionProjection.self,
+            from: Data(#"{"id":"task-id","eligible":false,"revision":null,"items":[],"cancellationEligible":true,"cancellationChecklistRevision":12,"cancellationRevision":3,"cancellableItems":[{"id":"reminder-1","label":"Remind me to pack","status":"pending"},{"id":"lookup-1","label":"Find my flight","status":"blocked"}]}"#.utf8)
+        )
+
+        XCTAssertTrue(projection.isValid(for: "task-id"))
+        XCTAssertTrue(projection.canCancelItems)
+        XCTAssertEqual(projection.cancellableItems?.map(\.status), ["pending", "blocked"])
+
+        let invalidState = try JSONDecoder().decode(
+            ChecklistCorrectionProjection.self,
+            from: Data(#"{"id":"task-id","eligible":false,"revision":null,"items":[],"cancellationEligible":true,"cancellationChecklistRevision":12,"cancellationRevision":3,"cancellableItems":[{"id":"reminder-1","label":"Remind me to pack","status":"done"}]}"#.utf8)
+        )
+        XCTAssertFalse(invalidState.isValid(for: "task-id"))
+
+        let duplicate = try JSONDecoder().decode(
+            ChecklistCorrectionProjection.self,
+            from: Data(#"{"id":"task-id","eligible":false,"revision":null,"items":[],"cancellationEligible":true,"cancellationChecklistRevision":12,"cancellationRevision":3,"cancellableItems":[{"id":"lookup-1","label":"Find my flight","status":"pending"},{"id":"lookup-1","label":"Find my hotel","status":"blocked"}]}"#.utf8)
+        )
+        XCTAssertFalse(duplicate.isValid(for: "task-id"))
+    }
+
+    func testChecklistCancellationPostReceiptRequiresBoundOperationAndValidGeneration() throws {
+        let body = ChecklistCancellationBody(
+            itemId: "lookup-1",
+            expectedRevision: 4,
+            expectedCancellationRevision: 2,
+            ownerMessageId: "operation-1"
+        )
+        let valid = try JSONDecoder().decode(
+            ChecklistCancellationPostResponse.self,
+            from: Data(#"{"ok":true,"outcome":"cancelled","transitioned":true,"queueGeneration":7,"ownerMessageId":"operation-1","taskId":"task-1","itemId":"lookup-1","checklistRevision":4,"cancellationRevision":3}"#.utf8)
+        )
+        XCTAssertTrue(valid.confirms(body, taskID: "task-1"))
+
+        let negativeGeneration = try JSONDecoder().decode(
+            ChecklistCancellationPostResponse.self,
+            from: Data(#"{"ok":true,"outcome":"cancelled","transitioned":true,"queueGeneration":-1,"ownerMessageId":"operation-1","taskId":"task-1","itemId":"lookup-1","checklistRevision":4,"cancellationRevision":3}"#.utf8)
+        )
+        XCTAssertFalse(negativeGeneration.confirms(body, taskID: "task-1"))
+
+        let contradictoryReplay = try JSONDecoder().decode(
+            ChecklistCancellationPostResponse.self,
+            from: Data(#"{"ok":true,"outcome":"already_cancelled","transitioned":true,"queueGeneration":7,"ownerMessageId":"operation-1","taskId":"task-1","itemId":"lookup-1","checklistRevision":4,"cancellationRevision":3}"#.utf8)
+        )
+        XCTAssertFalse(contradictoryReplay.confirms(body, taskID: "task-1"))
+    }
+
     func testAPNSEnvironmentUsesOnlyExplicitPackagingValues() throws {
         XCTAssertEqual(APNSEnvironment(configuredValue: "sandbox"), .sandbox)
         XCTAssertEqual(APNSEnvironment(configuredValue: "production"), .production)

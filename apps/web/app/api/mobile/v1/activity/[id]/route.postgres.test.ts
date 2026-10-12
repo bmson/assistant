@@ -12,6 +12,7 @@ vi.mock('@/mobile-auth', () => ({
 
 describe('mobile Activity checklist correction in PostgreSQL mode', () => {
   const correctionMessageId = randomUUID();
+  const cancellationMessageId = randomUUID();
   const blockedCorrectionMessageId = randomUUID();
   let fixture: Awaited<ReturnType<typeof createActivityCorrectionRouteFixture>> | undefined;
   let taskId = '';
@@ -86,6 +87,39 @@ describe('mobile Activity checklist correction in PostgreSQL mode', () => {
     );
   }
 
+  function cancelChecklist(
+    id: string,
+    itemId: string,
+    overrides: Record<string, unknown> = {},
+  ): Promise<Response> {
+    if (!route) throw new Error('Route fixture is not initialized');
+    return route.POST(
+      new Request(`http://localhost/api/mobile/v1/activity/${id}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          action: 'cancel-checklist',
+          itemId,
+          expectedRevision: 0,
+          expectedCancellationRevision: 0,
+          ownerMessageId: cancellationMessageId,
+          ...overrides,
+        }),
+      }),
+      { params: Promise.resolve({ id }) },
+    );
+  }
+
+  function getCancellation(id: string, ownerMessageId: string): Promise<Response> {
+    if (!route) throw new Error('Route fixture is not initialized');
+    return route.GET(
+      new Request(
+        `http://localhost/api/mobile/v1/activity/${id}?cancellationOwnerMessageId=${ownerMessageId}`,
+      ),
+      { params: Promise.resolve({ id }) },
+    );
+  }
+
   it('rejects invalid, unauthorized, stale, and effect-ambiguous writes without mutation', async () => {
     auth.allowed.mockResolvedValueOnce(false);
     expect((await post(taskId)).status).toBe(401);
@@ -108,6 +142,79 @@ describe('mobile Activity checklist correction in PostgreSQL mode', () => {
     expect(await fixture.readMessage(blockedCorrectionMessageId)).toHaveLength(0);
   });
 
+  it('cancels exactly one selected item and reconciles its owner audit', async () => {
+    if (!route) throw new Error('Route fixture is not initialized');
+    const cancellationFixture = await createActivityCorrectionRouteFixture();
+    try {
+      const cancellationTaskId = cancellationFixture.taskId;
+      const cancellationItemId = cancellationFixture.checklist.items.find(
+        (item) => item.kind === 'reminder',
+      )?.id;
+      if (!cancellationItemId) throw new Error('Route fixture has no reminder checklist item');
+
+      auth.allowed.mockResolvedValueOnce(false);
+      expect((await cancelChecklist(cancellationTaskId, cancellationItemId)).status).toBe(401);
+      expect(
+        (await cancelChecklist(cancellationFixture.foreignTaskId, cancellationItemId)).status,
+      ).toBe(404);
+      expect(
+        (await cancelChecklist(cancellationTaskId, cancellationItemId, { extra: true })).status,
+      ).toBe(400);
+      expect(
+        (await cancelChecklist(cancellationTaskId, cancellationItemId, { expectedRevision: 1 }))
+          .status,
+      ).toBe(409);
+      expect(
+        (
+          await cancelChecklist(cancellationTaskId, cancellationItemId, {
+            expectedCancellationRevision: 1,
+          })
+        ).status,
+      ).toBe(409);
+
+      const confirmed = await cancelChecklist(cancellationTaskId, cancellationItemId);
+      expect(confirmed.status).toBe(200);
+      expect(await confirmed.json()).toMatchObject({
+        ok: true,
+        outcome: 'cancelled',
+        transitioned: true,
+        taskId: cancellationTaskId,
+        itemId: cancellationItemId,
+        ownerMessageId: cancellationMessageId,
+        checklistRevision: 0,
+        cancellationRevision: 1,
+      });
+      const replay = await cancelChecklist(cancellationTaskId, cancellationItemId);
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toMatchObject({
+        outcome: 'already_cancelled',
+        transitioned: false,
+        ownerMessageId: cancellationMessageId,
+      });
+      const audit = await getCancellation(cancellationTaskId, cancellationMessageId);
+      expect(audit.status).toBe(200);
+      expect(await audit.json()).toMatchObject({
+        id: cancellationTaskId,
+        checklistRevision: 0,
+        cancellationRevision: 1,
+        audit: {
+          revision: 1,
+          checklistRevision: 0,
+          taskId: cancellationTaskId,
+          ownerMessageId: cancellationMessageId,
+          itemIds: [cancellationItemId],
+        },
+      });
+      expect(await cancellationFixture.readMessage(cancellationMessageId)).toHaveLength(1);
+      expect(await cancellationFixture.readTask(cancellationTaskId)).toMatchObject({
+        status: 'pending',
+        queue_generation: 3,
+      });
+    } finally {
+      await cancellationFixture.dispose();
+    }
+  });
+
   it('writes the selected revision, owner message, and one queue generation through the route', async () => {
     if (!route || !fixture) throw new Error('Route fixture is not initialized');
     const projection = await getChecklistCorrection(taskId);
@@ -122,6 +229,12 @@ describe('mobile Activity checklist correction in PostgreSQL mode', () => {
           label: fixture.checklist.items.find((item) => item.id === lookupItemId)?.label,
         },
       ],
+      cancellationEligible: true,
+      cancellationChecklistRevision: 0,
+      cancellationRevision: 0,
+      cancellableItems: fixture.checklist.items
+        .filter((item) => item.status === 'pending' || item.status === 'blocked')
+        .map(({ id: itemId, label, status }) => ({ id: itemId, label, status })),
     });
     const accepted = await post(taskId);
     expect(accepted.status).toBe(200);
