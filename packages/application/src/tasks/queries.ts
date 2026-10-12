@@ -276,6 +276,21 @@ export interface TaskSnapshot {
         'revision' | 'ownerMessageId' | 'itemId' | 'toLabel' | 'toKind'
       >
     >;
+    /** Bounded owner-cancellation version and exact-operation audit for Activity reconciliation. */
+    cancellationRevision: number;
+    cancellationAudit: Array<
+      Pick<
+        NonNullable<RequestChecklist['cancellationAudit']>[number],
+        | 'revision'
+        | 'checklistRevision'
+        | 'taskId'
+        | 'conversationId'
+        | 'ownerTaskId'
+        | 'ownerMessageId'
+        | 'itemIds'
+        | 'requestSpans'
+      >
+    >;
   };
   archivedAt: Date | null;
 }
@@ -328,6 +343,28 @@ function checklistSnapshot(checklist: RequestChecklist): NonNullable<TaskSnapsho
         itemId,
         toLabel,
         ...(toKind ? { toKind } : {}),
+      }),
+    ),
+    cancellationRevision: checklist.cancellationRevision ?? 0,
+    cancellationAudit: (checklist.cancellationAudit ?? []).map(
+      ({
+        revision,
+        checklistRevision,
+        taskId,
+        conversationId,
+        ownerTaskId,
+        ownerMessageId,
+        itemIds,
+        requestSpans,
+      }) => ({
+        revision,
+        ...(checklistRevision === undefined ? {} : { checklistRevision }),
+        taskId,
+        conversationId,
+        ownerTaskId,
+        ownerMessageId,
+        itemIds,
+        requestSpans,
       }),
     ),
   };

@@ -75,6 +75,28 @@ describe('Activity checklist correction client', () => {
     expect(markup).not.toContain('Done');
   });
 
+  it('shows cancellation next to the exact pending item without changing its displayed state', () => {
+    const markup = renderToStaticMarkup(
+      <ChecklistCorrectionEntry
+        taskId="task-1"
+        ownerScope="owner-1"
+        revision={3}
+        cancellationRevision={1}
+        items={[{ id: 'hotel-lookup', label: 'Find my hotel in Berlin' }]}
+        cancellableItems={[
+          { id: 'hotel-lookup', label: 'Find my hotel in Berlin' },
+          { id: 'hotel-reminder', label: 'Remind me to check in' },
+        ]}
+      />,
+    );
+    expect(markup).toContain('Update this request');
+    expect(markup).toContain('aria-label="Cancel Find my hotel in Berlin"');
+    expect(markup).toContain('aria-label="Cancel Remind me to check in"');
+    expect(markup.match(/Cancel item/g)).toHaveLength(2);
+    expect(markup).not.toContain('Cancellation confirmed');
+    expect(markup).not.toContain('cancelled');
+  });
+
   it('sends one pinned task correction and accepts only its explicit owner-message receipt', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(matchingPostback()));
     await expect(saveActivityChecklistCorrection(request, fetcher)).resolves.toEqual({

@@ -394,6 +394,121 @@ struct APIClient: Sendable {
         )
     }
 
+    /// Makes one selected-item cancellation POST, followed by at most one exact
+    /// owner-message audit read when the POST result is ambiguous.
+    func cancelChecklistItem(
+        taskID: String,
+        itemID: String,
+        expectedRevision: Int,
+        expectedCancellationRevision: Int,
+        ownerMessageID: String,
+        itemLabel: String,
+        totalDeadline: Duration = .seconds(12),
+        postDeadline: Duration = .seconds(9)
+    ) async -> ChecklistCorrectionSubmission {
+        guard Self.isCorrectionIdentifier(taskID),
+              Self.isCorrectionIdentifier(ownerMessageID),
+              !itemID.isEmpty, itemID.utf16.count <= 128,
+              !itemLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              itemLabel.utf16.count <= 500,
+              (0...12).contains(expectedRevision),
+              (0..<12).contains(expectedCancellationRevision) else { return .rejected }
+        let body = ChecklistCancellationBody(
+            itemId: itemID,
+            expectedRevision: expectedRevision,
+            expectedCancellationRevision: expectedCancellationRevision,
+            ownerMessageId: ownerMessageID
+        )
+        var post = makeRequest(
+            url: configuration.baseURL.appending(path: "api/mobile/v1/activity/\(taskID)")
+        )
+        post.httpMethod = "POST"
+        post.setValue("application/json", forHTTPHeaderField: "content-type")
+        do {
+            post.httpBody = try JSONEncoder().encode(body)
+        } catch {
+            return .rejected
+        }
+
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: totalDeadline)
+        let postBudget = min(postDeadline, deadline - clock.now)
+        do {
+            let (data, response) = try await checklistCorrectionData(for: post, timeout: postBudget)
+            guard let http = response as? HTTPURLResponse else {
+                return await reconcileChecklistCancellation(body, taskID: taskID, itemLabel: itemLabel, deadline: deadline, clock: clock)
+            }
+            if (400..<500).contains(http.statusCode) { return .rejected }
+            if (200..<300).contains(http.statusCode),
+               let result = try? JSONDecoder().decode(ChecklistCancellationPostResponse.self, from: data),
+               result.confirms(body, taskID: taskID) {
+                return .confirmed
+            }
+        } catch {
+            if Task.isCancelled { return .uncertain }
+        }
+        return await reconcileChecklistCancellation(body, taskID: taskID, itemLabel: itemLabel, deadline: deadline, clock: clock)
+    }
+
+    func checkChecklistCancellation(
+        taskID: String,
+        itemID: String,
+        expectedRevision: Int,
+        expectedCancellationRevision: Int,
+        ownerMessageID: String,
+        itemLabel: String
+    ) async -> ChecklistCorrectionSubmission {
+        guard Self.isCorrectionIdentifier(taskID),
+              Self.isCorrectionIdentifier(ownerMessageID),
+              !itemID.isEmpty, itemID.utf16.count <= 128,
+              !itemLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              itemLabel.utf16.count <= 500,
+              (0...12).contains(expectedRevision),
+              (0..<12).contains(expectedCancellationRevision) else { return .rejected }
+        let body = ChecklistCancellationBody(
+            itemId: itemID,
+            expectedRevision: expectedRevision,
+            expectedCancellationRevision: expectedCancellationRevision,
+            ownerMessageId: ownerMessageID
+        )
+        return await reconcileChecklistCancellation(
+            body,
+            taskID: taskID,
+            itemLabel: itemLabel,
+            deadline: ContinuousClock.now.advanced(by: .seconds(12)),
+            clock: ContinuousClock()
+        )
+    }
+
+    private func reconcileChecklistCancellation(
+        _ body: ChecklistCancellationBody,
+        taskID: String,
+        itemLabel: String,
+        deadline: ContinuousClock.Instant,
+        clock: ContinuousClock
+    ) async -> ChecklistCorrectionSubmission {
+        guard !Task.isCancelled else { return .uncertain }
+        let remaining = deadline - clock.now
+        guard remaining > .zero else { return .uncertain }
+        var components = URLComponents(
+            url: configuration.baseURL.appending(path: "api/mobile/v1/activity/\(taskID)"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [.init(name: "cancellationOwnerMessageId", value: body.ownerMessageId)]
+        guard let url = components?.url else { return .uncertain }
+        var request = makeRequest(url: url)
+        request.timeoutInterval = 12
+        do {
+            let (data, response) = try await checklistCorrectionData(for: request, timeout: remaining)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let result = try? JSONDecoder().decode(ChecklistCancellationReconciliation.self, from: data)
+            else { return .uncertain }
+            return result.confirms(body, taskID: taskID, itemLabel: itemLabel) ? .confirmed : .uncertain
+        } catch {
+            return .uncertain
+        }
+    }
+
     private func reconcileChecklistCorrection(
         _ body: ChecklistCorrectionBody,
         taskID: String,

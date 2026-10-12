@@ -40,6 +40,7 @@ describe.skipIf(!localEmulator)(
     const correctionConversationId = randomUUID();
     const correctionOriginalMessageId = randomUUID();
     const correctionOwnerMessageId = randomUUID();
+    const cancellationOwnerMessageId = randomUUID();
     const correctionUnsafeId = randomUUID();
     const correctionUnsafeConversationId = randomUUID();
     const correctionUnsafeOriginalMessageId = randomUUID();
@@ -290,6 +291,21 @@ describe.skipIf(!localEmulator)(
         replacementLabel: replacementLookup,
         ...overrides,
       });
+    const cancelChecklist = (id: string, itemId: string, overrides: Record<string, unknown> = {}) =>
+      post(id, 'cancel-checklist', {
+        itemId,
+        expectedRevision: 0,
+        expectedCancellationRevision: 0,
+        ownerMessageId: cancellationOwnerMessageId,
+        ...overrides,
+      });
+    const getCancellation = (id: string, ownerMessageId: string) =>
+      route.GET(
+        new Request(
+          `http://localhost/api/mobile/v1/activity/${id}?cancellationOwnerMessageId=${ownerMessageId}`,
+        ),
+        { params: Promise.resolve({ id }) },
+      );
 
     it('accepts only an authenticated, exact pending lookup correction and reconciles its persisted audit', async () => {
       auth.allowed.mockResolvedValueOnce(false);
@@ -415,6 +431,32 @@ describe.skipIf(!localEmulator)(
         eligible: true,
         revision: 0,
         items: [{ id: correctionLookupItem.id, label: correctionLookupItem.label }],
+        cancellationEligible: true,
+        cancellationChecklistRevision: 0,
+        cancellationRevision: 0,
+        cancellableItems: correctionChecklist.items
+          .filter((item) => item.status === 'pending' || item.status === 'blocked')
+          .map(({ id: itemId, label, status }) => ({ id: itemId, label, status })),
+      });
+
+      const blockedReminder = correctionChecklist.items.find((item) => item.kind === 'reminder');
+      if (!blockedReminder) throw new Error('Projection fixture has no reminder item');
+      const withBlockedItem = {
+        ...correctionChecklist,
+        items: correctionChecklist.items.map((item) =>
+          item.id === blockedReminder.id ? { ...item, status: 'blocked' as const } : item,
+        ),
+      };
+      await store
+        .doc('tasks', correctionId)
+        .update({ state: { requestChecklist: withBlockedItem } });
+      const blockedProjection = await getChecklistCorrection(correctionId);
+      expect(await blockedProjection.json()).toMatchObject({
+        cancellationEligible: true,
+        cancellableItems: expect.arrayContaining([
+          expect.objectContaining({ id: blockedReminder.id, status: 'blocked' }),
+          expect.objectContaining({ id: correctionLookupItem.id, status: 'pending' }),
+        ]),
       });
 
       const compact = await get(correctionId);
@@ -430,6 +472,10 @@ describe.skipIf(!localEmulator)(
         eligible: false,
         revision: null,
         items: [],
+        cancellationEligible: false,
+        cancellationChecklistRevision: null,
+        cancellationRevision: null,
+        cancellableItems: [],
       });
       expect((await getChecklistCorrection(foreignId)).status).toBe(404);
 
@@ -465,6 +511,106 @@ describe.skipIf(!localEmulator)(
       ).toBe(400);
     });
 
+    it('cancels one selected checklist item and exposes only its exact owner audit', async () => {
+      const reminder = correctionChecklist.items.find((item) => item.kind === 'reminder');
+      if (!reminder) throw new Error('Cancellation fixture has no reminder item');
+      auth.allowed.mockResolvedValueOnce(false);
+      expect((await cancelChecklist(correctionId, reminder.id)).status).toBe(401);
+      expect((await cancelChecklist(foreignId, reminder.id)).status).toBe(404);
+      expect((await cancelChecklist(correctionId, reminder.id, { extra: true })).status).toBe(400);
+      expect(
+        (await cancelChecklist(correctionId, reminder.id, { ownerMessageId: 'bad-id' })).status,
+      ).toBe(400);
+      expect(
+        (await cancelChecklist(correctionId, reminder.id, { expectedRevision: 1 })).status,
+      ).toBe(409);
+      expect(
+        (await cancelChecklist(correctionId, reminder.id, { expectedCancellationRevision: 1 }))
+          .status,
+      ).toBe(409);
+      auth.allowed.mockResolvedValueOnce(false);
+      expect((await getCancellation(correctionId, cancellationOwnerMessageId)).status).toBe(401);
+
+      const cancelled = await cancelChecklist(correctionId, reminder.id);
+      expect(cancelled.status).toBe(200);
+      expect(await cancelled.json()).toMatchObject({
+        ok: true,
+        outcome: 'cancelled',
+        transitioned: true,
+        taskId: correctionId,
+        itemId: reminder.id,
+        ownerMessageId: cancellationOwnerMessageId,
+        checklistRevision: 0,
+        cancellationRevision: 1,
+      });
+      const replay = await cancelChecklist(correctionId, reminder.id);
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toMatchObject({
+        outcome: 'already_cancelled',
+        transitioned: false,
+        ownerMessageId: cancellationOwnerMessageId,
+      });
+      const readback = await getCancellation(correctionId, cancellationOwnerMessageId);
+      expect(readback.status).toBe(200);
+      expect(await readback.json()).toMatchObject({
+        id: correctionId,
+        checklistRevision: 0,
+        cancellationRevision: 1,
+        audit: {
+          revision: 1,
+          checklistRevision: 0,
+          taskId: correctionId,
+          conversationId: correctionConversationId,
+          ownerTaskId: correctionId,
+          ownerMessageId: cancellationOwnerMessageId,
+          itemIds: [reminder.id],
+          requestSpans: [reminder.label],
+        },
+      });
+      expect((await store.doc('messages', cancellationOwnerMessageId).get()).data()).toMatchObject({
+        id: cancellationOwnerMessageId,
+        taskId: correctionId,
+        conversationId: correctionConversationId,
+        role: 'user',
+        origin: 'owner',
+      });
+      expect((await store.doc('tasks', correctionId).get()).get('state')).toMatchObject({
+        requestChecklist: {
+          cancellationRevision: 1,
+          cancellationAudit: [
+            { ownerMessageId: cancellationOwnerMessageId, itemIds: [reminder.id] },
+          ],
+          items: expect.arrayContaining([
+            expect.objectContaining({ id: reminder.id, status: 'cancelled' }),
+            expect.objectContaining({ id: correctionLookupItem.id, status: 'pending' }),
+          ]),
+        },
+      });
+      expect(
+        (await store.collection('outbox').where('taskId', '==', correctionId).get()).size,
+      ).toBe(1);
+      expect(
+        (
+          await route.GET(
+            new Request(
+              `http://localhost/api/mobile/v1/activity/${correctionId}?cancellationOwnerMessageId=${cancellationOwnerMessageId}&cancellationOwnerMessageId=${cancellationOwnerMessageId}`,
+            ),
+            { params: Promise.resolve({ id: correctionId }) },
+          )
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await route.GET(
+            new Request(
+              `http://localhost/api/mobile/v1/activity/${correctionId}?cancellationOwnerMessageId=${cancellationOwnerMessageId}&extra=1`,
+            ),
+            { params: Promise.resolve({ id: correctionId }) },
+          )
+        ).status,
+      ).toBe(400);
+    });
+
     it('declines correction projection for exhausted revisions and malformed checklist identity', async () => {
       const exhausted = { ...correctionChecklist, revision: 12 };
       await store.doc('tasks', correctionId).update({ state: { requestChecklist: exhausted } });
@@ -473,6 +619,12 @@ describe.skipIf(!localEmulator)(
         eligible: false,
         revision: null,
         items: [],
+        cancellationEligible: true,
+        cancellationChecklistRevision: 12,
+        cancellationRevision: 0,
+        cancellableItems: correctionChecklist.items
+          .filter((item) => item.status === 'pending' || item.status === 'blocked')
+          .map(({ id: itemId, label, status }) => ({ id: itemId, label, status })),
       });
 
       const duplicateItems = [
@@ -487,6 +639,10 @@ describe.skipIf(!localEmulator)(
         eligible: false,
         revision: null,
         items: [],
+        cancellationEligible: false,
+        cancellationChecklistRevision: null,
+        cancellationRevision: null,
+        cancellableItems: [],
       });
     });
 

@@ -21,6 +21,7 @@ import {
 import { readMobileMutationBody } from '@/lib/mobile-mutation-body';
 import { getDb } from '@/lib/server';
 import {
+  cancelTaskChecklistItemActivity,
   getTaskActivityDetail,
   getTaskActivityStatus,
   reviseTaskActivityChecklistItem,
@@ -57,14 +58,15 @@ export async function GET(
       const checklist = detail.task.checklist;
       const items = checklist?.items ?? [];
       const revision = checklist?.revision;
-      const eligible =
+      const cancellationRevision = checklist?.cancellationRevision ?? 0;
+      const checklistIsValid =
         detail.task.type === 'chat_turn' &&
         detail.task.trust === 'owner' &&
         detail.task.status === 'needs_attention' &&
         detail.task.archivedAt === null &&
         Number.isSafeInteger(revision) &&
         Number(revision) >= 0 &&
-        Number(revision) < 12 &&
+        Number(revision) <= 12 &&
         items.length <= 12 &&
         new Set(items.map((item) => item.id)).size === items.length &&
         items.every(
@@ -76,10 +78,21 @@ export async function GET(
             item.label.trim().length > 0 &&
             item.label.length <= 500,
         );
+      const eligible = checklistIsValid && Number(revision) < 12;
+      const cancellationEligible =
+        checklistIsValid &&
+        Number.isSafeInteger(cancellationRevision) &&
+        Number(cancellationRevision) >= 0 &&
+        Number(cancellationRevision) < 12;
       const pendingLookups = eligible
         ? items
             .filter((item) => item.status === 'pending' && item.kind === 'lookup')
             .map(({ id: itemId, label }) => ({ id: itemId, label }))
+        : [];
+      const cancellableItems = cancellationEligible
+        ? items
+            .filter((item) => item.status === 'pending' || item.status === 'blocked')
+            .map(({ id: itemId, label, status }) => ({ id: itemId, label, status }))
         : [];
       const correctionEligible = eligible && pendingLookups.length > 0;
       return mobileJson({
@@ -87,6 +100,11 @@ export async function GET(
         eligible: correctionEligible,
         revision: correctionEligible ? revision : null,
         items: correctionEligible ? pendingLookups : [],
+        cancellationEligible: cancellationEligible && cancellableItems.length > 0,
+        cancellationChecklistRevision:
+          cancellationEligible && cancellableItems.length > 0 ? revision : null,
+        cancellationRevision: cancellationEligible ? cancellationRevision : null,
+        cancellableItems: cancellationEligible ? cancellableItems : [],
       });
     }
     const correctionOwnerMessageId = url.searchParams.get('correctionOwnerMessageId');
@@ -107,6 +125,43 @@ export async function GET(
       return mobileJson({
         id,
         revision: checklist?.revision ?? 0,
+        audit,
+      });
+    }
+    const cancellationOwnerMessageId = url.searchParams.get('cancellationOwnerMessageId');
+    if (cancellationOwnerMessageId !== null) {
+      if (
+        !UUID_RE.test(cancellationOwnerMessageId) ||
+        url.searchParams.getAll('cancellationOwnerMessageId').length !== 1 ||
+        [...url.searchParams.keys()].some((key) => key !== 'cancellationOwnerMessageId')
+      )
+        return mobileJson(
+          { error: 'invalid checklist cancellation reconciliation request' },
+          { status: 400 },
+        );
+      const detail = await getTaskActivityDetail(id);
+      if (!detail) return mobileJson({ error: 'activity not found' }, { status: 404 });
+      const checklist = detail.task.checklist;
+      const storedAudit =
+        checklist?.cancellationAudit?.find(
+          (entry) => entry.ownerMessageId === cancellationOwnerMessageId,
+        ) ?? null;
+      const audit = storedAudit
+        ? {
+            revision: storedAudit.revision,
+            checklistRevision: storedAudit.checklistRevision ?? null,
+            taskId: storedAudit.taskId,
+            conversationId: storedAudit.conversationId,
+            ownerTaskId: storedAudit.ownerTaskId,
+            ownerMessageId: storedAudit.ownerMessageId,
+            itemIds: storedAudit.itemIds,
+            requestSpans: storedAudit.requestSpans,
+          }
+        : null;
+      return mobileJson({
+        id,
+        checklistRevision: checklist?.revision ?? 0,
+        cancellationRevision: checklist?.cancellationRevision ?? 0,
         audit,
       });
     }
@@ -191,6 +246,7 @@ export async function POST(
     'budgetUsdLimit',
     'itemId',
     'expectedRevision',
+    'expectedCancellationRevision',
     'ownerMessageId',
     'replacementKind',
     'replacementLabel',
@@ -201,10 +257,71 @@ export async function POST(
     budgetUsdLimit?: unknown;
     itemId?: unknown;
     expectedRevision?: unknown;
+    expectedCancellationRevision?: unknown;
     ownerMessageId?: unknown;
     replacementKind?: unknown;
     replacementLabel?: unknown;
   } | null;
+  if (body?.action === 'cancel-checklist') {
+    const allowed = new Set([
+      'action',
+      'itemId',
+      'expectedRevision',
+      'expectedCancellationRevision',
+      'ownerMessageId',
+    ]);
+    if (Object.keys(body).some((key) => !allowed.has(key)))
+      return mobileJson({ error: 'Request body contains an unsupported field.' }, { status: 400 });
+    if (
+      typeof body.itemId !== 'string' ||
+      body.itemId.length < 1 ||
+      body.itemId.length > 128 ||
+      !Number.isSafeInteger(body.expectedRevision) ||
+      Number(body.expectedRevision) < 0 ||
+      Number(body.expectedRevision) > 12 ||
+      !Number.isSafeInteger(body.expectedCancellationRevision) ||
+      Number(body.expectedCancellationRevision) < 0 ||
+      Number(body.expectedCancellationRevision) > 12 ||
+      typeof body.ownerMessageId !== 'string' ||
+      !UUID_RE.test(body.ownerMessageId)
+    )
+      return mobileJson({ error: 'Invalid checklist cancellation.' }, { status: 400 });
+    try {
+      const result = await cancelTaskChecklistItemActivity({
+        taskId: id,
+        itemId: body.itemId,
+        expectedRevision: Number(body.expectedRevision),
+        expectedCancellationRevision: Number(body.expectedCancellationRevision),
+        ownerMessageId: body.ownerMessageId,
+      });
+      const success = result.outcome === 'cancelled' || result.outcome === 'already_cancelled';
+      const status =
+        result.outcome === 'not_found'
+          ? 404
+          : success
+            ? 200
+            : result.outcome === 'invalid'
+              ? 400
+              : 409;
+      return mobileJson(
+        {
+          ok: success,
+          ...result,
+          ...(success
+            ? {
+                taskId: id,
+                itemId: body.itemId,
+                checklistRevision: Number(body.expectedRevision),
+                cancellationRevision: Number(body.expectedCancellationRevision) + 1,
+              }
+            : {}),
+        },
+        { status },
+      );
+    } catch {
+      return mobileJson({ error: 'The selected request could not be cancelled.' }, { status: 503 });
+    }
+  }
   if (body?.action === 'correct-checklist') {
     const allowed = new Set([
       'action',
