@@ -113,4 +113,22 @@ describe('email observer and attachment Firestore index contract', () => {
       ),
     ).toBe(false);
   });
+
+  it('declares the exact source index used by both security review scans', () => {
+    const emailSync = source('packages/firestore/src/email-sync.ts');
+    const attentionStart = emailSync.indexOf('async listSecurityAttentionCandidates(');
+    const reviewStart = emailSync.indexOf('async listSecurityReviewItems(');
+    const decisionStart = emailSync.indexOf('async decideSecurityIncident(');
+    expect(attentionStart).toBeGreaterThanOrEqual(0);
+    expect(reviewStart).toBeGreaterThan(attentionStart);
+    expect(decisionStart).toBeGreaterThan(reviewStart);
+
+    const attention = emailSync.slice(attentionStart, reviewStart);
+    const reviews = emailSync.slice(reviewStart, decisionStart);
+    const sourceQuery =
+      ".collection('securityIncidentSources') .where('agentId', '==', agentId) .orderBy('observedAt', 'asc') .limit(10_001)";
+    expect(attention).toContain(sourceQuery);
+    expect(reviews).toContain(sourceQuery);
+    expect(hasIndex('securityIncidentSources', ['agentId', 'observedAt'])).toBe(true);
+  });
 });
