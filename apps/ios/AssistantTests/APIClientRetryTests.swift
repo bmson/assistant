@@ -6090,12 +6090,14 @@ extension APIClientRetryTests {
     @MainActor
     func testChecklistCancellationKeepsItemAndExactOperationUntilConfirmed() async throws {
         let taskID = "123e4567-e89b-12d3-a456-426614174000"
+        let expectedOperationID = "123e4567-e89b-12d3-a456-426614174001"
         let projection = #"{"id":"123e4567-e89b-12d3-a456-426614174000","eligible":false,"revision":null,"items":[],"cancellationEligible":true,"cancellationChecklistRevision":4,"cancellationRevision":1,"cancellableItems":[{"id":"lookup-1","label":"Find my flight","status":"blocked"},{"id":"reminder-1","label":"Remind me to pack","status":"pending"}]}"#
         let unmatchedAudit = #"{"id":"123e4567-e89b-12d3-a456-426614174000","checklistRevision":4,"cancellationRevision":2,"audit":{"revision":2,"checklistRevision":4,"taskId":"123e4567-e89b-12d3-a456-426614174000","conversationId":"conversation-1","ownerTaskId":"123e4567-e89b-12d3-a456-426614174000","ownerMessageId":"other-operation","itemIds":["lookup-1"],"requestSpans":["Find my flight"]}}"#
         let exactReceipt = #"{"ok":true,"outcome":"cancelled","transitioned":true,"queueGeneration":8,"ownerMessageId":"123e4567-e89b-12d3-a456-426614174001","taskId":"123e4567-e89b-12d3-a456-426614174000","itemId":"lookup-1","checklistRevision":4,"cancellationRevision":2}"#
         StubURLProtocol.prime([
             .success(status: 200, body: Data(projection.utf8)),
             .success(status: 200, body: Data(#"{"ok":true}"#.utf8)),
+            .success(status: 200, body: Data(unmatchedAudit.utf8)),
             .success(status: 200, body: Data(unmatchedAudit.utf8)),
             .success(status: 200, body: Data(exactReceipt.utf8)),
         ])
@@ -6106,14 +6108,16 @@ extension APIClientRetryTests {
                 client: makeClient()
             ),
             taskID: taskID,
-            connectionIsCurrent: { true }
+            connectionIsCurrent: { true },
+            operationIDFactory: { expectedOperationID }
         )
         await controller.load()
         let selected = try XCTUnwrap(controller.cancellableItems.first(where: { $0.id == "lookup-1" }))
         XCTAssertEqual(controller.requestItems.map(\.id), ["lookup-1", "reminder-1"])
         XCTAssertEqual(Set(controller.requestItems.map(\.id)).count, controller.requestItems.count,
             "An editable lookup must not appear twice in the combined request list.")
-        XCTAssertTrue(controller.requestItems.first(where: { $0.id == "lookup-1" })?.canChangeLookup == true)
+        XCTAssertFalse(controller.requestItems.first(where: { $0.id == "lookup-1" })?.canChangeLookup == true,
+            "A blocked lookup is cancellable but is not in the editable lookup projection.")
         XCTAssertTrue(controller.requestItems.first(where: { $0.id == "lookup-1" })?.canCancel == true)
         XCTAssertTrue(controller.requestItems.first(where: { $0.id == "reminder-1" })?.canCancel == true)
         controller.selectCancellationItem(selected)
@@ -6145,14 +6149,24 @@ extension APIClientRetryTests {
         let retryResult = await controller.cancelSelectedItem()
         XCTAssertEqual(retryResult, .confirmed)
         XCTAssertEqual(controller.cancellationOperationID, operationID)
+        XCTAssertEqual(operationID, expectedOperationID)
         XCTAssertEqual(controller.selectedCancellationItem?.id, selected.id,
             "The item is not optimistically removed from the saved projection.")
         let cancellationPayloads = try StubURLProtocol.requests.filter { $0.0 == "POST" }.map { request in
-            try XCTUnwrap(request.3)
+            let data = try XCTUnwrap(request.3)
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         }
         XCTAssertEqual(cancellationPayloads.count, 2)
-        XCTAssertEqual(cancellationPayloads[0], cancellationPayloads[1],
+        XCTAssertEqual(cancellationPayloads[0] as NSDictionary, cancellationPayloads[1] as NSDictionary,
             "A manual repeat must preserve the same operation ID and revision fences.")
+        let expectedPayload: [String: Any] = [
+            "action": "cancel-checklist",
+            "itemId": selected.id,
+            "expectedRevision": 4,
+            "expectedCancellationRevision": 1,
+            "ownerMessageId": expectedOperationID,
+        ]
+        XCTAssertEqual(cancellationPayloads[0] as NSDictionary, expectedPayload as NSDictionary)
         XCTAssertEqual(StubURLProtocol.attempts, ["GET", "POST", "GET", "GET", "POST"])
         controller.dispose()
     }
