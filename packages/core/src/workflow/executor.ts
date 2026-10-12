@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { TaskRow } from '@assistant/db';
 import { createPostgresExecutionPersistence } from '@assistant/db';
 import type { ExecutionContextRepository } from '@assistant/persistence';
@@ -288,13 +289,19 @@ async function checklistCancellationOwnersAreValid(
       conversationId: task.conversationId,
       messageId: entry.ownerMessageId,
     });
+    const ownerMessageBindingValid = entry.requestHash
+      ? entry.requestHash ===
+        createHash('sha256')
+          .update(JSON.stringify(['owner-checklist-cancellation-v1', message?.text ?? '']))
+          .digest('hex')
+      : Boolean(message && entry.requestSpans.every((span) => message.text.includes(span)));
     if (
       !message ||
       message.id !== entry.ownerMessageId ||
       message.taskId !== task.id ||
       message.role !== 'user' ||
       message.origin !== 'owner' ||
-      entry.requestSpans.some((span) => !message.text.includes(span))
+      !ownerMessageBindingValid
     )
       return 'cancellation-owner-message-unverified';
   }

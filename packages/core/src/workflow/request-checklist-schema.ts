@@ -29,6 +29,11 @@ const ChecklistCancellationAuditSchema = z.object({
   conversationId: z.string().min(1).max(128),
   ownerTaskId: z.string().min(1).max(128),
   ownerMessageId: z.string().min(1).max(128),
+  /** Present on composer-originated actions; preserves exact operation replay identity. */
+  requestHash: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
   itemIds: z.array(z.string().min(1).max(128)).min(1).max(12),
   requestSpans: z.array(z.string().min(1).max(500)).min(1).max(12),
 });

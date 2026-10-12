@@ -12,6 +12,7 @@ import {
   recordOwnerChecklistCancellation,
   requestChecklistHasUnfinished,
   requestChecklistSummary,
+  resolveOwnerChecklistCancellation,
   revisePendingRequestChecklistItem,
   reviseRequestChecklist,
   supersededChecklistLookupForToolCall,
@@ -79,6 +80,100 @@ function correctionInput(
     replacement,
   };
 }
+
+describe('direct internal checklist cancellation wording', () => {
+  it('resolves an explicit internal lookup or request part to one pending item', () => {
+    const value = checklist('Find my hotel reservation and remind me about check-in');
+    const [lookupItem, reminderItem] = value.items;
+    if (!lookupItem || !reminderItem) throw new Error('missing cancellation fixture items');
+
+    expect(resolveOwnerChecklistCancellation(value, 'Cancel the hotel lookup.')).toEqual({
+      kind: 'matched',
+      itemId: lookupItem.id,
+      expectedRevision: value.revision ?? 0,
+      expectedCancellationRevision: value.cancellationRevision ?? 0,
+    });
+    expect(
+      resolveOwnerChecklistCancellation(value, 'Drop the reminder part of this request.'),
+    ).toEqual({
+      kind: 'matched',
+      itemId: reminderItem.id,
+      expectedRevision: value.revision ?? 0,
+      expectedCancellationRevision: value.cancellationRevision ?? 0,
+    });
+  });
+
+  it('leaves real-world cancellation language to ordinary admission', () => {
+    const value = checklist('Find my hotel reservation, and remind me about check-in');
+    for (const text of [
+      'Cancel my flight.',
+      'Cancel my flight tomorrow.',
+      'Cancel my booking.',
+      'Cancel my event.',
+      'Cancel my reminder.',
+      'Cancel my reminder for the flight.',
+      'Cancel my reminder after arrival.',
+      `Cancel my flight ${'without changing the itinerary '.repeat(40)}`,
+    ]) {
+      expect(resolveOwnerChecklistCancellation(value, text), text).toEqual({
+        kind: 'not_cancellation',
+      });
+    }
+  });
+
+  it('refuses quoted, conditional, retracted, or conjoined actions', () => {
+    const value = checklist('Find my hotel reservation and remind me about check-in');
+    for (const text of [
+      '"Cancel the hotel lookup."',
+      'Cancel the hotel lookup if it is still pending.',
+      'Cancel the hotel lookup, actually keep it.',
+      'Cancel the hotel lookup and keep the reminder.',
+      'Cancel the hotel lookup; skip the reminder search.',
+      'Could you cancel the hotel lookup?',
+    ]) {
+      expect(resolveOwnerChecklistCancellation(value, text), text).not.toMatchObject({
+        kind: 'matched',
+      });
+    }
+  });
+
+  it('does not treat conditional words already present in checklist labels or targets as a direct action', () => {
+    const labelCondition = checklist();
+    const labelItem = labelCondition.items[0];
+    if (!labelItem) throw new Error('missing lookup fixture item');
+    labelItem.label = 'Find my hotel reservation after arrival';
+    labelItem.targetTerms = ['hotel', 'arrival'];
+    expect(
+      resolveOwnerChecklistCancellation(labelCondition, 'Cancel the hotel lookup after arrival.'),
+    ).toEqual({ kind: 'ambiguous' });
+
+    const targetCondition = checklist();
+    const targetItem = targetCondition.items[0];
+    if (!targetItem) throw new Error('missing lookup fixture item');
+    targetItem.targetTerms = ['hotel', 'Friday'];
+    expect(
+      resolveOwnerChecklistCancellation(targetCondition, 'Cancel the hotel lookup until Friday.'),
+    ).toEqual({ kind: 'ambiguous' });
+  });
+
+  it('does not resolve completed or multiply matching work', () => {
+    const value = checklist('Find my hotel reservation and remind me about check-in');
+    const lookupItem = value.items[0];
+    if (!lookupItem) throw new Error('missing lookup fixture item');
+    lookupItem.status = 'completed';
+    expect(resolveOwnerChecklistCancellation(value, 'Cancel the hotel lookup.')).toEqual({
+      kind: 'ambiguous',
+    });
+
+    const duplicate = checklist('Find my hotel reservation and remind me about check-in');
+    const first = duplicate.items[0];
+    if (!first) throw new Error('missing lookup fixture item');
+    duplicate.items.push({ ...structuredClone(first), id: `${first.id}-duplicate` });
+    expect(resolveOwnerChecklistCancellation(duplicate, 'Cancel the hotel lookup.')).toEqual({
+      kind: 'ambiguous',
+    });
+  });
+});
 
 describe('durable request checklist', () => {
   it('cancels only the selected pending item and retains a completed sibling', () => {

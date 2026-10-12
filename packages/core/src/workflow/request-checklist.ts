@@ -50,6 +50,107 @@ function words(text: string): string[] {
       .match(/[\p{L}\p{N}]+/gu) ?? []
   );
 }
+
+export type OwnerChecklistCancellationResolution =
+  | { kind: 'not_cancellation' }
+  | { kind: 'no_match' }
+  | { kind: 'ambiguous' }
+  | {
+      kind: 'matched';
+      itemId: string;
+      expectedRevision: number;
+      expectedCancellationRevision: number;
+    };
+
+const INTERNAL_CANCELLATION_REFERENCE = new Set([
+  'lookup',
+  'search',
+  'request',
+  'part',
+  'task',
+  'step',
+  'item',
+]);
+const CANCELLATION_KIND_CUES: Record<Kind, ReadonlySet<string>> = {
+  lookup: new Set(['lookup', 'search']),
+  save: new Set(['save', 'saving', 'remember', 'memory']),
+  card: new Set(['card']),
+  reminder: new Set(['reminder']),
+  send: new Set(['email', 'send', 'sending', 'message']),
+  draft: new Set(['draft']),
+  document: new Set(['document', 'doc', 'spreadsheet', 'sheet', 'presentation', 'slides']),
+  calendar: new Set(['calendar', 'event', 'meeting', 'appointment']),
+};
+const CANCELLATION_TARGET_STOP = new Set([
+  ...STOP,
+  ...INTERNAL_CANCELLATION_REFERENCE,
+  ...Object.values(CANCELLATION_KIND_CUES).flatMap((cues) => [...cues]),
+  'cancel',
+  'stop',
+  'skip',
+  'drop',
+  'of',
+  'please',
+  'part',
+  'request',
+]);
+
+/** Resolve one direct reference to internal checklist work; business cancellations stay ordinary chat. */
+export function resolveOwnerChecklistCancellation(
+  checklistValue: unknown,
+  text: string,
+): OwnerChecklistCancellationResolution {
+  const direct = /^\s*(?:please\s+)?(?:cancel|stop|skip|drop)\b/i.test(text);
+  if (!direct) return { kind: 'not_cancellation' };
+  const body = text
+    .trim()
+    .replace(/[.!]+$/, '')
+    .replace(/^please\s+/i, '')
+    .replace(/^(?:cancel|stop|skip|drop)\s+/i, '')
+    .trim();
+  const bodyWords = words(body);
+  // Business cancellations remain ordinary chat unless the owner explicitly
+  // points at internal work. Check this before bounded internal-command rules
+  // so dates, conditions, and long business requests cannot be hijacked.
+  if (!bodyWords.some((word) => INTERNAL_CANCELLATION_REFERENCE.has(word)))
+    return { kind: 'not_cancellation' };
+  const parsed = RequestChecklistSchema.safeParse(checklistValue);
+  if (
+    !parsed.success ||
+    text.length > 500 ||
+    /["“”'`?!;\n\r]/.test(text) ||
+    /\b(?:and|then|also|but|or|if|unless|when|whether|after|before|until|once|provided|assuming|maybe|might|could|would|should|never|don't|do not|did|was|were|used to|said|says|quoted)\b|\b(?:only\s+if|as soon as|in case)\b|\b(?:today|tomorrow|tonight|later)\b|\bat\s+\d{1,2}(?::\d{2})?\b/i.test(
+      text,
+    )
+  )
+    return { kind: 'ambiguous' };
+
+  const kinds = (Object.entries(CANCELLATION_KIND_CUES) as Array<[Kind, ReadonlySet<string>]>)
+    .filter(([, cues]) => bodyWords.some((word) => cues.has(word)))
+    .map(([kind]) => kind);
+  if (kinds.length > 1) return { kind: 'ambiguous' };
+  const targetTerms = [...new Set(bodyWords.filter((word) => !CANCELLATION_TARGET_STOP.has(word)))];
+  if (targetTerms.length === 0 && kinds.length === 0) return { kind: 'ambiguous' };
+
+  const matches = parsed.data.items.filter((item) => {
+    if (kinds.length === 1 && item.kind !== kinds[0]) return false;
+    const availableTerms = new Set([...item.targetTerms, ...words(item.label)]);
+    return targetTerms.every((term) => availableTerms.has(term));
+  });
+  if (matches.length === 0) return { kind: 'no_match' };
+  if (matches.length !== 1) return { kind: 'ambiguous' };
+  const item = matches[0];
+  if (!item) return { kind: 'ambiguous' };
+  if ((item.status !== 'pending' && item.status !== 'blocked') || item.ownerCancellation)
+    return { kind: 'ambiguous' };
+  return {
+    kind: 'matched',
+    itemId: item.id,
+    expectedRevision: parsed.data.revision ?? 0,
+    expectedCancellationRevision: parsed.data.cancellationRevision ?? 0,
+  };
+}
+
 function kindOf(span: string): Kind | undefined {
   if (/^(?:create|make|save)\b.*\bcard\b/i.test(span)) return 'card';
   if (/^remind\b|^(?:create|schedule|add)\b.*\breminder\b/i.test(span)) return 'reminder';
@@ -692,6 +793,8 @@ export function cancelPendingRequestChecklistItem(
       expectedRevision: number;
       expectedCancellationRevision: number;
       ownerMessageId: string;
+      ownerMessageText?: string;
+      requestHash?: string;
     };
     evidence: ChecklistEvidence[];
   },
@@ -714,7 +817,8 @@ export function cancelPendingRequestChecklistItem(
     !Number.isSafeInteger(binding.expectedRevision) ||
     binding.expectedRevision < 0 ||
     !Number.isSafeInteger(binding.expectedCancellationRevision) ||
-    binding.expectedCancellationRevision < 0
+    binding.expectedCancellationRevision < 0 ||
+    (binding.requestHash !== undefined && !/^[0-9a-f]{64}$/.test(binding.requestHash))
   )
     return { decision: 'invalid' };
 
@@ -736,7 +840,7 @@ export function cancelPendingRequestChecklistItem(
     return { decision: 'unsafe_evidence' };
   if (cancellationRevision >= MAX_CHECKLIST_CORRECTIONS) return { decision: 'invalid' };
 
-  const expectedText = `Cancel this request: ${item.label}`;
+  const expectedText = binding.ownerMessageText ?? `Cancel this request: ${item.label}`;
   if (ownerMessage.text !== expectedText || expectedText.length > 8_000)
     return { decision: 'invalid' };
   const byId = new Map(evidence.map((row) => [row.id, row]));
@@ -784,6 +888,7 @@ export function cancelPendingRequestChecklistItem(
         conversationId: task.conversationId,
         ownerTaskId: task.id,
         ownerMessageId: ownerMessage.id,
+        ...(binding.requestHash ? { requestHash: binding.requestHash } : {}),
         itemIds: [item.id],
         requestSpans: [item.label],
       },

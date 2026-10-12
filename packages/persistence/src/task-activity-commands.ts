@@ -85,6 +85,10 @@ export interface PendingChecklistCancellationInput {
   expectedCancellationRevision: number;
   /** Stable across retries; becomes the durable owner-message ID. */
   ownerMessageId: string;
+  /** Present for composer actions; the exact authenticated owner text is preserved. */
+  ownerMessageText?: string;
+  /** SHA-256 of the action kind and exact owner text; absent for legacy Activity actions. */
+  requestHash?: string;
 }
 
 export interface PendingChecklistCancellationOutcome {

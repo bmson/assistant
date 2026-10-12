@@ -53,7 +53,11 @@ import type {
   ExecutionPersistence,
   TaskLease,
 } from '@assistant/persistence';
-import { chatAdmissionPayload, embeddingSpaceIdentityKey } from '@assistant/persistence';
+import {
+  chatAdmissionPayload,
+  composerChecklistCancellationRequestHash,
+  embeddingSpaceIdentityKey,
+} from '@assistant/persistence';
 import {
   convertToModelMessages,
   createUIMessageStream,
@@ -71,6 +75,7 @@ import {
   looksLikeActionRequest,
 } from './chat-triage.js';
 import { readBoundedJson } from './http-body.js';
+import { taskActivityComposerChecklistCancellationPolicy } from './tasks/commands.js';
 
 const MAX_REQUEST_BYTES = 32 * 1024;
 const MAX_USER_MESSAGE_BYTES = 16 * 1024;
@@ -736,7 +741,8 @@ export async function handleChatTurn(
     );
   }
 
-  const userText = textOf(userMessage).trim();
+  const rawUserText = textOf(userMessage);
+  const userText = rawUserText.trim();
   if (!userText) {
     return Response.json(
       { error: 'Type a message first, then send.', code: 'bad_request' },
@@ -764,6 +770,78 @@ export async function handleChatTurn(
       },
       { status: 404 },
     );
+  }
+  // A direct internal cancellation uses the already-owned task's deterministic
+  // resume path and must not depend on a new model route being configured.
+  // Business cancellations are classified as not_applicable and continue
+  // through ordinary route validation and admission below.
+  if (
+    existingConversation &&
+    !dependencies.resumeTask &&
+    /^\s*(?:please\s+)?(?:cancel|stop|skip|drop)\b/i.test(userText)
+  ) {
+    const composerCancellation = await chat.admitComposerChecklistCancellation({
+      agentId: agent.id,
+      conversationId: existingConversation.id,
+      clientOperationId,
+      requestHash: composerChecklistCancellationRequestHash(rawUserText),
+      rawText: rawUserText,
+      policy: taskActivityComposerChecklistCancellationPolicy,
+      ...(nativeClientId ? { clientId: nativeClientId } : {}),
+    });
+    if (composerCancellation.kind === 'applied' || composerCancellation.kind === 'replayed') {
+      if (composerCancellation.kind === 'applied')
+        getQueueNotifier().notify(
+          composerCancellation.task.id,
+          composerCancellation.queueGeneration,
+        );
+      return acceptedStreamResponse(composerCancellation.task.id, {
+        'x-conversation-id': existingConversation.id,
+        'x-async-task': composerCancellation.task.id,
+        'x-message-cursor': encodeMessageCursor(composerCancellation.message),
+        'x-owner-message-id': composerCancellation.message.id,
+      });
+    }
+    if (composerCancellation.kind === 'ambiguous') {
+      return Response.json(
+        {
+          error: 'More than one pending request could match. Open task activity and choose one.',
+          code: 'owner_action_ambiguous',
+          conversationId: existingConversation.id,
+        },
+        { status: 409, headers: { 'cache-control': 'no-store' } },
+      );
+    }
+    if (composerCancellation.kind === 'no_match') {
+      return Response.json(
+        {
+          error: 'I could not find one open request that matches. Check Activity and try again.',
+          code: 'owner_action_not_found',
+          conversationId: existingConversation.id,
+        },
+        { status: 409, headers: { 'cache-control': 'no-store' } },
+      );
+    }
+    if (composerCancellation.kind === 'unsafe') {
+      return Response.json(
+        {
+          error: 'I could not safely stop that request yet. Refresh its task status and try again.',
+          code: 'owner_action_unavailable',
+          conversationId: existingConversation.id,
+        },
+        { status: 409, headers: { 'cache-control': 'no-store' } },
+      );
+    }
+    if (composerCancellation.kind === 'conflict') {
+      return Response.json(
+        {
+          error: 'This send ID belongs to a different message. Send it again as a new message.',
+          code: 'operation_conflict',
+          conversationId: existingConversation.id,
+        },
+        { status: 409, headers: { 'cache-control': 'no-store' } },
+      );
+    }
   }
   // Resolve the effective draft route before creating a conversation or admitting
   // this owner request. `route()` applies saved connections, role policy, model

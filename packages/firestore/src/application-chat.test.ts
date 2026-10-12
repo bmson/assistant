@@ -1,9 +1,23 @@
-import { randomUUID } from 'node:crypto';
-import { chatAdmissionCancellationPayload, chatAdmissionPayload } from '@assistant/persistence';
+import { createHash, randomUUID } from 'node:crypto';
+import { handleChatTurn } from '@assistant/application';
+import { taskActivityComposerChecklistCancellationPolicy } from '@assistant/application/tasks';
+import { loadConfig } from '@assistant/config';
+import type { ExecutorDeps, ModelRouter } from '@assistant/core';
+import { executeTask } from '@assistant/core/workflow/executor';
+import { buildRequestChecklist } from '@assistant/core/workflow/request-checklist';
+import {
+  chatAdmissionCancellationPayload,
+  chatAdmissionPayload,
+  composerChecklistCancellationRequestHash,
+  finalChannelDelivery,
+  newTaskRecord,
+} from '@assistant/persistence';
 import { FieldValue, Timestamp } from '@google-cloud/firestore';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import { FirestoreApplicationChatPersistence } from './application-chat.js';
-import type { InstallationStore } from './store.js';
+import { createFirestoreExecutionPersistence } from './execution.js';
+import { decodeRecord, encodeRecord, type InstallationStore } from './store.js';
 import { disposeStore, emulatorStore } from './test-store.js';
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
@@ -33,6 +47,53 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
     afterEach(async () => {
       await disposeStore(store);
     });
+
+    async function seedPausedChecklist(request: string) {
+      const conversation = await repository.createConversation(agentId);
+      const taskId = randomUUID();
+      const originalMessageId = randomUUID();
+      const checklist = buildRequestChecklist(request);
+      if (!checklist) throw new Error('test checklist is invalid');
+      const now = store.now();
+      const task = {
+        ...newTaskRecord(
+          {
+            agentId,
+            conversationId: conversation.id,
+            type: 'chat_turn',
+            trust: 'owner',
+            trigger: {
+              source: 'chat',
+              agentId,
+              conversationId: conversation.id,
+              trust: 'owner',
+              payload: { text: checklist.request, triggerMessageId: originalMessageId },
+            },
+          },
+          taskId,
+          now,
+        ),
+        status: 'needs_attention',
+        queueGeneration: 4,
+        state: { requestChecklist: checklist },
+      };
+      await store.doc('tasks', taskId).set(encodeRecord(task));
+      await store.doc('messages', originalMessageId).set(
+        encodeRecord({
+          id: originalMessageId,
+          conversationId: conversation.id,
+          taskId,
+          role: 'user',
+          origin: 'owner',
+          parts: [{ type: 'text', text: checklist.request }],
+          text: checklist.request,
+          createdAt: now,
+          hiddenAt: null,
+          appendSequence: '00000000000000000000',
+        }),
+      );
+      return { conversation, taskId, checklist };
+    }
 
     it('refuses a second owner even when the requested owner ID is configured', async () => {
       const foreign = randomUUID();
@@ -152,6 +213,543 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       await expect(
         repository.queueAdmittedChatTurn({ agentId, task: lease, triagedActionable: true }),
       ).resolves.toBeNull();
+    });
+
+    it('does not reinterpret an existing normal admission key as a composer cancellation', async () => {
+      const conversation = await repository.createConversation(agentId);
+      const normalInput = {
+        agentId,
+        conversationId: conversation.id,
+        clientOperationId: randomUUID(),
+        requestHash: 'a'.repeat(64),
+        text: 'Cancel the reminder part of this request.',
+        autonomous: false,
+        force: false,
+        spoken: false,
+      };
+      const first = await repository.admitChatTurn(normalInput);
+      if (first.kind !== 'admitted') throw new Error('expected normal chat admission');
+      const rawText = normalInput.text;
+      await expect(
+        repository.admitComposerChecklistCancellation({
+          agentId,
+          conversationId: conversation.id,
+          clientOperationId: normalInput.clientOperationId,
+          requestHash: composerChecklistCancellationRequestHash(rawText),
+          rawText,
+          policy: taskActivityComposerChecklistCancellationPolicy,
+        }),
+      ).resolves.toEqual({ kind: 'conflict' });
+      const replay = await repository.admitChatTurn(normalInput);
+      if (replay.kind !== 'admitted') throw new Error('expected ordinary replay admission');
+      expect(replay).toMatchObject({
+        created: false,
+        task: { id: first.task.id },
+        message: { id: first.message.id, taskId: first.task.id },
+      });
+      await expect(
+        store.doc('messages', normalInput.clientOperationId).get(),
+      ).resolves.toMatchObject({
+        exists: false,
+      });
+    });
+
+    it('leaves long, dated, and arrival-conditioned business cancellations unchanged', async () => {
+      const { conversation, taskId, checklist } = await seedPausedChecklist(
+        'Find my flight itinerary and remind me about boarding',
+      );
+      const rawTexts = [
+        'Cancel my flight tomorrow.',
+        'Cancel my reminder after arrival.',
+        `Cancel my reminder for the flight ${'without changing the itinerary '.repeat(40)}`,
+      ];
+      for (const rawText of rawTexts) {
+        const result = await repository.admitComposerChecklistCancellation({
+          agentId,
+          conversationId: conversation.id,
+          clientOperationId: randomUUID(),
+          requestHash: composerChecklistCancellationRequestHash(rawText),
+          rawText,
+          policy: taskActivityComposerChecklistCancellationPolicy,
+        });
+        expect(result, rawText).toEqual({ kind: 'not_applicable' });
+      }
+      const unchanged = await store.doc('tasks', taskId).get();
+      expect(unchanged.get('status')).toBe('needs_attention');
+      expect(unchanged.get('queueGeneration')).toBe(4);
+      expect(decodeRecord<Record<string, unknown>>(unchanged.data()).state).toMatchObject({
+        requestChecklist: checklist,
+      });
+      expect(
+        (await store.collection('messages').where('conversationId', '==', conversation.id).get())
+          .size,
+      ).toBe(1);
+    });
+
+    it('returns a typed conflict for a cross-conversation composer operation collision', async () => {
+      const request =
+        'Find the museum ticket confirmation email and remind me about check-in tomorrow';
+      const first = await seedPausedChecklist(request);
+      const second = await seedPausedChecklist(request);
+      const operationId = randomUUID();
+      const rawText = 'Cancel the reminder part of this request.';
+      const input = (conversationId: string) => ({
+        agentId,
+        conversationId,
+        clientOperationId: operationId,
+        requestHash: composerChecklistCancellationRequestHash(rawText),
+        rawText,
+        policy: taskActivityComposerChecklistCancellationPolicy,
+      });
+      const results = await Promise.all([
+        repository.admitComposerChecklistCancellation(input(first.conversation.id)),
+        repository.admitComposerChecklistCancellation(input(second.conversation.id)),
+      ]);
+      expect(results.map(({ kind }) => kind).sort()).toEqual(['applied', 'conflict']);
+      const message = await store.doc('messages', operationId).get();
+      const appliedConversationId = message.get('conversationId');
+      expect([first.conversation.id, second.conversation.id]).toContain(appliedConversationId);
+      const [firstTask, secondTask] = await Promise.all([
+        store.doc('tasks', first.taskId).get(),
+        store.doc('tasks', second.taskId).get(),
+      ]);
+      expect([firstTask.get('status'), secondTask.get('status')].sort()).toEqual([
+        'needs_attention',
+        'pending',
+      ]);
+      expect(message.get('taskId')).toBe(
+        appliedConversationId === first.conversation.id ? first.taskId : second.taskId,
+      );
+    });
+
+    it('lets Stop cancel the exact composer operation before its accepted response arrives', async () => {
+      const { conversation, taskId } = await seedPausedChecklist(
+        'Find the museum ticket confirmation email and remind me about check-in tomorrow',
+      );
+      const operationId = randomUUID();
+      const rawText = 'Cancel the reminder part of this request.';
+      const applied = await repository.admitComposerChecklistCancellation({
+        agentId,
+        conversationId: conversation.id,
+        clientOperationId: operationId,
+        requestHash: composerChecklistCancellationRequestHash(rawText),
+        rawText,
+        policy: taskActivityComposerChecklistCancellationPolicy,
+      });
+      expect(applied).toMatchObject({ kind: 'applied', task: { id: taskId } });
+      const stopped = await repository.cancelChatTurn({
+        agentId,
+        conversationId: conversation.id,
+        clientOperationId: operationId,
+        composerCancellationPolicy: taskActivityComposerChecklistCancellationPolicy,
+      });
+      expect(stopped).toMatchObject({
+        kind: 'admitted_task',
+        task: { id: taskId, status: 'cancelled' },
+        transitioned: true,
+        effectStatus: 'unknown',
+      });
+      const persisted = await store.doc('tasks', taskId).get();
+      expect(persisted.get('status')).toBe('cancelled');
+      expect((await store.doc('messages', operationId).get()).get('taskId')).toBe(taskId);
+    });
+
+    it('atomically cancels one composer-referenced item and replays without a second wake', async () => {
+      const conversation = await repository.createConversation(agentId);
+      const taskId = randomUUID();
+      const originalMessageId = randomUUID();
+      const checklist = buildRequestChecklist(
+        'Find the museum ticket confirmation email and remind me about check-in tomorrow',
+      );
+      if (!checklist) throw new Error('test checklist is invalid');
+      const lookup = checklist.items.find((item) => item.kind === 'lookup');
+      const reminder = checklist.items.find((item) => item.kind === 'reminder');
+      if (!lookup || !reminder) throw new Error('missing compound checklist outcomes');
+      const now = store.now();
+      const task = {
+        ...newTaskRecord(
+          {
+            agentId,
+            conversationId: conversation.id,
+            type: 'chat_turn',
+            trust: 'owner',
+            trigger: {
+              source: 'chat',
+              agentId,
+              conversationId: conversation.id,
+              trust: 'owner',
+              payload: { text: checklist.request, triggerMessageId: originalMessageId },
+            },
+          },
+          taskId,
+          now,
+        ),
+        status: 'needs_attention',
+        queueGeneration: 4,
+        state: { requestChecklist: checklist },
+      };
+      await store.doc('tasks', taskId).set(encodeRecord(task));
+      await store.doc('messages', originalMessageId).set(
+        encodeRecord({
+          id: originalMessageId,
+          conversationId: conversation.id,
+          taskId,
+          role: 'user',
+          origin: 'owner',
+          parts: [{ type: 'text', text: checklist.request }],
+          text: checklist.request,
+          createdAt: now,
+          hiddenAt: null,
+          appendSequence: '00000000000000000000',
+        }),
+      );
+
+      const rawText = 'Cancel the reminder part of this request.';
+      const operationId = randomUUID();
+      const requestHash = createHash('sha256')
+        .update(JSON.stringify(['owner-checklist-cancellation-v1', rawText]))
+        .digest('hex');
+      const input = {
+        agentId,
+        conversationId: conversation.id,
+        clientOperationId: operationId,
+        requestHash,
+        rawText,
+        policy: taskActivityComposerChecklistCancellationPolicy,
+      };
+      const route = vi.fn(async () => {
+        throw new Error('an internal cancellation must not require a model route');
+      });
+      const response = await handleChatTurn(
+        new Request('https://assistant.example/api/chat', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            conversationId: conversation.id,
+            clientOperationId: operationId,
+            messages: [
+              {
+                id: operationId,
+                role: 'user',
+                parts: [{ type: 'text', text: rawText }],
+              },
+            ],
+          }),
+        }),
+        {
+          config: loadConfig({
+            OPENROUTER_API_KEY: 'synthetic-test-only',
+            QUEUE_DRIVER: 'local',
+            CHAT_RECALL_ENABLED: 'false',
+            GRAPH_RAG_ENABLED: 'false',
+          }),
+          chat: repository,
+          router: { route } as unknown as ModelRouter,
+        },
+      );
+      const replays = await Promise.all([
+        repository.admitComposerChecklistCancellation(input),
+        repository.admitComposerChecklistCancellation(input),
+      ]);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('x-async-task')).toBe(taskId);
+      expect(response.headers.get('x-owner-message-id')).toBe(operationId);
+      expect(route).not.toHaveBeenCalled();
+      expect(replays.map(({ kind }) => kind)).toEqual(['replayed', 'replayed']);
+      const stored = await store.doc('tasks', taskId).get();
+      const storedTask = decodeRecord<Record<string, unknown>>(stored.data());
+      const state = storedTask.state as { requestChecklist: typeof checklist };
+      expect(storedTask).toMatchObject({ status: 'pending', queueGeneration: 5, plan: null });
+      expect(state.requestChecklist.items.map(({ id, status }) => ({ id, status }))).toEqual([
+        { id: lookup.id, status: 'pending' },
+        { id: reminder.id, status: 'cancelled' },
+      ]);
+      expect(state.requestChecklist.cancellationAudit?.at(-1)).toMatchObject({
+        ownerMessageId: operationId,
+        requestHash,
+        itemIds: [reminder.id],
+      });
+      expect((await store.doc('messages', operationId).get()).data()).toMatchObject({
+        id: operationId,
+        taskId,
+        conversationId: conversation.id,
+        role: 'user',
+        origin: 'owner',
+        text: rawText,
+      });
+      expect((await store.collection('messages').where('taskId', '==', taskId).get()).size).toBe(2);
+      expect((await store.collection('outbox').where('taskId', '==', taskId).get()).size).toBe(1);
+      await expect(
+        repository.admitComposerChecklistCancellation({ ...input, requestHash: 'f'.repeat(64) }),
+      ).resolves.toMatchObject({ kind: 'conflict' });
+
+      const execution = createFirestoreExecutionPersistence(store, agentId, {
+        provider: 'test',
+        model: 'offline-fixture',
+        dimensions: 1536,
+        revision: 'composer-cancellation-test-v1',
+      });
+      const executorRouter = {
+        object: vi.fn(async () => {
+          throw new Error('the retained checklist lookup must not call the planner');
+        }),
+        step: vi.fn(async () => {
+          throw new Error('the retained checklist lookup must not call the model');
+        }),
+        embed: vi.fn(async (values: string[]) => values.map(() => new Array(1536).fill(0))),
+      } as unknown as ModelRouter;
+      const dispatched: string[] = [];
+      const dispatcher: ExecutorDeps['dispatcher'] = {
+        toolDefs: () => [
+          {
+            name: 'gmail.search',
+            description: 'Search mail',
+            inputSchema: z.object({ query: z.string() }),
+          },
+          {
+            name: 'reminder.create',
+            description: 'Create a reminder',
+            inputSchema: z.object({ text: z.string() }),
+          },
+        ],
+        resultIsUntrusted: () => false,
+        dispatch: async (dispatchInput) => {
+          dispatched.push(dispatchInput.toolName);
+          if (dispatchInput.toolName !== 'gmail.search')
+            throw new Error(
+              `cancelled reminder unexpectedly dispatched: ${dispatchInput.toolName}`,
+            );
+          const result = {
+            complete: true,
+            mailboxSearched: 'all mail',
+            results: [{ subject: 'Museum ticket confirmation' }],
+          };
+          const toolCallId = randomUUID();
+          await store.doc('toolCalls', toolCallId).set(
+            encodeRecord({
+              id: toolCallId,
+              taskId,
+              agentId,
+              toolName: dispatchInput.toolName,
+              args: dispatchInput.args,
+              risk: 'autonomous',
+              status: 'succeeded',
+              result,
+              error: null,
+              step: dispatchInput.step,
+              decision: {
+                ...dispatchInput.provenance,
+                modelToolCallId: dispatchInput.modelToolCallId,
+              },
+              createdAt: store.now(),
+              finishedAt: store.now(),
+            }),
+          );
+          return { kind: 'executed', toolCallId, result, cached: false };
+        },
+        executeApproved: vi.fn(async () => ({ kind: 'failed' as const, error: 'unused' })),
+      };
+      const executionResult = await executeTask(
+        {
+          db: {} as never,
+          persistence: execution,
+          router: executorRouter,
+          dispatcher,
+          deliverFinal: async (_task, _text, attemptId) =>
+            finalChannelDelivery('synthetic', 'accepted', attemptId),
+        },
+        taskId,
+        5,
+      );
+      const finishedTask = await store.doc('tasks', taskId).get();
+      expect(
+        executionResult.outcome,
+        JSON.stringify({
+          executionResult,
+          dispatched,
+          task: finishedTask.data(),
+        }),
+      ).toBe('done');
+      expect(dispatched).toEqual(['gmail.search']);
+      expect(executorRouter.object).not.toHaveBeenCalled();
+      expect(executorRouter.step).not.toHaveBeenCalled();
+      const finished = decodeRecord<Record<string, unknown>>(finishedTask.data());
+      const finishedChecklist = (finished.state as { requestChecklist: typeof checklist })
+        .requestChecklist;
+      expect(finished.status).toBe('done');
+      expect(finishedChecklist.items.map(({ id, status }) => ({ id, status }))).toEqual([
+        { id: lookup.id, status: 'completed' },
+        { id: reminder.id, status: 'cancelled' },
+      ]);
+      const finalMessages = await store
+        .collection('messages')
+        .where('taskId', '==', taskId)
+        .where('role', '==', 'assistant')
+        .get();
+      expect(finalMessages.docs).toHaveLength(1);
+      expect(finalMessages.docs[0]?.get('text')).toContain('Museum ticket confirmation');
+      expect(finalMessages.docs[0]?.get('text')).toContain('Cancelled by the owner; not done.');
+    });
+
+    it('parks when the bounded owner-task inventory overflows without mutating any task', async () => {
+      const conversation = await repository.createConversation(agentId);
+      const distractorChecklist = buildRequestChecklist('Find the library schedule and save it');
+      if (!distractorChecklist) throw new Error('test checklist is invalid');
+      const tasksToInsert = Array.from({ length: 65 }, () => {
+        const id = randomUUID();
+        const now = store.now();
+        return {
+          id,
+          ...encodeRecord(
+            newTaskRecord(
+              {
+                agentId,
+                conversationId: conversation.id,
+                type: 'chat_turn',
+                trust: 'owner',
+                trigger: {
+                  source: 'chat',
+                  agentId,
+                  conversationId: conversation.id,
+                  trust: 'owner',
+                  payload: {
+                    text: distractorChecklist.request,
+                    triggerMessageId: randomUUID(),
+                  },
+                },
+              },
+              id,
+              now,
+            ),
+          ),
+          status: 'needs_attention',
+          queueGeneration: 4,
+          state: { requestChecklist: distractorChecklist },
+        };
+      });
+      const batch = store.db.batch();
+      for (const task of tasksToInsert) batch.set(store.doc('tasks', task.id), task);
+      await batch.commit();
+
+      const rawText = 'Cancel the reminder part of this request.';
+      const result = await repository.admitComposerChecklistCancellation({
+        agentId,
+        conversationId: conversation.id,
+        clientOperationId: randomUUID(),
+        requestHash: createHash('sha256')
+          .update(JSON.stringify(['owner-checklist-cancellation-v1', rawText]))
+          .digest('hex'),
+        rawText,
+        policy: taskActivityComposerChecklistCancellationPolicy,
+      });
+
+      expect(result).toEqual({ kind: 'unsafe', reason: 'invalid_history' });
+      const storedTasks = await store
+        .collection('tasks')
+        .where('conversationId', '==', conversation.id)
+        .get();
+      expect(storedTasks.size).toBe(65);
+      expect(
+        storedTasks.docs.every(
+          (document) =>
+            document.get('status') === 'needs_attention' && document.get('queueGeneration') === 4,
+        ),
+      ).toBe(true);
+      expect(
+        (await store.collection('messages').where('conversationId', '==', conversation.id).get())
+          .size,
+      ).toBe(0);
+      expect((await store.collection('outbox').get()).size).toBe(0);
+    });
+
+    it('parks when the same internal cancellation matches two eligible owner turns', async () => {
+      const conversation = await repository.createConversation(agentId);
+      const originalRequest =
+        'Find the museum ticket confirmation email and remind me about check-in tomorrow';
+      const secondRequest =
+        'Find the concert ticket confirmation email and remind me about check-in tomorrow';
+      const now = store.now();
+      const fixtures = [originalRequest, secondRequest].map((request) => {
+        const checklist = buildRequestChecklist(request);
+        if (!checklist) throw new Error('test checklist is invalid');
+        const taskId = randomUUID();
+        const originalMessageId = randomUUID();
+        const task = {
+          ...newTaskRecord(
+            {
+              agentId,
+              conversationId: conversation.id,
+              type: 'chat_turn',
+              trust: 'owner',
+              trigger: {
+                source: 'chat',
+                agentId,
+                conversationId: conversation.id,
+                trust: 'owner',
+                payload: { text: request, triggerMessageId: originalMessageId },
+              },
+            },
+            taskId,
+            now,
+          ),
+          status: 'needs_attention',
+          queueGeneration: 4,
+          state: { requestChecklist: checklist },
+        };
+        const message = {
+          id: originalMessageId,
+          conversationId: conversation.id,
+          taskId,
+          role: 'user',
+          origin: 'owner',
+          parts: [{ type: 'text', text: request }],
+          text: request,
+          createdAt: now,
+          hiddenAt: null,
+          appendSequence: '00000000000000000000',
+        };
+        return { task, message };
+      });
+      const batch = store.db.batch();
+      for (const { task, message } of fixtures) {
+        batch.set(store.doc('tasks', task.id), encodeRecord(task));
+        batch.set(store.doc('messages', message.id), encodeRecord(message));
+      }
+      await batch.commit();
+
+      const rawText = 'Cancel the reminder part of this request.';
+      const operationId = randomUUID();
+      const result = await repository.admitComposerChecklistCancellation({
+        agentId,
+        conversationId: conversation.id,
+        clientOperationId: operationId,
+        requestHash: createHash('sha256')
+          .update(JSON.stringify(['owner-checklist-cancellation-v1', rawText]))
+          .digest('hex'),
+        rawText,
+        policy: taskActivityComposerChecklistCancellationPolicy,
+      });
+
+      expect(result).toEqual({ kind: 'ambiguous' });
+      const storedTasks = await store
+        .collection('tasks')
+        .where('conversationId', '==', conversation.id)
+        .get();
+      expect(storedTasks.docs).toHaveLength(2);
+      expect(
+        storedTasks.docs.every(
+          (document) =>
+            document.get('status') === 'needs_attention' && document.get('queueGeneration') === 4,
+        ),
+      ).toBe(true);
+      expect(
+        (await store.collection('messages').where('conversationId', '==', conversation.id).get())
+          .size,
+      ).toBe(2);
+      await expect(store.doc('messages', operationId).get()).resolves.toMatchObject({
+        exists: false,
+      });
+      expect((await store.collection('outbox').get()).size).toBe(0);
     });
 
     it('durably cancels before admission and replays without creating owner content', async () => {

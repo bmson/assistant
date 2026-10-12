@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { loadConfig } from '@assistant/config';
 import {
   buildRequestChecklist,
   type ExecutorDeps,
@@ -20,6 +21,7 @@ import {
   toolCalls,
 } from '@assistant/db';
 import {
+  composerChecklistCancellationRequestHash,
   finalChannelDelivery,
   finalChannelDeliveryReport,
   MAX_TASK_QUEUE_GENERATION,
@@ -28,10 +30,12 @@ import {
 import { and, eq, inArray } from 'drizzle-orm';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { handleChatTurn } from '../chat-turn.js';
 import {
   cancelPendingChecklistActivity,
   retryActivity,
   revisePendingChecklistActivity,
+  taskActivityComposerChecklistCancellationPolicy,
 } from './commands.js';
 
 describe('atomic Activity checklist correction', () => {
@@ -401,6 +405,626 @@ describe('atomic Activity checklist correction', () => {
       outcome: 'invalid',
       transitioned: false,
     });
+  });
+
+  it('applies one direct composer cancellation atomically and replays the exact owner operation', async () => {
+    const { ownerId, taskId, checklist, conversationId } = await seed({
+      request: 'Find the museum ticket confirmation email and remind me about check-in tomorrow',
+    });
+    const lookup = checklist.items.find((item) => item.kind === 'lookup');
+    const reminder = checklist.items.find((item) => item.kind === 'reminder');
+    if (!lookup || !reminder) throw new Error('missing compound checklist outcomes');
+    const rawText = 'Cancel the reminder part of this request.';
+    const operationId = randomUUID();
+    const requestHash = createHash('sha256')
+      .update(JSON.stringify(['owner-checklist-cancellation-v1', rawText]))
+      .digest('hex');
+    const repository = createPostgresApplicationChatPersistence(db);
+    const input = {
+      agentId: ownerId,
+      conversationId,
+      clientOperationId: operationId,
+      requestHash,
+      rawText,
+      policy: taskActivityComposerChecklistCancellationPolicy,
+    };
+
+    const results = await Promise.all([
+      repository.admitComposerChecklistCancellation(input),
+      repository.admitComposerChecklistCancellation(input),
+    ]);
+    const storedTask = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+    const storedMessage = await db.query.messages.findFirst({
+      where: eq(messages.id, operationId),
+    });
+    expect(results.map((result) => result.kind).sort()).toEqual(['applied', 'replayed']);
+    const updatedChecklist = (storedTask?.state as { requestChecklist?: typeof checklist } | null)
+      ?.requestChecklist;
+    expect(storedTask).toMatchObject({ status: 'pending', queueGeneration: 5, plan: null });
+    expect(updatedChecklist?.items.map(({ id, status }) => ({ id, status }))).toEqual([
+      { id: lookup.id, status: 'pending' },
+      { id: reminder.id, status: 'cancelled' },
+    ]);
+    expect(storedMessage).toMatchObject({
+      id: operationId,
+      taskId,
+      conversationId,
+      role: 'user',
+      origin: 'owner',
+      text: rawText,
+    });
+    expect(
+      await db.query.messages.findMany({
+        where: and(eq(messages.taskId, taskId), eq(messages.role, 'user')),
+      }),
+    ).toHaveLength(2);
+    expect((updatedChecklist?.cancellationAudit ?? []).at(-1)).toMatchObject({
+      ownerMessageId: operationId,
+      requestHash,
+      itemIds: [reminder.id],
+    });
+
+    await expect(
+      repository.admitComposerChecklistCancellation({
+        ...input,
+        requestHash: 'f'.repeat(64),
+      }),
+    ).resolves.toMatchObject({ kind: 'conflict' });
+    await expect(
+      repository.admitComposerChecklistCancellation({
+        ...input,
+        rawText: 'Cancel the reminder part of this request now.',
+      }),
+    ).resolves.toMatchObject({ kind: 'conflict' });
+  });
+
+  it('keeps a regular admission replay key separate from composer cancellation', async () => {
+    const { ownerId, taskId, conversationId, checklist } = await seed({
+      request: 'Find the museum ticket confirmation email and remind me about check-in tomorrow',
+    });
+    const repository = createPostgresApplicationChatPersistence(db);
+    const operationId = randomUUID();
+    const normalInput = {
+      agentId: ownerId,
+      conversationId,
+      clientOperationId: operationId,
+      requestHash: 'b'.repeat(64),
+      text: 'Cancel the reminder part of this request.',
+      autonomous: false,
+      force: false,
+      spoken: false,
+    };
+    const first = await repository.admitChatTurn(normalInput);
+    if (first.kind !== 'admitted') throw new Error('expected normal chat admission');
+    taskIds.push(first.task.id);
+
+    await expect(
+      repository.admitComposerChecklistCancellation({
+        agentId: ownerId,
+        conversationId,
+        clientOperationId: operationId,
+        requestHash: composerChecklistCancellationRequestHash(normalInput.text),
+        rawText: normalInput.text,
+        policy: taskActivityComposerChecklistCancellationPolicy,
+      }),
+    ).resolves.toEqual({ kind: 'conflict' });
+    const replay = await repository.admitChatTurn(normalInput);
+    if (replay.kind !== 'admitted') throw new Error('expected ordinary replay admission');
+    expect(replay).toMatchObject({
+      created: false,
+      task: { id: first.task.id },
+      message: { id: first.message.id, taskId: first.task.id },
+    });
+    const original = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+    expect(original).toMatchObject({ status: 'needs_attention', queueGeneration: 4 });
+    expect(original?.state).toMatchObject({ requestChecklist: checklist });
+    expect(await db.query.messages.findMany({ where: eq(messages.id, operationId) })).toEqual([]);
+  });
+
+  it('returns one conflict when the same composer operation races across conversations', async () => {
+    const firstSeed = await seed({
+      request: 'Find the museum ticket confirmation email and remind me about check-in tomorrow',
+    });
+    const secondSeed = await seed({
+      request: 'Find the museum ticket confirmation email and remind me about check-in tomorrow',
+    });
+    const repository = createPostgresApplicationChatPersistence(db);
+    const operationId = randomUUID();
+    const rawText = 'Cancel the reminder part of this request.';
+    const input = (conversationId: string) => ({
+      agentId: firstSeed.ownerId,
+      conversationId,
+      clientOperationId: operationId,
+      requestHash: composerChecklistCancellationRequestHash(rawText),
+      rawText,
+      policy: taskActivityComposerChecklistCancellationPolicy,
+    });
+    const outcomes = await Promise.all([
+      repository.admitComposerChecklistCancellation(input(firstSeed.conversationId)),
+      repository.admitComposerChecklistCancellation(input(secondSeed.conversationId)),
+    ]);
+    expect(outcomes.map(({ kind }) => kind).sort()).toEqual(['applied', 'conflict']);
+    const operationMessage = await db.query.messages.findFirst({
+      where: eq(messages.id, operationId),
+    });
+    const [firstTask, secondTask] = await Promise.all([
+      db.query.tasks.findFirst({ where: eq(tasks.id, firstSeed.taskId) }),
+      db.query.tasks.findFirst({ where: eq(tasks.id, secondSeed.taskId) }),
+    ]);
+    expect([firstTask?.status, secondTask?.status].sort()).toEqual(['needs_attention', 'pending']);
+    const appliedConversationId =
+      firstTask?.status === 'pending' ? firstSeed.conversationId : secondSeed.conversationId;
+    expect(operationMessage?.conversationId).toBe(appliedConversationId);
+    expect(operationMessage?.taskId).toBe(
+      firstTask?.status === 'pending' ? firstSeed.taskId : secondSeed.taskId,
+    );
+  });
+
+  it('accepts Stop for the exact composer cancellation before its send response arrives', async () => {
+    const { ownerId, taskId, conversationId } = await seed({
+      request: 'Find the museum ticket confirmation email and remind me about check-in tomorrow',
+    });
+    const rawText = 'Cancel the reminder part of this request.';
+    const operationId = randomUUID();
+    const repository = createPostgresApplicationChatPersistence(db);
+    const applied = await repository.admitComposerChecklistCancellation({
+      agentId: ownerId,
+      conversationId,
+      clientOperationId: operationId,
+      requestHash: composerChecklistCancellationRequestHash(rawText),
+      rawText,
+      policy: taskActivityComposerChecklistCancellationPolicy,
+    });
+    expect(applied).toMatchObject({ kind: 'applied', task: { id: taskId } });
+    const stopped = await repository.cancelChatTurn({
+      agentId: ownerId,
+      conversationId,
+      clientOperationId: operationId,
+      composerCancellationPolicy: taskActivityComposerChecklistCancellationPolicy,
+    });
+    expect(stopped).toMatchObject({
+      kind: 'admitted_task',
+      task: { id: taskId, status: 'cancelled' },
+      transitioned: true,
+      effectStatus: 'unknown',
+    });
+    const stored = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+    expect(stored).toMatchObject({ status: 'cancelled', queueGeneration: 5 });
+    expect(await db.query.messages.findMany({ where: eq(messages.id, operationId) })).toHaveLength(
+      1,
+    );
+  });
+
+  it('parks when more than the bounded owner-task inventory is present', async () => {
+    const { ownerId, taskId, conversationId, checklist } = await seed({
+      request: 'Find the museum ticket confirmation email and remind me about check-in tomorrow',
+    });
+    const distractorChecklist = buildRequestChecklist('Find the library schedule and save it');
+    if (!checklist || !distractorChecklist) throw new Error('test checklist is invalid');
+    const overflowTasks = Array.from({ length: 64 }, (_, index) => {
+      const id = randomUUID();
+      return {
+        ...newTaskRecord(
+          {
+            agentId: ownerId,
+            conversationId,
+            type: 'chat_turn',
+            trust: 'owner',
+            trigger: {
+              source: 'chat',
+              agentId: ownerId,
+              conversationId,
+              trust: 'owner',
+              payload: { text: distractorChecklist.request, triggerMessageId: randomUUID() },
+            },
+          },
+          id,
+          new Date(Date.now() + index + 1),
+        ),
+        status: 'needs_attention' as const,
+        queueGeneration: 4,
+        state: { requestChecklist: distractorChecklist },
+      };
+    });
+    taskIds.push(...overflowTasks.map(({ id }) => id));
+    await db.insert(tasks).values(overflowTasks);
+
+    const rawText = 'Cancel the reminder part of this request.';
+    const repository = createPostgresApplicationChatPersistence(db);
+    const result = await repository.admitComposerChecklistCancellation({
+      agentId: ownerId,
+      conversationId,
+      clientOperationId: randomUUID(),
+      requestHash: createHash('sha256')
+        .update(JSON.stringify(['owner-checklist-cancellation-v1', rawText]))
+        .digest('hex'),
+      rawText,
+      policy: taskActivityComposerChecklistCancellationPolicy,
+    });
+
+    expect(result).toEqual({ kind: 'unsafe', reason: 'invalid_history' });
+    const inventory = await db.query.tasks.findMany({
+      where: eq(tasks.conversationId, conversationId),
+    });
+    expect(inventory).toHaveLength(65);
+    expect(
+      inventory.every((task) => task.status === 'needs_attention' && task.queueGeneration === 4),
+    ).toBe(true);
+    expect(
+      await db.query.messages.findMany({ where: eq(messages.conversationId, conversationId) }),
+    ).toHaveLength(1);
+    expect(await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) })).toMatchObject({
+      status: 'needs_attention',
+      queueGeneration: 4,
+      state: { requestChecklist: checklist },
+    });
+  });
+
+  it('parks when the same internal cancellation matches eligible tasks in two owner turns', async () => {
+    const { ownerId, taskId, conversationId, checklist } = await seed({
+      request: 'Find the museum ticket confirmation email and remind me about check-in tomorrow',
+    });
+    const secondChecklist = buildRequestChecklist(
+      'Find the concert ticket confirmation email and remind me about check-in tomorrow',
+    );
+    if (!checklist || !secondChecklist) throw new Error('test checklist is invalid');
+    const secondTaskId = randomUUID();
+    const secondOriginalMessageId = randomUUID();
+    await db.insert(tasks).values({
+      ...newTaskRecord(
+        {
+          agentId: ownerId,
+          conversationId,
+          type: 'chat_turn',
+          trust: 'owner',
+          trigger: {
+            source: 'chat',
+            agentId: ownerId,
+            conversationId,
+            trust: 'owner',
+            payload: { text: secondChecklist.request, triggerMessageId: secondOriginalMessageId },
+          },
+        },
+        secondTaskId,
+        new Date(),
+      ),
+      status: 'needs_attention',
+      queueGeneration: 4,
+      state: { requestChecklist: secondChecklist },
+    });
+    taskIds.push(secondTaskId);
+    await db.insert(messages).values({
+      id: secondOriginalMessageId,
+      conversationId,
+      taskId: secondTaskId,
+      role: 'user',
+      origin: 'owner',
+      parts: [{ type: 'text', text: secondChecklist.request }],
+      text: secondChecklist.request,
+    });
+
+    const rawText = 'Cancel the reminder part of this request.';
+    const operationId = randomUUID();
+    const result = await createPostgresApplicationChatPersistence(
+      db,
+    ).admitComposerChecklistCancellation({
+      agentId: ownerId,
+      conversationId,
+      clientOperationId: operationId,
+      requestHash: createHash('sha256')
+        .update(JSON.stringify(['owner-checklist-cancellation-v1', rawText]))
+        .digest('hex'),
+      rawText,
+      policy: taskActivityComposerChecklistCancellationPolicy,
+    });
+
+    expect(result).toEqual({ kind: 'ambiguous' });
+    const storedTasks = await db.query.tasks.findMany({
+      where: eq(tasks.conversationId, conversationId),
+    });
+    expect(storedTasks).toHaveLength(2);
+    expect(
+      storedTasks.every((task) => task.status === 'needs_attention' && task.queueGeneration === 4),
+    ).toBe(true);
+    expect(storedTasks.find((task) => task.id === taskId)?.state).toMatchObject({
+      requestChecklist: checklist,
+    });
+    expect(storedTasks.find((task) => task.id === secondTaskId)?.state).toMatchObject({
+      requestChecklist: secondChecklist,
+    });
+    expect(
+      await db.query.messages.findMany({ where: eq(messages.conversationId, conversationId) }),
+    ).toHaveLength(2);
+    expect(await db.query.messages.findMany({ where: eq(messages.id, operationId) })).toHaveLength(
+      0,
+    );
+  });
+
+  it('routes a direct owner cancellation through chat admission and executes only the retained lookup', async () => {
+    const { taskId, conversationId, checklist } = await seed({
+      request: 'Find the museum ticket confirmation email and remind me about check-in tomorrow',
+    });
+    const lookup = checklist.items.find((item) => item.kind === 'lookup');
+    const reminder = checklist.items.find((item) => item.kind === 'reminder');
+    if (!lookup || !reminder) throw new Error('missing compound request outcomes');
+
+    const rawText = 'Cancel the reminder part of this request.';
+    const operationId = randomUUID();
+    const chat = createPostgresApplicationChatPersistence(db);
+    const route = vi.fn(async () => ({ ok: true as const, modelId: 'synthetic/offline' }));
+    const response = await handleChatTurn(
+      new Request('https://assistant.example/api/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          conversationId,
+          clientOperationId: operationId,
+          messages: [
+            {
+              id: operationId,
+              role: 'user',
+              parts: [{ type: 'text', text: rawText }],
+            },
+          ],
+        }),
+      }),
+      {
+        config: loadConfig({
+          OPENROUTER_API_KEY: 'synthetic-test-only',
+          QUEUE_DRIVER: 'local',
+          CHAT_RECALL_ENABLED: 'false',
+          GRAPH_RAG_ENABLED: 'false',
+        }),
+        db,
+        chat,
+        router: { route } as unknown as ModelRouter,
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-async-task')).toBe(taskId);
+    expect(response.headers.get('x-owner-message-id')).toBe(operationId);
+    expect(route).not.toHaveBeenCalled();
+    const admittedTask = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+    expect(admittedTask).toMatchObject({ status: 'pending', queueGeneration: 5 });
+
+    const executorRouter = {
+      object: vi.fn(async () => {
+        throw new Error('the retained checklist lookup must not call the planner');
+      }),
+      step: vi.fn(async () => {
+        throw new Error('the retained checklist lookup must not call the model');
+      }),
+      embed: vi.fn(async (values: string[]) => values.map(() => new Array(1536).fill(0))),
+    } as unknown as ModelRouter;
+    const dispatched: string[] = [];
+    const dispatcher: ExecutorDeps['dispatcher'] = {
+      toolDefs: () => [
+        {
+          name: 'gmail.search',
+          description: 'Search mail',
+          inputSchema: z.object({ query: z.string() }),
+        },
+        {
+          name: 'reminder.create',
+          description: 'Create a reminder',
+          inputSchema: z.object({ text: z.string() }),
+        },
+      ],
+      resultIsUntrusted: () => false,
+      dispatch: async (input) => {
+        dispatched.push(input.toolName);
+        if (input.toolName !== 'gmail.search')
+          throw new Error(`cancelled reminder unexpectedly dispatched: ${input.toolName}`);
+        const result = {
+          complete: true,
+          mailboxSearched: 'all mail',
+          results: [{ subject: 'Museum ticket confirmation' }],
+        };
+        const [stored] = await db
+          .insert(toolCalls)
+          .values({
+            taskId,
+            toolName: input.toolName,
+            args: input.args,
+            risk: 'autonomous',
+            status: 'succeeded',
+            result,
+            step: input.step,
+            decision: { ...input.provenance, modelToolCallId: input.modelToolCallId },
+            finishedAt: new Date(),
+          })
+          .returning({ id: toolCalls.id });
+        if (!stored) throw new Error('synthetic Gmail lookup did not persist');
+        return { kind: 'executed', toolCallId: stored.id, result, cached: false };
+      },
+      executeApproved: async () => ({ kind: 'failed', error: 'unused' }),
+    };
+    const execution = await executeTask(
+      {
+        db,
+        persistence: createPostgresExecutionPersistence(db),
+        router: executorRouter,
+        dispatcher,
+        deliverFinal: async (_task, _text, attemptId) =>
+          finalChannelDelivery('synthetic', 'accepted', attemptId),
+      },
+      taskId,
+      5,
+    );
+
+    const taskAfterExecution = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+    expect(
+      execution.outcome,
+      JSON.stringify({ execution, dispatched, task: taskAfterExecution?.state }),
+    ).toBe('done');
+    expect(dispatched).toEqual(['gmail.search']);
+    expect(executorRouter.object).not.toHaveBeenCalled();
+    expect(executorRouter.step).not.toHaveBeenCalled();
+    const finishedTask = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+    const finishedChecklist = (finishedTask?.state as { requestChecklist?: typeof checklist })
+      ?.requestChecklist;
+    expect(finishedTask?.status).toBe('done');
+    expect(finishedChecklist?.items.map(({ id, status }) => ({ id, status }))).toEqual([
+      { id: lookup.id, status: 'completed' },
+      { id: reminder.id, status: 'cancelled' },
+    ]);
+    const finalMessage = await db.query.messages.findFirst({
+      where: and(eq(messages.taskId, taskId), eq(messages.role, 'assistant')),
+    });
+    expect(finalMessage?.text).toContain('museum ticket confirmation');
+    expect(finalMessage?.text).toContain('Cancelled by the owner; not done.');
+  });
+
+  it('parks rather than executing when a composer cancellation audit hash does not match its owner message', async () => {
+    const { ownerId, taskId, conversationId, checklist } = await seed({
+      request: 'Find the museum ticket confirmation email and remind me about check-in tomorrow',
+    });
+    const rawText = 'Cancel the reminder part of this request.';
+    const operationId = randomUUID();
+    const chat = createPostgresApplicationChatPersistence(db);
+    const requestHash = createHash('sha256')
+      .update(JSON.stringify(['owner-checklist-cancellation-v1', rawText]))
+      .digest('hex');
+    const applied = await chat.admitComposerChecklistCancellation({
+      agentId: ownerId,
+      conversationId,
+      clientOperationId: operationId,
+      requestHash,
+      rawText,
+      policy: taskActivityComposerChecklistCancellationPolicy,
+    });
+    expect(applied.kind).toBe('applied');
+    const current = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+    if (!current) throw new Error('composed cancellation task was not persisted');
+    const currentState = current?.state as {
+      requestChecklist: typeof checklist;
+      [key: string]: unknown;
+    };
+    await db
+      .update(tasks)
+      .set({
+        state: {
+          ...currentState,
+          requestChecklist: {
+            ...currentState.requestChecklist,
+            cancellationAudit: currentState.requestChecklist.cancellationAudit?.map((entry) => ({
+              ...entry,
+              requestHash: 'f'.repeat(64),
+            })),
+          },
+        },
+      })
+      .where(eq(tasks.id, taskId));
+
+    const router = {
+      object: vi.fn(async () => {
+        throw new Error('unverified owner action must not reach the planner');
+      }),
+      step: vi.fn(async () => {
+        throw new Error('unverified owner action must not reach the model');
+      }),
+      embed: vi.fn(async (values: string[]) => values.map(() => new Array(1536).fill(0))),
+    } as unknown as ModelRouter;
+    const dispatched: string[] = [];
+    const result = await executeTask(
+      {
+        db,
+        persistence: createPostgresExecutionPersistence(db),
+        router,
+        dispatcher: {
+          toolDefs: () => [
+            {
+              name: 'gmail.search',
+              description: 'Search mail',
+              inputSchema: z.object({ query: z.string() }),
+            },
+          ],
+          resultIsUntrusted: () => false,
+          dispatch: async (input) => {
+            dispatched.push(input.toolName);
+            return { kind: 'rejected', reason: 'must not run' };
+          },
+          executeApproved: async () => ({ kind: 'failed', error: 'unused' }),
+        },
+        deliverFinal: async (_task, _text, attemptId) =>
+          finalChannelDelivery('synthetic', 'accepted', attemptId),
+      },
+      taskId,
+      5,
+    );
+    expect(result).toMatchObject({
+      outcome: 'needs_attention',
+      detail: 'owner cancellation evidence requires review: cancellation-owner-message-unverified',
+    });
+    expect(dispatched).toEqual([]);
+    expect(router.object).not.toHaveBeenCalled();
+    expect(router.step).not.toHaveBeenCalled();
+    expect(
+      await db.query.messages.findMany({
+        where: and(eq(messages.taskId, taskId), eq(messages.role, 'assistant')),
+      }),
+    ).toEqual([]);
+  });
+
+  it('does not reinterpret business cancellations and clarifies internal requests without a matching task', async () => {
+    const owner = await getAgent(db);
+    const conversation = await createPostgresApplicationChatPersistence(db).createConversation(
+      owner.id,
+    );
+    conversationIds.push(conversation.id);
+    const repository = createPostgresApplicationChatPersistence(db);
+    const request = (rawText: string) => ({
+      agentId: owner.id,
+      conversationId: conversation.id,
+      clientOperationId: randomUUID(),
+      requestHash: createHash('sha256')
+        .update(JSON.stringify(['owner-checklist-cancellation-v1', rawText]))
+        .digest('hex'),
+      rawText,
+      policy: taskActivityComposerChecklistCancellationPolicy,
+    });
+
+    await expect(
+      repository.admitComposerChecklistCancellation(request('Cancel my hotel booking.')),
+    ).resolves.toMatchObject({ kind: 'not_applicable' });
+    await expect(
+      repository.admitComposerChecklistCancellation(request('Cancel the hotel lookup.')),
+    ).resolves.toMatchObject({ kind: 'no_match' });
+    expect(
+      await db.query.messages.findMany({ where: eq(messages.conversationId, conversation.id) }),
+    ).toEqual([]);
+  });
+
+  it('leaves a real-world flight reminder cancellation to ordinary admission', async () => {
+    const { ownerId, taskId, conversationId, checklist } = await seed({
+      request: 'Find my flight itinerary and remind me about boarding',
+    });
+    const repository = createPostgresApplicationChatPersistence(db);
+    for (const rawText of [
+      'Cancel my flight tomorrow.',
+      'Cancel my reminder after arrival.',
+      `Cancel my reminder for the flight ${'without changing the itinerary '.repeat(40)}`,
+    ]) {
+      const result = await repository.admitComposerChecklistCancellation({
+        agentId: ownerId,
+        conversationId,
+        clientOperationId: randomUUID(),
+        requestHash: composerChecklistCancellationRequestHash(rawText),
+        rawText,
+        policy: taskActivityComposerChecklistCancellationPolicy,
+      });
+      expect(result, rawText).toEqual({ kind: 'not_applicable' });
+    }
+    const stored = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
+    expect(stored).toMatchObject({
+      status: 'needs_attention',
+      queueGeneration: 4,
+      state: { requestChecklist: checklist },
+    });
+    expect(
+      await db.query.messages.findMany({ where: eq(messages.conversationId, conversationId) }),
+    ).toHaveLength(1);
   });
 
   it.each([

@@ -16,6 +16,7 @@ import type {
 } from '@assistant/persistence';
 import type { UIMessage } from 'ai';
 import { listSavedCards } from './cards.js';
+import { taskActivityComposerChecklistCancellationPolicy } from './tasks/commands.js';
 
 const TERMINAL_TASK_STATUSES = ['done', 'failed', 'cancelled'];
 /** A task in one of these is not going to produce more output on its own. */
@@ -598,6 +599,7 @@ export async function cancelChatTurn(
     agentId: agent.id,
     conversationId: input.conversationId,
     clientOperationId: input.clientOperationId,
+    composerCancellationPolicy: taskActivityComposerChecklistCancellationPolicy,
   });
 }
 

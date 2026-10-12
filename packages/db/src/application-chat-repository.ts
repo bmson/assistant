@@ -3,6 +3,7 @@ import type {
   ApplicationChatMessage,
   ApplicationChatPersistence,
   ApplicationChatSuggestion,
+  ComposerChecklistCancellationResult,
   TaskLease,
 } from '@assistant/persistence';
 import {
@@ -13,9 +14,15 @@ import {
   chatAdmissionCancellationTrigger,
   chatAdmissionExternalEventId,
   chatAdmissionPayload,
+  completeChecklistCorrectionEvidence,
+  composerChecklistCancellationRequestHash,
   isChatAdmissionCancellationProjection,
+  isPinnedOwnerChatRequestMessage,
+  MAX_CHECKLIST_CORRECTION_LEDGER_ROWS,
+  MAX_TASK_QUEUE_GENERATION,
   newTaskRecord,
   normalizeTaskBudget,
+  ownerChatChecklistRequestMessageId,
   recallSurfaceRefs,
   withChatAdmissionPhase,
 } from '@assistant/persistence';
@@ -39,6 +46,7 @@ import {
 import type { Db } from './client.js';
 import { createPostgresExecutionEvidenceRepository } from './execution-evidence-repository.js';
 import { assertPostgresInstallationOwner } from './installation-owner.js';
+import { lockPostgresOwnerChatAction } from './owner-chat-action-lock.js';
 import {
   assertPostgresPrivacyObservationFence,
   lockPostgresPrivacyObservationFence,
@@ -55,6 +63,7 @@ import {
   recallSurfaces,
   suggestions,
   tasks,
+  toolCallReceipts,
   toolCalls,
 } from './schema.js';
 import { createPostgresTaskRepository } from './task-lifecycle-repository.js';
@@ -62,6 +71,21 @@ import { createPostgresTaskRepository } from './task-lifecycle-repository.js';
 const TERMINAL_TASK_STATUSES = ['done', 'failed', 'cancelled'];
 const GOAL_BLOCKED_PREFIX = 'Waiting on the owner:';
 const DIRECT_CHAT_LEASE_MS = 10 * 60_000;
+const MAX_COMPOSER_CANCELLATION_TASKS = 64;
+
+function isComposerMessagePrimaryKeyCollision(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 4 && current && typeof current === 'object'; depth += 1) {
+    const record = current as Record<string, unknown>;
+    if (
+      record.code === '23505' &&
+      (record.constraint === 'messages_pkey' || record.constraint_name === 'messages_pkey')
+    )
+      return true;
+    current = record.cause;
+  }
+  return false;
+}
 
 function conciseTitle(value: string | undefined): string | undefined {
   const title = value?.replace(/\s+/g, ' ').trim() ?? '';
@@ -778,6 +802,7 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
     async cancelChatTurn(input) {
       assertChatAdmissionOperationId(input.clientOperationId);
       return db.transaction(async (tx) => {
+        await lockPostgresOwnerChatAction(tx, input.agentId, input.conversationId);
         const [conversation] = await tx
           .select({ id: conversations.id })
           .from(conversations)
@@ -858,6 +883,104 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
 
         const existing = await readExisting();
         if (existing) return existing;
+        const [operationMessage] = await tx
+          .select()
+          .from(messages)
+          .where(eq(messages.id, input.clientOperationId))
+          .limit(1);
+        if (operationMessage) {
+          const message = operationMessage;
+          if (
+            !input.composerCancellationPolicy ||
+            message.conversationId !== input.conversationId ||
+            message.role !== 'user' ||
+            message.origin !== 'owner' ||
+            message.hiddenAt !== null ||
+            !message.taskId
+          )
+            throw new Error('Chat operation ID was already used for a different request');
+          const [task] = await tx
+            .select()
+            .from(tasks)
+            .where(and(eq(tasks.id, message.taskId), eq(tasks.agentId, input.agentId)))
+            .limit(1)
+            .for('update');
+          const state =
+            task?.state && typeof task.state === 'object' && !Array.isArray(task.state)
+              ? (task.state as Record<string, unknown>)
+              : null;
+          const checklist = state?.requestChecklist;
+          const auditRows =
+            checklist && typeof checklist === 'object' && !Array.isArray(checklist)
+              ? (checklist as Record<string, unknown>).cancellationAudit
+              : null;
+          const audit = Array.isArray(auditRows)
+            ? auditRows.find(
+                (entry) =>
+                  entry &&
+                  typeof entry === 'object' &&
+                  !Array.isArray(entry) &&
+                  (entry as Record<string, unknown>).ownerMessageId === message.id,
+              )
+            : null;
+          const requestHash =
+            audit && typeof audit === 'object' && !Array.isArray(audit)
+              ? (audit as Record<string, unknown>).requestHash
+              : null;
+          if (
+            !task ||
+            task.conversationId !== input.conversationId ||
+            task.type !== 'chat_turn' ||
+            task.trust !== 'owner' ||
+            task.goalId !== null ||
+            typeof requestHash !== 'string' ||
+            requestHash !== composerChecklistCancellationRequestHash(message.text) ||
+            !input.composerCancellationPolicy.matchesComposerReplay({
+              checklist,
+              ownerMessageId: message.id,
+              ownerMessageText: message.text,
+              requestHash,
+              task: { id: task.id, conversationId: task.conversationId },
+              priorMessage: {
+                id: message.id,
+                taskId: message.taskId,
+                conversationId: message.conversationId,
+                role: message.role,
+                origin: message.origin,
+                text: message.text,
+              },
+            })
+          )
+            throw new Error('Chat operation ID was already used for a different request');
+          if (['done', 'failed', 'cancelled'].includes(task.status))
+            return {
+              kind: 'admitted_task',
+              task,
+              status: task.status,
+              transitioned: false,
+              effectStatus: 'unknown',
+            } as const;
+          const [updated] = await tx
+            .update(tasks)
+            .set({
+              status: 'cancelled',
+              lockedUntil: null,
+              leaseToken: null,
+              runAfter: null,
+              attempt: 0,
+              updatedAt: sql`now()`,
+            })
+            .where(and(eq(tasks.id, task.id), eq(tasks.agentId, input.agentId)))
+            .returning();
+          if (!updated) throw new Error('Chat task cancellation lost its locked row');
+          return {
+            kind: 'admitted_task',
+            task: updated,
+            status: 'cancelled',
+            transitioned: true,
+            effectStatus: 'unknown',
+          } as const;
+        }
         const [clock] = await tx.execute<{ now: string }>(sql`select clock_timestamp() as now`);
         if (!clock) throw new Error('Missing database clock');
         const tombstone = {
@@ -899,6 +1022,7 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
 
     async admitChatTurn(input) {
       return db.transaction(async (tx) => {
+        await lockPostgresOwnerChatAction(tx, input.agentId, input.conversationId);
         const [conversation] = await tx
           .select({ id: conversations.id })
           .from(conversations)
@@ -956,6 +1080,13 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
         };
         const existing = await readExisting();
         if (existing) return existing;
+        const [operationMessage] = await tx
+          .select({ id: messages.id })
+          .from(messages)
+          .where(eq(messages.id, input.clientOperationId))
+          .limit(1);
+        if (operationMessage)
+          throw new Error('Chat operation ID was already used for a different request');
 
         const [budget] = await tx.select().from(budgets).where(eq(budgets.scope, 'task_default'));
         const [clock] = await tx.execute<{ now: string }>(sql`select clock_timestamp() as now`);
@@ -1044,6 +1175,332 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
           .where(ownedConversationWhere(input.agentId, input.conversationId));
         return { kind: 'admitted', created: true, task: created, message, lease } as const;
       });
+    },
+
+    async admitComposerChecklistCancellation(input) {
+      assertChatAdmissionOperationId(input.clientOperationId);
+      if (!/^[0-9a-f]{64}$/.test(input.requestHash) || !input.rawText) return { kind: 'ambiguous' };
+      let result: ComposerChecklistCancellationResult;
+      try {
+        result = await db.transaction(async (tx) => {
+          await lockPostgresOwnerChatAction(tx, input.agentId, input.conversationId);
+          const textResolution = input.policy.resolve(
+            { version: 1, request: '', items: [] },
+            input.rawText,
+          );
+          if (textResolution.kind === 'not_cancellation')
+            return { kind: 'not_applicable' } as const;
+          if (textResolution.kind === 'ambiguous') return { kind: 'ambiguous' } as const;
+          if (input.rawText.length > 500) return { kind: 'ambiguous' } as const;
+
+          const priorMessage = await tx
+            .select()
+            .from(messages)
+            .where(eq(messages.id, input.clientOperationId))
+            .limit(1);
+          if (priorMessage[0]) {
+            const prior = priorMessage[0];
+            if (
+              prior.conversationId !== input.conversationId ||
+              prior.role !== 'user' ||
+              prior.origin !== 'owner' ||
+              prior.text !== input.rawText ||
+              prior.hiddenAt !== null ||
+              !prior.taskId
+            )
+              return { kind: 'conflict' } as const;
+            const [priorTask] = await tx
+              .select()
+              .from(tasks)
+              .where(and(eq(tasks.id, prior.taskId), eq(tasks.agentId, input.agentId)))
+              .limit(1)
+              .for('update');
+            if (
+              !priorTask ||
+              priorTask.conversationId !== input.conversationId ||
+              priorTask.type !== 'chat_turn' ||
+              priorTask.trust !== 'owner' ||
+              priorTask.goalId !== null
+            )
+              return { kind: 'conflict' } as const;
+            const state =
+              priorTask.state &&
+              typeof priorTask.state === 'object' &&
+              !Array.isArray(priorTask.state)
+                ? (priorTask.state as Record<string, unknown>)
+                : null;
+            if (
+              input.policy.matchesComposerReplay({
+                checklist: state?.requestChecklist,
+                ownerMessageId: input.clientOperationId,
+                ownerMessageText: input.rawText,
+                requestHash: input.requestHash,
+                task: { id: priorTask.id, conversationId: priorTask.conversationId },
+                priorMessage: {
+                  id: prior.id,
+                  taskId: prior.taskId,
+                  conversationId: prior.conversationId,
+                  role: prior.role,
+                  origin: prior.origin,
+                  text: prior.text,
+                },
+              })
+            )
+              return {
+                kind: 'replayed',
+                task: priorTask,
+                message: prior,
+                queueGeneration: priorTask.queueGeneration,
+              } as const;
+            return { kind: 'conflict' } as const;
+          }
+
+          // A normal admitted turn reserves this operation identity in the
+          // admission event index, even though its owner message has a separate
+          // generated ID. Never reinterpret that replay key as a checklist edit.
+          const [existingAdmission] = await tx
+            .select({ id: tasks.id })
+            .from(tasks)
+            .where(eq(tasks.externalEventId, chatAdmissionExternalEventId(input)))
+            .limit(1);
+          if (existingAdmission) return { kind: 'conflict' } as const;
+
+          const candidates = await tx
+            .select()
+            .from(tasks)
+            .where(
+              and(
+                eq(tasks.agentId, input.agentId),
+                eq(tasks.conversationId, input.conversationId),
+                eq(tasks.type, 'chat_turn'),
+                eq(tasks.trust, 'owner'),
+                isNull(tasks.goalId),
+                notInArray(tasks.status, TERMINAL_TASK_STATUSES),
+              ),
+            )
+            .orderBy(asc(tasks.id))
+            .limit(MAX_COMPOSER_CANCELLATION_TASKS + 1)
+            .for('update');
+          if (candidates.length > MAX_COMPOSER_CANCELLATION_TASKS)
+            return { kind: 'unsafe', reason: 'invalid_history' } as const;
+
+          const matched: Array<{
+            task: (typeof candidates)[number];
+            state: Record<string, unknown>;
+            resolution: Extract<ReturnType<typeof input.policy.resolve>, { kind: 'matched' }>;
+          }> = [];
+          let ambiguous = false;
+          let noMatch = textResolution.kind === 'no_match';
+          for (const task of candidates) {
+            const state =
+              task.state && typeof task.state === 'object' && !Array.isArray(task.state)
+                ? (task.state as Record<string, unknown>)
+                : null;
+            const resolution = input.policy.resolve(state?.requestChecklist, input.rawText);
+            if (resolution.kind === 'ambiguous') ambiguous = true;
+            if (resolution.kind === 'no_match') noMatch = true;
+            if (resolution.kind === 'matched' && state) matched.push({ task, state, resolution });
+          }
+          if (ambiguous || matched.length > 1) return { kind: 'ambiguous' } as const;
+          const candidate = matched[0];
+          if (!candidate)
+            return noMatch
+              ? ({ kind: 'no_match' } as const)
+              : ({ kind: 'not_applicable' } as const);
+          const { task, state, resolution } = candidate;
+          if (
+            task.status !== 'needs_attention' ||
+            task.leaseToken !== null ||
+            task.lockedUntil !== null ||
+            task.archivedAt !== null ||
+            task.queueGeneration < 0 ||
+            task.queueGeneration >= MAX_TASK_QUEUE_GENERATION
+          )
+            return { kind: 'unsafe', reason: 'not_paused' } as const;
+          if (
+            state.pendingApprovalId ||
+            state.pendingJob != null ||
+            state.pendingToolBatch != null ||
+            state.pendingFinal != null ||
+            (Array.isArray(state.pendingApprovals) && state.pendingApprovals.length > 0)
+          )
+            return { kind: 'unsafe', reason: 'unknown_effect' } as const;
+
+          const [conversation] = await tx
+            .select()
+            .from(conversations)
+            .where(ownedConversationWhere(input.agentId, input.conversationId))
+            .limit(1)
+            .for('update');
+          if (!conversation || conversation.archivedAt !== null)
+            return { kind: 'unsafe', reason: 'candidate_changed' } as const;
+
+          const checklist = state.requestChecklist;
+          if (!checklist || typeof checklist !== 'object' || Array.isArray(checklist))
+            return { kind: 'unsafe', reason: 'invalid_history' } as const;
+          const request = (checklist as Record<string, unknown>).request;
+          if (typeof request !== 'string')
+            return { kind: 'unsafe', reason: 'invalid_history' } as const;
+          const originalMessageId = ownerChatChecklistRequestMessageId(task, request);
+          if (!originalMessageId) return { kind: 'unsafe', reason: 'invalid_history' } as const;
+          const [originalMessage] = await tx
+            .select()
+            .from(messages)
+            .where(and(eq(messages.id, originalMessageId), isNull(messages.hiddenAt)))
+            .limit(1);
+          if (
+            !originalMessage ||
+            !isPinnedOwnerChatRequestMessage(task, originalMessage, originalMessageId, request)
+          )
+            return { kind: 'unsafe', reason: 'invalid_history' } as const;
+
+          const [approval] = await tx
+            .select({ id: approvals.id })
+            .from(approvals)
+            .innerJoin(toolCalls, eq(toolCalls.id, approvals.toolCallId))
+            .where(
+              and(
+                eq(toolCalls.taskId, task.id),
+                inArray(approvals.status, ['pending', 'approved']),
+              ),
+            )
+            .limit(1);
+          if (approval) return { kind: 'unsafe', reason: 'unknown_effect' } as const;
+
+          const calls = await tx
+            .select({
+              id: toolCalls.id,
+              taskId: toolCalls.taskId,
+              toolName: toolCalls.toolName,
+              status: toolCalls.status,
+              args: toolCalls.args,
+              result: toolCalls.result,
+              error: toolCalls.error,
+            })
+            .from(toolCalls)
+            .where(eq(toolCalls.taskId, task.id))
+            .orderBy(asc(toolCalls.id))
+            .limit(MAX_CHECKLIST_CORRECTION_LEDGER_ROWS + 1);
+          const receipts = await tx
+            .select({
+              id: toolCallReceipts.id,
+              agentId: toolCallReceipts.agentId,
+              taskId: toolCallReceipts.taskId,
+              toolCallId: toolCallReceipts.toolCallId,
+              toolName: toolCallReceipts.toolName,
+              effectOutcome: toolCallReceipts.effectOutcome,
+            })
+            .from(toolCallReceipts)
+            .where(eq(toolCallReceipts.taskId, task.id))
+            .orderBy(asc(toolCallReceipts.id))
+            .limit(MAX_CHECKLIST_CORRECTION_LEDGER_ROWS + 1);
+          if (
+            calls.length > MAX_CHECKLIST_CORRECTION_LEDGER_ROWS ||
+            receipts.length > MAX_CHECKLIST_CORRECTION_LEDGER_ROWS
+          )
+            return { kind: 'unsafe', reason: 'unknown_effect' } as const;
+          const evidence = completeChecklistCorrectionEvidence({
+            agentId: input.agentId,
+            taskId: task.id,
+            toolCalls: calls as Parameters<
+              typeof completeChecklistCorrectionEvidence
+            >[0]['toolCalls'],
+            receipts: receipts as Parameters<
+              typeof completeChecklistCorrectionEvidence
+            >[0]['receipts'],
+          });
+          if (!evidence) return { kind: 'unsafe', reason: 'unknown_effect' } as const;
+
+          const binding = {
+            taskId: task.id,
+            itemId: resolution.itemId,
+            expectedRevision: resolution.expectedRevision,
+            expectedCancellationRevision: resolution.expectedCancellationRevision,
+            ownerMessageId: input.clientOperationId,
+            ownerMessageText: input.rawText,
+            requestHash: input.requestHash,
+          };
+          const cancelled = input.policy.cancel({
+            checklist,
+            task: { id: task.id, agentId: input.agentId, conversationId: input.conversationId },
+            binding,
+            evidence: evidence.rows,
+          });
+          if (cancelled.decision !== 'cancelled') {
+            return {
+              kind: 'unsafe',
+              reason:
+                cancelled.decision === 'unsafe_evidence' ? 'unknown_effect' : 'candidate_changed',
+            } as const;
+          }
+          if (
+            !input.policy.matchesReplay({
+              checklist: cancelled.checklist,
+              cancellation: binding,
+              task: { id: task.id, conversationId: input.conversationId },
+              priorMessage: {
+                id: input.clientOperationId,
+                taskId: task.id,
+                conversationId: input.conversationId,
+                role: 'user',
+                origin: 'owner',
+                text: input.rawText,
+              },
+            })
+          )
+            return { kind: 'unsafe', reason: 'invalid_history' } as const;
+
+          const [clock] = await tx.execute<{ now: string }>(sql`select clock_timestamp() as now`);
+          if (!clock) throw new Error('Missing database clock');
+          const now = new Date(clock.now);
+          const updatedState = { ...state, requestChecklist: cancelled.checklist };
+          const [updatedTask] = await tx
+            .update(tasks)
+            .set({
+              status: 'pending',
+              state: updatedState,
+              plan: null,
+              runAfter: null,
+              lockedUntil: null,
+              leaseToken: null,
+              queueGeneration: task.queueGeneration + 1,
+              attempt: 0,
+              attentionNotifiedAt: null,
+              updatedAt: now,
+            })
+            .where(and(eq(tasks.id, task.id), eq(tasks.agentId, input.agentId)))
+            .returning();
+          if (!updatedTask) return { kind: 'unsafe', reason: 'candidate_changed' } as const;
+          const [message] = await tx
+            .insert(messages)
+            .values({
+              id: input.clientOperationId,
+              conversationId: input.conversationId,
+              taskId: task.id,
+              role: 'user',
+              origin: 'owner',
+              clientId: input.clientId ?? null,
+              parts: [{ type: 'text', text: input.rawText }],
+              text: input.rawText,
+            })
+            .returning();
+          if (!message) throw new Error('Composer cancellation owner message was not persisted');
+          await tx
+            .update(conversations)
+            .set({ updatedAt: now })
+            .where(ownedConversationWhere(input.agentId, input.conversationId));
+          return {
+            kind: 'applied',
+            task: updatedTask,
+            message,
+            queueGeneration: updatedTask.queueGeneration,
+          } as const;
+        });
+      } catch (error) {
+        if (isComposerMessagePrimaryKeyCollision(error)) return { kind: 'conflict' };
+        throw error;
+      }
+      return result;
     },
 
     async queueAdmittedChatTurn(input) {

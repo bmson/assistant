@@ -16,9 +16,15 @@ import {
   chatAdmissionCancellationTrigger,
   chatAdmissionExternalEventId,
   chatAdmissionPayload,
+  completeChecklistCorrectionEvidence,
+  composerChecklistCancellationRequestHash,
   isChatAdmissionCancellationProjection,
+  isPinnedOwnerChatRequestMessage,
+  MAX_CHECKLIST_CORRECTION_LEDGER_ROWS,
+  MAX_TASK_QUEUE_GENERATION,
   newTaskRecord,
   normalizeTaskBudget,
+  ownerChatChecklistRequestMessageId,
   recallSurfaceRefs,
   withChatAdmissionPhase,
 } from '@assistant/persistence';
@@ -42,6 +48,7 @@ const MAX_LOOKUP_IDS = 200;
 const GOAL_BLOCKED_PREFIX = 'Waiting on the owner:';
 const DIRECT_CHAT_LEASE_MS = 10 * 60_000;
 const FIRST_APPEND_ID = '00000000-0000-0000-0000-000000000000';
+const MAX_COMPOSER_CANCELLATION_TASKS = 64;
 
 function conciseTitle(value: string | undefined): string | undefined {
   const title = value?.replace(/\s+/g, ' ').trim() ?? '';
@@ -1031,6 +1038,109 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
       if (!conversationSnapshot.exists || !isOwnedChat(conversationSnapshot.data(), input.agentId))
         throw new Error('chat not found');
       const key = await tx.get(eventRef);
+      const operationMessage = await tx.get(this.store.doc('messages', input.clientOperationId));
+      if (key.exists && operationMessage.exists)
+        throw new Error('Chat operation ID was already used for a different request');
+      if (operationMessage.exists) {
+        const message = decodeRecord<ApplicationChatMessage>(operationMessage.data());
+        if (
+          !input.composerCancellationPolicy ||
+          message.id !== input.clientOperationId ||
+          documentKey(input.clientOperationId) !== operationMessage.id ||
+          message.conversationId !== input.conversationId ||
+          message.role !== 'user' ||
+          message.origin !== 'owner' ||
+          typeof message.text !== 'string' ||
+          message.hiddenAt !== null ||
+          !message.taskId
+        )
+          throw new Error('Chat operation ID was already used for a different request');
+        const taskSnapshot = await tx.get(this.store.doc('tasks', message.taskId));
+        if (!taskSnapshot.exists || taskSnapshot.get('agentId') !== input.agentId)
+          throw new Error('Chat operation ID was already used for a different request');
+        const task = decodeRecord<Records['tasks']>(taskSnapshot.data());
+        const state =
+          task.state && typeof task.state === 'object' && !Array.isArray(task.state)
+            ? (task.state as Record<string, unknown>)
+            : null;
+        const checklist = state?.requestChecklist;
+        const auditRows =
+          checklist && typeof checklist === 'object' && !Array.isArray(checklist)
+            ? (checklist as Record<string, unknown>).cancellationAudit
+            : null;
+        const audit = Array.isArray(auditRows)
+          ? auditRows.find(
+              (entry) =>
+                entry &&
+                typeof entry === 'object' &&
+                !Array.isArray(entry) &&
+                (entry as Record<string, unknown>).ownerMessageId === message.id,
+            )
+          : null;
+        const requestHash =
+          audit && typeof audit === 'object' && !Array.isArray(audit)
+            ? (audit as Record<string, unknown>).requestHash
+            : null;
+        if (
+          task.id !== message.taskId ||
+          documentKey(task.id) !== taskSnapshot.id ||
+          task.conversationId !== input.conversationId ||
+          task.type !== 'chat_turn' ||
+          task.trust !== 'owner' ||
+          task.goalId !== null ||
+          typeof requestHash !== 'string' ||
+          requestHash !== composerChecklistCancellationRequestHash(message.text) ||
+          !input.composerCancellationPolicy.matchesComposerReplay({
+            checklist,
+            ownerMessageId: message.id,
+            ownerMessageText: message.text,
+            requestHash,
+            task: { id: task.id, conversationId: task.conversationId },
+            priorMessage: {
+              id: message.id,
+              taskId: message.taskId,
+              conversationId: message.conversationId,
+              role: message.role,
+              origin: message.origin,
+              text: message.text,
+            },
+          })
+        )
+          throw new Error('Chat operation ID was already used for a different request');
+        if (['done', 'failed', 'cancelled'].includes(task.status))
+          return {
+            kind: 'admitted_task',
+            task,
+            status: task.status,
+            transitioned: false,
+            effectStatus: 'unknown',
+          } as const;
+        const now = this.store.now();
+        tx.update(this.store.doc('tasks', task.id), {
+          status: 'cancelled',
+          lockedUntil: null,
+          leaseToken: null,
+          runAfter: null,
+          attempt: 0,
+          updatedAt: now,
+        });
+        tx.update(conversationRef, { updatedAt: now });
+        return {
+          kind: 'admitted_task',
+          task: {
+            ...task,
+            status: 'cancelled',
+            lockedUntil: null,
+            leaseToken: null,
+            runAfter: null,
+            attempt: 0,
+            updatedAt: now,
+          },
+          status: 'cancelled',
+          transitioned: true,
+          effectStatus: 'unknown',
+        } as const;
+      }
       if (key.exists) {
         const taskId = key.get('taskId');
         if (typeof taskId !== 'string' || !taskId)
@@ -1085,6 +1195,7 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
           attempt: 0,
           updatedAt: now,
         });
+        tx.update(conversationRef, { updatedAt: now });
         return {
           kind: 'admitted_task',
           task: {
@@ -1121,6 +1232,7 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
       };
       tx.create(this.store.doc('tasks', taskId), encodeRecord(task));
       tx.create(eventRef, { taskId, createdAt: now });
+      tx.update(conversationRef, { updatedAt: now });
       return {
         kind: 'cancelled_before_admission',
         task,
@@ -1145,6 +1257,10 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
       const conversationSnapshot = await tx.get(conversationRef);
       if (!conversationSnapshot.exists || !isOwnedChat(conversationSnapshot.data(), input.agentId))
         throw new Error('chat not found');
+
+      const operationMessage = await tx.get(this.store.doc('messages', input.clientOperationId));
+      if (operationMessage.exists)
+        throw new Error('Chat operation ID was already used for a different request');
 
       const key = await tx.get(eventRef);
       if (key.exists) {
@@ -1283,6 +1399,349 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
         messageSnapshot.get('createdAt'),
         messageSnapshot.get('appendedAt'),
       ),
+    };
+  }
+
+  async admitComposerChecklistCancellation(
+    input: Parameters<ApplicationChatPersistence['admitComposerChecklistCancellation']>[0],
+  ) {
+    assertChatAdmissionOperationId(input.clientOperationId);
+    if (!/^[0-9a-f]{64}$/.test(input.requestHash) || !input.rawText)
+      return { kind: 'ambiguous' } as const;
+    const externalEventId = chatAdmissionExternalEventId(input);
+    const eventRef = this.store.doc(
+      'taskEventKeys',
+      createHash('sha256').update(externalEventId).digest('hex'),
+    );
+
+    const result = await this.store.db.runTransaction(async (tx) => {
+      const conversationRef = this.store.doc('conversations', input.conversationId);
+      const conversation = await tx.get(conversationRef);
+      if (
+        !conversation.exists ||
+        !isOwnedChat(conversation.data(), input.agentId) ||
+        conversation.get('archivedAt') !== null
+      )
+        return { kind: 'conflict' } as const;
+
+      const textResolution = input.policy.resolve(
+        { version: 1, request: '', items: [] },
+        input.rawText,
+      );
+      if (textResolution.kind === 'not_cancellation') return { kind: 'not_applicable' } as const;
+      if (textResolution.kind === 'ambiguous') return { kind: 'ambiguous' } as const;
+      if (input.rawText.length > 500) return { kind: 'ambiguous' } as const;
+
+      const messageRef = this.store.doc('messages', input.clientOperationId);
+      const priorSnapshot = await tx.get(messageRef);
+      if (priorSnapshot.exists) {
+        const prior = decodeRecord<ApplicationChatMessage>(priorSnapshot.data());
+        if (
+          prior.id !== input.clientOperationId ||
+          documentKey(input.clientOperationId) !== priorSnapshot.id ||
+          prior.conversationId !== input.conversationId ||
+          prior.role !== 'user' ||
+          prior.origin !== 'owner' ||
+          prior.text !== input.rawText ||
+          prior.hiddenAt !== null ||
+          !prior.taskId
+        )
+          return { kind: 'conflict' } as const;
+        const priorTaskRef = this.store.doc('tasks', prior.taskId);
+        const priorTaskSnapshot = await tx.get(priorTaskRef);
+        if (!priorTaskSnapshot.exists || priorTaskSnapshot.get('agentId') !== input.agentId)
+          return { kind: 'conflict' } as const;
+        const priorTask = decodeRecord<Records['tasks']>(priorTaskSnapshot.data());
+        if (
+          priorTask.id !== prior.taskId ||
+          documentKey(priorTask.id) !== priorTaskSnapshot.id ||
+          priorTask.conversationId !== input.conversationId ||
+          priorTask.type !== 'chat_turn' ||
+          priorTask.trust !== 'owner' ||
+          priorTask.goalId !== null
+        )
+          return { kind: 'conflict' } as const;
+        const state =
+          priorTask.state && typeof priorTask.state === 'object' && !Array.isArray(priorTask.state)
+            ? (priorTask.state as Record<string, unknown>)
+            : null;
+        if (
+          input.policy.matchesComposerReplay({
+            checklist: state?.requestChecklist,
+            ownerMessageId: input.clientOperationId,
+            ownerMessageText: input.rawText,
+            requestHash: input.requestHash,
+            task: { id: priorTask.id, conversationId: input.conversationId },
+            priorMessage: {
+              id: prior.id,
+              taskId: prior.taskId,
+              conversationId: prior.conversationId,
+              role: prior.role,
+              origin: prior.origin,
+              text: prior.text,
+            },
+          })
+        )
+          return {
+            kind: 'replayed',
+            task: priorTask,
+            message: prior,
+            queueGeneration: priorTask.queueGeneration,
+          } as const;
+        return { kind: 'conflict' } as const;
+      }
+
+      // Normal chat admission stores the operation identity in taskEventKeys,
+      // independently of its generated owner-message ID. Preserve that key's
+      // original meaning on retries.
+      const existingAdmission = await tx.get(eventRef);
+      if (existingAdmission.exists) return { kind: 'conflict' } as const;
+
+      const taskQuery = this.store
+        .collection('tasks')
+        .where('agentId', '==', input.agentId)
+        .where('conversationId', '==', input.conversationId)
+        .where('status', 'not-in', TERMINAL_TASK_STATUSES)
+        .limit(MAX_COMPOSER_CANCELLATION_TASKS + 1);
+      const taskSnapshot = await tx.get(taskQuery);
+      if (taskSnapshot.size > MAX_COMPOSER_CANCELLATION_TASKS)
+        return { kind: 'unsafe', reason: 'invalid_history' } as const;
+      const candidates = taskSnapshot.docs
+        .map((document) => ({ document, task: decodeRecord<Records['tasks']>(document.data()) }))
+        .filter(
+          ({ document, task }) =>
+            task.id === document.get('id') &&
+            documentKey(task.id) === document.id &&
+            task.agentId === input.agentId &&
+            task.conversationId === input.conversationId &&
+            task.type === 'chat_turn' &&
+            task.trust === 'owner' &&
+            task.goalId === null &&
+            !isChatAdmissionCancellationProjection(task),
+        )
+        .sort((left, right) => left.task.id.localeCompare(right.task.id));
+      if (candidates.length > MAX_COMPOSER_CANCELLATION_TASKS)
+        return { kind: 'unsafe', reason: 'invalid_history' } as const;
+
+      const matched: Array<{
+        ref: FirebaseFirestore.DocumentReference;
+        task: Records['tasks'];
+        state: Record<string, unknown>;
+        resolution: Extract<ReturnType<typeof input.policy.resolve>, { kind: 'matched' }>;
+      }> = [];
+      let ambiguous = false;
+      let noMatch = textResolution.kind === 'no_match';
+      for (const { document, task } of candidates) {
+        const state =
+          task.state && typeof task.state === 'object' && !Array.isArray(task.state)
+            ? (task.state as Record<string, unknown>)
+            : null;
+        const resolution = input.policy.resolve(state?.requestChecklist, input.rawText);
+        if (resolution.kind === 'ambiguous') ambiguous = true;
+        if (resolution.kind === 'no_match') noMatch = true;
+        if (resolution.kind === 'matched' && state)
+          matched.push({ ref: document.ref, task, state, resolution });
+      }
+      if (ambiguous || matched.length > 1) return { kind: 'ambiguous' } as const;
+      const candidate = matched[0];
+      if (!candidate)
+        return noMatch ? ({ kind: 'no_match' } as const) : ({ kind: 'not_applicable' } as const);
+      const { task, state, resolution } = candidate;
+      if (
+        task.status !== 'needs_attention' ||
+        task.leaseToken !== null ||
+        task.lockedUntil !== null ||
+        task.archivedAt !== null ||
+        !Number.isSafeInteger(task.queueGeneration) ||
+        task.queueGeneration < 0 ||
+        task.queueGeneration >= MAX_TASK_QUEUE_GENERATION
+      )
+        return { kind: 'unsafe', reason: 'not_paused' } as const;
+      if (
+        state.pendingApprovalId ||
+        state.pendingJob != null ||
+        state.pendingToolBatch != null ||
+        state.pendingFinal != null ||
+        (Array.isArray(state.pendingApprovals) && state.pendingApprovals.length > 0)
+      )
+        return { kind: 'unsafe', reason: 'unknown_effect' } as const;
+
+      const checklist = state.requestChecklist;
+      if (!checklist || typeof checklist !== 'object' || Array.isArray(checklist))
+        return { kind: 'unsafe', reason: 'invalid_history' } as const;
+      const request = (checklist as Record<string, unknown>).request;
+      if (typeof request !== 'string')
+        return { kind: 'unsafe', reason: 'invalid_history' } as const;
+      const originalMessageId = ownerChatChecklistRequestMessageId(task, request);
+      if (!originalMessageId) return { kind: 'unsafe', reason: 'invalid_history' } as const;
+      const originalMessageSnapshot = await tx.get(this.store.doc('messages', originalMessageId));
+      if (!originalMessageSnapshot.exists)
+        return { kind: 'unsafe', reason: 'invalid_history' } as const;
+      const originalMessage = decodeRecord<ApplicationChatMessage>(originalMessageSnapshot.data());
+      if (
+        !isPinnedOwnerChatRequestMessage(task, originalMessage, originalMessageId, request) ||
+        originalMessage.hiddenAt !== null
+      )
+        return { kind: 'unsafe', reason: 'invalid_history' } as const;
+
+      const callsQuery = this.store
+        .collection('toolCalls')
+        .where('taskId', '==', task.id)
+        .limit(MAX_CHECKLIST_CORRECTION_LEDGER_ROWS + 1);
+      const receiptsQuery = this.store
+        .collection('toolCallReceipts')
+        .where('taskId', '==', task.id)
+        .limit(MAX_CHECKLIST_CORRECTION_LEDGER_ROWS + 1);
+      const approvalsQuery = this.store
+        .collection('approvals')
+        .where('taskId', '==', task.id)
+        .where('status', 'in', ['pending', 'approved'])
+        .limit(1);
+      const [callsSnapshot, receiptsSnapshot, approvalsSnapshot] = await Promise.all([
+        tx.get(callsQuery),
+        tx.get(receiptsQuery),
+        tx.get(approvalsQuery),
+      ]);
+      if (approvalsSnapshot.size > 0) return { kind: 'unsafe', reason: 'unknown_effect' } as const;
+      if (
+        callsSnapshot.size > MAX_CHECKLIST_CORRECTION_LEDGER_ROWS ||
+        receiptsSnapshot.size > MAX_CHECKLIST_CORRECTION_LEDGER_ROWS
+      )
+        return { kind: 'unsafe', reason: 'unknown_effect' } as const;
+      const calls = callsSnapshot.docs.map((document) => {
+        const row = decodeRecord<Record<string, unknown>>(document.data());
+        if (
+          typeof row.id !== 'string' ||
+          document.id !== documentKey(row.id) ||
+          row.taskId !== task.id ||
+          typeof row.toolName !== 'string' ||
+          typeof row.status !== 'string' ||
+          !Object.hasOwn(row, 'args')
+        )
+          return null;
+        return row as unknown as Parameters<
+          typeof completeChecklistCorrectionEvidence
+        >[0]['toolCalls'][number];
+      });
+      const receipts = receiptsSnapshot.docs.map((document) => {
+        const row = decodeRecord<Record<string, unknown>>(document.data());
+        if (
+          typeof row.id !== 'string' ||
+          document.id !== documentKey(row.id) ||
+          row.agentId !== input.agentId ||
+          row.taskId !== task.id ||
+          typeof row.toolCallId !== 'string' ||
+          typeof row.toolName !== 'string' ||
+          !['completed', 'failed', 'unknown', 'not_executed'].includes(String(row.effectOutcome))
+        )
+          return null;
+        return row as unknown as Parameters<
+          typeof completeChecklistCorrectionEvidence
+        >[0]['receipts'][number];
+      });
+      if (calls.includes(null) || receipts.includes(null))
+        return { kind: 'unsafe', reason: 'unknown_effect' } as const;
+      const evidence = completeChecklistCorrectionEvidence({
+        agentId: input.agentId,
+        taskId: task.id,
+        toolCalls: calls as Parameters<typeof completeChecklistCorrectionEvidence>[0]['toolCalls'],
+        receipts: receipts as Parameters<typeof completeChecklistCorrectionEvidence>[0]['receipts'],
+      });
+      if (!evidence) return { kind: 'unsafe', reason: 'unknown_effect' } as const;
+
+      const binding = {
+        taskId: task.id,
+        itemId: resolution.itemId,
+        expectedRevision: resolution.expectedRevision,
+        expectedCancellationRevision: resolution.expectedCancellationRevision,
+        ownerMessageId: input.clientOperationId,
+        ownerMessageText: input.rawText,
+        requestHash: input.requestHash,
+      };
+      const cancellation = input.policy.cancel({
+        checklist,
+        task: { id: task.id, agentId: input.agentId, conversationId: input.conversationId },
+        binding,
+        evidence: evidence.rows,
+      });
+      if (cancellation.decision !== 'cancelled')
+        return {
+          kind: 'unsafe',
+          reason:
+            cancellation.decision === 'unsafe_evidence' ? 'unknown_effect' : 'candidate_changed',
+        } as const;
+      if (
+        !input.policy.matchesReplay({
+          checklist: cancellation.checklist,
+          cancellation: binding,
+          task: { id: task.id, conversationId: input.conversationId },
+          priorMessage: {
+            id: input.clientOperationId,
+            taskId: task.id,
+            conversationId: input.conversationId,
+            role: 'user',
+            origin: 'owner',
+            text: input.rawText,
+          },
+        })
+      )
+        return { kind: 'unsafe', reason: 'invalid_history' } as const;
+
+      const now = this.store.now();
+      const queueGeneration = task.queueGeneration + 1;
+      const updatedTask: Records['tasks'] = {
+        ...task,
+        status: 'pending',
+        state: { ...state, requestChecklist: cancellation.checklist },
+        plan: null,
+        runAfter: null,
+        lockedUntil: null,
+        leaseToken: null,
+        queueGeneration,
+        attempt: 0,
+        attentionNotifiedAt: null,
+        updatedAt: now,
+      };
+      const message: ApplicationChatMessage = {
+        id: input.clientOperationId,
+        conversationId: input.conversationId,
+        taskId: task.id,
+        role: 'user',
+        origin: 'owner',
+        clientId: input.clientId ?? null,
+        clientDeliveredAt: null,
+        clientDeliveredBy: null,
+        parts: [{ type: 'text', text: input.rawText }],
+        text: input.rawText,
+        channelMessageId: null,
+        embedding: null,
+        embeddingSpaceKey: null,
+        hiddenAt: null,
+        createdAt: now,
+        appendSequence: FIRST_APPEND_ID,
+      };
+      tx.create(messageRef, encodeRecord(message));
+      tx.update(candidate.ref, encodeRecord(updatedTask));
+      tx.update(conversationRef, { updatedAt: now });
+      createWakeIntent(tx, this.store, {
+        taskId: task.id,
+        generation: queueGeneration,
+        availableAt: now,
+      });
+      return { kind: 'applied', task: updatedTask, queueGeneration } as const;
+    });
+    if (result.kind !== 'applied') return result;
+    const committed = await this.store.doc('messages', input.clientOperationId).get();
+    if (!committed.exists) throw new Error('Committed composer cancellation message is missing');
+    return {
+      kind: 'applied' as const,
+      task: result.task,
+      message: decodeMessageData(
+        committed.data() ?? {},
+        committed.get('createdAt'),
+        committed.get('appendedAt'),
+      ),
+      queueGeneration: result.queueGeneration,
     };
   }
 
