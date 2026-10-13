@@ -92,7 +92,9 @@ function labelDay(day: string, timeZone: string): string {
   const at = Date.parse(`${day}T12:00:00Z`);
   if (!Number.isFinite(at)) return day;
   return new Intl.DateTimeFormat('en-US', {
-    timeZone,
+    // `day` is already a civil key computed in the owner's zone. Formatting
+    // UTC noon in that same zone can shift it across the date line again.
+    timeZone: 'UTC',
     weekday: 'short',
     month: 'short',
     day: 'numeric',

@@ -509,6 +509,34 @@ describe('weeklyCalendarPlan', () => {
     expect(missingZone).not.toContain('Tentative focus blocks');
   });
 
+  it.each([
+    {
+      timeZone: 'Pacific/Kiritimati',
+      timeMin: '2026-10-11T10:00:00Z',
+      timeMax: '2026-10-18T10:00:00Z',
+      busy: { start: '2026-10-11T19:00:00Z', end: '2026-10-12T01:00:00Z' },
+    },
+    {
+      timeZone: 'Etc/GMT+12',
+      timeMin: '2026-10-12T12:00:00Z',
+      timeMax: '2026-10-19T12:00:00Z',
+      busy: { start: '2026-10-12T21:00:00Z', end: '2026-10-13T03:00:00Z' },
+    },
+  ])('keeps an overloaded civil date stable in the date-line zone $timeZone', (scenario) => {
+    const text = weeklyCalendarPlan({
+      timeMin: scenario.timeMin,
+      timeMax: scenario.timeMax,
+      timeZone: scenario.timeZone,
+      evidence: evidence({
+        timeMin: scenario.timeMin,
+        timeMax: scenario.timeMax,
+        busy: [scenario.busy],
+      }) as never,
+    });
+    expect(text).toContain('Overloaded-day estimate: Mon, Oct 12');
+    expect(text).not.toContain('Overloaded-day estimate: Tue, Oct 13');
+  });
+
   it('only includes strict Google Calendar event URLs', () => {
     const rows = evidence({
       pages: [
