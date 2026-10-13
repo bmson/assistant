@@ -235,6 +235,7 @@ describe('conversations.search PostgreSQL owner and privacy filters', () => {
       },
     ];
     const repository = createPostgresConversationSearchRepository(db);
+    if (!repository.validateSources) throw new Error('Source validation unavailable');
     expect(
       (await repository.validateSources({ agentId, sourceRefs: refs })).unchangedSourceRefs,
     ).toEqual([true]);

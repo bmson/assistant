@@ -88,6 +88,9 @@ describe('exact historical source projection', () => {
     expect(sources[0]?.speaker).toBe('Historical message (authorship not confirmed)');
   });
   it('rejects invented quotes, changed source bodies, and duplicate selections', () => {
+    const originalEvidence = evidence[0];
+    const firstSelection = selection.selections[0];
+    if (!originalEvidence || !firstSelection) throw new Error('Missing test sources');
     expect(
       validMemoryReadSelection(
         {
@@ -102,7 +105,7 @@ describe('exact historical source projection', () => {
     expect(
       validMemoryReadSelection(selection, [
         {
-          ...evidence[0],
+          ...originalEvidence,
           result: {
             matches: [message('owner-correction', 'Correction withdrawn.', 'user', 'owner')],
           },
@@ -111,7 +114,7 @@ describe('exact historical source projection', () => {
     ).toBe(false);
     expect(
       validMemoryReadSelection(
-        { ...selection, selections: [selection.selections[0], selection.selections[0]] },
+        { ...selection, selections: [firstSelection, firstSelection] },
         evidence,
       ),
     ).toBe(false);
