@@ -41,6 +41,7 @@ function harness() {
   const repository: SkillContextRepository = {
     kind: 'skill-context-repository',
     recall,
+    findByName: vi.fn(async () => null),
     bumpUse,
     recordOutcome,
   };

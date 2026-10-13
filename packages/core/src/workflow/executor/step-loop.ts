@@ -16,7 +16,13 @@ import { listOpenCommitments, renderOpenCommitments } from '../../memory/commitm
 import { getOwnerCard } from '../../memory/consolidation.js';
 import { retrieveOwnerContext } from '../../memory/recall-context.js';
 import { recordRecallMetric } from '../../memory/recall-metrics.js';
-import { bumpSkillUse, recallSkills, renderSkillsBlock } from '../../memory/skills.js';
+import {
+  bumpSkillUse,
+  findActiveSkillByExactName,
+  recallSkills,
+  renderSkillsBlock,
+  requestedSavedSkillName,
+} from '../../memory/skills.js';
 import type { StepCallOutcome } from '../../model-router/router.js';
 import { withSpan } from '../../otel.js';
 import { approvalHeadline, approvalPrompt } from '../../owner-text.js';
@@ -746,6 +752,30 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // task is done, not what it is allowed to do. Fetched once and reused across
   // loop iterations — the library is task-stable.
   let skillsBlock: string | undefined;
+  let explicitlyRequestedSkillRetrieved = false;
+  const explicitlyRequestedSkillName = readRequest
+    ? requestedSavedSkillName(ownerText, latestUserText(rc.window))
+    : null;
+  if (!restrictedChecklistResume && explicitlyRequestedSkillName) {
+    try {
+      const skillStorage = deps.persistence?.skills ?? db;
+      const found = await findActiveSkillByExactName(
+        skillStorage,
+        agent.id,
+        explicitlyRequestedSkillName,
+      );
+      if (found) {
+        skillsBlock = renderSkillsBlock([found]);
+        explicitlyRequestedSkillRetrieved = true;
+        if (!state.usedSkillIds.includes(found.id)) {
+          state.usedSkillIds = [...state.usedSkillIds, found.id];
+          await bumpSkillUse(skillStorage, [found.id], agent.id);
+        }
+      }
+    } catch (err) {
+      console.error('named skill lookup failed — continuing without it', err);
+    }
+  }
   if (!restrictedChecklistResume && privilegedTask && !readRequest) {
     const lastUser = [...rc.window].reverse().find((m) => m.role === 'user');
     const skillQuery = [
@@ -1931,7 +1961,8 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           ownerCard: !state.untrustedContext ? ownerCard : undefined,
           recall: !state.untrustedContext ? recallBlock : undefined,
           openLoops: !state.untrustedContext ? openLoops : undefined,
-          skills: !state.untrustedContext ? skillsBlock : undefined,
+          skills:
+            !state.untrustedContext || explicitlyRequestedSkillRetrieved ? skillsBlock : undefined,
           ambient: !state.untrustedContext ? ambientBlock : undefined,
           tainted: state.untrustedContext,
           // Only the dashboard gets the companion persona and cue vocabulary;

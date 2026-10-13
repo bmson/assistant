@@ -101,6 +101,48 @@ export class FirestoreSkillContextRepository implements SkillContextRepository {
     );
   }
 
+  async findByName(
+    input: Parameters<SkillContextRepository['findByName']>[0],
+  ): Promise<Awaited<ReturnType<SkillContextRepository['findByName']>>> {
+    if (!input.agentId || !input.name.trim() || input.name !== input.name.trim()) return null;
+    const candidates = await this.store
+      .collection('skills')
+      .where('agentId', '==', input.agentId)
+      .where('name', '==', input.name)
+      .limit(2)
+      .get();
+    // A duplicate name is ambiguous in Firestore, even though PostgreSQL's
+    // owner/name constraint prevents it. Fail closed instead of choosing one.
+    if (candidates.size !== 1) return null;
+    const candidate = candidates.docs[0];
+    if (!candidate?.updateTime) return null;
+
+    return this.store.db.runTransaction(
+      async (tx) => {
+        const snapshot = await tx.get(candidate.ref);
+        if (
+          !snapshot.exists ||
+          !snapshot.updateTime ||
+          !candidate.updateTime?.isEqual(snapshot.updateTime) ||
+          snapshot.get('agentId') !== input.agentId ||
+          snapshot.get('name') !== input.name ||
+          snapshot.get('deprecated') !== false
+        )
+          return null;
+        const row = decodeRecord<Records['skills'] & { embeddingSpace?: string }>(snapshot.data());
+        if (
+          candidate.id !== documentKey(row.id) ||
+          row.agentId !== input.agentId ||
+          row.name !== input.name
+        )
+          return null;
+        const { embedding: _embedding, embeddingSpace: _space, ...skill } = row;
+        return skill;
+      },
+      { readOnly: true },
+    );
+  }
+
   async bumpUse(input: Parameters<SkillContextRepository['bumpUse']>[0]): Promise<void> {
     const ids = [...new Set(input.ids)];
     if (ids.length === 0) return;

@@ -16,6 +16,7 @@ describe('configured skill embedding width', () => {
     const repository = {
       kind: 'skill-context-repository' as const,
       recall,
+      findByName: vi.fn(async () => null),
       bumpUse: vi.fn(async () => undefined),
       recordOutcome: vi.fn(async () => undefined),
     } satisfies SkillContextRepository;

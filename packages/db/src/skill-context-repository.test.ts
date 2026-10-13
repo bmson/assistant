@@ -124,6 +124,27 @@ describe('PostgreSQL learned-skill context', () => {
     ).rejects.toThrow('embedding');
   });
 
+  it('looks up only an exact active skill name within the requested owner', async () => {
+    await expect(
+      repository.findByName({ agentId: ownerId, name: 'first equal match' }),
+    ).resolves.toMatchObject({
+      id: skillIds[0],
+      agentId: ownerId,
+      name: 'first equal match',
+    });
+    const found = await repository.findByName({ agentId: ownerId, name: 'first equal match' });
+    expect(found).not.toHaveProperty('embedding');
+    await expect(
+      repository.findByName({ agentId: ownerId, name: 'foreign exact match' }),
+    ).resolves.toBe(null);
+    await expect(
+      repository.findByName({ agentId: foreignOwnerId, name: 'already deprecated' }),
+    ).resolves.toBe(null);
+    await expect(
+      repository.findByName({ agentId: ownerId, name: 'First equal match' }),
+    ).resolves.toBe(null);
+  });
+
   it('atomically increments owner counters and deprecates on the third failure', async () => {
     await Promise.all(
       Array.from({ length: 12 }, () =>

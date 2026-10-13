@@ -62,6 +62,7 @@ async function runUnsupportedRequest(scenario: Scenario) {
   const skills = {
     kind: 'skill-context-repository' as const,
     recall: vi.fn(async () => []),
+    findByName: vi.fn(async () => null),
     bumpUse: vi.fn(async () => {}),
     recordOutcome: vi.fn(async () => {}),
   };
@@ -437,6 +438,7 @@ async function runFlightContinuation(
   const skills = {
     kind: 'skill-context-repository' as const,
     recall: vi.fn(async () => []),
+    findByName: vi.fn(async () => null),
     bumpUse: vi.fn(async () => {}),
     recordOutcome: vi.fn(async () => {}),
   };

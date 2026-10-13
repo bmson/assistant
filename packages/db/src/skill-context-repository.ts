@@ -39,6 +39,23 @@ export function createPostgresSkillContextRepository(db: Db): SkillContextReposi
       });
     },
 
+    async findByName(input) {
+      const [skill] = await db
+        .select()
+        .from(skills)
+        .where(
+          and(
+            eq(skills.agentId, input.agentId),
+            eq(skills.name, input.name),
+            eq(skills.deprecated, false),
+          ),
+        )
+        .limit(1);
+      if (!skill) return null;
+      const { embedding: _embedding, ...safe } = skill;
+      return safe;
+    },
+
     async bumpUse(input) {
       const ids = [...new Set(input.ids)];
       if (ids.length === 0) return;

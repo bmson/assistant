@@ -22,6 +22,60 @@ import type { ModelRouter } from '../model-router/router.js';
 
 const skillText = skillEmbeddingText;
 
+/**
+ * Personal-read turns may surface a saved procedure only when the owner names
+ * it explicitly. Requiring a quoted name keeps ordinary mentions from being
+ * treated as retrieval requests.
+ */
+export function requestedSavedSkillName(
+  ownerAuthoredText: string,
+  rawOwnerRequest = ownerAuthoredText,
+): string | null {
+  // Owner-intent provenance removes quoted text from its authored projection.
+  // Use that projection to prove the lookup directive came from the owner, then
+  // take only the quoted name immediately following that directive as data.
+  const command =
+    /(?:^|[.!?;\n]\s*|\b(?:please|can you|could you|would you)\s+)(?:please\s+)?(?:use|apply|follow)\s+(?:(?:my|the)\s+)?(?:(?:saved|learned)\s+)?skill(?:\s+(?:named|called))?\b/i;
+  if (!command.test(ownerAuthoredText)) return null;
+  const match = rawOwnerRequest.match(
+    /(?:^|[.!?;\n]\s*|\b(?:please|can you|could you|would you)\s+)(?:please\s+)?(?:use|apply|follow)\s+(?:(?:my|the)\s+)?(?:(?:saved|learned)\s+)?skill(?:\s+(?:named|called))?\s*[:=]?\s*(?:"([^"\r\n]{1,200})"|'([^'\r\n]{1,200})'|“([^”\r\n]{1,200})”|‘([^’\r\n]{1,200})’)/i,
+  );
+  const name = match
+    ?.slice(1)
+    .find((value) => typeof value === 'string')
+    ?.trim();
+  if (
+    !name ||
+    name.length > 200 ||
+    Array.from(name).some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint < 32 || codePoint === 127;
+    })
+  )
+    return null;
+  return name;
+}
+
+/** Resolve an exact active skill name within the configured owner's library. */
+export async function findActiveSkillByExactName(
+  storage: Db | SkillContextRepository,
+  agentId: string,
+  name: string,
+): Promise<LearnedSkill | null> {
+  if (!agentId || !name || name !== name.trim() || name.length > 200) return null;
+  if (isSkillContextRepository(storage)) {
+    return storage.findByName({ agentId, name });
+  }
+  const [skill] = await storage
+    .select()
+    .from(skills)
+    .where(and(eq(skills.agentId, agentId), eq(skills.name, name), eq(skills.deprecated, false)))
+    .limit(1);
+  if (!skill) return null;
+  const { embedding: _embedding, ...safe } = skill;
+  return safe;
+}
+
 export interface SaveSkillInput {
   agentId: string;
   name: string;
