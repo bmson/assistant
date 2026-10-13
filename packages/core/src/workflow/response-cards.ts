@@ -1336,7 +1336,9 @@ export function responseCardsForFinal(input: {
   // answer underneath the review. Explicit source-display requests retain the
   // normal cards below.
   const synthesizedRead = Boolean(
-    input.readRequest?.emailReview || input.readRequest?.weeklyCalendarPlan,
+    input.readRequest?.emailReview ||
+      input.readRequest?.weeklyCalendarPlan ||
+      input.readRequest?.compoundTripDiscovery,
   );
   const explicitMailRead =
     !input.readRequest?.upcomingFlightDiscovery &&
@@ -1363,7 +1365,7 @@ export function responseCardsForFinal(input: {
       ...sheetRowsResponseCards(input.evidence),
       ...weatherLookupResponseCards(input.evidence),
       ...scoreboardResponseCards(input.evidence),
-      ...routeResponseCards(input.evidence),
+      ...(input.readRequest?.compoundTripDiscovery ? [] : routeResponseCards(input.evidence)),
       ...(synthesizedRead ? [] : searchResponseCards(input.evidence)),
     ],
     input.lookupOrder ?? [],

@@ -26,6 +26,7 @@ describe('response cards', () => {
   it.each([
     'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.',
     'Review my calendar for next week and identify scheduling conflicts and overloaded days. Find three realistic 90-minute focus blocks during working hours, allowing time for travel and breaks. Recommend changes, but show me the plan before editing my calendar.',
+    'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.',
   ])(
     'keeps a checked review concise instead of appending its raw source reads: %s',
     (requestText) => {
@@ -76,7 +77,13 @@ describe('response cards', () => {
         timeZone: 'America/Los_Angeles',
       });
       expect(readRequest).not.toBeNull();
-      expect(Boolean(readRequest?.emailReview || readRequest?.weeklyCalendarPlan)).toBe(true);
+      expect(
+        Boolean(
+          readRequest?.emailReview ||
+            readRequest?.weeklyCalendarPlan ||
+            readRequest?.compoundTripDiscovery,
+        ),
+      ).toBe(true);
       expect(responseCardsForFinal({ evidence, readRequest, requestText })).toEqual([]);
       const ordinary = responseCardsForFinal({
         evidence,
@@ -87,6 +94,47 @@ describe('response cards', () => {
       );
     },
   );
+
+  it('keeps a compound itinerary concise without duplicate route and search cards', () => {
+    const evidence = [
+      {
+        toolName: 'maps.directions',
+        status: 'succeeded',
+        result: {
+          origin: { label: 'BER', lat: 52.366, lng: 13.503 },
+          destination: { label: 'Confirmed hotel', lat: 52.51, lng: 13.39 },
+          durationSeconds: 2700,
+          distanceMeters: 25000,
+          mapsUrl: 'https://maps.apple.com/?saddr=52.366,13.503&daddr=52.51,13.39',
+        },
+      },
+      {
+        toolName: 'web.search',
+        status: 'succeeded',
+        result: {
+          results: [
+            {
+              title: 'Airport transport',
+              url: 'https://ber.berlin-airport.de/',
+              snippet: 'Transport options',
+            },
+          ],
+        },
+      },
+    ];
+    expect(
+      responseCardsForFinal({
+        evidence,
+        readRequest: { ...request, compoundTripDiscovery: true },
+        requestText: 'Compare public transport and taxi for my trip.',
+      }),
+    ).toEqual([]);
+    expect(
+      responseCardsForFinal({ evidence, requestText: 'Show the route and search results.' }).map(
+        (card) => card.kind,
+      ),
+    ).toEqual(['route', 'web-search-results']);
+  });
 
   it('keeps an unverified flight calendar row out of a reconciled departure answer', () => {
     const evidence = [
@@ -197,7 +245,7 @@ describe('response cards', () => {
       now: new Date('2026-10-08T18:00:00Z'),
       timeZone: 'America/Los_Angeles',
     });
-    expect(readRequest).toMatchObject({ answerFocus: 'flight', upcomingFlightDiscovery: true });
+    expect(readRequest).toMatchObject({ answerFocus: 'trip', compoundTripDiscovery: true });
 
     const cards = responseCardsForFinal({
       requestText,
