@@ -88,7 +88,7 @@ function labelTime(at: number, timeZone: string): string {
   }).format(new Date(at));
 }
 
-function labelDay(day: string, timeZone: string): string {
+function labelDay(day: string): string {
   const at = Date.parse(`${day}T12:00:00Z`);
   if (!Number.isFinite(at)) return day;
   return new Intl.DateTimeFormat('en-US', {
@@ -508,7 +508,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     .filter(([, stats]) => stats.busyMs >= 6 * 60 * 60_000)
     .map(
       ([day]) =>
-        `Overloaded-day estimate: ${labelDay(day, input.timeZone)} has at least 6 merged busy hours inside 9–5. This is a planning heuristic.`,
+        `Overloaded-day estimate: ${labelDay(day)} has at least 6 merged busy hours inside 9–5. This is a planning heuristic.`,
     );
   const attendanceTargets = [...new Set(potentialAttendanceEvents)].slice(0, 3);
   const attendanceCheck = attendanceTargets.length
