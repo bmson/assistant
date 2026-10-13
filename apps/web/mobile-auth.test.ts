@@ -186,6 +186,12 @@ describe('mobile JSON error boundary', () => {
       error: 'Document page size must be between 1 and 100',
     });
 
+    const selection = mobileJson(
+      { error: 'Select a document before continuing.' },
+      { status: 400 },
+    );
+    expect(await selection.json()).toEqual({ error: 'Select a document before continuing.' });
+
     const diagnostic = mobileJson(
       { error: 'SQLSTATE 42P01: relation private_table does not exist' },
       { status: 409 },
@@ -215,5 +221,12 @@ describe('mobile JSON error boundary', () => {
         createdAt: '2026-10-13T12:00:00.000Z',
       },
     });
+
+    const diagnosticWordsInSuccess = {
+      ok: true,
+      message: 'Firestore index review includes the SELECT action requested by the owner.',
+      details: 'These are safe product-facing details, not an error.',
+    };
+    expect(await mobileJson(diagnosticWordsInSuccess).json()).toEqual(diagnosticWordsInSuccess);
   });
 });
