@@ -195,6 +195,132 @@ describe('reasoning is spent only where it earns its latency', () => {
       | undefined;
     expect(stepCall?.[1].estimatedUsd).toBeGreaterThan(baselineStepEstimate);
   });
+
+  it('accounts for transformed owner tools using their model-facing input schemas', async () => {
+    const router = routerWith(provider(), false);
+    // These mirror the transformed public inputs registered by watch.create,
+    // watch.web, and applications.watch_confirmation. The full owner registry
+    // exposes them together with ordinary lookup tools.
+    const watchCreate = z.object({
+      name: z.string().trim().min(1).max(120),
+      expectedSenderEmails: z
+        .array(z.string().trim().toLowerCase().email())
+        .min(1)
+        .max(10)
+        .transform((values) => [...new Set(values)]),
+      keywords: z
+        .array(z.string().trim().min(1).max(100))
+        .max(10)
+        .optional()
+        .transform((values) =>
+          values?.length ? [...new Set(values.map((value) => value.toLowerCase()))] : undefined,
+        ),
+      tier: z.enum(['notify', 'suggest']).default('notify'),
+      expiresInDays: z.number().int().min(1).max(90).default(30),
+      maxFires: z.number().int().min(1).max(1_000).optional(),
+    });
+    const webWatch = z
+      .object({
+        name: z.string().trim().min(1).max(120),
+        url: z.string().trim().url(),
+        mode: z.enum(['change', 'contains', 'absent']).default('change'),
+        pattern: z.string().trim().min(1).max(200).optional(),
+        intervalMinutes: z.number().int().min(15).max(1_440).default(60),
+        expiresInDays: z.number().int().min(1).max(90).default(30),
+        maxFires: z.number().int().min(1).max(1_000).optional(),
+      })
+      .superRefine((value, ctx) => {
+        if ((value.mode === 'contains' || value.mode === 'absent') && !value.pattern) {
+          ctx.addIssue({ code: 'custom', message: 'pattern required', path: ['pattern'] });
+        }
+      });
+    const applicationConfirmation = z
+      .object({
+        company: z.string().trim().min(1).max(200),
+        role: z.string().trim().min(1).max(200),
+        expectedSenderEmails: z
+          .array(z.string().trim().toLowerCase().email())
+          .min(1)
+          .max(5)
+          .transform((values) => [...new Set(values)]),
+        confirmationToken: z
+          .string()
+          .trim()
+          .min(6)
+          .max(100)
+          .regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]+$/)
+          .transform((value) => value.toUpperCase()),
+        expiresAt: z.string().datetime({ offset: true }),
+        trackerUpdate: z
+          .object({ spreadsheetId: z.string(), sheetName: z.string(), startCell: z.string() })
+          .optional(),
+        documentUpdate: z.object({ documentId: z.string(), content: z.string() }).optional(),
+      })
+      .refine((value) => value.trackerUpdate || value.documentUpdate, {
+        message: 'at least one update is required',
+      });
+
+    expect(() => z.toJSONSchema(z.string().transform((value) => value.toUpperCase()))).toThrow(
+      /Transforms cannot be represented/,
+    );
+    expect(() => z.toJSONSchema(watchCreate)).toThrow(/Transforms cannot be represented/);
+    expect(() => z.toJSONSchema(applicationConfirmation)).toThrow(
+      /Transforms cannot be represented/,
+    );
+    expect(() => z.toJSONSchema(webWatch)).not.toThrow();
+    for (const schema of [watchCreate, webWatch, applicationConfirmation]) {
+      expect(z.toJSONSchema(schema, { target: 'draft-7', io: 'input' })).toMatchObject({
+        type: 'object',
+      });
+    }
+
+    await router.step('draft', {
+      prompt: 'Review my emails and identify the five important requests.',
+      maxRetries: 0,
+      tools: {
+        'watch.create': { description: 'Create an inbox watch', inputSchema: watchCreate },
+        'watch.web': { description: 'Create a web watch', inputSchema: webWatch },
+        'applications.watch_confirmation': {
+          description: 'Track an application confirmation',
+          inputSchema: applicationConfirmation,
+        },
+        'gmail.search': {
+          description: 'Search owner email',
+          inputSchema: z.object({ query: z.string().trim().min(1) }),
+        },
+      } as never,
+    });
+
+    expect(stubs.reserveCost).toHaveBeenCalledOnce();
+    expect(stubs.generateText).toHaveBeenCalledOnce();
+    expect(stubs.generateText.mock.calls[0]?.[0].tools).toMatchObject({
+      watch_create: { inputSchema: watchCreate },
+      watch_web: { inputSchema: webWatch },
+      applications_watch_confirmation: { inputSchema: applicationConfirmation },
+    });
+    // Accounting changes only the serialized model-facing schema; the same
+    // runtime Zod validators still perform normalization when tools execute.
+    expect(
+      watchCreate.parse({
+        name: '  Mail  ',
+        expectedSenderEmails: [' A@EXAMPLE.COM ', 'a@example.com'],
+      }),
+    ).toMatchObject({ name: 'Mail', expectedSenderEmails: ['a@example.com'] });
+    expect(
+      applicationConfirmation.parse({
+        company: ' Acme ',
+        role: 'Engineer',
+        expectedSenderEmails: [' Hiring@EXAMPLE.COM '],
+        confirmationToken: ' req_123 ',
+        expiresAt: '2026-01-01T00:00:00.000Z',
+        documentUpdate: { documentId: 'doc_123456789', content: 'Append confirmation' },
+      }),
+    ).toMatchObject({
+      company: 'Acme',
+      expectedSenderEmails: ['hiring@example.com'],
+      confirmationToken: 'REQ_123',
+    });
+  });
   it('turns reasoning off for a classifier, and does not reserve headroom it will not use', async () => {
     const optionsFor = vi.fn(() => undefined);
     const router = routerWith(provider({ optionsFor }));
