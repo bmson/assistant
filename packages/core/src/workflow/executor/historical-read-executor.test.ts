@@ -14,11 +14,14 @@ import {
   conversationMessageSourceRevision,
   conversationMessageSpeakerRevision,
 } from '@assistant/persistence';
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import type { TaskState } from '../../events.js';
 import { taskState } from '../machine.js';
 import { detectPersonalReadRequest } from '../read-intent.js';
 import { stageModelFinalResponse } from './finalize.js';
+import type { RunContext } from './phases.js';
+import { runStepLoop } from './step-loop.js';
 import type { ExecutorDeps } from './types.js';
 
 const DATABASE_URL = (() => {
@@ -260,5 +263,252 @@ describe('historical conversation read finalization', () => {
       .where(eq(tasks.id, currentTaskId));
     expect(result.outcome).toBe('done');
     expect(completed?.status).toBe('done');
+  });
+
+  it('routes the exact Berlin correction question through the executor and cites historical speakers separately', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+
+    const conversationId = randomUUID();
+    const priorTaskId = randomUUID();
+    const currentTaskId = randomUUID();
+    const currentOwnerMessageId = randomUUID();
+    const request =
+      'Look back at our earlier conversation about my Berlin flight. What did I say was wrong with the departure time you gave me? Separate my correction from the Assistant’s earlier claim and cite the relevant conversation source. Do not treat this historical answer as a verified current flight time.';
+    const ownerCorrection =
+      'That departure time is wrong: my Berlin booking says 1:45 PM local time, not 9:15 AM.';
+    const assistantClaim = 'Your Berlin flight departs at 9:15 AM.';
+    const historicalMessages = [
+      { id: randomUUID(), role: 'user' as const, origin: 'owner', text: ownerCorrection },
+      { id: randomUUID(), role: 'assistant' as const, origin: 'assistant', text: assistantClaim },
+    ];
+    conversationIds.push(conversationId);
+    taskIds.push(priorTaskId, currentTaskId);
+    messageIds.push(...historicalMessages.map((message) => message.id), currentOwnerMessageId);
+
+    await db.insert(conversations).values({
+      id: conversationId,
+      agentId,
+      channel: 'chat',
+      trust: 'owner',
+      title: 'historical-flight-correction-e2e',
+    });
+    await db.insert(tasks).values([
+      {
+        id: priorTaskId,
+        agentId,
+        conversationId,
+        type: 'chat_turn',
+        status: 'done',
+        trust: 'owner',
+        trigger: {
+          source: 'chat',
+          agentId,
+          conversationId,
+          trust: 'owner',
+          payload: { text: 'Earlier discussion about the Berlin flight.' },
+        },
+      },
+      {
+        id: currentTaskId,
+        agentId,
+        conversationId,
+        type: 'chat_turn',
+        status: 'pending',
+        trust: 'owner',
+        trigger: {
+          source: 'chat',
+          agentId,
+          conversationId,
+          trust: 'owner',
+          payload: { text: request, triggerMessageId: currentOwnerMessageId },
+        },
+        state: {},
+      },
+    ]);
+    const createdAt = new Date('2026-10-01T12:00:00.000Z');
+    await db.insert(messages).values([
+      ...historicalMessages.map((message, index) => ({
+        ...message,
+        conversationId,
+        taskId: priorTaskId,
+        parts: [],
+        createdAt: new Date(createdAt.getTime() + index * 60_000),
+      })),
+      {
+        id: currentOwnerMessageId,
+        conversationId,
+        taskId: currentTaskId,
+        role: 'user',
+        origin: 'owner',
+        text: request,
+        parts: [{ type: 'text', text: request }],
+      },
+    ]);
+
+    const taskRepository = createPostgresTaskRepository(db);
+    const lease = await taskRepository.claim(currentTaskId);
+    if (!lease) throw new Error('The historical flight lookup task could not be claimed');
+    const persistence = createPostgresExecutionPersistence(db);
+    const sourceConversations = vi.fn(async ({ query }: { query: string; limit: number }) => {
+      expect(query).toBe(request);
+      const rows = await db
+        .select()
+        .from(messages)
+        .where(and(eq(messages.conversationId, conversationId), eq(messages.taskId, priorTaskId)));
+      return rows
+        .filter((row) => /berlin|departure|1:45|9:15/i.test(row.text))
+        .map((row) => ({
+          messageId: row.id,
+          conversationId: row.conversationId,
+          sourceRevision: conversationMessageSourceRevision(row.id, row.text),
+          speakerRevision: conversationMessageSpeakerRevision(
+            row.id,
+            row.text,
+            row.role,
+            row.origin,
+          ),
+          text: row.text,
+          role: row.role,
+          origin: row.origin,
+          createdAt: row.createdAt.toISOString(),
+        }))
+        .slice(0, 10);
+    });
+    const dispatchedNames: string[] = [];
+    const dispatch = vi.fn(
+      async (input: {
+        task: { id: string };
+        step: number;
+        toolName: string;
+        args: Record<string, unknown>;
+      }) => {
+        dispatchedNames.push(input.toolName);
+        if (input.toolName !== 'conversations.search')
+          throw new Error(`Unexpected historical source read: ${input.toolName}`);
+        const result = {
+          mode: 'semantic',
+          matches: await sourceConversations(input.args as { query: string; limit: number }),
+        };
+        const [stored] = await db
+          .insert(toolCalls)
+          .values({
+            taskId: input.task.id,
+            step: input.step,
+            toolName: input.toolName,
+            args: input.args,
+            risk: 'autonomous',
+            status: 'succeeded',
+            result,
+          })
+          .returning({ id: toolCalls.id });
+        if (!stored) throw new Error('The historical search receipt was not persisted');
+        return { kind: 'executed' as const, toolCallId: stored.id, result, cached: false };
+      },
+    );
+    const scriptedObjects: unknown[] = [
+      {
+        selections: [
+          { sourceKey: `message:${historicalMessages[0]?.id}`, quote: ownerCorrection },
+          { sourceKey: `message:${historicalMessages[1]?.id}`, quote: assistantClaim },
+        ],
+      },
+      { decision: 'publish' },
+    ];
+    const router = {
+      step: vi.fn(async () => ({
+        ok: true as const,
+        modelId: 'scripted/historical-flight',
+        degraded: false as const,
+        text: 'The current verified departure time is 9:15 AM.',
+        toolCalls: [],
+        finishReason: 'stop' as const,
+      })),
+      object: vi.fn(async (_role: string, _input: { system: string; prompt: string }) => {
+        const object = scriptedObjects.shift();
+        if (!object) throw new Error('Unexpected additional model object call');
+        return { ok: true, modelId: 'scripted/historical-flight', degraded: false, object };
+      }),
+      embed: vi.fn(async () => {
+        throw new Error('Historical conversation search must not invoke semantic embeddings');
+      }),
+      embeddingSpace: vi.fn(async () => ({
+        provider: 'scripted',
+        model: 'not-used',
+        dimensions: 1536,
+        revision: '1',
+      })),
+    };
+    const deps = {
+      db,
+      persistence,
+      router,
+      dispatcher: {
+        toolDefs: () => [
+          {
+            name: 'conversations.search',
+            description: 'Search persisted conversation history',
+            inputSchema: {},
+          },
+        ],
+        resultIsUntrusted: (toolName: string) => toolName === 'conversations.search',
+        dispatch,
+        executeApproved: vi.fn(),
+      },
+      notifyOwner: vi.fn(async () => ({ legs: [] })),
+    } as unknown as ExecutorDeps;
+    const state = taskState(lease);
+    state.untrustedContext = true;
+    const window = [{ role: 'user' as const, content: request }];
+    const now = new Date('2026-10-13T12:00:00.000Z');
+    const context = {
+      deps,
+      db,
+      router,
+      dispatcher: deps.dispatcher,
+      task: lease,
+      agent: { id: agentId, timezone: 'America/Los_Angeles' },
+      state: state as TaskState,
+      ctx: {
+        taskId: currentTaskId,
+        agentId,
+        trust: 'owner',
+        tainted: false,
+        db,
+        now: () => now,
+        signal: new AbortController().signal,
+        log: vi.fn(async () => {}),
+      },
+      window,
+    } as unknown as RunContext;
+
+    expect(detectPersonalReadRequest(window)?.firstToolName).toBe('conversations.search');
+    const result = await runStepLoop(context, {
+      action: 'reply',
+      reasoning: 'Answer from persisted historical conversation sources.',
+      steps: [],
+      missingInfo: [],
+    });
+
+    const persisted = await db.query.messages.findMany({
+      where: eq(messages.taskId, currentTaskId),
+      orderBy: (table, { asc }) => [asc(table.createdAt)],
+    });
+    const answer = persisted.find((message) => message.role === 'assistant')?.text ?? '';
+    expect(result.outcome, JSON.stringify({ result, answer })).toBe('done');
+    expect(dispatchedNames).toEqual(['conversations.search']);
+    expect(router.step).toHaveBeenCalledTimes(1);
+    expect(router.embed).not.toHaveBeenCalled();
+    expect(sourceConversations).toHaveBeenCalledTimes(1);
+    expect(answer).toContain(`Recorded owner message:** “${ownerCorrection}”`);
+    expect(answer).toContain(`Earlier assistant claim (not verified fact):** “${assistantClaim}”`);
+    expect(answer).toContain(
+      `conversation ${conversationId}; message ${historicalMessages[0]?.id}`,
+    );
+    expect(answer).toContain(
+      `conversation ${conversationId}; message ${historicalMessages[1]?.id}`,
+    );
+    expect(answer).toContain('historical records, not a fresh check');
+    expect(answer).not.toContain('The current verified departure time is 9:15 AM.');
+    expect(answer).not.toContain('TEST-DO-NOT-REPEAT');
   });
 });
