@@ -194,6 +194,9 @@ describe('consumer Firestore index readiness', () => {
     const documentIndex = spec.indexes.find(
       (index) =>
         index.collectionGroup === 'documents' &&
+        index.fields.some(
+          (field) => field.fieldPath === 'createdAt' && field.order === 'DESCENDING',
+        ) &&
         index.fields.some((field) => field.fieldPath === '__name__'),
     );
     const ascendingIndex = spec.indexes.find(
@@ -217,6 +220,9 @@ describe('consumer Firestore index readiness', () => {
     const documentIndex = changed.indexes.find(
       (index) =>
         index.collectionGroup === 'documents' &&
+        index.fields.some(
+          (field) => field.fieldPath === 'createdAt' && field.order === 'DESCENDING',
+        ) &&
         index.fields.some((field) => field.fieldPath === '__name__'),
     );
     const nameField = documentIndex?.fields.find((field) => field.fieldPath === '__name__');
