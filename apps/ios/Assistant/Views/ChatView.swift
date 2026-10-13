@@ -1062,8 +1062,19 @@ struct ChatView: View {
                 // composer was a ScrollView overlay, UIKit's pan recognizer
                 // still received pulls that began on the input and shifted the
                 // transcript before the menu gesture took over.
-                composer
-                    .fixedSize(horizontal: false, vertical: true)
+                // Reserve space for navigation alongside the composer so the
+                // control cannot cover a message the owner is reading.
+                VStack(spacing: 8) {
+                    if showsJumpToLatest {
+                        jumpToLatestButton {
+                            jumpFeedback += 1
+                            jumpToLatest()
+                        }
+                        .transition(.opacity)
+                    }
+                    composer
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                     .frame(maxWidth: isLandscape ? 680 : .infinity)
                     .frame(maxWidth: .infinity)
                     // A plain, explicit padding is deliberate. Safe-area
@@ -1082,13 +1093,6 @@ struct ChatView: View {
             }
             .overlay(alignment: .bottom) {
                 VStack(spacing: 10) {
-                    if showsJumpToLatest {
-                        jumpToLatestButton {
-                            jumpFeedback += 1
-                            jumpToLatest()
-                        }
-                        .transition(.opacity)
-                    }
                     if let undo = model.hiddenMessageUndo {
                         hiddenMessageUndoBar(undo)
                             .transition(.opacity)

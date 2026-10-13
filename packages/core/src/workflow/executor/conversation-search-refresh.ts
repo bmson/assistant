@@ -4,7 +4,10 @@ import type {
   ConversationSearchSourceRef,
   ExecutionEvidenceRecord,
 } from '@assistant/persistence';
-import { conversationMessageSourceRevision } from '@assistant/persistence';
+import {
+  conversationMessageSourceRevision,
+  validConversationSpeaker,
+} from '@assistant/persistence';
 import type { ModelMessage } from 'ai';
 
 const MAX_SEARCH_CALLS = 3;
@@ -142,8 +145,13 @@ function queryInput(input: unknown): { query: string; limit: number } | null {
 }
 
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  const optional = ['role', 'origin', 'speakerRevision'];
   const keys = Object.keys(value);
-  return keys.every((key) => allowed.includes(key)) && allowed.every((key) => key in value);
+  return (
+    validConversationSpeaker(value) &&
+    keys.every((key) => allowed.includes(key) || optional.includes(key)) &&
+    allowed.every((key) => key in value)
+  );
 }
 
 function parseSourceRefs(value: unknown): { refs: ConversationSearchSourceRef[]; valid: boolean } {
@@ -201,6 +209,9 @@ function parseSourceRefs(value: unknown): { refs: ConversationSearchSourceRef[];
       messageId: match.messageId,
       conversationId: match.conversationId,
       sourceRevision: match.sourceRevision,
+      ...(typeof match.speakerRevision === 'string'
+        ? { speakerRevision: match.speakerRevision }
+        : {}),
     });
   }
   return { refs, valid: true };
@@ -463,6 +474,9 @@ export async function refreshResumedConversationSearch(
           matches: refreshed.matches.map((match) => ({
             messageId: match.messageId,
             sourceRevision: match.sourceRevision,
+            ...(typeof match.speakerRevision === 'string'
+              ? { speakerRevision: match.speakerRevision }
+              : {}),
             conversationId: match.conversationId,
             text: match.text,
             createdAt: match.createdAt.toISOString(),

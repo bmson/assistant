@@ -54,6 +54,7 @@ import {
   type TaskLease,
   taskState,
 } from '../machine.js';
+import { selectMemoryReadAnswer } from '../memory-read-answer.js';
 import { verifyFinalOutput } from '../output-verification.js';
 import { PLANNER_VERSION } from '../planner.js';
 import { detectPersonalReadRequest, type PersonalReadRequest } from '../read-intent.js';
@@ -719,11 +720,22 @@ export async function stageModelFinalResponse(
       .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
       .join('\n'),
   ].join('\n');
+  const classifiedRead = readContext ? readContext.readRequest : detectPersonalReadRequest(window);
+  const memoryReadSelection =
+    classifiedRead?.kind === 'memory'
+      ? await selectMemoryReadAnswer({
+          router: deps.router,
+          taskId: task.id,
+          request: latestUserText(window) ?? '',
+          evidence,
+        })
+      : undefined;
   const contractOptions = {
+    ...(memoryReadSelection ? { memoryReadSelection } : {}),
     requestText:
       task.trust === 'owner' && !isForwardedIngest(task) ? latestUserText(window) : undefined,
     urlCorpus: sourceCorpus,
-    readRequest: readContext ? readContext.readRequest : detectPersonalReadRequest(window),
+    readRequest: classifiedRead,
     ...(readContext?.compoundTripExtraction
       ? { compoundTripExtraction: readContext.compoundTripExtraction }
       : {}),

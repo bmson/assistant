@@ -4,6 +4,7 @@ import {
   conversationMessageSourceRevision,
   type Records,
   type ToolExecutionRepository,
+  validConversationSpeaker,
 } from '@assistant/persistence';
 import { z } from 'zod';
 import { register } from '../register.js';
@@ -73,6 +74,7 @@ function searchSourceRefs(
     conversationId: string;
     sourceRevision: string;
     text: string;
+    speakerRevision?: string;
   }> = [];
   const seen = new Set<string>();
   let totalTextBytes = 0;
@@ -84,7 +86,8 @@ function searchSourceRefs(
         : ['messageId', 'conversationId', 'sourceRevision', 'text', 'createdAt'];
     if (
       !match ||
-      !hasOnlyKeys(match, allowedMatchKeys) ||
+      !validConversationSpeaker(match) ||
+      !hasOnlyKeys(match, [...allowedMatchKeys, 'role', 'origin', 'speakerRevision']) ||
       typeof match.messageId !== 'string' ||
       !UUID.test(match.messageId) ||
       typeof match.conversationId !== 'string' ||
@@ -106,6 +109,9 @@ function searchSourceRefs(
       conversationId: match.conversationId,
       sourceRevision: match.sourceRevision,
       text: match.text,
+      ...(typeof match.speakerRevision === 'string'
+        ? { speakerRevision: match.speakerRevision }
+        : {}),
     });
   }
   // Do not hash any stored body until the aggregate byte limit has passed.
@@ -117,6 +123,9 @@ function searchSourceRefs(
       messageId: match.messageId,
       conversationId: match.conversationId,
       sourceRevision: match.sourceRevision,
+      ...(typeof match.speakerRevision === 'string'
+        ? { speakerRevision: match.speakerRevision }
+        : {}),
     });
   }
   return { query: args.data.query, limit: args.data.limit, refs };
@@ -158,7 +167,11 @@ function validRefreshResult(
             'sourceRevision',
             'text',
             'createdAt',
+            'role',
+            'origin',
+            'speakerRevision',
           ]) ||
+          !validConversationSpeaker(match) ||
           !boundedString(match.text, MAX_SEARCH_TEXT_BYTES)
         )
           return false;

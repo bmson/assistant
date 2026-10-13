@@ -1,8 +1,7 @@
+import type { CalendarPlanOptions } from './calendar-plan-intent.js';
 import type { ActionEvidence } from './response-contract.js';
 
 const SLOT_MS = 15 * 60_000;
-const FOCUS_MS = 90 * 60_000;
-const BREAK_MS = 15 * 60_000;
 const TRAVEL_MS = 30 * 60_000;
 const MAX_EVENT_PAGES = 3;
 
@@ -191,6 +190,7 @@ export interface WeeklyCalendarPlanInput {
   timeMax: string;
   timeZone?: string;
   evidence: ActionEvidence[];
+  plan?: CalendarPlanOptions;
 }
 
 /** A deterministic, review-only proposal. It never schedules or edits events. */
@@ -204,6 +204,10 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     coverageComplete,
     slotCount,
   });
+  const focusMs = (input.plan?.focusMinutes ?? 90) * 60_000;
+  const breakMs = (input.plan?.breakMinutes ?? 15) * 60_000;
+  const requestedSlots = input.plan?.slotCount ?? 3;
+  const windowLabel = input.plan?.windowLabel ?? 'next week';
   const start = dateMs(input.timeMin);
   const end = dateMs(input.timeMax);
   if (start === undefined || end === undefined || end <= start)
@@ -341,12 +345,25 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     const location = typeof event.location === 'string' && event.location.trim().length > 0;
     const hasVideo =
       Array.isArray(event.links) && event.links.some((value) => record(value)?.type === 'video');
-    const inPerson = location && !hasVideo;
+    const remoteLocation =
+      typeof event.location === 'string' &&
+      /(?:https?:\/\/|\b(?:online|virtual|remote|zoom|teams|google meet|video call)\b)/i.test(
+        event.location,
+      );
+    const inPerson = location && !hasVideo && !remoteLocation;
     if (inPerson) travelBufferCount += 1;
     if (inPerson && attendance(event) === 'potential') potentialTravelBufferCount += 1;
     eventBusy.push({
-      start: Math.max(start, interval.start - (inPerson ? TRAVEL_MS : 0)),
-      end: Math.min(end, interval.end + (inPerson ? TRAVEL_MS : 0)),
+      start: Math.max(
+        start,
+        interval.start -
+          Math.max(inPerson ? TRAVEL_MS : 0, (input.plan?.meetingBufferMinutes ?? 0) * 60_000),
+      ),
+      end: Math.min(
+        end,
+        interval.end +
+          Math.max(inPerson ? TRAVEL_MS : 0, (input.plan?.meetingBufferMinutes ?? 0) * 60_000),
+      ),
     });
   }
   const busyMerged = mergeIntervals([...busy, ...eventBusy]);
@@ -355,14 +372,14 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     string,
     { busyMs: number; candidates: Array<{ start: number; end: number }> }
   >();
-  for (let at = start; at + FOCUS_MS + BREAK_MS <= end; at += SLOT_MS) {
+  for (let at = start; at + focusMs + breakMs <= end; at += SLOT_MS) {
     const parts = localParts(at, input.timeZone);
     if (!parts || parts.weekday === 0 || parts.weekday === 6 || parts.hour < 9 || parts.hour >= 17)
       continue;
     const day = dayStats.get(parts.day) ?? { busyMs: 0, candidates: [] };
     dayStats.set(parts.day, day);
-    const focusEnd = at + FOCUS_MS;
-    const occupiedEnd = focusEnd + BREAK_MS;
+    const focusEnd = at + focusMs;
+    const occupiedEnd = focusEnd + breakMs;
     const endParts = localParts(occupiedEnd, input.timeZone);
     if (
       !endParts ||
@@ -391,18 +408,18 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     .sort((a, b) => a[1].busyMs - b[1].busyMs || a[0].localeCompare(b[0]));
   const chosen: Array<{ start: number; end: number }> = [];
   for (const [, stats] of rankedDays) {
-    if (chosen.length >= 3) break;
+    if (chosen.length >= requestedSlots) break;
     const first = stats.candidates[0];
     if (first) chosen.push(first);
   }
-  if (chosen.length < 3) {
+  if (chosen.length < requestedSlots) {
     const remaining = rankedDays
       .flatMap(([day, stats]) =>
         stats.candidates.map((candidate) => ({ day, candidate, busyMs: stats.busyMs })),
       )
       .sort((a, b) => a.busyMs - b.busyMs || a.candidate.start - b.candidate.start);
     for (const item of remaining) {
-      if (chosen.length >= 3) break;
+      if (chosen.length >= requestedSlots) break;
       if (chosen.some((selected) => overlap(selected, item.candidate))) continue;
       chosen.push(item.candidate);
     }
@@ -452,7 +469,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         `Overloaded-day estimate: ${day} has at least 6 merged busy hours inside 9–5. This is a planning heuristic.`,
     );
   const lines = [
-    `Here’s a review-only plan for next week in ${input.timeZone}. I haven’t changed your calendar.`,
+    `Here’s a review-only plan for ${windowLabel} in ${input.timeZone}. I haven’t changed your calendar.`,
   ];
   if (!complete) {
     lines.push(
@@ -500,21 +517,21 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   if (chosen.length === 0) {
     lines.push(
       busyValid
-        ? 'I couldn’t identify suitable 90-minute blocks from the available data. Please confirm coverage or working hours before I suggest more.'
+        ? `I couldn’t identify suitable ${focusMs / 60_000}-minute blocks from the available data. Please confirm coverage or working hours before I suggest more.`
         : 'I did not suggest focus times because usable free/busy intervals were unavailable. Please confirm coverage before choosing a time.',
     );
   } else {
     lines.push('Tentative focus blocks:');
     for (const slot of chosen) {
-      const focusEnd = slot.start + FOCUS_MS;
+      const focusEnd = slot.start + focusMs;
       lines.push(
-        `- ${labelTime(slot.start, input.timeZone)}–${new Intl.DateTimeFormat('en-US', { timeZone: input.timeZone, hour: 'numeric', minute: '2-digit' }).format(new Date(focusEnd))} (90 minutes), then a 15-minute break.`,
+        `- ${labelTime(slot.start, input.timeZone)}–${new Intl.DateTimeFormat('en-US', { timeZone: input.timeZone, hour: 'numeric', minute: '2-digit' }).format(new Date(focusEnd))} (${focusMs / 60_000} minutes), then a ${breakMs / 60_000}-minute break.`,
       );
     }
   }
-  if (chosen.length < 3)
+  if (chosen.length < requestedSlots)
     lines.push(
-      `I found ${chosen.length} of 3 requested focus blocks; the remaining time did not fit without overlapping checked commitments and breaks.`,
+      `I found ${chosen.length} of ${requestedSlots} requested focus blocks; the remaining time did not fit without overlapping checked commitments and breaks.`,
     );
   const sourceLinks = uniqueEvents
     .map(strictGoogleCalendarLink)

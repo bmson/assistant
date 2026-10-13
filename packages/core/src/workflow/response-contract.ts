@@ -10,6 +10,11 @@ import type { CompoundTripExtraction } from './compound-trip-extraction.js';
 import { compoundTripReadProjection } from './compound-trip-read.js';
 import { correctFlightWriteClaims } from './flight-write-contract.js';
 import { detectFutureWatchIntent, type FutureWatchIntent } from './future-watch-intent.js';
+import {
+  type MemoryReadSelection,
+  renderMemoryReadAnswer,
+  validMemoryReadSelection,
+} from './memory-read-answer.js';
 import type { PersonalReadRequest } from './read-intent.js';
 import { effectiveReminders } from './reminder-state.js';
 import { isDurableSave, isMemoryWriteRequest, savedWorkSummary } from './saved-work.js';
@@ -81,6 +86,8 @@ export interface ResponseContractResult {
 }
 
 interface ResponseContractOptions {
+  /** Runtime-selected exact historical quotes; revalidated against the current ledger. */
+  memoryReadSelection?: MemoryReadSelection;
   requestText?: string;
   urlCorpus?: string;
   /** Deterministically detected from the latest owner turn. */
@@ -3623,6 +3630,21 @@ function enforcePersonalReadGrounding(
   const gaps = requiredReadGaps(request, evidence, opts?.compoundTripExtraction);
   if (gaps.labels.length > 0)
     return coverageGapResponse(request, evidence, gaps, opts?.compoundTripExtraction);
+  if (request.kind === 'memory' && opts?.memoryReadSelection)
+    return {
+      text: renderMemoryReadAnswer(opts.memoryReadSelection, currentSuccessfulEvidence(evidence)),
+      blocked: !validMemoryReadSelection(
+        opts.memoryReadSelection,
+        currentSuccessfulEvidence(evidence),
+      ),
+      unsupported: validMemoryReadSelection(
+        opts.memoryReadSelection,
+        currentSuccessfulEvidence(evidence),
+      )
+        ? []
+        : ['memory'],
+      groundingFallback: ['historical answer rendered from exact selected source passages'],
+    };
   if (request.answerFocus === 'flight')
     return {
       text: verifiedReadResponse(request, evidence, opts?.compoundTripExtraction),
