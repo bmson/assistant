@@ -3140,7 +3140,12 @@ export function verifiedReadResponse(
         const times = [...new Set(facts.map((fact) => fact.minutes))];
         const candidateEvents =
           request.upcomingFlightDiscovery && candidate ? [candidate.event] : events;
-        const calendarClocks = flightCalendarClocks(request, candidateEvents, day, candidate);
+        const calendarClocks = flightCalendarClocks(
+          request,
+          candidateEvents,
+          day,
+          request.upcomingFlightDiscovery ? candidate : null,
+        );
         if (request.upcomingFlightDiscovery && !day) {
           return calendarCoverageComplete
             ? 'I found no dated flight candidate in the calendar I could check; booking-only itineraries were not independently selected. Connections, hotel, and ground transport remain unverified.'
