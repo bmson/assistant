@@ -88,6 +88,17 @@ function labelTime(at: number, timeZone: string): string {
   }).format(new Date(at));
 }
 
+function labelDay(day: string, timeZone: string): string {
+  const at = Date.parse(`${day}T12:00:00Z`);
+  if (!Number.isFinite(at)) return day;
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  }).format(new Date(at));
+}
+
 function resultOf(row: ActionEvidence): PlainRecord | undefined {
   return record(row.result);
 }
@@ -446,6 +457,9 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   chosen.sort((a, b) => a.start - b.start);
 
   const conflictPairs: string[] = [];
+  const confirmedConflictPairs: string[] = [];
+  const possibleOverlapPairs: string[] = [];
+  const potentialAttendanceEvents: string[] = [];
   const conflictEvents = uniqueEvents
     .filter((event) => attendance(event) !== 'not-attending' && event.allDay !== true)
     .map((event) => ({ event, interval: parseEventInterval(event), presence: attendance(event) }))
@@ -475,8 +489,15 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       const uncertainLongContext =
         (isExtendedContext(left.interval) && !isExtendedLodging(left.event, left.interval)) ||
         (isExtendedContext(right.interval) && !isExtendedLodging(right.event, right.interval));
+      const pair = `${eventTitle(left.event)} and ${eventTitle(right.event)}`;
+      if (verified && !uncertainLongContext) confirmedConflictPairs.push(pair);
+      else {
+        possibleOverlapPairs.push(pair);
+        if (left.presence === 'potential') potentialAttendanceEvents.push(eventTitle(left.event));
+        if (right.presence === 'potential') potentialAttendanceEvents.push(eventTitle(right.event));
+      }
       conflictPairs.push(
-        `${verified && !uncertainLongContext ? 'Scheduling conflict' : 'Possible overlap'}: ${eventTitle(left.event)} and ${eventTitle(right.event)} (${labelTime(Math.max(left.interval.start, right.interval.start), input.timeZone)}).`,
+        `${verified && !uncertainLongContext ? 'Scheduling conflict' : 'Possible overlap'}: ${pair} (${labelTime(Math.max(left.interval.start, right.interval.start), input.timeZone)}).`,
       );
     }
   }
@@ -485,14 +506,18 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     .filter(([, stats]) => stats.busyMs >= 6 * 60 * 60_000)
     .map(
       ([day]) =>
-        `Overloaded-day estimate: ${day} has at least 6 merged busy hours inside 9–5. This is a planning heuristic.`,
+        `Overloaded-day estimate: ${labelDay(day, input.timeZone)} has at least 6 merged busy hours inside 9–5. This is a planning heuristic.`,
     );
+  const attendanceTargets = [...new Set(potentialAttendanceEvents)].slice(0, 3);
+  const attendanceCheck = attendanceTargets.length
+    ? attendanceTargets.join(', ')
+    : `whether both overlapping items are commitments (${possibleOverlapPairs.slice(0, 3).join('; ')})`;
   const lines = [
     `Here’s a review-only plan for ${windowLabel} in ${input.timeZone}. I haven’t changed your calendar.`,
   ];
   if (!complete) {
     lines.push(
-      'Coverage is incomplete, so the focus times below are tentative and are not confirmed free.',
+      'Coverage is incomplete, so any times below are tentative and not confirmed free. Confirm the missing calendars before relying on this review.',
     );
     if (unavailableCalendars.length > 0)
       lines.push(
@@ -519,11 +544,11 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   if (conflictPairs.length > 0) lines.push(...conflictPairs.slice(0, 5));
   if (conflictPairs.some((line) => line.startsWith('Scheduling conflict:')))
     lines.push(
-      'Recommended change: review the overlapping events and choose which one to move after checking your priorities.',
+      `Recommended change: choose which accepted event to reschedule after checking priorities (${confirmedConflictPairs.slice(0, 3).join('; ')}).`,
     );
   if (conflictPairs.some((line) => line.startsWith('Possible overlap:')))
     lines.push(
-      'Recommended check: confirm whether you need to attend the shared-calendar item before changing either event.',
+      `Recommended next step: confirm attendance for ${attendanceCheck}. If both events are required in an overlap, choose one to reschedule; leave the calendar unchanged until attendance is clear.`,
     );
   if (conflictPairs.length === 0 && complete)
     lines.push('I found no overlapping attended events in the checked calendar data.');
@@ -565,10 +590,6 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         .slice(0, 5)
         .map((url, index) => `[Event ${index + 1}](<${url}>)`)
         .join(' · ')}`,
-    );
-  if (!complete)
-    lines.push(
-      'Please confirm the missing calendar coverage before relying on these times. I can adjust the proposal, but I will not edit your calendar without your approval.',
     );
   return result(lines.join('\n'), complete, chosen.length);
 }

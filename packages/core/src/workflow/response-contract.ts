@@ -1483,6 +1483,25 @@ function shortDate(value: string, timeZone?: string): string {
   }
 }
 
+/** A readable date for both ends of an interval that crosses local days. */
+function intervalDateTime(value: string, timeZone?: string): string {
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return value;
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: timeZone ?? 'UTC',
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    }).format(new Date(ms));
+  } catch {
+    return value;
+  }
+}
+
 /** Does the searched window cover more than one local day? */
 function spansDays(window: PersonalReadRequest['timeWindow']): boolean {
   if (!window) return true;
@@ -3359,21 +3378,30 @@ export function verifiedReadResponse(
           const clockStart = clockOnly(rawStart, request.timeZone);
           const clockEnd = clockOnly(rawEnd, request.timeZone);
           const datePrefix = multiDay ? shortDate(rawStart, request.timeZone) : '';
+          const spansDates = Boolean(
+            rawEnd &&
+              eventLocalDay(rawStart, request.timeZone) !== eventLocalDay(rawEnd, request.timeZone),
+          );
+          const intervalRange = spansDates
+            ? `${intervalDateTime(rawStart, request.timeZone)} – ${intervalDateTime(rawEnd, request.timeZone)}`
+            : '';
           const when = allDay
             ? [datePrefix, 'All day'].filter(Boolean).join(' · ')
-            : [datePrefix, clockStart ? `${clockStart}${clockEnd ? `–${clockEnd}` : ''}` : '']
+            : intervalRange ||
+              [datePrefix, clockStart ? `${clockStart}${clockEnd ? `–${clockEnd}` : ''}` : '']
                 .filter(Boolean)
                 .join(' · ');
           // A window ending on a different day than it started is the one case
           // the plain clock cannot express on its own.
-          const spansDates =
-            rawEnd &&
-            eventLocalDay(rawStart, request.timeZone) !== eventLocalDay(rawEnd, request.timeZone);
           const spanNote =
             allDay && end && end !== start
               ? ` (through ${end})`
               : spansDates
-                ? ` (starts ${start}; ends ${end})`
+                ? request.timeWindow &&
+                  Date.parse(rawStart) < Date.parse(request.timeWindow.timeMin) &&
+                  Date.parse(rawEnd) > Date.parse(request.timeWindow.timeMin)
+                  ? ' (continues into the requested period)'
+                  : ''
                 : '';
           lines.push(
             `- **${when || start || '(no time returned)'}** — ${summary}${spanNote}${location ? ` — ${location}` : ''}${attendeeText ? ` — with ${attendeeText}` : ''}${eventLinks ? ` — ${eventLinks}` : ''}${calendar && manyCalendars ? ` (${calendar})` : ''}`,

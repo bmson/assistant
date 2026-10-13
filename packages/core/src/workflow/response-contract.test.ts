@@ -375,6 +375,80 @@ describe('response execution contract', () => {
     for (const event of events) expect(response).toContain(event.summary);
     expect(response).toContain('Appointment 50');
   });
+
+  it('renders a multi-day event as a dated interval and marks when it continues into the requested window', () => {
+    const request = {
+      kind: 'calendar' as const,
+      firstToolName: 'calendar.list_events' as const,
+      queryTerms: [],
+      requiresThreadRead: false,
+      timeZone: 'America/Los_Angeles',
+      timeWindow: {
+        label: 'tomorrow',
+        timeMin: '2026-10-14T00:00:00-07:00',
+        timeMax: '2026-10-15T00:00:00-07:00',
+      },
+    };
+    const response = verifiedReadResponse(request, [
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        args: { timeMin: request.timeWindow.timeMin, timeMax: request.timeWindow.timeMax },
+        result: {
+          complete: true,
+          calendarsSearched: ['Family'],
+          events: [
+            {
+              eventId: 'stay',
+              summary: 'Multi-day stay',
+              start: '2026-10-10T06:00:00-07:00',
+              end: '2026-10-17T02:00:00-07:00',
+            },
+          ],
+        },
+      },
+    ]);
+    expect(response).toContain('Sat, Oct 10, 2026, 6:00 AM');
+    expect(response).toContain('Sat, Oct 17, 2026, 2:00 AM');
+    expect(response).toContain('continues into the requested period');
+    expect(response).not.toContain('06:00–02:00');
+  });
+
+  it('keeps a same-day calendar item as a concise clock range', () => {
+    const request = {
+      kind: 'calendar' as const,
+      firstToolName: 'calendar.list_events' as const,
+      queryTerms: [],
+      requiresThreadRead: false,
+      timeZone: 'America/Los_Angeles',
+      timeWindow: {
+        label: 'tomorrow',
+        timeMin: '2026-10-14T00:00:00-07:00',
+        timeMax: '2026-10-15T00:00:00-07:00',
+      },
+    };
+    const response = verifiedReadResponse(request, [
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        args: { timeMin: request.timeWindow.timeMin, timeMax: request.timeWindow.timeMax },
+        result: {
+          complete: true,
+          calendarsSearched: ['Family'],
+          events: [
+            {
+              eventId: 'meeting',
+              summary: 'Meeting',
+              start: '2026-10-14T10:00:00-07:00',
+              end: '2026-10-14T11:00:00-07:00',
+            },
+          ],
+        },
+      },
+    ]);
+    expect(response).toContain('**10:00–11:00** — Meeting');
+    expect(response).not.toContain('continues into the requested period');
+  });
   it.each([
     'Mira has an appointment scheduled for January 12.',
     'Her appointment was scheduled for January 12.',

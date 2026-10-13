@@ -73,6 +73,26 @@ describe('weeklyCalendarPlan', () => {
     expect(text).not.toContain('no overlapping attended events');
   });
 
+  it('uses readable local dates for overloaded days and states the missing-coverage limit once', () => {
+    const text = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        availabilityComplete: false,
+        unavailable: ['Holiday calendar'],
+        busy: [{ start: '2026-10-12T16:00:00Z', end: '2026-10-12T22:00:00Z' }],
+      }) as never,
+    });
+    expect(text).toContain('Overloaded-day estimate: Mon, Oct 12');
+    expect(text).not.toContain('Overloaded-day estimate: 2026-10-12');
+    expect(text.match(/Confirm the missing calendars before relying on this review/g)).toHaveLength(
+      1,
+    );
+    expect(text).toContain('Holiday calendar');
+    expect(text).not.toMatch(/suggested focus times are confirmed free/i);
+  });
+
   it('reports the overloaded-day assessment even when no checked day exceeds the heuristic', () => {
     const complete = weeklyCalendarPlan({
       timeMin,
@@ -196,7 +216,9 @@ describe('weeklyCalendarPlan', () => {
     });
     expect(text).toContain('Possible overlap: Review and Shared hold');
     expect(text).not.toContain('Scheduling conflict: Review and Shared hold');
-    expect(text).toContain('Recommended check: confirm whether you need to attend');
+    expect(text).toContain('Recommended next step: confirm attendance for Shared hold.');
+    expect(text).toContain('choose one to reschedule');
+    expect(text).toContain('leave the calendar unchanged until attendance is clear');
   });
 
   it('recommends reviewing verified conflicts without choosing which event to move', () => {
@@ -241,7 +263,9 @@ describe('weeklyCalendarPlan', () => {
       evidence: rows as never,
     });
     expect(text).toContain('Scheduling conflict: Planning and Appointment');
-    expect(text).toContain('Recommended change: review the overlapping events');
+    expect(text).toContain(
+      'Recommended change: choose which accepted event to reschedule after checking priorities (Planning and Appointment).',
+    );
     expect(text).not.toContain('I found no overlapping attended events');
     expect(text).not.toContain('move Planning');
     expect(text).not.toContain('move Appointment');

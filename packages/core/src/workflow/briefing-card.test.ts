@@ -122,6 +122,29 @@ describe('agendaSection', () => {
     });
   });
 
+  it('keeps a cross-day interval date-aware instead of showing only its start clock', () => {
+    const section = agendaSection({
+      events: [
+        {
+          eventId: 'multi-day',
+          summary: 'Extended event',
+          start: '2026-10-10T13:00:00Z',
+          end: '2026-10-17T09:00:00Z',
+          calendar: 'Personal',
+          allDay: false,
+        },
+      ],
+      complete: true,
+      conflicts: [],
+      salient: [],
+      timeZone,
+      now,
+    });
+    expect(section && 'items' in section ? section.items[0]?.time : '').toContain(
+      'Sat, Oct 10 6:00 AM → Sat, Oct 17 2:00 AM',
+    );
+  });
+
   it('is absent for an empty calendar', () => {
     expect(
       agendaSection({ events: [], complete: true, conflicts: [], salient: [], timeZone, now }),
