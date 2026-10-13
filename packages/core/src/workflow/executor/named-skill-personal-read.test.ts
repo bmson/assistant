@@ -2,6 +2,7 @@ import type { LearnedSkill, SkillContextRepository } from '@assistant/persistenc
 import { describe, expect, it, vi } from 'vitest';
 import type { TaskState } from '../../events.js';
 import { TaskStateSchema } from '../../events.js';
+import { stageFinalResponse } from './finalize.js';
 import type { RunContext } from './phases.js';
 import { runStepLoop } from './step-loop.js';
 
@@ -64,7 +65,14 @@ async function runPersonalRead(request: string, foundSkill: LearnedSkill | null 
     async ({ toolName, args }: { toolName: string; args: Record<string, unknown> }) => {
       if (toolName !== 'calendar.list_events') throw new Error(`Unexpected tool: ${toolName}`);
       const result = {
-        events: [],
+        events: [
+          {
+            id: 'design-review-1',
+            summary: 'Design review',
+            start: '2026-10-13T09:00:00-07:00',
+            end: '2026-10-13T09:30:00-07:00',
+          },
+        ],
         complete: true,
         calendarRosterComplete: true,
         calendarsSearched: ['primary'],
@@ -174,7 +182,7 @@ async function runPersonalRead(request: string, foundSkill: LearnedSkill | null 
     steps: [],
     missingInfo: [],
   });
-  return { result, skills, systems, router, dispatch, state };
+  return { result, skills, systems, router, dispatch, state, task, window, deps, rows };
 }
 
 describe('named saved skill use during a personal read', () => {
@@ -212,4 +220,78 @@ describe('named saved skill use during a personal read', () => {
     expect(skills.bumpUse).not.toHaveBeenCalled();
     expect(systems.join('\n')).not.toContain(skill.steps);
   });
+
+  it('finalizes a truthful retrieval receipt while retaining checked calendar evidence', async () => {
+    const f = await runPersonalRead(
+      'What is on my calendar today? Apply my saved skill named "Calendar review".',
+    );
+    f.state.usedSkillIds = [skill.id];
+    const pending = {
+      text: `I used Calendar review and followed its instructions. Your calendar has a 9:00 design review.`,
+      progress: 'Calendar checked.',
+      terminalStatus: 'done' as const,
+      outcome: 'done' as const,
+    };
+
+    const result = await stageFinalResponse(
+      f.deps as unknown as import('./types.js').ExecutorDeps,
+      { ...f.task, type: 'scheduled_task', conversationId: null } as never,
+      f.state,
+      f.window as never,
+      pending,
+    );
+
+    expect(result.outcome).toBe('done');
+    expect(f.dispatch).toHaveBeenCalledOnce();
+    expect(f.rows[0]?.result).toMatchObject({
+      events: [{ id: 'design-review-1', summary: 'Design review' }],
+      complete: true,
+      calendarRosterComplete: true,
+    });
+    expect(f.state.usedSkillIds).toContain(skill.id);
+    expect(f.skills.findByName).toHaveBeenLastCalledWith({
+      agentId: 'owner-1',
+      name: 'Calendar review',
+    });
+    expect(pending.text).toContain(
+      'Saved skill “Calendar review” was retrieved as planning guidance.',
+    );
+    expect(pending.text).not.toContain('I used Calendar review');
+    expect(pending.text).toContain('Your calendar has a 9:00 design review.');
+  });
+
+  it.each(['unused', 'missing', 'lookup throws'] as const)(
+    'does not turn an unsupported model use claim into a successful receipt when skill is %s',
+    async (condition) => {
+      const f = await runPersonalRead(
+        'What is on my calendar today? Apply my saved skill named "Calendar review".',
+        condition === 'missing' ? null : skill,
+      );
+      f.state.usedSkillIds = condition === 'unused' ? [] : [skill.id];
+      if (condition === 'lookup throws')
+        vi.mocked(f.skills.findByName).mockRejectedValueOnce(new Error('repository unavailable'));
+      const pending = {
+        text: 'I used Calendar review. Your calendar has a 9:00 design review.',
+        progress: 'Calendar checked.',
+        terminalStatus: 'done' as const,
+        outcome: 'done' as const,
+      };
+
+      const result = await stageFinalResponse(
+        f.deps as unknown as import('./types.js').ExecutorDeps,
+        { ...f.task, type: 'scheduled_task', conversationId: null } as never,
+        f.state,
+        f.window as never,
+        pending,
+      );
+
+      expect(result.outcome).toBe('needs_attention');
+      expect(pending.terminalStatus).toBe('needs_attention');
+      expect(pending.text).toContain(
+        'I could not verify retrieval of the saved skill “Calendar review”; the answer does not establish that it was used.',
+      );
+      expect(pending.text).not.toContain('I used Calendar review');
+      expect(pending.text).toContain('Your calendar has a 9:00 design review.');
+    },
+  );
 });
