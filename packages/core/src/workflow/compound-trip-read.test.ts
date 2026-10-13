@@ -372,6 +372,209 @@ describe('compound trip read projection', () => {
       destinationAirport: 'BER',
     });
     expect(projection.text).not.toContain('could not match a dated outbound leg');
+
+    const dateOnlyEvidence = [
+      completeCalendarEvents([
+        {
+          eventId: 'date-only-flight',
+          summary: 'Outbound flight to Berlin',
+          description: 'Travel day in Berlin',
+          start: '2026-10-17T08:10:00Z',
+          status: 'confirmed',
+        },
+      ]),
+      ...bookingEmailEvidence(),
+    ];
+    const dateOnlyProjection = compoundTripReadProjection(read, dateOnlyEvidence, extracted);
+    expect(dateOnlyProjection.flight).toBeUndefined();
+    expect(dateOnlyProjection.text).toContain('could not match a dated outbound leg');
+  });
+
+  it('keeps unresolved future flight clocks ambiguous instead of choosing another candidate', () => {
+    const read = request();
+    const known = {
+      threadId: 'clock-ambiguity-thread',
+      messageId: 'known-flight',
+      subject: 'Itinerary',
+      flightNumber: 'LH101',
+      direction: 'outbound' as const,
+      departureDate: '2026-11-02',
+      departureTime: '10:00',
+      departureTimeZone: 'Europe/Berlin',
+      arrivalDate: '2026-11-02',
+      arrivalTime: '12:00',
+      arrivalTimeZone: 'Europe/Berlin',
+      originAirport: 'SFO',
+      destinationAirport: 'BER',
+      bookingReference: 'KNOWN-101',
+      excerpt: 'LH101 2026-11-02 10:00 Europe/Berlin',
+    };
+    const unresolved = {
+      ...known,
+      messageId: 'unresolved-flight',
+      flightNumber: 'LH202',
+      departureTime: '09:30',
+      departureTimeZone: undefined,
+      bookingReference: 'UNKNOWN-202',
+      excerpt: 'LH202 2026-11-02 09:30',
+    };
+    const projection = compoundTripReadProjection(
+      read,
+      [
+        completeCalendarEvents([
+          {
+            ...calendarFlight(),
+            eventId: 'known-calendar-flight',
+            summary: 'Outbound flight LH101 to Berlin',
+            description: 'Booking reference: KNOWN-101',
+            start: '2026-11-02T10:00:00+01:00',
+          },
+        ]),
+      ],
+      {
+        status: 'complete',
+        segments: [known, unresolved],
+        hotels: [],
+        rejectedFacts: 0,
+        sourceMessageIds: ['known-flight', 'unresolved-flight'],
+      },
+    );
+    expect(projection.flight).toBeUndefined();
+    expect(projection.text).toContain('unresolved source clock');
+  });
+
+  it('orders future outbound candidates by normalized instants across time zones', () => {
+    const read = request();
+    const segments = [
+      {
+        threadId: 'mixed-zone-thread',
+        messageId: 'later-instant',
+        subject: 'Itinerary',
+        flightNumber: 'LH101',
+        direction: 'outbound' as const,
+        departureDate: '2026-11-02',
+        departureTime: '23:50',
+        departureTimeZone: 'America/Los_Angeles',
+        arrivalDate: '2026-11-03',
+        arrivalTime: '07:00',
+        arrivalTimeZone: 'Europe/Paris',
+        originAirport: 'SFO',
+        destinationAirport: 'LAX',
+        bookingReference: 'BOOKING-LA',
+        excerpt: 'LH101 2026-11-02 23:50 America/Los_Angeles',
+      },
+      {
+        threadId: 'mixed-zone-thread',
+        messageId: 'earlier-instant',
+        subject: 'Itinerary',
+        flightNumber: 'LH202',
+        direction: 'outbound' as const,
+        departureDate: '2026-11-03',
+        departureTime: '00:10',
+        departureTimeZone: 'Europe/Paris',
+        arrivalDate: '2026-11-03',
+        arrivalTime: '02:00',
+        arrivalTimeZone: 'Europe/Paris',
+        originAirport: 'SFO',
+        destinationAirport: 'BER',
+        bookingReference: 'BOOKING-PARIS',
+        excerpt: 'LH202 2026-11-03 00:10 Europe/Paris',
+      },
+    ];
+    const projection = compoundTripReadProjection(
+      read,
+      [
+        completeCalendarEvents([
+          {
+            eventId: 'later-instant-calendar',
+            summary: 'Outbound flight LH101 SFO to LAX',
+            description: 'Booking reference: BOOKING-LA',
+            start: '2026-11-03T07:50:00Z',
+            timeZone: 'America/Los_Angeles',
+            status: 'confirmed',
+          },
+          {
+            eventId: 'earlier-instant-calendar',
+            summary: 'Outbound flight LH202 SFO to BER',
+            description: 'Booking reference: BOOKING-PARIS',
+            start: '2026-11-02T23:10:00Z',
+            timeZone: 'Europe/Paris',
+            status: 'confirmed',
+          },
+        ]),
+      ],
+      {
+        status: 'complete',
+        segments,
+        hotels: [],
+        rejectedFacts: 0,
+        sourceMessageIds: ['later-instant', 'earlier-instant'],
+      },
+    );
+    expect(projection.flight?.segment?.flightNumber).toBe('LH202');
+    expect(projection.flight?.event.eventId).toBe('earlier-instant-calendar');
+  });
+
+  it('does not call a UTC-serialized event the wrong local departure date', () => {
+    const read = request();
+    const evidence = [
+      completeCalendarEvents([
+        {
+          eventId: 'kiritimati-flight',
+          summary: 'Outbound flight LH401 SFO to BER',
+          description: 'Booking reference: KIRI-2026',
+          start: '2026-11-01T10:30:00Z',
+          timeZone: 'Pacific/Kiritimati',
+          status: 'confirmed',
+        },
+      ]),
+      row(
+        'gmail.search',
+        { query: read.mailQuery },
+        { results: [{ threadId: 'kiritimati-booking', subject: 'LH401 itinerary' }] },
+      ),
+      row(
+        'gmail.read_thread',
+        { threadId: 'kiritimati-booking' },
+        {
+          complete: true,
+          messages: [
+            {
+              messageId: 'kiritimati-message',
+              subject: 'LH401 itinerary',
+              text: 'Outbound LH401. Departure date: 2026-11-02. Departure time: 00:30 Pacific/Kiritimati. Arrival date: 2026-11-02. Arrival time: 10:00 Europe/Berlin. From: SFO. To: BER. Booking reference: KIRI-2026',
+            },
+          ],
+        },
+      ),
+    ];
+    const projection = compoundTripReadProjection(read, evidence, {
+      status: 'complete',
+      segments: [
+        {
+          threadId: 'kiritimati-booking',
+          messageId: 'kiritimati-message',
+          subject: 'LH401 itinerary',
+          flightNumber: 'LH401',
+          direction: 'outbound',
+          departureDate: '2026-11-02',
+          departureTime: '00:30',
+          departureTimeZone: 'Pacific/Kiritimati',
+          arrivalDate: '2026-11-02',
+          arrivalTime: '10:00',
+          arrivalTimeZone: 'Europe/Berlin',
+          originAirport: 'SFO',
+          destinationAirport: 'BER',
+          bookingReference: 'KIRI-2026',
+          excerpt: 'LH401 2026-11-02 00:30 Pacific/Kiritimati',
+        },
+      ],
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: ['kiritimati-message'],
+    });
+    expect(projection.flight?.event.eventId).toBe('kiritimati-flight');
+    expect(projection.flight?.segment).toMatchObject({ departureDate: '2026-11-02' });
   });
 
   it('selects only public-transport and taxi pages from HTTPS search results', () => {
@@ -777,6 +980,20 @@ describe('compound trip read projection', () => {
     expect(unknownChronology.connectionSummary).toBeUndefined();
     expect(unknownChronology.routeOrigin).toBeUndefined();
     expect(unknownChronology.text).toContain('could not verify the chronological order');
+    const missingConnectionDepartureZone = compoundTripReadProjection(read, validEvidence, {
+      status: 'complete',
+      segments: [outbound, { ...validConnection, departureTimeZone: undefined }],
+      hotels: [hotel],
+      rejectedFacts: 0,
+      sourceMessageIds: ['outbound-message', 'connection-message', 'hotel-booking-message'],
+    });
+    expect(missingConnectionDepartureZone.flightSegments).toHaveLength(2);
+    expect(missingConnectionDepartureZone.connectionSummary).toBeUndefined();
+    expect(missingConnectionDepartureZone.routeOrigin).toBeUndefined();
+    expect(missingConnectionDepartureZone.routeDestination).toBeUndefined();
+    expect(missingConnectionDepartureZone.text).toContain(
+      'departure or arrival clock/time zone is missing or ambiguous',
+    );
 
     const evidence = [
       completeCalendarEvents([
@@ -890,6 +1107,103 @@ describe('compound trip read projection', () => {
       direction: 'unknown',
     });
     expect(projection.flight?.event.summary).toContain('Outbound');
+  });
+
+  it('does not choose the first of multiple paired return alternatives', () => {
+    const read = request();
+    const reference = 'ALT-RET-41';
+    const outbound = {
+      threadId: 'alternatives-thread',
+      messageId: 'outbound-message',
+      subject: 'Itinerary',
+      flightNumber: 'LH401',
+      direction: 'outbound' as const,
+      departureDate: '2026-11-04',
+      departureTime: '13:45',
+      departureTimeZone: 'America/Los_Angeles',
+      arrivalDate: '2026-11-04',
+      arrivalTime: '18:30',
+      arrivalTimeZone: 'Europe/Berlin',
+      originAirport: 'SFO',
+      destinationAirport: 'BER',
+      bookingReference: reference,
+      excerpt: 'LH401 outbound 2026-11-04 13:45 America/Los_Angeles',
+    };
+    const returns = [
+      {
+        threadId: 'alternatives-thread',
+        messageId: 'return-one',
+        subject: 'Itinerary',
+        flightNumber: 'LH402',
+        direction: 'return' as const,
+        departureDate: '2026-11-11',
+        departureTime: '09:00',
+        departureTimeZone: 'Europe/Berlin',
+        arrivalDate: '2026-11-11',
+        arrivalTime: '18:00',
+        arrivalTimeZone: 'America/Los_Angeles',
+        originAirport: 'BER',
+        destinationAirport: 'SFO',
+        bookingReference: reference,
+        excerpt: 'LH402 return 2026-11-11 09:00 Europe/Berlin',
+      },
+      {
+        threadId: 'alternatives-thread',
+        messageId: 'return-two',
+        subject: 'Itinerary',
+        flightNumber: 'LH404',
+        direction: 'return' as const,
+        departureDate: '2026-11-12',
+        departureTime: '11:00',
+        departureTimeZone: 'Europe/Berlin',
+        arrivalDate: '2026-11-12',
+        arrivalTime: '20:00',
+        arrivalTimeZone: 'America/Los_Angeles',
+        originAirport: 'BER',
+        destinationAirport: 'SFO',
+        bookingReference: reference,
+        excerpt: 'LH404 return 2026-11-12 11:00 Europe/Berlin',
+      },
+    ];
+    const projection = compoundTripReadProjection(
+      read,
+      [
+        completeCalendarEvents([
+          {
+            ...calendarFlight(),
+            eventId: 'outbound-event',
+            summary: 'Outbound flight LH401 to Berlin',
+            description: `Booking reference: ${reference}`,
+            start: '2026-11-04T13:45:00-08:00',
+          },
+          {
+            ...calendarFlight(),
+            eventId: 'return-one-event',
+            summary: 'Return flight LH402 to SFO',
+            description: `Booking reference: ${reference}`,
+            start: '2026-11-11T09:00:00+01:00',
+          },
+          {
+            ...calendarFlight(),
+            eventId: 'return-two-event',
+            summary: 'Return flight LH404 to SFO',
+            description: `Booking reference: ${reference}`,
+            start: '2026-11-12T11:00:00+01:00',
+          },
+        ]),
+      ],
+      {
+        status: 'complete',
+        segments: [outbound, ...returns],
+        hotels: [],
+        rejectedFacts: 0,
+        sourceMessageIds: ['outbound-message', 'return-one', 'return-two'],
+      },
+    );
+    expect(projection.flight?.segment?.flightNumber).toBe('LH401');
+    expect(projection.returnFlight).toBeUndefined();
+    expect(projection.text).toContain('more than one plausible flight candidate');
+    expect(projection.text).not.toContain('Dated return leg from the same booking');
   });
 
   it('uses the final connected-leg arrival date for hotel matching and retains the booked return legs', () => {
