@@ -2546,6 +2546,67 @@ describe('golden tasks', () => {
     expect(check?.blocked).toBe(false);
   });
 
+  it('answers a dated calendar overview from the calendar alone, without a Gmail search', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const eventUrl = 'https://calendar.google.com/calendar/event?eid=calendar-day-review';
+    let calendarReads = 0;
+    let gmailSearches = 0;
+    const answer = `Tomorrow you have one event: Design review, 16:00–16:30 ([calendar event](${eventUrl})). No overlaps were found.`;
+    const result = await runGoldenTask(db, agentId, {
+      name: 'calendar-day-overview-does-not-search-email',
+      event: {
+        source: 'chat',
+        trust: 'owner',
+        payload: {
+          text: 'What is on my calendar tomorrow? Use my local time zone, include event times and calendar names, and point out overlaps. Give a compact answer with source links. Do not edit anything.',
+        },
+      },
+      taskType: 'chat_turn',
+      plan: workflowPlan,
+      script: [{ text: answer }],
+      tools: {
+        'calendar.list_events': {
+          schema: z.object({}).passthrough(),
+          execute: async () => {
+            calendarReads += 1;
+            return {
+              complete: true,
+              calendarsSearched: ['Assistant'],
+              events: [
+                {
+                  eventId: 'evt-design-review',
+                  calendarId: 'primary',
+                  calendar: 'Assistant',
+                  summary: 'Design review',
+                  start: `${tomorrow}T16:00:00Z`,
+                  end: `${tomorrow}T16:30:00Z`,
+                  htmlLink: eventUrl,
+                },
+              ],
+            };
+          },
+        },
+        'gmail.search': {
+          schema: z.object({}).passthrough(),
+          execute: async () => {
+            gmailSearches += 1;
+            return { complete: true, results: [] };
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+
+    expect(calendarReads).toBe(1);
+    expect(gmailSearches).toBe(0);
+    expect(result.toolNames).toEqual(['calendar.list_events']);
+    expect(result.status).toBe('done');
+    expect(result.finalText).toContain('Design review');
+    expect(result.finalText).toContain('16:00–16:30');
+    expect(result.finalText).not.toMatch(/let me read|let me check|email results/i);
+  });
+
   it('plans the hypothetical work schedule without searching the owner calendar', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const request =

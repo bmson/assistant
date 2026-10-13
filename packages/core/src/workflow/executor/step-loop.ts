@@ -1287,7 +1287,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             );
           })
         : allReadToolEvidence;
-    if (readRequest?.compoundTripDiscovery) {
+    if (readRequest?.compoundTripDiscovery || readRequest?.upcomingFlightDiscovery) {
       if (
         !compoundTripExtractionAttempted &&
         compoundTripSourceReadsSettled(readRequest, readToolEvidence)
