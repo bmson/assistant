@@ -24,6 +24,18 @@ function hasIndex(collectionGroup: string, fields: string[]): boolean {
   );
 }
 
+function hasOrderedIndex(
+  collectionGroup: string,
+  fields: Array<{ fieldPath: string; order: string }>,
+): boolean {
+  return spec.indexes.some(
+    (index) =>
+      index.collectionGroup === collectionGroup &&
+      index.queryScope === 'COLLECTION' &&
+      JSON.stringify(index.fields) === JSON.stringify(fields),
+  );
+}
+
 function source(path: string): string {
   return readFileSync(resolve(root, path), 'utf8').replace(/\s+/g, ' ');
 }
@@ -130,5 +142,26 @@ describe('email observer and attachment Firestore index contract', () => {
     expect(attention).toContain(sourceQuery);
     expect(reviews).toContain(sourceQuery);
     expect(hasIndex('securityIncidentSources', ['agentId', 'observedAt'])).toBe(true);
+  });
+
+  it('covers the latest appended-message limitToLast query with its reversed index order', () => {
+    const chat = source('packages/firestore/src/application-chat.ts');
+    const listMessagesStart = chat.indexOf('async listMessages(');
+    const listMessagesEnd = chat.indexOf('async listMessagesByIds(', listMessagesStart);
+    expect(listMessagesStart).toBeGreaterThanOrEqual(0);
+    expect(listMessagesEnd).toBeGreaterThan(listMessagesStart);
+
+    const listMessages = chat.slice(listMessagesStart, listMessagesEnd);
+    expect(listMessages).toContain(
+      "query.orderBy('appendedAt', 'asc').orderBy('id', 'asc').limitToLast(limit).get()",
+    );
+    expect(
+      hasOrderedIndex('messages', [
+        { fieldPath: 'conversationId', order: 'ASCENDING' },
+        { fieldPath: 'hiddenAt', order: 'ASCENDING' },
+        { fieldPath: 'appendedAt', order: 'DESCENDING' },
+        { fieldPath: 'id', order: 'DESCENDING' },
+      ]),
+    ).toBe(true);
   });
 });

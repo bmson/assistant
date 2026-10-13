@@ -79,8 +79,9 @@ export function MobileTokenPanel({
           </code>
           <CopyButton value={freshToken} name="access key" />
           <span className="text-xs text-emerald-700 dark:text-emerald-400">
-            Update the Connection screen on your phone — the previous key stops working within 30
-            seconds.
+            Your new key can take up to 30 seconds to become active. If the app rejects it right
+            away, wait 30 seconds and tap Save and connect again using this same key. The previous
+            key stops working within 30 seconds.
           </span>
         </div>
       ) : null}
