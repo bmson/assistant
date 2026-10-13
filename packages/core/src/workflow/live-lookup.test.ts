@@ -13,6 +13,16 @@ import {
 } from './live-lookup.js';
 
 describe('live lookup routing from home-screen regressions', () => {
+  it('leaves an explicit Google Doc read with the authenticated document reader', () => {
+    expect(
+      detectLiveLookup([
+        {
+          role: 'user',
+          content: 'Please read https://docs.google.com/document/d/doc-1234567890/edit',
+        },
+      ]),
+    ).toBeUndefined();
+  });
   it.each([
     'Read https://example.com/transit and summarize in three bullets. Do not use my email, calendar, or memories.',
     'Please summarize https://example.com/transit. Keep source links.',

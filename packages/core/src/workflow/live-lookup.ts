@@ -1,4 +1,5 @@
 import { leagueNamedIn } from '../sports/leagues.js';
+import { requestedDocumentReadIntent } from './artifact-intent.js';
 import {
   detectPersonalReadRequest,
   type ReadIntentMessage,
@@ -122,6 +123,9 @@ export function detectLiveLookup(
   const users = history.filter((m) => m.role === 'user').map(readIntentText);
   const request = users.at(-1)?.trim() ?? '';
   if (!request || /^(?:don't|do not|never)\b/i.test(request)) return undefined;
+  // Authenticated owner documents use the dedicated document reader; treating
+  // their explicit URL as a public page would bypass that deterministic path.
+  if (requestedDocumentReadIntent(request)) return undefined;
   if (/\b(?:password|passcode|wifi|wi-fi|API key)\b/i.test(request)) return undefined;
   const asks = QUESTION.test(request) || request.includes('?') || SEARCH.test(request);
   if (EVENT_REMINDER.test(request) && isSportsRequest(request, asks))
