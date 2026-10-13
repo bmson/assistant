@@ -210,7 +210,7 @@ function parseSourceRefs(value: unknown): { refs: ConversationSearchSourceRef[];
       conversationId: match.conversationId,
       sourceRevision: match.sourceRevision,
       ...(typeof match.speakerRevision === 'string'
-        ? { speakerRevision: match.speakerRevision }
+        ? { speakerRevision: match.speakerRevision, role: match.role, origin: match.origin }
         : {}),
     });
   }
@@ -475,7 +475,7 @@ export async function refreshResumedConversationSearch(
             messageId: match.messageId,
             sourceRevision: match.sourceRevision,
             ...(typeof match.speakerRevision === 'string'
-              ? { speakerRevision: match.speakerRevision }
+              ? { speakerRevision: match.speakerRevision, role: match.role, origin: match.origin }
               : {}),
             conversationId: match.conversationId,
             text: match.text,
