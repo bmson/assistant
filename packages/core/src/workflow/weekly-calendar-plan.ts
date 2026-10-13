@@ -204,6 +204,25 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     coverageComplete,
     slotCount,
   });
+  if (
+    input.plan &&
+    (!Number.isInteger(input.plan.focusMinutes) ||
+      input.plan.focusMinutes < 15 ||
+      input.plan.focusMinutes > 240 ||
+      !Number.isInteger(input.plan.slotCount) ||
+      input.plan.slotCount < 1 ||
+      input.plan.slotCount > 10 ||
+      !Number.isInteger(input.plan.breakMinutes) ||
+      input.plan.breakMinutes < 0 ||
+      input.plan.breakMinutes > 60 ||
+      (input.plan.meetingBufferMinutes !== undefined &&
+        (!Number.isInteger(input.plan.meetingBufferMinutes) ||
+          input.plan.meetingBufferMinutes < 0 ||
+          input.plan.meetingBufferMinutes > 60)))
+  )
+    return result(
+      'I couldn’t safely resolve the requested focus duration, count, or breaks. Please confirm those constraints.',
+    );
   const focusMs = (input.plan?.focusMinutes ?? 90) * 60_000;
   const breakMs = (input.plan?.breakMinutes ?? 15) * 60_000;
   const requestedSlots = input.plan?.slotCount ?? 3;
@@ -212,17 +231,17 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const end = dateMs(input.timeMax);
   if (start === undefined || end === undefined || end <= start)
     return result(
-      'I couldn’t resolve a safe calendar window for next week. Please check your calendar settings and ask me to try again.',
+      `I couldn’t resolve a safe calendar window for ${windowLabel}. Please check your calendar settings and ask me to try again.`,
     );
   if (!input.timeZone)
     return result(
-      'I can review next week, but your time zone is unavailable, so I can’t safely suggest focus times. Please confirm your time zone first.',
+      `I can review ${windowLabel}, but your time zone is unavailable, so I can’t safely suggest focus times. Please confirm your time zone first.`,
     );
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: input.timeZone }).format(new Date(start));
   } catch {
     return result(
-      'I can review next week, but your time zone setting is invalid, so I can’t safely suggest focus times.',
+      `I can review ${windowLabel}, but your time zone setting is invalid, so I can’t safely suggest focus times.`,
     );
   }
 
@@ -483,8 +502,12 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     else lines.push('The event list is incomplete or reached its bounded page limit.');
   }
   lines.push(
-    'Working hours are assumed to be 9 AM–5 PM because no configured hours were available. Each focus block is followed by a 15-minute break.',
+    `Working hours are assumed to be 9 AM–5 PM because no configured hours were available. Each focus block is followed by a ${breakMs / 60_000}-minute break.`,
   );
+  if (input.plan?.meetingBufferMinutes)
+    lines.push(
+      `I reserved ${input.plan.meetingBufferMinutes}-minute breaks on both sides of meetings.`,
+    );
   if (travelBufferCount > 0)
     lines.push(
       'I reserved an estimated 30-minute travel buffer on each side of events with a physical location and no video link; this is not a route estimate.',

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { requestedCalendarPlanOptions } from './calendar-plan-intent.js';
 import { weeklyCalendarPlan, weeklyCalendarPlanResult } from './weekly-calendar-plan.js';
 
 const timeMin = '2026-10-12T07:00:00.000Z';
@@ -525,5 +526,124 @@ describe('weeklyCalendarPlan', () => {
     });
     expect(text).toContain('https://calendar.google.com/calendar/event?eid=abc');
     expect(text).not.toContain('example.test');
+  });
+});
+
+describe('requested focus-plan variations', () => {
+  const prompt =
+    'Review my calendar for the next three working days. Find two 60-minute focus blocks between 9 AM and 5 PM, allowing 15-minute breaks around meetings. Mark coverage limits and show the plan; do not create events.';
+  it('keeps the requested count, duration, window and meeting break constraints', () => {
+    const plan = requestedCalendarPlanOptions(prompt);
+    expect(plan).toEqual({
+      focusMinutes: 60,
+      slotCount: 2,
+      breakMinutes: 15,
+      meetingBufferMinutes: 15,
+      workingDays: 3,
+      windowLabel: 'the next 3 working days',
+    });
+    const end = '2026-10-15T07:00:00.000Z';
+    const meeting = {
+      eventId: 'morning',
+      calendarId: 'Work',
+      summary: 'Review',
+      start: '2026-10-12T16:00:00Z',
+      end: '2026-10-12T17:00:00Z',
+      ownerResponse: 'accepted',
+      location: 'Online',
+      blocksTime: true,
+    };
+    const rows = evidence({
+      timeMax: end,
+      busy: [{ start: meeting.start, end: meeting.end }],
+      pages: [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          args: { timeMin, timeMax: end },
+          result: {
+            events: [meeting],
+            complete: true,
+            calendarRosterComplete: true,
+            unavailable: [],
+          },
+        },
+      ],
+    });
+    const answer = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax: end,
+      timeZone: 'America/Los_Angeles',
+      evidence: rows as never,
+      plan,
+    });
+    expect(answer.slotCount).toBe(2);
+    expect(answer.coverageComplete).toBe(true);
+    expect(answer.text.match(/\(60 minutes\)/g)).toHaveLength(2);
+    expect(answer.text).toContain('the next 3 working days');
+    expect(answer.text).toContain('both sides of meetings');
+    expect(answer.text).not.toContain('30-minute travel');
+    expect(answer.text).not.toContain('90 minutes');
+    expect(answer.text).not.toMatch(/- Mon, Oct 12, (9|10):00 AM/);
+    expect(answer.text).toContain('I haven’t changed your calendar');
+  });
+  it.each(['Online', 'https://zoom.us/j/123', 'Microsoft Teams', 'Google Meet', 'Virtual meeting'])(
+    'does not invent physical travel buffers for %s',
+    (location) => {
+      const event = {
+        eventId: 'remote',
+        calendarId: 'Work',
+        summary: 'Review',
+        start: '2026-10-12T18:00:00Z',
+        end: '2026-10-12T19:00:00Z',
+        location,
+        blocksTime: true,
+      };
+      const text = weeklyCalendarPlan({
+        timeMin,
+        timeMax,
+        timeZone: 'America/Los_Angeles',
+        evidence: evidence({
+          pages: [
+            {
+              toolName: 'calendar.list_events',
+              status: 'succeeded',
+              args: { timeMin, timeMax },
+              result: {
+                events: [event],
+                complete: true,
+                calendarRosterComplete: true,
+                unavailable: [],
+              },
+            },
+          ],
+        }) as never,
+      });
+      expect(text).not.toContain('travel buffer');
+    },
+  );
+  it('rejects malformed focus parameters instead of suggesting unusable slots', () => {
+    const plan = {
+      focusMinutes: Number.NaN,
+      slotCount: 2,
+      breakMinutes: 15,
+      windowLabel: 'next week',
+    };
+    expect(
+      weeklyCalendarPlanResult({
+        timeMin,
+        timeMax,
+        timeZone: 'UTC',
+        evidence: evidence() as never,
+        plan,
+      }),
+    ).toMatchObject({ coverageComplete: false, slotCount: 0 });
+  });
+  it.each([
+    'Create three focus blocks on my calendar next week.',
+    'Review a hypothetical schedule for focus time next week. Do not read my calendar.',
+    'Review my calendar next week with twelve 60-minute focus blocks.',
+  ])('does not classify a different action as a bounded read-only proposal: %s', (text) => {
+    expect(requestedCalendarPlanOptions(text)).toBeUndefined();
   });
 });

@@ -1018,7 +1018,10 @@ export async function stageModelFinalResponse(
       contractOptions.readRequest,
       evidence,
     ).weeklyPlanAssessment;
-    if (assessment?.coverageComplete !== true || assessment.slotCount < 3) {
+    if (
+      assessment?.coverageComplete !== true ||
+      assessment.slotCount < (contractOptions.readRequest.calendarPlanOptions?.slotCount ?? 3)
+    ) {
       pending.terminalStatus = 'needs_attention';
       pending.outcome = 'needs_attention';
       pending.preserveCheckedReadResponse = true;

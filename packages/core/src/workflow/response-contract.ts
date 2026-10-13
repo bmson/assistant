@@ -7,7 +7,7 @@ import {
 } from '../model-router/audit-graders.js';
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
 import type { CompoundTripExtraction } from './compound-trip-extraction.js';
-import { compoundTripReadProjection } from './compound-trip-read.js';
+import { compoundTripReadProjection, upcomingFlightReadProjection } from './compound-trip-read.js';
 import { correctFlightWriteClaims } from './flight-write-contract.js';
 import { detectFutureWatchIntent, type FutureWatchIntent } from './future-watch-intent.js';
 import {
@@ -1289,6 +1289,19 @@ function requiredReadGaps(
   compoundTripExtraction?: CompoundTripExtraction,
 ): { labels: string[]; unsupported: ActionKind[] } {
   const current = currentSuccessfulEvidence(evidence);
+  if (request.upcomingFlightDiscovery) {
+    const projection = upcomingFlightReadProjection(request, evidence, compoundTripExtraction);
+    const unsupported: ActionKind[] = [];
+    if (!projection.calendarComplete) unsupported.push('calendar_read');
+    if (!projection.gmailSearchComplete || !projection.threadsComplete)
+      unsupported.push('inbox_read');
+    return {
+      labels: projection.blocked
+        ? projection.text.split('\n\n').filter((line) => line.startsWith('Needs confirmation:'))
+        : [],
+      unsupported,
+    };
+  }
   if (request.compoundTripDiscovery) {
     const projection = compoundTripReadProjection(request, evidence, compoundTripExtraction);
     const labels = projection.blocked
@@ -3036,6 +3049,8 @@ export function verifiedReadResponse(
 ): string {
   if (request.temporalIssue || request.scopeIssue)
     return request.temporalIssue ?? request.scopeIssue ?? '';
+  if (request.upcomingFlightDiscovery)
+    return upcomingFlightReadProjection(request, evidence, compoundTripExtraction).text;
   if (request.compoundTripDiscovery)
     return compoundTripReadProjection(request, evidence, compoundTripExtraction).text;
   const current = currentSuccessfulEvidence(evidence);
@@ -3051,6 +3066,7 @@ export function verifiedReadResponse(
           timeMax: interval.endExclusive,
           timeZone: request.timeZone,
           evidence: current,
+          plan: request.calendarPlanOptions,
         })
       : 'I couldn’t safely resolve the calendar window for next week. Please confirm the date range and time zone.';
   }
@@ -3565,6 +3581,7 @@ export function enforcePersonalReadResponse(
         timeMax: weeklyInterval.endExclusive,
         timeZone: request.timeZone,
         evidence: currentSuccessfulEvidence(evidence),
+        plan: request.calendarPlanOptions,
       })
     : request.weeklyCalendarPlan
       ? { text: '', coverageComplete: false, slotCount: 0 }
@@ -3628,8 +3645,15 @@ function enforcePersonalReadGrounding(
       unsupported: ['calendar_read'],
     };
   const gaps = requiredReadGaps(request, evidence, opts?.compoundTripExtraction);
-  if (gaps.labels.length > 0)
+  if (gaps.labels.length > 0) {
+    if (request.upcomingFlightDiscovery)
+      return {
+        text: upcomingFlightReadProjection(request, evidence, opts?.compoundTripExtraction).text,
+        blocked: true,
+        unsupported: gaps.unsupported,
+      };
     return coverageGapResponse(request, evidence, gaps, opts?.compoundTripExtraction);
+  }
   if (request.kind === 'memory' && opts?.memoryReadSelection)
     return {
       text: renderMemoryReadAnswer(opts.memoryReadSelection, currentSuccessfulEvidence(evidence)),
@@ -3645,6 +3669,14 @@ function enforcePersonalReadGrounding(
         : ['memory'],
       groundingFallback: ['historical answer rendered from exact selected source passages'],
     };
+  if (request.upcomingFlightDiscovery) {
+    const projection = upcomingFlightReadProjection(
+      request,
+      evidence,
+      opts?.compoundTripExtraction,
+    );
+    return { text: projection.text, blocked: projection.blocked, unsupported: [] };
+  }
   if (request.answerFocus === 'flight')
     return {
       text: verifiedReadResponse(request, evidence, opts?.compoundTripExtraction),

@@ -17,6 +17,16 @@ const numbers: Record<string, number> = {
   eight: 8,
   nine: 9,
   ten: 10,
+  eleven: 11,
+  twelve: 12,
+  thirteen: 13,
+  fourteen: 14,
+  fifteen: 15,
+  sixteen: 16,
+  seventeen: 17,
+  eighteen: 18,
+  nineteen: 19,
+  twenty: 20,
 };
 function count(value: string | undefined): number | undefined {
   if (!value) return undefined;
@@ -35,7 +45,7 @@ export function requestedCalendarPlanOptions(text: string): CalendarPlanOptions 
     return undefined;
   const nextWeek = /\b(?:next|coming|following)\s+week\b/i.test(positive);
   const days =
-    /\bnext\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:working|work|business)\s+days\b/i.exec(
+    /\bnext\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+(?:working|work|business)\s+days\b/i.exec(
       positive,
     );
   const workingDays = count(days?.[1]);
@@ -44,7 +54,7 @@ export function requestedCalendarPlanOptions(text: string): CalendarPlanOptions 
   const focusMinutes = duration ? Number(duration[1]) : 90;
   if (!Number.isInteger(focusMinutes) || focusMinutes < 15 || focusMinutes > 240) return undefined;
   const slots =
-    /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:\d{2,3}[ -]minute\s+)?focus\s+blocks?\b/i.exec(
+    /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+(?:\d{2,3}[ -]minute\s+)?focus\s+blocks?\b/i.exec(
       positive,
     );
   const slotCount = slots ? count(slots[1]) : 3;
