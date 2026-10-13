@@ -3,7 +3,10 @@ import { z } from 'zod';
 export const EMAIL_REVIEW_QUERY = 'newer_than:7d -from:me';
 export const EMAIL_REVIEW_MAX_CANDIDATES = 5;
 export const EMAIL_REVIEW_MAX_RANK_POOL = 8;
-export const EMAIL_REVIEW_MAX_SEARCH_PAGES = 3;
+export const EMAIL_REVIEW_MAX_RANK_CANDIDATES = 80;
+// Spend up to five steps on bounded metadata paging while leaving task budget
+// for ranking and complete-thread verification.
+export const EMAIL_REVIEW_MAX_SEARCH_PAGES = 5;
 export const EMAIL_REVIEW_MAX_THREAD_CONTINUATIONS = 2;
 export const EMAIL_REVIEW_MAX_CONTEXT_CHARS = 50_000;
 export const EMAIL_REVIEW_MAX_RANK_CHARS = 40_000;
@@ -96,6 +99,7 @@ export interface EmailReviewCoverage {
   alreadyAnsweredThreads: number;
   obviousNewslettersExcluded: number;
   backfillShortfall?: 'rank_pool_exhausted' | 'step_budget';
+  metadataFallback?: boolean;
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -185,7 +189,7 @@ export function emailReviewRankContext(evidence: ReadonlyArray<EmailReviewEviden
 } {
   const all = emailReviewSearchCandidates(evidence)
     .filter((candidate) => !obviousNewsletter(candidate))
-    .slice(0, 60);
+    .slice(0, EMAIL_REVIEW_MAX_RANK_CANDIDATES);
   const candidates: EmailReviewCandidate[] = [];
   for (const candidate of all) {
     const compact = {
@@ -214,6 +218,23 @@ export function emailReviewRankContext(evidence: ReadonlyArray<EmailReviewEviden
     additionalMetadataCandidates,
   });
   return { prompt, candidateIds: candidates.map((candidate) => candidate.threadId) };
+}
+
+/** Use only task-local metadata IDs as read candidates when structured ranking fails. */
+export function emailReviewRecentMetadataFallback(
+  evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+  allowedCandidateIds: ReadonlyArray<string>,
+): string[] {
+  const allowed = new Set(allowedCandidateIds);
+  return emailReviewSearchCandidates(evidence)
+    .filter((candidate) => allowed.has(candidate.threadId) && !obviousNewsletter(candidate))
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.date);
+      const rightTime = Date.parse(right.date);
+      if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) return rightTime - leftTime;
+      return left.threadId.localeCompare(right.threadId);
+    })
+    .map((candidate) => candidate.threadId);
 }
 
 export function validEmailReviewSelection(
@@ -632,6 +653,7 @@ export function emailReviewCoverage(
   contextLimitedThreads = 0,
   alreadyAnsweredThreadIds: ReadonlyArray<string> = [],
   backfillShortfall?: EmailReviewCoverage['backfillShortfall'],
+  metadataFallback = false,
 ): EmailReviewCoverage {
   const searches = emailReviewSearchRows(evidence);
   const lastSearch = object(searches.at(-1)?.result);
@@ -663,6 +685,7 @@ export function emailReviewCoverage(
     obviousNewslettersExcluded:
       emailReviewSearchCandidates(evidence).filter(obviousNewsletter).length,
     ...(backfillShortfall ? { backfillShortfall } : {}),
+    ...(metadataFallback ? { metadataFallback: true } : {}),
   };
 }
 
@@ -828,7 +851,7 @@ export function formatEmailReviewAnswer(
   if (coverage.searchPages === 0)
     lines.push('The mailbox search did not return a usable result, so I prepared no reply drafts.');
   else if (coverage.searchPages >= EMAIL_REVIEW_MAX_SEARCH_PAGES && !coverage.searchComplete)
-    lines.push('Gmail reported additional or unavailable metadata beyond the page limit.');
+    lines.push('Gmail reported additional or unavailable metadata beyond the bounded page limit.');
   else if (!coverage.searchComplete)
     lines.push('The mail search had incomplete metadata coverage.');
   if (coverage.ownerOrChronologyExcluded > 0)
@@ -854,6 +877,10 @@ export function formatEmailReviewAnswer(
   if (coverage.contextLimitedThreads > 0)
     lines.push(
       `${coverage.contextLimitedThreads} selected ${coverage.contextLimitedThreads === 1 ? 'thread was' : 'threads were'} left out because complete context could not fit the bounded review.`,
+    );
+  if (coverage.metadataFallback)
+    lines.push(
+      'Automated ranking was unavailable, so I checked the newest eligible-looking threads in the scanned results. Each item below was checked against its complete thread; this fallback does not establish that the scan found every request.',
     );
   if (rankingFailed) {
     lines.push(

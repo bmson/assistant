@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   boundEmailReviewThreads,
+  EMAIL_REVIEW_MAX_RANK_CANDIDATES,
   EMAIL_REVIEW_MAX_RANK_POOL,
   EMAIL_REVIEW_QUERY,
   type EmailReviewEvidenceRow,
@@ -10,6 +11,7 @@ import {
   emailReviewNextThreadRead,
   emailReviewOwnerMailbox,
   emailReviewRankContext,
+  emailReviewRecentMetadataFallback,
   emailReviewSelectionWithinAuthorizedPool,
   emailReviewThreadReadResult,
   formatEmailReviewAnswer,
@@ -224,7 +226,7 @@ describe('bounded no-send email review', () => {
   });
 
   it('bounds metadata shown to ranking even when search fields are unusually large', () => {
-    const evidence = Array.from({ length: 60 }, (_, index) => {
+    const evidence = Array.from({ length: 90 }, (_, index) => {
       const row = search(`request-${String(index).padStart(2, '0')}`);
       const results = row.result.results as Array<Record<string, unknown>>;
       const metadata = required(results[0], `search metadata ${index}`);
@@ -236,7 +238,24 @@ describe('bounded no-send email review', () => {
     const context = emailReviewRankContext(evidence);
     expect(context.prompt.length).toBeLessThanOrEqual(40_000);
     expect(context.candidateIds.length).toBeGreaterThan(0);
-    expect(context.candidateIds.length).toBeLessThanOrEqual(60);
+    expect(context.candidateIds.length).toBeLessThanOrEqual(EMAIL_REVIEW_MAX_RANK_CANDIDATES);
+  });
+
+  it('falls back only to recent non-newsletter IDs in the supplied candidate set', () => {
+    const old = search('request-old');
+    const recent = search('request-new');
+    const oldResult = old.result.results as Array<Record<string, unknown>>;
+    const newResult = recent.result.results as Array<Record<string, unknown>>;
+    required(oldResult[0], 'old metadata').date = '2026-10-08T08:00:00Z';
+    required(newResult[0], 'recent metadata').date = '2026-10-12T08:00:00Z';
+    const newsletter = search('newsletter-new');
+    const newsletterResult = newsletter.result.results as Array<Record<string, unknown>>;
+    required(newsletterResult[0], 'newsletter metadata').subject = 'Weekly newsletter';
+    const evidence = [old, recent, newsletter, search('outside-prompt')];
+    expect(emailReviewRecentMetadataFallback(evidence, ['request-old', 'request-new'])).toEqual([
+      'request-new',
+      'request-old',
+    ]);
   });
 
   it('reads only ranked threads and allows at most two exact continuation pages', () => {

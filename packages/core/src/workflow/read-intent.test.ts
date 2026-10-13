@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { EMAIL_REVIEW_QUERY } from './email-review.js';
 import {
   buildReadToolInput,
   detectPersonalReadRequest,
@@ -1565,6 +1566,28 @@ describe('required read sequence', () => {
       result: { hasMore: true, nextPageToken: 'page-4', results: [] },
     };
     expect(nextRequiredReadTool(broad, [firstPage, secondPage, thirdPage])).toBeUndefined();
+  });
+
+  it('allows five bounded email-review metadata pages and then proceeds to complete-thread reads', () => {
+    const review = detectPersonalReadRequest(
+      turn(
+        'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.',
+      ),
+    );
+    expect(review?.emailReview).toBeDefined();
+    if (!review?.emailReview) throw new Error('expected bounded email review');
+    const pages: ReadToolEvidence[] = [];
+    for (let index = 0; index < 5; index += 1) {
+      const token = index === 0 ? undefined : `page-${index + 1}`;
+      pages.push({
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        args: { query: EMAIL_REVIEW_QUERY, ...(token ? { pageToken: token } : {}) },
+        result: { complete: false, hasMore: true, nextPageToken: `page-${index + 2}`, results: [] },
+      });
+      if (index < 4) expect(nextRequiredReadTool(review, pages)).toBe('gmail.search');
+    }
+    expect(nextRequiredReadTool(review, pages)).toBeUndefined();
   });
 
   it('binds searches to the owner wording and removes calendar narrowing', () => {
