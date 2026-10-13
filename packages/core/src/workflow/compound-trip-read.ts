@@ -590,7 +590,7 @@ function nextOutboundFlight(
         Number.isFinite(calendarDeparture) &&
         Math.abs(sourceDeparture - calendarDeparture) <= 5 * 60_000;
       const calendarHasSparseIdentity =
-        candidate.direction === 'unknown' && candidate.flightNumber === undefined;
+        candidate.direction === 'unknown' || candidate.flightNumber === undefined;
       return (
         directionMatches &&
         numberMatches &&
@@ -629,30 +629,42 @@ function nextOutboundFlight(
       ambiguous: false,
     };
   };
-  const futureSegments = (direction: 'outbound' | 'return') =>
-    segments
-      .filter((segment) => {
-        if (
-          (segment.direction !== direction &&
-            !(direction === 'outbound' && segment.direction === 'unknown')) ||
-          segment.departureDate < startDate ||
-          segment.departureDate >= endDate
-        )
-          return false;
-        if (segment.departureDate > startDate) return true;
-        const departureInstant = sourceLocalInstant(segment);
-        return departureInstant !== undefined && departureInstant >= startInstant;
-      })
-      .sort((a, b) =>
-        `${a.departureDate} ${a.departureTime}`.localeCompare(
-          `${b.departureDate} ${b.departureTime}`,
-        ),
-      );
-  const outbounds = futureSegments('outbound');
+  const futureSegments = (direction: 'outbound' | 'return') => {
+    const endInstant = Date.parse(request.timeWindow?.timeMax ?? '');
+    const candidates = segments
+      .filter(
+        (segment) =>
+          (segment.direction === direction ||
+            (direction === 'outbound' && segment.direction === 'unknown')) &&
+          segment.departureDate >= startDate &&
+          segment.departureDate < endDate,
+      )
+      .map((segment) => ({ segment, instant: sourceLocalInstant(segment) }))
+      .filter(
+        ({ instant }) =>
+          instant === undefined ||
+          (Number.isFinite(startInstant) &&
+            Number.isFinite(endInstant) &&
+            instant >= startInstant &&
+            instant < endInstant),
+      )
+      .sort((a, b) => {
+        if (a.instant === undefined || b.instant === undefined) return 0;
+        return a.instant - b.instant;
+      });
+    return {
+      segments: candidates.map(({ segment }) => segment),
+      unknownSegments: candidates
+        .filter(({ instant }) => instant === undefined)
+        .map(({ segment }) => segment),
+    };
+  };
+  const outboundCandidates = futureSegments('outbound');
+  const outbounds = outboundCandidates.segments;
   const firstOutbound = outbounds[0];
-  let ambiguous = false;
+  let ambiguous = outboundCandidates.unknownSegments.length > 0;
   let flight: CompoundTripFlightCandidate | undefined;
-  if (firstOutbound) {
+  if (firstOutbound && outboundCandidates.unknownSegments.length === 0) {
     const sameTime = outbounds.filter(
       (candidate) =>
         candidate.departureDate === firstOutbound.departureDate &&
@@ -665,7 +677,8 @@ function nextOutboundFlight(
       ambiguous = matched.ambiguous;
     }
   }
-  const returns = futureSegments('return');
+  const returnCandidates = futureSegments('return');
+  const returns = returnCandidates.segments;
   const pairedReturns = flight?.segment?.bookingReference
     ? returns.filter(
         (segment) =>
@@ -674,31 +687,32 @@ function nextOutboundFlight(
           segment.departureDate >= flight.segment.departureDate,
       )
     : [];
-  const firstPairedReturn = pairedReturns[0];
+  const pairedUnknownReturns = flight?.segment?.bookingReference
+    ? returnCandidates.unknownSegments.filter(
+        (segment) =>
+          segment.threadId === flight?.segment?.threadId &&
+          segment.bookingReference === flight.segment.bookingReference &&
+          segment.departureDate >= flight.segment.departureDate,
+      )
+    : [];
+  ambiguous ||= pairedUnknownReturns.length > 0;
+  const firstPairedReturn =
+    pairedReturns.length === 1 && pairedUnknownReturns.length === 0 ? pairedReturns[0] : undefined;
   let returnFlight: CompoundTripFlightCandidate | undefined;
-  if (firstPairedReturn) {
-    const matchingReturnTime = pairedReturns.filter(
-      (candidate) =>
-        candidate.departureDate === firstPairedReturn.departureDate &&
-        candidate.departureTime === firstPairedReturn.departureTime,
-    );
-    if (matchingReturnTime.length > 1) ambiguous = true;
-    else {
-      const matched = matchSegment(firstPairedReturn, 'return');
-      returnFlight = matched.flight;
-      ambiguous ||= matched.ambiguous;
-    }
+  if (pairedReturns.length > 1) {
+    ambiguous = true;
+  } else if (firstPairedReturn) {
+    const matched = matchSegment(firstPairedReturn, 'return');
+    returnFlight = matched.flight;
+    ambiguous ||= matched.ambiguous;
   }
   if (flight) return { flight, ...(returnFlight ? { returnFlight } : {}), ambiguous };
+  ambiguous ||= returnCandidates.unknownSegments.length > 0;
+  if (ambiguous) return { ambiguous };
   const firstReturn = returns[0];
   let currentTripReturn: CompoundTripFlightCandidate | undefined;
   if (firstReturn) {
-    const sameTime = returns.filter(
-      (candidate) =>
-        candidate.departureDate === firstReturn.departureDate &&
-        candidate.departureTime === firstReturn.departureTime,
-    );
-    if (sameTime.length > 1) ambiguous = true;
+    if (returns.length > 1) ambiguous = true;
     else currentTripReturn = matchSegment(firstReturn, 'return').flight;
   }
   return { ...(currentTripReturn ? { currentTripReturn } : {}), ambiguous };
@@ -710,19 +724,23 @@ function connectionSegments(
 ): CompoundTripFlightSegment[] {
   if (!flight?.bookingReference) return [];
   const firstDeparture = sourceLocalInstant(flight);
-  if (firstDeparture === undefined) return [];
   return segments
+    .map((segment, index) => ({ segment, index, instant: sourceLocalInstant(segment) }))
     .filter(
-      (segment) =>
+      ({ segment, instant }) =>
         segment.threadId === flight.threadId &&
         segment.bookingReference === flight.bookingReference &&
         segment !== flight &&
         (segment.direction === 'connection' || segment.direction === 'outbound') &&
-        (sourceLocalInstant(segment) ?? Number.NEGATIVE_INFINITY) > firstDeparture &&
-        (sourceLocalInstant(segment) ?? Number.POSITIVE_INFINITY) - firstDeparture <=
-          3 * 86_400_000,
+        (firstDeparture === undefined ||
+          instant === undefined ||
+          (instant > firstDeparture && instant - firstDeparture <= 3 * 86_400_000)),
     )
-    .sort((a, b) => (sourceLocalInstant(a) ?? 0) - (sourceLocalInstant(b) ?? 0));
+    .sort((a, b) => {
+      if (a.instant === undefined || b.instant === undefined) return a.index - b.index;
+      return a.instant - b.instant;
+    })
+    .map(({ segment }) => segment);
 }
 
 function connectionChainSummary(
@@ -1228,8 +1246,27 @@ function normalizePlace(value: string): string {
 }
 
 function sourceCivilDate(event: Record<string, unknown>): string | undefined {
-  const raw = text(event.start, 80);
-  return /^20\d{2}-\d{2}-\d{2}T/.test(raw) ? raw.slice(0, 10) : undefined;
+  const start = object(event.start);
+  const raw = text(start?.dateTime ?? start?.date ?? event.start, 80);
+  if (/^20\d{2}-\d{2}-\d{2}$/.test(raw)) return validDate(raw) ? raw : undefined;
+  if (!/^20\d{2}-\d{2}-\d{2}T/.test(raw) || !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw)) return undefined;
+  const instant = new Date(raw);
+  if (!Number.isFinite(instant.getTime())) return undefined;
+  const timeZone = text(event.timeZone, 120);
+  if (timeZone) {
+    if (!validTimeZone(timeZone)) return undefined;
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(instant);
+    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    const date = `${values.year}-${values.month}-${values.day}`;
+    return validDate(date) ? date : undefined;
+  }
+  const localDate = raw.slice(0, 10);
+  return validDate(localDate) ? localDate : undefined;
 }
 
 function destinationCivilDate(flight: CompoundTripFlightCandidate): string | undefined {
@@ -1511,7 +1548,9 @@ export function compoundTripReadProjection(
   if (!gmailSearchComplete || !allThreadsRead)
     gaps.push('Booking-email search or thread coverage is incomplete.');
   if (selectedFlight.ambiguous)
-    gaps.push('More than one calendar event matched a dated leg in this booking.');
+    gaps.push(
+      'The checked booking and calendar evidence has more than one plausible flight candidate or an unresolved source clock, so I could not choose which leg is next.',
+    );
   else if (!flight)
     gaps.push(
       currentTripReturn
