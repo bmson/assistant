@@ -441,6 +441,98 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect(hidden.matches).toEqual([]);
     });
 
+    it('invalidates speaker-only changes and rejects an empty optional speaker revision', async () => {
+      const conversationId = '77000000-0000-4000-8000-000000000077';
+      const messageId = '88000000-0000-4000-8000-000000000088';
+      const body = 'speaker provenance marker for a stable message body';
+      await store.doc('conversations', conversationId).set({
+        id: conversationId,
+        agentId: 'owner',
+      });
+      await store.doc('messages', messageId).set({
+        id: messageId,
+        conversationId,
+        role: 'user',
+        origin: 'owner',
+        text: body,
+        createdAt: new Date(),
+      });
+
+      const repository = new FirestoreConversationSearchRepository(store, space);
+      const initial = await repository.text({
+        agentId: 'owner',
+        query: 'speaker provenance',
+        limit: 5,
+      });
+      const original = initial.find((row) => row.messageId === messageId);
+      if (!original?.speakerRevision) throw new Error('Expected a speaker-bound source');
+      const originalRef = {
+        messageId,
+        conversationId,
+        sourceRevision: original.sourceRevision,
+        speakerRevision: original.speakerRevision,
+      };
+
+      const emptySpeakerRevision = { ...originalRef, speakerRevision: '' };
+      expect(
+        (await repository.validateSources({ agentId: 'owner', sourceRefs: [emptySpeakerRevision] }))
+          .unchangedSourceRefs,
+      ).toEqual([false]);
+      expect(
+        (
+          await repository.refreshForResume({
+            agentId: 'owner',
+            query: 'speaker provenance',
+            limit: 5,
+            sourceRefs: [emptySpeakerRevision],
+          })
+        ).unchangedSourceRefs,
+      ).toEqual([false]);
+
+      await store.doc('messages', messageId).update({ role: 'assistant' });
+      expect(
+        (await repository.validateSources({ agentId: 'owner', sourceRefs: [originalRef] }))
+          .unchangedSourceRefs,
+      ).toEqual([false]);
+      const roleChanged = await repository.refreshForResume({
+        agentId: 'owner',
+        query: 'speaker provenance',
+        limit: 5,
+        sourceRefs: [originalRef],
+      });
+      expect(roleChanged.unchangedSourceRefs).toEqual([false]);
+      const assistantMessage = roleChanged.matches.find((row) => row.messageId === messageId);
+      expect(assistantMessage?.role).toBe('assistant');
+      expect(assistantMessage?.sourceRevision).toBe(original.sourceRevision);
+      expect(assistantMessage?.speakerRevision).not.toBe(original.speakerRevision);
+      if (!assistantMessage?.speakerRevision)
+        throw new Error('Expected refreshed assistant speaker provenance');
+
+      const roleChangedRef = {
+        messageId,
+        conversationId,
+        sourceRevision: assistantMessage.sourceRevision,
+        speakerRevision: assistantMessage.speakerRevision,
+      };
+      await store.doc('messages', messageId).update({ origin: 'assistant' });
+      expect(
+        (await repository.validateSources({ agentId: 'owner', sourceRefs: [roleChangedRef] }))
+          .unchangedSourceRefs,
+      ).toEqual([false]);
+      const originChanged = await repository.refreshForResume({
+        agentId: 'owner',
+        query: 'speaker provenance',
+        limit: 5,
+        sourceRefs: [roleChangedRef],
+      });
+      expect(originChanged.unchangedSourceRefs).toEqual([false]);
+      const refreshedMessage = originChanged.matches.find((row) => row.messageId === messageId);
+      expect(refreshedMessage?.role).toBe('assistant');
+      expect(refreshedMessage?.origin).toBe('assistant');
+      expect(refreshedMessage?.sourceRevision).toBe(original.sourceRevision);
+      expect(refreshedMessage?.speakerRevision).not.toBe(roleChangedRef.speakerRevision);
+    });
+
     it('fails closed during active erasure and when the erasure fence changes during a read', async () => {
       await store
         .doc('conversations', 'fence-thread')

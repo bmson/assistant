@@ -1895,3 +1895,28 @@ describe('cards for a request with several live lookups', () => {
     expect(responseCardsForFinal({ evidence: [weather] as never })).toEqual([card]);
   });
 });
+
+it('includes both dates for a multi-day stay instead of displaying reversed same-day clocks', () => {
+  const cards = calendarResponseCards(
+    [
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        result: {
+          events: [
+            {
+              eventId: 'stay',
+              calendarId: 'hotel',
+              summary: 'Hotel stay',
+              start: '2026-10-10T13:00:00Z',
+              end: '2026-10-17T09:00:00Z',
+            },
+          ],
+        },
+      },
+    ],
+    request,
+  );
+  expect(cards[0]?.time).toBe('Oct 10, 2026, 6:00 AM–Oct 17, 2026, 2:00 AM');
+  expect(cards[0]?.time).not.toBe('6:00 AM–2:00 AM');
+});

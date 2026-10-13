@@ -30,7 +30,11 @@ import {
   scoreboardCardSpec,
 } from '../../generative-card.js';
 import type { RecallSource } from '../../memory/recall.js';
-import { recordSkillOutcome } from '../../memory/skills.js';
+import {
+  findActiveSkillByExactName,
+  recordSkillOutcome,
+  requestedSavedSkillName,
+} from '../../memory/skills.js';
 import { truncateAtBoundary } from '../../owner-text.js';
 import { type ArtifactIntent, artifactExecutionFailure } from '../artifact-intent.js';
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
@@ -56,6 +60,7 @@ import {
 } from '../machine.js';
 import { selectMemoryReadAnswer } from '../memory-read-answer.js';
 import { verifyFinalOutput } from '../output-verification.js';
+import { latestOwnerIntent } from '../owner-intent.js';
 import { PLANNER_VERSION } from '../planner.js';
 import { detectPersonalReadRequest, type PersonalReadRequest } from '../read-intent.js';
 import { requestChecklistHasUnfinished, requestChecklistSummary } from '../request-checklist.js';
@@ -487,6 +492,50 @@ export async function stageFinalResponse(
     if (pending.terminalStatus === 'done') {
       pending.terminalStatus = 'needs_attention';
       pending.outcome = 'needs_attention';
+    }
+  }
+  if (task.trust === 'owner' && !isForwardedIngest(task)) {
+    const intent = latestOwnerIntent(window, {
+      trust: 'owner',
+      trigger: task.trigger,
+      clarificationContinuation: state.clarificationContinuation,
+    });
+    const requestedSkill = requestedSavedSkillName(
+      intent.ownerAuthoredText,
+      latestUserText(window),
+    );
+    if (requestedSkill) {
+      let retrieved = false;
+      try {
+        const actual = await findActiveSkillByExactName(
+          deps.persistence?.skills ?? deps.db,
+          task.agentId,
+          requestedSkill,
+        );
+        retrieved = actual !== null && state.usedSkillIds.includes(actual.id);
+      } catch {
+        /* Missing evidence cannot support a use claim. */
+      }
+      const notice = retrieved
+        ? `Saved skill “${requestedSkill}” was retrieved as planning guidance.`
+        : `I could not verify retrieval of the saved skill “${requestedSkill}”; the answer does not establish that it was used.`;
+      // The durable task state and exact owner-scoped repository lookup provide
+      // the receipt; a model's claim is not evidence that a skill was retrieved.
+      pending.text = pending.text
+        .split(/(?<=[.!?])\s+|\n/)
+        .filter(
+          (line) =>
+            !(
+              line.includes(requestedSkill) && /\b(?:used|applied|followed|retrieved)\b/i.test(line)
+            ),
+        )
+        .join('\n')
+        .trim();
+      pending.text = `${notice}\n\n${pending.text}`;
+      if (!retrieved) {
+        pending.terminalStatus = 'needs_attention';
+        pending.outcome = 'needs_attention';
+      }
     }
   }
   state.pendingFinal = pending;

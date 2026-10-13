@@ -313,7 +313,7 @@ function personalReadNeedsAttention(
   return (
     Boolean(request.temporalIssue) ||
     checked.weeklyPlanAssessment?.coverageComplete !== true ||
-    checked.weeklyPlanAssessment.slotCount < 3
+    checked.weeklyPlanAssessment.slotCount < (request.calendarPlanOptions?.slotCount ?? 3)
   );
 }
 
@@ -657,7 +657,11 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       verifiedCompoundTripChecklist,
       ...(compoundTripExtraction ? { compoundTripExtraction } : {}),
     };
-    return !restrictedChecklistResume && directOwner && requestedCardIntent(ownerText)
+    return !restrictedChecklistResume &&
+      directOwner &&
+      (requestedCardIntent(ownerText) ||
+        readRequest?.kind === 'memory' ||
+        requestedSavedSkillName(ownerText, latestUserText(rc.window)))
       ? stageModelFinalResponse(deps, lease, state, rc.window, pending, artifactIntent, readContext)
       : stageFinalResponse(deps, lease, state, rc.window, pending, {
           verifiedCompoundTripChecklist,

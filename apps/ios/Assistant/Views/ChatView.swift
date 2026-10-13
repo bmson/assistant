@@ -838,23 +838,9 @@ struct ChatView: View {
         return Group {
             ConversationColumn {
                 ScrollView {
-                    // Deliberately eager, and the one thing here that is.
-                    //
-                    // The transcript's viewport ends 18pt above the composer,
-                    // and `scrollClipDisabled` below is what lets the strip
-                    // under the input keep showing the log. It can only draw
-                    // rows that exist, though, and a lazy stack stops vending
-                    // one once it leaves that viewport — so a bubble on its way
-                    // down was built, drawn under the glass, and then dropped a
-                    // few points later, blinking out of existence a whole
-                    // composer above the bottom of the screen.
-                    //
-                    // Building every row costs a long thread real work at open.
-                    // The alternative is a viewport that reaches the bottom of
-                    // the stage, and that is not free either: it puts the
-                    // scroll view in contact with geometry that moves under the
-                    // pull menu, and the transcript slid 10pt against the
-                    // composer for it. A row that exists cannot flicker.
+                    // Keep rows mounted while the reader scrolls. The viewport
+                    // ends before navigation and input, so message text cannot
+                    // draw behind those controls.
                     Group {
                         if model.messages.isEmpty {
                             VStack(spacing: 0) { emptyConversation }
@@ -920,11 +906,9 @@ struct ChatView: View {
                     .padding(.leading, AssistantTheme.compactGutter + (crownOnLeadingEdge ? landscapeCrownClearance : 0))
                     .padding(.trailing, AssistantTheme.compactGutter + (crownOnLeadingEdge ? 0 : landscapeCrownClearance))
                 }
-                // Older rows continue beneath the floating input and off the
-                // bottom of the screen while scrolling — the stack above is
-                // eager so that every one of them is there to draw. Clip at the
-                // outer stage, not this shorter viewport.
-                .scrollClipDisabled()
+                // The composer and navigation own separate layout slots.
+                // Respect this viewport even while older rows remain mounted.
+                .scrollClipDisabled(false)
                 .scrollIndicators(.hidden)
                 .scrollPosition($transcriptScrollPosition)
                 // Menu reveal is a transform of the parent surface. SwiftUI's

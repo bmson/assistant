@@ -100,6 +100,26 @@ function formatTime(value: string, timeZone?: string): string {
   }).format(date);
 }
 
+function calendarDate(value: string, timeZone?: string): string {
+  if (!timeZone) return value.slice(0, 10);
+  const date = new Date(value);
+  if (!Number.isFinite(date.valueOf())) return value.slice(0, 10);
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  }).format(date);
+}
+function calendarTimeRange(start: string, end: string, timeZone?: string): string {
+  const from = formatTime(start, timeZone);
+  if (!end) return from;
+  const to = formatTime(end, timeZone);
+  const fromDay = calendarDate(start, timeZone);
+  const toDay = calendarDate(end, timeZone);
+  return fromDay !== toDay ? `${fromDay}, ${from}–${toDay}, ${to}` : `${from}–${to}`;
+}
+
 function isVideoMeetingLink(link: RecordValue | undefined): boolean {
   if (string(link?.type) === 'video') return true;
   try {
@@ -189,11 +209,7 @@ export function calendarResponseCards(
         title: string(event.summary) || 'Untitled event',
         start,
         end,
-        time: allDay
-          ? 'All day'
-          : [formatTime(start, request?.timeZone), end ? formatTime(end, request?.timeZone) : '']
-              .filter(Boolean)
-              .join('–'),
+        time: allDay ? 'All day' : calendarTimeRange(start, end, request?.timeZone),
         allDay,
         location: string(event.location),
         attendees: Array.isArray(event.attendees)

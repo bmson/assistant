@@ -3366,7 +3366,15 @@ export function verifiedReadResponse(
                 .join(' · ');
           // A window ending on a different day than it started is the one case
           // the plain clock cannot express on its own.
-          const spanNote = allDay && end && end !== start ? ` (through ${end})` : '';
+          const spansDates =
+            rawEnd &&
+            eventLocalDay(rawStart, request.timeZone) !== eventLocalDay(rawEnd, request.timeZone);
+          const spanNote =
+            allDay && end && end !== start
+              ? ` (through ${end})`
+              : spansDates
+                ? ` (starts ${start}; ends ${end})`
+                : '';
           lines.push(
             `- **${when || start || '(no time returned)'}** — ${summary}${spanNote}${location ? ` — ${location}` : ''}${attendeeText ? ` — with ${attendeeText}` : ''}${eventLinks ? ` — ${eventLinks}` : ''}${calendar && manyCalendars ? ` (${calendar})` : ''}`,
           );
