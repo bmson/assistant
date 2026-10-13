@@ -241,6 +241,7 @@ describe('compound trip read projection', () => {
         {
           results: [{ threadId, subject: 'Lufthansa flight booking confirmation' }],
           complete: true,
+          hasMore: false,
         },
       ),
       row(
@@ -374,6 +375,12 @@ describe('compound trip read projection', () => {
         description: 'Outbound flight. Booking reference: NEXT-TRIP',
         start: '2026-10-22T10:00:00-07:00',
       },
+      {
+        eventId: 'later-return',
+        summary: 'Return flight KL 607',
+        description: 'Return flight. Booking reference: NEXT-TRIP',
+        start: '2026-10-29T12:00:00+02:00',
+      },
     ];
     const evidence: ReadToolEvidence[] = [
       completeCalendarEvents(events),
@@ -395,7 +402,7 @@ describe('compound trip read projection', () => {
             {
               messageId: 'two-trips-message',
               subject: 'Flight itineraries',
-              text: 'Two confirmed flight bookings.',
+              text: 'Return flight LH 777, 2026-10-16 at 14:10 Europe/Berlin from BER to SFO. Booking reference: CURRENT-TRIP.\nOutbound flight KL 606, 2026-10-22 at 10:00 America/Los_Angeles from SFO to AMS. Booking reference: NEXT-TRIP.\nReturn flight KL 607, 2026-10-29 at 12:00 Europe/Amsterdam from AMS to SFO. Booking reference: NEXT-TRIP.',
             },
           ],
         },
@@ -416,7 +423,8 @@ describe('compound trip read projection', () => {
           originAirport: 'BER',
           destinationAirport: 'SFO',
           bookingReference: 'CURRENT-TRIP',
-          excerpt: 'Return flight LH 777, 2026-10-16 at 14:10 Europe/Berlin.',
+          excerpt:
+            'Return flight LH 777, 2026-10-16 at 14:10 Europe/Berlin from BER to SFO. Booking reference: CURRENT-TRIP.',
         },
         {
           threadId: 'two-trips',
@@ -430,7 +438,23 @@ describe('compound trip read projection', () => {
           originAirport: 'SFO',
           destinationAirport: 'AMS',
           bookingReference: 'NEXT-TRIP',
-          excerpt: 'Outbound flight KL 606, 2026-10-22 at 10:00 America/Los_Angeles.',
+          excerpt:
+            'Outbound flight KL 606, 2026-10-22 at 10:00 America/Los_Angeles from SFO to AMS. Booking reference: NEXT-TRIP.',
+        },
+        {
+          threadId: 'two-trips',
+          messageId: 'two-trips-message',
+          subject: 'Flight itineraries',
+          flightNumber: 'KL607',
+          direction: 'return' as const,
+          departureDate: '2026-10-29',
+          departureTime: '12:00',
+          departureTimeZone: 'Europe/Amsterdam',
+          originAirport: 'AMS',
+          destinationAirport: 'SFO',
+          bookingReference: 'NEXT-TRIP',
+          excerpt:
+            'Return flight KL 607, 2026-10-29 at 12:00 Europe/Amsterdam from AMS to SFO. Booking reference: NEXT-TRIP.',
         },
       ],
       hotels: [],
@@ -445,10 +469,10 @@ describe('compound trip read projection', () => {
       direction: 'return',
       departureDate: '2026-10-16',
     });
-    expect(projection.text).toContain(
-      'Next matched future flight (return from a trip already underway)',
-    );
+    expect(projection.text).toContain('Next matched future return flight');
     expect(projection.text).not.toContain('KL606');
+    expect(projection.text).not.toContain('KL607');
+    expect(projection.text).not.toContain('Booked return flight');
     expect(projection.text).not.toMatch(/hotel|taxi|public transport/i);
   });
 
@@ -493,6 +517,167 @@ describe('compound trip read projection', () => {
     expect(projection.calendarCandidate).toBeUndefined();
     expect(projection.text).toContain('same departure instant');
     expect(projection.text).toContain('could not identify one unambiguous next flight');
+  });
+
+  it('does not promote a return segment whose quote or message is not bound to current complete sources', () => {
+    const read = request();
+    const quote =
+      'Return flight LH 777, 2026-10-16 at 14:10 Europe/Berlin. Booking reference: CURRENT-TRIP.';
+    const evidence: ReadToolEvidence[] = [
+      completeCalendarEvents([
+        {
+          eventId: 'current-return',
+          summary: 'Return flight to San Francisco',
+          description: 'Return flight. Booking reference: CURRENT-TRIP',
+          start: '2026-10-16T14:10:00+02:00',
+        },
+      ]),
+      row(
+        'gmail.search',
+        { query: read.mailQuery },
+        {
+          results: [{ threadId: 'current-itinerary', subject: 'Itinerary' }],
+          complete: true,
+          hasMore: false,
+        },
+      ),
+      row(
+        'gmail.read_thread',
+        { threadId: 'current-itinerary' },
+        {
+          complete: true,
+          messages: [
+            {
+              messageId: 'current-message',
+              subject: 'Itinerary',
+              text: 'The itinerary has no dated flight details in this message.',
+            },
+          ],
+        },
+      ),
+    ];
+    const forgedSegment = {
+      threadId: 'stale-itinerary',
+      messageId: 'stale-message',
+      subject: 'Old itinerary',
+      flightNumber: 'LH777',
+      direction: 'return' as const,
+      departureDate: '2026-10-16',
+      departureTime: '14:10',
+      departureTimeZone: 'Europe/Berlin',
+      originAirport: 'BER',
+      destinationAirport: 'SFO',
+      bookingReference: 'CURRENT-TRIP',
+      excerpt: quote,
+    };
+    const mismatchedSegment = {
+      ...forgedSegment,
+      threadId: 'current-itinerary',
+      messageId: 'current-message',
+      departureDate: '2026-10-22',
+    };
+    const projection = upcomingFlightReadProjection(read, evidence, {
+      status: 'complete',
+      segments: [forgedSegment, mismatchedSegment],
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: ['stale-message', 'current-message'],
+    });
+
+    expect(projection.flight).toBeUndefined();
+    expect(projection.calendarCandidate?.event.eventId).toBe('current-return');
+    expect(projection.text).toContain('booking and departure time are unconfirmed');
+    expect(projection.text).not.toContain('[Booking email]');
+    expect(projection.text).not.toContain('LH777');
+  });
+
+  it('keeps the earliest unmatched future return booking separate from a different calendar flight', () => {
+    const read = request();
+    const firstQuote =
+      'Return flight LH 777, 2026-10-16 at 14:10 Europe/Berlin from BER to SFO. Booking reference: RETURN-ONE.';
+    const laterQuote =
+      'Return flight LH 888, 2026-10-30 at 12:00 Europe/Berlin from BER to SFO. Booking reference: RETURN-TWO.';
+    const evidence: ReadToolEvidence[] = [
+      completeCalendarEvents([
+        {
+          eventId: 'different-calendar-flight',
+          summary: 'Return flight UA 999',
+          description: 'Booking reference: CALENDAR-BOOKING',
+          start: '2026-10-16T14:10:00+02:00',
+          links: [{ type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=diff' }],
+        },
+      ]),
+      row(
+        'gmail.search',
+        { query: read.mailQuery },
+        {
+          results: [{ threadId: 'return-bookings', subject: 'Airline returns' }],
+          complete: true,
+          hasMore: false,
+        },
+      ),
+      row(
+        'gmail.read_thread',
+        { threadId: 'return-bookings' },
+        {
+          complete: true,
+          messages: [
+            {
+              messageId: 'return-bookings-message',
+              subject: 'Airline returns',
+              text: `${firstQuote}\n${laterQuote}`,
+            },
+          ],
+        },
+      ),
+    ];
+    const projection = upcomingFlightReadProjection(read, evidence, {
+      status: 'complete',
+      segments: [
+        {
+          threadId: 'return-bookings',
+          messageId: 'return-bookings-message',
+          subject: 'Airline returns',
+          flightNumber: 'LH777',
+          direction: 'return',
+          departureDate: '2026-10-16',
+          departureTime: '14:10',
+          departureTimeZone: 'Europe/Berlin',
+          originAirport: 'BER',
+          destinationAirport: 'SFO',
+          bookingReference: 'RETURN-ONE',
+          excerpt: firstQuote,
+        },
+        {
+          threadId: 'return-bookings',
+          messageId: 'return-bookings-message',
+          subject: 'Airline returns',
+          flightNumber: 'LH888',
+          direction: 'return',
+          departureDate: '2026-10-30',
+          departureTime: '12:00',
+          departureTimeZone: 'Europe/Berlin',
+          originAirport: 'BER',
+          destinationAirport: 'SFO',
+          bookingReference: 'RETURN-TWO',
+          excerpt: laterQuote,
+        },
+      ],
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: ['return-bookings-message'],
+    });
+
+    expect(projection.calendarCandidate?.event.eventId).toBe('different-calendar-flight');
+    expect(projection.text).toContain('Return flight UA 999');
+    expect(projection.text).toContain('Separate future booking candidate: LH777 BER→SFO');
+    expect(projection.text).toContain('2026-10-16 14:10 Europe/Berlin');
+    expect(projection.text).toContain('[Booking email]');
+    expect(projection.text).toContain(
+      'could not confirm whether the sources describe the same flight',
+    );
+    expect(projection.text).not.toContain('LH888');
+    expect(projection.text).not.toContain('a confirmed conflict');
   });
 
   it('keeps independent flight and hotel bookings as candidates and attempts only grounded endpoint reads', () => {
@@ -1772,9 +1957,7 @@ describe('compound trip read projection', () => {
     const flightOnly = upcomingFlightReadProjection(read, evidence);
     expect(flightOnly.flight?.segment?.flightNumber).toBe('LH777');
     expect(flightOnly.currentTripReturn?.segment?.flightNumber).toBe('LH777');
-    expect(flightOnly.text).toContain(
-      'Next matched future flight (return from a trip already underway)',
-    );
+    expect(flightOnly.text).toContain('Next matched future return flight');
     expect(flightOnly.text).not.toContain('new outbound');
     expect(flightOnly.text).not.toMatch(/hotel|taxi|public.transport/i);
   });

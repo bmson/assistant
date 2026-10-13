@@ -865,6 +865,159 @@ function threadMessages(rows: ReadonlyArray<ReadToolEvidence>): SourceThreadMess
   }));
 }
 
+function exactSourceToken(quote: string, value: string): boolean {
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`, 'iu').test(quote);
+}
+
+function sourceDateMatches(quote: string, date: string): boolean {
+  const match = /^(20\d{2})-(\d{2})-(\d{2})$/.exec(date);
+  if (!match?.[1] || !match[2] || !match[3]) return false;
+  const parsedDate = new Date(`${date}T00:00:00.000Z`);
+  if (!Number.isFinite(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== date)
+    return false;
+  const [, year, month, day] = match;
+  const names = [
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December',
+  ];
+  const name = names[Number(month) - 1];
+  if (!name || Number(day) < 1 || Number(day) > 31) return false;
+  const normalizedQuote = quote.replace(/\s+/g, ' ');
+  return [
+    new RegExp(`\\b${year}-${month}-${day}\\b`),
+    new RegExp(`\\b${name}\\s+${Number(day)}(?:st|nd|rd|th)?[,]?\\s+${year}\\b`, 'i'),
+    new RegExp(`\\b${Number(day)}(?:st|nd|rd|th)?\\s+${name}[,]?\\s+${year}\\b`, 'i'),
+    new RegExp(
+      `\\b${name.slice(0, 3)}[a-z]*\\.?\\s+${Number(day)}(?:st|nd|rd|th)?[,]?\\s+${year}\\b`,
+      'i',
+    ),
+    new RegExp(
+      `\\b${Number(day)}(?:st|nd|rd|th)?\\s+${name.slice(0, 3)}[a-z]*\\.?[,]?\\s+${year}\\b`,
+      'i',
+    ),
+  ].some((pattern) => pattern.test(normalizedQuote));
+}
+
+function normalizedSourceClock(value: string): string | undefined {
+  const match = /^(\d{1,2}):(\d{2})(?:\s*([AP]M))?$/i.exec(value.trim());
+  if (!match?.[1] || !match[2]) return undefined;
+  let hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (minute > 59 || hour > 23) return undefined;
+  if (match[3]) {
+    if (hour < 1 || hour > 12) return undefined;
+    if (hour === 12) hour = 0;
+    if (match[3].toUpperCase() === 'PM') hour += 12;
+  }
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+function sourceHasClock(quote: string, value: string): boolean {
+  const target = normalizedSourceClock(value);
+  if (!target) return false;
+  const clocks = /\b(\d{1,2}):(\d{2})(?:\s*([AP]M))?\b/gi;
+  for (const match of quote.matchAll(clocks)) {
+    const clock = normalizedSourceClock(`${match[1]}:${match[2]}${match[3] ? ` ${match[3]}` : ''}`);
+    if (clock === target) return true;
+  }
+  return false;
+}
+
+function sourceHasFlightNumber(quote: string, flightNumber: string): boolean {
+  const expected = flightNumber.replace(/\s+/g, '').toUpperCase();
+  return [...quote.matchAll(/\b([A-Z]{2,3}\s*\d{1,4})\b/gi)].some(
+    (match) => match[1]?.replace(/\s+/g, '').toUpperCase() === expected,
+  );
+}
+
+function extractedSegmentMatchesCurrentSource(
+  segment: CompoundTripFlightSegment,
+  source: SourceThreadMessage | undefined,
+  sourceMessageIds: ReadonlySet<string>,
+): boolean {
+  const quote = segment.excerpt?.trim();
+  if (
+    !source ||
+    !quote ||
+    quote.length > 700 ||
+    !source.text.includes(quote) ||
+    !sourceMessageIds.has(segment.messageId) ||
+    !/^[A-Z]{2,3}\s*\d{1,4}$/i.test(segment.flightNumber) ||
+    !sourceHasFlightNumber(quote, segment.flightNumber) ||
+    !sourceDateMatches(quote, segment.departureDate) ||
+    !sourceHasClock(quote, segment.departureTime)
+  )
+    return false;
+  if (segment.arrivalDate && !sourceDateMatches(quote, segment.arrivalDate)) return false;
+  if (segment.arrivalTime && !sourceHasClock(quote, segment.arrivalTime)) return false;
+  for (const zone of [segment.departureTimeZone, segment.arrivalTimeZone]) {
+    if (zone && !exactSourceToken(quote, zone)) return false;
+  }
+  for (const airport of [segment.originAirport, segment.destinationAirport]) {
+    if (airport && !exactSourceToken(quote, airport)) return false;
+  }
+  if (segment.bookingReference && !exactSourceToken(quote, segment.bookingReference)) return false;
+  if (
+    (segment.direction === 'outbound' && !/\b(?:outbound|departing|departure)\b/i.test(quote)) ||
+    (segment.direction === 'return' && !/\b(?:return|inbound|homebound)\b/i.test(quote)) ||
+    (segment.direction === 'connection' &&
+      !/\b(?:connection|connecting|layover|transfer)\b/i.test(quote))
+  )
+    return false;
+  return true;
+}
+
+function bindTripExtractionToCurrentEvidence(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+  extraction: CompoundTripExtraction | undefined,
+): CompoundTripExtraction | undefined {
+  if (extraction?.status !== 'complete') return extraction;
+  const messages = threadMessages(compoundTripCompleteSourceThreads(request, evidence));
+  const sourceByPair = new Map(
+    messages.map((message) => [`${message.threadId}:${message.messageId}`, message]),
+  );
+  const sourceMessageIds = new Set(extraction.sourceMessageIds);
+  const segments = extraction.segments.filter((segment) =>
+    extractedSegmentMatchesCurrentSource(
+      segment,
+      sourceByPair.get(`${segment.threadId}:${segment.messageId}`),
+      sourceMessageIds,
+    ),
+  );
+  return {
+    ...extraction,
+    segments,
+    hotels: [],
+    rejectedFacts: extraction.rejectedFacts + extraction.segments.length - segments.length,
+  };
+}
+
+function sameFlightSegment(
+  left: CompoundTripFlightSegment,
+  right: CompoundTripFlightSegment,
+): boolean {
+  return (
+    left.threadId === right.threadId &&
+    left.messageId === right.messageId &&
+    left.flightNumber === right.flightNumber &&
+    left.departureDate === right.departureDate &&
+    left.departureTime === right.departureTime &&
+    left.bookingReference === right.bookingReference
+  );
+}
+
 function compoundTripExtractionFromEvidence(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): CompoundTripExtraction | undefined {
@@ -1807,17 +1960,40 @@ export function upcomingFlightReadProjection(
   evidence: ReadonlyArray<ReadToolEvidence>,
   extractedFacts?: CompoundTripExtraction,
 ): UpcomingFlightReadProjection {
-  const trip = compoundTripReadProjection(request, evidence, extractedFacts);
+  const extraction = bindTripExtractionToCurrentEvidence(
+    request,
+    evidence,
+    extractedFacts ?? compoundTripExtractionFromEvidence(evidence),
+  );
+  const trip = compoundTripReadProjection(request, evidence, extraction);
   const allSegments =
-    extractedFacts?.status === 'complete'
-      ? extractedFacts.segments
-      : extractedFacts === undefined
-        ? (compoundTripExtractionFromEvidence(evidence)?.segments ?? trip.flightSegments)
+    extraction?.status === 'complete'
+      ? extraction.segments
+      : extraction === undefined
+        ? parseFlightSegments(threadMessages(compoundTripCompleteSourceThreads(request, evidence)))
         : trip.flightSegments;
+  const futureOutboundBookings = new Set(
+    allSegments.flatMap((segment) => {
+      const instant = sourceLocalInstant(segment);
+      return segment.direction === 'outbound' &&
+        segment.bookingReference &&
+        instant !== undefined &&
+        instant >= Date.parse(request.timeWindow?.timeMin ?? '') &&
+        instant < Date.parse(request.timeWindow?.timeMax ?? '')
+        ? [`${segment.threadId}:${segment.bookingReference}`]
+        : [];
+    }),
+  );
+  const unpairedFutureReturns = allSegments.filter(
+    (segment) =>
+      segment.direction === 'return' &&
+      (!segment.bookingReference ||
+        !futureOutboundBookings.has(`${segment.threadId}:${segment.bookingReference}`)),
+  );
   const returnOnly = nextOutboundFlight(
     request,
     flightCandidates(request, trip.calendarRows),
-    allSegments.filter((segment) => segment.direction === 'return'),
+    unpairedFutureReturns,
   );
   const matchedFlights = [trip.flight, trip.currentTripReturn, returnOnly.currentTripReturn].filter(
     (candidate): candidate is CompoundTripFlightCandidate => candidate !== undefined,
@@ -1845,6 +2021,64 @@ export function upcomingFlightReadProjection(
   const calendarCandidate =
     !matchedFlightAmbiguous && !calendarCandidateAmbiguous ? firstCalendarMatches[0] : undefined;
   const selectedFlight = flight ?? calendarCandidate;
+  const selectedFlightMatchesTripOutbound = Boolean(
+    selectedFlight?.segment &&
+      trip.flight?.segment &&
+      sameFlightSegment(selectedFlight.segment, trip.flight.segment),
+  );
+  const matchedSegments = [
+    flight?.segment,
+    trip.returnFlight?.segment,
+    trip.currentTripReturn?.segment,
+  ].filter((segment): segment is CompoundTripFlightSegment => segment !== undefined);
+  const selectedInstant = selectedFlight
+    ? Date.parse(selectedFlight.instant)
+    : Number.POSITIVE_INFINITY;
+  const selectedDate = selectedFlight
+    ? (selectedFlight.segment?.departureDate ?? sourceCivilDate(selectedFlight.event))
+    : undefined;
+  const startInstant = Date.parse(request.timeWindow?.timeMin ?? '');
+  const endInstant = Date.parse(request.timeWindow?.timeMax ?? '');
+  const unmatchedFutureSegments = allSegments
+    .filter((segment) => {
+      if (segment.direction !== 'outbound' && segment.direction !== 'return') return false;
+      if (matchedSegments.some((matched) => sameFlightSegment(segment, matched))) return false;
+      const instant = sourceLocalInstant(segment);
+      if (
+        instant === undefined ||
+        !Number.isFinite(startInstant) ||
+        !Number.isFinite(endInstant) ||
+        instant < startInstant ||
+        instant >= endInstant
+      )
+        return false;
+      return instant <= selectedInstant || segment.departureDate === selectedDate;
+    })
+    .sort(
+      (left, right) =>
+        (sourceLocalInstant(left) ?? Number.POSITIVE_INFINITY) -
+        (sourceLocalInstant(right) ?? Number.POSITIVE_INFINITY),
+    );
+  const firstUnmatchedInstant = unmatchedFutureSegments[0]
+    ? sourceLocalInstant(unmatchedFutureSegments[0])
+    : undefined;
+  const firstUnmatchedMatches = firstUnmatchedInstant
+    ? unmatchedFutureSegments.filter(
+        (segment) => sourceLocalInstant(segment) === firstUnmatchedInstant,
+      )
+    : [];
+  const unmatchedBookingAmbiguous = firstUnmatchedMatches.length > 1;
+  const unmatchedBookingCandidate = unmatchedBookingAmbiguous
+    ? undefined
+    : firstUnmatchedMatches[0];
+  const unmatchedBookingInstant = unmatchedBookingCandidate
+    ? sourceLocalInstant(unmatchedBookingCandidate)
+    : undefined;
+  const unmatchedCandidatePrecedesSelected = Boolean(
+    unmatchedBookingInstant !== undefined &&
+      Number.isFinite(selectedInstant) &&
+      unmatchedBookingInstant < selectedInstant,
+  );
   const gaps: string[] = [];
   if (!trip.calendarComplete)
     gaps.push('Calendar coverage is incomplete, so I cannot establish which flight is next.');
@@ -1853,6 +2087,10 @@ export function upcomingFlightReadProjection(
   if (matchedFlightAmbiguous || calendarCandidateAmbiguous)
     gaps.push(
       'More than one future flight candidate has the same departure instant, so I could not choose one safely.',
+    );
+  if (unmatchedBookingAmbiguous)
+    gaps.push(
+      'More than one separate future booking segment has the same departure instant, so I could not select one safely.',
     );
   if (!selectedFlight)
     gaps.push(
@@ -1872,6 +2110,18 @@ export function upcomingFlightReadProjection(
     gaps.push('The booking source does not state the outbound departure time zone.');
   if (selectedFlight?.segment && !selectedFlight.itineraryConnectionChainComplete)
     gaps.push('The booking source does not establish a complete dated connection chain.');
+  if (unmatchedBookingCandidate) {
+    if (unmatchedBookingInstant !== undefined && Number.isFinite(selectedInstant)) {
+      if (unmatchedCandidatePrecedesSelected)
+        gaps.push(
+          'An earlier booking candidate is not matched to the calendar flight, so I could not establish which source identifies the next flight.',
+        );
+      else if (unmatchedBookingCandidate.departureDate === selectedDate)
+        gaps.push(
+          'A separate booking candidate falls on the calendar flight date but is not matched to it; I could not confirm whether the sources describe the same flight.',
+        );
+    }
+  }
   const summary: string[] = [];
   if (selectedFlight) {
     const calendarLink = calendarSource(selectedFlight.event);
@@ -1893,29 +2143,30 @@ export function upcomingFlightReadProjection(
         `Next future calendar flight candidate: ${title}${candidateDate ? `; calendar date ${candidateDate}` : ''}${calendarTime ? `; calendar time in ${displayTimeZone}: ${calendarTime}` : ''}${calendarLink ? ` [Calendar source](${calendarLink})` : ''}. Its booking and departure time are unconfirmed.`,
       );
     } else {
-      const isCurrentReturn = selectedFlight.segment?.direction === 'return' && !trip.returnFlight;
-      const flightLabel = isCurrentReturn
-        ? 'Next matched future flight (return from a trip already underway)'
-        : 'Next matched outbound flight';
+      const flightLabel = unmatchedCandidatePrecedesSelected
+        ? 'Later calendar-matched flight'
+        : selectedFlight.segment?.direction === 'return'
+          ? 'Next matched future return flight'
+          : 'Next matched outbound flight';
       summary.push(
         `${flightLabel}: ${selectedFlight.segment ? formatFlightSegment(selectedFlight.segment) : (selectedFlight.flightNumber ?? 'calendar flight')}${calendarTime ? `; calendar time in ${displayTimeZone}: ${calendarTime}` : ''}${calendarLink ? ` [Calendar](${calendarLink})` : ''}${bookingLink ? ` [Booking email](${bookingLink})` : ''}.`,
       );
     }
-    if (trip.returnFlight?.segment) {
+    if (selectedFlightMatchesTripOutbound && trip.returnFlight?.segment) {
       const returnCalendarLink = calendarSource(trip.returnFlight.event);
       const returnBookingLink = links.get(trip.returnFlight.segment.threadId);
       summary.push(
         `Booked return flight: ${formatFlightSegment(trip.returnFlight.segment)}${returnCalendarLink ? ` [Calendar](${returnCalendarLink})` : ''}${returnBookingLink ? ` [Booking email](${returnBookingLink})` : ''}.`,
       );
     }
-    if (trip.connectionSummary)
+    if (selectedFlightMatchesTripOutbound && trip.connectionSummary)
       summary.push(`Source-backed connecting legs: ${trip.connectionSummary}.`);
   }
-  for (const segment of trip.unmatchedBookingSegments) {
-    const link = threadSourceLinks(trip.readThreads).get(segment.threadId);
-    summary.push(
-      `Unmatched future booking candidate: ${formatFlightSegment(segment)}${link ? ` [Booking email](${link})` : ''}.`,
-    );
+  if (unmatchedBookingCandidate) {
+    const link = threadSourceLinks(trip.readThreads).get(unmatchedBookingCandidate.threadId);
+    const candidateSummary = `${unmatchedCandidatePrecedesSelected ? 'Earlier' : 'Separate'} future booking candidate: ${formatFlightSegment(unmatchedBookingCandidate)}${link ? ` [Booking email](${link})` : ''}. I could not match it to a calendar flight.`;
+    if (unmatchedCandidatePrecedesSelected) summary.unshift(candidateSummary);
+    else summary.push(candidateSummary);
   }
   return {
     calendarComplete: trip.calendarComplete,
@@ -1926,7 +2177,7 @@ export function upcomingFlightReadProjection(
     ...(trip.currentTripReturn ? { currentTripReturn: trip.currentTripReturn } : {}),
     ...(calendarCandidate ? { calendarCandidate } : {}),
     flightSegments: trip.flightSegments,
-    unmatchedBookingSegments: trip.unmatchedBookingSegments,
+    unmatchedBookingSegments: unmatchedBookingCandidate ? [unmatchedBookingCandidate] : [],
     blocked: gaps.length > 0,
     text: [
       summary.length > 0
