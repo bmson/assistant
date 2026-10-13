@@ -580,7 +580,8 @@ describe('golden tasks', () => {
             expect(args).toMatchObject({ query: 'newer_than:7d -from:me', maxResults: 20 });
             return {
               query: 'newer_than:7d -from:me',
-              mailboxSearched: 'owner@example.com',
+              mailboxSearched: 'assistant-bot@example.com',
+              configuredOwnerMailbox: 'owner@example.com',
               complete: true,
               hasMore: false,
               unavailable: [],
@@ -797,7 +798,8 @@ describe('golden tasks', () => {
           }),
           execute: async () => ({
             query: 'newer_than:7d -from:me',
-            mailboxSearched: 'owner@example.com',
+            mailboxSearched: 'assistant-bot@example.com',
+            configuredOwnerMailbox: 'owner@example.com',
             complete: true,
             hasMore: false,
             unavailable: [],
@@ -939,7 +941,8 @@ describe('golden tasks', () => {
                   : ['request-d', 'request-e', 'request-f'];
             return {
               query: 'newer_than:7d -from:me',
-              mailboxSearched: 'owner@example.com',
+              mailboxSearched: 'assistant-bot@example.com',
+              configuredOwnerMailbox: 'owner@example.com',
               complete: page === 3,
               hasMore: page < 3,
               ...(page < 3 ? { nextPageToken: `page-${page + 1}` } : {}),

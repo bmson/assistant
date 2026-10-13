@@ -361,11 +361,13 @@ function addressList(value: string): string[] {
 export function emailReviewOwnerMailbox(
   evidence: ReadonlyArray<EmailReviewEvidenceRow>,
 ): string | undefined {
-  const mailboxes = new Set(
-    emailReviewSearchRows(evidence)
-      .map((row) => singleEmail(string(object(row.result)?.mailboxSearched, 300)))
-      .filter((value): value is string => Boolean(value)),
+  const rows = emailReviewSearchRows(evidence);
+  if (rows.length === 0) return undefined;
+  const configuredOwners = rows.map((row) =>
+    singleEmail(string(object(row.result)?.configuredOwnerMailbox, 300)),
   );
+  if (configuredOwners.some((value) => !value)) return undefined;
+  const mailboxes = new Set(configuredOwners);
   return mailboxes.size === 1 ? [...mailboxes][0] : undefined;
 }
 

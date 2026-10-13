@@ -287,6 +287,7 @@ export const googleModule = defineModule<GoogleClient>({
     registerGmailTools(registry, {
       client,
       botEmail: config.ASSISTANT_EMAIL,
+      ownerEmail: config.OWNER_EMAIL,
       botName: config.ASSISTANT_NAME,
       workspace,
       prepareOutbound,
