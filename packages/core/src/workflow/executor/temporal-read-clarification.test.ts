@@ -154,6 +154,7 @@ async function runFlightContinuation(
     weeklyCalendarPlan?: boolean;
     weeklyCalendarIncomplete?: boolean;
     weeklyBusy?: unknown[];
+    modelIgnoresNoTools?: boolean;
   } = {},
 ) {
   const rows: Array<Record<string, unknown>> = [];
@@ -163,7 +164,10 @@ async function runFlightContinuation(
       modelId: 'synthetic/flight-continuation',
       degraded: false as const,
       text: '',
-      toolCalls: [],
+      toolCalls: options.modelIgnoresNoTools
+        ? [{ toolCallId: 'forbidden-provider-call', toolName: 'calendar.create_event', input: {} }]
+        : [],
+      ...(options.modelIgnoresNoTools ? { finishReason: 'tool-calls' as const } : {}),
     })),
     object: vi.fn(async () => {
       throw new Error('private-read route should skip planning');
@@ -510,6 +514,26 @@ async function runFlightContinuation(
 }
 
 describe('unsupported temporal requests through the actual executor step loop', () => {
+  it('finishes a checked read when the provider ignores the no-tool boundary', async () => {
+    const request =
+      'Review my calendar for next week and identify scheduling conflicts and overloaded days. Find three realistic 90-minute focus blocks during working hours, allowing time for travel and breaks. Recommend changes, but show me the plan before editing my calendar.';
+    const { result, state, router, dispatch } = await runFlightContinuation([], request, {
+      weeklyCalendarPlan: true,
+      weeklyCalendarIncomplete: true,
+      modelIgnoresNoTools: true,
+    });
+    expect(result.outcome).toBe('needs_attention');
+    expect(router.step).toHaveBeenCalledTimes(1);
+    expect(dispatch.mock.calls.map(([call]) => call.toolName)).toEqual([
+      'calendar.availability',
+      'calendar.list_events',
+      'calendar.list_events',
+    ]);
+    expect(state.pendingFinal?.text).toContain('review-only plan for next week');
+    expect(state.pendingFinal?.text).toContain('Holidays in United States');
+    expect(state.pendingFinal?.responseCards ?? []).toEqual([]);
+  });
+
   it('reads availability and every bounded event page before proposing a review-only week', async () => {
     const request =
       'Review my calendar for next week and identify scheduling conflicts and overloaded days. Find three realistic 90-minute focus blocks during working hours, allowing time for travel and breaks. Recommend changes, but show me the plan before editing my calendar.';

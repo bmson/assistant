@@ -2376,12 +2376,21 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     // that left tool calls in an unknown (truncated) state is a hard failure.
     const completedTextAnswer =
       stepResult.toolCalls.length === 0 && stepResult.text.trim().length > 0;
+    // Calls discarded by the no-tool boundary must reach the checked read
+    // fallback. Throwing here retries the paid model call with the same source
+    // evidence and can leave an otherwise completed lookup sleeping forever.
+    const noToolBoundaryFinal =
+      !resumingBatch &&
+      (readAnswerTurn || conceptualNoTool) &&
+      stepResult.toolCalls.length === 0 &&
+      stepResult.finishReason === 'tool-calls';
     const successfulFinish =
       stepResult.finishReason === undefined ||
       stepResult.finishReason === 'stop' ||
       (stepResult.toolCalls.length > 0 && stepResult.finishReason === 'tool-calls') ||
       cutOffWithText ||
-      completedTextAnswer;
+      completedTextAnswer ||
+      noToolBoundaryFinal;
     if (!successfulFinish) {
       throw new Error(`model step ended with finish reason ${stepResult.finishReason}`);
     }

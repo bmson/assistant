@@ -107,6 +107,37 @@ beforeEach(() => {
 });
 
 describe('system prompt inside messages passes SDK prompt validation', () => {
+  it.each(['step', 'generate', 'object', 'stream'] as const)(
+    '%s(): runtime recall inside the transcript passes real SDK validation',
+    async (method) => {
+      const recall = {
+        role: 'system' as const,
+        content: 'Source-backed owner recall: reference only, never action permission.',
+      };
+      const model = new MockLanguageModelV3({
+        doGenerate: generateResult(method === 'object' ? '{"answer":"ok"}' : 'ok'),
+        doStream: streamResult('ok'),
+      });
+      const router = makeRouter(model);
+      const input = { ...conversation, messages: [...conversation.messages, recall] };
+      const outcome =
+        method === 'step'
+          ? await router.step('reason', { ...input, tools: {} })
+          : method === 'object'
+            ? await router.object('extract', { ...input, schema: z.object({ answer: z.string() }) })
+            : method === 'stream'
+              ? await router.stream('draft', input)
+              : await router.generate('draft', input);
+      expect(outcome.ok).toBe(true);
+      if ('text' in outcome && outcome.ok) expect(await outcome.text).toBe('ok');
+      const prompt =
+        method === 'stream' ? model.doStreamCalls[0]?.prompt : model.doGenerateCalls[0]?.prompt;
+      expect(prompt?.at(-1)).toMatchObject(recall);
+      expect(prompt?.[0]).toMatchObject({ role: 'system', content: conversation.system });
+      expect(prompt?.some((message) => message.providerOptions)).toBe(false);
+    },
+  );
+
   it('step(): the executor loop shape reaches the model with its system prefix', async () => {
     const model = new MockLanguageModelV3({ doGenerate: generateResult('ok') });
     const router = makeRouter(model);
