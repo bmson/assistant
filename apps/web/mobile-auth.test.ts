@@ -17,7 +17,7 @@ vi.mock('./auth', () => ({ isAuthed: authState.cookie }));
 vi.mock('./lib/owner-auth/runtime', () => ({ verifyOwnerDeviceToken: authState.device }));
 
 import { clearMobileAccessTokenCache } from './lib/mobile-access-token';
-import { isMobileAuthed } from './mobile-auth';
+import { isMobileAuthed, mobileJson } from './mobile-auth';
 import { secureTokenMatches } from './mobile-token';
 
 beforeEach(() => {
@@ -147,5 +147,99 @@ describe('mobile bearer authentication', () => {
         }),
       ),
     ).toBe(true);
+  });
+});
+
+describe('mobile JSON error boundary', () => {
+  it('hides Firestore project and index diagnostics from server-error responses', async () => {
+    const response = mobileJson(
+      {
+        error:
+          '9 FAILED_PRECONDITION: The query requires an index. Create it: https://console.firebase.google.com/v1/r/project/private-project/firestore/indexes?create_composite=secret',
+        outcome: 'unconfirmed',
+        retryable: false,
+        stack: 'FirestoreError: private stack at read (/srv/app.js:10:2)',
+      },
+      { status: 503 },
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    const body = await response.json();
+    expect(body).toEqual({
+      error: 'The request could not be completed. Check its status before trying again.',
+      outcome: 'unconfirmed',
+      retryable: false,
+    });
+    expect(JSON.stringify(body)).not.toMatch(
+      /private-project|create_composite|FAILED_PRECONDITION|srv\/app/,
+    );
+  });
+
+  it('preserves actionable validation errors but sanitizes provider diagnostics even on a 4xx', async () => {
+    const validation = mobileJson(
+      { error: 'Document page size must be between 1 and 100' },
+      { status: 400 },
+    );
+    expect(validation.status).toBe(400);
+    expect(await validation.json()).toEqual({
+      error: 'Document page size must be between 1 and 100',
+    });
+
+    const selection = mobileJson(
+      { error: 'Select a document before continuing.' },
+      { status: 400 },
+    );
+    expect(await selection.json()).toEqual({ error: 'Select a document before continuing.' });
+
+    const diagnostic = mobileJson(
+      { error: 'SQLSTATE 42P01: relation private_table does not exist' },
+      { status: 409 },
+    );
+    expect(diagnostic.status).toBe(409);
+    expect(await diagnostic.json()).toEqual({
+      error: 'The request could not be completed. Check its status before trying again.',
+    });
+
+    const drizzleDiagnostic = mobileJson(
+      {
+        error: 'Failed query: select "id" from "goals" where "id" = $1 params: ["private-goal-id"]',
+      },
+      { status: 409 },
+    );
+    expect(drizzleDiagnostic.status).toBe(409);
+    const drizzleBody = await drizzleDiagnostic.json();
+    expect(drizzleBody).toEqual({
+      error: 'The request could not be completed. Check its status before trying again.',
+    });
+    expect(JSON.stringify(drizzleBody)).not.toMatch(/private-goal-id|select|params/i);
+  });
+
+  it('leaves normal structured success payloads unchanged', async () => {
+    const payload = {
+      ok: true,
+      result: {
+        status: 'needs_attention',
+        noticeId: 'notice-1',
+        createdAt: new Date('2026-10-13T12:00:00.000Z'),
+      },
+    };
+    const response = mobileJson(payload, { status: 200 });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      result: {
+        status: 'needs_attention',
+        noticeId: 'notice-1',
+        createdAt: '2026-10-13T12:00:00.000Z',
+      },
+    });
+
+    const diagnosticWordsInSuccess = {
+      ok: true,
+      message: 'Firestore index review includes the SELECT action requested by the owner.',
+      details: 'These are safe product-facing details, not an error.',
+    };
+    expect(await mobileJson(diagnosticWordsInSuccess).json()).toEqual(diagnosticWordsInSuccess);
   });
 });
