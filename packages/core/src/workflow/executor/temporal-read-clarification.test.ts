@@ -171,7 +171,7 @@ async function runFlightContinuation(
         : [],
       ...(options.modelIgnoresNoTools ? { finishReason: 'tool-calls' as const } : {}),
     })),
-    object: vi.fn(async () => {
+    object: vi.fn(async (_purpose: string, _input: Record<string, unknown>) => {
       throw new Error('private-read route should skip planning');
     }),
     embed: vi.fn(async (texts: string[]) => texts.map(() => new Array(1536).fill(0.01))),
@@ -284,35 +284,34 @@ async function runFlightContinuation(
           results: options.incompleteMailSearch
             ? []
             : options.upcomingFlight
-              ? [
-                  {
+              ? (() => {
+                  const booking = {
                     threadId: 'booking-upcoming',
                     subject: 'Lisbon flight confirmation',
                     snippet: 'Departure November 12, 2026. Fare expires December 2, 2026.',
-                  },
-                  {
+                  };
+                  const oslo = {
                     threadId: 'oslo-flight-same-day',
                     subject: 'Oslo flight confirmation',
                     snippet: 'Departure November 12, 2026.',
-                  },
-                  {
-                    threadId: options.newsletterLisbonSource
-                      ? 'lisbon-newsletter'
-                      : options.yearlessLisbonConfirmation
-                        ? 'lisbon-yearless'
-                        : 'old-flight',
-                    subject: options.newsletterLisbonSource
-                      ? 'Lisbon flight deals'
-                      : options.yearlessLisbonConfirmation
-                        ? 'Lisbon flight itinerary'
-                        : 'Lisbon flight itinerary',
-                    snippet: options.newsletterLisbonSource
-                      ? 'Flight departure November 12, 2026 at 7:30 AM.'
-                      : options.yearlessLisbonConfirmation
-                        ? 'Departure November 12 at 7:30 AM.'
-                        : 'Departure September 8, 2026.',
-                  },
-                ]
+                  };
+                  const alternate = options.newsletterLisbonSource
+                    ? {
+                        threadId: 'lisbon-newsletter',
+                        subject: 'Lisbon flight deals',
+                        snippet: 'Flight departure November 12, 2026 at 7:30 AM.',
+                      }
+                    : options.yearlessLisbonConfirmation
+                      ? {
+                          threadId: 'lisbon-yearless',
+                          subject: 'Lisbon flight itinerary',
+                          snippet: 'Departure November 12 at 7:30 AM.',
+                        }
+                      : { threadId: 'old-flight', subject: 'Lisbon flight itinerary' };
+                  return options.newsletterLisbonSource || options.yearlessLisbonConfirmation
+                    ? [booking, alternate, oslo]
+                    : [booking, oslo, alternate];
+                })()
               : options.currentBookingFourth
                 ? [
                     {
@@ -405,12 +404,98 @@ async function runFlightContinuation(
       } else {
         throw new Error(`Unexpected tool dispatch: ${toolName}`);
       }
+      const evidenceArgs = { ...args };
+      if (toolName === 'gmail.search') {
+        const query = String(args.query ?? '');
+        const maxResults = Number.isInteger(args.maxResults) ? Number(args.maxResults) : 10;
+        const results = Array.isArray(result.results) ? result.results : [];
+        const unavailable = Array.isArray(result.unavailable) ? result.unavailable : [];
+        const complete = result.complete === true;
+        const hasMore = result.hasMore === true;
+        const nextPageToken =
+          typeof result.nextPageToken === 'string' ? result.nextPageToken : undefined;
+        evidenceArgs.maxResults = maxResults;
+        Object.assign(result, {
+          query,
+          unavailable,
+          hasMore,
+          receipt: {
+            version: 1,
+            source: { kind: 'gmail-search', id: query },
+            requested: {
+              limit: maxResults,
+              ...(typeof args.pageToken === 'string' ? { cursor: args.pageToken } : {}),
+              scope: 'query-page',
+            },
+            covered: {
+              count: results.length,
+              total: results.length,
+              unavailable: unavailable.length,
+            },
+            complete,
+            losses: complete ? [] : ['coverage-unknown'],
+            continuation:
+              hasMore && nextPageToken
+                ? { tool: 'gmail.search', input: { query, maxResults, pageToken: nextPageToken } }
+                : null,
+          },
+        });
+      } else if (toolName === 'gmail.read_thread') {
+        const threadId = String(args.threadId ?? '');
+        const start = Number.isInteger(args.startMessageIndex) ? Number(args.startMessageIndex) : 0;
+        const offset = Number.isInteger(args.startMessageOffset)
+          ? Number(args.startMessageOffset)
+          : 0;
+        const maxMessages = Number.isInteger(args.maxMessages) ? Number(args.maxMessages) : 20;
+        const maxChars = Number.isInteger(args.maxChars) ? Number(args.maxChars) : 20_000;
+        const messages = Array.isArray(result.messages)
+          ? result.messages.map((message, index) => {
+              const item = message as Record<string, unknown>;
+              const body = typeof item.text === 'string' ? item.text : '';
+              return {
+                ...item,
+                messageId:
+                  typeof item.messageId === 'string'
+                    ? item.messageId
+                    : `${threadId}-message-${index}`,
+                sourceLength: body.length,
+                truncated: false,
+              };
+            })
+          : [];
+        const complete = result.complete === true;
+        evidenceArgs.startMessageIndex = start;
+        evidenceArgs.startMessageOffset = offset;
+        evidenceArgs.maxMessages = maxMessages;
+        evidenceArgs.maxChars = maxChars;
+        Object.assign(result, {
+          threadId,
+          messages,
+          hasMore: false,
+          receipt: {
+            version: 1,
+            source: { kind: 'gmail-thread', id: threadId },
+            requested: { start, offset, limit: maxMessages, scope: 'thread-messages' },
+            covered: {
+              start,
+              offset,
+              end: start + messages.length,
+              count: messages.length,
+              total: start + messages.length,
+              unavailable: 0,
+            },
+            complete,
+            losses: complete ? [] : ['coverage-unknown'],
+            continuation: null,
+          },
+        });
+      }
       const id = `flight-evidence-${rows.length + 1}`;
       rows.push({
         id,
         toolName,
         status: 'succeeded',
-        args,
+        args: evidenceArgs,
         result,
         error: null,
         step: rows.length + 1,
@@ -775,7 +860,7 @@ describe('flight clarification through the actual executor step loop', () => {
     expect(result.outcome).not.toBe('done');
   });
 
-  it('returns a qualified single-flight candidate despite output-policy wording', async () => {
+  it('keeps a calendar-only flight candidate incomplete when booking identity is not verified', async () => {
     const request =
       'Find my next flight from my booking emails and calendar. Confirm its departure date and time zone, and clearly mark anything you cannot verify.';
     const { result, state, dispatch, router } = await runFlightContinuation([], request, {
@@ -783,42 +868,47 @@ describe('flight clarification through the actual executor step loop', () => {
       withRequestChecklist: true,
     });
 
-    expect(result.outcome).toBe('done');
+    expect(result.outcome).toBe('needs_attention');
     expect(dispatch.mock.calls.map(([call]) => call.toolName)).toEqual([
       'calendar.list_events',
       'gmail.search',
       'gmail.read_thread',
       'gmail.read_thread',
-      'gmail.read_thread',
     ]);
     expect(dispatch.mock.calls[0]?.[0].args).toMatchObject({
       timeMin: '2026-10-09T12:00:00.000Z',
-      timeMax: '2028-10-08T07:00:00.000Z',
+      timeMax: '2027-10-09T12:00:00.000Z',
       maxResults: 50,
     });
     expect(dispatch.mock.calls[1]?.[0].args.query).toBe(
       '{flight flights itinerary "e-ticket" "boarding pass" "booking confirmation" "reservation confirmation"}',
     );
-    expect(router.object).not.toHaveBeenCalled();
-    expect(state.pendingFinal?.contractBlocked).toBe(false);
+    expect(router.object).toHaveBeenCalledTimes(1);
+    expect(router.object.mock.calls[0]?.[1]).toMatchObject({
+      taskId: 'synthetic-flight-task',
+      maxRetries: 0,
+      singleAttempt: true,
+      maxEstimatedCostUsd: 0.05,
+      requestProfile: { tools: 'none', output: 'json_schema', streaming: false },
+    });
+    expect(state.pendingFinal?.contractBlocked).toBe(true);
     expect(state.pendingFinal?.text).toContain(
-      'The next flight candidate in your calendar is Flight to Lisbon on November 12, 2026.',
-    );
-    expect(state.pendingFinal?.text).toContain('The calendar shows 9:00 AM Pacific Standard Time.');
-    expect(state.pendingFinal?.text).toContain(
-      'A separate booking-email candidate mentioning lisbon lists departure at 9:30 AM',
-    );
-    expect(state.pendingFinal?.text).toContain("couldn't establish that it is the same flight");
-    expect(state.pendingFinal?.text).toContain('or reconcile its source time zone');
-    expect(state.pendingFinal?.text).toContain(
-      'Calendar source: https://calendar.google.com/calendar/event?eid=lisbon',
+      'Next future calendar flight candidate: Flight to Lisbon; calendar date 2026-11-12',
     );
     expect(state.pendingFinal?.text).toContain(
-      'Booking email candidate: https://mail.google.com/mail/u/0/#all/booking-upcoming',
+      'calendar time in America/Los_Angeles: Nov 12, 2026, 9:00 AM',
     );
+    expect(state.pendingFinal?.text).toContain('Its booking and departure time are unconfirmed.');
+    expect(state.pendingFinal?.text).toContain(
+      'I could not match it to a fully dated booking segment',
+    );
+    expect(state.pendingFinal?.text).toContain(
+      '[Calendar source](https://calendar.google.com/calendar/event?eid=lisbon)',
+    );
+    expect(state.pendingFinal?.text).not.toContain('Booking email candidate');
     expect(state.pendingFinal?.text).not.toContain('This request is not fully completed.');
     expect(state.pendingFinal?.text).not.toContain('Not completed:');
-    expect(state.pendingFinal?.terminalStatus).toBe('done');
+    expect(state.pendingFinal?.terminalStatus).toBe('needs_attention');
     expect(state.pendingFinal?.text).not.toMatch(/September 8|flight-newsletter|taxi|transit/);
     expect(
       (state.pendingFinal?.responseCards ?? []).some(
@@ -838,16 +928,16 @@ describe('flight clarification through the actual executor step loop', () => {
       'calendar.list_events',
       'gmail.search',
     ]);
-    expect(state.pendingFinal?.text).toContain("couldn't finish checking the booking emails");
     expect(state.pendingFinal?.text).toContain(
-      'The next flight candidate in your calendar is Flight to Lisbon on November 12, 2026 at 9:00 AM Pacific Standard Time',
+      'Booking-email search or thread coverage is incomplete.',
     );
     expect(state.pendingFinal?.text).toContain(
-      'Calendar source: https://calendar.google.com/calendar/event?eid=lisbon',
+      'Next future calendar flight candidate: Flight to Lisbon; calendar date 2026-11-12',
     );
     expect(state.pendingFinal?.text).toContain(
-      'Connections, hotel, and ground transport remain unverified.',
+      '[Calendar source](https://calendar.google.com/calendar/event?eid=lisbon)',
     );
+    expect(state.pendingFinal?.text).toContain('Its booking and departure time are unconfirmed.');
     expect(state.pendingFinal?.terminalStatus).toBe('needs_attention');
   });
 
@@ -858,10 +948,9 @@ describe('flight clarification through the actual executor step loop', () => {
     });
     expect(result.outcome).toBe('needs_attention');
     expect(state.pendingFinal?.text).toContain(
-      'A flight candidate in your calendar is Flight to Lisbon',
+      'Next future calendar flight candidate: Flight to Lisbon',
     );
-    expect(state.pendingFinal?.text).not.toContain('The next flight candidate in your calendar');
-    expect(state.pendingFinal?.text).toContain('Calendar coverage was incomplete');
+    expect(state.pendingFinal?.text).toContain('Calendar coverage is incomplete');
   });
 
   it('does not infer that no next flight exists from an incomplete calendar search', async () => {
@@ -871,10 +960,10 @@ describe('flight clarification through the actual executor step loop', () => {
       withoutFlightCandidate: true,
     });
     expect(result.outcome).toBe('needs_attention');
-    expect(state.pendingFinal?.text).toContain('could not establish which flight is next');
+    expect(state.pendingFinal?.text).toContain('I cannot establish which flight is next.');
     expect(state.pendingFinal?.text).not.toContain('I found no dated flight candidate');
     expect(state.pendingFinal?.text).toContain(
-      'booking-only itineraries were not independently selected',
+      'I could not identify a dated future flight candidate in the checked calendar.',
     );
   });
 
@@ -884,9 +973,11 @@ describe('flight clarification through the actual executor step loop', () => {
       missingCalendarRosterFlag: true,
     });
     expect(result.outcome).toBe('needs_attention');
-    expect(state.pendingFinal?.text).toContain('A flight candidate in your calendar');
-    expect(state.pendingFinal?.text).toContain('Calendar coverage was incomplete');
-    expect(state.pendingFinal?.text).toContain("couldn't finish checking the calendar");
+    expect(state.pendingFinal?.text).toContain('Next future calendar flight candidate');
+    expect(state.pendingFinal?.text).toContain('Calendar coverage is incomplete');
+    expect(state.pendingFinal?.text).toContain(
+      'Booking-email search or thread coverage is incomplete.',
+    );
   });
 
   it('does not use a same-route newsletter to confirm a departure clock', async () => {
@@ -895,10 +986,9 @@ describe('flight clarification through the actual executor step loop', () => {
       upcomingFlight: true,
       newsletterLisbonSource: true,
     });
-    expect(state.pendingFinal?.text).toContain(
-      'booking-email candidate mentioning lisbon lists departure at 9:30 AM',
-    );
-    expect(state.pendingFinal?.text).not.toContain('7:30 AM');
+    expect(state.pendingFinal?.text).toContain('Next future calendar flight candidate');
+    expect(state.pendingFinal?.text).toContain('Its booking and departure time are unconfirmed.');
+    expect(state.pendingFinal?.text).not.toMatch(/7:30 AM|9:30 AM|Booking email candidate/);
   });
 
   it('does not bind a yearless old confirmation to a future flight date', async () => {
@@ -907,10 +997,9 @@ describe('flight clarification through the actual executor step loop', () => {
       upcomingFlight: true,
       yearlessLisbonConfirmation: true,
     });
-    expect(state.pendingFinal?.text).toContain(
-      'booking-email candidate mentioning lisbon lists departure at 9:30 AM',
-    );
-    expect(state.pendingFinal?.text).not.toContain('7:30 AM');
+    expect(state.pendingFinal?.text).toContain('Next future calendar flight candidate');
+    expect(state.pendingFinal?.text).toContain('Its booking and departure time are unconfirmed.');
+    expect(state.pendingFinal?.text).not.toMatch(/7:30 AM|9:30 AM|Booking email candidate/);
   });
 
   it('bounds and escapes the selected calendar title', async () => {
@@ -920,7 +1009,7 @@ describe('flight clarification through the actual executor step loop', () => {
       hostileCalendarTitle: 'Flight to Lisbon [click](https://evil.example)',
     });
     expect(state.pendingFinal?.text).toContain(
-      String.raw`Flight to Lisbon \[click\]\(https://evil\.example\)`,
+      String.raw`Flight to Lisbon \[click\]\(https://evil.example\)`,
     );
     expect(state.pendingFinal?.text).not.toContain('[click](https://evil.example)');
   });
