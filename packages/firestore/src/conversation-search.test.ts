@@ -474,20 +474,17 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       };
 
       const emptySpeakerRevision = { ...originalRef, speakerRevision: '' };
-      expect(
-        (await repository.validateSources({ agentId: 'owner', sourceRefs: [emptySpeakerRevision] }))
-          .unchangedSourceRefs,
-      ).toEqual([false]);
-      expect(
-        (
-          await repository.refreshForResume({
-            agentId: 'owner',
-            query: 'speaker provenance',
-            limit: 5,
-            sourceRefs: [emptySpeakerRevision],
-          })
-        ).unchangedSourceRefs,
-      ).toEqual([false]);
+      await expect(
+        repository.validateSources({ agentId: 'owner', sourceRefs: [emptySpeakerRevision] }),
+      ).rejects.toThrow('Invalid conversation source identity');
+      await expect(
+        repository.refreshForResume({
+          agentId: 'owner',
+          query: 'speaker provenance',
+          limit: 5,
+          sourceRefs: [emptySpeakerRevision],
+        }),
+      ).rejects.toThrow('Invalid resumed conversation source identity');
 
       await store.doc('messages', messageId).update({ role: 'assistant' });
       expect(
