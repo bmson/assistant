@@ -2546,6 +2546,46 @@ describe('golden tasks', () => {
     expect(check?.blocked).toBe(false);
   });
 
+  it('plans the hypothetical work schedule without searching the owner calendar', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const request =
+      'Plan a hypothetical work morning from 09:00 to 12:30. Include a 90-minute deep-work block, a 45-minute review, a 30-minute meeting at 11:30, and two 15-minute breaks. Show a compact table with start and end times, identify any unused time, and check that nothing overlaps. Do not look at or change my real calendar.';
+    const answer = [
+      '| Time | Plan |',
+      '|---|---|',
+      '| 09:00–10:30 | Deep work |',
+      '| 10:30–10:45 | Break |',
+      '| 10:45–11:30 | Review |',
+      '| 11:30–12:00 | Meeting |',
+      '| 12:00–12:15 | Break |',
+      '| 12:15–12:30 | Unused time |',
+      '',
+      'The blocks do not overlap. The review is 45 minutes, deep work is 90 minutes, and 15 minutes remain unused.',
+    ].join('\n');
+    const result = await runGoldenTask(db, agentId, {
+      name: 'hypothetical-schedule-does-not-read-private-calendar',
+      event: { source: 'chat', trust: 'owner', payload: { text: request } },
+      taskType: 'chat_turn',
+      plan: {
+        action: 'reply',
+        reasoning: 'Answer the hypothetical schedule request.',
+        steps: [],
+        missingInfo: [],
+      },
+      script: [{ text: answer }],
+      tools: {},
+    });
+    createdTaskIds.push(result.taskId);
+
+    expect(result.toolNames).toEqual([]);
+    expect(result.stepCount).toBe(1);
+    expect(result.status).toBe('done');
+    expect(result.finalText).toContain('09:00–10:30');
+    expect(result.finalText).toContain('12:15–12:30');
+    expect(result.finalText).not.toContain("That's everything I could actually see");
+    expect(result.finalText).not.toContain('I could not get to');
+  });
+
   it('blocks an invented flight return time before the calendar tool executes', async (ctx) => {
     if (!dbUp) return ctx.skip();
     let executed = false;

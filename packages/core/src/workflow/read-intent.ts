@@ -154,6 +154,24 @@ const SAME_SUBJECT_LOOKUP_OFFER =
   /\b(?:would you like me to|shall i|should i|i can)\s+(?:check|verify|look up|read|search for)\s+(?:that|it|the (?:details|confirmation)|(?:your|the|our) hotel(?: confirmation| reservation)?)\b/i;
 const MUTATING_OFFER =
   /\b(?:add|archive|book|cancel|create|delete|edit|forward|invite|move|reply|reschedule|save|schedule|send|submit|update)\b/i;
+const NEGATED_LOOKUP_VERB = String.raw`(?:look(?:\s+up)?|check|search|read|open|access|review|scan|inspect|consult)`;
+
+function explicitlyProhibitsPrivateRead(text: string, surface: 'calendar' | 'email'): boolean {
+  const accountSurface =
+    surface === 'calendar'
+      ? String.raw`(?:google\s+)?(?:calendars?|schedules?|agendas?)`
+      : `(?:gmail|e-?mails?|mail|inboxes|mailboxes|messages?|threads?)`;
+  const sourceOwner = String.raw`(?:my|our)\s+(?:(?:real|actual|personal)\s+)?`;
+  const direct = new RegExp(
+    String.raw`\b(?:do\s+not|don['’]?t|never)\s+${NEGATED_LOOKUP_VERB}\b[^.!?\n]{0,120}\b${sourceOwner}${accountSurface}\b`,
+    'i',
+  );
+  const without = new RegExp(
+    String.raw`\bwithout\s+${NEGATED_LOOKUP_VERB}(?:ing)?\b[^.!?\n]{0,120}\b${sourceOwner}${accountSurface}\b`,
+    'i',
+  );
+  return direct.test(text) || without.test(text);
+}
 
 /**
  * Use the nearest substantive OWNER turn to resolve a short detail question.
@@ -1339,8 +1357,10 @@ function detectPersonalReadRequestInternal(
   }
   if (latestIndex === -1) return null;
   const latest = readIntentText(messages[latestIndex]);
+  const calendarReadProhibited = explicitlyProhibitsPrivateRead(latest, 'calendar');
+  const emailReadProhibited = explicitlyProhibitsPrivateRead(latest, 'email');
   const flightContinuation =
-    clarificationDepth < 2
+    clarificationDepth < 2 && !calendarReadProhibited && !emailReadProhibited
       ? flightScopeClarificationContinuation(
           messages,
           latestIndex,
@@ -1370,6 +1390,7 @@ function detectPersonalReadRequestInternal(
   // mutation, so enforcing its source reads must not turn it into a tool-less
   // answer or authorize any other follow-through.
   if (
+    !emailReadProhibited &&
     requestedCardIntent(latest) &&
     /^\s*(?:(?:please|can you|could you|would you)\s+)*(?:create|make|save)\b/i.test(latest) &&
     /\b(?:my|our)\s+(?:hotel|reservation|booking)\b/i.test(latest) &&
@@ -1386,7 +1407,7 @@ function detectPersonalReadRequestInternal(
       answerFocus: 'lodging',
     };
   }
-  if (directEmailReviewIntent(latest)) {
+  if (!emailReadProhibited && directEmailReviewIntent(latest)) {
     return {
       kind: 'email',
       queryTerms: [],
@@ -1571,6 +1592,7 @@ function detectPersonalReadRequestInternal(
     (verification && flightLanguage.test(latest)) ||
     terms.some((term) => !SCHEDULED_THING.test(term));
   const namedSchedule =
+    !calendarReadProhibited &&
     !genericScheduleList &&
     !nextEventQuestion &&
     (SCHEDULED_THING.test(latest) || (verification && SCHEDULED_THING.test(recentContext))) &&
@@ -1578,18 +1600,21 @@ function detectPersonalReadRequestInternal(
     (READ_OR_QUESTION.test(latest) || verification || whyLookup);
   const daySchedule = DAY_SCHEDULE.test(latest);
   const calendar =
-    upcomingFlightDiscovery ||
-    daySchedule ||
-    namedSchedule ||
-    (CALENDAR_SURFACE.test(latest) &&
-      (READ_OR_QUESTION.test(latest) || verification || whyLookup)) ||
-    (verification && CALENDAR_SURFACE.test(recentContext));
+    !calendarReadProhibited &&
+    (upcomingFlightDiscovery ||
+      daySchedule ||
+      namedSchedule ||
+      (CALENDAR_SURFACE.test(latest) &&
+        (READ_OR_QUESTION.test(latest) || verification || whyLookup)) ||
+      (verification && CALENDAR_SURFACE.test(recentContext)));
   const email =
-    upcomingFlightDiscovery ||
-    (EMAIL_SURFACE.test(latest) &&
-      (READ_OR_QUESTION.test(latest) || receiptQuestion(latest) || verification)) ||
-    (verification && EMAIL_SURFACE.test(recentContext));
+    !emailReadProhibited &&
+    (upcomingFlightDiscovery ||
+      (EMAIL_SURFACE.test(latest) &&
+        (READ_OR_QUESTION.test(latest) || receiptQuestion(latest) || verification)) ||
+      (verification && EMAIL_SURFACE.test(recentContext)));
   const availability =
+    !calendarReadProhibited &&
     AVAILABILITY_SURFACE.test(latest) &&
     !namedSchedule &&
     (!EMAIL_SURFACE.test(latest) ||
@@ -1599,6 +1624,7 @@ function detectPersonalReadRequestInternal(
       CALENDAR_TIME_REFERENCE.test(latest));
 
   const weeklyCalendarPlan =
+    !calendarReadProhibited &&
     /\b(?:focus blocks?|focus time|overloaded days?|scheduling conflicts?)\b/i.test(latest) &&
     /\b(?:next week|coming week|following week)\b/i.test(latest) &&
     /\b(?:calendar|schedule)\b/i.test(latest);
