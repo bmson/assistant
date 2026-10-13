@@ -1332,6 +1332,7 @@ export function responseCardsForFinal(input: {
   lookupOrder?: ReadonlyArray<LiveLookup['kind']>;
 }): ResponseCard[] {
   const explicitMailRead =
+    !input.readRequest?.upcomingFlightDiscovery &&
     /\b(?:show|open|read|display|list|find|pull\s+up|what\s+(?:does|did))\b[^.!?]{0,120}\b(?:e-?mails?|mail|gmail|inbox|messages?|threads?)\b/i.test(
       input.requestText ?? '',
     );

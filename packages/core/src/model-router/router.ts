@@ -736,7 +736,16 @@ function toolInputTokens(tools: ToolSet): number {
     };
     const schema = tool.inputSchema ?? tool.parameters;
     if (!schema) throw new Error(`Tool ${name} does not expose a countable input schema`);
-    return { name, description: tool.description ?? '', parameters: z.toJSONSchema(schema) };
+    // Tool schemas describe the JSON the model sends. Many tools normalize that
+    // input with Zod transforms (for example sender emails and confirmation
+    // tokens); converting their output schema here throws before the provider
+    // call even though the AI SDK correctly converts the same schemas in input
+    // mode. Match the SDK's model-facing schema conversion exactly.
+    return {
+      name,
+      description: tool.description ?? '',
+      parameters: z.toJSONSchema(schema, { target: 'draft-7', io: 'input' }),
+    };
   });
   return estimatedSerializedTokens(requestSchema);
 }

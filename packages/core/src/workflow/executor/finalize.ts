@@ -462,10 +462,14 @@ export async function stageFinalResponse(
       qualifiedDraft &&
       (correctionOwnedChecklist ||
         pending.outcome === 'clarify' ||
+        pending.preserveCheckedReadResponse === true ||
         pending.contractBlocked === false)
         ? `${qualifiedDraft}\n\n`
         : '';
-    pending.text = `${answer}This request is not fully completed.\n\n${requestChecklistSummary(checklist)}`;
+    pending.text =
+      pending.preserveCheckedReadResponse === true && qualifiedDraft
+        ? qualifiedDraft
+        : `${answer}This request is not fully completed.\n\n${requestChecklistSummary(checklist)}`;
     const last = window.at(-1);
     if (last?.role === 'assistant' && last.content === draft) last.content = pending.text;
     pending.progress = 'Some requested outcomes remain unverified.';

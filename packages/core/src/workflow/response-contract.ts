@@ -1306,6 +1306,24 @@ function requiredReadGaps(
     labels.push('a successful all-calendar event search using the requested terms/date range');
     unsupported.push('calendar_read');
   }
+  if (
+    request.upcomingFlightDiscovery &&
+    calendars.length > 0 &&
+    calendars.some((row) => {
+      const result = record(row.result);
+      return (
+        result?.complete !== true ||
+        typeof result?.nextPageToken === 'string' ||
+        result?.paginationUnavailable === true ||
+        result?.calendarRosterComplete !== true ||
+        !Array.isArray(result?.unavailable) ||
+        result.unavailable.length > 0
+      );
+    })
+  ) {
+    labels.push('complete future-calendar coverage to establish which flight is next');
+    unsupported.push('calendar_read');
+  }
   if (request.kind !== 'calendar' && gmailSearches.length === 0) {
     labels.push('a successful Gmail search using the requested terms');
     unsupported.push('inbox_read');
@@ -2361,14 +2379,85 @@ function statedClocks(value: string): number[] {
 }
 
 const FLIGHT_SOURCE = /\b(?:flight|flights|airline|itinerary|boarding|departure)\b/i;
+const FLIGHT_BOOKING_SOURCE =
+  /\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass|e-ticket)\b/i;
 const FLIGHT_DEPARTURE_CLOCK =
   /\b(?:departure(?:\s+time)?|departs?|departed|departing|leaves?)\s*(?:(?:is|was|will be)\s+)?(?:at\s+)?(?::\s*)?(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?|\d{1,2}:\d{2})\b/gi;
 
-type FlightDepartureFact = { day: string; minutes: number; subject: string; source: string };
+type FlightDepartureFact = {
+  day: string;
+  minutes: number;
+  subject: string;
+  source: string;
+  threadId: string;
+};
 
 function requestedLocalDay(request: PersonalReadRequest): string | null {
   const start = request.temporalIntent?.interval.start ?? request.timeWindow?.timeMin;
   return start ? eventLocalDay(start, request.timeZone) : null;
+}
+
+type UpcomingFlightCandidate = {
+  day: string;
+  instant: number;
+  event: Record<string, unknown>;
+  source: string;
+};
+
+/** Select only a timestamped future flight record from the calendar. */
+function upcomingFlightCandidate(
+  request: PersonalReadRequest,
+  evidence: ActionEvidence[],
+): UpcomingFlightCandidate | null {
+  if (!request.upcomingFlightDiscovery) {
+    const day = requestedLocalDay(request);
+    return day ? { day, instant: 0, event: {}, source: '' } : null;
+  }
+  const interval = request.temporalIntent?.interval;
+  if (!interval) return null;
+  const start = Date.parse(interval.start);
+  const end = Date.parse(interval.endExclusive);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+  const candidates: UpcomingFlightCandidate[] = [];
+  const current = currentSuccessfulEvidence(evidence);
+
+  for (const row of matchingCalendarRows(request, current)) {
+    for (const event of resultItems(row, 'events')) {
+      const eventStart = stringField(event, 'start');
+      if (!/[T ]\d{2}:\d{2}/.test(eventStart)) continue;
+      const instant = Date.parse(eventStart);
+      const source = [
+        stringField(event, 'summary'),
+        stringField(event, 'description'),
+        stringField(event, 'location'),
+      ].join(' ');
+      if (
+        !Number.isFinite(instant) ||
+        instant < start ||
+        instant >= end ||
+        !FLIGHT_SOURCE.test(source) ||
+        stringField(event, 'status').toLowerCase() === 'cancelled'
+      )
+        continue;
+      const day = eventLocalDay(eventStart, request.timeZone);
+      if (day) candidates.push({ day, instant, event, source });
+    }
+  }
+  candidates.sort(
+    (left, right) =>
+      left.instant - right.instant ||
+      left.day.localeCompare(right.day) ||
+      stringField(left.event, 'eventId').localeCompare(stringField(right.event, 'eventId')) ||
+      stringField(left.event, 'summary').localeCompare(stringField(right.event, 'summary')),
+  );
+  return candidates[0] ?? null;
+}
+
+function flightRouteTerms(source: string): string[] {
+  const route = source.match(
+    /\b(?:to|from)\s+([\p{L}][\p{L}'’.-]*(?:\s+[\p{L}][\p{L}'’.-]*){0,2})/iu,
+  )?.[1];
+  return route ? groundingWords(route) : [];
 }
 
 function dateMatchesDay(sourceDate: string, day: string): boolean {
@@ -2385,14 +2474,19 @@ function dateMatchesDay(sourceDate: string, day: string): boolean {
 function flightDepartureFacts(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
+  dayOverride?: string | null,
+  candidateSource?: string,
 ): FlightDepartureFact[] {
-  const day = requestedLocalDay(request);
-  if (!day || request.queryTerms.length === 0) return [];
+  const day = dayOverride ?? requestedLocalDay(request);
+  if (!day || (request.queryTerms.length === 0 && !request.upcomingFlightDiscovery)) return [];
   const current = currentSuccessfulEvidence(evidence);
   const searches = matchingGmailSearchRows(request, current);
   const threads = matchingGmailThreadRows(searches, current);
   const facts = new Map<string, FlightDepartureFact>();
+  const routeTerms = candidateSource ? flightRouteTerms(candidateSource) : [];
+  if (request.upcomingFlightDiscovery && routeTerms.length === 0) return [];
   for (const thread of threads) {
+    const threadId = stringField(record(thread.args) ?? {}, 'threadId');
     for (const message of resultItems(thread, 'messages')) {
       const source = [
         stringField(message, 'subject'),
@@ -2402,7 +2496,9 @@ function flightDepartureFacts(
         .filter(Boolean)
         .join(' ');
       if (!FLIGHT_SOURCE.test(source)) continue;
+      if (request.upcomingFlightDiscovery && !FLIGHT_BOOKING_SOURCE.test(source)) continue;
       const sourceWords = new Set(groundingWords(source));
+      if (routeTerms.some((term) => !sourceWords.has(term))) continue;
       if (
         request.queryTerms.some((term) =>
           groundingWords(term).some((word) => !sourceWords.has(word)),
@@ -2410,8 +2506,10 @@ function flightDepartureFacts(
       )
         continue;
       const sourceDates = explicitCivilDates(source);
+      const sourceDateMatchesDay = (date: string) =>
+        dateMatchesDay(date, day) && (!request.upcomingFlightDiscovery || !date.startsWith('*-'));
       const oneDatedItinerary =
-        new Set(sourceDates).size === 1 && sourceDates.some((date) => dateMatchesDay(date, day));
+        new Set(sourceDates).size === 1 && sourceDates.some(sourceDateMatchesDay);
       const subject = stringField(message, 'subject');
       // Airline confirmations commonly use standalone DEPARTURE / ARRIVAL
       // headings followed by a date-and-time line. Keep each heading's bounded
@@ -2431,11 +2529,11 @@ function flightDepartureFacts(
           section.push(line);
         }
         const sectionText = section.join(' ');
-        if (!explicitCivilDates(sectionText).some((date) => dateMatchesDay(date, day))) continue;
+        if (!explicitCivilDates(sectionText).some(sourceDateMatchesDay)) continue;
         const clockLine = /\bat\s+(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?))\b/gi;
         for (const match of sectionText.matchAll(clockLine)) {
           for (const minutes of statedClocks(match[1] ?? ''))
-            facts.set(`${day}:${minutes}:${source}`, { day, minutes, subject, source });
+            facts.set(`${day}:${minutes}:${source}`, { day, minutes, subject, source, threadId });
         }
       }
       // If a message contains outbound and return legs, bind each departure to
@@ -2443,13 +2541,12 @@ function flightDepartureFacts(
       // header sentence, so its departure clause can inherit that one date.
       for (const clause of source.split(/[;.!?\n]+/)) {
         const dateBound =
-          explicitCivilDates(clause).some((candidate) => dateMatchesDay(candidate, day)) ||
-          oneDatedItinerary;
+          explicitCivilDates(clause).some(sourceDateMatchesDay) || oneDatedItinerary;
         if (!dateBound) continue;
         FLIGHT_DEPARTURE_CLOCK.lastIndex = 0;
         for (const match of clause.matchAll(FLIGHT_DEPARTURE_CLOCK)) {
           for (const minutes of statedClocks(match[1] ?? ''))
-            facts.set(`${day}:${minutes}:${source}`, { day, minutes, subject, source });
+            facts.set(`${day}:${minutes}:${source}`, { day, minutes, subject, source, threadId });
         }
       }
       FLIGHT_DEPARTURE_CLOCK.lastIndex = 0;
@@ -2500,14 +2597,63 @@ function flightClockLabel(minutes: number): string {
 
 type FlightCalendarClock = { minutes: number; label: string };
 
+function upcomingFlightSourceLinks(
+  candidate: UpcomingFlightCandidate | null,
+  threadIds: string[] = [],
+): string {
+  const sources: string[] = [];
+  const links = candidate?.event.links;
+  if (Array.isArray(links)) {
+    for (const link of links) {
+      const value = record(link);
+      if (stringField(value ?? {}, 'type') !== 'calendar') continue;
+      const raw = stringField(value ?? {}, 'url');
+      try {
+        const parsed = new URL(raw);
+        const eventLink =
+          parsed.protocol === 'https:' &&
+          ['calendar.google.com', 'www.google.com'].includes(parsed.hostname) &&
+          parsed.pathname.toLowerCase().includes('event') &&
+          parsed.username === '' &&
+          parsed.password === '';
+        if (eventLink)
+          sources.push(`Calendar source: ${parsed.href.replace(/[()]/g, encodeURIComponent)}`);
+      } catch {
+        // Ignore a malformed or non-Google provider URL.
+      }
+    }
+  }
+  for (const threadId of [...new Set(threadIds)]) {
+    if (/^[A-Za-z0-9_-]{3,128}$/.test(threadId))
+      sources.push(`Booking email candidate: https://mail.google.com/mail/u/0/#all/${threadId}`);
+  }
+  return sources.length > 0 ? `\n${sources.join('\n')}` : '';
+}
+
+function timeZoneLabel(timeZone: string | undefined, instant: number): string {
+  if (!timeZone) return 'your calendar time zone';
+  try {
+    return (
+      new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'long' })
+        .formatToParts(new Date(instant))
+        .find((part) => part.type === 'timeZoneName')?.value ?? 'your calendar time zone'
+    );
+  } catch {
+    return 'your calendar time zone';
+  }
+}
+
 function flightCalendarClocks(
   request: PersonalReadRequest,
   events: Record<string, unknown>[],
+  dayOverride?: string | null,
+  candidate?: UpcomingFlightCandidate | null,
 ): FlightCalendarClock[] {
-  const day = requestedLocalDay(request);
+  const day = dayOverride ?? requestedLocalDay(request);
   if (!day) return [];
   const clocks = new Map<number, FlightCalendarClock>();
   for (const event of events) {
+    if (candidate && candidate.event !== event) continue;
     const start = stringField(event, 'start');
     if (!start || !/[T ]\d{2}:\d{2}/.test(start)) continue;
     const parsed = zonedClock(start, request.timeZone);
@@ -2973,26 +3119,90 @@ export function verifiedReadResponse(
       );
       if (request.answerFocus === 'flight') {
         const complete = flightSourcesAreComplete(request, evidence);
-        const facts = complete ? flightDepartureFacts(request, evidence) : [];
+        const calendarCoverageComplete =
+          request.upcomingFlightDiscovery &&
+          calendarRows.length > 0 &&
+          calendarRows.every((row) => {
+            const result = record(row.result);
+            return (
+              result?.complete === true &&
+              typeof result.nextPageToken !== 'string' &&
+              result.paginationUnavailable !== true &&
+              result.calendarRosterComplete === true &&
+              Array.isArray(result.unavailable) &&
+              result.unavailable.length === 0
+            );
+          });
+        const candidate = upcomingFlightCandidate(request, evidence);
+        const day = candidate?.day ?? null;
+        const facts =
+          complete && day ? flightDepartureFacts(request, evidence, day, candidate?.source) : [];
         const times = [...new Set(facts.map((fact) => fact.minutes))];
-        const calendarClocks = flightCalendarClocks(request, events);
+        const candidateEvents =
+          request.upcomingFlightDiscovery && candidate ? [candidate.event] : events;
+        const calendarClocks = flightCalendarClocks(
+          request,
+          candidateEvents,
+          day,
+          request.upcomingFlightDiscovery ? candidate : null,
+        );
+        if (request.upcomingFlightDiscovery && !day) {
+          return calendarCoverageComplete
+            ? 'I found no dated flight candidate in the calendar I could check; booking-only itineraries were not independently selected. Connections, hotel, and ground transport remain unverified.'
+            : 'I could not establish which flight is next because calendar coverage is incomplete; booking-only itineraries were not independently selected. Connections, hotel, and ground transport remain unverified.';
+        }
+        const dayLabel =
+          request.upcomingFlightDiscovery && day
+            ? new Date(`${day}T12:00:00.000Z`).toLocaleDateString('en-US', {
+                timeZone: 'UTC',
+                dateStyle: 'long',
+              })
+            : undefined;
         const destination =
           request.queryTerms
             .filter(
               (term) => !/^(?:flight|flights|airline|itinerary|boarding|departure)$/i.test(term),
             )
             .join(' ') || 'requested';
+        const candidateTitle = (
+          stringField(candidate?.event ?? {}, 'summary').slice(0, 160) || 'the upcoming flight'
+        ).replace(/([\\`*_{}[\]()#+.!|>~-])/g, '\\$1');
+        const candidateLead = calendarCoverageComplete
+          ? `The next flight candidate in your calendar is ${candidateTitle}`
+          : `A flight candidate in your calendar is ${candidateTitle}`;
+        const candidateCoverageNote = calendarCoverageComplete
+          ? ''
+          : ' Calendar coverage was incomplete, so I cannot establish that this is the next flight.';
+        const sourceLinks = (threadIds: string[] = []) =>
+          request.upcomingFlightDiscovery ? upcomingFlightSourceLinks(candidate, threadIds) : '';
         const conflict = calendarClocks.find(
           (clock) => times.length === 1 && clock.minutes !== times[0],
         );
-        if (conflict && times.length === 1)
-          return `The matching booking message lists departure at ${flightClockLabel(times[0] as number)}, while the ${conflict.label} shows ${flightClockLabel(conflict.minutes)}. They conflict, so I couldn't confirm which time is current.`;
-        if (times.length > 1)
-          return `I found conflicting departure times for the matching ${destination} itineraries, so I couldn't confirm which time is current.`;
-        if (times.length === 1)
-          return `The matching ${destination} booking message lists departure at ${flightClockLabel(times[0] as number)}.`;
+        if (request.upcomingFlightDiscovery && times.length > 1) {
+          const routeLabel = flightRouteTerms(candidate?.source ?? '').join(' ') || 'this route';
+          return `${candidateLead}${dayLabel ? ` on ${dayLabel}` : ''}, but I found multiple departure clocks in booking-email candidates for ${routeLabel} and couldn't establish which, if any, belongs to this calendar flight.${candidateCoverageNote} Connections, hotel, and ground transport remain unverified.${sourceLinks(facts.map((fact) => fact.threadId))}`;
+        }
+        if (request.upcomingFlightDiscovery && times.length === 1) {
+          const calendarTime = calendarClocks[0];
+          const dayText = dayLabel ? ` on ${dayLabel}` : '';
+          const calendarText = calendarTime
+            ? ` The calendar shows ${flightClockLabel(calendarTime.minutes)} ${timeZoneLabel(request.timeZone, candidate?.instant ?? Date.now())}.`
+            : '';
+          const routeLabel = flightRouteTerms(candidate?.source ?? '').join(' ') || 'this route';
+          return `${candidateLead}${dayText}.${calendarText} A separate booking-email candidate mentioning ${routeLabel} lists departure at ${flightClockLabel(times[0] as number)}, but I couldn't establish that it is the same flight or reconcile its source time zone.${candidateCoverageNote} Connections, hotel, and ground transport remain unverified.${sourceLinks(facts.map((fact) => fact.threadId))}`;
+        }
+        if (!request.upcomingFlightDiscovery && conflict && times.length === 1)
+          return `The matching booking message lists departure at ${flightClockLabel(times[0] as number)}, while the ${conflict.label} shows ${flightClockLabel(conflict.minutes)}${dayLabel ? ` on ${dayLabel}` : ''}. They conflict, so I couldn't confirm which time is current.`;
+        if (!request.upcomingFlightDiscovery && times.length > 1)
+          return `I found conflicting departure times for the matching ${destination} itineraries${dayLabel ? ` on ${dayLabel}` : ''}, so I couldn't confirm which time is current.`;
+        if (!request.upcomingFlightDiscovery && times.length === 1)
+          return `The matching ${destination} booking message lists departure at ${flightClockLabel(times[0] as number)}${dayLabel ? ` on ${dayLabel}` : ''}.`;
         if (calendarClocks.length > 0)
-          return `The calendar has a ${destination} flight entry, but the mail results did not confirm its departure time. I couldn't verify the flight time.`;
+          return request.upcomingFlightDiscovery
+            ? `${candidateLead}${dayLabel ? ` on ${dayLabel}` : ''} at ${flightClockLabel(calendarClocks[0]?.minutes ?? 0)} ${timeZoneLabel(request.timeZone, candidate?.instant ?? Date.now())}, but I couldn't confirm its departure time from the booking email.${candidateCoverageNote} Connections, hotel, and ground transport remain unverified.${sourceLinks()}`
+            : `The calendar has a ${destination} flight entry${dayLabel ? ` on ${dayLabel}` : ''}, but the mail results did not confirm its departure time. I couldn't verify the flight time.`;
+        if (request.upcomingFlightDiscovery)
+          return `I found an upcoming flight candidate for ${dayLabel ?? 'an unconfirmed date'}, but its departure time is not confirmed by the booking email I read.${candidateCoverageNote} Connections, hotel, and ground transport remain unverified.${sourceLinks()}`;
         return `I couldn't confirm a departure time for a ${destination} flight ${request.timeWindow?.label ?? 'on the requested date'} from the calendar and mail results I read.`;
       }
       const calendars = new Set<string>();
@@ -3262,8 +3472,11 @@ function coverageGapResponse(
         ? 'the calendar and booking emails'
         : 'the calendar'
       : 'the booking emails';
+    const tripDetails = request.upcomingFlightDiscovery
+      ? ' Hotel and route details are still unverified.'
+      : '';
     return {
-      text: `${verified}I couldn't finish checking ${missing}, so the departure time is still unverified.`,
+      text: `${verified}I couldn't finish checking ${missing}, so the departure time is still unverified.${tripDetails}`,
       blocked: true,
       unsupported: gaps.unsupported,
     };

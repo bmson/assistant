@@ -125,6 +125,50 @@ describe('response cards', () => {
     );
   });
 
+  it('treats booking email references in upcoming-trip discovery as sources, not an inbox request', () => {
+    const requestText =
+      'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
+    const readRequest = detectPersonalReadRequest([{ role: 'user', content: requestText }], {
+      now: new Date('2026-10-08T18:00:00Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    expect(readRequest).toMatchObject({ answerFocus: 'flight', upcomingFlightDiscovery: true });
+
+    const cards = responseCardsForFinal({
+      requestText,
+      readRequest,
+      evidence: [
+        {
+          toolName: 'gmail.search',
+          status: 'succeeded',
+          result: {
+            complete: true,
+            mailboxSearched: 'owner@example.com',
+            results: [
+              { threadId: 'booking', subject: 'Current flight confirmation' },
+              { threadId: 'old', subject: 'Old flight itinerary' },
+              { threadId: 'newsletter', subject: 'Weekly travel news' },
+            ],
+          },
+        },
+        ...[
+          ['booking', 'Current flight confirmation'],
+          ['old', 'Old flight itinerary'],
+          ['newsletter', 'Weekly travel news'],
+        ].map(([threadId, subject]) => ({
+          toolName: 'gmail.read_thread',
+          status: 'succeeded',
+          args: { threadId },
+          result: { threadId, messages: [{ subject, text: `${subject} details` }] },
+        })),
+      ],
+    });
+
+    expect(
+      cards.some((card) => card.kind === 'email-results' || card.kind === 'email-thread'),
+    ).toBe(false);
+  });
+
   it.each([
     'Show me the Berlin flight confirmation email.',
     'Open the Berlin flight confirmation email.',

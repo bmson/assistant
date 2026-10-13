@@ -1579,3 +1579,61 @@ describe('focused flight verification follow-ups', () => {
     expect(nextRequiredReadTool(request, [])).toBeUndefined();
   });
 });
+
+describe('upcoming flight discovery', () => {
+  const options = { now: new Date('2026-10-09T12:00:00Z'), timeZone: 'America/Los_Angeles' };
+
+  it('does not treat the requested verification policy as a correction to an old claim', () => {
+    const request = detectPersonalReadRequest(
+      turn('Find my next flight, check for conflicts, and call out anything you cannot verify.'),
+      options,
+    );
+    expect(request).toMatchObject({
+      kind: 'calendar_email',
+      answerFocus: 'flight',
+      firstToolName: 'calendar.list_events',
+      queryTerms: [],
+      mailQuery:
+        '{flight flights itinerary "e-ticket" "boarding pass" "booking confirmation" "reservation confirmation"}',
+      timeWindow: {
+        timeMin: '2026-10-09T12:00:00.000Z',
+        timeMax: '2028-10-08T07:00:00.000Z',
+      },
+    });
+    expect(request?.verification).toBeUndefined();
+    expect(request?.scopeIssue).toBeUndefined();
+    if (!request) throw new Error('expected a bounded upcoming flight discovery');
+    expect(buildReadToolInput(request, 'calendar.list_events', [])).toMatchObject({
+      timeMin: '2026-10-09T12:00:00.000Z',
+      timeMax: '2028-10-08T07:00:00.000Z',
+      maxResults: 50,
+    });
+    expect(buildReadToolInput(request, 'gmail.search', [])?.query).toBe(request.mailQuery);
+  });
+
+  it('still asks for the date of a subject-less terse correction', () => {
+    const request = detectPersonalReadRequest(
+      [
+        { role: 'user', content: 'When is my flight to Berlin tomorrow?' },
+        { role: 'assistant', content: 'Your flight leaves at 9:15 AM.' },
+        { role: 'user', content: 'Are you sure?' },
+      ],
+      options,
+    );
+    expect(request).toMatchObject({
+      verification: true,
+      answerFocus: 'flight',
+      scopeIssue: expect.stringMatching(/date/i),
+    });
+    if (!request) throw new Error('expected a scoped flight correction');
+    expect(nextRequiredReadTool(request, [])).toBeUndefined();
+  });
+
+  it('does not treat a later next-step phrase as upcoming-flight discovery', () => {
+    const request = detectPersonalReadRequest(
+      turn('Check my flight tomorrow for conflicts, then plan the next route.'),
+      options,
+    );
+    expect(request?.upcomingFlightDiscovery).toBeUndefined();
+  });
+});
