@@ -560,7 +560,6 @@ function nextOutboundFlight(
       const eventDate = sourceCivilDate(candidate.event);
       const numberMatches =
         candidate.flightNumber === undefined || candidate.flightNumber === segment.flightNumber;
-      const dateMatches = eventDate === segment.departureDate;
       const referenceMatches =
         !candidate.bookingReference ||
         !segment.bookingReference ||
@@ -589,6 +588,17 @@ function nextOutboundFlight(
         sourceDeparture !== undefined &&
         Number.isFinite(calendarDeparture) &&
         Math.abs(sourceDeparture - calendarDeparture) <= 5 * 60_000;
+      const hasStrongIdentity =
+        (candidate.flightNumber !== undefined && candidate.flightNumber === segment.flightNumber) ||
+        referenceMatchesStrongly;
+      const eventHasNoTimeZone = !text(candidate.event.timeZone, 120);
+      const departureZone = text(segment.departureTimeZone, 120);
+      const boundLocalDate =
+        eventHasNoTimeZone && hasStrongIdentity && timeMatches && validTimeZone(departureZone)
+          ? civilDateInTimeZone(candidate.instant, departureZone)
+          : undefined;
+      const dateMatches =
+        eventDate === segment.departureDate || boundLocalDate === segment.departureDate;
       const calendarHasSparseIdentity =
         candidate.direction === 'unknown' || candidate.flightNumber === undefined;
       return (
@@ -665,12 +675,12 @@ function nextOutboundFlight(
   let ambiguous = outboundCandidates.unknownSegments.length > 0;
   let flight: CompoundTripFlightCandidate | undefined;
   if (firstOutbound && outboundCandidates.unknownSegments.length === 0) {
-    const sameTime = outbounds.filter(
-      (candidate) =>
-        candidate.departureDate === firstOutbound.departureDate &&
-        candidate.departureTime === firstOutbound.departureTime,
-    );
-    if (sameTime.length > 1) ambiguous = true;
+    const firstInstant = sourceLocalInstant(firstOutbound);
+    const sameInstant = outbounds.filter((candidate) => {
+      const instant = sourceLocalInstant(candidate);
+      return firstInstant !== undefined && instant === firstInstant;
+    });
+    if (sameInstant.length > 1) ambiguous = true;
     else {
       const matched = matchSegment(firstOutbound, 'outbound');
       flight = matched.flight;
@@ -1267,6 +1277,20 @@ function sourceCivilDate(event: Record<string, unknown>): string | undefined {
   }
   const localDate = raw.slice(0, 10);
   return validDate(localDate) ? localDate : undefined;
+}
+
+function civilDateInTimeZone(instantValue: string, timeZone: string): string | undefined {
+  const instant = new Date(instantValue);
+  if (!Number.isFinite(instant.getTime()) || !validTimeZone(timeZone)) return undefined;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(instant);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const date = `${values.year}-${values.month}-${values.day}`;
+  return validDate(date) ? date : undefined;
 }
 
 function destinationCivilDate(flight: CompoundTripFlightCandidate): string | undefined {

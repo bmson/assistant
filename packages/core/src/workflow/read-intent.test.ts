@@ -450,6 +450,40 @@ describe('detectPersonalReadRequest', () => {
     });
   });
 
+  it.each([
+    'Plan a hypothetical work morning from 09:00 to 12:30. Include a 90-minute deep-work block, a 45-minute review, a 30-minute meeting at 11:30, and two 15-minute breaks. Show a compact table with start and end times, identify any unused time, and check that nothing overlaps. Do not look at or change my real calendar.',
+    'Hypothetically, make a sample 09:00–12:30 schedule with deep work, a review, an 11:30 meeting, and two breaks. Please do not inspect my actual calendar; use only the details in this message.',
+    'Lay out a pretend work morning with a 90-minute focus block and a 30-minute meeting at 11:30. Without checking my calendar, show the times and any unused slot.',
+  ])('does not turn a hypothetical schedule into a private read: %s', (text) => {
+    expect(detectPersonalReadRequest(turn(text))).toBeNull();
+  });
+
+  it('keeps explicit calendar and email reads enabled when the owner only forbids changes', () => {
+    expect(
+      detectPersonalReadRequest(
+        turn('What meetings do I have on my calendar tomorrow? Do not edit it.'),
+      ),
+    ).toMatchObject({ kind: 'calendar', firstToolName: 'calendar.list_events' });
+    expect(
+      detectPersonalReadRequest(
+        turn('Search my email for the hotel confirmation. Do not reply or change anything.'),
+      ),
+    ).toMatchObject({ kind: 'email', firstToolName: 'gmail.search' });
+  });
+
+  it('honors a prohibition for one private source without suppressing a separate allowed read', () => {
+    expect(
+      detectPersonalReadRequest(
+        turn('Do not look at my real calendar. Search my email for the hotel confirmation.'),
+      ),
+    ).toMatchObject({ kind: 'email', firstToolName: 'gmail.search' });
+    expect(
+      detectPersonalReadRequest(
+        turn('Do not search my email. What meetings do I have on my calendar tomorrow?'),
+      ),
+    ).toMatchObject({ kind: 'calendar', firstToolName: 'calendar.list_events' });
+  });
+
   it.each(['Make this sentence clear.', 'Is the explanation clear?', 'Empty my inbox tomorrow.'])(
     'does not confuse another clear or empty request with availability: %s',
     (text) => {
