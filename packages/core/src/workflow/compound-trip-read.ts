@@ -589,7 +589,8 @@ function nextOutboundFlight(
         Number.isFinite(calendarDeparture) &&
         Math.abs(sourceDeparture - calendarDeparture) <= 5 * 60_000;
       const hasStrongIdentity =
-        candidate.flightNumber === segment.flightNumber || referenceMatchesStrongly;
+        (candidate.flightNumber !== undefined && candidate.flightNumber === segment.flightNumber) ||
+        referenceMatchesStrongly;
       const eventHasNoTimeZone = !text(candidate.event.timeZone, 120);
       const departureZone = text(segment.departureTimeZone, 120);
       const boundLocalDate =
@@ -674,12 +675,12 @@ function nextOutboundFlight(
   let ambiguous = outboundCandidates.unknownSegments.length > 0;
   let flight: CompoundTripFlightCandidate | undefined;
   if (firstOutbound && outboundCandidates.unknownSegments.length === 0) {
-    const sameTime = outbounds.filter(
-      (candidate) =>
-        candidate.departureDate === firstOutbound.departureDate &&
-        candidate.departureTime === firstOutbound.departureTime,
-    );
-    if (sameTime.length > 1) ambiguous = true;
+    const firstInstant = sourceLocalInstant(firstOutbound);
+    const sameInstant = outbounds.filter((candidate) => {
+      const instant = sourceLocalInstant(candidate);
+      return firstInstant !== undefined && instant === firstInstant;
+    });
+    if (sameInstant.length > 1) ambiguous = true;
     else {
       const matched = matchSegment(firstOutbound, 'outbound');
       flight = matched.flight;

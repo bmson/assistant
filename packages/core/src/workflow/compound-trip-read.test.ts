@@ -620,6 +620,92 @@ describe('compound trip read projection', () => {
     expect(projection.flight).toBeUndefined();
   });
 
+  it('does not treat two absent flight numbers as a strong identity', () => {
+    const read = request();
+    const projection = compoundTripReadProjection(
+      read,
+      [
+        completeCalendarEvents([
+          {
+            eventId: 'unidentified-kiritimati-flight',
+            summary: 'Outbound flight SFO to BER',
+            start: '2026-11-01T10:30:00Z',
+            status: 'confirmed',
+          },
+        ]),
+      ],
+      {
+        status: 'complete',
+        segments: [
+          {
+            threadId: 'unidentified-booking',
+            messageId: 'unidentified-message',
+            subject: 'Flight itinerary',
+            flightNumber: undefined as unknown as string,
+            direction: 'outbound',
+            departureDate: '2026-11-02',
+            departureTime: '00:30',
+            departureTimeZone: 'Pacific/Kiritimati',
+            arrivalDate: '2026-11-02',
+            arrivalTime: '10:00',
+            arrivalTimeZone: 'Europe/Berlin',
+            originAirport: 'SFO',
+            destinationAirport: 'BER',
+            excerpt: '2026-11-02 00:30 Pacific/Kiritimati',
+          },
+        ],
+        hotels: [],
+        rejectedFacts: 0,
+        sourceMessageIds: ['unidentified-message'],
+      },
+    );
+
+    expect(projection.flight).toBeUndefined();
+  });
+
+  it('treats different local dates and clocks at the same instant as ambiguous outbound candidates', () => {
+    const read = request();
+    const kiritimati = {
+      threadId: 'kiritimati-booking',
+      messageId: 'kiritimati-outbound',
+      subject: 'Kiritimati itinerary',
+      flightNumber: 'LH401',
+      direction: 'outbound' as const,
+      departureDate: '2026-11-02',
+      departureTime: '00:30',
+      departureTimeZone: 'Pacific/Kiritimati',
+      arrivalDate: '2026-11-02',
+      arrivalTime: '10:00',
+      arrivalTimeZone: 'Europe/Berlin',
+      originAirport: 'SFO',
+      destinationAirport: 'BER',
+      bookingReference: 'KIRI-2026',
+      excerpt: 'LH401 2026-11-02 00:30 Pacific/Kiritimati',
+    };
+    const kolkata = {
+      ...kiritimati,
+      threadId: 'kolkata-booking',
+      messageId: 'kolkata-outbound',
+      subject: 'Kolkata itinerary',
+      flightNumber: 'LH402',
+      departureDate: '2026-11-01',
+      departureTime: '16:00',
+      departureTimeZone: 'Asia/Kolkata',
+      bookingReference: 'KOL-2026',
+      excerpt: 'LH402 2026-11-01 16:00 Asia/Kolkata',
+    };
+    const projection = compoundTripReadProjection(read, [completeCalendarEvents([])], {
+      status: 'complete',
+      segments: [kiritimati, kolkata],
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: ['kiritimati-outbound', 'kolkata-outbound'],
+    });
+
+    expect(projection.flight).toBeUndefined();
+    expect(projection.text).toContain('more than one plausible flight candidate');
+  });
+
   it('selects only public-transport and taxi pages from HTTPS search results', () => {
     const read = request();
     const evidence: ReadToolEvidence[] = [
