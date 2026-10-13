@@ -509,7 +509,12 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     .map(strictGoogleCalendarLink)
     .filter((value): value is string => Boolean(value));
   if (sourceLinks.length > 0)
-    lines.push(`Calendar sources: ${[...new Set(sourceLinks)].slice(0, 5).join(' ')}`);
+    lines.push(
+      `Calendar sources: ${[...new Set(sourceLinks)]
+        .slice(0, 5)
+        .map((url, index) => `[Event ${index + 1}](<${url}>)`)
+        .join(' · ')}`,
+    );
   if (!complete)
     lines.push(
       'Please confirm the missing calendar coverage before relying on these times. I can adjust the proposal, but I will not edit your calendar without your approval.',

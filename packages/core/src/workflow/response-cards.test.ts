@@ -23,6 +23,71 @@ const request = {
 };
 
 describe('response cards', () => {
+  it.each([
+    'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.',
+    'Review my calendar for next week and identify scheduling conflicts and overloaded days. Find three realistic 90-minute focus blocks during working hours, allowing time for travel and breaks. Recommend changes, but show me the plan before editing my calendar.',
+  ])(
+    'keeps a checked review concise instead of appending its raw source reads: %s',
+    (requestText) => {
+      const evidence = [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          result: {
+            events: [
+              {
+                eventId: 'meeting',
+                summary: 'Review',
+                start: '2026-10-20T16:00:00Z',
+                end: '2026-10-20T17:00:00Z',
+              },
+            ],
+          },
+        },
+        {
+          toolName: 'calendar.availability',
+          status: 'succeeded',
+          args: { timeMin: '2026-10-19T07:00:00Z', timeMax: '2026-10-26T07:00:00Z' },
+          result: { busy: [], complete: true, calendarsChecked: ['Work'] },
+        },
+        {
+          toolName: 'gmail.search',
+          status: 'succeeded',
+          result: {
+            results: [
+              { threadId: 'request-thread', subject: 'Budget approval' },
+              { threadId: 'unread-thread', subject: 'Older source material' },
+            ],
+            complete: true,
+          },
+        },
+        {
+          toolName: 'gmail.read_thread',
+          status: 'succeeded',
+          args: { threadId: 'request-thread' },
+          result: {
+            threadId: 'request-thread',
+            messages: [{ subject: 'Budget approval', text: 'Can you review this?' }],
+          },
+        },
+      ];
+      const readRequest = detectPersonalReadRequest([{ role: 'user', content: requestText }], {
+        now: new Date('2026-10-13T15:00:00Z'),
+        timeZone: 'America/Los_Angeles',
+      });
+      expect(readRequest).not.toBeNull();
+      expect(Boolean(readRequest?.emailReview || readRequest?.weeklyCalendarPlan)).toBe(true);
+      expect(responseCardsForFinal({ evidence, readRequest, requestText })).toEqual([]);
+      const ordinary = responseCardsForFinal({
+        evidence,
+        requestText: 'Show my calendar and email threads.',
+      });
+      expect(ordinary.map((card) => card.kind)).toEqual(
+        expect.arrayContaining(['calendar-event', 'availability', 'email-results', 'email-thread']),
+      );
+    },
+  );
+
   it('keeps an unverified flight calendar row out of a reconciled departure answer', () => {
     const evidence = [
       {
