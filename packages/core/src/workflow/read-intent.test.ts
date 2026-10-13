@@ -1999,6 +1999,70 @@ describe('upcoming flight discovery', () => {
     expect(nextRequiredReadTool(request, [calendar, search, thread])).not.toBe('maps.directions');
   });
 
+  it('continues a partially read booking thread during flight-only discovery', () => {
+    const request = detectPersonalReadRequest(
+      turn('Find my next future flight using booking emails and calendar.'),
+      options,
+    );
+    if (!request) throw new Error('Expected flight-only discovery');
+    const calendar: ReadToolEvidence = {
+      toolName: 'calendar.list_events',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: {
+        timeMin: request.timeWindow?.timeMin,
+        timeMax: request.timeWindow?.timeMax,
+        maxResults: 50,
+      },
+      result: { events: [], complete: true, calendarRosterComplete: true, unavailable: [] },
+    };
+    const search: ReadToolEvidence = {
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { query: request.mailQuery, maxResults: 20 },
+      result: {
+        query: request.mailQuery,
+        complete: true,
+        hasMore: false,
+        results: [
+          { threadId: 'complete-flight', subject: 'Flight booking confirmation' },
+          { threadId: 'paged-flight', subject: 'Flight booking confirmation' },
+        ],
+      },
+    };
+    const completeThread: ReadToolEvidence = {
+      toolName: 'gmail.read_thread',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { threadId: 'complete-flight', startMessageIndex: 0, startMessageOffset: 0 },
+      result: { complete: true, messages: [{ messageId: 'complete-message' }] },
+    };
+    const continuation = {
+      threadId: 'paged-flight',
+      startMessageIndex: 0,
+      startMessageOffset: 8_000,
+      maxMessages: 20,
+      maxChars: 20_000,
+    };
+    const partialThread: ReadToolEvidence = {
+      toolName: 'gmail.read_thread',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { threadId: 'paged-flight', startMessageIndex: 0, startMessageOffset: 0 },
+      result: {
+        complete: false,
+        hasMore: true,
+        messages: [{ messageId: 'partial-message' }],
+        continuation: { tool: 'gmail.read_thread', input: continuation },
+      },
+    };
+    const evidence = [calendar, search, completeThread, partialThread];
+
+    expect(nextRequiredReadTool(request, evidence)).toBe('gmail.read_thread');
+    expect(buildReadToolInput(request, 'gmail.read_thread', evidence)).toEqual(continuation);
+  });
+
   it('does not treat the requested verification policy as a correction to an old claim', () => {
     const request = detectPersonalReadRequest(
       turn('Find my next flight, check for conflicts, and call out anything you cannot verify.'),

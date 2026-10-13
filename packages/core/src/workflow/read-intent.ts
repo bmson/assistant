@@ -2741,7 +2741,7 @@ export function buildReadToolInput(
   }
   if (
     toolName === 'gmail.read_thread' &&
-    !(request.compoundTripDiscovery
+    !(hasTypedTripRead(request)
       ? compoundThreadReadInput(evidence, request)
       : nextGmailThreadId(evidence, request))
   )
