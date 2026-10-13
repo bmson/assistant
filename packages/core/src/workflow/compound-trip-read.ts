@@ -1632,6 +1632,45 @@ export function compoundTripReadProjection(
       : hotelCandidates(completeThreads, flight),
   );
   const hotel = hotels.length === 1 ? hotels[0] : undefined;
+  // Partial reads may still contain exact, source-local details. Keep these
+  // separate from verified trip selection: they never establish which trip is
+  // next, connect flight and hotel records, or enable a route query.
+  const partialSearchRows = request.mailQuery
+    ? validSearchPrefixRows(gmailSearchRows, request.mailQuery)
+    : [];
+  const partialReadThreads = currentGmailThreads(partialSearchRows, evidence).filter(
+    (row) => !completeIds.has(text(object(row.args)?.threadId, 100)),
+  );
+  const partialSourceMessages = threadMessages(partialReadThreads);
+  const partialFlightSegments =
+    tripExtraction?.status === 'complete' ? [] : parseFlightSegments(partialSourceMessages);
+  const partialHotelCandidates =
+    tripExtraction?.status === 'complete' ? [] : hotelCandidates(partialReadThreads, undefined);
+  const partialMailLinks = threadSourceLinks(partialReadThreads);
+  const partialSourceLines = [
+    ...partialFlightSegments.flatMap((segment) => {
+      const link = partialMailLinks.get(segment.threadId);
+      return link
+        ? [
+            `Flight details in a partially read booking email, not verified as the next trip or matched to a calendar flight: ${formatFlightSegment(segment)} [Booking email](${link}).`,
+          ]
+        : [];
+    }),
+    ...partialHotelCandidates.flatMap((candidate) => {
+      const link = partialMailLinks.get(candidate.threadId);
+      if (!link) return [];
+      const label = candidate.hotelName || candidate.subject || 'Accommodation record';
+      const details = [
+        candidate.city,
+        candidate.checkIn && candidate.checkOut
+          ? `${candidate.checkIn} to ${candidate.checkOut}`
+          : undefined,
+      ].filter(Boolean);
+      return [
+        `Accommodation candidate in a partially read booking email${details.length ? ` (${details.join('; ')})` : ''}; it is not linked to a flight: ${markdownText(label)} [Booking email](${link}).`,
+      ];
+    }),
+  ];
   const selectedBookingSegments = flight?.segment
     ? flightSegments.filter(
         (segment) =>
@@ -1768,6 +1807,10 @@ export function compoundTripReadProjection(
     );
   if (hotels.length > 1)
     gaps.push('More than one hotel booking candidate matched; I could not choose one safely.');
+  else if (!hotel && partialHotelCandidates.length > 0)
+    gaps.push(
+      'A hotel candidate appears in a partially read email, so I could not verify its full reservation or link it to a flight.',
+    );
   else if (!hotel)
     gaps.push('I could not identify one hotel booking candidate in the checked email threads.');
   else if (!hotel.address) gaps.push('The hotel candidate did not include an explicit address.');
@@ -1885,6 +1928,9 @@ export function compoundTripReadProjection(
   const itinerary = [
     flight
       ? `Dated outbound leg: ${flight.segment ? formatFlightSegment(flight.segment) : (flight.flightNumber ?? 'flight')}${localFlightTime ? `; Calendar displays ${localFlightTime} in ${request.timeZone ?? 'UTC'}` : ''}${flight.sourceOffset ? ` (calendar source offset ${flight.sourceOffset})` : ''}${departureTimeMatched ? '; the clocks agree after time-zone conversion' : ''}${departureTimeConflict ? '; the clocks conflict after time-zone conversion' : ''}${calendarUrl ? ` [Calendar source](${calendarUrl})` : ''}${flightConfirmation && mailLinks.has(text(object(flightConfirmation.args)?.threadId)) ? ` [dated booking-thread source](${mailLinks.get(text(object(flightConfirmation.args)?.threadId))})` : ''}.`
+      : '',
+    partialSourceLines.length > 0
+      ? `Partial source details, kept separate from the unverified trip selection:\n${partialSourceLines.map((line) => `- ${line}`).join('\n')}`
       : '',
     ...unmatchedBookingSegments.map((segment) => {
       const sourceLink = mailLinks.get(segment.threadId);

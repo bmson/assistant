@@ -781,6 +781,100 @@ describe('compound trip read projection', () => {
     );
   });
 
+  it('shows exact flight and hotel facts from partial email reads without linking them into a trip', () => {
+    const read = request();
+    const flightThread = 'partial-flight-thread';
+    const hotelThread = 'partial-hotel-thread';
+    const search = row(
+      'gmail.search',
+      { query: read.mailQuery, maxResults: 20 },
+      {
+        results: [
+          { threadId: flightThread, subject: 'Flight booking details' },
+          { threadId: hotelThread, subject: 'Hotel reservation details' },
+        ],
+        complete: false,
+        hasMore: true,
+        nextPageToken: 'next-search-page',
+        continuation: {
+          tool: 'gmail.search',
+          input: {
+            query: read.mailQuery,
+            maxResults: 20,
+            pageToken: 'next-search-page',
+          },
+        },
+      },
+    );
+    const partialFlight = row(
+      'gmail.read_thread',
+      { threadId: flightThread },
+      {
+        complete: false,
+        hasMore: true,
+        messages: [
+          {
+            messageId: 'partial-flight-message',
+            subject: 'Flight booking details',
+            text: 'Outbound flight\nFlight number: LX 102\nDeparture date: 2026-10-17\nDeparture time: 10:10 Europe/Zurich\nFrom: ZRH\nTo: SFO',
+          },
+        ],
+      },
+    );
+    const partialHotel = row(
+      'gmail.read_thread',
+      { threadId: hotelThread },
+      {
+        complete: false,
+        hasMore: true,
+        messages: [
+          {
+            messageId: 'partial-hotel-message',
+            subject: 'Hotel reservation details',
+            text: 'Hotel reservation: Alpine House, Zurich\nCheck-in: 2026-10-17\nCheck-out: 2026-10-19',
+          },
+        ],
+      },
+    );
+    const incompleteCalendar = row(
+      'calendar.list_events',
+      { timeMin: read.timeWindow?.timeMin, timeMax: read.timeWindow?.timeMax },
+      {
+        events: [],
+        complete: false,
+        calendarRosterComplete: false,
+        unavailable: [],
+      },
+    );
+    const evidence = [incompleteCalendar, search, partialFlight, partialHotel];
+    const projection = compoundTripReadProjection(read, evidence);
+
+    expect(projection.readThreads).toHaveLength(2);
+    expect(projection.blocked).toBe(true);
+    expect(projection.flight).toBeUndefined();
+    expect(projection.hotel).toBeUndefined();
+    expect(projection.routeOrigin).toBeUndefined();
+    expect(projection.webQuery).toBeUndefined();
+    expect(projection.text).toContain('Partial source details, kept separate');
+    expect(projection.text).toContain('LX102 ZRH→SFO; departs 2026-10-17 10:10 Europe/Zurich');
+    expect(projection.text).toContain(
+      '[Booking email](https://mail.google.com/mail/u/0/#all/partial-flight-thread)',
+    );
+    expect(projection.text).toContain(
+      '(Zurich; 2026-10-17 to 2026-10-19); it is not linked to a flight: Hotel Alpine House',
+    );
+    expect(projection.text).toContain(
+      '[Booking email](https://mail.google.com/mail/u/0/#all/partial-hotel-thread)',
+    );
+    expect(projection.text).toContain('it is not linked to a flight');
+    expect(projection.text).toContain('A hotel candidate appears in a partially read email');
+    expect(projection.text).not.toContain(
+      'I could not identify one hotel booking candidate in the checked email threads',
+    );
+    expect(projection.text).not.toContain('Dated outbound leg:');
+    expect(projection.text).not.toContain('your next trip is');
+  });
+
   it('matches an explicitly outbound booking to an ordinary sparse calendar flight only by exact route and time', () => {
     const read = request();
     const evidence = [
