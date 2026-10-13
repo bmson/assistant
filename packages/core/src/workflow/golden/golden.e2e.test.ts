@@ -985,7 +985,8 @@ describe('golden tasks', () => {
             pageToken: z.string().optional(),
           }),
           execute: async (input) => {
-            const page = input.pageToken ? Number(String(input.pageToken).replace('page-', '')) : 1;
+            const { pageToken } = z.object({ pageToken: z.string().optional() }).parse(input);
+            const page = pageToken ? Number(pageToken.replace('page-', '')) : 1;
             searchPages += 1;
             return {
               query: 'newer_than:7d -from:me',
