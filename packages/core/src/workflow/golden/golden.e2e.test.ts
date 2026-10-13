@@ -574,7 +574,7 @@ describe('golden tasks', () => {
       destination: address,
       mode: 'driving',
     });
-  });
+  }, 15_000); // Nine dispatcher/tool rounds plus persistence; leave bounded parallel-CI headroom.
 
   it('ranks bounded mail metadata, reads only selected complete threads, and drafts in chat without mail writes', async (ctx) => {
     if (!dbUp) return ctx.skip();
