@@ -98,6 +98,23 @@ function isSportsRequest(request: string, asks: boolean): boolean {
 const CORRECTION =
   /^(?:look it up|search the web|check (?:the )?(?:score|wcore)|run it|rub it|try again|check again)\b/i;
 
+/** A requested page is read directly; URLs mentioned only as context are not commands. */
+function requestedPageUrl(request: string): string | undefined {
+  const match =
+    /(?:^|[.!?]\s+)(?:please\s+)?(?:read|open|fetch|summarize|review|check)\s+(?:the\s+)?(?:page\s+(?:at|on)\s+)?(https?:\/\/[^\s<>"']+)/i.exec(
+      request,
+    );
+  const value = match?.[1]?.replace(/[.,;!?]+$/, '');
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.username || url.password) return undefined;
+    return url.href;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Routing alone grants no authority: every lookup still uses the dispatcher. */
 export function detectLiveLookup(
   history: ReadonlyArray<ReadIntentMessage>,
@@ -122,6 +139,7 @@ export function detectLiveLookup(
     return MY_EVENT.test(request)
       ? { kind: 'directions', request, destination: 'calendar' }
       : { kind: 'directions', request };
+  if (requestedPageUrl(request)) return { kind: 'web', request };
   if (detectPersonalReadRequest(history)) return undefined;
   if (/\binvestigate\b[\s\S]*\b(?:team|club|company|match)\b/i.test(request))
     return { kind: 'web', request };
@@ -501,6 +519,12 @@ export function nextLiveLookup(
     if (scores.some(sportsAnswered)) return undefined;
     // An uncovered team or league, or a provider outage: search the web.
     return nextLiveLookup({ kind: 'web', request: lookup.request }, evidence);
+  }
+  const requestedUrl = requestedPageUrl(lookup.request);
+  if (requestedUrl) {
+    return rows.some((row) => row.toolName === 'web.fetch')
+      ? undefined
+      : { toolName: 'web.fetch', input: { url: requestedUrl } };
   }
   const searches = rows.filter((row) => row.toolName === 'web.search');
   if (!searches.length && !rows.some((row) => row.toolName === 'web.fetch'))

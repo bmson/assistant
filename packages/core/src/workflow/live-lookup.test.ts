@@ -13,6 +13,39 @@ import {
 } from './live-lookup.js';
 
 describe('live lookup routing from home-screen regressions', () => {
+  it.each([
+    'Read https://example.com/transit and summarize in three bullets. Do not use my email, calendar, or memories.',
+    'Please summarize https://example.com/transit. Keep source links.',
+    'Review the page at https://example.com/transit.',
+  ])('reads the explicitly requested page directly: %s', (request) => {
+    const lookup = detectLiveLookup([{ role: 'user', content: request }]);
+    expect(lookup).toMatchObject({ kind: 'web' });
+    if (!lookup) throw new Error('Expected a public page lookup');
+    expect(nextLiveLookup(lookup, [])).toEqual({
+      toolName: 'web.fetch',
+      input: { url: 'https://example.com/transit' },
+    });
+    expect(
+      nextLiveLookup(lookup, [
+        {
+          toolName: 'web.fetch',
+          status: 'succeeded',
+          result: { text: 'Official transit information' },
+        },
+      ]),
+    ).toBeUndefined();
+    expect(
+      nextLiveLookup(lookup, [{ toolName: 'web.fetch', status: 'failed', result: null }]),
+    ).toBeUndefined();
+  });
+  it.each([
+    'Do not read https://example.com/transit.',
+    'The reference is https://example.com/transit, but just rewrite my sentence.',
+    'Read https://user:password@example.com/transit.',
+  ])('does not force a page read from contextual or prohibited links: %s', (content) => {
+    expect(detectLiveLookup([{ role: 'user', content }])).toBeUndefined();
+  });
+
   it('forces a team fixture lookup before creating an event-completion reminder', () => {
     const request = 'Remind me after the Giants game tomorrow to check the score.';
     const lookup = detectLiveLookup([{ role: 'user', content: request }]);
