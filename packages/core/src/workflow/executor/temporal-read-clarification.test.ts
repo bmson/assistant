@@ -664,6 +664,11 @@ describe('flight clarification through the actual executor step loop', () => {
     expect(state.pendingFinal?.text).not.toContain('Not completed:');
     expect(state.pendingFinal?.terminalStatus).toBe('needs_attention');
     expect(state.pendingFinal?.text).not.toMatch(/September 8|flight-newsletter|taxi|transit/);
+    expect(
+      (state.pendingFinal?.responseCards ?? []).some(
+        (card) => card.kind === 'email-results' || card.kind === 'email-thread',
+      ),
+    ).toBe(false);
   });
 
   it('names incomplete mail coverage instead of claiming a flight was fully checked', async () => {
