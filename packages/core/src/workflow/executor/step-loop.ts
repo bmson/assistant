@@ -1561,14 +1561,14 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           ? validateEmailReviewAnswer(generated.value, bounded.threads)
           : undefined;
         const finalText = validated
-          ? formatEmailReviewAnswer(validated, coverage)
+          ? formatEmailReviewAnswer(validated.items, coverage)
           : formatEmailReviewAnswer([], coverage, true);
         state.step += 1;
         if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
         rc.window.push({ role: 'assistant', content: finalText } as ModelMessage);
         return stageEmailReviewResponse(
           finalText,
-          validated !== undefined && reviewCoverageComplete,
+          validated !== undefined && validated.deadlineGaps === 0 && reviewCoverageComplete,
         );
       }
       const checked = enforcePersonalReadResponse(

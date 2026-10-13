@@ -453,9 +453,9 @@ describe('bounded no-send email review', () => {
       },
       [thread],
     );
-    expect(validated).toHaveLength(1);
+    expect(validated?.items).toHaveLength(1);
     const formatted = formatEmailReviewAnswer(
-      required(validated, 'validated source-bound review'),
+      required(validated?.items, 'validated source-bound review'),
       emailReviewCoverage(['thread-a'], [thread], [search('thread-a')]),
     );
     expect(formatted).toContain('The latest message says: “Could you confirm by Friday?”');
@@ -478,32 +478,88 @@ describe('bounded no-send email review', () => {
         [thread],
       ),
     ).toBeUndefined();
+    const unverifiedOptionalDeadline = validateEmailReviewAnswer(
+      {
+        items: [
+          {
+            ...validAnswer('thread-a').items[0],
+            deadline: { messageId: 'missing-message', quote: 'Friday is nice' },
+          },
+        ],
+      },
+      [thread],
+    );
+    expect(unverifiedOptionalDeadline?.deadlineGaps).toBe(1);
+    expect(unverifiedOptionalDeadline?.items[0]).toMatchObject({
+      disposition: 'draft',
+      deadlineNeedsReview: true,
+    });
+    expect(unverifiedOptionalDeadline?.items[0]?.unverifiedDeadlineQuote).toBeUndefined();
     expect(
-      validateEmailReviewAnswer(
+      formatEmailReviewAnswer(
+        required(unverifiedOptionalDeadline?.items, 'draft preserved with missing deadline quote'),
+        emailReviewCoverage(['thread-a'], [thread], [search('thread-a')]),
+      ),
+    ).toContain('A deadline could not be verified against the thread');
+
+    const deadlinePhrases = [
+      'Applications close November 3.',
+      'Registration closes on November 3.',
+      'The last day to apply is November 3.',
+      'Please submit by November 3.',
+      'The payment is due on November 3.',
+    ];
+    for (const phrase of deadlinePhrases) {
+      const phraseThread = {
+        ...thread,
+        messages: thread.messages.map((message, index) =>
+          index === thread.messages.length - 1
+            ? { ...message, text: `${message.text} ${phrase}` }
+            : message,
+        ),
+      };
+      const validatedDeadline = validateEmailReviewAnswer(
         {
           items: [
             {
               ...validAnswer('thread-a').items[0],
-              deadline: { messageId: 'latest-thread-a', quote: 'Friday is nice' },
+              deadline: { messageId: 'latest-thread-a', quote: phrase },
             },
           ],
         },
-        [thread],
+        [phraseThread],
+      );
+      expect(validatedDeadline?.deadlineGaps, phrase).toBe(0);
+      expect(validatedDeadline?.items[0]?.deadlineQuote, phrase).toBe(phrase);
+    }
+
+    const nonDeadlinePhrase = 'The review meeting is on November 3.';
+    const nonDeadlineThread = {
+      ...thread,
+      messages: thread.messages.map((message, index) =>
+        index === thread.messages.length - 1
+          ? { ...message, text: `${message.text} ${nonDeadlinePhrase}` }
+          : message,
       ),
-    ).toBeUndefined();
-    expect(
-      validateEmailReviewAnswer(
-        {
-          items: [
-            {
-              ...validAnswer('thread-a').items[0],
-              deadline: { messageId: 'latest-thread-a', quote: 'November 3' },
-            },
-          ],
-        },
-        [thread],
-      ),
-    ).toBeUndefined();
+    };
+    const nonDeadlineAssessment = validateEmailReviewAnswer(
+      {
+        items: [
+          {
+            ...validAnswer('thread-a').items[0],
+            deadline: { messageId: 'latest-thread-a', quote: nonDeadlinePhrase },
+          },
+        ],
+      },
+      [nonDeadlineThread],
+    );
+    expect(nonDeadlineAssessment?.deadlineGaps).toBe(1);
+    expect(nonDeadlineAssessment?.items[0]).toMatchObject({
+      disposition: 'draft',
+      deadlineNeedsReview: true,
+      unverifiedDeadlineQuote: nonDeadlinePhrase,
+    });
+    expect(nonDeadlineAssessment?.items[0]?.deadlineQuote).toBeUndefined();
     expect(
       validateEmailReviewAnswer(
         {

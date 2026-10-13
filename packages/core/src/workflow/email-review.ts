@@ -630,7 +630,15 @@ function quoteExists(thread: EmailReviewThread, messageId: string, quote: string
 }
 
 function looksLikeDeadlineQuote(quote: string): boolean {
-  return /\b(?:by|before|until|due|deadline|no later than|tomorrow|today|asap)\b/i.test(quote);
+  return (
+    /\b(?:by|before|until|due|deadline|no later than|tomorrow|today|asap)\b/i.test(quote) ||
+    /\b(?:applications?|registration|submissions?|entries|enrollment|rsvp|responses?|renewal|offers?|payments?|bookings?)\b.{0,60}\b(?:close[sd]?|end(?:s|ed)?|expire[sd]?|last day|final day|due|deadline)\b/i.test(
+      quote,
+    ) ||
+    /\b(?:close[sd]?|end(?:s|ed)?|expire[sd]?|last day|final day)\b.{0,60}\b(?:on\s+)?(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d{1,2}[/-]\d{1,2}|\d{4}-\d{2}-\d{2})\b/i.test(
+      quote,
+    )
+  );
 }
 
 function draftClaimsStayInsideThread(thread: EmailReviewThread, draft: string): boolean {
@@ -660,17 +668,25 @@ export interface ValidatedEmailReviewItem {
   why: string;
   whyQuote: string;
   deadlineQuote?: string;
+  unverifiedDeadlineQuote?: string;
+  deadlineNeedsReview?: boolean;
   draftBody?: string;
+}
+
+export interface ValidatedEmailReviewAnswer {
+  items: ValidatedEmailReviewItem[];
+  deadlineGaps: number;
 }
 
 export function validateEmailReviewAnswer(
   value: unknown,
   threads: ReadonlyArray<EmailReviewThread>,
-): ValidatedEmailReviewItem[] | undefined {
+): ValidatedEmailReviewAnswer | undefined {
   const parsed = EmailReviewAnswerSchema.safeParse(value);
   if (!parsed.success) return undefined;
   if (parsed.data.items.length !== threads.length) return undefined;
   const output: ValidatedEmailReviewItem[] = [];
+  let deadlineGaps = 0;
   for (const [index, item] of parsed.data.items.entries()) {
     const thread = threads[index];
     if (
@@ -681,12 +697,15 @@ export function validateEmailReviewAnswer(
     )
       return undefined;
     const deadlineQuote = item.deadline?.quote;
-    if (
+    const deadlineQuoteIsSourceBound =
+      item.deadline !== null &&
+      item.deadline !== undefined &&
+      quoteExists(thread, item.deadline.messageId, item.deadline.quote);
+    const deadlineNeedsReview = Boolean(
       item.deadline &&
-      (!quoteExists(thread, item.deadline.messageId, item.deadline.quote) ||
-        !looksLikeDeadlineQuote(item.deadline.quote))
-    )
-      return undefined;
+        (!deadlineQuoteIsSourceBound || !looksLikeDeadlineQuote(item.deadline.quote)),
+    );
+    if (deadlineNeedsReview) deadlineGaps += 1;
     if (item.disposition === 'draft') {
       if (
         !item.draftBody?.trim() ||
@@ -710,13 +729,21 @@ export function validateEmailReviewAnswer(
       disposition: item.disposition,
       why: item.why,
       whyQuote: item.whyQuote,
-      ...(deadlineQuote ? { deadlineQuote } : {}),
+      ...(deadlineQuote && deadlineQuoteIsSourceBound && !deadlineNeedsReview
+        ? { deadlineQuote }
+        : {}),
+      ...(deadlineNeedsReview
+        ? {
+            deadlineNeedsReview: true,
+            ...(deadlineQuoteIsSourceBound ? { unverifiedDeadlineQuote: deadlineQuote } : {}),
+          }
+        : {}),
       ...(item.disposition === 'draft' && item.draftBody
         ? { draftBody: item.draftBody.trim() }
         : {}),
     });
   }
-  return output;
+  return { items: output, deadlineGaps };
 }
 
 export function formatEmailReviewAnswer(
@@ -763,9 +790,15 @@ export function formatEmailReviewAnswer(
     lines.push(`From: ${thread.recipient}`);
     lines.push(`Why it may need a reply: The latest message says: “${item.whyQuote}”`);
     lines.push(
-      item.deadlineQuote
-        ? `Deadline mentioned in the thread: “${item.deadlineQuote}”`
-        : 'Deadline: none was confirmed in the reviewed thread.',
+      item.deadlineNeedsReview
+        ? item.unverifiedDeadlineQuote
+          ? 'Possible deadline needs checking against the thread: “' +
+            item.unverifiedDeadlineQuote +
+            '”'
+          : 'A deadline could not be verified against the thread, so please check the source before relying on one.'
+        : item.deadlineQuote
+          ? `Deadline mentioned in the thread: “${item.deadlineQuote}”`
+          : 'No deadline was identified in this review.',
     );
     if (item.disposition === 'draft' && item.draftBody) {
       lines.push('**Draft for review — not saved or sent:**');

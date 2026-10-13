@@ -241,9 +241,10 @@ describe('golden tasks', () => {
                   to: 'owner@example.com',
                   date: '2026-10-11T16:00:00Z',
                   subject: 'Please confirm renewal',
-                  text: 'Could you confirm by Friday? The renewal remains available.',
-                  sourceLength: 'Could you confirm by Friday? The renewal remains available.'
-                    .length,
+                  text: 'Could you confirm by Friday? The renewal remains available. The new program takes effect November 3.',
+                  sourceLength:
+                    'Could you confirm by Friday? The renewal remains available. The new program takes effect November 3.'
+                      .length,
                   truncated: false,
                 },
               ],
@@ -299,6 +300,54 @@ describe('golden tasks', () => {
     expect(checklistState.requestChecklist?.items[0]?.status).toBe('pending');
     expect(checklistState.pendingFinal?.preserveCheckedReadResponse).toBe(true);
     expect(checklistState.pendingFinal?.text).toContain('Thanks for your note.');
+
+    const deadlineNeedsReview = await runGoldenTask(db, agentId, {
+      ...fixture,
+      name: 'email-review-unverified-optional-deadline-keeps-draft',
+      objects: [
+        fixture.objects?.[0] ?? { role: 'reason', value: { threadIds: ['request-a'] } },
+        {
+          role: 'reason',
+          value: {
+            items: [
+              {
+                threadId: 'request-a',
+                latestMessageId: 'request-a-latest',
+                disposition: 'draft',
+                recipient: 'vendor@example.net',
+                why: 'The sender asks for confirmation.',
+                whyMessageId: 'request-a-latest',
+                whyQuote: 'Could you confirm by Friday?',
+                deadline: {
+                  messageId: 'request-a-latest',
+                  quote: 'The new program takes effect November 3.',
+                },
+                draftBody: 'Thanks for your note.',
+                draftSourceMessageIds: ['request-a-old', 'request-a-latest'],
+              },
+            ],
+          },
+        },
+      ],
+    });
+    createdTaskIds.push(deadlineNeedsReview.taskId);
+
+    expect(deadlineNeedsReview.status).toBe('needs_attention');
+    expect(deadlineNeedsReview.finalText).toContain('Thanks for your note.');
+    expect(deadlineNeedsReview.finalText).toContain(
+      'Possible deadline needs checking against the thread',
+    );
+    expect(deadlineNeedsReview.finalText).toContain('The new program takes effect November 3.');
+    expect(deadlineNeedsReview.finalText).not.toContain(
+      'Deadline mentioned in the thread: “The new program takes effect November 3.',
+    );
+    const [deadlineTask] = await db
+      .select({ state: tasks.state })
+      .from(tasks)
+      .where(eq(tasks.id, deadlineNeedsReview.taskId));
+    expect(
+      TaskStateSchema.parse(deadlineTask?.state).pendingFinal?.preserveCheckedReadResponse,
+    ).toBe(true);
 
     const failedGeneration = await runGoldenTask(db, agentId, {
       ...fixture,
