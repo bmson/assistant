@@ -20,6 +20,7 @@ import { TaskStateSchema } from '../../events.js';
 import * as generatedCardModule from '../../generative-card.js';
 import { GenerativeCardSpecV1Schema } from '../../generative-card.js';
 import { refreshRequestChecklist } from '../executor/checklist.js';
+import { detectPersonalReadRequest } from '../read-intent.js';
 import {
   buildRequestChecklist,
   recordOwnerChecklistCancellation,
@@ -88,6 +89,226 @@ const workflowPlan = {
 };
 
 describe('golden tasks', () => {
+  it('executes a compound trip read through the real task dispatcher and returns only a grounded partial itinerary', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const prompt =
+      'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
+    const detected = detectPersonalReadRequest([{ role: 'user', content: prompt }]);
+    if (!detected?.compoundTripDiscovery || !detected.mailQuery)
+      throw new Error('Exact owner prompt did not enter the compound-trip read path');
+    const departure = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const departureDay = departure.toISOString().slice(0, 10);
+    const checkout = new Date(departure.getTime() + 2 * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    const address = '5 Alexanderplatz, 10178 Berlin';
+    const toolsSeen: Array<{ toolName: string; args: Record<string, unknown> }> = [];
+    const emptySchema = z.object({}).passthrough();
+    const result = await runGoldenTask(db, agentId, {
+      name: 'compound-trip-read-exact-owner-request',
+      event: {
+        source: 'chat',
+        trust: 'owner',
+        payload: { text: prompt },
+      },
+      taskType: 'chat_turn',
+      plan: workflowPlan,
+      pinOwnerRequest: true,
+      script: [
+        { toolCalls: [{ toolName: 'calendar.list_events', input: {} }] },
+        { toolCalls: [{ toolName: 'gmail.search', input: { query: detected.mailQuery } }] },
+        { toolCalls: [{ toolName: 'gmail.read_thread', input: { threadId: 'flight-thread' } }] },
+        { toolCalls: [{ toolName: 'gmail.read_thread', input: { threadId: 'hotel-thread' } }] },
+        {
+          toolCalls: [
+            {
+              toolName: 'maps.directions',
+              input: { origin: 'BER Airport', destination: address, mode: 'driving' },
+            },
+          ],
+        },
+        {
+          toolCalls: [
+            {
+              toolName: 'web.search',
+              input: {
+                query: '"BER" public transport taxi "Hotel Linden" "Berlin" official',
+                count: 5,
+              },
+            },
+          ],
+        },
+        { toolCalls: [{ toolName: 'web.fetch', input: { url: 'https://transit.example/ber' } }] },
+        { toolCalls: [{ toolName: 'web.fetch', input: { url: 'https://taxi.example/ber' } }] },
+        { text: 'Here is your verified complete trip plan.' },
+      ],
+      tools: {
+        'calendar.list_events': {
+          schema: emptySchema,
+          execute: async (args) => {
+            toolsSeen.push({
+              toolName: 'calendar.list_events',
+              args: args as Record<string, unknown>,
+            });
+            return {
+              events: [
+                {
+                  eventId: 'trip-flight-event',
+                  summary: 'Flight to Berlin, LH 777',
+                  description: 'Arrival airport: BER',
+                  location: 'Berlin Brandenburg Airport',
+                  start: `${departureDay}T10:10:00+02:00`,
+                  status: 'confirmed',
+                  links: [
+                    {
+                      type: 'calendar',
+                      url: 'https://calendar.google.com/calendar/event?eid=golden-trip',
+                    },
+                  ],
+                },
+              ],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            };
+          },
+        },
+        'gmail.search': {
+          schema: z.object({ query: z.string() }),
+          execute: async (args) => {
+            const parsed = z.object({ query: z.string() }).parse(args);
+            toolsSeen.push({ toolName: 'gmail.search', args: parsed });
+            return {
+              results: [
+                { threadId: 'flight-thread', subject: 'Airline booking confirmation LH 777' },
+                { threadId: 'hotel-thread', subject: 'Hotel reservation confirmed' },
+              ],
+              complete: true,
+              hasMore: false,
+            };
+          },
+        },
+        'gmail.read_thread': {
+          schema: z.object({ threadId: z.string() }),
+          execute: async (args) => {
+            const threadId = z.object({ threadId: z.string() }).parse(args).threadId;
+            toolsSeen.push({ toolName: 'gmail.read_thread', args: { threadId } });
+            if (threadId === 'flight-thread')
+              return {
+                complete: true,
+                messages: [
+                  {
+                    subject: 'Airline booking confirmation LH 777',
+                    text: 'Booking confirmation for flight LH 777. Arrival airport: BER. Booking reference: FLIGHT-728.',
+                  },
+                ],
+              };
+            if (threadId === 'hotel-thread')
+              return {
+                complete: true,
+                messages: [
+                  {
+                    subject: 'Reservation confirmed: Hotel Linden, Berlin',
+                    text: `Reservation confirmed: Hotel Linden, Berlin.\nCheck-in: ${departureDay}.\nCheck-out: ${checkout}.\nAddress: ${address}.`,
+                  },
+                ],
+              };
+            throw new Error(`Unexpected thread read: ${threadId}`);
+          },
+        },
+        'maps.directions': {
+          schema: z.object({
+            origin: z.string(),
+            destination: z.string(),
+            mode: z.literal('driving'),
+          }),
+          execute: async (args) => {
+            const parsed = z
+              .object({ origin: z.string(), destination: z.string(), mode: z.literal('driving') })
+              .parse(args);
+            toolsSeen.push({ toolName: 'maps.directions', args: parsed });
+            return { durationSeconds: 1500, mapsUrl: 'https://maps.example/route', ...parsed };
+          },
+        },
+        'web.search': {
+          schema: z.object({ query: z.string(), count: z.number().optional() }),
+          execute: async (args) => {
+            const parsed = z
+              .object({ query: z.string(), count: z.number().optional() })
+              .parse(args);
+            toolsSeen.push({ toolName: 'web.search', args: parsed });
+            return {
+              query: parsed.query,
+              results: [
+                {
+                  title: 'Berlin airport rail',
+                  url: 'https://transit.example/ber',
+                  snippet: 'Public transport connects BER Airport with Alexanderplatz, Berlin.',
+                },
+                {
+                  title: 'Berlin airport taxi',
+                  url: 'https://taxi.example/ber',
+                  snippet: 'Taxi service from BER Airport to Alexanderplatz, Berlin.',
+                },
+              ],
+            };
+          },
+        },
+        'web.fetch': {
+          schema: z.object({ url: z.string() }),
+          execute: async (args) => {
+            const url = z.object({ url: z.string() }).parse(args).url;
+            toolsSeen.push({ toolName: 'web.fetch', args: { url } });
+            return {
+              status: 200,
+              finalUrl: url,
+              contentType: 'text/html',
+              text: 'BER Airport service to Hotel Linden and Alexanderplatz in Berlin.',
+              truncated: false,
+            };
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+
+    expect(result.toolNames).toEqual([
+      'calendar.list_events',
+      'gmail.search',
+      'gmail.read_thread',
+      'gmail.read_thread',
+      'maps.directions',
+      'web.search',
+      'web.fetch',
+      'web.fetch',
+    ]);
+    expect(result.status).toBe('needs_attention');
+    expect(result.finalText).toContain('Flight candidate: Flight to Berlin, LH 777');
+    expect(result.finalText).toContain('Separately sourced hotel candidate: Hotel Linden, Berlin');
+    expect(result.finalText).toContain('does not prove they are the same itinerary');
+    expect(result.finalText).toContain('did not name a time zone');
+    expect(result.finalText).toContain('taxi');
+    expect(result.finalText).toContain('transit-versus-taxi comparison');
+    expect(result.finalText).not.toContain('verified complete trip plan');
+    expect(
+      toolsSeen.every(({ toolName }) =>
+        [
+          'calendar.list_events',
+          'gmail.search',
+          'gmail.read_thread',
+          'maps.directions',
+          'web.search',
+          'web.fetch',
+        ].includes(toolName),
+      ),
+    ).toBe(true);
+    expect(toolsSeen.find(({ toolName }) => toolName === 'maps.directions')?.args).toEqual({
+      origin: 'BER Airport',
+      destination: address,
+      mode: 'driving',
+    });
+  });
+
   it('prefers the grounded shipment answer to the raw email lookup card', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const card = GenerativeCardSpecV1Schema.parse({

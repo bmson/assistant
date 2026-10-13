@@ -16,6 +16,81 @@ const turn = (text: string, prior = '') => [
 ];
 
 describe('detectPersonalReadRequest', () => {
+  it('routes the compound next-trip request as bounded read-only discovery, not flight verification', () => {
+    const requestText =
+      'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
+    const request = detectPersonalReadRequest(turn(requestText), {
+      now: new Date('2026-10-13T18:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    expect(request).toMatchObject({
+      kind: 'calendar_email',
+      firstToolName: 'calendar.list_events',
+      requiresThreadRead: true,
+      answerFocus: 'trip',
+      compoundTripDiscovery: true,
+      maxResults: 50,
+      timeWindow: {
+        timeMin: '2026-10-13T18:00:00.000Z',
+        timeMax: '2027-10-13T18:00:00.000Z',
+      },
+    });
+    expect(request?.verification).toBeUndefined();
+    expect(request?.scopeIssue).toBeUndefined();
+    expect(request?.upcomingFlightDiscovery).toBeUndefined();
+    expect(request?.mailQuery).toContain('hotel');
+  });
+
+  it('caps compound trip reads and never resumes from other-task search or calendar receipts', () => {
+    const requestText =
+      'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
+    const request = detectPersonalReadRequest([{ role: 'user', content: requestText }], {
+      now: new Date('2026-10-13T18:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!request) throw new Error('Expected read request');
+    const capped: ReadToolEvidence[] = Array.from({ length: 10 }, (_, index) => ({
+      toolName: index % 2 ? 'web.fetch' : 'gmail.search',
+      status: 'failed',
+      args: {},
+      fromCurrentTask: true,
+    }));
+    expect(nextRequiredReadTool(request, capped)).toBeUndefined();
+
+    const previousTask = Array.from({ length: 10 }, (_, index) => ({
+      ...capped[index],
+      fromCurrentTask: false,
+      status: 'succeeded',
+      result: { complete: true, results: [] },
+    })) as ReadToolEvidence[];
+    expect(nextRequiredReadTool(request, previousTask)).toBe('calendar.list_events');
+  });
+
+  it('spends its two-thread budget on distinct flight and hotel booking candidates', () => {
+    const requestText =
+      'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
+    const request = detectPersonalReadRequest([{ role: 'user', content: requestText }]);
+    if (!request?.mailQuery) throw new Error('Expected the compound trip read query');
+    const evidence: ReadToolEvidence[] = [
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: request.mailQuery },
+        result: {
+          results: [
+            { threadId: 'hotel-one', subject: 'Hotel reservation confirmation' },
+            { threadId: 'hotel-two', subject: 'Hotel booking confirmation' },
+            { threadId: 'flight-one', subject: 'Flight LH 777 booking confirmation' },
+          ],
+          complete: true,
+          hasMore: false,
+        },
+      },
+    ];
+    expect(gmailThreadIdsToRead(evidence, request)).toEqual(['flight-one', 'hotel-one']);
+  });
+
   it('requires mailbox source reads for a requested reservation card while keeping other actions separate', () => {
     expect(
       detectPersonalReadRequest(

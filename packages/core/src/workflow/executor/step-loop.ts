@@ -228,7 +228,9 @@ function readAnswerDirective(request: PersonalReadRequest): string {
         ? 'Identify the lodging, address, or check-in detail only if the returned booking/calendar evidence supports it for the requested stay. Distinguish booking date from travel dates. If several stays match, show their dates and ask which one; if the requested detail is missing, say exactly what could not be confirmed. Never infer a hotel or stay from a nearby event or typical travel plans.'
         : request.answerFocus === 'applications'
           ? 'List only companies whose returned mail establishes an application. Separate application confirmations, rejections, interviews, and job recommendations. An interview or a public job listing alone is not an application receipt. This is the history found in these sources, not necessarily every application ever submitted.'
-          : 'For a flight-time question, use a dated itinerary matching the requested destination and day. Bind the departure time to that same itinerary; never substitute a boarding time or a clock from another message. If the matching sources conflict or do not state one date-bound departure time, say that you could not confirm it.',
+          : request.answerFocus === 'trip'
+            ? 'Use only successful reads from this task. Keep flight and hotel bookings independent unless they share an exact booking identity. Matching destination city and a hotel stay date spanning the calendar flight date only makes a provisional candidate; never describe those sources as the same confirmed itinerary. Route checks are allowed only for that provisional candidate with an explicit arrival airport and hotel street address. Calendar time is displayed in the owner timezone; retain the source timestamp offset and do not relabel it as a named airport timezone. State missing connection, booking-time, hotel, route, transit, or taxi evidence precisely. Never book, edit, contact, or send anything.'
+            : 'For a flight-time question, use a dated itinerary matching the requested destination and day. Bind the departure time to that same itinerary; never substitute a boarding time or a clock from another message. If the matching sources conflict or do not state one date-bound departure time, say that you could not confirm it.',
       'Lead with the answer, then concise source-backed details. Do not substitute an unrelated agenda or ask permission to perform a lookup that already ran. Do not claim any booking, application, save, or reminder was created by this read-only task.',
     ].join('\n');
   }
@@ -1429,14 +1431,20 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           text: checked.text,
           progress: checked.text.slice(0, 200),
           terminalStatus:
-            checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
+            checked.blocked &&
+            (readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery)
+              ? 'needs_attention'
+              : 'done',
           outcome:
-            checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
+            checked.blocked &&
+            (readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery)
+              ? 'needs_attention'
+              : 'done',
           contractBlocked: checked.blocked,
           contractUnsupportedCount: checked.unsupported.length,
           contractNotice: checked.blocked || undefined,
           preserveCheckedReadResponse:
-            (readRequest.upcomingFlightDiscovery &&
+            ((readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery) &&
               (checked.blocked || requestChecklistHasUnfinished(state.requestChecklist))) ||
             undefined,
         });
@@ -2694,14 +2702,20 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         text: checked.text,
         progress: checked.text.slice(0, 200),
         terminalStatus:
-          checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
+          checked.blocked &&
+          (readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery)
+            ? 'needs_attention'
+            : 'done',
         outcome:
-          checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
+          checked.blocked &&
+          (readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery)
+            ? 'needs_attention'
+            : 'done',
         contractBlocked: checked.blocked,
         contractUnsupportedCount: checked.unsupported.length,
         contractNotice: checked.blocked || undefined,
         preserveCheckedReadResponse:
-          (readRequest.upcomingFlightDiscovery &&
+          ((readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery) &&
             (checked.blocked || requestChecklistHasUnfinished(state.requestChecklist))) ||
           undefined,
       });
@@ -2790,13 +2804,20 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       text: checked.text,
       progress: checked.text.slice(0, 200),
       terminalStatus:
-        checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
-      outcome: checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
+        checked.blocked &&
+        (readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery)
+          ? 'needs_attention'
+          : 'done',
+      outcome:
+        checked.blocked &&
+        (readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery)
+          ? 'needs_attention'
+          : 'done',
       contractBlocked: checked.blocked,
       contractUnsupportedCount: checked.unsupported.length,
       contractNotice: checked.blocked || undefined,
       preserveCheckedReadResponse:
-        (readRequest.upcomingFlightDiscovery &&
+        ((readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery) &&
           (checked.blocked || requestChecklistHasUnfinished(state.requestChecklist))) ||
         undefined,
     });

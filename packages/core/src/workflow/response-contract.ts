@@ -6,6 +6,7 @@ import {
   repairPresentationDefects,
 } from '../model-router/audit-graders.js';
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
+import { compoundTripReadProjection } from './compound-trip-read.js';
 import { correctFlightWriteClaims } from './flight-write-contract.js';
 import { detectFutureWatchIntent, type FutureWatchIntent } from './future-watch-intent.js';
 import type { PersonalReadRequest } from './read-intent.js';
@@ -1271,6 +1272,23 @@ function requiredReadGaps(
   evidence: ActionEvidence[],
 ): { labels: string[]; unsupported: ActionKind[] } {
   const current = currentSuccessfulEvidence(evidence);
+  if (request.compoundTripDiscovery) {
+    const projection = compoundTripReadProjection(request, evidence);
+    const labels = projection.blocked
+      ? projection.text.split('\n\n').filter((line) => line.startsWith('Needs confirmation:'))
+      : [];
+    const unsupported: ActionKind[] = [];
+    if (!projection.calendarRows.length || !projection.calendarComplete)
+      unsupported.push('calendar_read');
+    if (
+      !projection.gmailSearchRows.length ||
+      !projection.gmailSearchComplete ||
+      !projection.threadsComplete
+    )
+      unsupported.push('inbox_read');
+    if (!projection.mapRoute || !projection.webSearch) unsupported.push('research');
+    return { labels: [...new Set(labels)], unsupported };
+  }
   if (request.kind === 'drive' || request.kind === 'memory' || request.kind === 'knowledge_graph') {
     if (matchingPrivateReadRows(request, current).length > 0) {
       return { labels: [], unsupported: [] };
@@ -3000,6 +3018,7 @@ export function verifiedReadResponse(
 ): string {
   if (request.temporalIssue || request.scopeIssue)
     return request.temporalIssue ?? request.scopeIssue ?? '';
+  if (request.compoundTripDiscovery) return compoundTripReadProjection(request, evidence).text;
   const current = currentSuccessfulEvidence(evidence);
   if (request.kind === 'drive') {
     const rows = matchingPrivateReadRows(request, current);
@@ -3463,6 +3482,13 @@ function coverageGapResponse(
   evidence: ActionEvidence[],
   gaps: { labels: string[]; unsupported: ActionKind[] },
 ): ResponseContractResult {
+  if (request.compoundTripDiscovery) {
+    return {
+      text: compoundTripReadProjection(request, evidence).text,
+      blocked: true,
+      unsupported: gaps.unsupported,
+    };
+  }
   const verified = currentSuccessfulEvidence(evidence).length
     ? `${verifiedReadResponse(request, evidence)}\n\n`
     : '';
@@ -3531,6 +3557,8 @@ function enforcePersonalReadGrounding(
   const gaps = requiredReadGaps(request, evidence);
   if (gaps.labels.length > 0) return coverageGapResponse(request, evidence, gaps);
   if (request.answerFocus === 'flight')
+    return { text: verifiedReadResponse(request, evidence), blocked: false, unsupported: [] };
+  if (request.compoundTripDiscovery)
     return { text: verifiedReadResponse(request, evidence), blocked: false, unsupported: [] };
   if (request.kind === 'memory' || request.kind === 'knowledge_graph') {
     const rows = matchingPrivateReadRows(request, currentSuccessfulEvidence(evidence));

@@ -6,6 +6,12 @@
  */
 
 import { requestedCardIntent } from './card-intent.js';
+import {
+  compoundTripFetchTargets,
+  compoundTripReadProjection,
+  compoundTripRoute,
+  MAX_COMPOUND_TRIP_TOOL_CALLS,
+} from './compound-trip-read.js';
 import { detectFutureWatchIntent } from './future-watch-intent.js';
 
 export type PersonalReadKind =
@@ -78,13 +84,15 @@ export interface PersonalReadRequest {
   /** Explicit owner-supplied lodging scope used only to rank returned mail metadata. */
   mailRelevanceTerms?: string[];
   /** Specific question to answer, rather than turning every lookup into an agenda. */
-  answerFocus?: 'lodging' | 'applications' | 'flight';
+  answerFocus?: 'lodging' | 'applications' | 'flight' | 'trip';
   /** Broad mail-history requests use a bounded metadata-page continuation. */
   requiresExhaustiveMail?: boolean;
   /** Current/upcoming mail questions prioritize the newest matching thread. */
   preferLatestMail?: boolean;
   /** A bounded future lookup, distinct from correcting a prior flight claim. */
   upcomingFlightDiscovery?: boolean;
+  /** A bounded read-only itinerary lookup spanning flight, hotel, and ground transport. */
+  compoundTripDiscovery?: boolean;
 }
 
 export interface PersonalReadDetectionOptions {
@@ -103,6 +111,7 @@ export interface ReadToolEvidence {
   id?: string;
   toolName: string;
   status: string;
+  fromCurrentTask?: boolean;
   args?: unknown;
   result?: unknown;
   error?: string | null;
@@ -585,6 +594,26 @@ function isUpcomingFlightDiscovery(text: string): boolean {
   const nextTripWithFlight =
     /\b(?:next|upcoming|soonest)\s+trip\b/i.test(text) && /\bflight\b/i.test(text);
   return (nextFlight || nextTripWithFlight) && (READ_OR_QUESTION.test(text) || VERIFY.test(text));
+}
+
+function isCompoundTripDiscovery(text: string): boolean {
+  return (
+    /\bnext\s+trip\b/i.test(text) &&
+    /\b(?:flight|flights)\b/i.test(text) &&
+    /\b(?:hotel|accommodation)\b/i.test(text) &&
+    /\b(?:airport|public transport|taxi)\b/i.test(text) &&
+    /\b(?:find|check|compare|plan|look up|search)\b/i.test(text)
+  );
+}
+
+function compoundTripWindow(now: Date): PersonalReadTimeWindow {
+  const start = new Date(now.getTime());
+  const end = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000);
+  return {
+    timeMin: start.toISOString(),
+    timeMax: end.toISOString(),
+    label: 'the next 365 days',
+  };
 }
 
 function hasExplicitTemporalPhrase(text: string): boolean {
@@ -1312,7 +1341,8 @@ function detectPersonalReadRequestInternal(
     .slice(Math.max(0, latestIndex - 4), latestIndex)
     .map(messageText)
     .join('\n');
-  const upcomingFlightDiscovery = isUpcomingFlightDiscovery(latest);
+  const compoundTripDiscovery = isCompoundTripDiscovery(latest);
+  const upcomingFlightDiscovery = !compoundTripDiscovery && isUpcomingFlightDiscovery(latest);
   // A phrase such as "find my next flight and verify anything uncertain" is
   // discovery, not a correction to an assistant claim. Only terse challenges
   // without an independently named upcoming flight inherit prior scope.
@@ -1389,6 +1419,22 @@ function detectPersonalReadRequestInternal(
       requiresThreadRead: false,
       ...(options.timeZone ? { timeZone: options.timeZone } : {}),
       ...(verification ? { verification: true } : {}),
+    };
+  }
+  if (compoundTripDiscovery) {
+    const timeWindow = compoundTripWindow(options.now ?? new Date());
+    return {
+      kind: 'calendar_email',
+      queryTerms: [],
+      firstToolName: 'calendar.list_events',
+      requiresThreadRead: true,
+      timeWindow,
+      ...(options.timeZone ? { timeZone: options.timeZone } : {}),
+      answerFocus: 'trip',
+      compoundTripDiscovery: true,
+      maxResults: 50,
+      mailQuery:
+        '{flight flights itinerary "e-ticket" "boarding pass" "booking confirmation" "reservation confirmation" hotel lodging accommodation "check-in" "check-out"}',
     };
   }
   // A terse correction such as "was that made up?" carries no subject of its
@@ -1654,6 +1700,7 @@ export function gmailSearchThreadIds(
 ): string[] {
   const ids: string[] = [];
   for (const row of evidence) {
+    if (request?.compoundTripDiscovery && row.fromCurrentTask === false) continue;
     if (
       !succeeded(row) ||
       row.toolName !== 'gmail.search' ||
@@ -1671,9 +1718,63 @@ export function gmailSearchThreadIds(
     }
   }
   const unique = [...new Set(ids)];
-  if (request?.answerFocus === 'flight' || request?.answerFocus === 'lodging') {
+  if (request?.compoundTripDiscovery) {
+    const metadata = new Map<string, { subject: string; snippet: string }>();
+    for (const row of evidence) {
+      if (row.fromCurrentTask === false || !succeeded(row) || row.toolName !== 'gmail.search')
+        continue;
+      const results = objectRecord(row.result)?.results;
+      if (!Array.isArray(results)) continue;
+      for (const item of results) {
+        const result = objectRecord(item);
+        const id = typeof result?.threadId === 'string' ? result.threadId : undefined;
+        if (!id) continue;
+        const prior = metadata.get(id);
+        metadata.set(id, {
+          subject: [prior?.subject, typeof result?.subject === 'string' ? result.subject : '']
+            .filter(Boolean)
+            .join(' '),
+          snippet: [prior?.snippet, typeof result?.snippet === 'string' ? result.snippet : '']
+            .filter(Boolean)
+            .join(' '),
+        });
+      }
+    }
+    const flightThreads = unique
+      .map((threadId, index) => {
+        const item = metadata.get(threadId);
+        const source = `${item?.subject ?? ''} ${item?.snippet ?? ''}`;
+        const flight =
+          /\b(?:flight|airline|itinerary|boarding pass|e-?ticket|record locator)\b/i.test(source);
+        const booking =
+          /\b(?:booking|confirmation|reservation|ticket|itinerary|record locator)\b/i.test(source);
+        return { threadId, index, score: flight && booking ? 1 : 0 };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => a.index - b.index);
+    const hotelThreads = unique
+      .map((threadId, index) => {
+        const item = metadata.get(threadId);
+        const source = `${item?.subject ?? ''} ${item?.snippet ?? ''}`;
+        const hotel = /\b(?:hotel|lodging|accommodation|airbnb)\b/i.test(source);
+        const booking = /\b(?:booking|confirmation|reservation|check[- ]?in)\b/i.test(source);
+        return { threadId, index, score: hotel && booking ? 1 : 0 };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => a.index - b.index);
+    const selected = [flightThreads[0]?.threadId, hotelThreads[0]?.threadId].filter(
+      (threadId): threadId is string => Boolean(threadId),
+    );
+    return [...new Set([...selected, ...unique])];
+  }
+  if (
+    request?.answerFocus === 'flight' ||
+    request?.answerFocus === 'lodging' ||
+    request?.answerFocus === 'trip'
+  ) {
     const scores = new Map<string, number>();
     for (const row of evidence) {
+      if (request?.compoundTripDiscovery && row.fromCurrentTask === false) continue;
       if (
         !succeeded(row) ||
         row.toolName !== 'gmail.search' ||
@@ -1689,26 +1790,40 @@ export function gmailSearchThreadIds(
         if (typeof metadata.threadId !== 'string') continue;
         const subject = typeof metadata.subject === 'string' ? metadata.subject : '';
         const snippet = typeof metadata.snippet === 'string' ? metadata.snippet : '';
+        const flightScore =
+          (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass|flight|airline)\b/i.test(
+            subject,
+          )
+            ? 2
+            : 0) +
+          (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass|departure|flight|airline)\b/i.test(
+            snippet,
+          )
+            ? 1
+            : 0);
+        const hotelScore = /\b(?:hotel|lodging|accommodation|airbnb)\b/i.test(subject) ? 3 : 0;
         const score =
-          request.answerFocus === 'flight'
-            ? (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass)\b/i.test(
-                subject,
-              )
-                ? 2
-                : 0) +
-              (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass|departure)\b/i.test(
-                snippet,
-              )
-                ? 1
-                : 0)
-            : lodgingMetadataScore(
-                subject,
-                snippet,
-                request.mailRelevanceTerms ?? [],
-                request.mailTemporalLabel,
-                request.timeWindow,
-                request.timeZone,
-              );
+          request.answerFocus === 'trip'
+            ? flightScore + hotelScore
+            : request.answerFocus === 'flight'
+              ? (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass)\b/i.test(
+                  subject,
+                )
+                  ? 2
+                  : 0) +
+                (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass|departure)\b/i.test(
+                  snippet,
+                )
+                  ? 1
+                  : 0)
+              : lodgingMetadataScore(
+                  subject,
+                  snippet,
+                  request.mailRelevanceTerms ?? [],
+                  request.mailTemporalLabel,
+                  request.timeWindow,
+                  request.timeZone,
+                );
         scores.set(metadata.threadId, Math.max(scores.get(metadata.threadId) ?? 0, score));
       }
     }
@@ -1915,17 +2030,22 @@ function metadataDateIntervals(text: string): Array<{ start: string; endExclusiv
 
 export const MAX_GMAIL_THREADS_TO_READ = 3;
 export const MAX_GMAIL_SEARCH_PAGES = 3;
+export const MAX_COMPOUND_CALENDAR_PAGES = 2;
 
 export function gmailThreadIdsToRead(
   evidence: ReadonlyArray<ReadToolEvidence>,
   request?: PersonalReadRequest,
 ): string[] {
-  return gmailSearchThreadIds(evidence, request).slice(0, MAX_GMAIL_THREADS_TO_READ);
+  const limit = request?.compoundTripDiscovery ? 2 : MAX_GMAIL_THREADS_TO_READ;
+  return gmailSearchThreadIds(evidence, request).slice(0, limit);
 }
 
 function gmailReadThreadIds(evidence: ReadonlyArray<ReadToolEvidence>): string[] {
   return evidence
-    .filter((row) => succeeded(row) && row.toolName === 'gmail.read_thread')
+    .filter(
+      (row) =>
+        row.fromCurrentTask !== false && succeeded(row) && row.toolName === 'gmail.read_thread',
+    )
     .map((row) =>
       row.args && typeof row.args === 'object'
         ? (row.args as { threadId?: unknown }).threadId
@@ -1937,6 +2057,7 @@ function gmailReadThreadIds(evidence: ReadonlyArray<ReadToolEvidence>): string[]
 function gmailThreadAttempts(evidence: ReadonlyArray<ReadToolEvidence>, threadId: string): number {
   return evidence.filter(
     (row) =>
+      row.fromCurrentTask !== false &&
       row.toolName === 'gmail.read_thread' &&
       row.args &&
       typeof row.args === 'object' &&
@@ -1964,8 +2085,11 @@ function nextGmailSearchPage(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): string | undefined {
   if (!request.requiresThreadRead && !request.requiresExhaustiveMail) return undefined;
-  const searches = evidence.filter((row) => matchingGmailSearch(row, request));
-  if (searches.length >= MAX_GMAIL_SEARCH_PAGES) return undefined;
+  const searches = evidence.filter(
+    (row) => row.fromCurrentTask !== false && matchingGmailSearch(row, request),
+  );
+  const pageCap = request.compoundTripDiscovery ? 2 : MAX_GMAIL_SEARCH_PAGES;
+  if (searches.length >= pageCap) return undefined;
   const latest = searches.at(-1);
   if (!latest?.result || typeof latest.result !== 'object') return undefined;
   const result = latest.result as { hasMore?: unknown; nextPageToken?: unknown };
@@ -1987,6 +2111,69 @@ export function nextRequiredReadTool(
   if (request.kind === 'drive' || request.kind === 'memory' || request.kind === 'knowledge_graph') {
     if (evidence.some((row) => matchingPrivateRead(row, request))) return undefined;
     return attempts(evidence, request.firstToolName) < 2 ? request.firstToolName : undefined;
+  }
+  if (request.compoundTripDiscovery) {
+    const currentEvidence = evidence.filter((row) => row.fromCurrentTask !== false);
+    const compoundReadTools = new Set([
+      'calendar.list_events',
+      'gmail.search',
+      'gmail.read_thread',
+      'maps.directions',
+      'web.search',
+      'web.fetch',
+    ]);
+    if (
+      currentEvidence.filter((row) => compoundReadTools.has(row.toolName)).length >=
+      MAX_COMPOUND_TRIP_TOOL_CALLS
+    )
+      return undefined;
+    const calendarRows = currentEvidence.filter((row) => matchingCalendarRead(row, request));
+    if (calendarRows.length === 0 && attempts(currentEvidence, request.firstToolName) < 2)
+      return request.firstToolName;
+    const lastCalendar = calendarRows.at(-1);
+    const calendarResult = objectRecord(lastCalendar?.result);
+    if (
+      typeof calendarResult?.nextPageToken === 'string' &&
+      calendarResult.paginationUnavailable !== true &&
+      calendarRows.length < MAX_COMPOUND_CALENDAR_PAGES
+    )
+      return request.firstToolName;
+
+    const searches = currentEvidence.filter((row) => matchingGmailSearch(row, request));
+    if (searches.length === 0 && attempts(currentEvidence, 'gmail.search') < 2)
+      return 'gmail.search';
+    if (nextGmailSearchPage(request, currentEvidence)) return 'gmail.search';
+    if (gmailThreadIdsToRead(currentEvidence, request).length > 0) {
+      const threadId = nextGmailThreadId(currentEvidence, request);
+      if (threadId) return 'gmail.read_thread';
+    }
+
+    const route = compoundTripRoute(request, currentEvidence);
+    if (route && !evidence.some((row) => matchingCompoundMapRoute(row, route)))
+      return 'maps.directions';
+    const projection = compoundTripReadProjection(request, currentEvidence);
+    if (
+      projection.webQuery &&
+      !evidence.some(
+        (row) =>
+          row.toolName === 'web.search' &&
+          objectRecord(row.args)?.query === projection.webQuery &&
+          row.fromCurrentTask !== false,
+      )
+    )
+      return 'web.search';
+    for (const target of compoundTripFetchTargets(request, currentEvidence)) {
+      if (
+        !evidence.some(
+          (row) =>
+            row.toolName === 'web.fetch' &&
+            objectRecord(row.args)?.url === target.url &&
+            row.fromCurrentTask !== false,
+        )
+      )
+        return 'web.fetch';
+    }
+    return undefined;
   }
   const calendarSucceeded = evidence.some((row) => matchingCalendarRead(row, request));
   if (request.kind !== 'email' && !calendarSucceeded) {
@@ -2024,6 +2211,9 @@ export function groundReadToolInput(
       ...allCalendars,
       ...(interval ? { timeMin: interval.start, timeMax: interval.endExclusive } : {}),
       maxResults: request.maxResults ?? 50,
+      ...(request.compoundTripDiscovery
+        ? { pageToken: compoundCalendarPageToken(request, evidence) }
+        : {}),
     };
   }
   if (toolName === 'calendar.search_events') {
@@ -2050,10 +2240,40 @@ export function groundReadToolInput(
       ...(pageToken ? { pageToken } : {}),
     };
   }
+  if (request.compoundTripDiscovery && toolName === 'maps.directions') {
+    const route = compoundTripRoute(request, evidence);
+    return route ? { ...route, mode: 'driving' } : {};
+  }
+  if (request.compoundTripDiscovery && toolName === 'web.search') {
+    const projection = compoundTripReadProjection(request, evidence);
+    return projection.webQuery ? { query: projection.webQuery, count: 5 } : {};
+  }
+  if (request.compoundTripDiscovery && toolName === 'web.fetch') {
+    const projection = compoundTripReadProjection(request, evidence);
+    const targets = compoundTripFetchTargets(request, evidence);
+    const target = targets.find(
+      (candidate) =>
+        !evidence.some(
+          (row) =>
+            row.toolName === 'web.fetch' &&
+            objectRecord(row.args)?.url === candidate.url &&
+            row.fromCurrentTask !== false,
+        ),
+    );
+    return target && projection.webQuery ? { url: target.url } : {};
+  }
   if (toolName === 'gmail.read_thread') {
     const target =
       nextGmailThreadId(evidence, request) ?? gmailThreadIdsToRead(evidence, request)[0];
     if (target) return { ...input, threadId: target };
+  }
+  if (request.compoundTripDiscovery && toolName === 'maps.directions') {
+    const route = compoundTripRoute(request, evidence);
+    return route ? { ...route, mode: 'driving' } : {};
+  }
+  if (request.compoundTripDiscovery && toolName === 'web.search') {
+    const projection = compoundTripReadProjection(request, evidence);
+    return projection.webQuery ? { query: projection.webQuery, count: 5 } : {};
   }
   if (toolName === 'drive.search') {
     return { query: request.queryTerms.join(' ') || 'recent', maxResults: 20 };
@@ -2067,6 +2287,32 @@ export function groundReadToolInput(
   return input;
 }
 
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function compoundCalendarPageToken(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): string | undefined {
+  const last = evidence
+    .filter((row) => row.fromCurrentTask !== false && matchingCalendarRead(row, request))
+    .at(-1);
+  const token = objectRecord(last?.result)?.nextPageToken;
+  return typeof token === 'string' ? token : undefined;
+}
+
+function matchingCompoundMapRoute(
+  row: ReadToolEvidence,
+  route: { origin: string; destination: string },
+): boolean {
+  if (row.fromCurrentTask === false || row.toolName !== 'maps.directions') return false;
+  const args = objectRecord(row.args);
+  return args?.origin === route.origin && args?.destination === route.destination;
+}
+
 /** Build exact forced-read arguments without asking a model to invent them. */
 export function buildReadToolInput(
   request: PersonalReadRequest,
@@ -2078,5 +2324,30 @@ export function buildReadToolInput(
   if (toolName === 'calendar.search_events' && request.queryTerms.length === 0) return null;
   if (toolName === 'calendar.availability' && !request.timeWindow) return null;
   if (toolName === 'gmail.read_thread' && !nextGmailThreadId(evidence, request)) return null;
+  if (
+    request.compoundTripDiscovery &&
+    toolName === 'maps.directions' &&
+    !compoundTripRoute(request, evidence)
+  )
+    return null;
+  if (
+    request.compoundTripDiscovery &&
+    toolName === 'web.search' &&
+    !compoundTripReadProjection(request, evidence).webQuery
+  )
+    return null;
+  if (
+    request.compoundTripDiscovery &&
+    toolName === 'web.fetch' &&
+    compoundTripFetchTargets(request, evidence).every((target) =>
+      evidence.some(
+        (row) =>
+          row.toolName === 'web.fetch' &&
+          objectRecord(row.args)?.url === target.url &&
+          row.fromCurrentTask !== false,
+      ),
+    )
+  )
+    return null;
   return groundReadToolInput(request, toolName, {}, evidence);
 }
