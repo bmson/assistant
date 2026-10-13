@@ -155,6 +155,7 @@ async function runFlightContinuation(
     weeklyCalendarIncomplete?: boolean;
     weeklyBusy?: unknown[];
     modelIgnoresNoTools?: boolean;
+    modelFinalText?: string;
   } = {},
 ) {
   const rows: Array<Record<string, unknown>> = [];
@@ -163,7 +164,7 @@ async function runFlightContinuation(
       ok: true as const,
       modelId: 'synthetic/flight-continuation',
       degraded: false as const,
-      text: '',
+      text: options.modelFinalText ?? '',
       toolCalls: options.modelIgnoresNoTools
         ? [{ toolCallId: 'forbidden-provider-call', toolName: 'calendar.create_event', input: {} }]
         : [],
@@ -579,11 +580,39 @@ describe('unsupported temporal requests through the actual executor step loop', 
     expect(state.pendingFinal?.text).toContain('not confirmed free');
   });
 
+  it.each([false, true])(
+    'uses source coverage to complete a non-empty model final (incomplete=%s)',
+    async (incomplete) => {
+      const request =
+        'Review my calendar for next week and identify scheduling conflicts and overloaded days. Find three realistic 90-minute focus blocks during working hours, allowing time for travel and breaks. Recommend changes, but show me the plan before editing my calendar.';
+      const { result, state, dispatch } = await runFlightContinuation([], request, {
+        weeklyCalendarPlan: true,
+        weeklyCalendarIncomplete: incomplete,
+        modelFinalText: 'Here is your review-only calendar plan. I have not changed your calendar.',
+      });
+      expect(result.outcome).toBe(incomplete ? 'needs_attention' : 'done');
+      expect(state.pendingFinal?.terminalStatus).toBe(incomplete ? 'needs_attention' : 'done');
+      expect(state.pendingFinal?.text).toContain('review-only plan for next week');
+      expect(state.pendingFinal?.responseCards ?? []).toEqual([]);
+      if (incomplete) {
+        expect(state.pendingFinal?.preserveCheckedReadResponse).toBe(true);
+        expect(state.pendingFinal?.text).toContain('not confirmed free');
+        expect(state.pendingFinal?.text).toContain('Holidays in United States');
+      }
+      expect(
+        dispatch.mock.calls.some(([call]) =>
+          /calendar\.(?:create|update|delete)/.test(call.toolName),
+        ),
+      ).toBe(false);
+    },
+  );
+
   it('keeps a complete-coverage plan in Activity when fewer than three focus blocks fit', async () => {
     const request =
       'Review my calendar for next week and identify scheduling conflicts and overloaded days. Find three realistic 90-minute focus blocks during working hours, allowing time for travel and breaks. Recommend changes, but show me the plan before editing my calendar.';
     const { result, state } = await runFlightContinuation([], request, {
       weeklyCalendarPlan: true,
+      modelFinalText: 'Here is your review-only calendar plan. I have not changed your calendar.',
       weeklyBusy: [
         { start: '2026-10-12T16:00:00Z', end: '2026-10-13T00:00:00Z' },
         { start: '2026-10-13T17:45:00Z', end: '2026-10-14T00:00:00Z' },
