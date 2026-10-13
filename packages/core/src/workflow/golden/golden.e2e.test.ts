@@ -25,6 +25,7 @@ import {
   recordOwnerChecklistCancellation,
   revisePendingRequestChecklistItem,
 } from '../request-checklist.js';
+import { RequestChecklistSchema } from '../request-checklist-schema.js';
 import { type GoldenFixture, runGoldenTask } from './harness.js';
 
 /**
@@ -140,7 +141,7 @@ describe('golden tasks', () => {
     if (!dbUp) return ctx.skip();
     const prompt =
       'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.';
-    const result = await runGoldenTask(db, agentId, {
+    const fixture: GoldenFixture = {
       name: 'bounded-email-review-no-send-executor',
       event: { source: 'chat', trust: 'owner', payload: { text: prompt } },
       taskType: 'chat_turn',
@@ -250,7 +251,8 @@ describe('golden tasks', () => {
           },
         },
       },
-    });
+    };
+    const result = await runGoldenTask(db, agentId, fixture);
     createdTaskIds.push(result.taskId);
 
     expect(result.toolNames).toEqual(['gmail.search', 'gmail.read_thread']);
@@ -260,6 +262,58 @@ describe('golden tasks', () => {
     expect(result.finalText).toContain('Thanks for your note.');
     expect(result.finalText).not.toContain('Weekly product newsletter');
     expect(result.finalText).not.toContain('sent the reply');
+
+    const reviewChecklist = RequestChecklistSchema.parse({
+      version: 1,
+      request: prompt,
+      items: [
+        {
+          id: 'email-review',
+          label: 'Find the most important requests that still need my response',
+          kind: 'lookup',
+          targetTerms: ['requests', 'response'],
+          status: 'pending',
+          evidence: [],
+        },
+      ],
+    });
+    const checklistReview = await runGoldenTask(db, agentId, {
+      ...fixture,
+      name: 'bounded-email-review-preserves-checked-response-with-request-checklist',
+      initialRequestChecklist: reviewChecklist,
+    });
+    createdTaskIds.push(checklistReview.taskId);
+
+    expect(checklistReview.toolNames).toEqual(['gmail.search', 'gmail.read_thread']);
+    expect(checklistReview.status).toBe('needs_attention');
+    expect(checklistReview.finalText).toContain('Draft for review — not saved or sent');
+    expect(checklistReview.finalText).toContain('Thanks for your note.');
+    expect(checklistReview.finalText).not.toContain('This request is not fully completed.');
+    expect(checklistReview.finalText).not.toContain('sent the reply');
+
+    const [checklistTask] = await db
+      .select({ state: tasks.state })
+      .from(tasks)
+      .where(eq(tasks.id, checklistReview.taskId));
+    const checklistState = TaskStateSchema.parse(checklistTask?.state);
+    expect(checklistState.requestChecklist?.items[0]?.status).toBe('pending');
+    expect(checklistState.pendingFinal?.preserveCheckedReadResponse).toBe(true);
+    expect(checklistState.pendingFinal?.text).toContain('Thanks for your note.');
+
+    const failedGeneration = await runGoldenTask(db, agentId, {
+      ...fixture,
+      name: 'email-review-generation-failure-keeps-attention-status',
+      initialRequestChecklist: reviewChecklist,
+      objects: [
+        fixture.objects?.[0] ?? { role: 'reason', value: { threadIds: [] } },
+        { role: 'reason', value: {}, unavailable: true },
+      ],
+    });
+    createdTaskIds.push(failedGeneration.taskId);
+
+    expect(failedGeneration.status).toBe('needs_attention');
+    expect(failedGeneration.finalText).toContain('could not safely prioritize');
+    expect(failedGeneration.finalText).not.toContain('Thanks for your note.');
   });
 
   it('uses at most twelve executor steps for three metadata pages, five threads, two continuations, and the final review', async (ctx) => {

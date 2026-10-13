@@ -1,12 +1,13 @@
 import { type Db, messages, tasks, toolCalls } from '@assistant/db';
 import { eq } from 'drizzle-orm';
 import type { ZodType } from 'zod';
-import type { InboundEvent, Plan } from '../../events.js';
+import { type InboundEvent, type Plan, TaskStateSchema } from '../../events.js';
 import type { GenerativeCardSpecV1 } from '../../generative-card.js';
 import type { ModelRouter, StepCallOutcome } from '../../model-router/router.js';
 import type { DispatcherPort, ExecutorDeps } from '../executor.js';
 import { executeTask } from '../executor.js';
 import { enqueueTask } from '../machine.js';
+import type { RequestChecklist } from '../request-checklist-schema.js';
 
 /**
  * A golden task: a scripted conversation with the model plus assertions about
@@ -35,6 +36,8 @@ export interface GoldenFixture {
   afterFirstExecution?: (input: { db: Db; taskId: string; agentId: string }) => Promise<void>;
   /** Give this synthetic chat the durable pinned owner-message shape of a production admission. */
   pinOwnerRequest?: boolean;
+  /** Seed a validated checklist state to exercise composed finalization behavior. */
+  initialRequestChecklist?: RequestChecklist;
   /** One entry per model step: tool calls to propose and/or final text. */
   script: Array<{
     text?: string;
@@ -235,6 +238,11 @@ export async function runGoldenTask(
     ...(fixture.plan ? { plan: fixture.plan } : {}),
     ...(fixture.maxSteps ? { maxSteps: fixture.maxSteps } : {}),
   });
+  if (fixture.initialRequestChecklist) {
+    const state = TaskStateSchema.parse(task.state);
+    state.requestChecklist = fixture.initialRequestChecklist;
+    await db.update(tasks).set({ state }).where(eq(tasks.id, task.id));
+  }
   if (fixture.pinOwnerRequest && task.conversationId) {
     const payload = (fixture.event as { payload?: Record<string, unknown> }).payload ?? {};
     const text = payload.text;

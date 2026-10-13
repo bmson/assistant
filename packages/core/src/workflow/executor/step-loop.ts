@@ -1355,6 +1355,21 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     if (readRequest && !mustRecordGoalProgress && !forcedReadTool && !forcedLiveLookup) {
       if (readRequest.emailReview) {
         const review = readRequest.emailReview;
+        const stageEmailReviewResponse = async (
+          text: string,
+          complete: boolean,
+        ): Promise<ExecuteResult> =>
+          stageReadFinal({
+            text,
+            progress: text.slice(0, 200),
+            terminalStatus: complete ? 'done' : 'needs_attention',
+            outcome: complete ? 'done' : 'needs_attention',
+            // Email review text comes from bounded receipts plus a validated
+            // assessment or a deterministic coverage-gap formatter. Keep that
+            // checked result visible when another checklist outcome remains;
+            // the checklist still controls task completion.
+            preserveCheckedReadResponse: true,
+          });
         const reviewEvidence = readToolEvidence.map((row) => ({ ...row, result: row.result }));
         const selected = review.selectedThreadIds;
         const persistReview = async (next: typeof review): Promise<boolean> => {
@@ -1399,12 +1414,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               true,
             );
             rc.window.push({ role: 'assistant', content: finalText } as ModelMessage);
-            return stageReadFinal({
-              text: finalText,
-              progress: finalText.slice(0, 200),
-              terminalStatus: 'done',
-              outcome: 'done',
-            });
+            return stageEmailReviewResponse(finalText, false);
           } else {
             const rankingContext = emailReviewRankContext(reviewEvidence);
             let ranked: { ok: boolean; threadIds?: string[] };
@@ -1473,8 +1483,8 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           return stageReadFinal({
             text: finalText,
             progress: finalText,
-            terminalStatus: 'done',
-            outcome: 'done',
+            terminalStatus: 'needs_attention',
+            outcome: 'needs_attention',
           });
         }
 
@@ -1493,6 +1503,23 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           reviewEvidence,
           bounded.omittedThreadIds.length,
         );
+        const rankedCandidateIds = readRequest.emailReview.rankedCandidateIds;
+        const nonNewsletterCandidates = Math.max(
+          0,
+          coverage.uniqueThreads - coverage.obviousNewslettersExcluded,
+        );
+        const rankingCoverageComplete =
+          nonNewsletterCandidates === 0 ||
+          (rankedCandidateIds !== undefined &&
+            rankedCandidateIds.length >= nonNewsletterCandidates);
+        const reviewCoverageComplete =
+          !readRequest.emailReview.rankingFailed &&
+          coverage.searchComplete &&
+          coverage.completeThreads === coverage.selectedThreads &&
+          coverage.contextLimitedThreads === 0 &&
+          coverage.ownerOrChronologyExcluded === 0 &&
+          rankingCoverageComplete &&
+          (coverage.selectedThreads > 0 || nonNewsletterCandidates === 0);
         if (readRequest.emailReview.rankingFailed || bounded.threads.length === 0) {
           const finalText = formatEmailReviewAnswer(
             [],
@@ -1500,12 +1527,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             readRequest.emailReview.rankingFailed ?? false,
           );
           rc.window.push({ role: 'assistant', content: finalText } as ModelMessage);
-          return stageReadFinal({
-            text: finalText,
-            progress: finalText.slice(0, 200),
-            terminalStatus: 'done',
-            outcome: 'done',
-          });
+          return stageEmailReviewResponse(finalText, reviewCoverageComplete);
         }
         if (selected === undefined && successfulSearches.length === 0) {
           if (
@@ -1519,12 +1541,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         if (state.step >= task.maxSteps) {
           const finalText = `${formatEmailReviewAnswer([], coverage)}\n\nThe task reached its bounded work limit before it could prepare reviewed drafts.`;
           rc.window.push({ role: 'assistant', content: finalText } as ModelMessage);
-          return stageReadFinal({
-            text: finalText,
-            progress: finalText.slice(0, 200),
-            terminalStatus: 'done',
-            outcome: 'done',
-          });
+          return stageEmailReviewResponse(finalText, false);
         }
         let generated: { ok: boolean; value?: unknown };
         try {
@@ -1549,12 +1566,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         state.step += 1;
         if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
         rc.window.push({ role: 'assistant', content: finalText } as ModelMessage);
-        return stageReadFinal({
-          text: finalText,
-          progress: finalText.slice(0, 200),
-          terminalStatus: 'done',
-          outcome: 'done',
-        });
+        return stageEmailReviewResponse(
+          finalText,
+          validated !== undefined && reviewCoverageComplete,
+        );
       }
       const checked = enforcePersonalReadResponse(
         readRequest,
