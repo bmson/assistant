@@ -36,6 +36,7 @@ import { type ArtifactIntent, artifactExecutionFailure } from '../artifact-inten
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
 import { CARD_NOT_BUILT, requestedCardIntent } from '../card-intent.js';
 import { responseCardSteps } from '../card-steps.js';
+import type { CompoundTripExtraction } from '../compound-trip-extraction.js';
 import { isGoalWorkEvidence } from '../goal-evidence.js';
 import {
   detectLiveLookups,
@@ -435,14 +436,22 @@ export async function stageFinalResponse(
   state: TaskState,
   window: ModelMessage[],
   pending: PendingFinal,
+  options?: { verifiedCompoundTripChecklist?: boolean },
 ): Promise<ExecuteResult> {
   const correctionOwnedChecklist =
     state.requestChecklist?.revision !== undefined ||
     state.requestChecklist?.revisionAudit !== undefined;
+  const compoundTripChecklistOwned =
+    options?.verifiedCompoundTripChecklist === true &&
+    state.requestChecklist !== undefined &&
+    state.requestChecklist.items.length > 0 &&
+    state.requestChecklist.items.every(
+      (item) => item.status === 'completed' && item.evidence.length > 0,
+    );
   // Correction reads reconcile only their selected, revision-bound item after
   // typed coverage. The generic receipt matcher uses broader target terms and
   // can both lose corrected state and satisfy a same-kind sibling by accident.
-  if (!correctionOwnedChecklist)
+  if (!correctionOwnedChecklist && !compoundTripChecklistOwned)
     await refreshRequestChecklist(executionEvidence(deps), task, state);
   const checklist = state.requestChecklist;
   if (checklist && requestChecklistHasUnfinished(checklist)) {
@@ -560,6 +569,8 @@ export async function stageModelFinalResponse(
    */
   readContext?: {
     readRequest?: PersonalReadRequest | null;
+    compoundTripExtraction?: CompoundTripExtraction;
+    verifiedCompoundTripChecklist?: boolean;
     groundingCorpus?: string;
     /** The owner's clock, which resolves "my 3pm" to one calendar event. */
     lookupContext?: LookupContext;
@@ -712,6 +723,9 @@ export async function stageModelFinalResponse(
       task.trust === 'owner' && !isForwardedIngest(task) ? latestUserText(window) : undefined,
     urlCorpus: sourceCorpus,
     readRequest: readContext ? readContext.readRequest : detectPersonalReadRequest(window),
+    ...(readContext?.compoundTripExtraction
+      ? { compoundTripExtraction: readContext.compoundTripExtraction }
+      : {}),
     groundingCorpus: readContext?.groundingCorpus,
     liveCorpus: liveLookups.length > 0 ? liveLookupCorpus(rows) : undefined,
   };
@@ -1027,12 +1041,22 @@ export async function stageModelFinalResponse(
   // A known contact's plain answer would otherwise dead-end in the dashboard;
   // propose it back to them (owner-approved) so the thread does not go silent.
   await maybeEnqueueKnownSenderReply(deps, task, text);
-  return stageFinalResponse(deps, task, state, window, {
-    ...pending,
-    text,
-    progress: text.slice(0, 200),
-    contractNotice: checked.blocked || undefined,
-  });
+  return stageFinalResponse(
+    deps,
+    task,
+    state,
+    window,
+    {
+      ...pending,
+      text,
+      progress: text.slice(0, 200),
+      contractNotice: checked.blocked || undefined,
+    },
+    {
+      verifiedCompoundTripChecklist:
+        readContext?.verifiedCompoundTripChecklist === true && !checked.blocked,
+    },
+  );
 }
 
 /**

@@ -615,15 +615,15 @@ describe('flight clarification through the actual executor step loop', () => {
     expect(result.outcome).not.toBe('done');
   });
 
-  it('discovers an upcoming flight despite output-policy wording and preserves an honest source gap', async () => {
+  it('returns a qualified single-flight candidate despite output-policy wording', async () => {
     const request =
-      'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
+      'Find my next flight from my booking emails and calendar. Confirm its departure date and time zone, and clearly mark anything you cannot verify.';
     const { result, state, dispatch, router } = await runFlightContinuation([], request, {
       upcomingFlight: true,
       withRequestChecklist: true,
     });
 
-    expect(result.outcome).toBe('needs_attention');
+    expect(result.outcome).toBe('done');
     expect(dispatch.mock.calls.map(([call]) => call.toolName)).toEqual([
       'calendar.list_events',
       'gmail.search',
@@ -641,7 +641,6 @@ describe('flight clarification through the actual executor step loop', () => {
     );
     expect(router.object).not.toHaveBeenCalled();
     expect(state.pendingFinal?.contractBlocked).toBe(false);
-    expect(state.pendingFinal?.preserveCheckedReadResponse).toBe(true);
     expect(state.pendingFinal?.text).toContain(
       'The next flight candidate in your calendar is Flight to Lisbon on November 12, 2026.',
     );
@@ -652,9 +651,6 @@ describe('flight clarification through the actual executor step loop', () => {
     expect(state.pendingFinal?.text).toContain("couldn't establish that it is the same flight");
     expect(state.pendingFinal?.text).toContain('or reconcile its source time zone');
     expect(state.pendingFinal?.text).toContain(
-      'Connections, hotel, and ground transport remain unverified.',
-    );
-    expect(state.pendingFinal?.text).toContain(
       'Calendar source: https://calendar.google.com/calendar/event?eid=lisbon',
     );
     expect(state.pendingFinal?.text).toContain(
@@ -662,7 +658,7 @@ describe('flight clarification through the actual executor step loop', () => {
     );
     expect(state.pendingFinal?.text).not.toContain('This request is not fully completed.');
     expect(state.pendingFinal?.text).not.toContain('Not completed:');
-    expect(state.pendingFinal?.terminalStatus).toBe('needs_attention');
+    expect(state.pendingFinal?.terminalStatus).toBe('done');
     expect(state.pendingFinal?.text).not.toMatch(/September 8|flight-newsletter|taxi|transit/);
     expect(
       (state.pendingFinal?.responseCards ?? []).some(

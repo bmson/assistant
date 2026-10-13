@@ -6,6 +6,7 @@ import {
   repairPresentationDefects,
 } from '../model-router/audit-graders.js';
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
+import type { CompoundTripExtraction } from './compound-trip-extraction.js';
 import { compoundTripReadProjection } from './compound-trip-read.js';
 import { correctFlightWriteClaims } from './flight-write-contract.js';
 import { detectFutureWatchIntent, type FutureWatchIntent } from './future-watch-intent.js';
@@ -78,6 +79,8 @@ interface ResponseContractOptions {
   urlCorpus?: string;
   /** Deterministically detected from the latest owner turn. */
   readRequest?: PersonalReadRequest | null;
+  /** Task-local, quote-validated facts extracted from complete booking messages. */
+  compoundTripExtraction?: CompoundTripExtraction;
   /**
    * Context the turn legitimately supplied that is not itself a tool result —
    * chiefly the ambient weather/location block, which v25 invites the answer
@@ -1270,10 +1273,11 @@ function matchingPrivateReadRows(
 function requiredReadGaps(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
+  compoundTripExtraction?: CompoundTripExtraction,
 ): { labels: string[]; unsupported: ActionKind[] } {
   const current = currentSuccessfulEvidence(evidence);
   if (request.compoundTripDiscovery) {
-    const projection = compoundTripReadProjection(request, evidence);
+    const projection = compoundTripReadProjection(request, evidence, compoundTripExtraction);
     const labels = projection.blocked
       ? projection.text.split('\n\n').filter((line) => line.startsWith('Needs confirmation:'))
       : [];
@@ -3015,10 +3019,12 @@ export function groundReadDraft(
 export function verifiedReadResponse(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
+  compoundTripExtraction?: CompoundTripExtraction,
 ): string {
   if (request.temporalIssue || request.scopeIssue)
     return request.temporalIssue ?? request.scopeIssue ?? '';
-  if (request.compoundTripDiscovery) return compoundTripReadProjection(request, evidence).text;
+  if (request.compoundTripDiscovery)
+    return compoundTripReadProjection(request, evidence, compoundTripExtraction).text;
   const current = currentSuccessfulEvidence(evidence);
   if (request.kind === 'drive') {
     const rows = matchingPrivateReadRows(request, current);
@@ -3481,10 +3487,11 @@ function coverageGapResponse(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
   gaps: { labels: string[]; unsupported: ActionKind[] },
+  compoundTripExtraction?: CompoundTripExtraction,
 ): ResponseContractResult {
   if (request.compoundTripDiscovery) {
     return {
-      text: compoundTripReadProjection(request, evidence).text,
+      text: compoundTripReadProjection(request, evidence, compoundTripExtraction).text,
       blocked: true,
       unsupported: gaps.unsupported,
     };
@@ -3554,12 +3561,21 @@ function enforcePersonalReadGrounding(
       blocked: true,
       unsupported: ['calendar_read'],
     };
-  const gaps = requiredReadGaps(request, evidence);
-  if (gaps.labels.length > 0) return coverageGapResponse(request, evidence, gaps);
+  const gaps = requiredReadGaps(request, evidence, opts?.compoundTripExtraction);
+  if (gaps.labels.length > 0)
+    return coverageGapResponse(request, evidence, gaps, opts?.compoundTripExtraction);
   if (request.answerFocus === 'flight')
-    return { text: verifiedReadResponse(request, evidence), blocked: false, unsupported: [] };
+    return {
+      text: verifiedReadResponse(request, evidence, opts?.compoundTripExtraction),
+      blocked: false,
+      unsupported: [],
+    };
   if (request.compoundTripDiscovery)
-    return { text: verifiedReadResponse(request, evidence), blocked: false, unsupported: [] };
+    return {
+      text: verifiedReadResponse(request, evidence, opts?.compoundTripExtraction),
+      blocked: false,
+      unsupported: [],
+    };
   if (request.kind === 'memory' || request.kind === 'knowledge_graph') {
     const rows = matchingPrivateReadRows(request, currentSuccessfulEvidence(evidence));
     const facts = rows.flatMap((row) =>

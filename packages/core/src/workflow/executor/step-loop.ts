@@ -32,6 +32,12 @@ import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-impo
 import { requestedCardIntent } from '../card-intent.js';
 import { taskBoundCorrectionReadRequest } from '../checklist-correction-resume.js';
 import {
+  type CompoundTripExtraction,
+  compoundTripExtractionEvidence,
+  compoundTripSourceMessages,
+  extractCompoundTripBookings,
+} from '../compound-trip-extraction.js';
+import {
   detectFutureWatchIntent,
   futureWatchRecoveryCallMatches,
   shouldAttemptFutureWatchRecovery,
@@ -419,6 +425,8 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           timeZone: requestTimeZone,
         })
       : null;
+  let compoundTripExtraction: CompoundTripExtraction | undefined;
+  let compoundTripExtractionAttempted = false;
   const stageReadFinal = async (
     pending: Parameters<typeof stageFinalResponse>[4],
   ): Promise<ExecuteResult> => {
@@ -471,12 +479,83 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         };
       }
     }
-    return !restrictedChecklistResume && directOwner && requestedCardIntent(ownerText)
-      ? stageModelFinalResponse(deps, lease, state, rc.window, pending, artifactIntent, {
+    let verifiedCompoundTripChecklist = false;
+    if (
+      readRequest?.compoundTripDiscovery &&
+      pending.contractBlocked === false &&
+      pending.terminalStatus === 'done' &&
+      pending.outcome === 'done' &&
+      pending.contractUnsupportedCount === 0 &&
+      !rc.checklistCancellation &&
+      !rc.checklistCorrection
+    ) {
+      const checklist = state.requestChecklist;
+      const eligibleChecklist = Boolean(
+        checklist &&
+          checklist.request.trim() === ownerText.trim() &&
+          checklist.revision === undefined &&
+          checklist.revisionAudit === undefined &&
+          checklist.cancellationRevision === undefined &&
+          checklist.cancellationAudit === undefined &&
+          checklist.lastOwnerAction === undefined &&
+          checklist.items.length > 0 &&
+          checklist.items.every(
+            (item) =>
+              item.kind === 'lookup' && item.status === 'pending' && !item.ownerCancellation,
+          ),
+      );
+      if (eligibleChecklist && checklist) {
+        const proofRows = await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id });
+        const readRows: ReadToolEvidence[] = proofRows
+          .filter(
+            (row) =>
+              row.status === 'succeeded' &&
+              /^(?:calendar\.(?:list_events|search_events)|gmail\.(?:search|read_thread)|maps\.directions|web\.(?:search|fetch))$/.test(
+                row.toolName,
+              ),
+          )
+          .map((row) => ({ ...row, fromCurrentTask: true }));
+        if (compoundTripExtraction)
+          readRows.push(compoundTripExtractionEvidence(compoundTripExtraction));
+        const independentlyChecked = enforcePersonalReadResponse(
           readRequest,
-          lookupContext,
-        })
-      : stageFinalResponse(deps, lease, state, rc.window, pending);
+          readRows.map((row) => ({ ...row, result: row.result })),
+        );
+        const receipts = proofRows
+          .filter(
+            (row) =>
+              row.status === 'succeeded' &&
+              /^(?:calendar\.(?:list_events|search_events)|gmail\.(?:search|read_thread)|maps\.directions|web\.(?:search|fetch))$/.test(
+                row.toolName,
+              ),
+          )
+          .slice(-256)
+          .map((row) => ({ id: row.id, toolName: row.toolName }));
+        if (!independentlyChecked.blocked && receipts.length > 0) {
+          state.requestChecklist = {
+            ...checklist,
+            items: checklist.items.map((item) => ({
+              ...item,
+              status: 'completed',
+              evidence: receipts,
+              detail: undefined,
+            })),
+          };
+          verifiedCompoundTripChecklist = true;
+        }
+      }
+    }
+    const readContext = {
+      readRequest,
+      lookupContext,
+      verifiedCompoundTripChecklist,
+      ...(compoundTripExtraction ? { compoundTripExtraction } : {}),
+    };
+    return !restrictedChecklistResume && directOwner && requestedCardIntent(ownerText)
+      ? stageModelFinalResponse(deps, lease, state, rc.window, pending, artifactIntent, readContext)
+      : stageFinalResponse(deps, lease, state, rc.window, pending, {
+          verifiedCompoundTripChecklist,
+        });
   };
   // A conceptual question was explicitly classified before the planner ran.
   // Keep the same no-tool guarantee at execution time: a model may still emit
@@ -1076,7 +1155,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         : [];
     const correctionProjection = rc.checklistCorrection;
     const cancellationProjection = rc.checklistCancellation;
-    const readToolEvidence: ReadToolEvidence[] = correctionProjection
+    let readToolEvidence: ReadToolEvidence[] = correctionProjection
       ? allReadToolEvidence.filter((row) => {
           if (correctionExcludedEvidenceIds.includes(row.id)) return false;
           const decision =
@@ -1108,6 +1187,28 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             );
           })
         : allReadToolEvidence;
+    if (readRequest?.compoundTripDiscovery) {
+      if (!compoundTripExtractionAttempted) {
+        const completeSources = compoundTripSourceMessages(readRequest, readToolEvidence);
+        if (completeSources.length > 0) {
+          compoundTripExtractionAttempted = true;
+          compoundTripExtraction = await extractCompoundTripBookings({
+            router: deps.router,
+            taskId: task.id,
+            request: readRequest,
+            evidence: readToolEvidence,
+          });
+        }
+      }
+      // taskEvidence is reloaded on every executor iteration. Keep the one-shot
+      // typed extraction attached so deterministic route and web planning use
+      // the same validated facts after each persisted tool result.
+      if (compoundTripExtraction)
+        readToolEvidence = [
+          ...readToolEvidence,
+          compoundTripExtractionEvidence(compoundTripExtraction),
+        ];
+    }
     const forcedReadTool =
       !mustRecordGoalProgress && readRequest
         ? nextRequiredReadTool(readRequest, readToolEvidence)
@@ -2791,10 +2892,15 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // never replace it with generic progress prose or ask the owner to choose a
   // provider. Goal sessions retain their stricter progress-persistence path.
   if (readRequest && !isUnattendedGoalSession(task)) {
-    const readToolEvidence = await evidence.taskEvidence({
+    let readToolEvidence = await evidence.taskEvidence({
       agentId: task.agentId,
       taskId: task.id,
     });
+    if (compoundTripExtraction)
+      readToolEvidence = [
+        ...readToolEvidence,
+        compoundTripExtractionEvidence(compoundTripExtraction) as (typeof readToolEvidence)[number],
+      ];
     const checked = enforcePersonalReadResponse(
       readRequest,
       readToolEvidence.map((row) => ({ ...row, result: row.result })),

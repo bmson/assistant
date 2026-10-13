@@ -44,6 +44,8 @@ export interface GoldenFixture {
   }>;
   /** Optional self-review result after the final scripted model step. */
   verification?: GoldenVerification;
+  /** Structured booking facts returned by the bounded compound-trip extractor. */
+  compoundTripExtraction?: unknown;
   /** Optional grounded card composition; persistence still uses the real database. */
   card?: GenerativeCardSpecV1;
   /** Tool implementations available to the scripted model. */
@@ -80,16 +82,24 @@ export interface GoldenResult {
   finalText: string;
   /** The durable terminal task status. */
   status: string;
+  /** Number of bounded structured booking extractions attempted. */
+  extractCalls: number;
   taskId: string;
 }
 
 class ScriptedRouter {
   private index = 0;
+  private extractionCallCount = 0;
   constructor(
     private script: GoldenFixture['script'],
     private verification: GoldenVerification = { decision: 'publish' },
     private card?: GenerativeCardSpecV1,
+    private compoundTripExtraction?: unknown,
   ) {}
+
+  get extractCalls(): number {
+    return this.extractionCallCount;
+  }
 
   async step(): Promise<StepCallOutcome> {
     const entry = this.script[this.index] ?? { text: 'Done.' };
@@ -110,6 +120,16 @@ class ScriptedRouter {
   }
 
   async object<T>(role: string, options?: { system?: string }): Promise<unknown> {
+    if (role === 'extract') this.extractionCallCount += 1;
+    if (role === 'extract' && this.compoundTripExtraction !== undefined) {
+      return {
+        ok: true,
+        modelId: 'golden/trip-extractor',
+        degraded: false,
+        object: this.compoundTripExtraction as T,
+        finishReason: 'stop',
+      };
+    }
     if (role === 'rewrite') {
       if (options?.system?.startsWith('You compose a native information card')) {
         return {
@@ -208,11 +228,13 @@ export async function runGoldenTask(
   agentId: string,
   fixture: GoldenFixture,
 ): Promise<GoldenResult> {
-  const router = new ScriptedRouter(
+  const scriptedRouter = new ScriptedRouter(
     fixture.script,
     fixture.verification,
     fixture.card,
-  ) as unknown as ModelRouter;
+    fixture.compoundTripExtraction,
+  );
+  const router = scriptedRouter as unknown as ModelRouter;
   const { task } = await enqueueTask(db, {
     event: { ...fixture.event, agentId } as InboundEvent,
     type: fixture.taskType,
@@ -275,6 +297,7 @@ export async function runGoldenTask(
     toolNames: rows.map((row) => row.toolName),
     finalText: pendingFinal?.text ?? finished?.progress ?? '',
     status: finished?.status ?? 'missing',
+    extractCalls: scriptedRouter.extractCalls,
     taskId: task.id,
   };
 }

@@ -49,7 +49,7 @@ describe('detectPersonalReadRequest', () => {
       timeZone: 'America/Los_Angeles',
     });
     if (!request) throw new Error('Expected read request');
-    const capped: ReadToolEvidence[] = Array.from({ length: 10 }, (_, index) => ({
+    const capped: ReadToolEvidence[] = Array.from({ length: 12 }, (_, index) => ({
       toolName: index % 2 ? 'web.fetch' : 'gmail.search',
       status: 'failed',
       args: {},
@@ -57,7 +57,7 @@ describe('detectPersonalReadRequest', () => {
     }));
     expect(nextRequiredReadTool(request, capped)).toBeUndefined();
 
-    const previousTask = Array.from({ length: 10 }, (_, index) => ({
+    const previousTask = Array.from({ length: 12 }, (_, index) => ({
       ...capped[index],
       fromCurrentTask: false,
       status: 'succeeded',

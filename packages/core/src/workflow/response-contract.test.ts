@@ -2995,7 +2995,7 @@ describe('groundReadDraft', () => {
 
   it('does not match a yearless booking date to a discovered future flight', () => {
     const requestText =
-      'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
+      'Find my upcoming flight from my booking emails and calendar. Confirm its departure date and time zone.';
     const request = detectPersonalReadRequest([{ role: 'user', content: requestText }], {
       now: new Date('2026-10-09T12:00:00Z'),
       timeZone: 'America/Los_Angeles',

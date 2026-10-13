@@ -2080,6 +2080,63 @@ function nextGmailThreadId(
   );
 }
 
+function compoundThreadReadInput(
+  evidence: ReadonlyArray<ReadToolEvidence>,
+  request: PersonalReadRequest,
+): Record<string, unknown> | undefined {
+  if (!request.compoundTripDiscovery) return undefined;
+  const targets = gmailThreadIdsToRead(evidence, request).slice(0, 2);
+  for (const threadId of targets) {
+    const attempts = evidence.filter(
+      (row) =>
+        row.fromCurrentTask !== false &&
+        row.toolName === 'gmail.read_thread' &&
+        objectRecord(row.args)?.threadId === threadId,
+    ).length;
+    const pages = evidence.filter(
+      (row) =>
+        row.fromCurrentTask !== false &&
+        succeeded(row) &&
+        row.toolName === 'gmail.read_thread' &&
+        objectRecord(row.args)?.threadId === threadId,
+    );
+    if (pages.length === 0) {
+      if (attempts >= 2) continue;
+      return {
+        threadId,
+        startMessageIndex: 0,
+        startMessageOffset: 0,
+        maxMessages: 20,
+        maxChars: 20_000,
+      };
+    }
+    const latest = pages.at(-1);
+    const result = objectRecord(latest?.result);
+    if (result?.complete === true) continue;
+    if (pages.length >= 2 || attempts >= 2) continue;
+    const continuation = objectRecord(result?.continuation);
+    const input = objectRecord(continuation?.input);
+    if (
+      continuation?.tool === 'gmail.read_thread' &&
+      input?.threadId === threadId &&
+      Number.isInteger(input.startMessageIndex) &&
+      Number(input.startMessageIndex) >= 0 &&
+      Number(input.startMessageIndex) <= 100_000 &&
+      Number.isInteger(input.startMessageOffset) &&
+      Number(input.startMessageOffset) >= 0 &&
+      Number(input.startMessageOffset) <= 100_000 &&
+      Number.isInteger(input.maxMessages) &&
+      Number(input.maxMessages) >= 1 &&
+      Number(input.maxMessages) <= 100 &&
+      Number.isInteger(input.maxChars) &&
+      Number(input.maxChars) >= 100 &&
+      Number(input.maxChars) <= 50_000
+    )
+      return { ...input };
+  }
+  return undefined;
+}
+
 function nextGmailSearchPage(
   request: PersonalReadRequest,
   evidence: ReadonlyArray<ReadToolEvidence>,
@@ -2144,6 +2201,8 @@ export function nextRequiredReadTool(
       return 'gmail.search';
     if (nextGmailSearchPage(request, currentEvidence)) return 'gmail.search';
     if (gmailThreadIdsToRead(currentEvidence, request).length > 0) {
+      const pagedThread = compoundThreadReadInput(currentEvidence, request);
+      if (pagedThread) return 'gmail.read_thread';
       const threadId = nextGmailThreadId(currentEvidence, request);
       if (threadId) return 'gmail.read_thread';
     }
@@ -2263,6 +2322,8 @@ export function groundReadToolInput(
     return target && projection.webQuery ? { url: target.url } : {};
   }
   if (toolName === 'gmail.read_thread') {
+    const compoundPage = compoundThreadReadInput(evidence, request);
+    if (compoundPage) return compoundPage;
     const target =
       nextGmailThreadId(evidence, request) ?? gmailThreadIdsToRead(evidence, request)[0];
     if (target) return { ...input, threadId: target };
@@ -2323,7 +2384,13 @@ export function buildReadToolInput(
   if (toolName === 'calendar.list_events' && !request.timeWindow) return null;
   if (toolName === 'calendar.search_events' && request.queryTerms.length === 0) return null;
   if (toolName === 'calendar.availability' && !request.timeWindow) return null;
-  if (toolName === 'gmail.read_thread' && !nextGmailThreadId(evidence, request)) return null;
+  if (
+    toolName === 'gmail.read_thread' &&
+    !(request.compoundTripDiscovery
+      ? compoundThreadReadInput(evidence, request)
+      : nextGmailThreadId(evidence, request))
+  )
+    return null;
   if (
     request.compoundTripDiscovery &&
     toolName === 'maps.directions' &&

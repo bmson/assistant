@@ -89,7 +89,7 @@ const workflowPlan = {
 };
 
 describe('golden tasks', () => {
-  it('executes a compound trip read through the real task dispatcher and returns only a grounded partial itinerary', async (ctx) => {
+  it('executes a compound trip read through the real task dispatcher and returns a source-grounded itinerary', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const prompt =
       'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
@@ -102,6 +102,9 @@ describe('golden tasks', () => {
       .toISOString()
       .slice(0, 10);
     const address = '5 Alexanderplatz, 10178 Berlin';
+    const outboundQuote = `Outbound flight LH 777 departs from SFO to FRA on ${departureDay} at 10:10 Europe/Berlin and arrives at 11:45 Europe/Berlin. Booking FLIGHT-728.`;
+    const connectionQuote = `Connection flight LH 101 departs from FRA to BER on ${departureDay} at 12:30 Europe/Berlin and arrives at 13:20 Europe/Berlin. Booking FLIGHT-728.`;
+    const hotelQuote = `Your reserved Hotel Linden at ${address} in Berlin covers ${departureDay} through ${checkout}; confirmation HOTEL-55123.`;
     const toolsSeen: Array<{ toolName: string; args: Record<string, unknown> }> = [];
     const emptySchema = z.object({}).passthrough();
     const result = await runGoldenTask(db, agentId, {
@@ -114,6 +117,61 @@ describe('golden tasks', () => {
       taskType: 'chat_turn',
       plan: workflowPlan,
       pinOwnerRequest: true,
+      compoundTripExtraction: {
+        messages: [
+          {
+            threadId: 'flight-thread',
+            messageId: 'flight-confirmation-message',
+            segments: [
+              {
+                flightNumber: 'LH 777',
+                role: 'outbound',
+                departureDate: departureDay,
+                departureTime: '10:10',
+                departureTimeZone: 'Europe/Berlin',
+                arrivalDate: departureDay,
+                arrivalTime: '11:45',
+                arrivalTimeZone: 'Europe/Berlin',
+                originAirport: 'SFO',
+                destinationAirport: 'FRA',
+                bookingReference: 'FLIGHT-728',
+                quote: outboundQuote,
+              },
+              {
+                flightNumber: 'LH 101',
+                role: 'connection',
+                departureDate: departureDay,
+                departureTime: '12:30',
+                departureTimeZone: 'Europe/Berlin',
+                arrivalDate: departureDay,
+                arrivalTime: '13:20',
+                arrivalTimeZone: 'Europe/Berlin',
+                originAirport: 'FRA',
+                destinationAirport: 'BER',
+                bookingReference: 'FLIGHT-728',
+                quote: connectionQuote,
+              },
+            ],
+            hotels: [],
+          },
+          {
+            threadId: 'hotel-thread',
+            messageId: 'hotel-confirmation-message',
+            segments: [],
+            hotels: [
+              {
+                name: 'Hotel Linden',
+                address,
+                city: 'Berlin',
+                checkIn: departureDay,
+                checkOut: checkout,
+                bookingReference: 'HOTEL-55123',
+                quote: hotelQuote,
+              },
+            ],
+          },
+        ],
+      },
       script: [
         { toolCalls: [{ toolName: 'calendar.list_events', input: {} }] },
         { toolCalls: [{ toolName: 'gmail.search', input: { query: detected.mailQuery } }] },
@@ -154,10 +212,11 @@ describe('golden tasks', () => {
               events: [
                 {
                   eventId: 'trip-flight-event',
-                  summary: 'Flight to Berlin, LH 777',
-                  description: 'Arrival airport: BER',
+                  summary: 'Outbound flight LH 777 to Berlin',
+                  description: 'Arrival airport: BER. Booking reference: FLIGHT-728',
                   location: 'Berlin Brandenburg Airport',
                   start: `${departureDay}T10:10:00+02:00`,
+                  timeZone: 'Europe/Berlin',
                   status: 'confirmed',
                   links: [
                     {
@@ -174,44 +233,130 @@ describe('golden tasks', () => {
           },
         },
         'gmail.search': {
-          schema: z.object({ query: z.string() }),
+          schema: z.object({
+            query: z.string(),
+            maxResults: z.number().int().default(10),
+            pageToken: z.string().optional(),
+          }),
           execute: async (args) => {
-            const parsed = z.object({ query: z.string() }).parse(args);
+            const parsed = z
+              .object({
+                query: z.string(),
+                maxResults: z.number().int().default(10),
+                pageToken: z.string().optional(),
+              })
+              .parse(args);
             toolsSeen.push({ toolName: 'gmail.search', args: parsed });
+            const results = [
+              { threadId: 'flight-thread', subject: 'Airline booking confirmation LH 777' },
+              { threadId: 'hotel-thread', subject: 'Hotel reservation confirmed' },
+            ];
             return {
-              results: [
-                { threadId: 'flight-thread', subject: 'Airline booking confirmation LH 777' },
-                { threadId: 'hotel-thread', subject: 'Hotel reservation confirmed' },
-              ],
+              query: parsed.query,
+              results,
               complete: true,
               hasMore: false,
+              unavailable: [],
+              coverage: {
+                requested: parsed.maxResults,
+                discovered: results.length,
+                returned: results.length,
+                unavailable: 0,
+                hasMore: false,
+                complete: true,
+              },
+              receipt: {
+                version: 1,
+                source: { kind: 'gmail-search', id: parsed.query },
+                requested: {
+                  limit: parsed.maxResults,
+                  ...(parsed.pageToken ? { cursor: parsed.pageToken } : {}),
+                  scope: 'query-page',
+                },
+                covered: { count: results.length, total: results.length, unavailable: 0 },
+                complete: true,
+                losses: [],
+                continuation: null,
+              },
             };
           },
         },
         'gmail.read_thread': {
-          schema: z.object({ threadId: z.string() }),
+          schema: z.object({
+            threadId: z.string(),
+            startMessageIndex: z.number().int().default(0),
+            startMessageOffset: z.number().int().default(0),
+            maxMessages: z.number().int().default(20),
+            maxChars: z.number().int().default(20_000),
+          }),
           execute: async (args) => {
-            const threadId = z.object({ threadId: z.string() }).parse(args).threadId;
-            toolsSeen.push({ toolName: 'gmail.read_thread', args: { threadId } });
-            if (threadId === 'flight-thread')
+            const parsed = z
+              .object({
+                threadId: z.string(),
+                startMessageIndex: z.number().int().default(0),
+                startMessageOffset: z.number().int().default(0),
+                maxMessages: z.number().int().default(20),
+                maxChars: z.number().int().default(20_000),
+              })
+              .parse(args);
+            const { threadId } = parsed;
+            toolsSeen.push({ toolName: 'gmail.read_thread', args: parsed });
+            const messages =
+              threadId === 'flight-thread'
+                ? [
+                    {
+                      messageId: 'flight-confirmation-message',
+                      subject: 'Airline booking confirmation LH 777',
+                      text: `${outboundQuote}\n${connectionQuote}`,
+                    },
+                  ]
+                : threadId === 'hotel-thread'
+                  ? [
+                      {
+                        messageId: 'hotel-confirmation-message',
+                        subject: 'Reservation confirmed: Hotel Linden, Berlin',
+                        text: hotelQuote,
+                      },
+                    ]
+                  : undefined;
+            if (messages)
               return {
+                threadId,
                 complete: true,
-                messages: [
-                  {
-                    subject: 'Airline booking confirmation LH 777',
-                    text: 'Booking confirmation for flight LH 777. Arrival airport: BER. Booking reference: FLIGHT-728.',
+                hasMore: false,
+                messages: messages.map((message) => ({
+                  ...message,
+                  sourceLength: message.text.length,
+                  truncated: false,
+                })),
+                coverage: {
+                  requested: parsed.maxMessages,
+                  discovered: messages.length,
+                  returned: messages.length,
+                  unavailable: 0,
+                  complete: true,
+                },
+                receipt: {
+                  version: 1,
+                  source: { kind: 'gmail-thread', id: threadId },
+                  requested: {
+                    start: parsed.startMessageIndex,
+                    offset: parsed.startMessageOffset,
+                    limit: parsed.maxMessages,
+                    scope: 'thread-messages',
                   },
-                ],
-              };
-            if (threadId === 'hotel-thread')
-              return {
-                complete: true,
-                messages: [
-                  {
-                    subject: 'Reservation confirmed: Hotel Linden, Berlin',
-                    text: `Reservation confirmed: Hotel Linden, Berlin.\nCheck-in: ${departureDay}.\nCheck-out: ${checkout}.\nAddress: ${address}.`,
+                  covered: {
+                    start: parsed.startMessageIndex,
+                    offset: parsed.startMessageOffset,
+                    end: parsed.startMessageIndex + messages.length,
+                    count: messages.length,
+                    total: messages.length,
+                    unavailable: 0,
                   },
-                ],
+                  complete: true,
+                  losses: [],
+                  continuation: null,
+                },
               };
             throw new Error(`Unexpected thread read: ${threadId}`);
           },
@@ -243,12 +388,13 @@ describe('golden tasks', () => {
                 {
                   title: 'Berlin airport rail',
                   url: 'https://transit.example/ber',
-                  snippet: 'Public transport connects BER Airport with Alexanderplatz, Berlin.',
+                  snippet:
+                    'Public transport from BER Airport to Hotel Linden, 5 Alexanderplatz, Berlin.',
                 },
                 {
                   title: 'Berlin airport taxi',
                   url: 'https://taxi.example/ber',
-                  snippet: 'Taxi service from BER Airport to Alexanderplatz, Berlin.',
+                  snippet: 'Taxi from BER Airport to Hotel Linden, 5 Alexanderplatz, Berlin.',
                 },
               ],
             };
@@ -263,7 +409,10 @@ describe('golden tasks', () => {
               status: 200,
               finalUrl: url,
               contentType: 'text/html',
-              text: 'BER Airport service to Hotel Linden and Alexanderplatz in Berlin.',
+              text:
+                url === 'https://transit.example/ber'
+                  ? 'Public transport from BER Airport to Hotel Linden at 5 Alexanderplatz, Berlin takes 35 minutes and costs EUR 4.90 for this route.'
+                  : 'Taxi from BER Airport to Hotel Linden at 5 Alexanderplatz, Berlin usually takes 45 minutes and costs EUR 62.00.',
               truncated: false,
             };
           },
@@ -282,13 +431,26 @@ describe('golden tasks', () => {
       'web.fetch',
       'web.fetch',
     ]);
-    expect(result.status).toBe('needs_attention');
-    expect(result.finalText).toContain('Flight candidate: Flight to Berlin, LH 777');
+    expect(result.status).toBe('done');
+    expect(result.extractCalls).toBe(1);
+    expect(result.finalText).toContain(
+      `Dated outbound leg: LH777 SFO→FRA; departs ${departureDay} 10:10 Europe/Berlin; arrives ${departureDay} 11:45 Europe/Berlin`,
+    );
+    expect(result.finalText).toContain(
+      `Source-backed connected flight segments: LH777 SFO→FRA; departs ${departureDay} 10:10 Europe/Berlin; arrives ${departureDay} 11:45 Europe/Berlin; LH101 FRA→BER; departs ${departureDay} 12:30 Europe/Berlin; arrives ${departureDay} 13:20 Europe/Berlin`,
+    );
     expect(result.finalText).toContain('Separately sourced hotel candidate: Hotel Linden, Berlin');
-    expect(result.finalText).toContain('does not prove they are the same itinerary');
-    expect(result.finalText).toContain('did not name a time zone');
-    expect(result.finalText).toContain('taxi');
-    expect(result.finalText).toContain('transit-versus-taxi comparison');
+    expect(result.finalText).toContain('treated the connection as an inference');
+    expect(result.finalText).toContain('the clocks agree after time-zone conversion');
+    expect(result.finalText).toContain('source-reported fare EUR 4.90');
+    expect(result.finalText).toContain('source-reported fare EUR 62.00');
+    expect(result.finalText).toContain(
+      'https://calendar.google.com/calendar/event?eid=golden-trip',
+    );
+    expect(result.finalText).toContain('https://mail.google.com/mail/u/0/#all/flight-thread');
+    expect(result.finalText).toContain('https://mail.google.com/mail/u/0/#all/hotel-thread');
+    expect(result.finalText).toContain('https://transit.example/ber');
+    expect(result.finalText).toContain('https://taxi.example/ber');
     expect(result.finalText).not.toContain('verified complete trip plan');
     expect(
       toolsSeen.every(({ toolName }) =>
