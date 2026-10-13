@@ -2993,6 +2993,79 @@ describe('groundReadDraft', () => {
     ] satisfies ActionEvidence[];
   }
 
+  it('does not match a yearless booking date to a discovered future flight', () => {
+    const requestText =
+      'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
+    const request = detectPersonalReadRequest([{ role: 'user', content: requestText }], {
+      now: new Date('2026-10-09T12:00:00Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!request?.upcomingFlightDiscovery) throw new Error('expected upcoming flight discovery');
+
+    const event = {
+      eventId: 'berlin-flight',
+      calendarId: 'Personal',
+      summary: 'Flight to Berlin',
+      start: '2026-11-12T14:00:00Z',
+      htmlLink: 'https://calendar.google.com/calendar/event?eid=berlin-flight',
+    };
+    const threadId = 'yearless-berlin-booking';
+    const evidence: ActionEvidence[] = [
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        args: {
+          timeMin: request.timeWindow?.timeMin,
+          timeMax: request.timeWindow?.timeMax,
+          maxResults: 50,
+        },
+        result: {
+          complete: true,
+          calendarRosterComplete: true,
+          calendarsSearched: ['Personal'],
+          unavailable: [],
+          events: [event],
+        },
+      },
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        args: { query: request.mailQuery },
+        result: {
+          complete: true,
+          mailboxSearched: 'owner@example.com',
+          results: [
+            { threadId, messageId: 'booking-message', subject: 'Berlin booking confirmation' },
+          ],
+        },
+      },
+      {
+        toolName: 'gmail.read_thread',
+        status: 'succeeded',
+        args: { threadId },
+        result: {
+          complete: true,
+          messages: [
+            {
+              threadId,
+              messageId: 'booking-message',
+              subject: 'Berlin booking confirmation',
+              text: 'Berlin flight booking confirmation.\nDeparture\nNovember 12 at 7:30 AM.',
+            },
+          ],
+        },
+      },
+    ];
+
+    const response = verifiedReadResponse(request, evidence);
+    expect(response).toContain('Flight to Berlin');
+    expect(response).toContain('November 12, 2026');
+    expect(response).toContain('6:00 AM Pacific Standard Time');
+    expect(response).not.toContain('7:30 AM');
+    expect(response).toContain("couldn't confirm its departure time from the booking email");
+    expect(response).toContain('Connections, hotel, and ground transport remain unverified.');
+  });
+
   it.each(['Are you sure?', 'There is nothing in the calendar about 9:15 flight.'])(
     'answers the challenged flight without exposing unrelated source records: %s',
     (content) => {

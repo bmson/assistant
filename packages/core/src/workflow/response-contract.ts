@@ -2507,7 +2507,7 @@ function flightDepartureFacts(
         continue;
       const sourceDates = explicitCivilDates(source);
       const sourceDateMatchesDay = (date: string) =>
-        dateMatchesDay(date, day) && (!request.upcomingFlightDiscovery || date !== '*');
+        dateMatchesDay(date, day) && (!request.upcomingFlightDiscovery || !date.startsWith('*-'));
       const oneDatedItinerary =
         new Set(sourceDates).size === 1 && sourceDates.some(sourceDateMatchesDay);
       const subject = stringField(message, 'subject');
