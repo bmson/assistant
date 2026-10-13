@@ -158,7 +158,11 @@ describe('golden tasks', () => {
     const prompt =
       'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
     const detected = detectPersonalReadRequest([{ role: 'user', content: prompt }]);
-    if (!detected?.compoundTripDiscovery || !detected.mailQuery)
+    const flightQuery = detected?.mailQueries?.find((entry) => entry.category === 'flight')?.query;
+    const lodgingQuery = detected?.mailQueries?.find(
+      (entry) => entry.category === 'lodging',
+    )?.query;
+    if (!detected?.compoundTripDiscovery || !flightQuery || !lodgingQuery)
       throw new Error('Exact owner prompt did not enter the compound-trip read path');
     const departure = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     const departureDay = departure.toISOString().slice(0, 10);
@@ -238,12 +242,21 @@ describe('golden tasks', () => {
       },
       script: [
         { toolCalls: [{ toolName: 'calendar.list_events', input: {} }] },
-        { toolCalls: [{ toolName: 'gmail.search', input: { query: detected.mailQuery } }] },
+        { toolCalls: [{ toolName: 'gmail.search', input: { query: flightQuery } }] },
         {
           toolCalls: [
             {
               toolName: 'gmail.search',
-              input: { query: detected.mailQuery, pageToken: 'search-page-2' },
+              input: { query: flightQuery, pageToken: 'flight-page-2' },
+            },
+          ],
+        },
+        { toolCalls: [{ toolName: 'gmail.search', input: { query: lodgingQuery } }] },
+        {
+          toolCalls: [
+            {
+              toolName: 'gmail.search',
+              input: { query: lodgingQuery, pageToken: 'lodging-page-2' },
             },
           ],
         },
@@ -319,23 +332,43 @@ describe('golden tasks', () => {
               })
               .parse(args);
             toolsSeen.push({ toolName: 'gmail.search', args: parsed });
+            const flightSearch = parsed.query === flightQuery;
+            const lodgingSearch = parsed.query === lodgingQuery;
+            if (!flightSearch && !lodgingSearch)
+              throw new Error('Unexpected Gmail search category in golden fixture');
             const firstPage = !parsed.pageToken;
-            const results = firstPage
-              ? [
-                  { threadId: 'newsletter-1', subject: 'Weekly newsletter' },
-                  { threadId: 'newsletter-2', subject: 'Weekly newsletter' },
-                  { threadId: 'newsletter-3', subject: 'Weekly newsletter' },
-                  { threadId: 'newsletter-4', subject: 'Weekly newsletter' },
-                  { threadId: 'newsletter-5', subject: 'Weekly newsletter' },
-                ]
-              : [
-                  { threadId: 'newsletter-6', subject: 'Travel deals' },
-                  { threadId: 'newsletter-7', subject: 'Travel deals' },
-                  { threadId: 'flight-thread', subject: 'Airline booking confirmation LH 777' },
-                  { threadId: 'hotel-thread', subject: 'Hotel reservation confirmed' },
-                  { threadId: 'newsletter-8', subject: 'Travel deals' },
-                ];
-            const nextPageToken = firstPage ? 'search-page-2' : 'search-page-3';
+            const results = flightSearch
+              ? firstPage
+                ? [
+                    { threadId: 'newsletter-1', subject: 'Flight booking offers - weekly news' },
+                    { threadId: 'newsletter-2', subject: 'Airline booking news digest' },
+                    { threadId: 'newsletter-3', subject: 'Flight booking product update' },
+                    { threadId: 'newsletter-4', subject: 'Airline booking trends' },
+                    { threadId: 'newsletter-5', subject: 'Flight booking newsletter' },
+                  ]
+                : [
+                    { threadId: 'newsletter-6', subject: 'Flight booking offers this week' },
+                    { threadId: 'flight-thread', subject: 'Airline booking confirmation LH 777' },
+                    { threadId: 'newsletter-8', subject: 'Airline booking news' },
+                  ]
+              : firstPage
+                ? [
+                    { threadId: 'newsletter-9', subject: 'Hotel booking trends' },
+                    { threadId: 'newsletter-10', subject: 'Booking confirmation product update' },
+                    { threadId: 'newsletter-11', subject: 'Hotel booking market news' },
+                  ]
+                : [
+                    { threadId: 'newsletter-12', subject: 'Reservation confirmation weekly guide' },
+                    { threadId: 'hotel-thread', subject: 'Hotel reservation confirmed' },
+                    { threadId: 'newsletter-13', subject: 'Hotel booking news' },
+                  ];
+            const nextPageToken = flightSearch
+              ? firstPage
+                ? 'flight-page-2'
+                : 'flight-page-3'
+              : firstPage
+                ? 'lodging-page-2'
+                : 'lodging-page-3';
             return {
               query: parsed.query,
               results,
@@ -526,6 +559,8 @@ describe('golden tasks', () => {
       'calendar.list_events',
       'gmail.search',
       'gmail.search',
+      'gmail.search',
+      'gmail.search',
       'gmail.read_thread',
       'gmail.read_thread',
       'maps.directions',
@@ -556,7 +591,15 @@ describe('golden tasks', () => {
     expect(result.finalText).toContain('https://transit.example/ber');
     expect(result.finalText).toContain('https://taxi.example/ber');
     expect(result.finalText).not.toContain('verified complete trip plan');
-    expect(toolsSeen.filter(({ toolName }) => toolName === 'gmail.search')).toHaveLength(2);
+    expect(toolsSeen.filter(({ toolName }) => toolName === 'gmail.search')).toHaveLength(4);
+    expect(
+      toolsSeen.filter(({ toolName }) => toolName === 'gmail.search').map(({ args }) => args),
+    ).toEqual([
+      { query: flightQuery, maxResults: 20 },
+      { query: flightQuery, maxResults: 20, pageToken: 'flight-page-2' },
+      { query: lodgingQuery, maxResults: 20 },
+      { query: lodgingQuery, maxResults: 20, pageToken: 'lodging-page-2' },
+    ]);
     expect(
       toolsSeen.every(({ toolName }) =>
         [
@@ -574,7 +617,7 @@ describe('golden tasks', () => {
       destination: address,
       mode: 'driving',
     });
-  }, 15_000); // Nine dispatcher/tool rounds plus persistence; leave bounded parallel-CI headroom.
+  }, 15_000); // Twelve dispatcher/tool rounds plus persistence; leave bounded parallel-CI headroom.
 
   it('ranks bounded mail metadata, reads only selected complete threads, and drafts in chat without mail writes', async (ctx) => {
     if (!dbUp) return ctx.skip();
