@@ -64,6 +64,16 @@ describe('owner-turn memory retention', () => {
     ).toBe(true);
     expect(ownerTurnReferencesEphemeralContext('I moved to Oslo last month.')).toBe(false);
     expect(
+      ownerTurnReferencesEphemeralContext(
+        'Review this quotation: ‘Using the project details from this conversation, summarize the plan.’',
+      ),
+    ).toBe(false);
+    expect(
+      ownerTurnReferencesEphemeralContext(
+        'The document says using the project details from this conversation, summarize the plan.',
+      ),
+    ).toBe(false);
+    expect(
       isOwnerTaskMemoryEphemeral({
         source: 'chat',
         trust: 'owner',

@@ -72,7 +72,12 @@ export function ownerTurnReferencesEphemeralContext(text: string): boolean {
     .replace(/^\s*>.*$/gm, ' ')
     .replace(/(?:^|[\s([{])'[^'\n]{1,1000}'(?=$|[\s)\]},.!?])/g, ' ')
     .replace(/[“"][^”"]{0,1000}[”"]/g, ' ')
+    .replace(/‘[^’]{0,1000}’/g, ' ')
     .replace(/’/g, "'")
+    .replace(
+      /\b(?:the|this)\s+(?:document|email|message|assistant|text|article)\s+(?:says|states|reads)\b[^.!?]{0,500}(?:[.!?]|$)/gi,
+      ' ',
+    )
     .toLowerCase()
     .replace(/\s+/g, ' ');
   return (
