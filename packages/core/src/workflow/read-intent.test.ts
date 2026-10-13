@@ -1,3 +1,7 @@
+import {
+  conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
+} from '@assistant/persistence';
 import { describe, expect, it } from 'vitest';
 import { EMAIL_REVIEW_QUERY } from './email-review.js';
 import {
@@ -729,6 +733,9 @@ describe('detectPersonalReadRequest', () => {
     });
     if (!request) throw new Error('Expected historical conversation search');
     const first = buildReadToolInput(request, 'conversations.search', []);
+    if (!first) throw new Error('Expected the first bounded history query');
+    for (const term of request.queryTerms)
+      expect(String(first.query).toLowerCase()).toContain(term);
     const firstRead = {
       toolName: 'conversations.search',
       status: 'succeeded',
@@ -774,6 +781,114 @@ describe('detectPersonalReadRequest', () => {
     expect(
       nextRequiredReadTool(request, [failedFirst, failedSecond, failedFollowup, failedFollowup]),
     ).not.toBe('memory.recall');
+  });
+
+  it('forces only current-task continuation pages for a truncated historical search', () => {
+    const request = detectPersonalReadRequest(
+      turn('What did I tell you earlier about my meeting-summary format?'),
+    );
+    if (!request) throw new Error('Expected historical conversation search');
+    const sourceId = '2a4ebf42-1753-4f5a-8ddc-8cc15b2271b8';
+    const sourceConversationId = 'd6c376b5-0532-40d7-a5f1-9efc86781af4';
+    const sourceText = `I prefer concise meeting summaries with decisions at the top. ${'context '.repeat(5_000)}`;
+    const searchResult = {
+      mode: 'semantic',
+      matches: [
+        {
+          messageId: sourceId,
+          conversationId: sourceConversationId,
+          text: sourceText,
+          role: 'user',
+          origin: 'owner',
+          speakerRevision: conversationMessageSpeakerRevision(
+            sourceId,
+            sourceText,
+            'user',
+            'owner',
+          ),
+          sourceRevision: conversationMessageSourceRevision(sourceId, sourceText),
+          createdAt: '2026-10-10T12:00:00.000Z',
+        },
+      ],
+    };
+    const searchJson = JSON.stringify(searchResult);
+    expect(searchJson.length).toBeGreaterThan(8_000);
+    const search = {
+      id: '4a4f71b4-efaa-49f4-b29b-5821f7becc77',
+      toolName: 'conversations.search',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { query: request.conversationQuery, limit: 20 },
+      result: searchResult,
+    };
+    const firstPageInput = buildReadToolInput(request, 'tools.read_result', [search]);
+    expect(nextRequiredReadTool(request, [search])).toBe('tools.read_result');
+    expect(firstPageInput).toEqual({ toolCallId: search.id, offset: 8_000 });
+    const unboundSearch = { ...search, fromCurrentTask: false };
+    expect(nextRequiredReadTool(request, [unboundSearch])).toBe('conversations.search');
+    expect(buildReadToolInput(request, 'tools.read_result', [unboundSearch])).toEqual({});
+
+    const foreignPage = {
+      id: 'f7fd2e17-9ef3-4f2a-b686-ff702aa71bf1',
+      toolName: 'tools.read_result',
+      status: 'succeeded',
+      fromCurrentTask: false,
+      args: firstPageInput,
+      result: {
+        offset: 8_000,
+        totalChars: searchJson.length,
+        chunk: searchJson.slice(8_000, 22_000),
+        hasMore: true,
+      },
+    };
+    expect(buildReadToolInput(request, 'tools.read_result', [search, foreignPage])).toEqual(
+      firstPageInput,
+    );
+
+    const firstPage = {
+      ...foreignPage,
+      id: 'a0749114-0ee8-432b-bf85-4d9b6e695204',
+      fromCurrentTask: true,
+    };
+    const secondPageInput = buildReadToolInput(request, 'tools.read_result', [search, firstPage]);
+    expect(nextRequiredReadTool(request, [search, firstPage])).toBe('tools.read_result');
+    expect(secondPageInput).toEqual({ toolCallId: search.id, offset: 22_000 });
+
+    const secondPage = {
+      id: '710ab90e-a552-41b4-b934-d1d43fae9ef0',
+      toolName: 'tools.read_result',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: secondPageInput,
+      result: {
+        offset: 22_000,
+        totalChars: searchJson.length,
+        chunk: searchJson.slice(22_000, 36_000),
+        hasMore: 36_000 < searchJson.length,
+      },
+    };
+    const thirdPageInput = buildReadToolInput(request, 'tools.read_result', [
+      search,
+      firstPage,
+      secondPage,
+    ]);
+    expect(thirdPageInput).toEqual({ toolCallId: search.id, offset: 36_000 });
+    const thirdPage = {
+      id: '968184c5-0f75-4f8a-98e2-9d0b00ad3c46',
+      toolName: 'tools.read_result',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: thirdPageInput,
+      result: {
+        offset: 36_000,
+        totalChars: searchJson.length,
+        chunk: searchJson.slice(36_000, 50_000),
+        hasMore: 50_000 < searchJson.length,
+      },
+    };
+    const allPages = [search, firstPage, secondPage, thirdPage];
+    expect(nextRequiredReadTool(request, allPages)).toBe('conversations.search');
+    expect(buildReadToolInput(request, 'tools.read_result', allPages)).toEqual({});
   });
 
   it('honors explicit memory-source prohibitions without suppressing a public URL request', () => {

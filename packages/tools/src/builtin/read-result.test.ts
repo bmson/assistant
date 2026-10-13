@@ -146,9 +146,9 @@ describe('read_result conversation-search privacy fence', () => {
     const first = await run();
     expect(first).toMatchObject({ offset: 0, hasMore: true });
     expect(first.totalChars).toBe(expected.length);
-    expect(first.chunk).toBe(expected.slice(0, 30_000));
-    const second = await run(30_000);
-    expect(second).toMatchObject({ offset: 30_000 });
+    expect(first.chunk).toBe(expected.slice(0, 14_000));
+    const second = await run(14_000);
+    expect(second).toMatchObject({ offset: 14_000 });
     expect(conversations.refreshForResume).toHaveBeenCalledTimes(2);
     expect(conversations.refreshForResume).toHaveBeenCalledWith({
       agentId: AGENT,
@@ -388,8 +388,19 @@ describe('read_result conversation-search privacy fence', () => {
     const page = await run();
     expect(page).toMatchObject({ offset: 0, hasMore: true });
     expect(page.totalChars).toBe(JSON.stringify(result).length);
-    expect(page.chunk).toBe(JSON.stringify(result).slice(0, 30_000));
+    expect(page.chunk).toBe(JSON.stringify(result).slice(0, 14_000));
     expect(conversations.refreshForResume).not.toHaveBeenCalled();
     expect(call.result).toEqual(result);
+  });
+
+  it('keeps a heavily escaped page visible within the read_result model limit', async () => {
+    const result = { detail: '"'.repeat(20_000) };
+    const { run } = harness({
+      call: storedCall({ toolName: 'gmail.send', result }) as Records['toolCalls'],
+      conversations: freshRepository(),
+    });
+    const page = await run();
+    expect(page.chunk).toBe(JSON.stringify(result).slice(0, 14_000));
+    expect(JSON.stringify(page).length).toBeLessThanOrEqual(32_000);
   });
 });

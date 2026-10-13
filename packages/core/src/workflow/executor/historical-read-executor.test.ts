@@ -349,8 +349,17 @@ describe('historical conversation read finalization', () => {
     const lease = await taskRepository.claim(currentTaskId);
     if (!lease) throw new Error('The historical flight lookup task could not be claimed');
     const persistence = createPostgresExecutionPersistence(db);
+    const detectedRequest = detectPersonalReadRequest([{ role: 'user', content: request }]);
+    if (!detectedRequest?.conversationQuery)
+      throw new Error('The historical flight prompt did not produce a focused search plan');
+    const expectedQueries = [
+      detectedRequest.conversationQuery,
+      detectedRequest.conversationFollowupQuery,
+    ].filter((query): query is string => Boolean(query));
+    const observedQueries: string[] = [];
     const sourceConversations = vi.fn(async ({ query }: { query: string; limit: number }) => {
-      expect(query).toBe(request);
+      expect(expectedQueries).toContain(query);
+      observedQueries.push(query);
       const rows = await db
         .select()
         .from(messages)
@@ -383,12 +392,15 @@ describe('historical conversation read finalization', () => {
         args: Record<string, unknown>;
       }) => {
         dispatchedNames.push(input.toolName);
-        if (input.toolName !== 'conversations.search')
-          throw new Error(`Unexpected historical source read: ${input.toolName}`);
-        const result = {
-          mode: 'semantic',
-          matches: await sourceConversations(input.args as { query: string; limit: number }),
-        };
+        const result =
+          input.toolName === 'conversations.search'
+            ? {
+                mode: 'semantic',
+                matches: await sourceConversations(input.args as { query: string; limit: number }),
+              }
+            : (() => {
+                throw new Error(`Unexpected historical source read: ${input.toolName}`);
+              })();
         const [stored] = await db
           .insert(toolCalls)
           .values({
@@ -495,10 +507,11 @@ describe('historical conversation read finalization', () => {
     });
     const answer = persisted.find((message) => message.role === 'assistant')?.text ?? '';
     expect(result.outcome, JSON.stringify({ result, answer })).toBe('done');
-    expect(dispatchedNames).toEqual(['conversations.search']);
+    expect(dispatchedNames).toEqual(expectedQueries.map(() => 'conversations.search'));
     expect(router.step).toHaveBeenCalledTimes(1);
     expect(router.embed).not.toHaveBeenCalled();
-    expect(sourceConversations).toHaveBeenCalledTimes(1);
+    expect(sourceConversations).toHaveBeenCalledTimes(expectedQueries.length);
+    expect(observedQueries).toEqual(expectedQueries);
     expect(answer).toContain(`Recorded owner message:** “${ownerCorrection}”`);
     expect(answer).toContain(`Earlier assistant claim (not verified fact):** “${assistantClaim}”`);
     expect(answer).toContain(

@@ -163,6 +163,61 @@ describe('exact historical source projection', () => {
       requestProfile: { tools: 'none' },
     });
   });
+  it('rejects a valid quote from a source omitted by the selector prompt budget', async () => {
+    const matches = Array.from({ length: 8 }, (_, index) =>
+      message(
+        `owner-${index}`,
+        `Owner note ${index}: ${'x'.repeat(3_900)} distinctive end phrase ${index}.`,
+        'user',
+        'owner',
+      ),
+    );
+    const inputEvidence: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: { matches },
+      },
+    ];
+    const object = vi.fn(async (_role: string, options: Record<string, unknown>) => {
+      const prompt = JSON.parse(String(options.prompt)) as {
+        sources: Array<{ key: string; body: string }>;
+      };
+      expect(prompt.sources.length).toBeLessThan(matches.length);
+      const hidden = matches.at(-1);
+      if (!hidden) throw new Error('Expected hidden source');
+      return {
+        ok: true,
+        object: {
+          selections: [
+            { sourceKey: `message:${hidden.messageId}`, quote: 'distinctive end phrase 7' },
+          ],
+        },
+      };
+    });
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request: 'What did I tell you?',
+      evidence: inputEvidence,
+    });
+    expect(result).toMatchObject({ status: 'unavailable', failureReason: 'invalid_quote' });
+    expect(
+      renderMemoryReadAnswer(
+        {
+          version: 1,
+          status: 'complete',
+          selections: [
+            {
+              sourceKey: `message:${matches.at(-1)?.messageId}`,
+              quote: 'distinctive end phrase 7',
+            },
+          ],
+        },
+        inputEvidence,
+      ),
+    ).toContain('could not reliably select passages');
+  });
   it('accepts only existing source IDs and exact relevant quotations', async () => {
     const object = vi.fn(async (_role: string, _options: Record<string, unknown>) => ({
       ok: true,

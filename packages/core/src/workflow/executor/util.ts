@@ -8,7 +8,7 @@ import type { ModelMessage } from 'ai';
  * result lives in its tool_calls row, which `tools.read_result` can page
  * through on demand.
  */
-const RESULT_CHAR_LIMIT = 8_000;
+export const DEFAULT_TOOL_RESULT_CHAR_LIMIT = 8_000;
 const RESULT_CHAR_LIMITS: Readonly<Record<string, number>> = {
   'web.fetch': 24_000,
   // A lookup answer is now written by the model and checked against the full
@@ -27,8 +27,8 @@ const RESULT_CHAR_LIMITS: Readonly<Record<string, number>> = {
   'tools.read_result': 32_000,
 };
 
-function resultCharLimit(toolName: string): number {
-  return RESULT_CHAR_LIMITS[toolName] ?? RESULT_CHAR_LIMIT;
+export function toolResultCharacterLimit(toolName: string): number {
+  return RESULT_CHAR_LIMITS[toolName] ?? DEFAULT_TOOL_RESULT_CHAR_LIMIT;
 }
 
 export const CONTEXT_WINDOW_LIMIT = 60;
@@ -48,7 +48,7 @@ function messageChars(message: ModelMessage | undefined): number {
 
 function truncateResult(toolName: string, result: unknown, dbToolCallId?: string): unknown {
   const json = JSON.stringify(result ?? null);
-  const limit = resultCharLimit(toolName);
+  const limit = toolResultCharacterLimit(toolName);
   // Round-trip through JSON: results straight from tools may hold Date
   // instances (drizzle rows) or undefined props, which fail the AI SDK's
   // ModelMessage schema on the NEXT step's validation (checkpointed windows

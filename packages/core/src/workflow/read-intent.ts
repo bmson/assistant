@@ -18,6 +18,7 @@ import {
   EMAIL_REVIEW_QUERY,
   emailReviewNextThreadRead,
 } from './email-review.js';
+import { DEFAULT_TOOL_RESULT_CHAR_LIMIT, toolResultCharacterLimit } from './executor/util.js';
 import { detectFutureWatchIntent } from './future-watch-intent.js';
 
 export type PersonalReadKind =
@@ -1221,6 +1222,13 @@ const QUERY_MODIFIERS = new Set([
 const MAX_MEMORY_RECALL_QUERY_CHARS = 1200;
 const MAX_CONVERSATION_SEARCH_QUERY_CHARS = 500;
 const MAX_MEMORY_SEARCH_PASSES = 2;
+const MAX_CONVERSATION_RESULT_PAGES = 8;
+const MAX_CONVERSATION_RESULT_CHARS = 1_000_000;
+// Must match tools.read_result's page size. Half of its tool-result clip leaves
+// room for worst-case JSON escaping in the page envelope.
+const CONVERSATION_RESULT_PAGE_CHARS = 14_000;
+const TOOL_CALL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+type ResultContinuation = { toolCallId: string; offset: number } | null | false;
 const MEMORY_SEARCH_STOP_WORDS = new Set([
   'about',
   'actually',
@@ -1351,6 +1359,97 @@ function nextHistoricalSearchQuery(
     if (attemptsForQuery.length < 2) return query;
   }
   return undefined;
+}
+
+function conversationSearchResultContinuation(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): { toolCallId: string; offset: number } | undefined {
+  const currentPages = evidence.filter(
+    (row) => row.fromCurrentTask === true && row.toolName === 'tools.read_result',
+  );
+  for (const query of historicalSearchQueries(request)) {
+    const search = evidence.find(
+      (row) =>
+        row.fromCurrentTask === true &&
+        row.toolName === 'conversations.search' &&
+        succeeded(row) &&
+        argsRecord(row)?.query === query,
+    );
+    if (!search?.id || !TOOL_CALL_ID.test(search.id)) continue;
+    let totalChars: number;
+    try {
+      totalChars = JSON.stringify(search.result ?? null).length;
+    } catch {
+      continue;
+    }
+    if (totalChars <= DEFAULT_TOOL_RESULT_CHAR_LIMIT || totalChars > MAX_CONVERSATION_RESULT_CHARS)
+      continue;
+
+    const pending = nextResultPage(search, currentPages);
+    if (pending === false) return undefined;
+    if (pending) return pending;
+  }
+  return undefined;
+}
+
+function nextResultPage(
+  target: ReadToolEvidence,
+  pages: ReadonlyArray<ReadToolEvidence>,
+  seen = new Set<string>(),
+  depth = 0,
+): ResultContinuation {
+  if (!target.id || !TOOL_CALL_ID.test(target.id) || seen.has(target.id) || depth > 3) return false;
+  seen.add(target.id);
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(target.result ?? null);
+  } catch {
+    return false;
+  }
+  if (
+    target.toolName === 'conversations.search' &&
+    serialized.length > MAX_CONVERSATION_RESULT_CHARS
+  )
+    return false;
+  const limit = toolResultCharacterLimit(target.toolName);
+  if (serialized.length <= limit) return null;
+
+  let offset = limit;
+  let pageCount = 0;
+  while (offset < serialized.length && pageCount < MAX_CONVERSATION_RESULT_PAGES) {
+    const attempts = pages.filter(
+      (row) => argsRecord(row)?.toolCallId === target.id && argsRecord(row)?.offset === offset,
+    );
+    const validPage = [...attempts].reverse().find((row) => {
+      if (!succeeded(row)) return false;
+      const result = objectRecord(row.result);
+      if (
+        !result ||
+        result.offset !== offset ||
+        result.totalChars !== serialized.length ||
+        typeof result.chunk !== 'string' ||
+        result.chunk.length === 0 ||
+        result.chunk.length > CONVERSATION_RESULT_PAGE_CHARS ||
+        typeof result.hasMore !== 'boolean'
+      )
+        return false;
+      const nextOffset = offset + result.chunk.length;
+      return nextOffset <= serialized.length && result.hasMore === nextOffset < serialized.length;
+    });
+    if (!validPage) {
+      if (attempts.length < 2 && pages.length < MAX_CONVERSATION_RESULT_PAGES)
+        return { toolCallId: target.id, offset };
+      return false;
+    }
+    pageCount += 1;
+    const nested = nextResultPage(validPage, pages, seen, depth + 1);
+    if (nested !== null) return nested;
+    const page = objectRecord(validPage.result);
+    if (!page) return false;
+    offset += (page.chunk as string).length;
+  }
+  return offset >= serialized.length ? null : false;
 }
 
 function nextSavedMemorySearchQuery(
@@ -1750,7 +1849,9 @@ function detectPersonalReadRequestInternal(
     const focusedQuery = kind === 'memory' ? focusedMemoryTopic(latest) : undefined;
     return {
       kind,
-      queryTerms: contextualPrivateTerms(),
+      queryTerms: conversationHistoryRequested
+        ? privateQueryTerms(focusedQuery ?? latest)
+        : contextualPrivateTerms(),
       ...(kind === 'memory' ? { memoryQuery: latest.slice(0, MAX_MEMORY_RECALL_QUERY_CHARS) } : {}),
       ...(focusedQuery ? { memorySearchQuery: focusedQuery } : {}),
       ...(conversationHistoryRequested
@@ -2647,6 +2748,7 @@ export function nextRequiredReadTool(
     return undefined;
   }
   if (request.kind === 'memory') {
+    if (conversationSearchResultContinuation(request, evidence)) return 'tools.read_result';
     if (nextHistoricalSearchQuery(request, evidence)) return 'conversations.search';
     if (nextSavedMemorySearchQuery(request, evidence)) return 'memory.recall';
     return undefined;
@@ -2749,6 +2851,8 @@ export function groundReadToolInput(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): Record<string, unknown> {
   if (request.temporalIssue || request.scopeIssue) return {};
+  if (toolName === 'tools.read_result' && request.kind === 'memory')
+    return conversationSearchResultContinuation(request, evidence) ?? {};
   if (toolName === 'conversations.search' && request.conversationQuery) {
     const query = nextHistoricalSearchQuery(request, evidence);
     return query ? { query, limit: 20 } : {};
