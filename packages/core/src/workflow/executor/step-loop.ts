@@ -3035,6 +3035,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       const notice = `${receipt ? `${receipt}\n\n` : ''}I couldn't finish the reply. Check Activity for anything that already ran before trying again.`;
       const cards = responseCardsForFinal({
         evidence: completed,
+        readRequest,
         requestText: latestUserText(rc.window),
       });
       rc.window.push({ role: 'assistant', content: notice } as ModelMessage);

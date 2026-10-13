@@ -531,6 +531,9 @@ describe('unsupported temporal requests through the actual executor step loop', 
     expect(state.pendingFinal?.text).toContain('review-only plan for next week');
     expect(state.pendingFinal?.text.match(/\(90 minutes\)/g)).toHaveLength(3);
     expect(state.pendingFinal?.text).toContain('I haven’t changed your calendar.');
+    // The fixture returns an empty model final after the source reads. Keep
+    // the checked plan, without reconstructing a raw agenda or busy-block dump.
+    expect(state.pendingFinal?.responseCards ?? []).toEqual([]);
     expect(
       dispatch.mock.calls.some(([call]) =>
         /calendar\.(?:create|update|delete)/.test(call.toolName),
