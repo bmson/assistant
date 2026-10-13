@@ -1898,16 +1898,16 @@ function detectPersonalReadRequestInternal(
         {
           category: 'flight',
           query:
-            '{subject:(flight booking) subject:(flight confirmation) subject:(airline booking) subject:(airline confirmation) subject:(e-ticket) subject:(itinerary confirmation) subject:(boarding pass)}',
+            '{subject:(flight booking) subject:(flight booked) subject:(flight reserved) subject:(flight confirmation) subject:(airline booking) subject:(airline booked) subject:(airline reserved) subject:(airline confirmation) subject:(e-ticket) subject:(itinerary confirmation) subject:(boarding pass)}',
         },
         {
           category: 'lodging',
           query:
-            '{subject:(hotel booking) subject:(hotel reservation) subject:(lodging reservation) subject:(accommodation booking) subject:(check-in confirmation) subject:(stay confirmation)}',
+            '{subject:(hotel booking) subject:(hotel booked) subject:(hotel reserved) subject:(hotel reservation) subject:(lodging booked) subject:(lodging reservation) subject:(accommodation booking) subject:(accommodation reservation) subject:(check-in confirmation) subject:(stay confirmation) subject:(booking confirmation) subject:(reservation confirmation) subject:(your reservation) subject:(reservation details)}',
         },
       ],
       mailQuery:
-        '{subject:(flight booking) subject:(flight confirmation) subject:(airline booking) subject:(airline confirmation) subject:(e-ticket) subject:(itinerary confirmation) subject:(boarding pass)}',
+        '{subject:(flight booking) subject:(flight booked) subject:(flight reserved) subject:(flight confirmation) subject:(airline booking) subject:(airline booked) subject:(airline reserved) subject:(airline confirmation) subject:(e-ticket) subject:(itinerary confirmation) subject:(boarding pass)}',
     };
   }
   // A terse correction such as "was that made up?" carries no subject of its
@@ -2272,7 +2272,9 @@ export function gmailSearchThreadIds(
         const flight =
           /\b(?:flight|airline|itinerary|boarding pass|e-?ticket|record locator)\b/i.test(source);
         const booking =
-          /\b(?:booking|confirmation|reservation|ticket|itinerary|record locator)\b/i.test(source);
+          /\b(?:booked|reserved|confirmation|confirmed|reservation|ticket|e-?ticket|itinerary|record locator|booking\s+(?:details|reference|receipt|number|confirmation))\b/i.test(
+            source,
+          );
         return {
           threadId,
           index,
@@ -2286,7 +2288,10 @@ export function gmailSearchThreadIds(
         const item = metadata.get(threadId);
         const source = `${item?.subject ?? ''} ${item?.snippet ?? ''}`;
         const hotel = /\b(?:hotel|lodging|accommodation|airbnb)\b/i.test(source);
-        const booking = /\b(?:booking|confirmation|reservation|check[- ]?in)\b/i.test(source);
+        const booking =
+          /\b(?:booked|reserved|confirmation|confirmed|reservation|check[- ]?in|booking\s+(?:details|reference|receipt|number|confirmation))\b/i.test(
+            source,
+          );
         return {
           threadId,
           index,

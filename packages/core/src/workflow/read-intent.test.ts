@@ -45,7 +45,13 @@ describe('detectPersonalReadRequest', () => {
     expect(request?.upcomingFlightDiscovery).toBeUndefined();
     expect(request?.mailQueries?.map((entry) => entry.category)).toEqual(['flight', 'lodging']);
     expect(request?.mailQueries?.[0]?.query).toContain('subject:(flight booking)');
+    expect(request?.mailQueries?.[0]?.query).toContain('subject:(flight booked)');
+    expect(request?.mailQueries?.[0]?.query).toContain('subject:(flight reserved)');
     expect(request?.mailQueries?.[1]?.query).toContain('subject:(hotel reservation)');
+    expect(request?.mailQueries?.[1]?.query).toContain('subject:(hotel reserved)');
+    expect(request?.mailQueries?.[1]?.query).toContain('subject:(booking confirmation)');
+    expect(request?.mailQueries?.[1]?.query).toContain('subject:(reservation confirmation)');
+    expect(request?.mailQueries?.[1]?.query).toContain('subject:(your reservation)');
     expect(request?.mailQuery).not.toContain('hotel');
   });
 
@@ -223,6 +229,53 @@ describe('detectPersonalReadRequest', () => {
       'flight-candidate-a',
       'lodging-candidate',
     ]);
+  });
+
+  it('finds booked flight and generic reservation subjects only when returned metadata substantiates each category', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Find my next trip from my booking emails and calendar. Confirm the flight and hotel. Plan the route from the destination airport to my hotel.',
+      ),
+    );
+    if (!request?.mailQueries?.length) throw new Error('Expected typed trip queries');
+    const flightQuery = request.mailQueries.find((entry) => entry.category === 'flight')?.query;
+    const lodgingQuery = request.mailQueries.find((entry) => entry.category === 'lodging')?.query;
+    if (!flightQuery || !lodgingQuery) throw new Error('Expected flight and lodging searches');
+    const evidence: ReadToolEvidence[] = [
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: flightQuery },
+        result: {
+          results: [
+            { threadId: 'booked-flight', subject: 'Fwd: Flight - BOOKED - City details' },
+            { threadId: 'flight-news', subject: 'Flight booking offers for next summer' },
+          ],
+          complete: true,
+          hasMore: false,
+        },
+      },
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: lodgingQuery },
+        result: {
+          results: [
+            { threadId: 'generic-confirmation', subject: 'Booking confirmation' },
+            {
+              threadId: 'your-reservation',
+              subject: 'Your reservation',
+              snippet: 'Hotel accommodation and check-in details',
+            },
+          ],
+          complete: true,
+          hasMore: false,
+        },
+      },
+    ];
+    expect(gmailThreadIdsToRead(evidence, request)).toEqual(['booked-flight', 'your-reservation']);
   });
 
   it('recognizes only the direct, bounded, explicitly no-send email review request', () => {
