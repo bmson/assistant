@@ -515,7 +515,7 @@ describe('compound trip read projection', () => {
     expect(projection.flight?.event.eventId).toBe('earlier-instant-calendar');
   });
 
-  it('does not call a UTC-serialized event the wrong local departure date', () => {
+  it('uses the bound booking zone when the calendar adapter omits event timeZone', () => {
     const read = request();
     const evidence = [
       completeCalendarEvents([
@@ -524,7 +524,6 @@ describe('compound trip read projection', () => {
           summary: 'Outbound flight LH401 SFO to BER',
           description: 'Booking reference: KIRI-2026',
           start: '2026-11-01T10:30:00Z',
-          timeZone: 'Pacific/Kiritimati',
           status: 'confirmed',
         },
       ]),
@@ -575,6 +574,50 @@ describe('compound trip read projection', () => {
     });
     expect(projection.flight?.event.eventId).toBe('kiritimati-flight');
     expect(projection.flight?.segment).toMatchObject({ departureDate: '2026-11-02' });
+  });
+
+  it('does not infer a calendar local date without a strong flight identity', () => {
+    const read = request();
+    const projection = compoundTripReadProjection(
+      read,
+      [
+        completeCalendarEvents([
+          {
+            eventId: 'sparse-kiritimati-flight',
+            summary: 'Outbound flight SFO to BER',
+            start: '2026-11-01T10:30:00Z',
+            status: 'confirmed',
+          },
+        ]),
+      ],
+      {
+        status: 'complete',
+        segments: [
+          {
+            threadId: 'kiritimati-booking',
+            messageId: 'kiritimati-message',
+            subject: 'LH401 itinerary',
+            flightNumber: 'LH401',
+            direction: 'outbound',
+            departureDate: '2026-11-02',
+            departureTime: '00:30',
+            departureTimeZone: 'Pacific/Kiritimati',
+            arrivalDate: '2026-11-02',
+            arrivalTime: '10:00',
+            arrivalTimeZone: 'Europe/Berlin',
+            originAirport: 'SFO',
+            destinationAirport: 'BER',
+            bookingReference: 'KIRI-2026',
+            excerpt: 'LH401 2026-11-02 00:30 Pacific/Kiritimati',
+          },
+        ],
+        hotels: [],
+        rejectedFacts: 0,
+        sourceMessageIds: ['kiritimati-message'],
+      },
+    );
+
+    expect(projection.flight).toBeUndefined();
   });
 
   it('selects only public-transport and taxi pages from HTTPS search results', () => {
