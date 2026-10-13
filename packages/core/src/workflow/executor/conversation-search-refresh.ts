@@ -467,9 +467,20 @@ export async function refreshResumedConversationSearch(
         observationGeneration = refreshed.observationGeneration;
         observationGenerationSeen = true;
       }
+      // Semantic hits cannot be reproduced by the bounded text refresh. When
+      // every original source reference and speaker revision is still current,
+      // keep that exact validated snapshot instead of replacing it with an
+      // unrelated literal-query result (often the owner's current question).
+      const retainedSemanticSnapshot =
+        refsUnchanged &&
+        parsed.refs.length > 0 &&
+        parsed.refs.every((ref) => typeof ref.speakerRevision === 'string') &&
+        record(stored.value)?.mode === 'semantic'
+          ? stored.value
+          : undefined;
       results.push({
         call,
-        value: {
+        value: retainedSemanticSnapshot ?? {
           mode: 'text',
           matches: refreshed.matches.map((match) => ({
             messageId: match.messageId,
