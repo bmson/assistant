@@ -42,11 +42,13 @@ describe('gmail.search', () => {
     const result = (await registerGmailTools(new ToolRegistry(), {
       client: { api } as never,
       botEmail: 'bot@example.com',
+      ownerEmail: 'Owner@Example.com',
     })
       .get('gmail.search')
       ?.tool.execute({ query: 'Clay', maxResults: 1 }, {} as never)) as {
       complete: boolean;
       mailboxSearched: string;
+      configuredOwnerMailbox?: string;
       matchingMessagesEstimate?: number;
       receipt: { continuation: { tool: string; input: { pageToken: string } } | null };
     };
@@ -55,6 +57,7 @@ describe('gmail.search', () => {
     expect(result).toMatchObject({
       complete: false,
       mailboxSearched: 'bot@example.com',
+      configuredOwnerMailbox: 'owner@example.com',
       matchingMessagesEstimate: 4,
       coverage: { requested: 1, discovered: 4, returned: 1, hasMore: true },
       nextPageToken: 'another-page',
