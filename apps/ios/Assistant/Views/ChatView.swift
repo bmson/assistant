@@ -784,10 +784,8 @@ struct ChatView: View {
         .ignoresSafeArea(.container)
     }
 
-    /// The transcript and the root error banner clear the Island by exactly the
-    /// same distance, from the same origin — both scroll and sit under a stack
-    /// that ignores the top safe area. One expression for both, because the two
-    /// drifting apart is what previously left the banner behind the pill.
+    /// The transcript viewport and root error banner clear the Island by the
+    /// same distance from the edge-to-edge stage origin.
     private var crownContentTopInset: CGFloat {
         if isLandscape { return 0 }
         return ActivityCrown.overlayTopInset(
@@ -922,16 +920,10 @@ struct ChatView: View {
                         transaction.scrollContentOffsetAdjustmentBehavior = .disabled
                     }
                 }
-                // Reserve real layout room for the crown at the start of the
-                // conversation. Unlike the removed clear mask, this cannot slice
-                // through a message bubble or its text. The 8pt gap that used to be
-                // added here is inside the clearance now — it is the same gap the
-                // error banner needs, so it belongs with the geometry.
-                .contentMargins(
-                    .top,
-                    crownContentTopInset,
-                    for: .scrollContent
-                )
+                // Constrain the viewport below the crown, rather than only
+                // offsetting the first content row. With clipping above, older
+                // text stays below the status area at every scroll position.
+                .padding(.top, crownContentTopInset)
                 // Never toggle `scrollDisabled` as the menu moves. That cancels
                 // UIScrollView's active pan by changing its environment and makes
                 // SwiftUI re-anchor the transcript inside the moving surface.
