@@ -24,6 +24,9 @@ export function ownerTurnRequestsEphemeralMemory(text: string): boolean {
     .replace(/\s+/g, ' ');
 
   const explicitOptOut =
+    /\b(?:do not|don't|dont|never|please don't|please do not)\s+(?:remember|retain)\s+(?:this|that|these|those|anything|what\s+i|any\s+of\s+this)\b/.test(
+      visible,
+    ) ||
     /\b(?:do not|don't|dont|never|please don't|please do not)\s+(?:save|store|remember|retain|keep)\b.{0,180}\b(?:memory|memories|personal facts?|personal information|anything from this conversation|this conversation)\b/.test(
       visible,
     ) ||

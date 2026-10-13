@@ -33,6 +33,11 @@ describe('owner-turn memory retention', () => {
       ),
     ).toBe(true);
     expect(ownerTurnRequestsEphemeralMemory('Don’t save this as a memory.')).toBe(true);
+    expect(ownerTurnRequestsEphemeralMemory('Don’t remember this story.')).toBe(true);
+    expect(
+      ownerTurnRequestsEphemeralMemory("Please don't remember what I'm about to tell you."),
+    ).toBe(true);
+    expect(ownerTurnRequestsEphemeralMemory('Do not retain these details.')).toBe(true);
   });
 
   it('does not treat quoted content or action limits as a retention policy', () => {
@@ -54,6 +59,8 @@ describe('owner-turn memory retention', () => {
     expect(ownerTurnRequestsEphemeralMemory('Do not send or edit anything.')).toBe(false);
     expect(ownerTurnRequestsEphemeralMemory('Do not invent details or send anything.')).toBe(false);
     expect(ownerTurnRequestsEphemeralMemory('Remember that I prefer concise notes.')).toBe(false);
+    expect(ownerTurnRequestsEphemeralMemory('Do not forget to remember the deadline.')).toBe(false);
+    expect(ownerTurnRequestsEphemeralMemory('The document says don’t remember this story.')).toBe(false);
   });
 
   it('recognizes only a bounded explicit follow-up to fictional context', () => {
