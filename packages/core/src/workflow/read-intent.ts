@@ -63,6 +63,12 @@ export interface PersonalReadRequest {
   memoryQuery?: string;
   /** Full bounded owner question for an explicitly requested past-chat search. */
   conversationQuery?: string;
+  /** One bounded follow-up query that emphasizes owner-authored historical evidence. */
+  conversationFollowupQuery?: string;
+  /** Saved facts are searched only when the owner explicitly permits that source. */
+  searchSavedMemory?: boolean;
+  /** Focused semantic query for saved-memory retrieval, separate from the answer prompt. */
+  memorySearchQuery?: string;
   /** First read tool the executor must call. */
   firstToolName:
     | 'calendar.list_events'
@@ -1212,6 +1218,155 @@ const QUERY_MODIFIERS = new Set([
 ]);
 const MAX_MEMORY_RECALL_QUERY_CHARS = 1200;
 const MAX_CONVERSATION_SEARCH_QUERY_CHARS = 500;
+const MAX_MEMORY_SEARCH_PASSES = 2;
+const MEMORY_SEARCH_STOP_WORDS = new Set([
+  'about',
+  'actually',
+  'after',
+  'again',
+  'and',
+  'any',
+  'are',
+  'assistant',
+  'before',
+  'being',
+  'can',
+  'could',
+  'did',
+  'do',
+  'does',
+  'during',
+  'earlier',
+  'ever',
+  'from',
+  'have',
+  'having',
+  'historical',
+  'how',
+  'i',
+  'if',
+  'in',
+  'inference',
+  'into',
+  'is',
+  'it',
+  'its',
+  'look',
+  'me',
+  'mention',
+  'mentioned',
+  'memories',
+  'memory',
+  'my',
+  'new',
+  'of',
+  'on',
+  'or',
+  'our',
+  'please',
+  'previous',
+  'previously',
+  'prior',
+  'said',
+  'save',
+  'saved',
+  'say',
+  'should',
+  'source',
+  'sources',
+  'tell',
+  'told',
+  'the',
+  'them',
+  'then',
+  'this',
+  'those',
+  'to',
+  'use',
+  'using',
+  'verified',
+  'we',
+  'what',
+  'when',
+  'where',
+  'which',
+  'who',
+  'why',
+  'with',
+  'would',
+  'you',
+  'your',
+  'claim',
+  'claims',
+  'conversation',
+  'conversations',
+  'distinguish',
+  'current',
+  'not',
+  'guess',
+  'answer',
+  'relevant',
+  'cite',
+  'clearly',
+  'different',
+]);
+
+function focusedMemoryTopic(text: string): string {
+  const tokens = text.match(/[\p{L}\p{N}][\p{L}\p{N}'’_-]*/gu) ?? [];
+  const focused = tokens
+    .map((token) => token.trim())
+    .filter((token) => {
+      const normalized = token.toLowerCase().replace(/['’]s$/u, '');
+      return token.length >= 2 && !MEMORY_SEARCH_STOP_WORDS.has(normalized);
+    })
+    .slice(0, 14);
+  return (focused.length ? focused.join(' ') : text.trim()).slice(
+    0,
+    MAX_CONVERSATION_SEARCH_QUERY_CHARS,
+  );
+}
+
+function historicalSearchQueries(request: PersonalReadRequest): string[] {
+  if (!request.conversationQuery) return [];
+  const queries = [request.conversationQuery, request.conversationFollowupQuery].filter(
+    (query): query is string => typeof query === 'string' && query.length > 0,
+  );
+  return [...new Set(queries)];
+}
+
+function nextHistoricalSearchQuery(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): string | undefined {
+  for (const query of historicalSearchQueries(request).slice(0, MAX_MEMORY_SEARCH_PASSES)) {
+    const attemptsForQuery = evidence.filter(
+      (row) =>
+        row.fromCurrentTask !== false &&
+        row.toolName === 'conversations.search' &&
+        argsRecord(row)?.query === query,
+    );
+    if (attemptsForQuery.some(succeeded)) continue;
+    if (attemptsForQuery.length < 2) return query;
+  }
+  return undefined;
+}
+
+function nextSavedMemorySearchQuery(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): string | undefined {
+  if (!request.searchSavedMemory) return undefined;
+  const query = request.memorySearchQuery ?? request.memoryQuery;
+  if (!query) return undefined;
+  const attemptsForQuery = evidence.filter(
+    (row) =>
+      row.fromCurrentTask !== false &&
+      row.toolName === 'memory.recall' &&
+      argsRecord(row)?.query === query,
+  );
+  if (attemptsForQuery.some(succeeded) || attemptsForQuery.length >= 2) return undefined;
+  return query;
+}
 
 function contentText(content: unknown): string {
   if (typeof content === 'string') return content;
@@ -1586,13 +1741,27 @@ function detectPersonalReadRequestInternal(
     const kind: PersonalReadKind = graphRead ? 'knowledge_graph' : driveRead ? 'drive' : 'memory';
     const conversationHistoryRequested =
       kind === 'memory' && CONVERSATION_HISTORY_REQUEST.test(latest);
+    const savedMemoryRequested =
+      kind === 'memory' &&
+      (!conversationHistoryRequested ||
+        /\b(?:saved|long[- ]term|personal)\s+memor(?:y|ies)\b/i.test(latest));
+    const focusedQuery = kind === 'memory' ? focusedMemoryTopic(latest) : undefined;
     return {
       kind,
       queryTerms: contextualPrivateTerms(),
       ...(kind === 'memory' ? { memoryQuery: latest.slice(0, MAX_MEMORY_RECALL_QUERY_CHARS) } : {}),
+      ...(focusedQuery ? { memorySearchQuery: focusedQuery } : {}),
       ...(conversationHistoryRequested
-        ? { conversationQuery: latest.slice(0, MAX_CONVERSATION_SEARCH_QUERY_CHARS) }
+        ? {
+            conversationQuery: focusedQuery,
+            conversationFollowupQuery:
+              `Owner-authored statements and corrections about ${focusedQuery}`.slice(
+                0,
+                MAX_CONVERSATION_SEARCH_QUERY_CHARS,
+              ),
+          }
         : {}),
+      ...(kind === 'memory' ? { searchSavedMemory: savedMemoryRequested } : {}),
       firstToolName:
         kind === 'knowledge_graph'
           ? 'memory.graph_snapshot'
@@ -2472,7 +2641,12 @@ export function nextRequiredReadTool(
     }
     return undefined;
   }
-  if (request.kind === 'drive' || request.kind === 'memory' || request.kind === 'knowledge_graph') {
+  if (request.kind === 'memory') {
+    if (nextHistoricalSearchQuery(request, evidence)) return 'conversations.search';
+    if (nextSavedMemorySearchQuery(request, evidence)) return 'memory.recall';
+    return undefined;
+  }
+  if (request.kind === 'drive' || request.kind === 'knowledge_graph') {
     if (evidence.some((row) => matchingPrivateRead(row, request))) return undefined;
     return attempts(evidence, request.firstToolName) < 2 ? request.firstToolName : undefined;
   }
@@ -2571,7 +2745,8 @@ export function groundReadToolInput(
 ): Record<string, unknown> {
   if (request.temporalIssue || request.scopeIssue) return {};
   if (toolName === 'conversations.search' && request.conversationQuery) {
-    return { query: request.conversationQuery, limit: 10 };
+    const query = nextHistoricalSearchQuery(request, evidence);
+    return query ? { query, limit: 20 } : {};
   }
   if (toolName === 'calendar.list_events') {
     const { calendarIds: _ignored, ...unboundCalendarArgs } = input;
@@ -2687,7 +2862,10 @@ export function groundReadToolInput(
   }
   if (toolName === 'memory.recall') {
     return {
-      query: request.memoryQuery ?? (request.queryTerms.join(' ') || 'owner history'),
+      query:
+        request.memorySearchQuery ??
+        request.memoryQuery ??
+        (request.queryTerms.join(' ') || 'owner history'),
       limit: 10,
     };
   }

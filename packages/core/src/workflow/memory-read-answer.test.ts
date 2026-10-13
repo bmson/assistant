@@ -155,6 +155,7 @@ describe('exact historical source projection', () => {
       evidence,
     });
     expect(result.status).toBe('unavailable');
+    expect(result.failureReason).toBe('invalid_quote');
     expect(object).toHaveBeenCalledTimes(1);
     expect(object.mock.calls[0]?.[1]).toMatchObject({
       maxRetries: 0,
@@ -181,5 +182,84 @@ describe('exact historical source projection', () => {
     const text = renderMemoryReadAnswer(result, evidence);
     expect(text).toContain('careful typography');
     expect(text).not.toContain('job applications');
+  });
+  it('removes an exact repeated current question and gives verified owner sources priority', async () => {
+    const request = 'What did I previously tell you about my meeting-summary format?';
+    const ownerText = 'I prefer concise meeting summaries with decisions at the top.';
+    const candidates: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: {
+          matches: [
+            message(
+              'assistant-neighbor',
+              'A long unrelated assistant statement.',
+              'assistant',
+              'assistant',
+            ),
+            message('repeated-question', request, 'user', 'owner'),
+            message('owner-preference', ownerText, 'user', 'owner'),
+          ],
+        },
+      },
+    ];
+    const object = vi.fn(async (_role: string, _options: Record<string, unknown>) => ({
+      ok: true,
+      object: {
+        selections: [{ sourceKey: 'message:owner-preference', quote: ownerText }],
+      },
+    }));
+
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence: candidates,
+    });
+    expect(result).toMatchObject({
+      status: 'complete',
+      selections: [{ sourceKey: 'message:owner-preference' }],
+    });
+    const call = object.mock.calls[0]?.[1];
+    if (!call || typeof call.prompt !== 'string')
+      throw new Error('Expected bounded selector prompt');
+    const prompt = JSON.parse(call.prompt) as { sources: Array<{ key: string; speaker: string }> };
+    expect(prompt.sources.map((source) => source.key)).toEqual([
+      'message:owner-preference',
+      'message:assistant-neighbor',
+    ]);
+    expect(prompt.sources.map((source) => source.key)).not.toContain('message:repeated-question');
+    expect(prompt.sources.some((source) => source.speaker === 'Recorded owner message')).toBe(true);
+    expect(validMemoryReadSelection(result, candidates, request)).toBe(true);
+    const rendered = renderMemoryReadAnswer(result, candidates, request);
+    expect(rendered).toContain(ownerText);
+    expect(rendered).not.toContain('repeated-question');
+  });
+  it('records selector failure classes without exposing provider diagnostics', async () => {
+    const providerFailure = await selectMemoryReadAnswer({
+      router: {
+        object: vi.fn(async () => ({ ok: false, error: new Error('private provider detail') })),
+      } as never,
+      taskId: 'qa',
+      request: 'What did I tell you about meeting summaries?',
+      evidence,
+    });
+    expect(providerFailure).toMatchObject({
+      status: 'unavailable',
+      failureReason: 'provider_unavailable',
+      selections: [],
+    });
+    expect(JSON.stringify(providerFailure)).not.toContain('private provider detail');
+
+    const invalidResult = await selectMemoryReadAnswer({
+      router: {
+        object: vi.fn(async () => ({ ok: true, object: { selections: 'not-an-array' } })),
+      } as never,
+      taskId: 'qa',
+      request: 'What did I tell you about meeting summaries?',
+      evidence,
+    });
+    expect(invalidResult).toMatchObject({ status: 'unavailable', failureReason: 'invalid_result' });
   });
 });

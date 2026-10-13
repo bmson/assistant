@@ -3664,14 +3664,20 @@ function enforcePersonalReadGrounding(
   }
   if (request.kind === 'memory' && opts?.memoryReadSelection)
     return {
-      text: renderMemoryReadAnswer(opts.memoryReadSelection, currentSuccessfulEvidence(evidence)),
+      text: renderMemoryReadAnswer(
+        opts.memoryReadSelection,
+        currentSuccessfulEvidence(evidence),
+        opts.requestText,
+      ),
       blocked: !validMemoryReadSelection(
         opts.memoryReadSelection,
         currentSuccessfulEvidence(evidence),
+        opts.requestText,
       ),
       unsupported: validMemoryReadSelection(
         opts.memoryReadSelection,
         currentSuccessfulEvidence(evidence),
+        opts.requestText,
       )
         ? []
         : ['memory'],

@@ -663,7 +663,7 @@ describe('detectPersonalReadRequest', () => {
     });
   });
 
-  it('preserves the bounded owner question as the semantic memory search', () => {
+  it('uses focused history passes and searches saved memory only when allowed', () => {
     const text =
       'What preferences have I previously told you about the Assistant’s UI and how its replies should look? Use saved memory or our earlier conversations. Distinguish what I actually said from your inference, mention your sources, and do not guess or save new memories.';
     const request = detectPersonalReadRequest(turn(text));
@@ -671,21 +671,47 @@ describe('detectPersonalReadRequest', () => {
       kind: 'memory',
       firstToolName: 'conversations.search',
       memoryQuery: text,
-      conversationQuery: text,
+      conversationQuery: 'preferences UI replies',
+      conversationFollowupQuery:
+        'Owner-authored statements and corrections about preferences UI replies',
+      searchSavedMemory: true,
+      memorySearchQuery: 'preferences UI replies',
     });
     if (!request) throw new Error('Expected a personal memory request');
-    expect(buildReadToolInput(request, 'conversations.search', [])).toEqual({
-      query: text,
+    const first = buildReadToolInput(request, 'conversations.search', []);
+    expect(first).toEqual({
+      query: 'preferences UI replies',
+      limit: 20,
+    });
+    expect(JSON.stringify(first)).not.toContain('Do not guess or save new memories');
+    expect(JSON.stringify(first)).not.toMatch(/\b(?:guess|save|source)\b/i);
+
+    const firstRead = {
+      toolName: 'conversations.search',
+      status: 'succeeded',
+      args: first,
+      result: { matches: [] },
+    };
+    expect(nextRequiredReadTool(request, [firstRead])).toBe('conversations.search');
+    const second = buildReadToolInput(request, 'conversations.search', [firstRead]);
+    expect(second).toEqual({
+      query: 'Owner-authored statements and corrections about preferences UI replies',
+      limit: 20,
+    });
+    const bothReads = [firstRead, { ...firstRead, args: second }];
+    expect(nextRequiredReadTool(request, bothReads)).toBe('memory.recall');
+    expect(buildReadToolInput(request, 'memory.recall', bothReads)).toEqual({
+      query: 'preferences UI replies',
       limit: 10,
     });
-    const input = buildReadToolInput(request, 'conversations.search', []) ?? {};
     expect(
       nextRequiredReadTool(request, [
+        ...bothReads,
         {
-          toolName: 'conversations.search',
+          toolName: 'memory.recall',
           status: 'succeeded',
-          args: input,
-          result: { matches: [] },
+          args: { query: 'preferences UI replies', limit: 10 },
+          result: { memories: [] },
         },
       ]),
     ).toBeUndefined();
@@ -693,11 +719,60 @@ describe('detectPersonalReadRequest', () => {
 
   it('routes a direct earlier-conversation question to a bounded history search', () => {
     const text = 'What did I tell you earlier about how I prefer meeting summaries?';
-    expect(detectPersonalReadRequest(turn(text))).toMatchObject({
+    const request = detectPersonalReadRequest(turn(text));
+    expect(request).toMatchObject({
       kind: 'memory',
       firstToolName: 'conversations.search',
-      conversationQuery: text,
+      conversationQuery: 'prefer meeting summaries',
+      searchSavedMemory: false,
     });
+    if (!request) throw new Error('Expected historical conversation search');
+    const first = buildReadToolInput(request, 'conversations.search', []);
+    const firstRead = {
+      toolName: 'conversations.search',
+      status: 'succeeded',
+      args: first,
+      result: { matches: [] },
+    };
+    const second = buildReadToolInput(request, 'conversations.search', [firstRead]);
+    expect(nextRequiredReadTool(request, [firstRead])).toBe('conversations.search');
+    expect(second).toMatchObject({ query: request.conversationFollowupQuery, limit: 20 });
+    expect(
+      nextRequiredReadTool(request, [firstRead, { ...firstRead, args: second }]),
+    ).toBeUndefined();
+  });
+
+  it('bounds repeated failed history searches and never adds unrequested saved-memory reads', () => {
+    const request = detectPersonalReadRequest(
+      turn('What did I tell you earlier about how I prefer meeting summaries?'),
+    );
+    if (!request) throw new Error('Expected historical conversation search');
+    const firstArgs = buildReadToolInput(request, 'conversations.search', []);
+    const failedFirst = {
+      toolName: 'conversations.search',
+      status: 'failed',
+      args: firstArgs,
+      result: { error: 'private backend detail' },
+    };
+    expect(nextRequiredReadTool(request, [failedFirst])).toBe('conversations.search');
+    expect(buildReadToolInput(request, 'conversations.search', [failedFirst])).toEqual(firstArgs);
+
+    const failedSecond = { ...failedFirst };
+    expect(nextRequiredReadTool(request, [failedFirst, failedSecond])).toBe('conversations.search');
+    const followup = buildReadToolInput(request, 'conversations.search', [
+      failedFirst,
+      failedSecond,
+    ]);
+    if (!followup) throw new Error('Expected a bounded follow-up search');
+    expect(followup.query).toBe(request.conversationFollowupQuery);
+    const failedFollowup = { ...failedFirst, args: followup };
+    expect(
+      nextRequiredReadTool(request, [failedFirst, failedSecond, failedFollowup, failedFollowup]),
+    ).toBeUndefined();
+    expect(request.searchSavedMemory).toBe(false);
+    expect(
+      nextRequiredReadTool(request, [failedFirst, failedSecond, failedFollowup, failedFollowup]),
+    ).not.toBe('memory.recall');
   });
 
   it('honors explicit memory-source prohibitions without suppressing a public URL request', () => {

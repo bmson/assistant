@@ -12,6 +12,8 @@ export interface MemoryReadSelection {
   version: 1;
   status: 'complete' | 'unavailable';
   selections: Array<{ sourceKey: string; quote: string }>;
+  /** Internal failure class; never includes provider text or private source content. */
+  failureReason?: 'provider_unavailable' | 'invalid_result' | 'invalid_quote';
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -23,9 +25,21 @@ function text(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
+function normalizedText(value: string): string {
+  return value.normalize('NFKC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase('en-US');
+}
+
+function memorySourcePriority(source: { speaker: string }): number {
+  if (source.speaker === 'Recorded owner message') return 0;
+  if (source.speaker === 'Saved fact marked owner-confirmed') return 1;
+  if (source.speaker === 'Earlier assistant claim (not verified fact)') return 2;
+  return 3;
+}
+
 /** Source identity and speaker come from the current ledger, never the selector. */
-export function memoryReadSources(evidence: ActionEvidence[]) {
+export function memoryReadSources(evidence: ActionEvidence[], excludeExactRequest?: string) {
   const sources: Array<{ key: string; body: string; speaker: string; provenance: string }> = [];
+  const excluded = excludeExactRequest ? normalizedText(excludeExactRequest) : undefined;
   for (const row of evidence) {
     if (row.fromCurrentTask === false || row.status !== 'succeeded') continue;
     const result = record(row.result);
@@ -54,6 +68,7 @@ export function memoryReadSources(evidence: ActionEvidence[]) {
         const match = record(raw);
         if (!match || !text(match.messageId) || !text(match.conversationId) || !text(match.text))
           continue;
+        if (excluded && normalizedText(text(match.text)) === excluded) continue;
         sources.push({
           key: `message:${text(match.messageId)}`,
           body: text(match.text).slice(0, 4000),
@@ -73,7 +88,9 @@ export function memoryReadSources(evidence: ActionEvidence[]) {
       }
     }
   }
-  return [...new Map(sources.map((source) => [source.key, source])).values()].slice(0, 20);
+  return [...new Map(sources.map((source) => [source.key, source])).values()]
+    .sort((left, right) => memorySourcePriority(left) - memorySourcePriority(right))
+    .slice(0, 20);
 }
 
 /** One tool-free selection pass; the model can select exact quotes, never author facts. */
@@ -83,8 +100,7 @@ export async function selectMemoryReadAnswer(input: {
   request: string;
   evidence: ActionEvidence[];
 }): Promise<MemoryReadSelection> {
-  const unavailable: MemoryReadSelection = { version: 1, status: 'unavailable', selections: [] };
-  const sources = memoryReadSources(input.evidence);
+  const sources = memoryReadSources(input.evidence, input.request);
   if (!sources.length) return { version: 1, status: 'complete', selections: [] };
   const bounded = [];
   let bytes = 0;
@@ -109,29 +125,54 @@ export async function selectMemoryReadAnswer(input: {
         requestProfile: { tools: 'none', output: 'json_schema', streaming: false },
       }),
     );
-    if (outcome?.ok !== true) return unavailable;
+    if (outcome?.ok !== true)
+      return {
+        version: 1,
+        status: 'unavailable',
+        selections: [],
+        failureReason: 'provider_unavailable',
+      };
     const parsed = SelectionSchema.safeParse(outcome.object);
-    if (!parsed.success) return unavailable;
+    if (!parsed.success)
+      return {
+        version: 1,
+        status: 'unavailable',
+        selections: [],
+        failureReason: 'invalid_result',
+      };
     const byKey = new Map(sources.map((source) => [source.key, source]));
     if (
       parsed.data.selections.some(
         (selection) => !byKey.get(selection.sourceKey)?.body.includes(selection.quote),
       )
     )
-      return unavailable;
+      return {
+        version: 1,
+        status: 'unavailable',
+        selections: [],
+        failureReason: 'invalid_quote',
+      };
     return { version: 1, status: 'complete', selections: parsed.data.selections };
   } catch {
-    return unavailable;
+    return {
+      version: 1,
+      status: 'unavailable',
+      selections: [],
+      failureReason: 'provider_unavailable',
+    };
   }
 }
 
 export function validMemoryReadSelection(
   selection: MemoryReadSelection,
   evidence: ActionEvidence[],
+  excludeExactRequest?: string,
 ): boolean {
   if (selection.version !== 1 || selection.status !== 'complete' || selection.selections.length > 8)
     return false;
-  const byKey = new Map(memoryReadSources(evidence).map((source) => [source.key, source]));
+  const byKey = new Map(
+    memoryReadSources(evidence, excludeExactRequest).map((source) => [source.key, source]),
+  );
   const seen = new Set<string>();
   return selection.selections.every((item) => {
     const key = JSON.stringify(item);
@@ -151,10 +192,11 @@ export function validMemoryReadSelection(
 export function renderMemoryReadAnswer(
   selection: MemoryReadSelection,
   evidence: ActionEvidence[],
+  excludeExactRequest?: string,
 ): string {
-  const sources = memoryReadSources(evidence);
+  const sources = memoryReadSources(evidence, excludeExactRequest);
   const byKey = new Map(sources.map((source) => [source.key, source]));
-  if (!validMemoryReadSelection(selection, evidence))
+  if (!validMemoryReadSelection(selection, evidence, excludeExactRequest))
     return 'I retrieved historical sources, but could not reliably select passages answering your question. I have not treated unrelated records or earlier assistant claims as established facts.';
   if (!selection.selections.length)
     return 'I could not find a relevant owner statement or supported saved fact in this bounded historical lookup. That does not establish that we never discussed it. I cannot confirm an answer from unrelated saved records or earlier assistant claims.';
