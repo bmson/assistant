@@ -66,8 +66,37 @@ export function mobileUnauthorized(): Response {
   );
 }
 
+const SAFE_MOBILE_FAILURE =
+  'The request could not be completed. Check its status before trying again.';
+const INTERNAL_DIAGNOSTIC =
+  /(?:firestore.{0,80}(?:index|project|collection)|(?:index|project).{0,80}firestore|console\.firebase\.google\.com|firestore\.googleapis\.com|googleapis\.com\/.*(?:index|project)|\b(?:FAILED_PRECONDITION|PERMISSION_DENIED|SQLSTATE|PostgresError|DrizzleError)\b|\b(?:SELECT|INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM)\b|\bat\s+[\w$.<>]+\s*\([^\n]*:\d+:\d+\))/i;
+const OMITTED_ERROR_FIELDS = new Set(['cause', 'debug', 'stack']);
+
+function sanitizeMobileErrorPayload(value: unknown, status: number, key = ''): unknown {
+  if (Array.isArray(value))
+    return value.map((item) => sanitizeMobileErrorPayload(item, status, key));
+  if (value && typeof value === 'object') {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return value;
+    const sanitized: Record<string, unknown> = {};
+    for (const [field, child] of Object.entries(value)) {
+      const normalizedField = field.toLowerCase();
+      if (status >= 400 && OMITTED_ERROR_FIELDS.has(normalizedField)) continue;
+      sanitized[field] = sanitizeMobileErrorPayload(child, status, normalizedField);
+    }
+    return sanitized;
+  }
+  if (typeof value !== 'string') return value;
+  if (status >= 500 && key === '') return SAFE_MOBILE_FAILURE;
+  if (status >= 500 && ['error', 'message', 'details'].includes(key)) return SAFE_MOBILE_FAILURE;
+  if (['error', 'message', 'details'].includes(key) && INTERNAL_DIAGNOSTIC.test(value))
+    return SAFE_MOBILE_FAILURE;
+  return value;
+}
+
 export function mobileJson(value: unknown, init: ResponseInit = {}): Response {
   const headers = new Headers(init.headers);
   headers.set('cache-control', 'no-store');
-  return Response.json(value, { ...init, headers });
+  const status = init.status ?? 200;
+  return Response.json(sanitizeMobileErrorPayload(value, status), { ...init, headers });
 }
