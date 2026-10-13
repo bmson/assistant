@@ -35,7 +35,7 @@ describe('Firestore maintenance query index contracts', () => {
   it('supports stale dispatch-reservation reconciliation by status and attempt time', () => {
     const costs = source('packages/firestore/src/costs.ts');
     const start = costs.indexOf('const staleDispatches = await this.store');
-    const end = costs.indexOf('let released = 0;', start);
+    const end = costs.indexOf('for (const doc of staleDispatches.docs)', start);
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
     const query = costs.slice(start, end);
@@ -44,7 +44,7 @@ describe('Firestore maintenance query index contracts', () => {
     expect(query).toContain(".where('status', '==', 'dispatching')");
     expect(query).toContain(".where('attemptStartedAt', '<', cutoff)");
     expect(query).toContain(".orderBy('attemptStartedAt')");
-    expect(query).toContain('.limit(batch).get()');
+    expect(query).toContain('.limit(batch) .get()');
     expectIndex('costReservations', [
       { fieldPath: 'status', order: 'ASCENDING' },
       { fieldPath: 'attemptStartedAt', order: 'ASCENDING' },
@@ -64,7 +64,7 @@ describe('Firestore maintenance query index contracts', () => {
     expect(query).toContain(".where('status', '==', 'pending')");
     expect(query).toContain(".where('status', '==', 'failed')");
     expect(query.match(/\.orderBy\('updatedAt'\)/g)).toHaveLength(2);
-    expect(query.match(/\.limit\(cap\)\.get\(\)/g)).toHaveLength(2);
+    expect(query.match(/\.limit\(cap\) \.get\(\)/g)).toHaveLength(2);
     expectIndex('watchFireEffects', [
       { fieldPath: 'agentId', order: 'ASCENDING' },
       { fieldPath: 'status', order: 'ASCENDING' },
