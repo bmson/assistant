@@ -214,39 +214,48 @@ export function registerGmailTools(registry: ToolRegistry, deps: GmailToolDeps):
         let nextMessageOffset = startMessageOffset;
         let pageHitBodyBoundary = false;
         let bodyTruncated = false;
-        const messages = sourceMessages
-          .slice(startMessageIndex, requestedEnd)
-          .flatMap((m, index) => {
-            if (remainingChars <= 0) return [];
-            const fullText = extractGmailText(m.payload);
-            const sourceIndex = startMessageIndex + index;
-            const startOffset = sourceIndex === startMessageIndex ? startMessageOffset : 0;
-            const page = boundedTextPage(fullText, startOffset, Math.min(remainingChars, 8_000));
-            remainingChars -= page.text.length;
-            pageHitBodyBoundary = page.end < fullText.length;
-            bodyTruncated ||= pageHitBodyBoundary;
-            if (pageHitBodyBoundary) {
-              nextMessageIndex = sourceIndex;
-              nextMessageOffset = page.end;
-            } else {
-              nextMessageIndex = sourceIndex + 1;
-              nextMessageOffset = 0;
-            }
-            if (remainingChars === 0 && nextMessageIndex < sourceMessages.length)
-              pageHitBodyBoundary = true;
-            return [
-              {
-                messageId: m.id,
-                from: gmailHeader(m.payload, 'From'),
-                to: gmailHeader(m.payload, 'To'),
-                date: gmailHeader(m.payload, 'Date'),
-                subject: gmailHeader(m.payload, 'Subject'),
-                text: page.text,
-                truncated: page.end < fullText.length,
-                sourceLength: fullText.length,
-              },
-            ];
+        const messages: Array<{
+          messageId: string;
+          from: string;
+          to: string;
+          date: string;
+          subject: string;
+          text: string;
+          truncated: boolean;
+          sourceLength: number;
+        }> = [];
+        for (const [index, m] of sourceMessages.slice(startMessageIndex, requestedEnd).entries()) {
+          if (remainingChars <= 0) break;
+          const fullText = extractGmailText(m.payload);
+          const sourceIndex = startMessageIndex + index;
+          const startOffset = sourceIndex === startMessageIndex ? startMessageOffset : 0;
+          const page = boundedTextPage(fullText, startOffset, Math.min(remainingChars, 8_000));
+          remainingChars -= page.text.length;
+          pageHitBodyBoundary = page.end < fullText.length;
+          bodyTruncated ||= pageHitBodyBoundary;
+          if (pageHitBodyBoundary) {
+            nextMessageIndex = sourceIndex;
+            nextMessageOffset = page.end;
+          } else {
+            nextMessageIndex = sourceIndex + 1;
+            nextMessageOffset = 0;
+          }
+          messages.push({
+            messageId: m.id,
+            from: gmailHeader(m.payload, 'From'),
+            to: gmailHeader(m.payload, 'To'),
+            date: gmailHeader(m.payload, 'Date'),
+            subject: gmailHeader(m.payload, 'Subject'),
+            text: page.text,
+            truncated: page.end < fullText.length,
+            sourceLength: fullText.length,
           });
+          if (pageHitBodyBoundary) break;
+          if (remainingChars === 0 && nextMessageIndex < sourceMessages.length) {
+            pageHitBodyBoundary = true;
+            break;
+          }
+        }
         const hasMore = pageHitBodyBoundary || nextMessageIndex < sourceMessages.length;
         const complete =
           sourceMessages.length > 0 && !hasMore && messages.every((message) => !message.truncated);

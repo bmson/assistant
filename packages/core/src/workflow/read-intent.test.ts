@@ -91,6 +91,105 @@ describe('detectPersonalReadRequest', () => {
     expect(gmailThreadIdsToRead(evidence, request)).toEqual(['flight-one', 'hotel-one']);
   });
 
+  it('recognizes only the direct, bounded, explicitly no-send email review request', () => {
+    const prompt =
+      'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.';
+    expect(detectPersonalReadRequest(turn(prompt))).toMatchObject({
+      kind: 'email',
+      firstToolName: 'gmail.search',
+      mailQuery: 'newer_than:7d -from:me',
+      requiresThreadRead: true,
+      emailReview: { windowDays: 7, requestedCount: 5 },
+    });
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'Review my recent emails from the past 7 days. Identify the 5 most important requests that still need my reply. Say why each matters, note any deadlines, and draft replies with the relevant thread context. Do not send anything yet.',
+        ),
+      ),
+    ).toMatchObject({ emailReview: { windowDays: 7, requestedCount: 5 } });
+  });
+
+  it.each([
+    'If I asked you to review my emails from the last seven days, find the five most important requests that still need my response, explain why each matters, identify deadlines, draft replies using the relevant thread context, and don’t send anything yet.',
+    'Should I review my emails from the last seven days and draft replies to the five most important requests that need my response? Don’t send anything yet.',
+    '> Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.',
+    'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet. Also email Riley the results.',
+    'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context.',
+  ])(
+    'does not widen the no-send review intent to quoted, conditional, or mixed requests',
+    (text) => {
+      expect(detectPersonalReadRequest(turn(text))).toBeNull();
+    },
+  );
+
+  it('routes an owner weekly planning request through availability plus bounded event pages', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Review my calendar for next week and identify scheduling conflicts and overloaded days. Find three realistic 90-minute focus blocks during working hours, allowing time for travel and breaks. Recommend changes, but show me the plan before editing my calendar.',
+      ),
+      { now: new Date('2026-10-09T12:00:00.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    expect(request).toMatchObject({
+      kind: 'calendar',
+      weeklyCalendarPlan: true,
+      firstToolName: 'calendar.availability',
+      queryTerms: [],
+      timeWindow: {
+        timeMin: '2026-10-12T07:00:00.000Z',
+        timeMax: '2026-10-19T07:00:00.000Z',
+      },
+    });
+    if (!request) throw new Error('expected a typed weekly plan request');
+    expect(nextRequiredReadTool(request, [])).toBe('calendar.availability');
+    const availability: ReadToolEvidence = {
+      toolName: 'calendar.availability',
+      status: 'succeeded',
+      args: { timeMin: request.timeWindow?.timeMin, timeMax: request.timeWindow?.timeMax },
+      result: { busy: [], complete: true },
+    };
+    expect(nextRequiredReadTool(request, [availability])).toBe('calendar.list_events');
+    const firstPage: ReadToolEvidence = {
+      toolName: 'calendar.list_events',
+      status: 'succeeded',
+      args: { timeMin: request.timeWindow?.timeMin, timeMax: request.timeWindow?.timeMax },
+      result: { events: [], complete: false, nextPageToken: 'page-two' },
+    };
+    expect(nextRequiredReadTool(request, [availability, firstPage])).toBe('calendar.list_events');
+    expect(
+      groundReadToolInput(request, 'calendar.list_events', { pageToken: 'model-forged' }, [
+        availability,
+        firstPage,
+      ]),
+    ).toMatchObject({ pageToken: 'page-two', maxResults: 50 });
+    const secondPage: ReadToolEvidence = {
+      toolName: 'calendar.list_events',
+      status: 'succeeded',
+      args: {
+        timeMin: request.timeWindow?.timeMin,
+        timeMax: request.timeWindow?.timeMax,
+        pageToken: 'page-two',
+      },
+      result: { events: [], complete: false, nextPageToken: 'page-three' },
+    };
+    expect(nextRequiredReadTool(request, [availability, firstPage, secondPage])).toBe(
+      'calendar.list_events',
+    );
+    const thirdPage: ReadToolEvidence = {
+      toolName: 'calendar.list_events',
+      status: 'succeeded',
+      args: {
+        timeMin: request.timeWindow?.timeMin,
+        timeMax: request.timeWindow?.timeMax,
+        pageToken: 'page-three',
+      },
+      result: { events: [], complete: false, nextPageToken: 'page-four' },
+    };
+    expect(
+      nextRequiredReadTool(request, [availability, firstPage, secondPage, thirdPage]),
+    ).toBeUndefined();
+  });
+
   it('requires mailbox source reads for a requested reservation card while keeping other actions separate', () => {
     expect(
       detectPersonalReadRequest(

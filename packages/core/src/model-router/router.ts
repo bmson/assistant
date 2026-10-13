@@ -2067,7 +2067,17 @@ export class ModelRouter {
     messages: ModelMessage[],
   ): { messages: ModelMessage[]; allowSystemInMessages?: true; system?: string } {
     void modelId;
-    return { ...(system ? { system } : {}), messages };
+    return {
+      ...(system ? { system } : {}),
+      messages,
+      // The executor supplies runtime-owned context messages (recall, goals,
+      // continuation) in its transcript. SDK v7 requires an explicit opt-in
+      // for their existing system role; this does not enable cache retention
+      // or promote any caller message into that role.
+      ...(messages.some((message) => message.role === 'system')
+        ? { allowSystemInMessages: true }
+        : {}),
+    };
   }
 
   private async stepOnce(

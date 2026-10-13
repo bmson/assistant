@@ -1331,6 +1331,13 @@ export function responseCardsForFinal(input: {
   /** The live lookups the request asked for, in the order it asked them. */
   lookupOrder?: ReadonlyArray<LiveLookup['kind']>;
 }): ResponseCard[] {
+  // These modes already produce a short, checked review from several sources.
+  // Keep the supporting inbox and agenda reads from becoming a second, raw
+  // answer underneath the review. Explicit source-display requests retain the
+  // normal cards below.
+  const synthesizedRead = Boolean(
+    input.readRequest?.emailReview || input.readRequest?.weeklyCalendarPlan,
+  );
   const explicitMailRead =
     !input.readRequest?.upcomingFlightDiscovery &&
     /\b(?:show|open|read|display|list|find|pull\s+up|what\s+(?:does|did))\b[^.!?]{0,120}\b(?:e-?mails?|mail|gmail|inbox|messages?|threads?)\b/i.test(
@@ -1343,13 +1350,13 @@ export function responseCardsForFinal(input: {
       ...statusResponseCards(input.evidence),
       ...calendarWriteResponseCards(input.evidence),
       ...reminderResponseCards(input.evidence),
-      ...calendarResponseCards(input.evidence, input.readRequest),
-      ...availabilityResponseCards(input.evidence),
+      ...(synthesizedRead ? [] : calendarResponseCards(input.evidence, input.readRequest)),
+      ...(synthesizedRead ? [] : availabilityResponseCards(input.evidence)),
       // Flight answers use mail only to reconcile the requested itinerary.
       // Do not turn every booking hit, historical message, or newsletter into
       // a second inbox result surface below the one calendar answer.
-      ...(flightFocusedRead ? [] : emailResponseCards(input.evidence)),
-      ...(flightFocusedRead ? [] : threadResponseCards(input.evidence)),
+      ...(flightFocusedRead || synthesizedRead ? [] : emailResponseCards(input.evidence)),
+      ...(flightFocusedRead || synthesizedRead ? [] : threadResponseCards(input.evidence)),
       ...documentResponseCards(input.evidence),
       ...knowledgeGraphResponseCards(input.evidence),
       ...driveResponseCards(input.evidence),
@@ -1357,7 +1364,7 @@ export function responseCardsForFinal(input: {
       ...weatherLookupResponseCards(input.evidence),
       ...scoreboardResponseCards(input.evidence),
       ...routeResponseCards(input.evidence),
-      ...searchResponseCards(input.evidence),
+      ...(synthesizedRead ? [] : searchResponseCards(input.evidence)),
     ],
     input.lookupOrder ?? [],
   );

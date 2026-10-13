@@ -61,6 +61,7 @@ import { requestChecklistHasUnfinished, requestChecklistSummary } from '../reque
 import { responseCardsForFinal } from '../response-cards.js';
 import {
   type ActionEvidence,
+  enforcePersonalReadResponse,
   enforceResponseContract,
   verifiedReadResponse,
 } from '../response-contract.js';
@@ -995,6 +996,21 @@ export async function stageModelFinalResponse(
   if (checked.qualityFallback || checked.unsupported.length > 0) {
     pending.terminalStatus = 'needs_attention';
     pending.outcome = 'needs_attention';
+  }
+  // A truthful tentative plan is useful, but its prose does not establish
+  // complete calendar coverage or that all three requested blocks fit. Use
+  // the same current durable evidence as the response contract for status,
+  // including when the provider returns a non-empty final answer.
+  if (contractOptions.readRequest?.weeklyCalendarPlan) {
+    const assessment = enforcePersonalReadResponse(
+      contractOptions.readRequest,
+      evidence,
+    ).weeklyPlanAssessment;
+    if (assessment?.coverageComplete !== true || assessment.slotCount < 3) {
+      pending.terminalStatus = 'needs_attention';
+      pending.outcome = 'needs_attention';
+      pending.preserveCheckedReadResponse = true;
+    }
   }
   pending.outputVerificationAttempted = reflection.attempted || undefined;
   pending.outputVerificationRevised = reflection.revised || undefined;

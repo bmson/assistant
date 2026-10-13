@@ -13,6 +13,10 @@ import { detectFutureWatchIntent, type FutureWatchIntent } from './future-watch-
 import type { PersonalReadRequest } from './read-intent.js';
 import { effectiveReminders } from './reminder-state.js';
 import { isDurableSave, isMemoryWriteRequest, savedWorkSummary } from './saved-work.js';
+import {
+  weeklyCalendarPlan as renderWeeklyCalendarPlan,
+  weeklyCalendarPlanResult,
+} from './weekly-calendar-plan.js';
 
 /**
  * The model writes prose, but the task/tool ledger is the authority for what
@@ -72,6 +76,8 @@ export interface ResponseContractResult {
    * surface.
    */
   groundingFallback?: string[];
+  /** Structured evidence for a weekly review; drives task status without parsing prose. */
+  weeklyPlanAssessment?: { coverageComplete: boolean; slotCount: number };
 }
 
 interface ResponseContractOptions {
@@ -3026,6 +3032,21 @@ export function verifiedReadResponse(
   if (request.compoundTripDiscovery)
     return compoundTripReadProjection(request, evidence, compoundTripExtraction).text;
   const current = currentSuccessfulEvidence(evidence);
+  if (request.weeklyCalendarPlan) {
+    const interval =
+      request.temporalIntent?.interval ??
+      (request.timeWindow
+        ? { start: request.timeWindow.timeMin, endExclusive: request.timeWindow.timeMax }
+        : undefined);
+    return interval
+      ? renderWeeklyCalendarPlan({
+          timeMin: interval.start,
+          timeMax: interval.endExclusive,
+          timeZone: request.timeZone,
+          evidence: current,
+        })
+      : 'I couldn’t safely resolve the calendar window for next week. Please confirm the date range and time zone.';
+  }
   if (request.kind === 'drive') {
     const rows = matchingPrivateReadRows(request, current);
     const files = uniqueRecords(
@@ -3525,19 +3546,57 @@ export function enforcePersonalReadResponse(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
 ): ResponseContractResult {
+  const weeklyInterval = request.weeklyCalendarPlan
+    ? (request.temporalIntent?.interval ??
+      (request.timeWindow
+        ? { start: request.timeWindow.timeMin, endExclusive: request.timeWindow.timeMax }
+        : undefined))
+    : undefined;
+  const weeklyAssessment = weeklyInterval
+    ? weeklyCalendarPlanResult({
+        timeMin: weeklyInterval.start,
+        timeMax: weeklyInterval.endExclusive,
+        timeZone: request.timeZone,
+        evidence: currentSuccessfulEvidence(evidence),
+      })
+    : request.weeklyCalendarPlan
+      ? { text: '', coverageComplete: false, slotCount: 0 }
+      : undefined;
   if (request.temporalIssue || request.scopeIssue)
     return {
       text: request.temporalIssue ?? request.scopeIssue ?? '',
       blocked: true,
       unsupported: ['calendar_read'],
+      ...(weeklyAssessment
+        ? { weeklyPlanAssessment: { coverageComplete: false, slotCount: 0 } }
+        : {}),
     };
   const gaps = requiredReadGaps(request, evidence);
-  if (gaps.labels.length > 0) return coverageGapResponse(request, evidence, gaps);
+  if (gaps.labels.length > 0) {
+    const response = coverageGapResponse(request, evidence, gaps);
+    return weeklyAssessment
+      ? {
+          ...response,
+          weeklyPlanAssessment: {
+            coverageComplete: false,
+            slotCount: weeklyAssessment.slotCount,
+          },
+        }
+      : response;
+  }
 
   return {
     text: verifiedReadResponse(request, evidence),
     blocked: false,
     unsupported: [],
+    ...(weeklyAssessment
+      ? {
+          weeklyPlanAssessment: {
+            coverageComplete: weeklyAssessment.coverageComplete,
+            slotCount: weeklyAssessment.slotCount,
+          },
+        }
+      : {}),
   };
 }
 

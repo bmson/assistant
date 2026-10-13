@@ -169,6 +169,145 @@ describe('gmail.search', () => {
     expect(second.receipt).toMatchObject({ complete: true, continuation: null });
   });
 
+  it('finishes a truncated message before reading the later owner reply', async () => {
+    const firstBody = `${'x'.repeat(8_000)}${'tail-'.repeat(400)}`;
+    const ownerReply = 'Owner reply: I can confirm the revised date.';
+    const api = vi.fn().mockResolvedValue({
+      messages: [
+        {
+          id: 'message-request',
+          threadId: 'thread-1',
+          payload: {
+            mimeType: 'text/plain',
+            headers: [
+              { name: 'From', value: 'sender@example.com' },
+              { name: 'Subject', value: 'Please review the date' },
+            ],
+            body: { data: Buffer.from(firstBody).toString('base64url') },
+          },
+        },
+        {
+          id: 'message-owner-reply',
+          threadId: 'thread-1',
+          payload: {
+            mimeType: 'text/plain',
+            headers: [
+              { name: 'From', value: 'owner@example.com' },
+              { name: 'Subject', value: 'Re: Please review the date' },
+            ],
+            body: { data: Buffer.from(ownerReply).toString('base64url') },
+          },
+        },
+      ],
+    });
+    const read = registerGmailTools(new ToolRegistry(), {
+      client: { api } as never,
+      botEmail: 'bot@example.com',
+    }).get('gmail.read_thread')?.tool;
+
+    const first = (await read?.execute({ threadId: 'thread-1' }, {} as never)) as {
+      messages: Array<{ messageId: string; text: string; truncated: boolean }>;
+      complete: boolean;
+      hasMore: boolean;
+      receipt: { continuation: { input: Record<string, unknown> } | null };
+    };
+    expect(first.messages.map(({ messageId, truncated }) => ({ messageId, truncated }))).toEqual([
+      { messageId: 'message-request', truncated: true },
+    ]);
+    expect(first).toMatchObject({ complete: false, hasMore: true });
+    expect(first.receipt.continuation?.input).toMatchObject({
+      startMessageIndex: 0,
+      startMessageOffset: 8_000,
+    });
+
+    const second = (await read?.execute(
+      first.receipt.continuation?.input as never,
+      {} as never,
+    )) as {
+      messages: Array<{ messageId: string; text: string; truncated: boolean }>;
+      complete: boolean;
+      hasMore: boolean;
+      receipt: { continuation: unknown };
+    };
+    expect(second.messages.map(({ messageId }) => messageId)).toEqual([
+      'message-request',
+      'message-owner-reply',
+    ]);
+    expect(second.messages[0]).toMatchObject({
+      text: firstBody.slice(8_000),
+      truncated: false,
+    });
+    expect(second.messages[1]).toMatchObject({ text: ownerReply, truncated: false });
+    expect(second).toMatchObject({
+      complete: true,
+      hasMore: false,
+      receipt: { continuation: null },
+    });
+
+    const reconstructed = new Map<string, string>();
+    for (const message of [...first.messages, ...second.messages]) {
+      reconstructed.set(
+        message.messageId,
+        `${reconstructed.get(message.messageId) ?? ''}${message.text}`,
+      );
+    }
+    expect([...reconstructed]).toEqual([
+      ['message-request', firstBody],
+      ['message-owner-reply', ownerReply],
+    ]);
+  });
+
+  it('keeps the whole-page character limit before continuing to the next message', async () => {
+    const api = vi.fn().mockResolvedValue({
+      messages: ['x'.repeat(100), 'owner reply'].map((text, index) => ({
+        id: `message-${index}`,
+        threadId: 'thread-1',
+        payload: {
+          mimeType: 'text/plain',
+          body: { data: Buffer.from(text).toString('base64url') },
+        },
+      })),
+    });
+    const read = registerGmailTools(new ToolRegistry(), {
+      client: { api } as never,
+      botEmail: 'bot@example.com',
+    }).get('gmail.read_thread')?.tool;
+
+    const first = (await read?.execute({ threadId: 'thread-1', maxChars: 100 }, {} as never)) as {
+      messages: Array<{ messageId: string; text: string }>;
+      hasMore: boolean;
+      receipt: { continuation: { input: Record<string, unknown> } | null };
+    };
+    expect(first.messages.map((message) => message.messageId)).toEqual(['message-0']);
+    expect(first.messages[0]?.text).toHaveLength(100);
+    expect(first.hasMore).toBe(true);
+    expect(first.receipt.continuation?.input).toMatchObject({
+      startMessageIndex: 1,
+      startMessageOffset: 0,
+    });
+
+    const second = (await read?.execute(
+      first.receipt.continuation?.input as never,
+      {} as never,
+    )) as {
+      messages: Array<{ messageId: string; text: string }>;
+      complete: boolean;
+    };
+    expect(second.messages).toEqual([
+      {
+        messageId: 'message-1',
+        text: 'owner reply',
+        from: '',
+        to: '',
+        date: '',
+        subject: '',
+        truncated: false,
+        sourceLength: 11,
+      },
+    ]);
+    expect(second.complete).toBe(true);
+  });
+
   it('continues to later thread messages when the requested message page is full', async () => {
     const api = vi.fn().mockResolvedValue({
       messages: ['one', 'two', 'decisive third'].map((text, index) => ({
