@@ -601,6 +601,54 @@ describe('response execution contract', () => {
       'Possible overlap: **City match arrival** and **City match kickoff**',
     );
   });
+
+  it('clips cross-boundary overlap times to the requested local day', () => {
+    const request = {
+      kind: 'calendar' as const,
+      firstToolName: 'calendar.list_events' as const,
+      queryTerms: [],
+      requiresThreadRead: false,
+      includeCalendarOverlapSummary: true,
+      timeZone: 'America/Los_Angeles',
+      timeWindow: {
+        label: 'tomorrow',
+        timeMin: '2026-10-14T07:00:00.000Z',
+        timeMax: '2026-10-15T07:00:00.000Z',
+      },
+    };
+    const response = verifiedReadResponse(request, [
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        args: { timeMin: request.timeWindow.timeMin, timeMax: request.timeWindow.timeMax },
+        result: {
+          complete: true,
+          calendarsSearched: ['Work', 'Personal'],
+          events: [
+            {
+              calendarId: 'work',
+              calendar: 'Work',
+              summary: 'Late review',
+              start: '2026-10-14T23:00:00-07:00',
+              end: '2026-10-15T02:00:00-07:00',
+            },
+            {
+              calendarId: 'personal',
+              calendar: 'Personal',
+              summary: 'Overnight appointment',
+              start: '2026-10-14T23:30:00-07:00',
+              end: '2026-10-15T01:00:00-07:00',
+            },
+          ],
+        },
+      },
+    ]);
+    expect(response).toContain(
+      'Possible overlap: **Late review** and **Overnight appointment**, Wed, Oct 14, 2026, 11:30 PM – Thu, Oct 15, 2026, 12:00 AM',
+    );
+    expect(response).not.toContain('–Thu 15 Oct 1:00 AM');
+  });
+
   it.each([
     'Mira has an appointment scheduled for January 12.',
     'Her appointment was scheduled for January 12.',

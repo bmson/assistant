@@ -1535,7 +1535,7 @@ function civilDayBoundary(day: string, timeZone: string): number | undefined {
       if (correction === 0) return candidate;
       candidate += correction;
     }
-    return candidate;
+    return undefined;
   } catch {
     return undefined;
   }
@@ -1618,13 +1618,23 @@ function calendarOverlapSummary(
     };
     return [{ event, projected, interval }];
   });
+  const requestedStart = request.timeWindow ? Date.parse(request.timeWindow.timeMin) : undefined;
+  const requestedEnd = request.timeWindow ? Date.parse(request.timeWindow.timeMax) : undefined;
+  const window =
+    requestedStart !== undefined &&
+    requestedEnd !== undefined &&
+    Number.isFinite(requestedStart) &&
+    Number.isFinite(requestedEnd) &&
+    requestedEnd > requestedStart
+      ? { start: requestedStart, end: requestedEnd }
+      : undefined;
   const notes: string[] = [];
   for (let index = 0; index < candidates.length; index += 1) {
     const left = candidates[index];
     if (!left) continue;
     for (const right of candidates.slice(index + 1)) {
-      const start = Math.max(left.interval.start, right.interval.start);
-      const end = Math.min(left.interval.end, right.interval.end);
+      const start = Math.max(left.interval.start, right.interval.start, window?.start ?? -Infinity);
+      const end = Math.min(left.interval.end, right.interval.end, window?.end ?? Infinity);
       if (start >= end) continue;
       const relationship = calendarRelationship(left.projected, right.projected);
       // Matching arrival/start records and exact duplicate candidates are
