@@ -821,12 +821,15 @@ describe('golden tasks', () => {
       objects: [
         fixture.objects?.[0] ?? { role: 'reason', value: { threadIds: [] } },
         { role: 'reason', value: {}, unavailable: true },
+        { role: 'reason', value: {}, unavailable: true },
       ],
     });
     createdTaskIds.push(failedGeneration.taskId);
 
     expect(failedGeneration.status).toBe('needs_attention');
-    expect(failedGeneration.finalText).toContain('could not safely prioritize');
+    expect(failedGeneration.finalText).toContain(
+      'complete-thread assessment could not be verified after a bounded retry',
+    );
     expect(failedGeneration.finalText).not.toContain('Thanks for your note.');
   });
 

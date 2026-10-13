@@ -5,10 +5,29 @@ import {
   clarificationAnswerStatus,
   explicitlyOptsOutOfRecall,
   extractOwnerIntent,
+  isConversationLocalContext,
   latestOwnerIntent,
 } from './owner-intent.js';
 
 describe('owner intent provenance', () => {
+  it('distinguishes current-conversation exercises from explicitly requested historical facts', () => {
+    expect(
+      isConversationLocalContext('For this fictional project exercise, acknowledge the details.'),
+    ).toBe(true);
+    expect(
+      isConversationLocalContext(
+        'Using the project details I just gave you in this conversation, list them.',
+      ),
+    ).toBe(true);
+    expect(
+      isConversationLocalContext(
+        'For a hypothetical exercise, use saved memories about my preferences.',
+      ),
+    ).toBe(false);
+    expect(isConversationLocalContext('Read my earlier conversations about the project.')).toBe(
+      false,
+    );
+  });
   it('admits an owner lookup question following background context and an explicit investigation', () => {
     for (const text of [
       'I was rejected from ExampleCo. Where should I try?',
@@ -113,6 +132,8 @@ describe('owner intent provenance', () => {
   it('honors explicit no-recall scope for ambient history and memory reads', () => {
     expect(explicitlyOptsOutOfRecall("Don't search my old messages for this.")).toBe(true);
     expect(explicitlyOptsOutOfRecall('Answer without looking anything up.')).toBe(true);
+    expect(explicitlyOptsOutOfRecall("Don't look anything up.")).toBe(true);
+    expect(explicitlyOptsOutOfRecall('Do not look anything up.')).toBe(true);
     expect(explicitlyOptsOutOfRecall('Please search my calendar for Friday.')).toBe(false);
   });
 

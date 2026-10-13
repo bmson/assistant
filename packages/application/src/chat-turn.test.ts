@@ -1691,6 +1691,38 @@ describe('chat needs-action triage', () => {
 });
 
 describe('tool-less conversational reply', () => {
+  it('keeps fictional exercise context in the current chat without ambient recall', async () => {
+    const store = chatStore();
+    const scripted = scriptedRouter({
+      triage: { needsAction: false },
+      draft: 'For this exercise, the project deadline is Friday.',
+    });
+    const response = await handleChatTurn(
+      send(
+        'For this hypothetical exercise only, the project deadline is Friday. Do not save fictional facts as personal memories.',
+      ),
+      {
+        config: loadConfig({
+          OPENROUTER_API_KEY: 'test-key',
+          QUEUE_DRIVER: 'local',
+          CHAT_RECALL_ENABLED: 'true',
+          GRAPH_RAG_ENABLED: 'false',
+        }),
+        router: scripted.router,
+        chat: store.chat,
+        persistence: { tasks: {}, ownerContext: {} } as never,
+      },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(stubs.getAmbientBlock).not.toHaveBeenCalled();
+    expect(stubs.getOwnerCard).not.toHaveBeenCalled();
+    const message = store.completions[0]?.messages[0];
+    expect(message).toBeDefined();
+    expect(message?.parts.some((part) => (part as { type?: string }).type === 'recall')).toBe(
+      false,
+    );
+  });
   it('uses the shared owner-scoped decision projection without tools', async () => {
     const store = chatStore();
     const scripted = scriptedRouter({
