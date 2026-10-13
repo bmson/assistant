@@ -243,6 +243,10 @@ export function proxy(request: NextRequest) {
     (path === '/api/mobile/v1/skills' && request.method === 'POST') ||
     (skillIdPath.test(path) && ['POST', 'PATCH', 'DELETE'].includes(request.method)) ||
     (path === '/api/mobile/v1/workspace' && request.method === 'GET') ||
+    (/^\/api\/mobile\/v1\/workspace\/sections\/(?:chats|skills|anomalies|improvements|import-sources|import-files)$/.test(
+      path,
+    ) &&
+      request.method === 'GET') ||
     (path === '/api/mobile/v1/overview' && request.method === 'GET') ||
     (path === '/api/mobile/v1/documents' && ['GET', 'POST'].includes(request.method)) ||
     (documentIdPath.test(path) && ['GET', 'DELETE'].includes(request.method)) ||
