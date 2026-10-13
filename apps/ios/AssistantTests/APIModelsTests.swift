@@ -1875,11 +1875,12 @@ final class APIModelsTests: XCTestCase {
             timeZone: zone,
             locale: locale
         )
-        XCTAssertTrue(range.contains("Oct 10, 2026"), range)
-        XCTAssertTrue(range.contains("6:00 AM"), range)
-        XCTAssertTrue(range.contains("Oct 17, 2026"), range)
-        XCTAssertTrue(range.contains("2:00 AM"), range)
-        XCTAssertFalse(range.contains("6:00 AM–2:00 AM"), range)
+        let normalizedRange = range.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        XCTAssertTrue(normalizedRange.contains("Oct 10, 2026"), range)
+        XCTAssertTrue(normalizedRange.contains("6:00 AM"), range)
+        XCTAssertTrue(normalizedRange.contains("Oct 17, 2026"), range)
+        XCTAssertTrue(normalizedRange.contains("2:00 AM"), range)
+        XCTAssertFalse(normalizedRange.contains("6:00 AM–2:00 AM"), range)
     }
 
     func testProactiveAlertCardDecodesGroundedDetails() {
