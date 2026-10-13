@@ -920,6 +920,11 @@ struct ChatView: View {
                         transaction.scrollContentOffsetAdjustmentBehavior = .disabled
                     }
                 }
+                // UIKit's scroll view can extend its drawing region into the
+                // safe-area overhang when the whole chat surface ignores the
+                // top inset. Reassert the SwiftUI viewport here before the
+                // crown clearance is added outside the scroll view.
+                .clipped()
                 // Constrain the viewport below the crown, rather than only
                 // offsetting the first content row. With clipping above, older
                 // text stays below the status area at every scroll position.
