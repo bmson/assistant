@@ -531,7 +531,7 @@ describe('weeklyCalendarPlan', () => {
 
 describe('requested focus-plan variations', () => {
   const prompt =
-    'Review my calendar for the next three working days. Find two 60-minute focus blocks between 9 AM and 5 PM, allowing 15-minute breaks around meetings. Mark coverage limits and show the plan; do not create events.';
+    'Look at my calendar for the next three working days. Suggest two 60-minute focus slots between 09:00 and 17:00, leave 15-minute breaks around meetings, and explain any limits in the availability check. Show the plan for review without creating events.';
   it('keeps the requested count, duration, window and meeting break constraints', () => {
     const plan = requestedCalendarPlanOptions(prompt);
     expect(plan).toEqual({

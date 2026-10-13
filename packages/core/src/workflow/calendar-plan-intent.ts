@@ -38,7 +38,7 @@ export function requestedCalendarPlanOptions(text: string): CalendarPlanOptions 
   const positive = text.replace(/\b(?:do\s+not|don['’]?t|never)\b[^.!?;\n]*/gi, '');
   if (
     !/\b(?:calendar|schedule)\b/i.test(positive) ||
-    !/\bfocus\s+(?:blocks?|time)\b/i.test(positive)
+    !/\bfocus\s+(?:blocks?|slots?|periods?|sessions?|time)\b/i.test(positive)
   )
     return undefined;
   if (/\b(?:create|add|book|schedule|move)\s+(?:\w+\s+){0,3}focus\b/i.test(positive))
@@ -50,11 +50,13 @@ export function requestedCalendarPlanOptions(text: string): CalendarPlanOptions 
     );
   const workingDays = count(days?.[1]);
   if (!nextWeek && !workingDays) return undefined;
-  const duration = /\b(\d{2,3})[ -]minute\s+focus\s+blocks?\b/i.exec(positive);
+  const duration = /\b(\d{2,3})[ -]minute\s+focus\s+(?:blocks?|slots?|periods?|sessions?)\b/i.exec(
+    positive,
+  );
   const focusMinutes = duration ? Number(duration[1]) : 90;
   if (!Number.isInteger(focusMinutes) || focusMinutes < 15 || focusMinutes > 240) return undefined;
   const slots =
-    /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+(?:\d{2,3}[ -]minute\s+)?focus\s+blocks?\b/i.exec(
+    /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+(?:\d{2,3}[ -]minute\s+)?focus\s+(?:blocks?|slots?|periods?|sessions?)\b/i.exec(
       positive,
     );
   const slotCount = slots ? count(slots[1]) : 3;
