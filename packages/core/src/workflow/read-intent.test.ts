@@ -543,6 +543,29 @@ describe('detectPersonalReadRequest', () => {
     });
   });
 
+  it('detects a concise practical calendar briefing without coupling to a named skill', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Use my saved skill "Clear task planning" to review my calendar for tomorrow and give me a short practical briefing. Say which saved skill you used, or clearly say if that skill could not be retrieved. Use actual calendar evidence, show source links, and do not change anything.',
+      ),
+      {
+        now: new Date('2026-10-13T18:08:55.000Z'),
+        timeZone: 'America/Los_Angeles',
+      },
+    );
+    expect(request).toMatchObject({
+      kind: 'calendar',
+      firstToolName: 'calendar.list_events',
+      includeCalendarBriefing: true,
+      includeCalendarOverlapSummary: true,
+      timeWindow: {
+        timeMin: '2026-10-14T07:00:00.000Z',
+        timeMax: '2026-10-15T07:00:00.000Z',
+      },
+    });
+    expect(request?.mailQuery).toBeUndefined();
+  });
+
   it.each(['Make this sentence clear.', 'Is the explanation clear?', 'Empty my inbox tomorrow.'])(
     'does not confuse another clear or empty request with availability: %s',
     (text) => {

@@ -135,6 +135,8 @@ export interface PersonalReadRequest {
   };
   /** Include a bounded, source-backed overlap note when the owner asks for one. */
   includeCalendarOverlapSummary?: boolean;
+  /** Use a concise agenda format for a requested calendar briefing. */
+  includeCalendarBriefing?: boolean;
 }
 
 export interface PersonalReadDetectionOptions {
@@ -2020,6 +2022,10 @@ function detectPersonalReadRequestInternal(
         : kind === 'calendar_email' || terms.length > 0
           ? 'calendar.search_events'
           : 'calendar.list_events';
+  const calendarBriefing =
+    kind === 'calendar' &&
+    /\b(?:calendar|agenda|schedule)\b/i.test(latest) &&
+    /\b(?:briefing|brief me|practical briefing|quick overview|short summary|recap)\b/i.test(latest);
 
   const request: PersonalReadRequest = {
     kind,
@@ -2035,7 +2041,8 @@ function detectPersonalReadRequestInternal(
       kind === 'calendar_email' ||
       (kind === 'email' &&
         (verification || /\b(?:when|where|what time|details?|what does|what did)\b/i.test(latest))),
-    ...(/\b(?:overlaps?|conflicts?|double[ -]?booked|clashes?)\b/i.test(latest)
+    ...(calendarBriefing ? { includeCalendarBriefing: true } : {}),
+    ...(calendarBriefing || /\b(?:overlaps?|conflicts?|double[ -]?booked|clashes?)\b/i.test(latest)
       ? { includeCalendarOverlapSummary: true }
       : {}),
   };

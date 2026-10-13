@@ -3351,9 +3351,11 @@ export function verifiedReadResponse(
         : 'the calendar and mail';
   const forWindow = request.timeWindow ? ` for ${request.timeWindow.label}` : '';
   const lines = [
-    request.verification
-      ? 'I rechecked it — this is everything the sources actually return:'
-      : `Here's what ${where} has${forWindow}:`,
+    request.includeCalendarBriefing
+      ? `Calendar briefing${forWindow} (local time):`
+      : request.verification
+        ? 'I rechecked it — this is everything the sources actually return:'
+        : `Here's what ${where} has${forWindow}:`,
   ];
 
   if (request.kind !== 'email') {
@@ -3574,7 +3576,7 @@ export function verifiedReadResponse(
                   : ''
                 : '';
           lines.push(
-            `- **${when || start || '(no time returned)'}** — ${summary}${spanNote}${location ? ` — ${location}` : ''}${attendeeText ? ` — with ${attendeeText}` : ''}${eventLinks ? ` — ${eventLinks}` : ''}${calendar && manyCalendars ? ` (${calendar})` : ''}`,
+            `- **${when || start || '(no time returned)'}** — ${summary}${spanNote}${!request.includeCalendarBriefing && location ? ` — ${location}` : ''}${!request.includeCalendarBriefing && attendeeText ? ` — with ${attendeeText}` : ''}${eventLinks ? ` — ${eventLinks}` : ''}${calendar && (manyCalendars || request.includeCalendarBriefing) ? ` (${calendar})` : ''}`,
           );
         }
       }

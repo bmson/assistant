@@ -649,6 +649,71 @@ describe('response execution contract', () => {
     expect(response).not.toContain('–Thu 15 Oct 1:00 AM');
   });
 
+  it('keeps a requested practical calendar briefing concise while retaining sources and overlap notes', () => {
+    const request = {
+      kind: 'calendar' as const,
+      firstToolName: 'calendar.list_events' as const,
+      queryTerms: [],
+      requiresThreadRead: false,
+      includeCalendarBriefing: true,
+      includeCalendarOverlapSummary: true,
+      timeZone: 'America/Los_Angeles',
+      timeWindow: {
+        label: 'tomorrow',
+        timeMin: '2026-10-14T07:00:00.000Z',
+        timeMax: '2026-10-15T07:00:00.000Z',
+      },
+    };
+    const response = verifiedReadResponse(request, [
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        args: { timeMin: request.timeWindow.timeMin, timeMax: request.timeWindow.timeMax },
+        result: {
+          complete: true,
+          calendarsSearched: ['Work', 'Personal'],
+          events: [
+            {
+              eventId: 'briefing-work',
+              calendarId: 'work',
+              calendar: 'Work',
+              summary: 'Project review',
+              location: '100 Private Street, Building 4',
+              attendees: ['colleague@example.test'],
+              start: '2026-10-14T10:00:00-07:00',
+              end: '2026-10-14T11:30:00-07:00',
+              ownerResponse: 'accepted',
+              links: [
+                {
+                  type: 'calendar',
+                  label: 'Open event',
+                  url: 'https://calendar.google.com/event?eid=briefing',
+                },
+              ],
+            },
+            {
+              eventId: 'briefing-personal',
+              calendarId: 'personal',
+              calendar: 'Personal',
+              summary: 'Appointment',
+              location: 'Another Private Street',
+              start: '2026-10-14T11:00:00-07:00',
+              end: '2026-10-14T12:00:00-07:00',
+            },
+          ],
+        },
+      },
+    ]);
+
+    expect(response).toContain('Calendar briefing for tomorrow (local time):');
+    expect(response).toContain('— Project review — [Open event]');
+    expect(response).toContain('— Appointment (Personal)');
+    expect(response).toContain('[Open event](https://calendar.google.com/event?eid=briefing)');
+    expect(response).toContain('Possible overlap: **Project review** and **Appointment**');
+    expect(response).not.toContain('Private Street');
+    expect(response).not.toContain('colleague@example.test');
+  });
+
   it.each([
     'Mira has an appointment scheduled for January 12.',
     'Her appointment was scheduled for January 12.',
