@@ -328,6 +328,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
 
   const eventBusy: Array<{ start: number; end: number }> = [];
   let travelBufferCount = 0;
+  let potentialTravelBufferCount = 0;
   for (const event of uniqueEvents) {
     const interval = parseEventInterval(event);
     if (
@@ -340,8 +341,9 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     const location = typeof event.location === 'string' && event.location.trim().length > 0;
     const hasVideo =
       Array.isArray(event.links) && event.links.some((value) => record(value)?.type === 'video');
-    const inPerson = location && !hasVideo && attendance(event) === 'attending';
+    const inPerson = location && !hasVideo;
     if (inPerson) travelBufferCount += 1;
+    if (inPerson && attendance(event) === 'potential') potentialTravelBufferCount += 1;
     eventBusy.push({
       start: Math.max(start, interval.start - (inPerson ? TRAVEL_MS : 0)),
       end: Math.min(end, interval.end + (inPerson ? TRAVEL_MS : 0)),
@@ -468,7 +470,11 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   );
   if (travelBufferCount > 0)
     lines.push(
-      'I reserved an estimated 30-minute travel buffer around explicitly in-person events; this is not a route estimate.',
+      'I reserved an estimated 30-minute travel buffer on each side of events with a physical location and no video link; this is not a route estimate.',
+    );
+  if (potentialTravelBufferCount > 0)
+    lines.push(
+      'I included those location-based buffers conservatively where shared-calendar attendance is unconfirmed. Confirm attendance and actual travel time before relying on the plan.',
     );
   if (conflictPairs.length > 0) lines.push(...conflictPairs.slice(0, 5));
   if (conflictPairs.some((line) => line.startsWith('Scheduling conflict:')))
@@ -482,6 +488,11 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   if (conflictPairs.length === 0 && complete)
     lines.push('I found no overlapping attended events in the checked calendar data.');
   if (overloads.length > 0) lines.push(...overloads.slice(0, 5));
+  else if (!busyValid) lines.push('I could not assess overloaded days from usable free/busy data.');
+  else
+    lines.push(
+      `Overloaded-day assessment: No checked working day reaches the 6-hour busy-time threshold inside the assumed 9–5 day.${complete ? ' This is a planning heuristic.' : ' This applies only to the checked data; missing coverage could change this assessment.'}`,
+    );
   if (overloads.length > 0)
     lines.push(
       'Recommended change: consider moving flexible work from an overloaded day to a lighter day after checking your priorities.',

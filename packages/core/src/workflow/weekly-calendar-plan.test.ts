@@ -72,6 +72,78 @@ describe('weeklyCalendarPlan', () => {
     expect(text).not.toContain('no overlapping attended events');
   });
 
+  it('reports the overloaded-day assessment even when no checked day exceeds the heuristic', () => {
+    const complete = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence() as never,
+    });
+    expect(complete).toContain('No checked working day reaches the 6-hour busy-time threshold');
+    const partial = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({ availabilityComplete: false, unavailable: ['Shared'] }) as never,
+    });
+    expect(partial).toContain('No checked working day reaches the 6-hour busy-time threshold');
+    expect(partial).toContain('missing coverage could change this assessment');
+    const invalid = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({ busy: [{ start: 'invalid', end: 'invalid' }] }) as never,
+    });
+    expect(invalid).toContain('I could not assess overloaded days from usable free/busy data');
+    expect(invalid).not.toContain('No checked working day reaches');
+  });
+
+  it('reserves estimated travel time for a physical shared event while keeping attendance uncertain', () => {
+    const shared = {
+      eventId: 'shared-physical',
+      calendarId: 'family',
+      summary: 'Shared appointment',
+      start: '2026-10-12T18:00:00Z',
+      end: '2026-10-12T19:00:00Z',
+      blocksTime: true,
+      location: '120 Example Street',
+    };
+    const busy = [
+      { start: '2026-10-12T16:00:00Z', end: '2026-10-12T17:30:00Z' },
+      { start: shared.start, end: shared.end },
+      ...[13, 14, 15, 16].map((day) => ({
+        start: `2026-10-${day}T16:00:00Z`,
+        end: `2026-10-${day + 1}T00:00:00Z`,
+      })),
+    ];
+    const text = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        busy,
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin, timeMax },
+            result: {
+              events: [shared],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+    });
+    expect(text).toContain('estimated 30-minute travel buffer');
+    expect(text).toContain('shared-calendar attendance is unconfirmed');
+    expect(text).toContain('- Mon, Oct 12, 12:30 PM');
+    expect(text).not.toContain('- Mon, Oct 12, 12:00 PM');
+    expect(text).toContain('not a route estimate');
+  });
+
   it('does not infer free time from malformed busy intervals', () => {
     const text = weeklyCalendarPlan({
       timeMin,
