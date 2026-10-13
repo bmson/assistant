@@ -7,8 +7,8 @@ import {
 import type { PersonalReadRequest, ReadToolEvidence } from './read-intent.js';
 
 const MAX_MESSAGES = 12;
-const MAX_MESSAGE_CHARS = 12_000;
 const MAX_INPUT_CHARS = 36_000;
+const MAX_MESSAGE_CHARS = MAX_INPUT_CHARS;
 const MAX_FLIGHT_EXCERPT_CHARS = 700;
 const MAX_HOTEL_EXCERPT_CHARS = 1_200;
 const MAX_OUTPUT_TOKENS = 3_600;

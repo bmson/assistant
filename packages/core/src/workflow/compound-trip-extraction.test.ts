@@ -23,16 +23,17 @@ const flightQuote =
 const hotelQuote =
   'Hotel Linden in Berlin, 5 Alexanderplatz, 10178 Berlin. Your stay is 22 October 2026 through 24 October 2026. Confirmation HOTEL-55123.';
 
-function evidence(body = `${flightQuote}\n${hotelQuote}`): ReadToolEvidence[] {
-  const messages = [
-    {
-      messageId: 'booking-message-1',
-      subject: 'Your Berlin trip',
-      text: body,
-      truncated: false,
-      sourceLength: body.length,
-    },
-  ];
+function evidence(
+  body = `${flightQuote}\n${hotelQuote}`,
+  additionalBodies: string[] = [],
+): ReadToolEvidence[] {
+  const messages = [body, ...additionalBodies].map((text, index) => ({
+    messageId: index === 0 ? 'booking-message-1' : `booking-message-${index + 1}`,
+    subject: 'Your Berlin trip',
+    text,
+    truncated: false,
+    sourceLength: text.length,
+  }));
   return [
     {
       toolName: 'gmail.search',
@@ -76,7 +77,14 @@ function evidence(body = `${flightQuote}\n${hotelQuote}`): ReadToolEvidence[] {
           version: 1,
           source: { kind: 'gmail-thread', id: 'trip-thread' },
           requested: { start: 0, offset: 0, limit: 20, scope: 'thread-messages' },
-          covered: { start: 0, offset: 0, end: 1, count: 1, total: 1, unavailable: 0 },
+          covered: {
+            start: 0,
+            offset: 0,
+            end: messages.length,
+            count: messages.length,
+            total: messages.length,
+            unavailable: 0,
+          },
           complete: true,
           losses: [],
           continuation: null,
@@ -373,19 +381,116 @@ describe('compound trip source extraction', () => {
     expect(object).not.toHaveBeenCalled();
   });
 
-  it('admits a complete booking message just over ten thousand characters within the total cap', async () => {
-    const longBody = `${flightQuote}\n${'x'.repeat(10_449 - flightQuote.length)}`;
+  it('extracts a fully continued 12,356-character message within the aggregate cap', async () => {
+    const longBody = `${flightQuote}\n${'x'.repeat(12_356 - flightQuote.length - 1)}`;
+    const companionBody = 'y'.repeat(3_511);
     const object = vi.fn().mockResolvedValue({ ok: true, object: extractedFacts() });
     const result = await extractCompoundTripBookings({
       router: { object } as never,
       taskId: 'task-trip-long-confirmation',
       request,
-      evidence: evidence(longBody),
+      evidence: evidence(longBody, [companionBody]),
     });
 
-    expect(longBody).toHaveLength(10_450);
+    expect(longBody).toHaveLength(12_356);
+    expect(longBody.length + companionBody.length).toBe(15_867);
     expect(object).toHaveBeenCalledTimes(1);
     expect(result.status).toBe('complete');
     expect(result.segments).toHaveLength(1);
+  });
+
+  it('keeps the aggregate source cap when individually bounded messages exceed it together', async () => {
+    const object = vi.fn();
+    const result = await extractCompoundTripBookings({
+      router: { object } as never,
+      taskId: 'task-trip-aggregate-cap',
+      request,
+      evidence: evidence('x'.repeat(20_000), ['y'.repeat(16_001)]),
+    });
+
+    expect(result.status).toBe('unavailable');
+    expect(result.segments).toEqual([]);
+    expect(object).not.toHaveBeenCalled();
+  });
+
+  it('does not trust a continuation read from a thread outside the selected search result', async () => {
+    const rows = evidence('x'.repeat(12_356));
+    const initialRead = rows.find((row) => row.toolName === 'gmail.read_thread');
+    if (!initialRead) throw new Error('fixture thread row missing');
+    const initialArgs = initialRead.args as Record<string, unknown>;
+    const initialResult = initialRead.result as Record<string, unknown>;
+    const initialReceipt = initialResult.receipt as Record<string, unknown>;
+    initialArgs.startMessageOffset = 0;
+    initialResult.complete = false;
+    initialResult.hasMore = true;
+    initialResult.continuation = {
+      tool: 'gmail.read_thread',
+      input: {
+        threadId: 'trip-thread',
+        startMessageIndex: 0,
+        startMessageOffset: 8_000,
+        maxMessages: 20,
+        maxChars: 20_000,
+      },
+    };
+    initialResult.messages = [
+      {
+        messageId: 'booking-message-1',
+        subject: 'Your Berlin trip',
+        text: 'x'.repeat(8_000),
+        truncated: true,
+        sourceLength: 12_356,
+      },
+    ];
+    initialReceipt.complete = false;
+    initialReceipt.losses = ['message-body'];
+    initialReceipt.covered = { start: 0, offset: 0, end: 1, count: 1, total: 1, unavailable: 0 };
+    initialReceipt.continuation = structuredClone(initialResult.continuation);
+    rows.push({
+      toolName: 'gmail.read_thread',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: {
+        threadId: 'foreign-thread',
+        startMessageIndex: 0,
+        startMessageOffset: 8_000,
+        maxMessages: 20,
+        maxChars: 20_000,
+      },
+      result: {
+        threadId: 'foreign-thread',
+        complete: true,
+        hasMore: false,
+        messages: [
+          {
+            messageId: 'booking-message-1',
+            subject: 'Your Berlin trip',
+            text: 'x'.repeat(4_356),
+            truncated: false,
+            sourceLength: 12_356,
+          },
+        ],
+        receipt: {
+          version: 1,
+          source: { kind: 'gmail-thread', id: 'foreign-thread' },
+          requested: { start: 0, offset: 8_000, limit: 20, scope: 'thread-messages' },
+          covered: { start: 0, offset: 8_000, end: 1, count: 1, total: 1, unavailable: 0 },
+          complete: true,
+          losses: [],
+          continuation: null,
+        },
+      },
+    });
+    const object = vi.fn();
+    const result = await extractCompoundTripBookings({
+      router: { object } as never,
+      taskId: 'task-trip-foreign-continuation',
+      request,
+      evidence: rows,
+    });
+
+    expect(result.status).toBe('unavailable');
+    expect(result.segments).toEqual([]);
+    expect(object).not.toHaveBeenCalled();
   });
 });
