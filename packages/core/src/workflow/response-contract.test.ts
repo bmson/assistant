@@ -449,6 +449,158 @@ describe('response execution contract', () => {
     expect(response).toContain('**10:00–11:00** — Meeting');
     expect(response).not.toContain('continues into the requested period');
   });
+
+  it('reports overlapping local intervals with attendance and incomplete coverage kept distinct', () => {
+    const request = {
+      kind: 'calendar' as const,
+      firstToolName: 'calendar.list_events' as const,
+      queryTerms: [],
+      requiresThreadRead: false,
+      includeCalendarOverlapSummary: true,
+      timeZone: 'America/Los_Angeles',
+      timeWindow: {
+        label: 'tomorrow',
+        timeMin: '2026-10-14T07:00:00.000Z',
+        timeMax: '2026-10-15T07:00:00.000Z',
+      },
+    };
+    const evidence: ActionEvidence[] = [
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        args: { timeMin: request.timeWindow.timeMin, timeMax: request.timeWindow.timeMax },
+        result: {
+          complete: false,
+          calendarsSearched: ['Work', 'Shared calendar'],
+          unavailable: [{ calendar: 'Shared calendar' }],
+          events: [
+            {
+              eventId: 'work-event',
+              calendarId: 'work',
+              calendar: 'Work',
+              summary: 'Project review',
+              start: '2026-10-14T10:00:00-07:00',
+              end: '2026-10-14T11:30:00-07:00',
+              ownerResponse: 'accepted',
+              blocksTime: true,
+              links: [
+                {
+                  type: 'calendar',
+                  label: 'Open event',
+                  url: 'https://calendar.google.com/event?eid=work',
+                },
+              ],
+            },
+            {
+              eventId: 'shared-event',
+              calendarId: 'shared',
+              calendar: 'Shared calendar',
+              summary: 'Planning hold',
+              start: '2026-10-14T11:00:00-07:00',
+              end: '2026-10-14T12:00:00-07:00',
+              blocksTime: true,
+            },
+            {
+              eventId: 'cancelled-event',
+              calendarId: 'work',
+              calendar: 'Work',
+              summary: 'Cancelled review',
+              start: '2026-10-14T10:30:00-07:00',
+              end: '2026-10-14T11:15:00-07:00',
+              status: 'cancelled',
+            },
+          ],
+        },
+      },
+    ];
+    const response = verifiedReadResponse(request, evidence);
+    expect(response).toContain(
+      'Possible overlap: **Project review** and **Planning hold**, Wed 14 Oct 11:00 AM–11:30 AM',
+    );
+    expect(response).toContain(
+      'personal attendance and matching occurrence identity are not established',
+    );
+    expect(response).toContain('coverage was incomplete; unavailable: Shared calendar');
+    expect(response).toContain('[Open event](https://calendar.google.com/event?eid=work)');
+    expect(response).not.toContain('Scheduling conflict: **Project review**');
+    expect(response).not.toContain('Cancelled review');
+    const withoutRequestedSummary = verifiedReadResponse(
+      { ...request, includeCalendarOverlapSummary: false },
+      evidence,
+    );
+    expect(withoutRequestedSummary).not.toContain('Possible overlap:');
+  });
+
+  it('reports accepted overlapping invitations as a scheduling conflict and skips matching arrivals', () => {
+    const request = {
+      kind: 'calendar' as const,
+      firstToolName: 'calendar.list_events' as const,
+      queryTerms: [],
+      requiresThreadRead: false,
+      includeCalendarOverlapSummary: true,
+      timeZone: 'America/Los_Angeles',
+      timeWindow: {
+        label: 'tomorrow',
+        timeMin: '2026-10-14T07:00:00.000Z',
+        timeMax: '2026-10-15T07:00:00.000Z',
+      },
+    };
+    const response = verifiedReadResponse(request, [
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        args: { timeMin: request.timeWindow.timeMin, timeMax: request.timeWindow.timeMax },
+        result: {
+          complete: true,
+          calendarsSearched: ['Work', 'Personal', 'Sports', 'Shared Sports'],
+          events: [
+            {
+              eventId: 'accepted-one',
+              calendarId: 'work',
+              calendar: 'Work',
+              summary: 'Review',
+              start: '2026-10-14T10:00:00-07:00',
+              end: '2026-10-14T11:00:00-07:00',
+              ownerResponse: 'accepted',
+            },
+            {
+              eventId: 'accepted-two',
+              calendarId: 'personal',
+              calendar: 'Personal',
+              summary: 'Appointment',
+              start: '2026-10-14T10:30:00-07:00',
+              end: '2026-10-14T11:30:00-07:00',
+              ownerResponse: 'accepted',
+            },
+            {
+              eventId: 'arrival',
+              calendarId: 'sports',
+              calendar: 'Sports',
+              summary: 'City match arrival',
+              description: 'Venue aliases: Central Field',
+              location: 'Central Field',
+              start: '2026-10-14T13:00:00-07:00',
+              end: '2026-10-14T13:45:00-07:00',
+            },
+            {
+              eventId: 'kickoff',
+              calendarId: 'sports-shared',
+              calendar: 'Shared Sports',
+              summary: 'City match kickoff',
+              description: 'Venue aliases: Central Field',
+              location: 'Central Field',
+              start: '2026-10-14T13:30:00-07:00',
+              end: '2026-10-14T14:30:00-07:00',
+            },
+          ],
+        },
+      },
+    ]);
+    expect(response).toContain('Scheduling conflict: **Review** and **Appointment**');
+    expect(response).not.toContain(
+      'Possible overlap: **City match arrival** and **City match kickoff**',
+    );
+  });
   it.each([
     'Mira has an appointment scheduled for January 12.',
     'Her appointment was scheduled for January 12.',

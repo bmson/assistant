@@ -132,6 +132,8 @@ export interface PersonalReadRequest {
     rankingSource?: 'model' | 'recent_metadata_fallback';
     rankingFailureReason?: 'router_error' | 'invalid_result';
   };
+  /** Include a bounded, source-backed overlap note when the owner asks for one. */
+  includeCalendarOverlapSummary?: boolean;
 }
 
 export interface PersonalReadDetectionOptions {
@@ -1932,6 +1934,9 @@ function detectPersonalReadRequestInternal(
       kind === 'calendar_email' ||
       (kind === 'email' &&
         (verification || /\b(?:when|where|what time|details?|what does|what did)\b/i.test(latest))),
+    ...(/\b(?:overlaps?|conflicts?|double[ -]?booked|clashes?)\b/i.test(latest)
+      ? { includeCalendarOverlapSummary: true }
+      : {}),
   };
   if (weeklyCalendarPlan && calendarPlanOptions) {
     request.timeWindow = calendarPlanWindow(options, calendarPlanOptions);

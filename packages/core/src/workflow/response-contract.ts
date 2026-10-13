@@ -5,6 +5,8 @@ import {
   gradeAuditedOutput,
   repairPresentationDefects,
 } from '../model-router/audit-graders.js';
+import type { BriefingCalendarEvent } from './briefing.js';
+import { calendarRelationship, calendarRelationshipNote } from './calendar-relationship.js';
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
 import type { CompoundTripExtraction } from './compound-trip-extraction.js';
 import { compoundTripReadProjection, upcomingFlightReadProjection } from './compound-trip-read.js';
@@ -1500,6 +1502,162 @@ function intervalDateTime(value: string, timeZone?: string): string {
   } catch {
     return value;
   }
+}
+
+function civilDayBoundary(day: string, timeZone: string): number | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!match) return undefined;
+  const target = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  let candidate = target;
+  try {
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    });
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const parts = formatter.formatToParts(new Date(candidate));
+      const part = (type: string) => Number(parts.find((item) => item.type === type)?.value);
+      const represented = Date.UTC(
+        part('year'),
+        part('month') - 1,
+        part('day'),
+        part('hour'),
+        part('minute'),
+        part('second'),
+      );
+      const correction = target - represented;
+      if (correction === 0) return candidate;
+      candidate += correction;
+    }
+    return candidate;
+  } catch {
+    return undefined;
+  }
+}
+
+function overlapInterval(
+  event: Record<string, unknown>,
+  timeZone: string,
+): { start: number; end: number } | undefined {
+  const start = stringField(event, 'start');
+  const end = stringField(event, 'end');
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(start) && /^\d{4}-\d{2}-\d{2}$/.test(end);
+  if (dateOnly) {
+    const startDay = start.slice(0, 10);
+    const endDay = end.slice(0, 10);
+    const from = civilDayBoundary(startDay, timeZone);
+    const to = civilDayBoundary(endDay, timeZone);
+    return from !== undefined && to !== undefined && to > from
+      ? { start: from, end: to }
+      : undefined;
+  }
+  const from = Date.parse(start);
+  const to = Date.parse(end);
+  return Number.isFinite(from) && Number.isFinite(to) && to > from
+    ? { start: from, end: to }
+    : undefined;
+}
+
+function overlapClock(value: number, timeZone?: string): string {
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: timeZone ?? 'UTC',
+      hour: 'numeric',
+      minute: '2-digit',
+    }).format(new Date(value));
+  } catch {
+    return new Date(value).toISOString();
+  }
+}
+
+function calendarOverlapSummary(
+  events: Record<string, unknown>[],
+  request: PersonalReadRequest,
+  complete: boolean,
+): string[] {
+  if (!request.includeCalendarOverlapSummary) return [];
+  const zone = request.timeZone ?? 'UTC';
+  const candidates = events.flatMap((event) => {
+    if (
+      stringField(event, 'status') === 'cancelled' ||
+      stringField(event, 'ownerResponse') === 'declined' ||
+      event.blocksTime === false
+    )
+      return [];
+    const interval = overlapInterval(event, zone);
+    if (!interval) return [];
+    const projected: BriefingCalendarEvent = {
+      summary: stringField(event, 'summary') || '(untitled event)',
+      start: stringField(event, 'start'),
+      end: stringField(event, 'end'),
+      calendar: stringField(event, 'calendar'),
+      allDay: event.allDay === true,
+      ...(stringField(event, 'eventId') ? { eventId: stringField(event, 'eventId') } : {}),
+      ...(stringField(event, 'calendarId') ? { calendarId: stringField(event, 'calendarId') } : {}),
+      ...(stringField(event, 'iCalUID') ? { iCalUID: stringField(event, 'iCalUID') } : {}),
+      ...(stringField(event, 'recurringEventId')
+        ? { recurringEventId: stringField(event, 'recurringEventId') }
+        : {}),
+      ...(stringField(event, 'originalStartTime')
+        ? { originalStartTime: stringField(event, 'originalStartTime') }
+        : {}),
+      ...(stringField(event, 'ownerResponse')
+        ? { ownerResponse: stringField(event, 'ownerResponse') }
+        : {}),
+      ...(typeof event.blocksTime === 'boolean' ? { blocksTime: event.blocksTime } : {}),
+      ...(stringField(event, 'location') ? { location: stringField(event, 'location') } : {}),
+      ...(stringField(event, 'description')
+        ? { description: stringField(event, 'description') }
+        : {}),
+    };
+    return [{ event, projected, interval }];
+  });
+  const notes: string[] = [];
+  for (let index = 0; index < candidates.length; index += 1) {
+    const left = candidates[index];
+    if (!left) continue;
+    for (const right of candidates.slice(index + 1)) {
+      const start = Math.max(left.interval.start, right.interval.start);
+      const end = Math.min(left.interval.end, right.interval.end);
+      if (start >= end) continue;
+      const relationship = calendarRelationship(left.projected, right.projected);
+      // Matching arrival/start records and exact duplicate candidates are
+      // retained in the agenda, but do not imply a scheduling conflict.
+      if (relationship !== 'unresolved') continue;
+      const bothAccepted =
+        stringField(left.event, 'ownerResponse') === 'accepted' &&
+        stringField(right.event, 'ownerResponse') === 'accepted';
+      const sameDay =
+        eventLocalDay(new Date(start).toISOString(), zone) ===
+        eventLocalDay(new Date(end).toISOString(), zone);
+      const overlapLabel = sameDay
+        ? `${shortDate(new Date(start).toISOString(), zone)} ${overlapClock(start, zone)}–${overlapClock(end, zone)}`
+        : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
+      notes.push(
+        `- ${bothAccepted ? 'Scheduling conflict' : 'Possible overlap'}: **${left.projected.summary}** and **${right.projected.summary}**, ${overlapLabel}. ${calendarRelationshipNote(relationship, bothAccepted ? 'confirmed' : 'unresolved')}`,
+      );
+    }
+  }
+  if (notes.length === 0)
+    return [
+      complete
+        ? 'No unresolved overlapping event times were found in the checked calendar results.'
+        : events.length > 0
+          ? 'No overlaps appeared in the checked event subset; calendar coverage is incomplete.'
+          : 'An overlap check was requested, but no calendar events were available to compare.',
+    ];
+  const shown = notes.slice(0, 3);
+  if (notes.length > shown.length)
+    shown.push(
+      `- ${notes.length - shown.length} additional overlapping pairs were found in the checked results.`,
+    );
+  return shown;
 }
 
 /** Does the searched window cover more than one local day? */
@@ -3323,7 +3481,8 @@ export function verifiedReadResponse(
       if (!request.timeWindow) {
         for (const range of ranges) lines.push(`- Searched ${range}`);
       }
-      if (events.length === 0) {
+      const agendaEvents = events.filter((event) => stringField(event, 'status') !== 'cancelled');
+      if (agendaEvents.length === 0) {
         lines.push(
           calendarRows.length > 0 && complete
             ? `Nothing on the calendar — no matching events${calendars.size > 0 ? ` across ${[...calendars].join(', ')}` : ''}.`
@@ -3334,10 +3493,11 @@ export function verifiedReadResponse(
       } else {
         const multiDay = spansDays(request.timeWindow);
         const manyCalendars =
-          new Set(events.map((event) => stringField(event, 'calendar')).filter(Boolean)).size > 1;
+          new Set(agendaEvents.map((event) => stringField(event, 'calendar')).filter(Boolean))
+            .size > 1;
         // Retrieval is already bounded by the read tool. A successful full
         // agenda must not silently become a twenty-event display preview.
-        for (const event of events) {
+        for (const event of agendaEvents) {
           const summary = stringField(event, 'summary') || '(untitled event)';
           const rawStart = stringField(event, 'start');
           const rawEnd = stringField(event, 'end');
@@ -3408,6 +3568,8 @@ export function verifiedReadResponse(
           );
         }
       }
+      if (request.includeCalendarOverlapSummary)
+        lines.push(...calendarOverlapSummary(events, request, complete));
       if (!complete || unavailable.length > 0) {
         lines.push(
           `Heads up: calendar coverage was incomplete${unavailable.length > 0 ? `; unavailable: ${[...new Set(unavailable)].join(', ')}` : ''}.`,
