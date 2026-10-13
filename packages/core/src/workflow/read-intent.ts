@@ -96,10 +96,17 @@ export interface PersonalReadRequest {
   emailReview?: {
     windowDays: 7;
     requestedCount: 5;
-    /** Runtime-selected IDs, validated against this task's successful searches. */
+    /** Runtime-selected read IDs, validated against this task's successful searches. */
     selectedThreadIds?: string[];
-    /** Exact bounded metadata pool shown to the structured ranker. */
+    /** Exact bounded metadata IDs shown to the structured ranker. */
     rankedCandidateIds?: string[];
+    /** Ordered reserve pool returned by the ranker, validated against rankedCandidateIds. */
+    rankedThreadIds?: string[];
+    /** Source-backed thread IDs for which a read was attempted. */
+    attemptedThreadIds?: string[];
+    /** Source-backed thread IDs with a complete later owner reply. */
+    excludedThreadIds?: string[];
+    backfillShortfall?: 'rank_pool_exhausted' | 'step_budget';
     rankingFailed?: boolean;
   };
 }

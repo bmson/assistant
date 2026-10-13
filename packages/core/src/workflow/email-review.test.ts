@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   boundEmailReviewThreads,
+  EMAIL_REVIEW_MAX_RANK_POOL,
   EMAIL_REVIEW_QUERY,
   type EmailReviewEvidenceRow,
   emailReviewCandidateIds,
@@ -9,6 +10,8 @@ import {
   emailReviewNextThreadRead,
   emailReviewOwnerMailbox,
   emailReviewRankContext,
+  emailReviewSelectionWithinAuthorizedPool,
+  emailReviewThreadReadResult,
   formatEmailReviewAnswer,
   validateEmailReviewAnswer,
   validEmailReviewSelection,
@@ -163,6 +166,33 @@ describe('bounded no-send email review', () => {
     expect(validEmailReviewSelection(['thread-a'], evidence)).toBe(true);
     expect(validEmailReviewSelection(['thread-a', 'thread-a'], evidence)).toBe(false);
     expect(validEmailReviewSelection(['invented'], evidence)).toBe(false);
+  });
+
+  it('allows a bounded eight-ID reserve pool while keeping final answers capped at five', () => {
+    const evidence = Array.from({ length: EMAIL_REVIEW_MAX_RANK_POOL }, (_, index) =>
+      search(`request-${index}`),
+    );
+    const ids = Array.from(
+      { length: EMAIL_REVIEW_MAX_RANK_POOL },
+      (_, index) => `request-${index}`,
+    );
+    expect(validEmailReviewSelection(ids, evidence)).toBe(true);
+    expect(validEmailReviewSelection([...ids, 'request-8'], evidence)).toBe(false);
+    expect(JSON.parse(emailReviewRankContext(evidence).prompt)).toMatchObject({ limit: 8 });
+  });
+
+  it('rejects resumed selected IDs beyond the verified backfill authorization', () => {
+    const ranked = Array.from(
+      { length: EMAIL_REVIEW_MAX_RANK_POOL },
+      (_, index) => `request-${index}`,
+    );
+    expect(emailReviewSelectionWithinAuthorizedPool(ranked.slice(0, 5), ranked, [])).toBe(true);
+    expect(
+      emailReviewSelectionWithinAuthorizedPool(ranked.slice(0, 6), ranked, ['request-0']),
+    ).toBe(true);
+    expect(emailReviewSelectionWithinAuthorizedPool(ranked, ranked, [])).toBe(false);
+    expect(emailReviewSelectionWithinAuthorizedPool(ranked.slice(0, 6), ranked, [])).toBe(false);
+    expect(emailReviewSelectionWithinAuthorizedPool(ranked.slice(0, 6), undefined, [])).toBe(false);
   });
 
   it('excludes obvious newsletters from the rank input while retaining an honest exclusion count', () => {
@@ -429,6 +459,59 @@ describe('bounded no-send email review', () => {
       emailReviewCompleteThread('thread-a', 'owner@example.com', [
         ...base,
         read('thread-a', truncated),
+      ]),
+    ).toBeUndefined();
+  });
+
+  it('distinguishes a fully verified later owner reply from incomplete or ambiguous direction', () => {
+    const ownerAnswered = [
+      {
+        messageId: 'incoming-request',
+        from: 'vendor@example.net',
+        to: 'owner@example.com',
+        date: '2026-10-10T10:00:00Z',
+        subject: 'Request',
+        text: 'Could you confirm?',
+        sourceLength: 'Could you confirm?'.length,
+        truncated: false,
+      },
+      {
+        messageId: 'owner-reply',
+        from: 'owner@example.com',
+        to: 'vendor@example.net',
+        date: '2026-10-11T10:00:00Z',
+        subject: 'Re: Request',
+        text: 'I have confirmed.',
+        sourceLength: 'I have confirmed.'.length,
+        truncated: false,
+      },
+    ];
+    const ownerAnsweredEvidence = [search('thread-a'), read('thread-a', ownerAnswered)];
+    expect(
+      emailReviewThreadReadResult('thread-a', 'owner@example.com', ownerAnsweredEvidence),
+    ).toEqual({
+      kind: 'already_answered',
+      threadId: 'thread-a',
+      latestMessageId: 'owner-reply',
+    });
+    expect(emailReviewCompleteThread('thread-a', 'owner@example.com', ownerAnsweredEvidence)).toBe(
+      undefined,
+    );
+
+    const outboundWithoutMatchingInbound = [
+      { ...required(ownerAnswered[0], 'prior inbound message'), to: 'other@example.net' },
+      required(ownerAnswered[1], 'owner reply'),
+    ];
+    expect(
+      emailReviewThreadReadResult('thread-a', 'owner@example.com', [
+        search('thread-a'),
+        read('thread-a', outboundWithoutMatchingInbound),
+      ]),
+    ).toEqual({ kind: 'not_eligible' });
+    expect(
+      emailReviewThreadReadResult('thread-a', 'owner@example.com', [
+        search('thread-a'),
+        read('thread-a', ownerAnswered, { complete: false }),
       ]),
     ).toBeUndefined();
   });
