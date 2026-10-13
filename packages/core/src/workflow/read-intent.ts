@@ -94,6 +94,8 @@ export interface PersonalReadRequest {
   scopeContext?: { kind: 'flight'; date?: string };
   /** Gmail query derived from the owner's words, not model-proposed narrowing. */
   mailQuery?: string;
+  /** Typed trip discovery keeps flight and lodging coverage independently bound. */
+  mailQueries?: ReadonlyArray<{ category: 'flight' | 'lodging'; query: string }>;
   /** Explicit trip period used only to rank returned lodging metadata. */
   mailTemporalLabel?: string;
   /** Used only to render returned timestamps for the owner. */
@@ -1892,8 +1894,20 @@ function detectPersonalReadRequestInternal(
       answerFocus: 'trip',
       compoundTripDiscovery: true,
       maxResults: 50,
+      mailQueries: [
+        {
+          category: 'flight',
+          query:
+            '{subject:(flight booking) subject:(flight confirmation) subject:(airline booking) subject:(airline confirmation) subject:(e-ticket) subject:(itinerary confirmation) subject:(boarding pass)}',
+        },
+        {
+          category: 'lodging',
+          query:
+            '{subject:(hotel booking) subject:(hotel reservation) subject:(lodging reservation) subject:(accommodation booking) subject:(check-in confirmation) subject:(stay confirmation)}',
+        },
+      ],
       mailQuery:
-        '{flight flights itinerary "e-ticket" "boarding pass" "booking confirmation" "reservation confirmation" hotel lodging accommodation "check-in" "check-out"}',
+        '{subject:(flight booking) subject:(flight confirmation) subject:(airline booking) subject:(airline confirmation) subject:(e-ticket) subject:(itinerary confirmation) subject:(boarding pass)}',
     };
   }
   // A terse correction such as "was that made up?" carries no subject of its
@@ -2172,6 +2186,12 @@ function matchingCalendarRead(row: ReadToolEvidence, request: PersonalReadReques
 function matchingGmailSearch(row: ReadToolEvidence, request: PersonalReadRequest): boolean {
   if (!succeeded(row) || row.toolName !== 'gmail.search') return false;
   const query = argsRecord(row)?.query;
+  if (request.mailQueries?.length) {
+    return (
+      typeof query === 'string' &&
+      request.mailQueries.some((entry) => query.trim().toLowerCase() === entry.query.toLowerCase())
+    );
+  }
   return request.mailQuery
     ? typeof query === 'string' && query.trim().toLowerCase() === request.mailQuery.toLowerCase()
     : queryIncludes(query, request.queryTerms);
@@ -2207,17 +2227,33 @@ export function gmailSearchThreadIds(
   }
   const unique = [...new Set(ids)];
   if (request?.compoundTripDiscovery) {
-    const metadata = new Map<string, { subject: string; snippet: string }>();
+    const metadata = new Map<
+      string,
+      { subject: string; snippet: string; categories: Set<string> }
+    >();
     for (const row of evidence) {
-      if (row.fromCurrentTask === false || !succeeded(row) || row.toolName !== 'gmail.search')
+      if (
+        row.fromCurrentTask === false ||
+        !succeeded(row) ||
+        row.toolName !== 'gmail.search' ||
+        !matchingGmailSearch(row, request)
+      )
         continue;
       const results = objectRecord(row.result)?.results;
       if (!Array.isArray(results)) continue;
+      const query = String(argsRecord(row)?.query ?? '')
+        .trim()
+        .toLowerCase();
+      const category = request.mailQueries?.find(
+        (entry) => entry.query.toLowerCase() === query,
+      )?.category;
       for (const item of results) {
         const result = objectRecord(item);
         const id = typeof result?.threadId === 'string' ? result.threadId : undefined;
         if (!id) continue;
         const prior = metadata.get(id);
+        const categories = prior?.categories ?? new Set<string>();
+        if (category) categories.add(category);
         metadata.set(id, {
           subject: [prior?.subject, typeof result?.subject === 'string' ? result.subject : '']
             .filter(Boolean)
@@ -2225,6 +2261,7 @@ export function gmailSearchThreadIds(
           snippet: [prior?.snippet, typeof result?.snippet === 'string' ? result.snippet : '']
             .filter(Boolean)
             .join(' '),
+          categories,
         });
       }
     }
@@ -2236,7 +2273,11 @@ export function gmailSearchThreadIds(
           /\b(?:flight|airline|itinerary|boarding pass|e-?ticket|record locator)\b/i.test(source);
         const booking =
           /\b(?:booking|confirmation|reservation|ticket|itinerary|record locator)\b/i.test(source);
-        return { threadId, index, score: flight && booking ? 1 : 0 };
+        return {
+          threadId,
+          index,
+          score: item?.categories.has('flight') && flight && booking ? 1 : 0,
+        };
       })
       .filter((item) => item.score > 0)
       .sort((a, b) => a.index - b.index);
@@ -2246,7 +2287,11 @@ export function gmailSearchThreadIds(
         const source = `${item?.subject ?? ''} ${item?.snippet ?? ''}`;
         const hotel = /\b(?:hotel|lodging|accommodation|airbnb)\b/i.test(source);
         const booking = /\b(?:booking|confirmation|reservation|check[- ]?in)\b/i.test(source);
-        return { threadId, index, score: hotel && booking ? 1 : 0 };
+        return {
+          threadId,
+          index,
+          score: item?.categories.has('lodging') && hotel && booking ? 1 : 0,
+        };
       })
       .filter((item) => item.score > 0)
       .sort((a, b) => a.index - b.index);
@@ -2635,6 +2680,44 @@ function nextGmailSearchPage(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): string | undefined {
   if (!request.requiresThreadRead && !request.requiresExhaustiveMail) return undefined;
+  const target = nextGmailSearchTarget(request, evidence);
+  return target ? (target.pageToken ?? target.query) : undefined;
+}
+
+function nextGmailSearchTarget(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): { query: string; pageToken?: string } | undefined {
+  if (request.mailQueries?.length && hasTypedTripRead(request)) {
+    for (const { query } of request.mailQueries) {
+      const attempts = evidence.filter(
+        (row) =>
+          row.fromCurrentTask !== false &&
+          row.toolName === 'gmail.search' &&
+          typeof argsRecord(row)?.query === 'string' &&
+          String(argsRecord(row)?.query).trim().toLowerCase() === query.toLowerCase(),
+      );
+      const searches = evidence.filter(
+        (row) =>
+          row.fromCurrentTask !== false &&
+          succeeded(row) &&
+          row.toolName === 'gmail.search' &&
+          typeof argsRecord(row)?.query === 'string' &&
+          String(argsRecord(row)?.query).trim().toLowerCase() === query.toLowerCase(),
+      );
+      if (searches.length === 0) {
+        if (attempts.length >= 2) continue;
+        return { query };
+      }
+      if (searches.length >= 2) continue;
+      const latest = searches.at(-1);
+      const result = objectRecord(latest?.result);
+      if (result?.hasMore === true && typeof result.nextPageToken === 'string')
+        return { query, pageToken: result.nextPageToken };
+      if (result?.complete === true && result.hasMore !== true) continue;
+    }
+    return undefined;
+  }
   const searches = evidence.filter(
     (row) => row.fromCurrentTask !== false && matchingGmailSearch(row, request),
   );
@@ -2644,11 +2727,12 @@ function nextGmailSearchPage(
       ? 2
       : MAX_GMAIL_SEARCH_PAGES;
   if (searches.length >= pageLimit) return undefined;
+  if (searches.length === 0 && request.mailQuery) return { query: request.mailQuery };
   const latest = searches.at(-1);
   if (!latest?.result || typeof latest.result !== 'object') return undefined;
   const result = latest.result as { hasMore?: unknown; nextPageToken?: unknown };
   return result.hasMore === true && typeof result.nextPageToken === 'string'
-    ? result.nextPageToken
+    ? { query: request.mailQuery ?? '', pageToken: result.nextPageToken }
     : undefined;
 }
 
@@ -2923,13 +3007,14 @@ export function groundReadToolInput(
     return interval ? { timeMin: interval.start, timeMax: interval.endExclusive } : input;
   }
   if (toolName === 'gmail.search') {
-    const pageToken = nextGmailSearchPage(request, evidence);
+    const target = nextGmailSearchTarget(request, evidence);
     const { pageToken: _untrustedPageToken, ...searchInput } = input;
     return {
       ...searchInput,
-      query: request.mailQuery || request.queryTerms.join(' ') || '-in:spam -in:trash',
+      query:
+        target?.query || request.mailQuery || request.queryTerms.join(' ') || '-in:spam -in:trash',
       maxResults: 20,
-      ...(pageToken ? { pageToken } : {}),
+      ...(target?.pageToken ? { pageToken: target.pageToken } : {}),
     };
   }
   if (request.compoundTripDiscovery && toolName === 'maps.directions') {

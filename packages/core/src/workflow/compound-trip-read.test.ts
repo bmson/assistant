@@ -1309,6 +1309,11 @@ describe('compound trip read projection', () => {
         },
       ),
       row(
+        'gmail.search',
+        { query: read.mailQueries?.find((entry) => entry.category === 'lodging')?.query },
+        { results: [], complete: true, hasMore: false },
+      ),
+      row(
         'gmail.read_thread',
         {
           threadId: flightThread,
@@ -1479,6 +1484,55 @@ describe('compound trip read projection', () => {
     };
     const projection = compoundTripReadProjection(read, [completeCalendarEvents([]), first]);
     expect(projection.gmailSearchComplete).toBe(false);
+  });
+
+  it('keeps flight and lodging search coverage independent and incomplete when either category has more pages', () => {
+    const read = request();
+    const [flight, lodging] = read.mailQueries ?? [];
+    if (!flight || !lodging) throw new Error('Expected separate flight and lodging searches');
+    const flightPage = row(
+      'gmail.search',
+      { query: flight.query, maxResults: 20 },
+      {
+        results: [
+          { threadId: 'newsletter', subject: 'Airline news and flight route updates' },
+          { threadId: 'flight-confirmation', subject: 'Flight booking confirmation' },
+        ],
+        complete: true,
+        hasMore: false,
+      },
+    );
+    const lodgingPage = row(
+      'gmail.search',
+      { query: lodging.query, maxResults: 20 },
+      {
+        results: [{ threadId: 'hotel-confirmation', subject: 'Hotel reservation confirmation' }],
+        complete: false,
+        hasMore: true,
+        nextPageToken: 'lodging-page-2',
+      },
+    );
+    const incomplete = compoundTripReadProjection(read, [
+      completeCalendarEvents([]),
+      flightPage,
+      lodgingPage,
+    ]);
+    expect(incomplete.gmailSearchComplete).toBe(false);
+    expect(incomplete.threadsComplete).toBe(false);
+    expect(incomplete.flight).toBeUndefined();
+    expect(incomplete.hotel).toBeUndefined();
+
+    const completeLodgingPage = row(
+      'gmail.search',
+      { query: lodging.query, maxResults: 20 },
+      { results: [], complete: true, hasMore: false },
+    );
+    const complete = compoundTripReadProjection(read, [
+      completeCalendarEvents([]),
+      flightPage,
+      completeLodgingPage,
+    ]);
+    expect(complete.gmailSearchComplete).toBe(true);
   });
 
   it('selects the dated outbound leg instead of an earlier return with the same flight number and validates the connection chain', () => {

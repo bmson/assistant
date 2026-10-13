@@ -43,7 +43,10 @@ describe('detectPersonalReadRequest', () => {
     expect(request?.verification).toBeUndefined();
     expect(request?.scopeIssue).toBeUndefined();
     expect(request?.upcomingFlightDiscovery).toBeUndefined();
-    expect(request?.mailQuery).toContain('hotel');
+    expect(request?.mailQueries?.map((entry) => entry.category)).toEqual(['flight', 'lodging']);
+    expect(request?.mailQueries?.[0]?.query).toContain('subject:(flight booking)');
+    expect(request?.mailQueries?.[1]?.query).toContain('subject:(hotel reservation)');
+    expect(request?.mailQuery).not.toContain('hotel');
   });
 
   it('caps compound trip reads and never resumes from other-task search or calendar receipts', () => {
@@ -76,17 +79,34 @@ describe('detectPersonalReadRequest', () => {
       'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
     const request = detectPersonalReadRequest([{ role: 'user', content: requestText }]);
     if (!request?.mailQuery) throw new Error('Expected the compound trip read query');
+    const flightQuery = request.mailQueries?.[0]?.query;
+    const lodgingQuery = request.mailQueries?.[1]?.query;
+    if (!flightQuery || !lodgingQuery) throw new Error('Expected separate trip mail queries');
     const evidence: ReadToolEvidence[] = [
       {
         toolName: 'gmail.search',
         status: 'succeeded',
         fromCurrentTask: true,
-        args: { query: request.mailQuery },
+        args: { query: lodgingQuery },
         result: {
           results: [
             { threadId: 'hotel-one', subject: 'Hotel reservation confirmation' },
             { threadId: 'hotel-two', subject: 'Hotel booking confirmation' },
-            { threadId: 'flight-one', subject: 'Flight LH 777 booking confirmation' },
+            { threadId: 'flight-one', subject: 'Flight booking confirmation' },
+          ],
+          complete: true,
+          hasMore: false,
+        },
+      },
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: flightQuery },
+        result: {
+          results: [
+            { threadId: 'newsletter', subject: 'Airline news: flight routes this week' },
+            { threadId: 'flight-one', subject: 'Flight booking confirmation' },
           ],
           complete: true,
           hasMore: false,
@@ -94,6 +114,115 @@ describe('detectPersonalReadRequest', () => {
       },
     ];
     expect(gmailThreadIdsToRead(evidence, request)).toEqual(['flight-one', 'hotel-one']);
+  });
+
+  it('binds trip searches and continuation cursors to each booking-intent category', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Find my next trip from my booking emails and calendar. Confirm the flight and hotel. Plan the route from the destination airport to my hotel.',
+      ),
+      { now: new Date('2026-10-13T18:00:00.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    if (!request?.mailQueries?.length) throw new Error('Expected typed trip queries');
+    const [flight, lodging] = request.mailQueries;
+    if (!flight || !lodging) throw new Error('Expected flight and lodging query entries');
+    expect(groundReadToolInput(request, 'gmail.search', { query: 'untrusted' }, [])).toMatchObject({
+      query: flight.query,
+      maxResults: 20,
+    });
+    const flightPage: ReadToolEvidence = {
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { query: flight.query, maxResults: 20 },
+      result: { results: [], complete: true, hasMore: false },
+    };
+    const calendarPage: ReadToolEvidence = {
+      toolName: 'calendar.list_events',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: {
+        timeMin: request.timeWindow?.timeMin,
+        timeMax: request.timeWindow?.timeMax,
+        calendarIds: [],
+      },
+      result: { events: [], complete: true },
+    };
+    expect(nextRequiredReadTool(request, [calendarPage, flightPage])).toBe('gmail.search');
+    expect(
+      groundReadToolInput(request, 'gmail.search', { query: 'untrusted', pageToken: 'fake' }, [
+        flightPage,
+      ]),
+    ).toMatchObject({ query: lodging.query, maxResults: 20 });
+    const lodgingPage: ReadToolEvidence = {
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { query: lodging.query, maxResults: 20 },
+      result: { results: [], complete: false, hasMore: true, nextPageToken: 'lodging-next' },
+    };
+    expect(
+      groundReadToolInput(request, 'gmail.search', { query: 'untrusted', pageToken: 'fake' }, [
+        flightPage,
+        lodgingPage,
+      ]),
+    ).toMatchObject({ query: lodging.query, maxResults: 20, pageToken: 'lodging-next' });
+    expect(
+      groundReadToolInput(request, 'gmail.search', { query: 'untrusted' }, [
+        {
+          ...flightPage,
+          result: {
+            results: [],
+            complete: false,
+            hasMore: true,
+            nextPageToken: 'flight-next',
+          },
+        },
+      ]),
+    ).toMatchObject({ query: flight.query, pageToken: 'flight-next' });
+  });
+
+  it('uses the two-thread trip budget for one source-matched flight and one source-matched lodging candidate', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Find my next trip from my booking emails and calendar. Confirm the flight and hotel. Plan the route from the destination airport to my hotel.',
+      ),
+    );
+    if (!request?.mailQueries?.length) throw new Error('Expected typed trip queries');
+    const flightQuery = request.mailQueries.find((entry) => entry.category === 'flight')?.query;
+    const lodgingQuery = request.mailQueries.find((entry) => entry.category === 'lodging')?.query;
+    if (!flightQuery || !lodgingQuery) throw new Error('Expected flight and lodging searches');
+    const evidence: ReadToolEvidence[] = [
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: flightQuery },
+        result: {
+          results: [
+            { threadId: 'flight-candidate-a', subject: 'Flight booking confirmation' },
+            { threadId: 'flight-candidate-b', subject: 'Airline itinerary confirmation' },
+          ],
+          complete: true,
+          hasMore: false,
+        },
+      },
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: lodgingQuery },
+        result: {
+          results: [{ threadId: 'lodging-candidate', subject: 'Hotel reservation confirmation' }],
+          complete: true,
+          hasMore: false,
+        },
+      },
+    ];
+    expect(gmailThreadIdsToRead(evidence, request)).toEqual([
+      'flight-candidate-a',
+      'lodging-candidate',
+    ]);
   });
 
   it('recognizes only the direct, bounded, explicitly no-send email review request', () => {

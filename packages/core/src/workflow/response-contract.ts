@@ -1183,6 +1183,11 @@ function queryCovers(row: ActionEvidence, terms: string[]): boolean {
 function gmailQueryCovers(row: ActionEvidence, request: PersonalReadRequest): boolean {
   const query = record(row.args)?.query;
   if (typeof query !== 'string') return false;
+  if (request.mailQueries?.length) {
+    return request.mailQueries.some(
+      (entry) => query.trim().toLowerCase() === entry.query.toLowerCase(),
+    );
+  }
   if (request.mailQuery) return query.trim().toLowerCase() === request.mailQuery.toLowerCase();
   return queryCovers(row, request.queryTerms);
 }

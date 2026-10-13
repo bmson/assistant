@@ -154,9 +154,14 @@ function currentGmailRows(
   request: PersonalReadRequest,
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): ReadToolEvidence[] {
+  const queries =
+    request.mailQueries?.map((entry) => entry.query) ??
+    (request.mailQuery ? [request.mailQuery] : []);
+  const allowed = new Set(queries.map((query) => query.toLowerCase()));
   return evidence.filter((row) => {
     if (!successful(row) || row.toolName !== 'gmail.search') return false;
-    return object(row.args)?.query === request.mailQuery;
+    const query = text(object(row.args)?.query, 4096);
+    return Boolean(query && allowed.has(query.toLowerCase()));
   });
 }
 
@@ -239,7 +244,7 @@ function validSearchPage(row: ReadToolEvidence, query: string): boolean {
 }
 
 function completeSearchQuery(rows: ReadonlyArray<ReadToolEvidence>, query: string): boolean {
-  if (rows.length === 0 || rows.length > 3) return false;
+  if (rows.length === 0 || rows.length > 2) return false;
   let cursor: string | undefined;
   const remaining = new Set(rows);
   const seenCursors = new Set<string>();
@@ -295,10 +300,18 @@ export function compoundTripCompleteSourceThreads(
   request: PersonalReadRequest,
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): ReadToolEvidence[] {
-  if (!request.mailQuery) return [];
-  const searchPrefix = validSearchPrefixRows(
-    currentGmailRows(request, evidence),
-    request.mailQuery,
+  const queries =
+    request.mailQueries?.map((entry) => entry.query) ??
+    (request.mailQuery ? [request.mailQuery] : []);
+  if (queries.length === 0) return [];
+  const searches = currentGmailRows(request, evidence);
+  const searchPrefix = queries.flatMap((query) =>
+    validSearchPrefixRows(
+      searches.filter(
+        (row) => text(object(row.args)?.query, 4096)?.toLowerCase() === query.toLowerCase(),
+      ),
+      query,
+    ),
   );
   if (searchPrefix.length === 0) return [];
   const threads = currentGmailThreads(searchPrefix, evidence);
@@ -1569,9 +1582,19 @@ export function compoundTripReadProjection(
     }) &&
     object(calendarRows.at(-1)?.result)?.complete === true &&
     typeof object(calendarRows.at(-1)?.result)?.nextPageToken !== 'string';
+  const mailQueries =
+    request.mailQueries?.map((entry) => entry.query) ??
+    (request.mailQuery ? [request.mailQuery] : []);
   const gmailSearchComplete =
-    typeof request.mailQuery === 'string' &&
-    completeSearchQuery(gmailSearchRows, request.mailQuery);
+    mailQueries.length > 0 &&
+    mailQueries.every((query) =>
+      completeSearchQuery(
+        gmailSearchRows.filter(
+          (row) => text(object(row.args)?.query, 4096)?.toLowerCase() === query.toLowerCase(),
+        ),
+        query,
+      ),
+    );
   const threadIds = new Set(
     gmailSearchRows.flatMap((row) => {
       const results = object(row.result)?.results;
@@ -1635,9 +1658,14 @@ export function compoundTripReadProjection(
   // Partial reads may still contain exact, source-local details. Keep these
   // separate from verified trip selection: they never establish which trip is
   // next, connect flight and hotel records, or enable a route query.
-  const partialSearchRows = request.mailQuery
-    ? validSearchPrefixRows(gmailSearchRows, request.mailQuery)
-    : [];
+  const partialSearchRows = mailQueries.flatMap((query) =>
+    validSearchPrefixRows(
+      gmailSearchRows.filter(
+        (row) => text(object(row.args)?.query, 4096)?.toLowerCase() === query.toLowerCase(),
+      ),
+      query,
+    ),
+  );
   const partialReadThreads = currentGmailThreads(partialSearchRows, evidence).filter(
     (row) => !completeIds.has(text(object(row.args)?.threadId, 100)),
   );
