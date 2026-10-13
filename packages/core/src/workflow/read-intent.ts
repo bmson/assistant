@@ -83,6 +83,8 @@ export interface PersonalReadRequest {
   requiresExhaustiveMail?: boolean;
   /** Current/upcoming mail questions prioritize the newest matching thread. */
   preferLatestMail?: boolean;
+  /** A bounded future lookup, distinct from correcting a prior flight claim. */
+  upcomingFlightDiscovery?: boolean;
 }
 
 export interface PersonalReadDetectionOptions {
@@ -574,6 +576,15 @@ function isNextEventRequest(text: string): boolean {
   return /\b(?:next|nearest|soonest)\s+(?:calendar\s+)?(?:event|meeting|appointment|call)\b/i.test(
     text,
   );
+}
+
+function isUpcomingFlightDiscovery(text: string): boolean {
+  const nextFlight = /\b(?:next|upcoming|soonest)\s+(?:flight|flights|airline|itinerary)\b/i.test(
+    text,
+  );
+  const nextTripWithFlight =
+    /\b(?:next|upcoming|soonest)\s+trip\b/i.test(text) && /\bflight\b/i.test(text);
+  return (nextFlight || nextTripWithFlight) && (READ_OR_QUESTION.test(text) || VERIFY.test(text));
 }
 
 function hasExplicitTemporalPhrase(text: string): boolean {
@@ -1301,7 +1312,11 @@ function detectPersonalReadRequestInternal(
     .slice(Math.max(0, latestIndex - 4), latestIndex)
     .map(messageText)
     .join('\n');
-  const verification = VERIFY.test(latest);
+  const upcomingFlightDiscovery = isUpcomingFlightDiscovery(latest);
+  // A phrase such as "find my next flight and verify anything uncertain" is
+  // discovery, not a correction to an assistant claim. Only terse challenges
+  // without an independently named upcoming flight inherit prior scope.
+  const verification = VERIFY.test(latest) && !upcomingFlightDiscovery;
   const recentOwnerTurns = messages
     .slice(Math.max(0, latestIndex - 8), latestIndex)
     .filter((message) => message.role === 'user')
@@ -1448,12 +1463,14 @@ function detectPersonalReadRequestInternal(
     (READ_OR_QUESTION.test(latest) || verification || whyLookup);
   const daySchedule = DAY_SCHEDULE.test(latest);
   const calendar =
+    upcomingFlightDiscovery ||
     daySchedule ||
     namedSchedule ||
     (CALENDAR_SURFACE.test(latest) &&
       (READ_OR_QUESTION.test(latest) || verification || whyLookup)) ||
     (verification && CALENDAR_SURFACE.test(recentContext));
   const email =
+    upcomingFlightDiscovery ||
     (EMAIL_SURFACE.test(latest) &&
       (READ_OR_QUESTION.test(latest) || receiptQuestion(latest) || verification)) ||
     (verification && EMAIL_SURFACE.test(recentContext));
@@ -1490,21 +1507,35 @@ function detectPersonalReadRequestInternal(
   const request: PersonalReadRequest = {
     kind,
     queryTerms: terms,
-    ...(namedSchedule && (flightLanguage.test(latest) || Boolean(ownerFlight))
+    ...(upcomingFlightDiscovery ||
+    (namedSchedule && (flightLanguage.test(latest) || Boolean(ownerFlight)))
       ? { answerFocus: 'flight' as const }
       : {}),
-    firstToolName,
+    firstToolName: upcomingFlightDiscovery ? 'calendar.list_events' : firstToolName,
+    ...(upcomingFlightDiscovery ? { upcomingFlightDiscovery: true } : {}),
     requiresThreadRead:
       kind === 'calendar_email' ||
       (kind === 'email' &&
         (verification || /\b(?:when|where|what time|details?|what does|what did)\b/i.test(latest))),
   };
-  if (kind !== 'calendar') {
+  if (upcomingFlightDiscovery) {
+    // Search a small set of booking-specific OR terms. ANDing the full owner
+    // sentence misses confirmations, while a generic "trip" term finds old
+    // unrelated itinerary mail.
+    request.queryTerms = [];
+    request.mailQuery =
+      '{flight flights itinerary "e-ticket" "boarding pass" "booking confirmation" "reservation confirmation"}';
+  }
+  if (kind !== 'calendar' && !upcomingFlightDiscovery) {
     if (EXHAUSTIVE_MAIL.test(latest)) request.requiresExhaustiveMail = true;
     if (CURRENT_MAIL.test(latest)) request.preferLatestMail = true;
   }
   if (kind !== 'email' && nextEventQuestion) {
     request.maxResults = 1;
+  } else if (kind !== 'email' && upcomingFlightDiscovery) {
+    // List enough bounded future events to select the first flight rather than
+    // letting an earlier dentist appointment consume a one-result page.
+    request.maxResults = 50;
   }
   if (kind !== 'email') {
     const temporal = resolveTemporalIntent(
@@ -1512,7 +1543,7 @@ function detectPersonalReadRequestInternal(
       kind,
       terms.length > 0,
       options,
-      nextEventQuestion ? 'next-event' : 'range',
+      nextEventQuestion || upcomingFlightDiscovery ? 'next-event' : 'range',
     );
     if (temporal.kind === 'resolved') {
       request.timeWindow = temporal.intent.window;
@@ -1523,13 +1554,13 @@ function detectPersonalReadRequestInternal(
     }
   }
   if (kind !== 'calendar') {
-    request.mailQuery = gmailQuery(hypothesis, terms);
+    if (!upcomingFlightDiscovery) request.mailQuery = gmailQuery(hypothesis, terms);
     // A relative travel date describes the itinerary, not when its confirmation
     // arrived. Older booking confirmations can still be authoritative for a
     // future flight, so only an explicitly stated mail-age filter narrows them.
     const explicitMailAge = /\b(?:last|past)\s+(?:\d{1,2}\s+days?|week|month)\b/i.test(hypothesis);
     if (request.answerFocus === 'flight' && !explicitMailAge) {
-      request.mailQuery = request.mailQuery.replace(/\s+newer_than:\d+d\b/gi, '').trim();
+      request.mailQuery = (request.mailQuery ?? '').replace(/\s+newer_than:\d+d\b/gi, '').trim();
     }
   }
   if (

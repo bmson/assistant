@@ -246,6 +246,8 @@ export const PendingFinalSchema = z.object({
   /** Response-contract verdict, persisted to response_checks at finalize. */
   contractBlocked: z.boolean().optional(),
   contractUnsupportedCount: z.number().int().optional(),
+  /** Preserve deterministic private-read gap text when other checklist work remains. */
+  preserveCheckedReadResponse: z.boolean().optional(),
   /** Best-effort self-review before the final deterministic contract pass. */
   outputVerificationAttempted: z.boolean().optional(),
   outputVerificationRevised: z.boolean().optional(),

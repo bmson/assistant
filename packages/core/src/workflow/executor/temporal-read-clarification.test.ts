@@ -2,6 +2,7 @@ import type { ExecutionEvidenceRepository, TaskLeaseRepository } from '@assistan
 import { describe, expect, it, vi } from 'vitest';
 import type { TaskState } from '../../events.js';
 import { TaskStateSchema } from '../../events.js';
+import { buildRequestChecklist } from '../request-checklist.js';
 import type { RunContext } from './phases.js';
 import { runStepLoop } from './step-loop.js';
 
@@ -139,7 +140,18 @@ async function runUnsupportedRequest(scenario: Scenario) {
 async function runFlightContinuation(
   history: Array<{ role: string; content: string }>,
   request: string,
-  options: { currentBookingFourth?: boolean } = {},
+  options: {
+    currentBookingFourth?: boolean;
+    incompleteCalendarSearch?: boolean;
+    missingCalendarRosterFlag?: boolean;
+    incompleteMailSearch?: boolean;
+    hostileCalendarTitle?: string;
+    newsletterLisbonSource?: boolean;
+    yearlessLisbonConfirmation?: boolean;
+    withoutFlightCandidate?: boolean;
+    withRequestChecklist?: boolean;
+    upcomingFlight?: boolean;
+  } = {},
 ) {
   const rows: Array<Record<string, unknown>> = [];
   const router = {
@@ -164,7 +176,51 @@ async function runFlightContinuation(
   const dispatch = vi.fn(
     async ({ toolName, args }: { toolName: string; args: Record<string, unknown> }) => {
       let result: Record<string, unknown>;
-      if (toolName === 'calendar.search_events') {
+      if (toolName === 'calendar.list_events') {
+        result = {
+          events: [
+            ...(options.upcomingFlight
+              ? [
+                  {
+                    eventId: 'dentist-before-flight',
+                    summary: 'Dentist appointment',
+                    start: '2026-10-15T16:00:00.000Z',
+                  },
+                ]
+              : []),
+            ...(!options.withoutFlightCandidate
+              ? [
+                  {
+                    eventId: options.upcomingFlight ? 'lisbon-flight' : 'upcoming-flight',
+                    summary: options.hostileCalendarTitle ?? 'Flight to Lisbon',
+                    start: options.upcomingFlight
+                      ? '2026-11-12T17:00:00.000Z'
+                      : '2026-11-12T17:00:00.000Z',
+                    links: [
+                      {
+                        type: 'calendar',
+                        url: 'https://calendar.google.com/calendar/event?eid=lisbon',
+                      },
+                    ],
+                  },
+                ]
+              : []),
+            ...(options.upcomingFlight
+              ? [
+                  {
+                    eventId: 'oslo-flight-later-same-day',
+                    summary: 'Flight to Oslo',
+                    start: '2026-11-12T20:00:00.000Z',
+                  },
+                ]
+              : []),
+          ],
+          complete: !options.incompleteCalendarSearch,
+          calendarRosterComplete: options.missingCalendarRosterFlag ? undefined : true,
+          unavailable: [],
+          calendarsSearched: ['primary'],
+        };
+      } else if (toolName === 'calendar.search_events') {
         result = {
           events: [
             {
@@ -178,64 +234,126 @@ async function runFlightContinuation(
         };
       } else if (toolName === 'gmail.search') {
         result = {
-          results: options.currentBookingFourth
-            ? [
-                {
-                  threadId: 'stale-1',
-                  subject: 'Berlin flight update',
-                  snippet: 'Gate information for your earlier trip.',
-                },
-                {
-                  threadId: 'stale-2',
-                  subject: 'Berlin airport notice',
-                  snippet: 'Terminal information for your earlier trip.',
-                },
-                {
-                  threadId: 'stale-3',
-                  subject: 'Your Berlin travel details',
-                  snippet: 'Information from an earlier trip.',
-                },
-                {
-                  threadId: 'current',
-                  subject: 'Berlin flight confirmation',
-                  snippet: 'Your itinerary and departure details.',
-                },
-              ]
-            : [
-                { threadId: 'current', subject: 'Berlin flight itinerary' },
-                { threadId: 'old', subject: 'Berlin flight itinerary' },
-                { threadId: 'newsletter', subject: 'Asiana newsletter' },
-              ],
+          results: options.incompleteMailSearch
+            ? []
+            : options.upcomingFlight
+              ? [
+                  {
+                    threadId: 'booking-upcoming',
+                    subject: 'Lisbon flight confirmation',
+                    snippet: 'Departure November 12, 2026. Fare expires December 2, 2026.',
+                  },
+                  {
+                    threadId: 'oslo-flight-same-day',
+                    subject: 'Oslo flight confirmation',
+                    snippet: 'Departure November 12, 2026.',
+                  },
+                  {
+                    threadId: options.newsletterLisbonSource
+                      ? 'lisbon-newsletter'
+                      : options.yearlessLisbonConfirmation
+                        ? 'lisbon-yearless'
+                        : 'old-flight',
+                    subject: options.newsletterLisbonSource
+                      ? 'Lisbon flight deals'
+                      : options.yearlessLisbonConfirmation
+                        ? 'Lisbon flight itinerary'
+                        : 'Lisbon flight itinerary',
+                    snippet: options.newsletterLisbonSource
+                      ? 'Flight departure November 12, 2026 at 7:30 AM.'
+                      : options.yearlessLisbonConfirmation
+                        ? 'Departure November 12 at 7:30 AM.'
+                        : 'Departure September 8, 2026.',
+                  },
+                ]
+              : options.currentBookingFourth
+                ? [
+                    {
+                      threadId: 'stale-1',
+                      subject: 'Berlin flight update',
+                      snippet: 'Gate information for your earlier trip.',
+                    },
+                    {
+                      threadId: 'stale-2',
+                      subject: 'Berlin airport notice',
+                      snippet: 'Terminal information for your earlier trip.',
+                    },
+                    {
+                      threadId: 'stale-3',
+                      subject: 'Your Berlin travel details',
+                      snippet: 'Information from an earlier trip.',
+                    },
+                    {
+                      threadId: 'current',
+                      subject: 'Berlin flight confirmation',
+                      snippet: 'Your itinerary and departure details.',
+                    },
+                  ]
+                : [
+                    { threadId: 'current', subject: 'Berlin flight itinerary' },
+                    { threadId: 'old', subject: 'Berlin flight itinerary' },
+                    { threadId: 'newsletter', subject: 'Asiana newsletter' },
+                  ],
           mailboxSearched: 'all mail',
-          complete: true,
+          complete: !options.incompleteMailSearch,
         };
       } else if (toolName === 'gmail.read_thread') {
         const source =
-          String(args.threadId) === 'current'
+          options.upcomingFlight && String(args.threadId) === 'booking-upcoming'
             ? {
-                subject: options.currentBookingFourth
-                  ? 'Berlin flight confirmation'
-                  : 'Berlin flight itinerary',
-                text: 'Berlin flight itinerary\nDeparture\nOctober 9, 2026 at 1:45 PM',
+                subject: 'Lisbon flight confirmation',
+                text: 'Lisbon flight itinerary\nDeparture\nNovember 12, 2026 at 9:30 AM CET\nFare expires December 2, 2026.',
               }
-            : options.currentBookingFourth && String(args.threadId).startsWith('stale-')
+            : options.upcomingFlight && String(args.threadId) === 'oslo-flight-same-day'
               ? {
-                  subject: 'Berlin flight details from an earlier trip',
-                  text: `Berlin flight itinerary\nDeparture\n${
-                    String(args.threadId) === 'stale-1'
-                      ? 'January 4, 2026 at 9:15 AM'
-                      : 'February 12, 2026 at 8:30 AM'
-                  }`,
+                  subject: 'Oslo flight confirmation',
+                  text: 'Oslo flight itinerary\nDeparture\nNovember 12, 2026 at 8:00 PM',
                 }
-              : String(args.threadId) === 'old'
+              : options.upcomingFlight && String(args.threadId) === 'old-flight'
                 ? {
-                    subject: 'Berlin flight itinerary',
-                    text: 'Berlin flight itinerary\nDeparture\nJanuary 4, 2026 at 9:15 AM',
+                    subject: 'Lisbon flight itinerary',
+                    text: 'Lisbon flight itinerary\nDeparture\nSeptember 8, 2026 at 9:30 AM',
                   }
-                : {
-                    subject: 'Asiana newsletter',
-                    text: 'Asiana newsletter with flight offers and fare promotions.',
-                  };
+                : options.upcomingFlight && String(args.threadId) === 'lisbon-newsletter'
+                  ? {
+                      subject: 'Lisbon flight deals',
+                      text: 'Flight departure November 12, 2026 at 7:30 AM.',
+                    }
+                  : options.upcomingFlight && String(args.threadId) === 'lisbon-yearless'
+                    ? {
+                        subject: 'Lisbon flight itinerary',
+                        text: 'Departure November 12 at 7:30 AM.',
+                      }
+                    : options.upcomingFlight
+                      ? {
+                          subject: 'Weekly travel news',
+                          text: 'Weekly travel news and flight offers.',
+                        }
+                      : String(args.threadId) === 'current'
+                        ? {
+                            subject: options.currentBookingFourth
+                              ? 'Berlin flight confirmation'
+                              : 'Berlin flight itinerary',
+                            text: 'Berlin flight itinerary\nDeparture\nOctober 9, 2026 at 1:45 PM',
+                          }
+                        : options.currentBookingFourth && String(args.threadId).startsWith('stale-')
+                          ? {
+                              subject: 'Berlin flight details from an earlier trip',
+                              text: `Berlin flight itinerary\nDeparture\n${
+                                String(args.threadId) === 'stale-1'
+                                  ? 'January 4, 2026 at 9:15 AM'
+                                  : 'February 12, 2026 at 8:30 AM'
+                              }`,
+                            }
+                          : String(args.threadId) === 'old'
+                            ? {
+                                subject: 'Berlin flight itinerary',
+                                text: 'Berlin flight itinerary\nDeparture\nJanuary 4, 2026 at 9:15 AM',
+                              }
+                            : {
+                                subject: 'Asiana newsletter',
+                                text: 'Asiana newsletter with flight offers and fare promotions.',
+                              };
         result = { messages: [source], complete: true };
       } else {
         throw new Error(`Unexpected tool dispatch: ${toolName}`);
@@ -285,6 +403,7 @@ async function runFlightContinuation(
     },
   );
   const toolDefs = vi.fn(() => [
+    { name: 'calendar.list_events', description: 'fixture calendar', inputSchema: {} },
     { name: 'calendar.search_events', description: 'fixture calendar', inputSchema: {} },
     { name: 'gmail.search', description: 'fixture Gmail search', inputSchema: {} },
     { name: 'gmail.read_thread', description: 'fixture Gmail thread', inputSchema: {} },
@@ -302,6 +421,7 @@ async function runFlightContinuation(
     untrustedContext: true,
     requestTimeZone: 'America/Los_Angeles',
     contextWindow: window,
+    ...(options.withRequestChecklist ? { requestChecklist: buildRequestChecklist(request) } : {}),
   });
   const task = {
     id: 'synthetic-flight-task',
@@ -493,5 +613,154 @@ describe('flight clarification through the actual executor step loop', () => {
     );
     expect(dispatch).not.toHaveBeenCalled();
     expect(result.outcome).not.toBe('done');
+  });
+
+  it('discovers an upcoming flight despite output-policy wording and preserves an honest source gap', async () => {
+    const request =
+      'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
+    const { result, state, dispatch, router } = await runFlightContinuation([], request, {
+      upcomingFlight: true,
+      withRequestChecklist: true,
+    });
+
+    expect(result.outcome).toBe('needs_attention');
+    expect(dispatch.mock.calls.map(([call]) => call.toolName)).toEqual([
+      'calendar.list_events',
+      'gmail.search',
+      'gmail.read_thread',
+      'gmail.read_thread',
+      'gmail.read_thread',
+    ]);
+    expect(dispatch.mock.calls[0]?.[0].args).toMatchObject({
+      timeMin: '2026-10-09T12:00:00.000Z',
+      timeMax: '2028-10-08T07:00:00.000Z',
+      maxResults: 50,
+    });
+    expect(dispatch.mock.calls[1]?.[0].args.query).toBe(
+      '{flight flights itinerary "e-ticket" "boarding pass" "booking confirmation" "reservation confirmation"}',
+    );
+    expect(router.object).not.toHaveBeenCalled();
+    expect(state.pendingFinal?.contractBlocked).toBe(false);
+    expect(state.pendingFinal?.preserveCheckedReadResponse).toBe(true);
+    expect(state.pendingFinal?.text).toContain(
+      'The next flight candidate in your calendar is Flight to Lisbon on November 12, 2026.',
+    );
+    expect(state.pendingFinal?.text).toContain('The calendar shows 9:00 AM Pacific Standard Time.');
+    expect(state.pendingFinal?.text).toContain(
+      'A separate booking-email candidate mentioning lisbon lists departure at 9:30 AM',
+    );
+    expect(state.pendingFinal?.text).toContain("couldn't establish that it is the same flight");
+    expect(state.pendingFinal?.text).toContain('or reconcile its source time zone');
+    expect(state.pendingFinal?.text).toContain(
+      'Connections, hotel, and ground transport remain unverified.',
+    );
+    expect(state.pendingFinal?.text).toContain(
+      'Calendar source: https://calendar.google.com/calendar/event?eid=lisbon',
+    );
+    expect(state.pendingFinal?.text).toContain(
+      'Booking email candidate: https://mail.google.com/mail/u/0/#all/booking-upcoming',
+    );
+    expect(state.pendingFinal?.text).not.toContain('This request is not fully completed.');
+    expect(state.pendingFinal?.text).not.toContain('Not completed:');
+    expect(state.pendingFinal?.terminalStatus).toBe('needs_attention');
+    expect(state.pendingFinal?.text).not.toMatch(/September 8|flight-newsletter|taxi|transit/);
+  });
+
+  it('names incomplete mail coverage instead of claiming a flight was fully checked', async () => {
+    const request = 'Find my next flight and call out anything you cannot verify.';
+    const { result, state, dispatch } = await runFlightContinuation([], request, {
+      incompleteMailSearch: true,
+      withRequestChecklist: true,
+    });
+    expect(result.outcome).toBe('needs_attention');
+    expect(dispatch.mock.calls.map(([call]) => call.toolName)).toEqual([
+      'calendar.list_events',
+      'gmail.search',
+    ]);
+    expect(state.pendingFinal?.text).toContain("couldn't finish checking the booking emails");
+    expect(state.pendingFinal?.text).toContain(
+      'The next flight candidate in your calendar is Flight to Lisbon on November 12, 2026 at 9:00 AM Pacific Standard Time',
+    );
+    expect(state.pendingFinal?.text).toContain(
+      'Calendar source: https://calendar.google.com/calendar/event?eid=lisbon',
+    );
+    expect(state.pendingFinal?.text).toContain(
+      'Connections, hotel, and ground transport remain unverified.',
+    );
+    expect(state.pendingFinal?.terminalStatus).toBe('needs_attention');
+  });
+
+  it('labels a flight as a candidate when calendar coverage is incomplete', async () => {
+    const request = 'Find my next flight and call out anything you cannot verify.';
+    const { result, state } = await runFlightContinuation([], request, {
+      incompleteCalendarSearch: true,
+    });
+    expect(result.outcome).toBe('needs_attention');
+    expect(state.pendingFinal?.text).toContain(
+      'A flight candidate in your calendar is Flight to Lisbon',
+    );
+    expect(state.pendingFinal?.text).not.toContain('The next flight candidate in your calendar');
+    expect(state.pendingFinal?.text).toContain('Calendar coverage was incomplete');
+  });
+
+  it('does not infer that no next flight exists from an incomplete calendar search', async () => {
+    const request = 'Find my next flight and call out anything you cannot verify.';
+    const { result, state } = await runFlightContinuation([], request, {
+      incompleteCalendarSearch: true,
+      withoutFlightCandidate: true,
+    });
+    expect(result.outcome).toBe('needs_attention');
+    expect(state.pendingFinal?.text).toContain('could not establish which flight is next');
+    expect(state.pendingFinal?.text).not.toContain('I found no dated flight candidate');
+    expect(state.pendingFinal?.text).toContain(
+      'booking-only itineraries were not independently selected',
+    );
+  });
+
+  it('treats a missing calendar-roster completeness flag as partial coverage', async () => {
+    const request = 'Find my next flight and call out anything you cannot verify.';
+    const { result, state } = await runFlightContinuation([], request, {
+      missingCalendarRosterFlag: true,
+    });
+    expect(result.outcome).toBe('needs_attention');
+    expect(state.pendingFinal?.text).toContain('A flight candidate in your calendar');
+    expect(state.pendingFinal?.text).toContain('Calendar coverage was incomplete');
+    expect(state.pendingFinal?.text).toContain("couldn't finish checking the calendar");
+  });
+
+  it('does not use a same-route newsletter to confirm a departure clock', async () => {
+    const request = 'Find my next flight and call out anything you cannot verify.';
+    const { state } = await runFlightContinuation([], request, {
+      upcomingFlight: true,
+      newsletterLisbonSource: true,
+    });
+    expect(state.pendingFinal?.text).toContain(
+      'booking-email candidate mentioning lisbon lists departure at 9:30 AM',
+    );
+    expect(state.pendingFinal?.text).not.toContain('7:30 AM');
+  });
+
+  it('does not bind a yearless old confirmation to a future flight date', async () => {
+    const request = 'Find my next flight and call out anything you cannot verify.';
+    const { state } = await runFlightContinuation([], request, {
+      upcomingFlight: true,
+      yearlessLisbonConfirmation: true,
+    });
+    expect(state.pendingFinal?.text).toContain(
+      'booking-email candidate mentioning lisbon lists departure at 9:30 AM',
+    );
+    expect(state.pendingFinal?.text).not.toContain('7:30 AM');
+  });
+
+  it('bounds and escapes the selected calendar title', async () => {
+    const request = 'Find my next flight and call out anything you cannot verify.';
+    const { state } = await runFlightContinuation([], request, {
+      incompleteMailSearch: true,
+      hostileCalendarTitle: 'Flight to Lisbon [click](https://evil.example)',
+    });
+    expect(state.pendingFinal?.text).toContain(
+      String.raw`Flight to Lisbon \[click\]\(https://evil\.example\)`,
+    );
+    expect(state.pendingFinal?.text).not.toContain('[click](https://evil.example)');
   });
 });

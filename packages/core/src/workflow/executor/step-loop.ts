@@ -79,6 +79,7 @@ import {
   hasOwnerChecklistCancellationMarker,
   ownerCancellationAuditIsConsistent,
   requestChecklistDirective,
+  requestChecklistHasUnfinished,
   supersededChecklistLookupForToolCall,
 } from '../request-checklist.js';
 import { responseCardsForFinal } from '../response-cards.js';
@@ -1427,11 +1428,17 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         return stageReadFinal({
           text: checked.text,
           progress: checked.text.slice(0, 200),
-          terminalStatus: 'done',
-          outcome: 'done',
+          terminalStatus:
+            checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
+          outcome:
+            checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
           contractBlocked: checked.blocked,
           contractUnsupportedCount: checked.unsupported.length,
           contractNotice: checked.blocked || undefined,
+          preserveCheckedReadResponse:
+            (readRequest.upcomingFlightDiscovery &&
+              (checked.blocked || requestChecklistHasUnfinished(state.requestChecklist))) ||
+            undefined,
         });
       }
       readAnswerTurn = true;
@@ -2686,11 +2693,17 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       return stageReadFinal({
         text: checked.text,
         progress: checked.text.slice(0, 200),
-        terminalStatus: 'done',
-        outcome: 'done',
+        terminalStatus:
+          checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
+        outcome:
+          checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
         contractBlocked: checked.blocked,
         contractUnsupportedCount: checked.unsupported.length,
         contractNotice: checked.blocked || undefined,
+        preserveCheckedReadResponse:
+          (readRequest.upcomingFlightDiscovery &&
+            (checked.blocked || requestChecklistHasUnfinished(state.requestChecklist))) ||
+          undefined,
       });
     }
     // An empty final completion is a failed reply, not a message to the owner
@@ -2776,11 +2789,16 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     return stageReadFinal({
       text: checked.text,
       progress: checked.text.slice(0, 200),
-      terminalStatus: 'done',
-      outcome: 'done',
+      terminalStatus:
+        checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
+      outcome: checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
       contractBlocked: checked.blocked,
       contractUnsupportedCount: checked.unsupported.length,
       contractNotice: checked.blocked || undefined,
+      preserveCheckedReadResponse:
+        (readRequest.upcomingFlightDiscovery &&
+          (checked.blocked || requestChecklistHasUnfinished(state.requestChecklist))) ||
+        undefined,
     });
   }
 
