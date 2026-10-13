@@ -3,6 +3,7 @@ import {
   compoundTripFetchTargets,
   compoundTripReadProjection,
   compoundTripRoute,
+  upcomingFlightReadProjection,
 } from './compound-trip-read.js';
 import {
   buildReadToolInput,
@@ -141,8 +142,7 @@ function row(
   return { toolName, status: 'succeeded', args, result, fromCurrentTask: true };
 }
 
-function completeCalendarEvents(events: unknown[]): ReadToolEvidence {
-  const read = request();
+function completeCalendarEvents(events: unknown[], read = request()): ReadToolEvidence {
   return row(
     'calendar.list_events',
     { timeMin: read.timeWindow?.timeMin, timeMax: read.timeWindow?.timeMax },
@@ -223,6 +223,74 @@ function calendarFlight(): Record<string, unknown> {
 }
 
 describe('compound trip read projection', () => {
+  it('projects a verified next flight without requiring hotel or ground-transport sources', () => {
+    const flightRequest = detectPersonalReadRequest(
+      [{ role: 'user', content: 'Find my next future flight using booking emails and calendar.' }],
+      { now: new Date('2026-10-13T18:00:00.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    if (!flightRequest?.upcomingFlightDiscovery || !flightRequest.mailQuery)
+      throw new Error('Expected flight-only discovery');
+    const threadId = 'flight-only-booking';
+    const bookingText =
+      'Outbound flight LH 777 from SFO to BER. Departure 17 October 2026 10:10 Europe/Berlin. Arrival 17 October 2026 13:10 Europe/Berlin. Booking reference FLIGHT-728.';
+    const evidence = [
+      completeCalendarEvents([calendarFlight()], flightRequest),
+      row(
+        'gmail.search',
+        { query: flightRequest.mailQuery },
+        {
+          results: [{ threadId, subject: 'Lufthansa flight booking confirmation' }],
+          complete: true,
+        },
+      ),
+      row(
+        'gmail.read_thread',
+        { threadId },
+        {
+          complete: true,
+          messages: [
+            {
+              messageId: 'flight-only-message',
+              subject: 'Flight booking confirmation',
+              text: bookingText,
+            },
+          ],
+        },
+      ),
+    ];
+    const extracted = {
+      status: 'complete' as const,
+      segments: [
+        {
+          threadId,
+          messageId: 'flight-only-message',
+          subject: 'Flight booking confirmation',
+          bookingReference: 'FLIGHT-728',
+          flightNumber: 'LH777',
+          departureDate: '2026-10-17',
+          departureTime: '10:10',
+          departureTimeZone: 'Europe/Berlin',
+          arrivalDate: '2026-10-17',
+          arrivalTime: '13:10',
+          arrivalTimeZone: 'Europe/Berlin',
+          originAirport: 'SFO',
+          destinationAirport: 'BER',
+          direction: 'outbound' as const,
+          excerpt: bookingText,
+        },
+      ],
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: ['flight-only-message'],
+    };
+    const projection = upcomingFlightReadProjection(flightRequest, evidence, extracted);
+    expect(projection.flight?.segment?.flightNumber).toBe('LH777');
+    expect(projection.text).toContain('Next matched outbound flight');
+    expect(projection.text).toContain('[Calendar]');
+    expect(projection.text).toContain('[Booking email]');
+    expect(projection.text).not.toMatch(/hotel|taxi|public.transport/i);
+  });
+
   it('keeps independent flight and hotel bookings as candidates and attempts only grounded endpoint reads', () => {
     const read = request();
     const evidence: ReadToolEvidence[] = [
@@ -1497,6 +1565,12 @@ describe('compound trip read projection', () => {
     expect(projection.text).toContain('[dated booking-thread source]');
     expect(projection.routeOrigin).toBeUndefined();
     expect(projection.webQuery).toBeUndefined();
+    const flightOnly = upcomingFlightReadProjection(read, evidence);
+    expect(flightOnly.flight).toBeUndefined();
+    expect(flightOnly.currentTripReturn?.segment?.flightNumber).toBe('LH777');
+    expect(flightOnly.text).toContain('not evidence of a new outbound flight');
+    expect(flightOnly.text).not.toContain('Next matched outbound flight');
+    expect(flightOnly.text).not.toMatch(/hotel|taxi|public.transport/i);
   });
 
   it('does not call an already-departed same-day booking the next trip', () => {

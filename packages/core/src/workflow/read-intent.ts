@@ -5,6 +5,7 @@
  * model room to invent a plausible calendar or inbox answer.
  */
 
+import { type CalendarPlanOptions, requestedCalendarPlanOptions } from './calendar-plan-intent.js';
 import { requestedCardIntent } from './card-intent.js';
 import {
   compoundTripFetchTargets,
@@ -55,14 +56,20 @@ export interface PersonalReadRequest {
   kind: PersonalReadKind;
   /** Deterministic review-only proposal requiring availability and event-list reads. */
   weeklyCalendarPlan?: boolean;
+  calendarPlanOptions?: CalendarPlanOptions;
   /** Literal subject terms to bind into calendar/Gmail searches. */
   queryTerms: string[];
+  /** Full bounded owner question for semantic memory retrieval. */
+  memoryQuery?: string;
+  /** Full bounded owner question for an explicitly requested past-chat search. */
+  conversationQuery?: string;
   /** First read tool the executor must call. */
   firstToolName:
     | 'calendar.list_events'
     | 'calendar.search_events'
     | 'calendar.availability'
     | 'gmail.search'
+    | 'conversations.search'
     | 'drive.search'
     | 'memory.recall'
     | 'memory.graph_snapshot';
@@ -154,23 +161,38 @@ const SAME_SUBJECT_LOOKUP_OFFER =
   /\b(?:would you like me to|shall i|should i|i can)\s+(?:check|verify|look up|read|search for)\s+(?:that|it|the (?:details|confirmation)|(?:your|the|our) hotel(?: confirmation| reservation)?)\b/i;
 const MUTATING_OFFER =
   /\b(?:add|archive|book|cancel|create|delete|edit|forward|invite|move|reply|reschedule|save|schedule|send|submit|update)\b/i;
-const NEGATED_LOOKUP_VERB = String.raw`(?:look(?:\s+up)?|check|search|read|open|access|review|scan|inspect|consult)`;
+const NEGATED_LOOKUP_VERB = String.raw`(?:look(?:\s+up)?|check|search|read|open|access|review|scan|inspect|consult|use)`;
 
-function explicitlyProhibitsPrivateRead(text: string, surface: 'calendar' | 'email'): boolean {
+function explicitlyProhibitsPrivateRead(
+  text: string,
+  surface: 'calendar' | 'email' | 'memory',
+): boolean {
   const accountSurface =
     surface === 'calendar'
       ? String.raw`(?:google\s+)?(?:calendars?|schedules?|agendas?)`
-      : `(?:gmail|e-?mails?|mail|inboxes|mailboxes|messages?|threads?)`;
+      : surface === 'email'
+        ? `(?:gmail|e-?mails?|mail|inboxes|mailboxes|messages?|threads?)`
+        : String.raw`(?:memories|memory|saved\s+(?:facts?|memories)|what\s+you\s+know)`;
   const sourceOwner = String.raw`(?:my|our)\s+(?:(?:real|actual|personal)\s+)?`;
-  const direct = new RegExp(
-    String.raw`\b(?:do\s+not|don['’]?t|never)\s+${NEGATED_LOOKUP_VERB}\b[^.!?\n]{0,120}\b${sourceOwner}${accountSurface}\b`,
-    'i',
+  const clause = String.raw`[^.!?\n]{0,180}`;
+  const prefix = String.raw`\b(?:do\s+not|don['’]?t|never)\s+${NEGATED_LOOKUP_VERB}\b`;
+  const negatedClause = new RegExp(`${prefix}(${clause})`, 'i').exec(text)?.[1] ?? '';
+  const direct = new RegExp(`\\b${sourceOwner}${accountSurface}\\b`, 'i');
+  const allPrivateSurfaces = String.raw`(?:gmail|e-?mails?|mail|inboxes|mailboxes|messages?|threads?|(?:google\s+)?calendars?|schedules?|agendas?|memories|memory|saved\s+(?:facts?|memories)|what\s+you\s+know)`;
+  const firstOwnedSource = new RegExp(`\\b${sourceOwner}${allPrivateSurfaces}\\b`, 'i').exec(
+    negatedClause,
   );
+  const listed = firstOwnedSource
+    ? negatedClause
+        .slice(firstOwnedSource.index + firstOwnedSource[0].length)
+        .split(/,|\b(?:and|or)\b/i)
+        .some((item) => new RegExp(`^\\s*(?:${sourceOwner})?${accountSurface}\\b`, 'i').test(item))
+    : false;
   const without = new RegExp(
-    String.raw`\bwithout\s+${NEGATED_LOOKUP_VERB}(?:ing)?\b[^.!?\n]{0,120}\b${sourceOwner}${accountSurface}\b`,
+    String.raw`\bwithout\s+${NEGATED_LOOKUP_VERB}(?:ing)?\b${clause}\b${sourceOwner}${accountSurface}\b`,
     'i',
   );
-  return direct.test(text) || without.test(text);
+  return direct.test(negatedClause) || listed || without.test(text);
 }
 
 /**
@@ -262,12 +284,16 @@ const KNOWLEDGE_GRAPH_SURFACE =
   /\b(?:(?:memory|knowledge)\s+graph|graph\s+(?:my\s+)?(?:memory|knowledge)|saved\s+connections?)\b/i;
 const MEMORY_SURFACE =
   /\b(?:memor(?:y|ies)|remember(?:ed)?|saved facts?|what you know|knowledge about me)\b/i;
+const CONVERSATION_HISTORY_REQUEST =
+  /\b(?:earlier|previous|prior|past)\s+(?:owner\s+)?(?:conversations?|chats?)\b|\b(?:previously|before)\s+(?:told|said|mentioned)\s+you\b|\bwhat\s+(?:did|have)\s+i\s+(?:tell|say|mention)\s+you\b/i;
 const AUTOBIOGRAPHICAL_READ =
   /\b(?:when|where)\s+did\s+i\b|\bhave\s+i\s+ever\b|\bdid\s+i\s+(?:attend|visit|see|go|meet|live|work|travel)\b/i;
 const AVAILABILITY_SURFACE =
   /\b(?:availability|available|busy|conflicts?|free|open\s+(?:time|slots?)|(?:calendar|schedule|agenda)\s+(?:(?:is|looks|appears)\s+)?(?:clear|empty))\b/i;
 const CALENDAR_TIME_REFERENCE =
   /\b(?:today|tomorrow|weekends?|weeks?|months?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|20\d{2}-\d{2}-\d{2})\b/i;
+const CALENDAR_DAY_OVERVIEW =
+  /\bwhat(?:\s+is|['’]s)?\s+on\s+(?:(?:my|our|the)\s+)?(?:calendar|schedule|agenda)\b/i;
 const SCHEDULED_THING =
   /\b(interviews?|meetings?|appointments?|calls?|chats?|flights?|reservations?|bookings?|events?)\b/i;
 const READ_OR_QUESTION =
@@ -301,6 +327,21 @@ const EMAIL_COMMAND_LEAD =
   /^\s*(?:(?:please|can you|could you|would you|i want you to)\s+)*(?:email|e-mail)\s+\S/iu;
 const READ_THEN_MUTATION =
   /(?:\b(?:and|then|also)\s+|[,;.!?\n]\s*)(?:please\s+)?(?:add|archive|block|book|cancel|compose|create|delete|draft|edit|email|flag|forward|hold|invite|label|make|mark|move|prepare|remember|remind|reply|reschedule|save|schedule|send|update|write)\b/i;
+
+/**
+ * Action words in an explicit prohibition do not turn an otherwise read-only
+ * lookup into a mixed workflow. Strip only the prohibited sentence before
+ * applying the positive read-then-write guard; a requested action elsewhere
+ * remains visible to the guard.
+ */
+function readThenMutationText(text: string): string {
+  return text
+    .replace(
+      /\b(?:do\s+not|don['’]?t|never)\s+(?:add|archive|block|book|cancel|compose|create|delete|draft|edit|email|flag|forward|hold|invite|label|make|mark|move|prepare|remember|remind|reply|reschedule|save|schedule|send|update|write)\b[^.!?\n]*/gi,
+      ' ',
+    )
+    .replace(/\bmark\s+(?:anything\s+)?(?:as\s+)?(?:uncertain|uncertainty|unverified)\b/gi, ' ');
+}
 
 function directEmailReviewIntent(text: string): boolean {
   if (
@@ -665,11 +706,12 @@ function isNextEventRequest(text: string): boolean {
 }
 
 function isUpcomingFlightDiscovery(text: string): boolean {
-  const nextFlight = /\b(?:next|upcoming|soonest)\s+(?:flight|flights|airline|itinerary)\b/i.test(
-    text,
-  );
+  const nextFlight =
+    /\b(?:next|upcoming|soonest)\s+(?:future\s+)?(?:flight|flights|airline|itinerary)\b/i.test(
+      text,
+    );
   const nextTripWithFlight =
-    /\b(?:next|upcoming|soonest)\s+trip\b/i.test(text) && /\bflight\b/i.test(text);
+    /\b(?:next|upcoming|soonest)\s+(?:future\s+)?trip\b/i.test(text) && /\bflight\b/i.test(text);
   return (nextFlight || nextTripWithFlight) && (READ_OR_QUESTION.test(text) || VERIFY.test(text));
 }
 
@@ -691,6 +733,44 @@ function compoundTripWindow(now: Date): PersonalReadTimeWindow {
     timeMax: end.toISOString(),
     label: 'the next 365 days',
   };
+}
+
+function upcomingFlightWindow(now: Date): PersonalReadTimeWindow {
+  return {
+    timeMin: now.toISOString(),
+    timeMax: new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+    label: 'the next 365 days',
+  };
+}
+
+function calendarPlanWindow(
+  options: PersonalReadDetectionOptions,
+  plan: CalendarPlanOptions,
+): PersonalReadTimeWindow {
+  const timeZone = options.timeZone ?? 'UTC';
+  const now = options.now ?? new Date();
+  if (!plan.workingDays) {
+    return (
+      resolveTimeWindowBounds('next week', 'calendar', false, {
+        ...options,
+        timeZone,
+      }) ??
+      timeWindow(
+        civilDateAt(now, timeZone),
+        addCivilDays(civilDateAt(now, timeZone), 7),
+        'next week',
+        timeZone,
+      )
+    );
+  }
+  const start = civilDateAt(now, timeZone);
+  let cursor = start;
+  let weekdays = 0;
+  while (weekdays < plan.workingDays) {
+    if (civilWeekday(cursor) !== 0 && civilWeekday(cursor) !== 6) weekdays += 1;
+    if (weekdays < plan.workingDays) cursor = addCivilDays(cursor, 1);
+  }
+  return timeWindow(start, addCivilDays(cursor, 1), plan.windowLabel, timeZone);
 }
 
 function hasExplicitTemporalPhrase(text: string): boolean {
@@ -1128,6 +1208,8 @@ const QUERY_MODIFIERS = new Set([
   'weeks',
   'yesterday',
 ]);
+const MAX_MEMORY_RECALL_QUERY_CHARS = 1200;
+const MAX_CONVERSATION_SEARCH_QUERY_CHARS = 500;
 
 function contentText(content: unknown): string {
   if (typeof content === 'string') return content;
@@ -1359,6 +1441,7 @@ function detectPersonalReadRequestInternal(
   const latest = readIntentText(messages[latestIndex]);
   const calendarReadProhibited = explicitlyProhibitsPrivateRead(latest, 'calendar');
   const emailReadProhibited = explicitlyProhibitsPrivateRead(latest, 'email');
+  const memoryReadProhibited = explicitlyProhibitsPrivateRead(latest, 'memory');
   const flightContinuation =
     clarificationDepth < 2 && !calendarReadProhibited && !emailReadProhibited
       ? flightScopeClarificationContinuation(
@@ -1420,7 +1503,7 @@ function detectPersonalReadRequestInternal(
   if (
     !latest ||
     /^\s*i\s+(?:read|checked|reviewed|looked|searched|scanned|opened)\b/i.test(latest) ||
-    READ_THEN_MUTATION.test(latest) ||
+    READ_THEN_MUTATION.test(readThenMutationText(latest)) ||
     EMAIL_COMMAND_LEAD.test(latest) ||
     (MUTATION_LEAD.test(latest) && !/\b(?:check|find|search|look|show)\b/i.test(latest))
   ) {
@@ -1485,27 +1568,37 @@ function detectPersonalReadRequestInternal(
     }
     return [];
   };
-  const graphRead = KNOWLEDGE_GRAPH_SURFACE.test(latest);
+  const graphRead = !memoryReadProhibited && KNOWLEDGE_GRAPH_SURFACE.test(latest);
   const driveRead =
     !graphRead &&
     (DRIVE_SURFACE.test(latest) || MEDIA_FILE_READ.test(latest)) &&
     (READ_OR_QUESTION.test(latest) || /^\s*(?:pull|open|find|show)\b/i.test(latest));
   const memoryRead =
+    !memoryReadProhibited &&
     !graphRead &&
     !driveRead &&
     ((MEMORY_SURFACE.test(latest) && (READ_OR_QUESTION.test(latest) || verification)) ||
+      (CONVERSATION_HISTORY_REQUEST.test(latest) && READ_OR_QUESTION.test(latest)) ||
       AUTOBIOGRAPHICAL_READ.test(latest));
   if (graphRead || driveRead || memoryRead) {
     const kind: PersonalReadKind = graphRead ? 'knowledge_graph' : driveRead ? 'drive' : 'memory';
+    const conversationHistoryRequested =
+      kind === 'memory' && CONVERSATION_HISTORY_REQUEST.test(latest);
     return {
       kind,
       queryTerms: contextualPrivateTerms(),
+      ...(kind === 'memory' ? { memoryQuery: latest.slice(0, MAX_MEMORY_RECALL_QUERY_CHARS) } : {}),
+      ...(conversationHistoryRequested
+        ? { conversationQuery: latest.slice(0, MAX_CONVERSATION_SEARCH_QUERY_CHARS) }
+        : {}),
       firstToolName:
         kind === 'knowledge_graph'
           ? 'memory.graph_snapshot'
           : kind === 'drive'
             ? 'drive.search'
-            : 'memory.recall',
+            : conversationHistoryRequested
+              ? 'conversations.search'
+              : 'memory.recall',
       requiresThreadRead: false,
       ...(options.timeZone ? { timeZone: options.timeZone } : {}),
       ...(verification ? { verification: true } : {}),
@@ -1586,13 +1679,16 @@ function detectPersonalReadRequestInternal(
     WHY_LOOKUP.test(latest) &&
     /\b(?:my|our|you said|said i|i had|i have|calendar|schedule)\b/i.test(latest);
   const nextEventQuestion = isNextEventRequest(latest);
-  if (nextEventQuestion) terms = [];
+  const calendarDayList =
+    CALENDAR_DAY_OVERVIEW.test(latest) && CALENDAR_TIME_REFERENCE.test(latest);
+  if (nextEventQuestion || calendarDayList) terms = [];
   const personalSchedule =
     /\b(?:my|our|the|this|that|do i|did i|is there|are there)\b/i.test(latest) ||
     (verification && flightLanguage.test(latest)) ||
     terms.some((term) => !SCHEDULED_THING.test(term));
   const namedSchedule =
     !calendarReadProhibited &&
+    !calendarDayList &&
     !genericScheduleList &&
     !nextEventQuestion &&
     (SCHEDULED_THING.test(latest) || (verification && SCHEDULED_THING.test(recentContext))) &&
@@ -1623,11 +1719,10 @@ function detectPersonalReadRequestInternal(
     (/\b(?:am i|are|check|do i|find|is|show|what|when|which)\b/i.test(latest) ||
       CALENDAR_TIME_REFERENCE.test(latest));
 
-  const weeklyCalendarPlan =
-    !calendarReadProhibited &&
-    /\b(?:focus blocks?|focus time|overloaded days?|scheduling conflicts?)\b/i.test(latest) &&
-    /\b(?:next week|coming week|following week)\b/i.test(latest) &&
-    /\b(?:calendar|schedule)\b/i.test(latest);
+  const calendarPlanOptions = !calendarReadProhibited
+    ? requestedCalendarPlanOptions(latest)
+    : undefined;
+  const weeklyCalendarPlan = calendarPlanOptions !== undefined;
 
   if (!calendar && !email && !availability && !weeklyCalendarPlan) return null;
   if (terms.length === 0 && email) terms = emailQueryTerms(hypothesis);
@@ -1635,13 +1730,14 @@ function detectPersonalReadRequestInternal(
   // Named appointments are commonly confirmed in email before (or instead of)
   // appearing on a calendar. Search both configured sources without asking the
   // owner which provider/account contains the answer.
-  const kind: PersonalReadKind = availability
-    ? 'calendar'
-    : namedSchedule || (calendar && email)
-      ? 'calendar_email'
-      : email
-        ? 'email'
-        : 'calendar';
+  const kind: PersonalReadKind =
+    weeklyCalendarPlan || availability
+      ? 'calendar'
+      : namedSchedule || (calendar && email)
+        ? 'calendar_email'
+        : email
+          ? 'email'
+          : 'calendar';
   const firstToolName =
     weeklyCalendarPlan || availability
       ? 'calendar.availability'
@@ -1653,7 +1749,7 @@ function detectPersonalReadRequestInternal(
 
   const request: PersonalReadRequest = {
     kind,
-    ...(weeklyCalendarPlan ? { weeklyCalendarPlan: true } : {}),
+    ...(weeklyCalendarPlan ? { weeklyCalendarPlan: true, calendarPlanOptions } : {}),
     queryTerms: weeklyCalendarPlan ? [] : terms,
     ...(upcomingFlightDiscovery ||
     (namedSchedule && (flightLanguage.test(latest) || Boolean(ownerFlight)))
@@ -1666,7 +1762,9 @@ function detectPersonalReadRequestInternal(
       (kind === 'email' &&
         (verification || /\b(?:when|where|what time|details?|what does|what did)\b/i.test(latest))),
   };
-  if (upcomingFlightDiscovery) {
+  if (weeklyCalendarPlan && calendarPlanOptions) {
+    request.timeWindow = calendarPlanWindow(options, calendarPlanOptions);
+  } else if (upcomingFlightDiscovery) {
     // Search a small set of booking-specific OR terms. ANDing the full owner
     // sentence misses confirmations, while a generic "trip" term finds old
     // unrelated itinerary mail.
@@ -1687,7 +1785,7 @@ function detectPersonalReadRequestInternal(
     // letting an earlier dentist appointment consume a one-result page.
     request.maxResults = 50;
   }
-  if (kind !== 'email') {
+  if (kind !== 'email' && !weeklyCalendarPlan && !upcomingFlightDiscovery) {
     const temporal = resolveTemporalIntent(
       temporalText,
       kind,
@@ -1703,7 +1801,9 @@ function detectPersonalReadRequestInternal(
       if (issue) request.temporalIssue = issue;
     }
   }
-  if (kind !== 'calendar') {
+  if (upcomingFlightDiscovery) {
+    request.timeWindow = upcomingFlightWindow(options.now ?? new Date());
+  } else if (kind !== 'calendar' && !weeklyCalendarPlan && !upcomingFlightDiscovery) {
     if (!upcomingFlightDiscovery) request.mailQuery = gmailQuery(hypothesis, terms);
     // A relative travel date describes the itinerary, not when its confirmation
     // arrived. Older booking confirmations can still be authoritative for a
@@ -1804,7 +1904,7 @@ export function gmailSearchThreadIds(
 ): string[] {
   const ids: string[] = [];
   for (const row of evidence) {
-    if (request?.compoundTripDiscovery && row.fromCurrentTask === false) continue;
+    if (hasTypedTripRead(request) && row.fromCurrentTask === false) continue;
     if (
       !succeeded(row) ||
       row.toolName !== 'gmail.search' ||
@@ -1878,7 +1978,7 @@ export function gmailSearchThreadIds(
   ) {
     const scores = new Map<string, number>();
     for (const row of evidence) {
-      if (request?.compoundTripDiscovery && row.fromCurrentTask === false) continue;
+      if (hasTypedTripRead(request) && row.fromCurrentTask === false) continue;
       if (
         !succeeded(row) ||
         row.toolName !== 'gmail.search' ||
@@ -2136,12 +2236,16 @@ export const MAX_GMAIL_THREADS_TO_READ = 3;
 export const MAX_GMAIL_SEARCH_PAGES = 3;
 export const MAX_COMPOUND_CALENDAR_PAGES = 2;
 
+function hasTypedTripRead(request: PersonalReadRequest | undefined): boolean {
+  return Boolean(request?.compoundTripDiscovery || request?.upcomingFlightDiscovery);
+}
+
 export function gmailThreadIdsToRead(
   evidence: ReadonlyArray<ReadToolEvidence>,
   request?: PersonalReadRequest,
 ): string[] {
   if (request?.emailReview) return request.emailReview.selectedThreadIds ?? [];
-  const limit = request?.compoundTripDiscovery ? 2 : MAX_GMAIL_THREADS_TO_READ;
+  const limit = hasTypedTripRead(request) ? 2 : MAX_GMAIL_THREADS_TO_READ;
   return gmailSearchThreadIds(evidence, request).slice(0, limit);
 }
 
@@ -2189,7 +2293,7 @@ function compoundThreadReadInput(
   evidence: ReadonlyArray<ReadToolEvidence>,
   request: PersonalReadRequest,
 ): Record<string, unknown> | undefined {
-  if (!request.compoundTripDiscovery) return undefined;
+  if (!hasTypedTripRead(request)) return undefined;
   const targets = gmailThreadIdsToRead(evidence, request).slice(0, 2);
   for (const threadId of targets) {
     const attempts = evidence.filter(
@@ -2252,7 +2356,7 @@ function nextGmailSearchPage(
   );
   const pageLimit = request.emailReview
     ? EMAIL_REVIEW_MAX_SEARCH_PAGES
-    : request.compoundTripDiscovery
+    : hasTypedTripRead(request)
       ? 2
       : MAX_GMAIL_SEARCH_PAGES;
   if (searches.length >= pageLimit) return undefined;
@@ -2274,7 +2378,7 @@ export function compoundTripSourceReadsSettled(
   request: PersonalReadRequest,
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): boolean {
-  if (!request.compoundTripDiscovery || nextGmailSearchPage(request, evidence)) return false;
+  if (!hasTypedTripRead(request) || nextGmailSearchPage(request, evidence)) return false;
   return (
     compoundThreadReadInput(evidence, request) === undefined &&
     nextGmailThreadId(evidence, request) === undefined
@@ -2370,19 +2474,17 @@ export function nextRequiredReadTool(
     if (evidence.some((row) => matchingPrivateRead(row, request))) return undefined;
     return attempts(evidence, request.firstToolName) < 2 ? request.firstToolName : undefined;
   }
-  if (request.compoundTripDiscovery) {
+  if (hasTypedTripRead(request)) {
     const currentEvidence = evidence.filter((row) => row.fromCurrentTask !== false);
-    const compoundReadTools = new Set([
+    const tripReadTools = new Set([
       'calendar.list_events',
       'gmail.search',
       'gmail.read_thread',
-      'maps.directions',
-      'web.search',
-      'web.fetch',
+      ...(request.compoundTripDiscovery ? ['maps.directions', 'web.search', 'web.fetch'] : []),
     ]);
     if (
-      currentEvidence.filter((row) => compoundReadTools.has(row.toolName)).length >=
-      MAX_COMPOUND_TRIP_TOOL_CALLS
+      currentEvidence.filter((row) => tripReadTools.has(row.toolName)).length >=
+      (request.compoundTripDiscovery ? MAX_COMPOUND_TRIP_TOOL_CALLS : 8)
     )
       return undefined;
     const calendarRows = currentEvidence.filter((row) => matchingCalendarRead(row, request));
@@ -2407,6 +2509,8 @@ export function nextRequiredReadTool(
       const threadId = nextGmailThreadId(currentEvidence, request);
       if (threadId) return 'gmail.read_thread';
     }
+
+    if (!request.compoundTripDiscovery) return undefined;
 
     const route = compoundTripRoute(request, currentEvidence);
     if (route && !evidence.some((row) => matchingCompoundMapRoute(row, route)))
@@ -2464,6 +2568,9 @@ export function groundReadToolInput(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): Record<string, unknown> {
   if (request.temporalIssue || request.scopeIssue) return {};
+  if (toolName === 'conversations.search' && request.conversationQuery) {
+    return { query: request.conversationQuery, limit: 10 };
+  }
   if (toolName === 'calendar.list_events') {
     const { calendarIds: _ignored, ...unboundCalendarArgs } = input;
     const allCalendars = request.weeklyCalendarPlan
@@ -2474,7 +2581,7 @@ export function groundReadToolInput(
       ...allCalendars,
       ...(interval ? { timeMin: interval.start, timeMax: interval.endExclusive } : {}),
       maxResults: request.maxResults ?? 50,
-      ...(request.compoundTripDiscovery
+      ...(hasTypedTripRead(request)
         ? { pageToken: compoundCalendarPageToken(request, evidence) }
         : request.weeklyCalendarPlan
           ? (() => {
@@ -2577,7 +2684,10 @@ export function groundReadToolInput(
     return { query: request.queryTerms.join(' ') || 'recent', maxResults: 20 };
   }
   if (toolName === 'memory.recall') {
-    return { query: request.queryTerms.join(' ') || 'owner history', limit: 10 };
+    return {
+      query: request.memoryQuery ?? (request.queryTerms.join(' ') || 'owner history'),
+      limit: 10,
+    };
   }
   if (toolName === 'memory.graph_snapshot') {
     return { query: request.queryTerms.join(' ') || 'owner', limit: 20 };

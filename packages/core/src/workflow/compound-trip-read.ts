@@ -95,6 +95,19 @@ export interface CompoundTripReadProjection {
   text: string;
 }
 
+export interface UpcomingFlightReadProjection {
+  calendarComplete: boolean;
+  gmailSearchComplete: boolean;
+  threadsComplete: boolean;
+  flight?: CompoundTripFlightCandidate;
+  returnFlight?: CompoundTripFlightCandidate;
+  currentTripReturn?: CompoundTripFlightCandidate;
+  flightSegments: CompoundTripFlightSegment[];
+  unmatchedBookingSegments: CompoundTripFlightSegment[];
+  blocked: boolean;
+  text: string;
+}
+
 function object(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -1777,6 +1790,93 @@ export function compoundTripReadProjection(
       `I checked the available trip sources. Here is the ${gaps.length === 0 ? 'source-checked' : 'supported partial'} itinerary:`,
       ...itinerary,
       'I did not book, change, or send anything.',
+    ].join('\n\n'),
+  };
+}
+
+/**
+ * Flight-only form of the typed trip projection. It shares the same current-task
+ * source validation and candidate selection, but does not make hotel or route
+ * evidence a prerequisite for answering a flight question.
+ */
+export function upcomingFlightReadProjection(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+  extractedFacts?: CompoundTripExtraction,
+): UpcomingFlightReadProjection {
+  const trip = compoundTripReadProjection(request, evidence, extractedFacts);
+  const gaps: string[] = [];
+  if (!trip.calendarComplete)
+    gaps.push('Calendar coverage is incomplete, so I cannot establish which flight is next.');
+  if (!trip.gmailSearchComplete || !trip.threadsComplete)
+    gaps.push('Booking-email search or thread coverage is incomplete.');
+  if (!trip.flight) {
+    gaps.push(
+      trip.currentTripReturn
+        ? 'The checked calendar identifies a return from a trip already underway, not a new outbound flight.'
+        : 'I could not match a dated outbound booking to a calendar flight event in the checked sources.',
+    );
+  }
+  const flight = trip.flight;
+  if (flight?.itineraryChronology === 'impossible')
+    gaps.push('The source-backed flight legs overlap or run in reverse order.');
+  else if (flight?.itineraryChronology !== 'valid')
+    gaps.push('I could not verify the chronological order of the source-backed flight legs.');
+  if (flight?.segment && !flight.segment.departureTimeZone)
+    gaps.push('The booking source does not state the outbound departure time zone.');
+  if (flight && !flight.itineraryConnectionChainComplete)
+    gaps.push('The booking source does not establish a complete dated connection chain.');
+  const summary: string[] = [];
+  if (flight) {
+    const calendarLink = calendarSource(flight.event);
+    const threadId = flight.segment?.threadId;
+    const links = threadSourceLinks(trip.readThreads);
+    const bookingLink = threadId ? links.get(threadId) : undefined;
+    const ownerLocalTime = flight.instant
+      ? new Intl.DateTimeFormat('en-US', {
+          dateStyle: 'medium',
+          timeStyle: 'short',
+          timeZone: request.timeZone ?? 'UTC',
+        }).format(new Date(flight.instant))
+      : '';
+    summary.push(
+      `Next matched outbound flight: ${flight.segment ? formatFlightSegment(flight.segment) : (flight.flightNumber ?? 'calendar flight')}${ownerLocalTime ? `; calendar time in ${request.timeZone ?? 'UTC'}: ${ownerLocalTime}` : ''}${calendarLink ? ` [Calendar](${calendarLink})` : ''}${bookingLink ? ` [Booking email](${bookingLink})` : ''}.`,
+    );
+    if (trip.returnFlight?.segment) {
+      const returnCalendarLink = calendarSource(trip.returnFlight.event);
+      const returnBookingLink = links.get(trip.returnFlight.segment.threadId);
+      summary.push(
+        `Booked return flight: ${formatFlightSegment(trip.returnFlight.segment)}${returnCalendarLink ? ` [Calendar](${returnCalendarLink})` : ''}${returnBookingLink ? ` [Booking email](${returnBookingLink})` : ''}.`,
+      );
+    }
+    if (trip.connectionSummary)
+      summary.push(`Source-backed connecting legs: ${trip.connectionSummary}.`);
+  }
+  if (trip.currentTripReturn?.segment && !flight)
+    summary.push(
+      `A current-trip return appears in the calendar: ${formatFlightSegment(trip.currentTripReturn.segment)}. It is not evidence of a new outbound flight.`,
+    );
+  for (const segment of trip.unmatchedBookingSegments) {
+    const link = threadSourceLinks(trip.readThreads).get(segment.threadId);
+    summary.push(
+      `Unmatched future booking candidate: ${formatFlightSegment(segment)}${link ? ` [Booking email](${link})` : ''}.`,
+    );
+  }
+  return {
+    calendarComplete: trip.calendarComplete,
+    gmailSearchComplete: trip.gmailSearchComplete,
+    threadsComplete: trip.threadsComplete,
+    ...(trip.flight ? { flight: trip.flight } : {}),
+    ...(trip.returnFlight ? { returnFlight: trip.returnFlight } : {}),
+    ...(trip.currentTripReturn ? { currentTripReturn: trip.currentTripReturn } : {}),
+    flightSegments: trip.flightSegments,
+    unmatchedBookingSegments: trip.unmatchedBookingSegments,
+    blocked: gaps.length > 0,
+    text: [
+      summary.length > 0
+        ? summary.join('\n\n')
+        : 'I could not verify a dated flight from the checked sources.',
+      ...gaps.map((gap) => `Needs confirmation: ${gap}`),
     ].join('\n\n'),
   };
 }
