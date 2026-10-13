@@ -140,7 +140,7 @@ describe('agendaSection', () => {
       timeZone,
       now,
     });
-    expect(section && 'items' in section ? section.items[0]?.time : '').toContain(
+    expect(section?.type === 'agenda' ? section.items[0]?.time : '').toContain(
       'Sat, Oct 10 6:00 AM → Sat, Oct 17 2:00 AM',
     );
   });
