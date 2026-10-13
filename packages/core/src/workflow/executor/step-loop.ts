@@ -85,6 +85,7 @@ import { latestOwnerIntent, type OwnerIntent, ownerAuthoredWindow } from '../own
 import { isConceptualNoToolRequest, PLANNER_VERSION } from '../planner.js';
 import {
   buildReadToolInput,
+  compoundTripSourceReadsSettled,
   detectPersonalReadRequest,
   groundReadToolInput,
   nextRequiredReadTool,
@@ -1287,7 +1288,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           })
         : allReadToolEvidence;
     if (readRequest?.compoundTripDiscovery) {
-      if (!compoundTripExtractionAttempted) {
+      if (
+        !compoundTripExtractionAttempted &&
+        compoundTripSourceReadsSettled(readRequest, readToolEvidence)
+      ) {
         const completeSources = compoundTripSourceMessages(readRequest, readToolEvidence);
         if (completeSources.length > 0) {
           compoundTripExtractionAttempted = true;

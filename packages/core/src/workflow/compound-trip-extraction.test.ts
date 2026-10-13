@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { extractCompoundTripBookings } from './compound-trip-extraction.js';
+import { compoundTripReadProjection } from './compound-trip-read.js';
 import type { PersonalReadRequest, ReadToolEvidence } from './read-intent.js';
 
 const request: PersonalReadRequest = {
@@ -177,6 +178,101 @@ describe('compound trip source extraction', () => {
     const options = object.mock.calls[0]?.[1] as { prompt: string };
     expect(options.prompt).toContain('untrusted data');
     expect(options.prompt).toContain('booking-message-1');
+  });
+
+  it('extracts complete selected threads from a valid search prefix while later provider pages remain', async () => {
+    const rows = evidence();
+    const search = rows.find((row) => row.toolName === 'gmail.search');
+    if (!search) throw new Error('fixture search row missing');
+    const result = search.result as Record<string, unknown>;
+    const hits = [
+      { threadId: 'newsletter-1', subject: 'Weekly newsletter' },
+      { threadId: 'newsletter-2', subject: 'Weekly newsletter' },
+      { threadId: 'newsletter-3', subject: 'Weekly newsletter' },
+      { threadId: 'trip-thread', subject: 'Your Berlin flight booking' },
+      { threadId: 'unread-hit-5', subject: 'Travel deals' },
+    ];
+    result.results = hits;
+    result.complete = false;
+    result.hasMore = true;
+    result.nextPageToken = 'provider-page-2';
+    result.continuation = {
+      tool: 'gmail.search',
+      input: { query: request.mailQuery, maxResults: 10, pageToken: 'provider-page-2' },
+    };
+    const receipt = result.receipt as Record<string, unknown>;
+    receipt.complete = false;
+    receipt.losses = ['provider-page'];
+    receipt.covered = { count: hits.length, total: 18, unavailable: 0 };
+    receipt.continuation = structuredClone(result.continuation);
+
+    const object = vi.fn().mockResolvedValue({ ok: true, object: extractedFacts() });
+    const extraction = await extractCompoundTripBookings({
+      router: { object } as never,
+      taskId: 'task-trip-provider-more',
+      request,
+      evidence: rows,
+    });
+
+    expect(object).toHaveBeenCalledTimes(1);
+    expect(extraction.status).toBe('complete');
+    expect(extraction.segments).toHaveLength(1);
+    expect(extraction.hotels).toHaveLength(1);
+    expect(extraction.sourceMessageIds).toEqual(['booking-message-1']);
+    const objectCall = object.mock.calls[0];
+    if (!objectCall) throw new Error('structured extraction call missing');
+    const prompt = (objectCall[1] as { prompt: string }).prompt;
+    expect(prompt).toContain('booking-message-1');
+    expect(prompt).not.toContain('newsletter-1');
+    const projection = compoundTripReadProjection(request, rows, extraction);
+    expect(projection.gmailSearchComplete).toBe(false);
+    expect(projection.threadsComplete).toBe(false);
+    expect(projection.blocked).toBe(true);
+    expect(projection.text).toContain('Booking-email search or thread coverage is incomplete');
+    expect(projection.text).not.toContain('fully verified complete trip');
+    expect(projection.text).toContain('Future booking candidate, not matched to a calendar flight');
+    expect(projection.text).toContain('[Booking email]');
+  });
+
+  it('parses source-exact abbreviated English month dates without guessing numeric dates', async () => {
+    const body =
+      'Outbound flight LH 401 departs SFO to FRA on Oct 22, 2026 at 21:10 Europe/Berlin. Booking code FLIGHT-8821. Hotel Linden, 5 Alexanderplatz, 10178 Berlin, stay 22 Oct 2026 through 24 Oct 2026. Confirmation HOTEL-55123.';
+    const facts = extractedFacts();
+    const message = (facts.messages as Array<Record<string, unknown>>)[0];
+    if (!message) throw new Error('fixture message missing');
+    const segment = (message.segments as Array<Record<string, unknown>>)[0];
+    const hotel = (message.hotels as Array<Record<string, unknown>>)[0];
+    if (!segment || !hotel) throw new Error('fixture facts missing');
+    segment.departureDate = 'Oct 22, 2026';
+    segment.quote =
+      'Outbound flight LH 401 departs SFO to FRA on Oct 22, 2026 at 21:10 Europe/Berlin. Booking code FLIGHT-8821.';
+    hotel.checkIn = '22 Oct 2026';
+    hotel.checkOut = '24 Oct 2026';
+    hotel.quote =
+      'Hotel Linden, 5 Alexanderplatz, 10178 Berlin, stay 22 Oct 2026 through 24 Oct 2026. Confirmation HOTEL-55123.';
+    const object = vi.fn().mockResolvedValue({ ok: true, object: facts });
+    const result = await extractCompoundTripBookings({
+      router: { object } as never,
+      taskId: 'task-trip-abbreviated-dates',
+      request,
+      evidence: evidence(body),
+    });
+    expect(result.segments[0]?.departureDate).toBe('2026-10-22');
+    expect(result.hotels[0]).toMatchObject({ checkIn: '2026-10-22', checkOut: '2026-10-24' });
+    const numericFacts = extractedFacts();
+    const numericMessage = (numericFacts.messages as Array<Record<string, unknown>>)[0];
+    if (!numericMessage) throw new Error('numeric fixture message missing');
+    const numericSegment = (numericMessage.segments as Array<Record<string, unknown>>)[0];
+    if (!numericSegment) throw new Error('numeric fixture segment missing');
+    numericSegment.departureDate = '10/22/2026';
+    numericSegment.quote = `${flightQuote} Issued 10/22/2026.`;
+    const numeric = await extractCompoundTripBookings({
+      router: { object: vi.fn().mockResolvedValue({ ok: true, object: numericFacts }) } as never,
+      taskId: 'task-trip-numeric-date',
+      request,
+      evidence: evidence(`${flightQuote} Issued 10/22/2026.\n${hotelQuote}`),
+    });
+    expect(numeric.segments).toEqual([]);
   });
 
   it('rejects a quote from a different message and a year absent from the source', async () => {

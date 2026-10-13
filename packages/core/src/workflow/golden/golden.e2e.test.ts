@@ -239,6 +239,14 @@ describe('golden tasks', () => {
       script: [
         { toolCalls: [{ toolName: 'calendar.list_events', input: {} }] },
         { toolCalls: [{ toolName: 'gmail.search', input: { query: detected.mailQuery } }] },
+        {
+          toolCalls: [
+            {
+              toolName: 'gmail.search',
+              input: { query: detected.mailQuery, pageToken: 'search-page-2' },
+            },
+          ],
+        },
         { toolCalls: [{ toolName: 'gmail.read_thread', input: { threadId: 'flight-thread' } }] },
         { toolCalls: [{ toolName: 'gmail.read_thread', input: { threadId: 'hotel-thread' } }] },
         {
@@ -311,23 +319,45 @@ describe('golden tasks', () => {
               })
               .parse(args);
             toolsSeen.push({ toolName: 'gmail.search', args: parsed });
-            const results = [
-              { threadId: 'flight-thread', subject: 'Airline booking confirmation LH 777' },
-              { threadId: 'hotel-thread', subject: 'Hotel reservation confirmed' },
-            ];
+            const firstPage = !parsed.pageToken;
+            const results = firstPage
+              ? [
+                  { threadId: 'newsletter-1', subject: 'Weekly newsletter' },
+                  { threadId: 'newsletter-2', subject: 'Weekly newsletter' },
+                  { threadId: 'newsletter-3', subject: 'Weekly newsletter' },
+                  { threadId: 'newsletter-4', subject: 'Weekly newsletter' },
+                  { threadId: 'newsletter-5', subject: 'Weekly newsletter' },
+                ]
+              : [
+                  { threadId: 'newsletter-6', subject: 'Travel deals' },
+                  { threadId: 'newsletter-7', subject: 'Travel deals' },
+                  { threadId: 'flight-thread', subject: 'Airline booking confirmation LH 777' },
+                  { threadId: 'hotel-thread', subject: 'Hotel reservation confirmed' },
+                  { threadId: 'newsletter-8', subject: 'Travel deals' },
+                ];
+            const nextPageToken = firstPage ? 'search-page-2' : 'search-page-3';
             return {
               query: parsed.query,
               results,
-              complete: true,
-              hasMore: false,
+              complete: false,
+              hasMore: true,
+              nextPageToken,
+              continuation: {
+                tool: 'gmail.search',
+                input: {
+                  query: parsed.query,
+                  maxResults: parsed.maxResults,
+                  pageToken: nextPageToken,
+                },
+              },
               unavailable: [],
               coverage: {
                 requested: parsed.maxResults,
-                discovered: results.length,
+                discovered: firstPage ? 18 : 13,
                 returned: results.length,
                 unavailable: 0,
-                hasMore: false,
-                complete: true,
+                hasMore: true,
+                complete: false,
               },
               receipt: {
                 version: 1,
@@ -338,9 +368,16 @@ describe('golden tasks', () => {
                   scope: 'query-page',
                 },
                 covered: { count: results.length, total: results.length, unavailable: 0 },
-                complete: true,
-                losses: [],
-                continuation: null,
+                complete: false,
+                losses: ['provider-page'],
+                continuation: {
+                  tool: 'gmail.search',
+                  input: {
+                    query: parsed.query,
+                    maxResults: parsed.maxResults,
+                    pageToken: nextPageToken,
+                  },
+                },
               },
             };
           },
@@ -488,6 +525,7 @@ describe('golden tasks', () => {
     expect(result.toolNames).toEqual([
       'calendar.list_events',
       'gmail.search',
+      'gmail.search',
       'gmail.read_thread',
       'gmail.read_thread',
       'maps.directions',
@@ -495,7 +533,7 @@ describe('golden tasks', () => {
       'web.fetch',
       'web.fetch',
     ]);
-    expect(result.status).toBe('done');
+    expect(result.status).toBe('needs_attention');
     expect(result.extractCalls).toBe(1);
     expect(result.finalText).toContain(
       `Dated outbound leg: LH777 SFO→FRA; departs ${departureDay} 10:10 Europe/Berlin; arrives ${departureDay} 11:45 Europe/Berlin`,
@@ -506,6 +544,8 @@ describe('golden tasks', () => {
     expect(result.finalText).toContain('Separately sourced hotel candidate: Hotel Linden, Berlin');
     expect(result.finalText).toContain('treated the connection as an inference');
     expect(result.finalText).toContain('the clocks agree after time-zone conversion');
+    expect(result.finalText).toContain('Booking-email search or thread coverage is incomplete');
+    expect(result.finalText).toContain('Dated outbound leg: LH777 SFO→FRA');
     expect(result.finalText).toContain('source-reported fare EUR 4.90');
     expect(result.finalText).toContain('source-reported fare EUR 62.00');
     expect(result.finalText).toContain(
@@ -516,6 +556,7 @@ describe('golden tasks', () => {
     expect(result.finalText).toContain('https://transit.example/ber');
     expect(result.finalText).toContain('https://taxi.example/ber');
     expect(result.finalText).not.toContain('verified complete trip plan');
+    expect(toolsSeen.filter(({ toolName }) => toolName === 'gmail.search')).toHaveLength(2);
     expect(
       toolsSeen.every(({ toolName }) =>
         [

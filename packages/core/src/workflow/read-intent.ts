@@ -2239,6 +2239,23 @@ function nextGmailSearchPage(
 }
 
 /**
+ * The compound-trip extractor runs only after the bounded search selection is
+ * stable and each selected thread has either completed its exact continuation
+ * chain or exhausted its bounded retry. A provider's remaining pages do not
+ * block extraction once the two-page search budget is reached.
+ */
+export function compoundTripSourceReadsSettled(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): boolean {
+  if (!request.compoundTripDiscovery || nextGmailSearchPage(request, evidence)) return false;
+  return (
+    compoundThreadReadInput(evidence, request) === undefined &&
+    nextGmailThreadId(evidence, request) === undefined
+  );
+}
+
+/**
  * Return the next read that must happen before a personal-data answer may be
  * drafted. Source retries are bounded; the response contract then publishes
  * an honest coverage gap instead of looping or guessing.

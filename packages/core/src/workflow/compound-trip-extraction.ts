@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { ModelRouter } from '../model-router/router.js';
 import {
   type CompoundTripFlightSegment,
-  compoundTripReadProjection,
+  compoundTripCompleteSourceThreads,
 } from './compound-trip-read.js';
 import type { PersonalReadRequest, ReadToolEvidence } from './read-intent.js';
 
@@ -120,6 +120,30 @@ function parseExplicitDate(value: string | null, quote: string): string | undefi
   if (dayFirst?.[1] && dayFirst[2] && dayFirst[3]) {
     const month = new Date(`${dayFirst[2]} 1, 2000`).getMonth() + 1;
     const normalized = `${dayFirst[3]}-${String(month).padStart(2, '0')}-${String(dayFirst[1]).padStart(2, '0')}`;
+    const date = new Date(`${normalized}T00:00:00Z`);
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === normalized
+      ? normalized
+      : undefined;
+  }
+  const abbreviatedMonthDay =
+    /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?[,]?\s+(20\d{2})\b/i.exec(
+      value,
+    );
+  if (abbreviatedMonthDay?.[1] && abbreviatedMonthDay[2] && abbreviatedMonthDay[3]) {
+    const month = new Date(`${abbreviatedMonthDay[1]} 1, 2000`).getMonth() + 1;
+    const normalized = `${abbreviatedMonthDay[3]}-${String(month).padStart(2, '0')}-${String(abbreviatedMonthDay[2]).padStart(2, '0')}`;
+    const date = new Date(`${normalized}T00:00:00Z`);
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === normalized
+      ? normalized
+      : undefined;
+  }
+  const abbreviatedDayMonth =
+    /\b(\d{1,2})(?:st|nd|rd|th)?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?[,]?\s+(20\d{2})\b/i.exec(
+      value,
+    );
+  if (abbreviatedDayMonth?.[1] && abbreviatedDayMonth[2] && abbreviatedDayMonth[3]) {
+    const month = new Date(`${abbreviatedDayMonth[2]} 1, 2000`).getMonth() + 1;
+    const normalized = `${abbreviatedDayMonth[3]}-${String(month).padStart(2, '0')}-${String(abbreviatedDayMonth[1]).padStart(2, '0')}`;
     const date = new Date(`${normalized}T00:00:00Z`);
     return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === normalized
       ? normalized
@@ -250,9 +274,7 @@ export function compoundTripSourceMessages(
   request: PersonalReadRequest,
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): CompoundTripSourceMessage[] {
-  const projection = compoundTripReadProjection(request, evidence);
-  if (!projection.gmailSearchComplete || !projection.threadsComplete) return [];
-  const rows = projection.readThreads;
+  const rows = compoundTripCompleteSourceThreads(request, evidence);
   const grouped = new Map<
     string,
     CompoundTripSourceMessage & { pages: Array<{ start: number; offset: number; text: string }> }

@@ -184,7 +184,7 @@ function bookingEmailEvidence(options: { hotelBody?: string; includeFlight?: boo
                 {
                   messageId: 'flight-booking-message',
                   subject: 'Lufthansa booking confirmation LH 777',
-                  text: 'Outbound\nFlight number: LH 777\nDeparture date: 2026-10-17\nDeparture time: 10:10 Europe/Berlin\nFrom: SFO\nTo: BER\nArrival airport: BER\nBooking reference: FLIGHT-728',
+                  text: 'Outbound\nFlight number: LH 777\nDeparture date: 2026-10-17\nDeparture time: 10:10 Europe/Berlin\nArrival date: 2026-10-17\nArrival time: 13:10 Europe/Berlin\nFrom: SFO\nTo: BER\nArrival airport: BER\nBooking reference: FLIGHT-728',
                 },
               ],
             },
@@ -322,6 +322,56 @@ describe('compound trip read projection', () => {
     expect(compoundTripReadProjection(read, evidence).hotel?.threadId).toBe(
       'hotel-reservation-thread',
     );
+  });
+
+  it('matches an explicitly outbound booking to an ordinary sparse calendar flight only by exact route and time', () => {
+    const read = request();
+    const evidence = [
+      completeCalendarEvents([
+        {
+          eventId: 'ordinary-flight',
+          summary: 'Flight SFO → BER',
+          description: 'Flight to Berlin Brandenburg Airport',
+          location: 'SFO → BER',
+          start: '2026-10-17T10:10:00+02:00',
+          timeZone: 'Europe/Berlin',
+          status: 'confirmed',
+        },
+      ]),
+      ...bookingEmailEvidence(),
+    ];
+    const extracted = {
+      status: 'complete' as const,
+      segments: [
+        {
+          threadId: 'flight-booking-thread',
+          messageId: 'flight-booking-message',
+          subject: 'Lufthansa booking confirmation LH 777',
+          flightNumber: 'LH777',
+          direction: 'outbound' as const,
+          departureDate: '2026-10-17',
+          departureTime: '10:10',
+          departureTimeZone: 'Europe/Berlin',
+          arrivalDate: '2026-10-17',
+          arrivalTime: '13:10',
+          arrivalTimeZone: 'Europe/Berlin',
+          originAirport: 'SFO',
+          destinationAirport: 'BER',
+          bookingReference: 'FLIGHT-728',
+          excerpt: 'Outbound flight LH 777 from SFO to BER, 2026-10-17 at 10:10 Europe/Berlin.',
+        },
+      ],
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: ['flight-booking-message'],
+    };
+    const projection = compoundTripReadProjection(read, evidence, extracted);
+    expect(projection.flight?.segment).toMatchObject({
+      flightNumber: 'LH777',
+      originAirport: 'SFO',
+      destinationAirport: 'BER',
+    });
+    expect(projection.text).not.toContain('could not match a dated outbound leg');
   });
 
   it('selects only public-transport and taxi pages from HTTPS search results', () => {
@@ -560,7 +610,7 @@ describe('compound trip read projection', () => {
           {
             messageId: 'itinerary-message',
             subject: 'LH booking confirmation',
-            text: `Return\nFlight number: LH 777\nDeparture date: 2026-10-14\nDeparture time: 08:00 Europe/Berlin\nFrom: BER\nTo: SFO\nBooking reference: ${reference}\nOutbound\nFlight number: LH 777\nDeparture date: 2026-11-02\nDeparture time: 10:15 Europe/Berlin\nFrom: SFO\nTo: FRA\nBooking reference: ${reference}\nConnection\nFlight number: LH 302\nDeparture date: 2026-11-02\nDeparture time: 12:00 Europe/Berlin\nFrom: FRA\nTo: BER\nBooking reference: ${reference}`,
+            text: `Return\nFlight number: LH 777\nDeparture date: 2026-10-14\nDeparture time: 08:00 Europe/Berlin\nArrival date: 2026-10-14\nArrival time: 19:00 America/Los_Angeles\nFrom: BER\nTo: SFO\nBooking reference: ${reference}\nOutbound\nFlight number: LH 777\nDeparture date: 2026-11-02\nDeparture time: 10:15 Europe/Berlin\nArrival date: 2026-11-02\nArrival time: 11:45 Europe/Berlin\nFrom: SFO\nTo: FRA\nBooking reference: ${reference}\nConnection\nFlight number: LH 302\nDeparture date: 2026-11-02\nDeparture time: 12:00 Europe/Berlin\nArrival date: 2026-11-02\nArrival time: 13:45 Europe/Berlin\nFrom: FRA\nTo: BER\nBooking reference: ${reference}`,
           },
         ],
       },
@@ -619,6 +669,180 @@ describe('compound trip read projection', () => {
     expect(projection.connectionSummary).toContain('LH302 FRA→BER; departs 2026-11-02');
     expect(projection.text).toContain('Source-backed connected flight segments');
     expect(projection.text).not.toContain('cannot confirm whether this flight is nonstop');
+  });
+
+  it('rejects overlapping overnight connections and a return that precedes the outbound arrival', () => {
+    const read = request();
+    const reference = 'TRIP-77881';
+    const segment = (
+      messageId: string,
+      flightNumber: string,
+      role: 'outbound' | 'connection' | 'return',
+      departureDate: string,
+      departureTime: string,
+      arrivalDate: string,
+      arrivalTime: string,
+      originAirport: string,
+      destinationAirport: string,
+    ) => ({
+      threadId: 'itinerary-thread',
+      messageId,
+      subject: 'Itinerary',
+      flightNumber,
+      direction: role,
+      departureDate,
+      departureTime,
+      departureTimeZone: 'Europe/Berlin',
+      arrivalDate,
+      arrivalTime,
+      arrivalTimeZone: 'Europe/Berlin',
+      originAirport,
+      destinationAirport,
+      bookingReference: reference,
+      excerpt: `${flightNumber} ${departureDate} ${departureTime} Europe/Berlin`,
+    });
+    const outbound = segment(
+      'outbound-message',
+      'LH777',
+      'outbound',
+      '2026-11-02',
+      '22:30',
+      '2026-11-03',
+      '00:10',
+      'SFO',
+      'FRA',
+    );
+    const overlappingConnection = segment(
+      'connection-message',
+      'LH101',
+      'connection',
+      '2026-11-02',
+      '23:30',
+      '2026-11-03',
+      '02:15',
+      'FRA',
+      'BER',
+    );
+    const hotel = {
+      threadId: 'hotel-reservation-thread',
+      messageId: 'hotel-booking-message',
+      sourceSubject: 'Hotel reservation confirmed',
+      name: 'Hotel Linden',
+      address: '5 Alexanderplatz, 10178 Berlin',
+      city: 'Berlin',
+      checkIn: '2026-11-03',
+      checkOut: '2026-11-05',
+      bookingReference: 'HOTEL-55123',
+      quote: 'Hotel Linden, Berlin, 5 Alexanderplatz, 2026-11-03 through 2026-11-05.',
+    };
+    const validConnection = segment(
+      'connection-message',
+      'LH101',
+      'connection',
+      '2026-11-03',
+      '00:55',
+      '2026-11-03',
+      '02:15',
+      'FRA',
+      'BER',
+    );
+    const validEvidence = [
+      completeCalendarEvents([
+        {
+          ...calendarFlight(),
+          summary: 'Outbound flight LH777 to Berlin',
+          description: `Arrival airport: BER. Booking reference: ${reference}`,
+          start: '2026-11-02T22:30:00+01:00',
+        },
+      ]),
+      ...bookingEmailEvidence(),
+    ];
+    const validProjection = compoundTripReadProjection(read, validEvidence, {
+      status: 'complete',
+      segments: [outbound, validConnection],
+      hotels: [hotel],
+      rejectedFacts: 0,
+      sourceMessageIds: ['outbound-message', 'connection-message', 'hotel-booking-message'],
+    });
+    expect(validProjection.connectionSummary).toContain('LH101 FRA→BER');
+    expect(validProjection.routeOrigin).toBe('BER Airport');
+    expect(validProjection.routeDestination).toBe(hotel.address);
+    const unknownChronology = compoundTripReadProjection(read, validEvidence, {
+      status: 'complete',
+      segments: [outbound, { ...validConnection, arrivalTimeZone: undefined }],
+      hotels: [hotel],
+      rejectedFacts: 0,
+      sourceMessageIds: ['outbound-message', 'connection-message', 'hotel-booking-message'],
+    });
+    expect(unknownChronology.connectionSummary).toBeUndefined();
+    expect(unknownChronology.routeOrigin).toBeUndefined();
+    expect(unknownChronology.text).toContain('could not verify the chronological order');
+
+    const evidence = [
+      completeCalendarEvents([
+        {
+          ...calendarFlight(),
+          summary: 'Outbound flight LH777 to Berlin',
+          description: `Arrival airport: BER. Booking reference: ${reference}`,
+          start: '2026-11-02T22:30:00+01:00',
+        },
+      ]),
+      ...bookingEmailEvidence(),
+    ];
+    const extracted = {
+      status: 'complete' as const,
+      segments: [outbound, overlappingConnection],
+      hotels: [hotel],
+      rejectedFacts: 0,
+      sourceMessageIds: ['outbound-message', 'connection-message', 'hotel-booking-message'],
+    };
+    const projection = compoundTripReadProjection(read, evidence, extracted);
+    expect(projection.connectionSummary).toBeUndefined();
+    expect(projection.routeOrigin).toBeUndefined();
+    expect(projection.blocked).toBe(true);
+    expect(projection.text).toContain('overlap or run in reverse order');
+    expect(compoundTripRoute(read, evidence)).toBeUndefined();
+
+    const returnSegment = segment(
+      'return-message',
+      'LH888',
+      'return',
+      '2026-11-03',
+      '01:30',
+      '2026-11-03',
+      '12:00',
+      'BER',
+      'SFO',
+    );
+    const withReturn = [
+      completeCalendarEvents([
+        {
+          ...calendarFlight(),
+          summary: 'Outbound flight LH777 to Berlin',
+          description: `Arrival airport: BER. Booking reference: ${reference}`,
+          start: '2026-11-02T22:30:00+01:00',
+        },
+        {
+          ...calendarFlight(),
+          eventId: 'calendar-return',
+          summary: 'Return flight LH888',
+          description: `Return. Booking reference: ${reference}`,
+          start: '2026-11-03T01:30:00+01:00',
+        },
+      ]),
+      ...bookingEmailEvidence(),
+    ];
+    const returnProjection = compoundTripReadProjection(read, withReturn, {
+      ...extracted,
+      segments: [outbound, validConnection, returnSegment],
+    });
+    expect(returnProjection.returnFlight).toBeDefined();
+    expect(returnProjection.routeOrigin).toBeUndefined();
+    expect(returnProjection.blocked).toBe(true);
+    expect(returnProjection.text).toContain(
+      'booked return leaves before the outbound itinerary arrives',
+    );
+    expect(compoundTripRoute(read, withReturn)).toBeUndefined();
   });
 
   it('uses an explicitly outbound calendar match when the booking segment direction is unstated', () => {
