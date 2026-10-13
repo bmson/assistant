@@ -69,7 +69,7 @@ export function mobileUnauthorized(): Response {
 const SAFE_MOBILE_FAILURE =
   'The request could not be completed. Check its status before trying again.';
 const INTERNAL_DIAGNOSTIC =
-  /(?:firestore.{0,80}(?:index|project|collection)|(?:index|project).{0,80}firestore|console\.firebase\.google\.com|firestore\.googleapis\.com|googleapis\.com\/.*(?:index|project)|\b(?:FAILED_PRECONDITION|PERMISSION_DENIED|SQLSTATE|PostgresError|DrizzleError)\b|\b(?:syntax error at or near|relation ["']?\w+["']? does not exist|duplicate key value violates unique constraint)\b|\bat\s+[\w$.<>]+\s*\([^\n]*:\d+:\d+\))/i;
+  /(?:firestore.{0,80}(?:index|project|collection)|(?:index|project).{0,80}firestore|console\.firebase\.google\.com|firestore\.googleapis\.com|googleapis\.com\/.*(?:index|project)|^\s*Failed query:|\b(?:FAILED_PRECONDITION|PERMISSION_DENIED|SQLSTATE|PostgresError|DrizzleError)\b|\b(?:syntax error at or near|relation ["']?\w+["']? does not exist|duplicate key value violates unique constraint)\b|\bat\s+[\w$.<>]+\s*\([^\n]*:\d+:\d+\))/i;
 const OMITTED_ERROR_FIELDS = new Set(['cause', 'debug', 'stack']);
 
 function sanitizeMobileErrorPayload(value: unknown, status: number, key = ''): unknown {

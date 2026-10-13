@@ -200,6 +200,19 @@ describe('mobile JSON error boundary', () => {
     expect(await diagnostic.json()).toEqual({
       error: 'The request could not be completed. Check its status before trying again.',
     });
+
+    const drizzleDiagnostic = mobileJson(
+      {
+        error: 'Failed query: select "id" from "goals" where "id" = $1 params: ["private-goal-id"]',
+      },
+      { status: 409 },
+    );
+    expect(drizzleDiagnostic.status).toBe(409);
+    const drizzleBody = await drizzleDiagnostic.json();
+    expect(drizzleBody).toEqual({
+      error: 'The request could not be completed. Check its status before trying again.',
+    });
+    expect(JSON.stringify(drizzleBody)).not.toMatch(/private-goal-id|select|params/i);
   });
 
   it('leaves normal structured success payloads unchanged', async () => {
