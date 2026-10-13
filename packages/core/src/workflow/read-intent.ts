@@ -47,6 +47,8 @@ export type TemporalIntentResolution =
 
 export interface PersonalReadRequest {
   kind: PersonalReadKind;
+  /** Deterministic review-only proposal requiring availability and event-list reads. */
+  weeklyCalendarPlan?: boolean;
   /** Literal subject terms to bind into calendar/Gmail searches. */
   queryTerms: string[];
   /** First read tool the executor must call. */
@@ -1543,7 +1545,12 @@ function detectPersonalReadRequestInternal(
     (/\b(?:am i|are|check|do i|find|is|show|what|when|which)\b/i.test(latest) ||
       CALENDAR_TIME_REFERENCE.test(latest));
 
-  if (!calendar && !email && !availability) return null;
+  const weeklyCalendarPlan =
+    /\b(?:focus blocks?|focus time|overloaded days?|scheduling conflicts?)\b/i.test(latest) &&
+    /\b(?:next week|coming week|following week)\b/i.test(latest) &&
+    /\b(?:calendar|schedule)\b/i.test(latest);
+
+  if (!calendar && !email && !availability && !weeklyCalendarPlan) return null;
   if (terms.length === 0 && email) terms = emailQueryTerms(hypothesis);
 
   // Named appointments are commonly confirmed in email before (or instead of)
@@ -1556,17 +1563,19 @@ function detectPersonalReadRequestInternal(
       : email
         ? 'email'
         : 'calendar';
-  const firstToolName = availability
-    ? 'calendar.availability'
-    : kind === 'email'
-      ? 'gmail.search'
-      : kind === 'calendar_email' || terms.length > 0
-        ? 'calendar.search_events'
-        : 'calendar.list_events';
+  const firstToolName =
+    weeklyCalendarPlan || availability
+      ? 'calendar.availability'
+      : kind === 'email'
+        ? 'gmail.search'
+        : kind === 'calendar_email' || terms.length > 0
+          ? 'calendar.search_events'
+          : 'calendar.list_events';
 
   const request: PersonalReadRequest = {
     kind,
-    queryTerms: terms,
+    ...(weeklyCalendarPlan ? { weeklyCalendarPlan: true } : {}),
+    queryTerms: weeklyCalendarPlan ? [] : terms,
     ...(upcomingFlightDiscovery ||
     (namedSchedule && (flightLanguage.test(latest) || Boolean(ownerFlight)))
       ? { answerFocus: 'flight' as const }
@@ -1590,7 +1599,9 @@ function detectPersonalReadRequestInternal(
     if (EXHAUSTIVE_MAIL.test(latest)) request.requiresExhaustiveMail = true;
     if (CURRENT_MAIL.test(latest)) request.preferLatestMail = true;
   }
-  if (kind !== 'email' && nextEventQuestion) {
+  if (weeklyCalendarPlan) {
+    request.maxResults = 50;
+  } else if (kind !== 'email' && nextEventQuestion) {
     request.maxResults = 1;
   } else if (kind !== 'email' && upcomingFlightDiscovery) {
     // List enough bounded future events to select the first flight rather than
@@ -2057,6 +2068,70 @@ export function nextRequiredReadTool(
       ? 'gmail.read_thread'
       : undefined;
   }
+  if (request.weeklyCalendarPlan) {
+    const availabilitySucceeded = evidence.some((row) => matchingCalendarRead(row, request));
+    if (!availabilitySucceeded && attempts(evidence, 'calendar.availability') < 2)
+      return 'calendar.availability';
+
+    const interval = calendarReadInterval(request);
+    const pages = evidence
+      .filter((row) => {
+        if (row.toolName !== 'calendar.list_events' || !succeeded(row)) return false;
+        const args = argsRecord(row);
+        if (Array.isArray(args?.calendarIds) && args.calendarIds.length > 0) return false;
+        return (
+          !interval || (args?.timeMin === interval.start && args?.timeMax === interval.endExclusive)
+        );
+      })
+      .slice(0, 3);
+    let expectedPageToken: string | undefined;
+    for (let index = 0; index < pages.length && index < 3; index += 1) {
+      const page = pages[index];
+      if (!page) break;
+      const args = argsRecord(page);
+      if ((args?.pageToken || undefined) !== expectedPageToken) break;
+      const result =
+        page.result && typeof page.result === 'object'
+          ? (page.result as Record<string, unknown>)
+          : undefined;
+      const token = result?.nextPageToken;
+      if (typeof token !== 'string' || token.length === 0 || token.length > 4096) {
+        expectedPageToken = undefined;
+        break;
+      }
+      expectedPageToken = token;
+    }
+    if (pages.length === 0) {
+      const attempted = evidence.filter(
+        (row) =>
+          row.toolName === 'calendar.list_events' && argsRecord(row)?.pageToken === undefined,
+      ).length;
+      return attempted < 2 ? 'calendar.list_events' : undefined;
+    }
+    const lastPage = pages.at(-1);
+    const lastArgs = lastPage ? argsRecord(lastPage) : undefined;
+    const lastResult =
+      lastPage?.result && typeof lastPage.result === 'object'
+        ? (lastPage.result as Record<string, unknown>)
+        : undefined;
+    if (expectedPageToken && pages.length < 3) {
+      const attempted = evidence.filter(
+        (row) =>
+          row.toolName === 'calendar.list_events' &&
+          argsRecord(row)?.pageToken === expectedPageToken,
+      ).length;
+      return attempted < 2 ? 'calendar.list_events' : undefined;
+    }
+    if (!lastResult || !Array.isArray(lastResult.events)) {
+      const attempted = evidence.filter(
+        (row) =>
+          row.toolName === 'calendar.list_events' &&
+          (argsRecord(row)?.pageToken || undefined) === (lastArgs?.pageToken || undefined),
+      ).length;
+      if (attempted < 2) return 'calendar.list_events';
+    }
+    return undefined;
+  }
   if (request.kind === 'drive' || request.kind === 'memory' || request.kind === 'knowledge_graph') {
     if (evidence.some((row) => matchingPrivateRead(row, request))) return undefined;
     return attempts(evidence, request.firstToolName) < 2 ? request.firstToolName : undefined;
@@ -2091,12 +2166,45 @@ export function groundReadToolInput(
 ): Record<string, unknown> {
   if (request.temporalIssue || request.scopeIssue) return {};
   if (toolName === 'calendar.list_events') {
-    const { calendarIds: _ignored, ...allCalendars } = input;
+    const { calendarIds: _ignored, ...unboundCalendarArgs } = input;
+    const allCalendars = request.weeklyCalendarPlan
+      ? (({ pageToken: _untrustedPageToken, ...args }) => args)(unboundCalendarArgs)
+      : unboundCalendarArgs;
     const interval = calendarReadInterval(request);
     return {
       ...allCalendars,
       ...(interval ? { timeMin: interval.start, timeMax: interval.endExclusive } : {}),
       maxResults: request.maxResults ?? 50,
+      ...(request.weeklyCalendarPlan
+        ? (() => {
+            const pages = evidence
+              .filter((row) => {
+                if (row.toolName !== 'calendar.list_events' || !succeeded(row)) return false;
+                const args = argsRecord(row);
+                return (
+                  args?.timeMin === interval?.start && args?.timeMax === interval?.endExclusive
+                );
+              })
+              .slice(0, 3);
+            let token: unknown;
+            let expectedPageToken: string | undefined;
+            for (const page of pages) {
+              if ((argsRecord(page)?.pageToken || undefined) !== expectedPageToken) break;
+              const result =
+                page.result && typeof page.result === 'object'
+                  ? (page.result as Record<string, unknown>)
+                  : undefined;
+              token = result?.nextPageToken;
+              expectedPageToken =
+                typeof token === 'string' && token.length > 0 && token.length <= 4096
+                  ? token
+                  : undefined;
+            }
+            return typeof token === 'string' && token.length > 0 && token.length <= 4096
+              ? { pageToken: token }
+              : {};
+          })()
+        : {}),
     };
   }
   if (toolName === 'calendar.search_events') {

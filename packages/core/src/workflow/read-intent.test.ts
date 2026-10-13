@@ -48,6 +48,73 @@ describe('detectPersonalReadRequest', () => {
     },
   );
 
+  it('routes an owner weekly planning request through availability plus bounded event pages', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Review my calendar for next week and identify scheduling conflicts and overloaded days. Find three realistic 90-minute focus blocks during working hours, allowing time for travel and breaks. Recommend changes, but show me the plan before editing my calendar.',
+      ),
+      { now: new Date('2026-10-09T12:00:00.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    expect(request).toMatchObject({
+      kind: 'calendar',
+      weeklyCalendarPlan: true,
+      firstToolName: 'calendar.availability',
+      queryTerms: [],
+      timeWindow: {
+        timeMin: '2026-10-12T07:00:00.000Z',
+        timeMax: '2026-10-19T07:00:00.000Z',
+      },
+    });
+    if (!request) throw new Error('expected a typed weekly plan request');
+    expect(nextRequiredReadTool(request, [])).toBe('calendar.availability');
+    const availability: ReadToolEvidence = {
+      toolName: 'calendar.availability',
+      status: 'succeeded',
+      args: { timeMin: request.timeWindow?.timeMin, timeMax: request.timeWindow?.timeMax },
+      result: { busy: [], complete: true },
+    };
+    expect(nextRequiredReadTool(request, [availability])).toBe('calendar.list_events');
+    const firstPage: ReadToolEvidence = {
+      toolName: 'calendar.list_events',
+      status: 'succeeded',
+      args: { timeMin: request.timeWindow?.timeMin, timeMax: request.timeWindow?.timeMax },
+      result: { events: [], complete: false, nextPageToken: 'page-two' },
+    };
+    expect(nextRequiredReadTool(request, [availability, firstPage])).toBe('calendar.list_events');
+    expect(
+      groundReadToolInput(request, 'calendar.list_events', { pageToken: 'model-forged' }, [
+        availability,
+        firstPage,
+      ]),
+    ).toMatchObject({ pageToken: 'page-two', maxResults: 50 });
+    const secondPage: ReadToolEvidence = {
+      toolName: 'calendar.list_events',
+      status: 'succeeded',
+      args: {
+        timeMin: request.timeWindow?.timeMin,
+        timeMax: request.timeWindow?.timeMax,
+        pageToken: 'page-two',
+      },
+      result: { events: [], complete: false, nextPageToken: 'page-three' },
+    };
+    expect(nextRequiredReadTool(request, [availability, firstPage, secondPage])).toBe(
+      'calendar.list_events',
+    );
+    const thirdPage: ReadToolEvidence = {
+      toolName: 'calendar.list_events',
+      status: 'succeeded',
+      args: {
+        timeMin: request.timeWindow?.timeMin,
+        timeMax: request.timeWindow?.timeMax,
+        pageToken: 'page-three',
+      },
+      result: { events: [], complete: false, nextPageToken: 'page-four' },
+    };
+    expect(
+      nextRequiredReadTool(request, [availability, firstPage, secondPage, thirdPage]),
+    ).toBeUndefined();
+  });
+
   it('requires mailbox source reads for a requested reservation card while keeping other actions separate', () => {
     expect(
       detectPersonalReadRequest(

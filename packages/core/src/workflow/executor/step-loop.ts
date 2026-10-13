@@ -197,6 +197,12 @@ function renderPlan(plan: Plan): string {
 }
 
 function readLookupDirective(request: PersonalReadRequest): string {
+  if (request.weeklyCalendarPlan) {
+    return [
+      '\nThis is a read-only weekly calendar review. Read free/busy and every event page for the exact owner-resolved week.',
+      'Keep incomplete calendar coverage explicit, use only the checked calendar data, and do not create, edit, move, or delete calendar events.',
+    ].join('\n');
+  }
   const terms =
     request.queryTerms.length > 0 ? ` Search terms: ${request.queryTerms.join(' ')}.` : '';
   if (request.kind === 'drive') {
@@ -234,6 +240,12 @@ function readLookupDirective(request: PersonalReadRequest): string {
  * one than a model told only to be careful.
  */
 function readAnswerDirective(request: PersonalReadRequest): string {
+  if (request.weeklyCalendarPlan) {
+    return [
+      '\nThe required weekly calendar reads have run. Give a concise review-only plan from the deterministic source summary, with incomplete coverage and assumptions stated plainly.',
+      'Do not claim a block is confirmed free when source coverage is incomplete. Do not call calendar write tools or imply that any change was made.',
+    ].join('\n');
+  }
   if (request.answerFocus) {
     return [
       '\nThe required sources have been read. Answer the latest question directly, with no more tool calls.',
@@ -261,6 +273,23 @@ function readAnswerDirective(request: PersonalReadRequest): string {
       : 'Every event the calendar returned for this window has to appear in your answer; do not drop one.',
     'Your answer is checked against those results before it goes out. If it does not match them, the owner gets a plain generated list instead of your reply \u2014 so keep it faithful and it goes out in your voice.',
   ].join('\n');
+}
+
+function personalReadNeedsAttention(
+  request: PersonalReadRequest,
+  checked: {
+    blocked: boolean;
+    text: string;
+    weeklyPlanAssessment?: { coverageComplete: boolean; slotCount: number };
+  },
+): boolean {
+  if (request.upcomingFlightDiscovery && checked.blocked) return true;
+  if (!request.weeklyCalendarPlan) return false;
+  return (
+    Boolean(request.temporalIssue) ||
+    checked.weeklyPlanAssessment?.coverageComplete !== true ||
+    checked.weeklyPlanAssessment.slotCount < 3
+  );
 }
 
 function readRoutingFailure(request: PersonalReadRequest, toolName: string): string {
@@ -1688,19 +1717,19 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       }
       if (checked.blocked || isUnattendedGoalSession(task) || readAnswerAttempted) {
         rc.window.push({ role: 'assistant', content: checked.text } as ModelMessage);
+        const needsAttention = personalReadNeedsAttention(readRequest, checked);
         return stageReadFinal({
           text: checked.text,
           progress: checked.text.slice(0, 200),
-          terminalStatus:
-            checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
-          outcome:
-            checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
+          terminalStatus: needsAttention ? 'needs_attention' : 'done',
+          outcome: needsAttention ? 'needs_attention' : 'done',
           contractBlocked: checked.blocked,
           contractUnsupportedCount: checked.unsupported.length,
-          contractNotice: checked.blocked || undefined,
+          contractNotice: checked.blocked || needsAttention || undefined,
           preserveCheckedReadResponse:
+            needsAttention ||
             (readRequest.upcomingFlightDiscovery &&
-              (checked.blocked || requestChecklistHasUnfinished(state.requestChecklist))) ||
+              requestChecklistHasUnfinished(state.requestChecklist)) ||
             undefined,
         });
       }
@@ -2953,19 +2982,19 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         readToolEvidence.map((row) => ({ ...row, result: row.result })),
       );
       rc.window.push({ role: 'assistant', content: checked.text } as ModelMessage);
+      const needsAttention = personalReadNeedsAttention(readRequest, checked);
       return stageReadFinal({
         text: checked.text,
         progress: checked.text.slice(0, 200),
-        terminalStatus:
-          checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
-        outcome:
-          checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
+        terminalStatus: needsAttention ? 'needs_attention' : 'done',
+        outcome: needsAttention ? 'needs_attention' : 'done',
         contractBlocked: checked.blocked,
         contractUnsupportedCount: checked.unsupported.length,
-        contractNotice: checked.blocked || undefined,
+        contractNotice: checked.blocked || needsAttention || undefined,
         preserveCheckedReadResponse:
+          needsAttention ||
           (readRequest.upcomingFlightDiscovery &&
-            (checked.blocked || requestChecklistHasUnfinished(state.requestChecklist))) ||
+            requestChecklistHasUnfinished(state.requestChecklist)) ||
           undefined,
       });
     }
@@ -3049,18 +3078,19 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       readToolEvidence.map((row) => ({ ...row, result: row.result })),
     );
     rc.window.push({ role: 'assistant', content: checked.text } as ModelMessage);
+    const needsAttention = personalReadNeedsAttention(readRequest, checked);
     return stageReadFinal({
       text: checked.text,
       progress: checked.text.slice(0, 200),
-      terminalStatus:
-        checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
-      outcome: checked.blocked && readRequest.upcomingFlightDiscovery ? 'needs_attention' : 'done',
+      terminalStatus: needsAttention ? 'needs_attention' : 'done',
+      outcome: needsAttention ? 'needs_attention' : 'done',
       contractBlocked: checked.blocked,
       contractUnsupportedCount: checked.unsupported.length,
-      contractNotice: checked.blocked || undefined,
+      contractNotice: checked.blocked || needsAttention || undefined,
       preserveCheckedReadResponse:
+        needsAttention ||
         (readRequest.upcomingFlightDiscovery &&
-          (checked.blocked || requestChecklistHasUnfinished(state.requestChecklist))) ||
+          requestChecklistHasUnfinished(state.requestChecklist)) ||
         undefined,
     });
   }

@@ -1,0 +1,457 @@
+import { describe, expect, it } from 'vitest';
+import { weeklyCalendarPlan, weeklyCalendarPlanResult } from './weekly-calendar-plan.js';
+
+const timeMin = '2026-10-12T07:00:00.000Z';
+const timeMax = '2026-10-19T07:00:00.000Z';
+
+function evidence(
+  options: {
+    timeMin?: string;
+    timeMax?: string;
+    busy?: unknown[];
+    availabilityComplete?: boolean;
+    unavailable?: unknown[];
+    pages?: Array<Record<string, unknown>>;
+  } = {},
+) {
+  return [
+    {
+      toolName: 'calendar.availability',
+      status: 'succeeded',
+      args: { timeMin: options.timeMin ?? timeMin, timeMax: options.timeMax ?? timeMax },
+      result: {
+        busy: options.busy ?? [],
+        complete: options.availabilityComplete ?? true,
+        unavailable: options.unavailable ?? [],
+        calendarsChecked: ['Work', 'Personal'],
+      },
+    },
+    ...(options.pages ?? [
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        args: {
+          timeMin: options.timeMin ?? timeMin,
+          timeMax: options.timeMax ?? timeMax,
+          maxResults: 50,
+        },
+        result: { events: [], complete: true, calendarRosterComplete: true, unavailable: [] },
+      },
+    ]),
+  ];
+}
+
+describe('weeklyCalendarPlan', () => {
+  it('proposes three weekday focus blocks and states that no calendar was edited', () => {
+    const text = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence() as never,
+    });
+    expect(text).toContain('review-only plan for next week');
+    expect(text).toContain('I haven’t changed your calendar.');
+    expect(text.match(/\(90 minutes\)/g)).toHaveLength(3);
+    expect(text).toContain('15-minute break');
+    expect(text).toContain('assumed to be 9 AM–5 PM');
+  });
+
+  it('keeps incomplete coverage tentative and names unavailable calendars without claiming clear time', () => {
+    const text = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        availabilityComplete: false,
+        unavailable: ['Shared calendar'],
+      }) as never,
+    });
+    expect(text).toContain('Coverage is incomplete');
+    expect(text).toContain('Shared calendar');
+    expect(text).toContain('not confirmed free');
+    expect(text).not.toContain('no overlapping attended events');
+  });
+
+  it('does not infer free time from malformed busy intervals', () => {
+    const text = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({ busy: [{ start: 'not-a-date', end: 'also-not-a-date' }] }) as never,
+    });
+    expect(text).toContain('Free/busy coverage could not be fully verified');
+    expect(text).toContain('did not suggest focus times');
+    expect(text).not.toContain('Tentative focus blocks');
+    expect(text).not.toContain('I found no overlapping attended events');
+  });
+
+  it('uses event attendance for conflicts and treats shared-calendar uncertainty as potential', () => {
+    const events = [
+      {
+        eventId: 'a',
+        calendarId: 'work',
+        summary: 'Review',
+        start: '2026-10-12T17:00:00Z',
+        end: '2026-10-12T18:00:00Z',
+        ownerResponse: 'accepted',
+        blocksTime: true,
+      },
+      {
+        eventId: 'b',
+        calendarId: 'shared',
+        summary: 'Shared hold',
+        start: '2026-10-12T17:30:00Z',
+        end: '2026-10-12T18:30:00Z',
+        blocksTime: true,
+      },
+    ];
+    const rows = evidence({
+      pages: [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          args: { timeMin, timeMax },
+          result: { events, complete: true, calendarRosterComplete: true, unavailable: [] },
+        },
+      ],
+    });
+    const text = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: rows as never,
+    });
+    expect(text).toContain('Possible overlap: Review and Shared hold');
+    expect(text).not.toContain('Scheduling conflict: Review and Shared hold');
+    expect(text).toContain('Recommended check: confirm whether you need to attend');
+  });
+
+  it('recommends reviewing verified conflicts without choosing which event to move', () => {
+    const rows = evidence({
+      pages: [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          args: { timeMin, timeMax },
+          result: {
+            events: [
+              {
+                eventId: 'a',
+                calendarId: 'work',
+                summary: 'Planning',
+                start: '2026-10-12T17:00:00Z',
+                end: '2026-10-12T18:00:00Z',
+                ownerResponse: 'accepted',
+                blocksTime: true,
+              },
+              {
+                eventId: 'b',
+                calendarId: 'personal',
+                summary: 'Appointment',
+                start: '2026-10-12T17:30:00Z',
+                end: '2026-10-12T18:30:00Z',
+                ownerResponse: 'accepted',
+                blocksTime: true,
+              },
+            ],
+            complete: true,
+            calendarRosterComplete: true,
+            unavailable: [],
+          },
+        },
+      ],
+    });
+    const text = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: rows as never,
+    });
+    expect(text).toContain('Scheduling conflict: Planning and Appointment');
+    expect(text).toContain('Recommended change: review the overlapping events');
+    expect(text).not.toContain('I found no overlapping attended events');
+    expect(text).not.toContain('move Planning');
+    expect(text).not.toContain('move Appointment');
+  });
+
+  it('does not call an all-day hotel conflict or use it as attendance evidence', () => {
+    const rows = evidence({
+      pages: [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          args: { timeMin, timeMax },
+          result: {
+            events: [
+              {
+                eventId: 'hotel',
+                calendarId: 'travel',
+                summary: 'Hotel stay',
+                start: '2026-10-12T07:00:00Z',
+                end: '2026-10-14T07:00:00Z',
+                allDay: true,
+                ownerResponse: 'accepted',
+                blocksTime: true,
+              },
+              {
+                eventId: 'meeting',
+                calendarId: 'work',
+                summary: 'Meeting',
+                start: '2026-10-12T17:00:00Z',
+                end: '2026-10-12T18:00:00Z',
+                ownerResponse: 'accepted',
+                blocksTime: true,
+              },
+            ],
+            complete: true,
+            calendarRosterComplete: true,
+            unavailable: [],
+          },
+        },
+      ],
+    });
+    const text = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: rows as never,
+    });
+    expect(text).not.toContain('Scheduling conflict: Hotel stay');
+  });
+
+  it('does not treat a multi-day hotel reservation as an attendance conflict or travel event', () => {
+    const rows = evidence({
+      pages: [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          args: { timeMin, timeMax },
+          result: {
+            events: [
+              {
+                eventId: 'hotel',
+                calendarId: 'travel',
+                summary: 'Hotel stay',
+                start: '2026-10-12T07:00:00Z',
+                end: '2026-10-16T07:00:00Z',
+                ownerResponse: 'accepted',
+                blocksTime: true,
+                location: 'Downtown',
+              },
+              {
+                eventId: 'meeting',
+                calendarId: 'work',
+                summary: 'Planning meeting',
+                start: '2026-10-12T17:00:00Z',
+                end: '2026-10-12T18:00:00Z',
+                ownerResponse: 'accepted',
+                blocksTime: true,
+              },
+            ],
+            complete: true,
+            calendarRosterComplete: true,
+            unavailable: [],
+          },
+        },
+      ],
+    });
+    const text = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: rows as never,
+    });
+    expect(text).not.toContain('Possible overlap: Hotel stay');
+    expect(text).not.toContain('Scheduling conflict: Hotel stay');
+    expect(text).not.toContain('travel buffer around explicitly in-person events');
+  });
+
+  it('recognizes a long stay from explicit lodging description when the property title is not generic', () => {
+    const rows = evidence({
+      pages: [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          args: { timeMin, timeMax },
+          result: {
+            events: [
+              {
+                eventId: 'hotel-screen-title',
+                calendarId: 'travel',
+                summary: 'NH Collection Berlin Mitte am Checkpoint Charlie',
+                description:
+                  'Hotel reservation: overnight stay, check in October 12 and check out October 16.',
+                start: '2026-10-12T07:00:00Z',
+                end: '2026-10-16T07:00:00Z',
+                ownerResponse: 'accepted',
+                blocksTime: true,
+                location: 'Berlin',
+              },
+              {
+                eventId: 'meeting',
+                calendarId: 'work',
+                summary: 'Planning meeting',
+                start: '2026-10-12T17:00:00Z',
+                end: '2026-10-12T18:00:00Z',
+                ownerResponse: 'accepted',
+                blocksTime: true,
+              },
+            ],
+            complete: true,
+            calendarRosterComplete: true,
+            unavailable: [],
+          },
+        },
+      ],
+    });
+    const text = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: rows as never,
+    });
+    expect(text).not.toContain('Possible overlap: NH Collection');
+    expect(text).not.toContain('Scheduling conflict: NH Collection');
+    expect(text).not.toContain('travel buffer around explicitly in-person events');
+  });
+
+  it('keeps an unclassified long blocking engagement as a possible overlap', () => {
+    const rows = evidence({
+      pages: [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          args: { timeMin, timeMax },
+          result: {
+            events: [
+              {
+                eventId: 'retreat',
+                calendarId: 'work',
+                summary: 'Leadership retreat',
+                start: '2026-10-12T07:00:00Z',
+                end: '2026-10-14T07:00:00Z',
+                ownerResponse: 'accepted',
+                blocksTime: true,
+              },
+              {
+                eventId: 'meeting',
+                calendarId: 'work',
+                summary: 'Planning meeting',
+                start: '2026-10-12T17:00:00Z',
+                end: '2026-10-12T18:00:00Z',
+                ownerResponse: 'accepted',
+                blocksTime: true,
+              },
+            ],
+            complete: true,
+            calendarRosterComplete: true,
+            unavailable: [],
+          },
+        },
+      ],
+    });
+    const text = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: rows as never,
+    });
+    expect(text).toContain('Possible overlap: Leadership retreat and Planning meeting');
+    expect(text).not.toContain('Scheduling conflict: Leadership retreat');
+  });
+
+  it('can place three blocks across two usable days without overlapping the break interval', () => {
+    const busy = [
+      { start: '2026-10-14T16:00:00Z', end: '2026-10-15T00:00:00Z' },
+      { start: '2026-10-15T16:00:00Z', end: '2026-10-16T00:00:00Z' },
+      { start: '2026-10-16T16:00:00Z', end: '2026-10-17T00:00:00Z' },
+    ];
+    const text = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({ busy }) as never,
+    });
+    const slots = text.split('\n').filter((line) => line.startsWith('- '));
+    expect(slots).toHaveLength(3);
+    expect(new Set(slots.map((line) => line.slice(2, 13))).size).toBe(2);
+    expect(text).not.toContain('couldn’t identify suitable 90-minute blocks');
+  });
+
+  it('reports a typed shortfall when fewer than three blocks fit', () => {
+    const busy = [
+      { start: '2026-10-12T16:00:00Z', end: '2026-10-13T00:00:00Z' },
+      { start: '2026-10-13T17:45:00Z', end: '2026-10-14T00:00:00Z' },
+      { start: '2026-10-14T16:00:00Z', end: '2026-10-15T00:00:00Z' },
+      { start: '2026-10-15T16:00:00Z', end: '2026-10-16T00:00:00Z' },
+      { start: '2026-10-16T16:00:00Z', end: '2026-10-17T00:00:00Z' },
+    ];
+    const result = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({ busy }) as never,
+    });
+    expect(result).toMatchObject({ coverageComplete: true, slotCount: 1 });
+    expect(result.text).toContain('I found 1 of 3 requested focus blocks');
+  });
+
+  it('uses DST-aware local labels and refuses to suggest times without a timezone', () => {
+    const afterDst = weeklyCalendarPlan({
+      timeMin: '2026-11-02T08:00:00.000Z',
+      timeMax: '2026-11-09T08:00:00.000Z',
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        timeMin: '2026-11-02T08:00:00.000Z',
+        timeMax: '2026-11-09T08:00:00.000Z',
+      }) as never,
+    });
+    expect(afterDst).toContain('Mon, Nov 2');
+    const missingZone = weeklyCalendarPlan({ timeMin, timeMax, evidence: evidence() as never });
+    expect(missingZone).toContain('time zone is unavailable');
+    expect(missingZone).not.toContain('Tentative focus blocks');
+  });
+
+  it('only includes strict Google Calendar event URLs', () => {
+    const rows = evidence({
+      pages: [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          args: { timeMin, timeMax },
+          result: {
+            events: [
+              {
+                eventId: 'safe',
+                summary: 'Planning',
+                start: '2026-10-12T18:00:00Z',
+                end: '2026-10-12T18:30:00Z',
+                links: [
+                  { type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=abc' },
+                ],
+              },
+              {
+                eventId: 'unsafe',
+                summary: 'Private',
+                start: '2026-10-12T19:00:00Z',
+                end: '2026-10-12T19:30:00Z',
+                links: [{ type: 'calendar', url: 'https://example.test/event/secret' }],
+              },
+            ],
+            complete: true,
+            calendarRosterComplete: true,
+            unavailable: [],
+          },
+        },
+      ],
+    });
+    const text = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: rows as never,
+    });
+    expect(text).toContain('https://calendar.google.com/calendar/event?eid=abc');
+    expect(text).not.toContain('example.test');
+  });
+});
