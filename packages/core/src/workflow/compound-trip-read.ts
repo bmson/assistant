@@ -1652,7 +1652,7 @@ export function compoundTripReadProjection(
       const link = partialMailLinks.get(segment.threadId);
       return link
         ? [
-            `Flight details in a partially read booking email, not verified as the next trip or matched to a calendar flight: ${formatFlightSegment(segment)} [Booking email](${link}).`,
+            `Flight details in a partially read email, not verified as a booking, the next trip, or a match to a calendar flight: ${formatFlightSegment(segment)} [Email source](${link}).`,
           ]
         : [];
     }),
@@ -1661,13 +1661,13 @@ export function compoundTripReadProjection(
       if (!link) return [];
       const label = candidate.hotelName || candidate.subject || 'Accommodation record';
       const details = [
-        candidate.city,
+        candidate.city ? markdownText(candidate.city) : undefined,
         candidate.checkIn && candidate.checkOut
           ? `${candidate.checkIn} to ${candidate.checkOut}`
           : undefined,
       ].filter(Boolean);
       return [
-        `Accommodation candidate in a partially read booking email${details.length ? ` (${details.join('; ')})` : ''}; it is not linked to a flight: ${markdownText(label)} [Booking email](${link}).`,
+        `Accommodation candidate in a partially read email${details.length ? ` (${details.join('; ')})` : ''}; the reservation is not verified or linked to a flight: ${markdownText(label)} [Email source](${link}).`,
       ];
     }),
   ];
