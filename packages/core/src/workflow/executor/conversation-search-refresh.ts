@@ -4,7 +4,10 @@ import type {
   ConversationSearchSourceRef,
   ExecutionEvidenceRecord,
 } from '@assistant/persistence';
-import { conversationMessageSourceRevision } from '@assistant/persistence';
+import {
+  conversationMessageSourceRevision,
+  validConversationSpeaker,
+} from '@assistant/persistence';
 import type { ModelMessage } from 'ai';
 
 const MAX_SEARCH_CALLS = 3;
@@ -142,8 +145,13 @@ function queryInput(input: unknown): { query: string; limit: number } | null {
 }
 
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  const optional = ['role', 'origin', 'speakerRevision'];
   const keys = Object.keys(value);
-  return keys.every((key) => allowed.includes(key)) && allowed.every((key) => key in value);
+  return (
+    validConversationSpeaker(value) &&
+    keys.every((key) => allowed.includes(key) || optional.includes(key)) &&
+    allowed.every((key) => key in value)
+  );
 }
 
 function parseSourceRefs(value: unknown): { refs: ConversationSearchSourceRef[]; valid: boolean } {
@@ -201,6 +209,9 @@ function parseSourceRefs(value: unknown): { refs: ConversationSearchSourceRef[];
       messageId: match.messageId,
       conversationId: match.conversationId,
       sourceRevision: match.sourceRevision,
+      ...(typeof match.speakerRevision === 'string'
+        ? { speakerRevision: match.speakerRevision, role: match.role, origin: match.origin }
+        : {}),
     });
   }
   return { refs, valid: true };
@@ -456,13 +467,27 @@ export async function refreshResumedConversationSearch(
         observationGeneration = refreshed.observationGeneration;
         observationGenerationSeen = true;
       }
+      // Semantic hits cannot be reproduced by the bounded text refresh. When
+      // every original source reference and speaker revision is still current,
+      // keep that exact validated snapshot instead of replacing it with an
+      // unrelated literal-query result (often the owner's current question).
+      const retainedSemanticSnapshot =
+        refsUnchanged &&
+        parsed.refs.length > 0 &&
+        parsed.refs.every((ref) => typeof ref.speakerRevision === 'string') &&
+        record(stored.value)?.mode === 'semantic'
+          ? stored.value
+          : undefined;
       results.push({
         call,
-        value: {
+        value: retainedSemanticSnapshot ?? {
           mode: 'text',
           matches: refreshed.matches.map((match) => ({
             messageId: match.messageId,
             sourceRevision: match.sourceRevision,
+            ...(typeof match.speakerRevision === 'string'
+              ? { speakerRevision: match.speakerRevision, role: match.role, origin: match.origin }
+              : {}),
             conversationId: match.conversationId,
             text: match.text,
             createdAt: match.createdAt.toISOString(),

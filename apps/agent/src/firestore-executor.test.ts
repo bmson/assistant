@@ -203,7 +203,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       } as unknown as ExecutorDeps['dispatcher'];
 
       const result = await executeTask(deps, current.id);
-      expect(result).toMatchObject({ outcome: 'done' });
+      expect(result.outcome, JSON.stringify(result)).toBe('done');
       expect(step).toHaveBeenCalledOnce();
       expect(dispatch).toHaveBeenCalledOnce();
       expect(dispatch).toHaveBeenCalledWith(

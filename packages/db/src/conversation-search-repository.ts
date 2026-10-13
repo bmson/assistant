@@ -1,6 +1,7 @@
 import type { ConversationSearchRepository } from '@assistant/persistence';
 import {
   conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
   historyLimit,
   validateSkillEmbedding,
 } from '@assistant/persistence';
@@ -63,7 +64,8 @@ export function createPostgresConversationSearchRepository(db: Db): Conversation
           !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
             ref.conversationId,
           ) ||
-          !/^[a-f0-9]{64}$/.test(ref.sourceRevision)
+          !/^[a-f0-9]{64}$/.test(ref.sourceRevision) ||
+          (ref.speakerRevision !== undefined && !/^[a-f0-9]{64}$/.test(ref.speakerRevision))
         )
           throw new Error('Invalid conversation source identity');
       }
@@ -74,6 +76,8 @@ export function createPostgresConversationSearchRepository(db: Db): Conversation
                 messageId: messages.id,
                 conversationId: messages.conversationId,
                 text: messages.text,
+                role: messages.role,
+                origin: messages.origin,
               })
               .from(messages)
               .innerJoin(conversations, eq(conversations.id, messages.conversationId))
@@ -93,7 +97,14 @@ export function createPostgresConversationSearchRepository(db: Db): Conversation
             const row = byId.get(ref.messageId);
             return (
               row?.conversationId === ref.conversationId &&
-              conversationMessageSourceRevision(ref.messageId, row.text) === ref.sourceRevision
+              conversationMessageSourceRevision(ref.messageId, row.text) === ref.sourceRevision &&
+              (ref.speakerRevision === undefined ||
+                conversationMessageSpeakerRevision(
+                  ref.messageId,
+                  row.text,
+                  row.role,
+                  row.origin ?? 'unknown',
+                ) === ref.speakerRevision)
             );
           }),
           observationGeneration,
@@ -114,7 +125,8 @@ export function createPostgresConversationSearchRepository(db: Db): Conversation
           !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
             ref.conversationId,
           ) ||
-          !/^[a-f0-9]{64}$/.test(ref.sourceRevision)
+          !/^[a-f0-9]{64}$/.test(ref.sourceRevision) ||
+          (ref.speakerRevision !== undefined && !/^[a-f0-9]{64}$/.test(ref.speakerRevision))
         )
           throw new Error('Invalid resumed conversation source identity');
       }
@@ -125,6 +137,8 @@ export function createPostgresConversationSearchRepository(db: Db): Conversation
                 messageId: messages.id,
                 conversationId: messages.conversationId,
                 text: messages.text,
+                role: messages.role,
+                origin: messages.origin,
                 createdAt: messages.createdAt,
               })
               .from(messages)
@@ -144,7 +158,14 @@ export function createPostgresConversationSearchRepository(db: Db): Conversation
           const row = sourceById.get(ref.messageId);
           return (
             row?.conversationId === ref.conversationId &&
-            conversationMessageSourceRevision(ref.messageId, row.text) === ref.sourceRevision
+            conversationMessageSourceRevision(ref.messageId, row.text) === ref.sourceRevision &&
+            (ref.speakerRevision === undefined ||
+              conversationMessageSpeakerRevision(
+                ref.messageId,
+                row.text,
+                row.role,
+                row.origin ?? 'unknown',
+              ) === ref.speakerRevision)
           );
         });
         const escapedQuery = input.query.replace(/[\\%_]/g, '\\$&');
@@ -153,6 +174,8 @@ export function createPostgresConversationSearchRepository(db: Db): Conversation
             messageId: messages.id,
             conversationId: messages.conversationId,
             text: messages.text,
+            role: messages.role,
+            origin: messages.origin,
             createdAt: messages.createdAt,
           })
           .from(messages)
@@ -175,6 +198,13 @@ export function createPostgresConversationSearchRepository(db: Db): Conversation
             messageId,
             text,
             sourceRevision: conversationMessageSourceRevision(messageId, text),
+            origin: row.origin ?? 'unknown',
+            speakerRevision: conversationMessageSpeakerRevision(
+              messageId,
+              text,
+              row.role,
+              row.origin ?? 'unknown',
+            ),
           })),
           mode: 'text' as const,
           observationGeneration,
@@ -193,6 +223,8 @@ export function createPostgresConversationSearchRepository(db: Db): Conversation
             messageId: messages.id,
             conversationId: messages.conversationId,
             text: messages.text,
+            role: messages.role,
+            origin: messages.origin,
             createdAt: messages.createdAt,
             similarity: sql<number>`1 - (${messages.embedding} <=> ${vector}::vector)`,
           })
@@ -215,6 +247,13 @@ export function createPostgresConversationSearchRepository(db: Db): Conversation
           messageId,
           text,
           sourceRevision: conversationMessageSourceRevision(messageId, text),
+          origin: row.origin ?? 'unknown',
+          speakerRevision: conversationMessageSpeakerRevision(
+            messageId,
+            text,
+            row.role,
+            row.origin ?? 'unknown',
+          ),
         }));
       });
     },
@@ -230,6 +269,8 @@ export function createPostgresConversationSearchRepository(db: Db): Conversation
             messageId: messages.id,
             conversationId: messages.conversationId,
             text: messages.text,
+            role: messages.role,
+            origin: messages.origin,
             createdAt: messages.createdAt,
           })
           .from(messages)
@@ -250,6 +291,13 @@ export function createPostgresConversationSearchRepository(db: Db): Conversation
           messageId,
           text,
           sourceRevision: conversationMessageSourceRevision(messageId, text),
+          origin: row.origin ?? 'unknown',
+          speakerRevision: conversationMessageSpeakerRevision(
+            messageId,
+            text,
+            row.role,
+            row.origin ?? 'unknown',
+          ),
         }));
       });
     },

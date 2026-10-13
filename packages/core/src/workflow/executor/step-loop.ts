@@ -16,7 +16,13 @@ import { listOpenCommitments, renderOpenCommitments } from '../../memory/commitm
 import { getOwnerCard } from '../../memory/consolidation.js';
 import { retrieveOwnerContext } from '../../memory/recall-context.js';
 import { recordRecallMetric } from '../../memory/recall-metrics.js';
-import { bumpSkillUse, recallSkills, renderSkillsBlock } from '../../memory/skills.js';
+import {
+  bumpSkillUse,
+  findActiveSkillByExactName,
+  recallSkills,
+  renderSkillsBlock,
+  requestedSavedSkillName,
+} from '../../memory/skills.js';
 import type { StepCallOutcome } from '../../model-router/router.js';
 import { withSpan } from '../../otel.js';
 import { approvalHeadline, approvalPrompt } from '../../owner-text.js';
@@ -32,8 +38,15 @@ import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-impo
 import { requestedCardIntent } from '../card-intent.js';
 import { taskBoundCorrectionReadRequest } from '../checklist-correction-resume.js';
 import {
+  type CompoundTripExtraction,
+  compoundTripExtractionEvidence,
+  compoundTripSourceMessages,
+  extractCompoundTripBookings,
+} from '../compound-trip-extraction.js';
+import {
   boundEmailReviewThreads,
   EMAIL_REVIEW_MAX_CANDIDATES,
+  EMAIL_REVIEW_MAX_RANK_CANDIDATES,
   EMAIL_REVIEW_MAX_RANK_POOL,
   EmailReviewAnswerSchema,
   EmailReviewRankSchema,
@@ -43,6 +56,7 @@ import {
   emailReviewOwnerMailbox,
   emailReviewPrompt,
   emailReviewRankContext,
+  emailReviewRecentMetadataFallback,
   emailReviewSelectionWithinAuthorizedPool,
   emailReviewVerifiedAnsweredThreadIds,
   formatEmailReviewAnswer,
@@ -79,6 +93,7 @@ import { latestOwnerIntent, type OwnerIntent, ownerAuthoredWindow } from '../own
 import { isConceptualNoToolRequest, PLANNER_VERSION } from '../planner.js';
 import {
   buildReadToolInput,
+  compoundTripSourceReadsSettled,
   detectPersonalReadRequest,
   groundReadToolInput,
   nextRequiredReadTool,
@@ -264,7 +279,9 @@ function readAnswerDirective(request: PersonalReadRequest): string {
         ? 'Identify the lodging, address, or check-in detail only if the returned booking/calendar evidence supports it for the requested stay. Distinguish booking date from travel dates. If several stays match, show their dates and ask which one; if the requested detail is missing, say exactly what could not be confirmed. Never infer a hotel or stay from a nearby event or typical travel plans.'
         : request.answerFocus === 'applications'
           ? 'List only companies whose returned mail establishes an application. Separate application confirmations, rejections, interviews, and job recommendations. An interview or a public job listing alone is not an application receipt. This is the history found in these sources, not necessarily every application ever submitted.'
-          : 'For a flight-time question, use a dated itinerary matching the requested destination and day. Bind the departure time to that same itinerary; never substitute a boarding time or a clock from another message. If the matching sources conflict or do not state one date-bound departure time, say that you could not confirm it.',
+          : request.answerFocus === 'trip'
+            ? 'Use only successful reads from this task. Keep flight and hotel bookings independent unless they share an exact booking identity. Matching destination city and a hotel stay date spanning the calendar flight date only makes a provisional candidate; never describe those sources as the same confirmed itinerary. Route checks are allowed only for that provisional candidate with an explicit arrival airport and hotel street address. Calendar time is displayed in the owner timezone; retain the source timestamp offset and do not relabel it as a named airport timezone. State missing connection, booking-time, hotel, route, transit, or taxi evidence precisely. Never book, edit, contact, or send anything.'
+            : 'For a flight-time question, use a dated itinerary matching the requested destination and day. Bind the departure time to that same itinerary; never substitute a boarding time or a clock from another message. If the matching sources conflict or do not state one date-bound departure time, say that you could not confirm it.',
       'Lead with the answer, then concise source-backed details. Do not substitute an unrelated agenda or ask permission to perform a lookup that already ran. Do not claim any booking, application, save, or reminder was created by this read-only task.',
     ].join('\n');
   }
@@ -298,7 +315,7 @@ function personalReadNeedsAttention(
   return (
     Boolean(request.temporalIssue) ||
     checked.weeklyPlanAssessment?.coverageComplete !== true ||
-    checked.weeklyPlanAssessment.slotCount < 3
+    checked.weeklyPlanAssessment.slotCount < (request.calendarPlanOptions?.slotCount ?? 3)
   );
 }
 
@@ -477,7 +494,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       let malformed = false;
       for (const [key, max] of [
         ['selectedThreadIds', EMAIL_REVIEW_MAX_RANK_POOL],
-        ['rankedCandidateIds', 60],
+        ['rankedCandidateIds', EMAIL_REVIEW_MAX_RANK_CANDIDATES],
         ['rankedThreadIds', EMAIL_REVIEW_MAX_RANK_POOL],
         ['attemptedThreadIds', EMAIL_REVIEW_MAX_RANK_POOL],
         ['excludedThreadIds', EMAIL_REVIEW_MAX_RANK_POOL],
@@ -493,10 +510,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           malformed = true;
           continue;
         }
-        readRequest.emailReview = {
-          ...readRequest.emailReview,
-          [key]: value,
-        };
+        readRequest.emailReview = { ...readRequest.emailReview, [key]: value };
       }
       if (
         record.backfillShortfall === 'rank_pool_exhausted' ||
@@ -509,18 +523,34 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       } else if ('backfillShortfall' in record && record.backfillShortfall !== undefined) {
         malformed = true;
       }
-      if (record.rankingFailed === true) {
+      if (record.rankingSource === 'model' || record.rankingSource === 'recent_metadata_fallback')
+        readRequest.emailReview = {
+          ...readRequest.emailReview,
+          rankingSource: record.rankingSource,
+        };
+      else if ('rankingSource' in record && record.rankingSource !== undefined) malformed = true;
+      if (
+        record.rankingFailureReason === 'router_error' ||
+        record.rankingFailureReason === 'invalid_result'
+      )
+        readRequest.emailReview = {
+          ...readRequest.emailReview,
+          rankingFailureReason: record.rankingFailureReason,
+        };
+      else if ('rankingFailureReason' in record && record.rankingFailureReason !== undefined)
+        malformed = true;
+      if (record.rankingFailed === true)
         readRequest.emailReview = { ...readRequest.emailReview, rankingFailed: true };
-      }
-      if (malformed) {
+      if (malformed)
         readRequest.emailReview = {
           ...readRequest.emailReview,
           selectedThreadIds: [],
           rankingFailed: true,
         };
-      }
     }
   }
+  let compoundTripExtraction: CompoundTripExtraction | undefined;
+  let compoundTripExtractionAttempted = false;
   const stageReadFinal = async (
     pending: Parameters<typeof stageFinalResponse>[4],
   ): Promise<ExecuteResult> => {
@@ -573,12 +603,87 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         };
       }
     }
-    return !restrictedChecklistResume && directOwner && requestedCardIntent(ownerText)
-      ? stageModelFinalResponse(deps, lease, state, rc.window, pending, artifactIntent, {
+    let verifiedCompoundTripChecklist = false;
+    if (
+      readRequest?.compoundTripDiscovery &&
+      pending.contractBlocked === false &&
+      pending.terminalStatus === 'done' &&
+      pending.outcome === 'done' &&
+      pending.contractUnsupportedCount === 0 &&
+      !rc.checklistCancellation &&
+      !rc.checklistCorrection
+    ) {
+      const checklist = state.requestChecklist;
+      const eligibleChecklist = Boolean(
+        checklist &&
+          checklist.request.trim() === ownerText.trim() &&
+          checklist.revision === undefined &&
+          checklist.revisionAudit === undefined &&
+          checklist.cancellationRevision === undefined &&
+          checklist.cancellationAudit === undefined &&
+          checklist.lastOwnerAction === undefined &&
+          checklist.items.length > 0 &&
+          checklist.items.every(
+            (item) =>
+              item.kind === 'lookup' && item.status === 'pending' && !item.ownerCancellation,
+          ),
+      );
+      if (eligibleChecklist && checklist) {
+        const proofRows = await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id });
+        const readRows: ReadToolEvidence[] = proofRows
+          .filter(
+            (row) =>
+              row.status === 'succeeded' &&
+              /^(?:calendar\.(?:list_events|search_events)|gmail\.(?:search|read_thread)|maps\.directions|web\.(?:search|fetch))$/.test(
+                row.toolName,
+              ),
+          )
+          .map((row) => ({ ...row, fromCurrentTask: true }));
+        if (compoundTripExtraction)
+          readRows.push(compoundTripExtractionEvidence(compoundTripExtraction));
+        const independentlyChecked = enforcePersonalReadResponse(
           readRequest,
-          lookupContext,
-        })
-      : stageFinalResponse(deps, lease, state, rc.window, pending);
+          readRows.map((row) => ({ ...row, result: row.result })),
+        );
+        const receipts = proofRows
+          .filter(
+            (row) =>
+              row.status === 'succeeded' &&
+              /^(?:calendar\.(?:list_events|search_events)|gmail\.(?:search|read_thread)|maps\.directions|web\.(?:search|fetch))$/.test(
+                row.toolName,
+              ),
+          )
+          .slice(-256)
+          .map((row) => ({ id: row.id, toolName: row.toolName }));
+        if (!independentlyChecked.blocked && receipts.length > 0) {
+          state.requestChecklist = {
+            ...checklist,
+            items: checklist.items.map((item) => ({
+              ...item,
+              status: 'completed',
+              evidence: receipts,
+              detail: undefined,
+            })),
+          };
+          verifiedCompoundTripChecklist = true;
+        }
+      }
+    }
+    const readContext = {
+      readRequest,
+      lookupContext,
+      verifiedCompoundTripChecklist,
+      ...(compoundTripExtraction ? { compoundTripExtraction } : {}),
+    };
+    return !restrictedChecklistResume &&
+      directOwner &&
+      (requestedCardIntent(ownerText) ||
+        readRequest?.kind === 'memory' ||
+        requestedSavedSkillName(ownerText, latestUserText(rc.window)))
+      ? stageModelFinalResponse(deps, lease, state, rc.window, pending, artifactIntent, readContext)
+      : stageFinalResponse(deps, lease, state, rc.window, pending, {
+          verifiedCompoundTripChecklist,
+        });
   };
   // A conceptual question was explicitly classified before the planner ran.
   // Keep the same no-tool guarantee at execution time: a model may still emit
@@ -746,6 +851,30 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // task is done, not what it is allowed to do. Fetched once and reused across
   // loop iterations — the library is task-stable.
   let skillsBlock: string | undefined;
+  let explicitlyRequestedSkillRetrieved = false;
+  const explicitlyRequestedSkillName = readRequest
+    ? requestedSavedSkillName(ownerText, latestUserText(rc.window))
+    : null;
+  if (!restrictedChecklistResume && explicitlyRequestedSkillName) {
+    try {
+      const skillStorage = deps.persistence?.skills ?? db;
+      const found = await findActiveSkillByExactName(
+        skillStorage,
+        agent.id,
+        explicitlyRequestedSkillName,
+      );
+      if (found) {
+        skillsBlock = renderSkillsBlock([found]);
+        explicitlyRequestedSkillRetrieved = true;
+        if (!state.usedSkillIds.includes(found.id)) {
+          state.usedSkillIds = [...state.usedSkillIds, found.id];
+          await bumpSkillUse(skillStorage, [found.id], agent.id);
+        }
+      }
+    } catch (err) {
+      console.error('named skill lookup failed — continuing without it', err);
+    }
+  }
   if (!restrictedChecklistResume && privilegedTask && !readRequest) {
     const lastUser = [...rc.window].reverse().find((m) => m.role === 'user');
     const skillQuery = [
@@ -1178,7 +1307,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         : [];
     const correctionProjection = rc.checklistCorrection;
     const cancellationProjection = rc.checklistCancellation;
-    const readToolEvidence: ReadToolEvidence[] = correctionProjection
+    let readToolEvidence: ReadToolEvidence[] = correctionProjection
       ? allReadToolEvidence.filter((row) => {
           if (correctionExcludedEvidenceIds.includes(row.id)) return false;
           const decision =
@@ -1210,6 +1339,31 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             );
           })
         : allReadToolEvidence;
+    if (readRequest?.compoundTripDiscovery || readRequest?.upcomingFlightDiscovery) {
+      if (
+        !compoundTripExtractionAttempted &&
+        compoundTripSourceReadsSettled(readRequest, readToolEvidence)
+      ) {
+        const completeSources = compoundTripSourceMessages(readRequest, readToolEvidence);
+        if (completeSources.length > 0) {
+          compoundTripExtractionAttempted = true;
+          compoundTripExtraction = await extractCompoundTripBookings({
+            router: deps.router,
+            taskId: task.id,
+            request: readRequest,
+            evidence: readToolEvidence,
+          });
+        }
+      }
+      // taskEvidence is reloaded on every executor iteration. Keep the one-shot
+      // typed extraction attached so deterministic route and web planning use
+      // the same validated facts after each persisted tool result.
+      if (compoundTripExtraction)
+        readToolEvidence = [
+          ...readToolEvidence,
+          compoundTripExtractionEvidence(compoundTripExtraction),
+        ];
+    }
     if (readRequest?.emailReview?.selectedThreadIds !== undefined) {
       const review = readRequest.emailReview;
       const selectedIds = review.selectedThreadIds ?? [];
@@ -1302,6 +1456,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               ? { backfillShortfall: nextReview.backfillShortfall }
               : {}),
             ...(nextReview.rankingFailed ? { rankingFailed: true } : {}),
+            ...(nextReview.rankingSource ? { rankingSource: nextReview.rankingSource } : {}),
+            ...(nextReview.rankingFailureReason
+              ? { rankingFailureReason: nextReview.rankingFailureReason }
+              : {}),
           };
           if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state)))
             return LOST_LEASE;
@@ -1503,6 +1661,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             ...(next.excludedThreadIds ? { excludedThreadIds: next.excludedThreadIds } : {}),
             ...(next.backfillShortfall ? { backfillShortfall: next.backfillShortfall } : {}),
             ...(next.rankingFailed ? { rankingFailed: true } : {}),
+            ...(next.rankingSource ? { rankingSource: next.rankingSource } : {}),
+            ...(next.rankingFailureReason
+              ? { rankingFailureReason: next.rankingFailureReason }
+              : {}),
           };
           return checkpointTask(deps.persistence?.tasks ?? db, lease, state);
         };
@@ -1542,7 +1704,11 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             return stageEmailReviewResponse(finalText, false);
           } else {
             const rankingContext = emailReviewRankContext(reviewEvidence);
-            let ranked: { ok: boolean; threadIds?: string[] };
+            let ranked: {
+              ok: boolean;
+              threadIds?: string[];
+              failureReason?: 'router_error' | 'invalid_result';
+            } = { ok: false, failureReason: 'invalid_result' };
             try {
               const outcome = await router.object('reason', {
                 taskId: task.id,
@@ -1554,20 +1720,12 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               });
               ranked = outcome.ok
                 ? { ok: true, threadIds: outcome.object.threadIds }
-                : { ok: false };
+                : { ok: false, failureReason: 'invalid_result' };
             } catch {
-              if (
-                !(await persistReview({
-                  ...review,
-                  selectedThreadIds: [],
-                  rankingFailed: true,
-                }))
-              )
-                return LOST_LEASE;
-              state.step += 1;
-              if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state)))
-                return LOST_LEASE;
-              continue;
+              // A model failure is not evidence that no thread needs a reply.
+              // Continue with task-local metadata IDs as read candidates; the
+              // complete-thread checks below remain the eligibility boundary.
+              ranked = { ok: false, failureReason: 'router_error' };
             }
             const rankedIds =
               ranked.ok &&
@@ -1578,15 +1736,29 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               )
                 ? ranked.threadIds
                 : undefined;
-            const nextReview: typeof review = rankedIds
+            const fallbackIds = rankedIds
+              ? undefined
+              : emailReviewRecentMetadataFallback(
+                  reviewEvidence,
+                  rankingContext.candidateIds,
+                ).slice(0, EMAIL_REVIEW_MAX_RANK_POOL);
+            const effectiveRankedIds = rankedIds ?? (fallbackIds?.length ? fallbackIds : undefined);
+            const nextReview: typeof review = effectiveRankedIds
               ? {
                   ...review,
-                  selectedThreadIds: rankedIds.slice(0, EMAIL_REVIEW_MAX_CANDIDATES),
+                  selectedThreadIds: effectiveRankedIds.slice(0, EMAIL_REVIEW_MAX_CANDIDATES),
                   rankedCandidateIds: rankingContext.candidateIds,
-                  rankedThreadIds: rankedIds,
+                  rankedThreadIds: effectiveRankedIds,
                   attemptedThreadIds: [],
                   excludedThreadIds: [],
                   backfillShortfall: undefined,
+                  ...(rankedIds
+                    ? { rankingSource: 'model' as const, rankingFailed: false }
+                    : {
+                        rankingSource: 'recent_metadata_fallback' as const,
+                        rankingFailed: false,
+                        rankingFailureReason: ranked.failureReason ?? 'invalid_result',
+                      }),
                 }
               : {
                   ...review,
@@ -1669,6 +1841,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           bounded.omittedThreadIds.length,
           answeredIds,
           backfillShortfall,
+          readRequest.emailReview.rankingSource === 'recent_metadata_fallback',
         );
         const rankedCandidateIds = readRequest.emailReview.rankedCandidateIds;
         const nonNewsletterCandidates = Math.max(
@@ -1904,15 +2077,25 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         return stageReadFinal({
           text: checked.text,
           progress: checked.text.slice(0, 200),
-          terminalStatus: needsAttention ? 'needs_attention' : 'done',
-          outcome: needsAttention ? 'needs_attention' : 'done',
+          terminalStatus:
+            needsAttention ||
+            (checked.blocked &&
+              (readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery))
+              ? 'needs_attention'
+              : 'done',
+          outcome:
+            needsAttention ||
+            (checked.blocked &&
+              (readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery))
+              ? 'needs_attention'
+              : 'done',
           contractBlocked: checked.blocked,
           contractUnsupportedCount: checked.unsupported.length,
           contractNotice: checked.blocked || needsAttention || undefined,
           preserveCheckedReadResponse:
             needsAttention ||
-            (readRequest.upcomingFlightDiscovery &&
-              requestChecklistHasUnfinished(state.requestChecklist)) ||
+            ((readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery) &&
+              (checked.blocked || requestChecklistHasUnfinished(state.requestChecklist))) ||
             undefined,
         });
       }
@@ -1931,7 +2114,8 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           ownerCard: !state.untrustedContext ? ownerCard : undefined,
           recall: !state.untrustedContext ? recallBlock : undefined,
           openLoops: !state.untrustedContext ? openLoops : undefined,
-          skills: !state.untrustedContext ? skillsBlock : undefined,
+          skills:
+            !state.untrustedContext || explicitlyRequestedSkillRetrieved ? skillsBlock : undefined,
           ambient: !state.untrustedContext ? ambientBlock : undefined,
           tainted: state.untrustedContext,
           // Only the dashboard gets the companion persona and cue vocabulary;
@@ -3178,15 +3362,25 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       return stageReadFinal({
         text: checked.text,
         progress: checked.text.slice(0, 200),
-        terminalStatus: needsAttention ? 'needs_attention' : 'done',
-        outcome: needsAttention ? 'needs_attention' : 'done',
+        terminalStatus:
+          needsAttention ||
+          (checked.blocked &&
+            (readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery))
+            ? 'needs_attention'
+            : 'done',
+        outcome:
+          needsAttention ||
+          (checked.blocked &&
+            (readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery))
+            ? 'needs_attention'
+            : 'done',
         contractBlocked: checked.blocked,
         contractUnsupportedCount: checked.unsupported.length,
         contractNotice: checked.blocked || needsAttention || undefined,
         preserveCheckedReadResponse:
           needsAttention ||
-          (readRequest.upcomingFlightDiscovery &&
-            requestChecklistHasUnfinished(state.requestChecklist)) ||
+          ((readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery) &&
+            (checked.blocked || requestChecklistHasUnfinished(state.requestChecklist))) ||
           undefined,
       });
     }
@@ -3262,10 +3456,15 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // never replace it with generic progress prose or ask the owner to choose a
   // provider. Goal sessions retain their stricter progress-persistence path.
   if (readRequest && !isUnattendedGoalSession(task)) {
-    const readToolEvidence = await evidence.taskEvidence({
+    let readToolEvidence = await evidence.taskEvidence({
       agentId: task.agentId,
       taskId: task.id,
     });
+    if (compoundTripExtraction)
+      readToolEvidence = [
+        ...readToolEvidence,
+        compoundTripExtractionEvidence(compoundTripExtraction) as (typeof readToolEvidence)[number],
+      ];
     const checked = enforcePersonalReadResponse(
       readRequest,
       readToolEvidence.map((row) => ({ ...row, result: row.result })),
@@ -3275,15 +3474,25 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     return stageReadFinal({
       text: checked.text,
       progress: checked.text.slice(0, 200),
-      terminalStatus: needsAttention ? 'needs_attention' : 'done',
-      outcome: needsAttention ? 'needs_attention' : 'done',
+      terminalStatus:
+        needsAttention ||
+        (checked.blocked &&
+          (readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery))
+          ? 'needs_attention'
+          : 'done',
+      outcome:
+        needsAttention ||
+        (checked.blocked &&
+          (readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery))
+          ? 'needs_attention'
+          : 'done',
       contractBlocked: checked.blocked,
       contractUnsupportedCount: checked.unsupported.length,
       contractNotice: checked.blocked || needsAttention || undefined,
       preserveCheckedReadResponse:
         needsAttention ||
-        (readRequest.upcomingFlightDiscovery &&
-          requestChecklistHasUnfinished(state.requestChecklist)) ||
+        ((readRequest.upcomingFlightDiscovery || readRequest.compoundTripDiscovery) &&
+          (checked.blocked || requestChecklistHasUnfinished(state.requestChecklist))) ||
         undefined,
     });
   }

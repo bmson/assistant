@@ -43,11 +43,15 @@ const WRITE_INTO_ARTIFACT =
 export function requestedArtifactIntent(text: string): ArtifactIntent | undefined {
   const normalized = text.trim();
   if (!CREATION_VERB.test(normalized)) return undefined;
+  // Restrictions on other actions do not turn a new-artifact request into an
+  // existing-file edit. Check creation prohibitions against the original text
+  // below, while classifying the positively requested action separately.
+  const positive = normalized.replace(/\b(?:do\s+not|don['’]?t|never)\b[^.!?;\n]*/gi, '');
   if (
-    GOOGLE_ARTIFACT_URL.test(normalized) ||
-    UPDATE_VERB.test(normalized) ||
-    EXISTING_ARTIFACT.test(normalized) ||
-    WRITE_INTO_ARTIFACT.test(normalized)
+    GOOGLE_ARTIFACT_URL.test(positive) ||
+    UPDATE_VERB.test(positive) ||
+    EXISTING_ARTIFACT.test(positive) ||
+    WRITE_INTO_ARTIFACT.test(positive)
   ) {
     return undefined;
   }
@@ -65,11 +69,11 @@ export function requestedArtifactIntent(text: string): ArtifactIntent | undefine
   }
 
   const matches: ArtifactIntent[] = [];
-  if (DOC.test(normalized)) matches.push({ toolName: 'docs.create', label: 'Google Doc' });
-  if (SHEET.test(normalized)) {
+  if (DOC.test(positive)) matches.push({ toolName: 'docs.create', label: 'Google Doc' });
+  if (SHEET.test(positive)) {
     matches.push({ toolName: 'sheets.create', label: 'Google Sheet' });
   }
-  if (SLIDES.test(normalized)) {
+  if (SLIDES.test(positive)) {
     matches.push({ toolName: 'slides.create', label: 'Google Slides presentation' });
   }
   return matches.length === 1 ? matches[0] : undefined;

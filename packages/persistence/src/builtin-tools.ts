@@ -6,6 +6,31 @@ export function conversationMessageSourceRevision(messageId: string, text: strin
   return createHash('sha256').update(messageId).update('\0').update(text).digest('hex');
 }
 
+/** Speaker provenance is bound separately so legacy body-only revisions remain usable. */
+export function conversationMessageSpeakerRevision(
+  messageId: string,
+  text: string,
+  role: string,
+  origin: string,
+): string {
+  return createHash('sha256')
+    .update(JSON.stringify([messageId, text, role, origin]))
+    .digest('hex');
+}
+export function validConversationSpeaker(value: Record<string, unknown>): boolean {
+  const fields = ['role', 'origin', 'speakerRevision'];
+  if (fields.every((key) => !(key in value))) return true;
+  return (
+    typeof value.messageId === 'string' &&
+    typeof value.text === 'string' &&
+    typeof value.role === 'string' &&
+    typeof value.origin === 'string' &&
+    typeof value.speakerRevision === 'string' &&
+    conversationMessageSpeakerRevision(value.messageId, value.text, value.role, value.origin) ===
+      value.speakerRevision
+  );
+}
+
 /** Occasion fields the `occasions.save` tool records for one named person. */
 export interface OccasionToolSaveInput {
   agentId: string;
@@ -59,6 +84,10 @@ export interface ContactLookupRepository {
 
 export interface ConversationSearchMatch {
   messageId: string;
+  /** Recorded speaker; omitted legacy sources cannot establish owner authorship. */
+  role?: string;
+  origin?: string;
+  speakerRevision?: string;
   /** Revision of this exact message body, suitable for stale-source checks. */
   sourceRevision: string;
   conversationId: string;
@@ -68,6 +97,8 @@ export interface ConversationSearchMatch {
 
 /** Owner-scoped message search behind `conversations.search`. */
 export interface ConversationSearchSourceRef {
+  /** Present when the retained search also claims a recorded speaker. */
+  speakerRevision?: string;
   messageId: string;
   conversationId: string;
   sourceRevision: string;

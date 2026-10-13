@@ -107,6 +107,36 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore learned-skill c
     ).rejects.toThrow('embedding space');
   });
 
+  it('resolves an exact active skill name only within the requested owner', async () => {
+    await Promise.all([
+      seed(skill('owner-named', { name: 'Calendar review' })),
+      seed(skill('foreign-named', { name: 'Calendar review', agentId: 'foreign' })),
+      seed(skill('owner-deprecated', { name: 'Deprecated review', deprecated: true })),
+    ]);
+
+    await expect(
+      repository.findByName({ agentId: 'owner', name: 'Calendar review' }),
+    ).resolves.toMatchObject({
+      id: 'owner-named',
+      agentId: 'owner',
+      name: 'Calendar review',
+    });
+    const found = await repository.findByName({ agentId: 'owner', name: 'Calendar review' });
+    expect(found).not.toHaveProperty('embedding');
+    await expect(repository.findByName({ agentId: 'owner', name: 'foreign-named' })).resolves.toBe(
+      null,
+    );
+    await expect(
+      repository.findByName({ agentId: 'owner', name: 'Deprecated review' }),
+    ).resolves.toBe(null);
+    await expect(
+      repository.findByName({ agentId: 'foreign', name: 'Calendar review' }),
+    ).resolves.toMatchObject({
+      id: 'foreign-named',
+      agentId: 'foreign',
+    });
+  });
+
   it('atomically scopes counters to the owner and deprecates on the third failure', async () => {
     await Promise.all([seed(skill('failed')), seed(skill('successful'))]);
     await Promise.all(

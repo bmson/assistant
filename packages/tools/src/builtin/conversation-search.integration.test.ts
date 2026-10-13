@@ -13,6 +13,7 @@ import {
 } from '@assistant/db';
 import {
   conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
   type EmbeddingSpace,
   embeddingSpaceIdentityKey,
 } from '@assistant/persistence';
@@ -203,10 +204,45 @@ describe('conversations.search PostgreSQL owner and privacy filters', () => {
     const semantic = (await tool.execute(
       { query: 'semantic fixture query', limit: 20 },
       context,
-    )) as { mode: string; matches: Array<{ text: string }> };
+    )) as {
+      mode: string;
+      matches: Array<{
+        text: string;
+        messageId: string;
+        conversationId: string;
+        role: string;
+        origin: string;
+        speakerRevision: string;
+        sourceRevision: string;
+      }>;
+    };
     expect(semantic.mode).toBe('semantic');
     expect(semantic.matches.map((row) => row.text)).toEqual(['owner semantic visible result']);
     expect(semantic.matches.some((row) => row.text === 'readability semantic result')).toBe(false);
+    const source = semantic.matches[0];
+    if (!source) throw new Error('Expected an owner source');
+    expect(source.role).toBe('user');
+    expect(source.origin).toBe('owner');
+    expect(source.speakerRevision).toBe(
+      conversationMessageSpeakerRevision(source.messageId, source.text, 'user', 'owner'),
+    );
+    const refs = [
+      {
+        messageId: source.messageId,
+        conversationId: source.conversationId,
+        sourceRevision: source.sourceRevision,
+        speakerRevision: source.speakerRevision,
+      },
+    ];
+    const repository = createPostgresConversationSearchRepository(db);
+    if (!repository.validateSources) throw new Error('Source validation unavailable');
+    expect(
+      (await repository.validateSources({ agentId, sourceRefs: refs })).unchangedSourceRefs,
+    ).toEqual([true]);
+    await db.update(messages).set({ role: 'assistant' }).where(eq(messages.id, source.messageId));
+    expect(
+      (await repository.validateSources({ agentId, sourceRefs: refs })).unchangedSourceRefs,
+    ).toEqual([false]);
 
     const literal = await createPostgresConversationSearchRepository(db).text({
       agentId,
@@ -219,7 +255,18 @@ describe('conversations.search PostgreSQL owner and privacy filters', () => {
     const fallback = (await tool.execute(
       { query: 'unique fallback marker', limit: 20 },
       context,
-    )) as { mode: string; matches: Array<{ text: string }> };
+    )) as {
+      mode: string;
+      matches: Array<{
+        text: string;
+        messageId: string;
+        conversationId: string;
+        role: string;
+        origin: string;
+        speakerRevision: string;
+        sourceRevision: string;
+      }>;
+    };
     expect(fallback.mode).toBe('text');
     expect(fallback.matches.map((row) => row.text)).toEqual(['owner unique fallback marker']);
     expect(fallback.matches.some((row) => row.text.includes('readability'))).toBe(false);

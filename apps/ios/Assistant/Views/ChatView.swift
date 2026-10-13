@@ -784,10 +784,8 @@ struct ChatView: View {
         .ignoresSafeArea(.container)
     }
 
-    /// The transcript and the root error banner clear the Island by exactly the
-    /// same distance, from the same origin — both scroll and sit under a stack
-    /// that ignores the top safe area. One expression for both, because the two
-    /// drifting apart is what previously left the banner behind the pill.
+    /// The transcript viewport and root error banner clear the Island by the
+    /// same distance from the edge-to-edge stage origin.
     private var crownContentTopInset: CGFloat {
         if isLandscape { return 0 }
         return ActivityCrown.overlayTopInset(
@@ -838,23 +836,9 @@ struct ChatView: View {
         return Group {
             ConversationColumn {
                 ScrollView {
-                    // Deliberately eager, and the one thing here that is.
-                    //
-                    // The transcript's viewport ends 18pt above the composer,
-                    // and `scrollClipDisabled` below is what lets the strip
-                    // under the input keep showing the log. It can only draw
-                    // rows that exist, though, and a lazy stack stops vending
-                    // one once it leaves that viewport — so a bubble on its way
-                    // down was built, drawn under the glass, and then dropped a
-                    // few points later, blinking out of existence a whole
-                    // composer above the bottom of the screen.
-                    //
-                    // Building every row costs a long thread real work at open.
-                    // The alternative is a viewport that reaches the bottom of
-                    // the stage, and that is not free either: it puts the
-                    // scroll view in contact with geometry that moves under the
-                    // pull menu, and the transcript slid 10pt against the
-                    // composer for it. A row that exists cannot flicker.
+                    // Keep rows mounted while the reader scrolls. The viewport
+                    // ends before navigation and input, so message text cannot
+                    // draw behind those controls.
                     Group {
                         if model.messages.isEmpty {
                             VStack(spacing: 0) { emptyConversation }
@@ -920,11 +904,9 @@ struct ChatView: View {
                     .padding(.leading, AssistantTheme.compactGutter + (crownOnLeadingEdge ? landscapeCrownClearance : 0))
                     .padding(.trailing, AssistantTheme.compactGutter + (crownOnLeadingEdge ? 0 : landscapeCrownClearance))
                 }
-                // Older rows continue beneath the floating input and off the
-                // bottom of the screen while scrolling — the stack above is
-                // eager so that every one of them is there to draw. Clip at the
-                // outer stage, not this shorter viewport.
-                .scrollClipDisabled()
+                // The composer and navigation own separate layout slots.
+                // Respect this viewport even while older rows remain mounted.
+                .scrollClipDisabled(false)
                 .scrollIndicators(.hidden)
                 .scrollPosition($transcriptScrollPosition)
                 // Menu reveal is a transform of the parent surface. SwiftUI's
@@ -938,16 +920,15 @@ struct ChatView: View {
                         transaction.scrollContentOffsetAdjustmentBehavior = .disabled
                     }
                 }
-                // Reserve real layout room for the crown at the start of the
-                // conversation. Unlike the removed clear mask, this cannot slice
-                // through a message bubble or its text. The 8pt gap that used to be
-                // added here is inside the clearance now — it is the same gap the
-                // error banner needs, so it belongs with the geometry.
-                .contentMargins(
-                    .top,
-                    crownContentTopInset,
-                    for: .scrollContent
-                )
+                // UIKit's scroll view can extend its drawing region into the
+                // safe-area overhang when the whole chat surface ignores the
+                // top inset. Reassert the SwiftUI viewport here before the
+                // crown clearance is added outside the scroll view.
+                .clipped()
+                // Constrain the viewport below the crown, rather than only
+                // offsetting the first content row. With clipping above, older
+                // text stays below the status area at every scroll position.
+                .padding(.top, crownContentTopInset)
                 // Never toggle `scrollDisabled` as the menu moves. That cancels
                 // UIScrollView's active pan by changing its environment and makes
                 // SwiftUI re-anchor the transcript inside the moving surface.
@@ -1062,8 +1043,19 @@ struct ChatView: View {
                 // composer was a ScrollView overlay, UIKit's pan recognizer
                 // still received pulls that began on the input and shifted the
                 // transcript before the menu gesture took over.
-                composer
-                    .fixedSize(horizontal: false, vertical: true)
+                // Reserve space for navigation alongside the composer so the
+                // control cannot cover a message the owner is reading.
+                VStack(spacing: 8) {
+                    if showsJumpToLatest {
+                        jumpToLatestButton {
+                            jumpFeedback += 1
+                            jumpToLatest()
+                        }
+                        .transition(.opacity)
+                    }
+                    composer
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                     .frame(maxWidth: isLandscape ? 680 : .infinity)
                     .frame(maxWidth: .infinity)
                     // A plain, explicit padding is deliberate. Safe-area
@@ -1082,13 +1074,6 @@ struct ChatView: View {
             }
             .overlay(alignment: .bottom) {
                 VStack(spacing: 10) {
-                    if showsJumpToLatest {
-                        jumpToLatestButton {
-                            jumpFeedback += 1
-                            jumpToLatest()
-                        }
-                        .transition(.opacity)
-                    }
                     if let undo = model.hiddenMessageUndo {
                         hiddenMessageUndoBar(undo)
                             .transition(.opacity)

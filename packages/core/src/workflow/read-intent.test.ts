@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { EMAIL_REVIEW_QUERY } from './email-review.js';
 import {
   buildReadToolInput,
   detectPersonalReadRequest,
@@ -16,6 +17,81 @@ const turn = (text: string, prior = '') => [
 ];
 
 describe('detectPersonalReadRequest', () => {
+  it('routes the compound next-trip request as bounded read-only discovery, not flight verification', () => {
+    const requestText =
+      'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
+    const request = detectPersonalReadRequest(turn(requestText), {
+      now: new Date('2026-10-13T18:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    expect(request).toMatchObject({
+      kind: 'calendar_email',
+      firstToolName: 'calendar.list_events',
+      requiresThreadRead: true,
+      answerFocus: 'trip',
+      compoundTripDiscovery: true,
+      maxResults: 50,
+      timeWindow: {
+        timeMin: '2026-10-13T18:00:00.000Z',
+        timeMax: '2027-10-13T18:00:00.000Z',
+      },
+    });
+    expect(request?.verification).toBeUndefined();
+    expect(request?.scopeIssue).toBeUndefined();
+    expect(request?.upcomingFlightDiscovery).toBeUndefined();
+    expect(request?.mailQuery).toContain('hotel');
+  });
+
+  it('caps compound trip reads and never resumes from other-task search or calendar receipts', () => {
+    const requestText =
+      'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
+    const request = detectPersonalReadRequest([{ role: 'user', content: requestText }], {
+      now: new Date('2026-10-13T18:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!request) throw new Error('Expected read request');
+    const capped: ReadToolEvidence[] = Array.from({ length: 12 }, (_, index) => ({
+      toolName: index % 2 ? 'web.fetch' : 'gmail.search',
+      status: 'failed',
+      args: {},
+      fromCurrentTask: true,
+    }));
+    expect(nextRequiredReadTool(request, capped)).toBeUndefined();
+
+    const previousTask = Array.from({ length: 12 }, (_, index) => ({
+      ...capped[index],
+      fromCurrentTask: false,
+      status: 'succeeded',
+      result: { complete: true, results: [] },
+    })) as ReadToolEvidence[];
+    expect(nextRequiredReadTool(request, previousTask)).toBe('calendar.list_events');
+  });
+
+  it('spends its two-thread budget on distinct flight and hotel booking candidates', () => {
+    const requestText =
+      'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
+    const request = detectPersonalReadRequest([{ role: 'user', content: requestText }]);
+    if (!request?.mailQuery) throw new Error('Expected the compound trip read query');
+    const evidence: ReadToolEvidence[] = [
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: request.mailQuery },
+        result: {
+          results: [
+            { threadId: 'hotel-one', subject: 'Hotel reservation confirmation' },
+            { threadId: 'hotel-two', subject: 'Hotel booking confirmation' },
+            { threadId: 'flight-one', subject: 'Flight LH 777 booking confirmation' },
+          ],
+          complete: true,
+          hasMore: false,
+        },
+      },
+    ];
+    expect(gmailThreadIdsToRead(evidence, request)).toEqual(['flight-one', 'hotel-one']);
+  });
+
   it('recognizes only the direct, bounded, explicitly no-send email review request', () => {
     const prompt =
       'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.';
@@ -113,6 +189,34 @@ describe('detectPersonalReadRequest', () => {
     expect(
       nextRequiredReadTool(request, [availability, firstPage, secondPage, thirdPage]),
     ).toBeUndefined();
+  });
+
+  it('routes a bounded next-working-days focus plan to calendar availability only', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Review my calendar for the next 3 working days. Find 2 90-minute focus blocks during working hours, with 15-minute breaks around meetings. Show a compact table and do not edit anything.',
+      ),
+      { now: new Date('2026-10-09T12:00:00.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    expect(request).toMatchObject({
+      kind: 'calendar',
+      weeklyCalendarPlan: true,
+      calendarPlanOptions: {
+        focusMinutes: 90,
+        slotCount: 2,
+        breakMinutes: 15,
+        workingDays: 3,
+        meetingBufferMinutes: 15,
+      },
+      firstToolName: 'calendar.availability',
+      timeWindow: {
+        timeMin: '2026-10-09T07:00:00.000Z',
+        timeMax: '2026-10-14T07:00:00.000Z',
+        label: 'the next 3 working days',
+      },
+    });
+    expect(request?.mailQuery).toBeUndefined();
+    expect(request?.firstToolName).not.toBe('gmail.search');
   });
 
   it('requires mailbox source reads for a requested reservation card while keeping other actions separate', () => {
@@ -375,6 +479,65 @@ describe('detectPersonalReadRequest', () => {
     });
   });
 
+  it.each([
+    'Plan a hypothetical work morning from 09:00 to 12:30. Include a 90-minute deep-work block, a 45-minute review, a 30-minute meeting at 11:30, and two 15-minute breaks. Show a compact table with start and end times, identify any unused time, and check that nothing overlaps. Do not look at or change my real calendar.',
+    'Hypothetically, make a sample 09:00–12:30 schedule with deep work, a review, an 11:30 meeting, and two breaks. Please do not inspect my actual calendar; use only the details in this message.',
+    'Lay out a pretend work morning with a 90-minute focus block and a 30-minute meeting at 11:30. Without checking my calendar, show the times and any unused slot.',
+  ])('does not turn a hypothetical schedule into a private read: %s', (text) => {
+    expect(detectPersonalReadRequest(turn(text))).toBeNull();
+  });
+
+  it('keeps explicit calendar and email reads enabled when the owner only forbids changes', () => {
+    expect(
+      detectPersonalReadRequest(
+        turn('What meetings do I have on my calendar tomorrow? Do not edit it.'),
+      ),
+    ).toMatchObject({ kind: 'calendar', firstToolName: 'calendar.list_events' });
+    expect(
+      detectPersonalReadRequest(
+        turn('Search my email for the hotel confirmation. Do not reply or change anything.'),
+      ),
+    ).toMatchObject({ kind: 'email', firstToolName: 'gmail.search' });
+  });
+
+  it('honors a prohibition for one private source without suppressing a separate allowed read', () => {
+    expect(
+      detectPersonalReadRequest(
+        turn('Do not look at my real calendar. Search my email for the hotel confirmation.'),
+      ),
+    ).toMatchObject({ kind: 'email', firstToolName: 'gmail.search' });
+    expect(
+      detectPersonalReadRequest(
+        turn('Do not search my email. What meetings do I have on my calendar tomorrow?'),
+      ),
+    ).toMatchObject({ kind: 'calendar', firstToolName: 'calendar.list_events' });
+  });
+
+  it('keeps tomorrow calendar overviews bounded to the requested calendar day', () => {
+    const text =
+      'What is on my calendar tomorrow? Use my local time zone, include event times and calendar names, and point out overlaps. Give a compact answer with source links. Do not edit anything.';
+    const request = detectPersonalReadRequest(turn(text), {
+      now: new Date('2026-10-13T18:08:55.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    expect(request).toMatchObject({
+      kind: 'calendar',
+      queryTerms: [],
+      firstToolName: 'calendar.list_events',
+      requiresThreadRead: false,
+      timeWindow: {
+        timeMin: '2026-10-14T07:00:00.000Z',
+        timeMax: '2026-10-15T07:00:00.000Z',
+      },
+    });
+    expect(request?.mailQuery).toBeUndefined();
+    if (!request) throw new Error('Expected a calendar request');
+    expect(buildReadToolInput(request, 'calendar.list_events', [])).toMatchObject({
+      timeMin: '2026-10-14T07:00:00.000Z',
+      timeMax: '2026-10-15T07:00:00.000Z',
+    });
+  });
+
   it.each(['Make this sentence clear.', 'Is the explanation clear?', 'Empty my inbox tomorrow.'])(
     'does not confuse another clear or empty request with availability: %s',
     (text) => {
@@ -476,12 +639,12 @@ describe('detectPersonalReadRequest', () => {
   );
 
   it('routes autobiographical memory, graph, and Drive reads through grounded tools', () => {
-    expect(
-      detectPersonalReadRequest(turn('When did I see the carnival parade in San Francisco?')),
-    ).toMatchObject({
+    const memoryQuestion = 'When did I see the carnival parade in San Francisco?';
+    expect(detectPersonalReadRequest(turn(memoryQuestion))).toMatchObject({
       kind: 'memory',
       firstToolName: 'memory.recall',
       queryTerms: ['carnival', 'parade', 'san', 'francisco'],
+      memoryQuery: memoryQuestion,
     });
     expect(detectPersonalReadRequest(turn('Look at my memory graph'))).toMatchObject({
       kind: 'knowledge_graph',
@@ -498,6 +661,67 @@ describe('detectPersonalReadRequest', () => {
       firstToolName: 'drive.search',
       queryTerms: ['carnival', 'parade', 'san', 'francisco'],
     });
+  });
+
+  it('preserves the bounded owner question as the semantic memory search', () => {
+    const text =
+      'What preferences have I previously told you about the Assistant’s UI and how its replies should look? Use saved memory or our earlier conversations. Distinguish what I actually said from your inference, mention your sources, and do not guess or save new memories.';
+    const request = detectPersonalReadRequest(turn(text));
+    expect(request).toMatchObject({
+      kind: 'memory',
+      firstToolName: 'conversations.search',
+      memoryQuery: text,
+      conversationQuery: text,
+    });
+    if (!request) throw new Error('Expected a personal memory request');
+    expect(buildReadToolInput(request, 'conversations.search', [])).toEqual({
+      query: text,
+      limit: 10,
+    });
+    const input = buildReadToolInput(request, 'conversations.search', []) ?? {};
+    expect(
+      nextRequiredReadTool(request, [
+        {
+          toolName: 'conversations.search',
+          status: 'succeeded',
+          args: input,
+          result: { matches: [] },
+        },
+      ]),
+    ).toBeUndefined();
+  });
+
+  it('routes a direct earlier-conversation question to a bounded history search', () => {
+    const text = 'What did I tell you earlier about how I prefer meeting summaries?';
+    expect(detectPersonalReadRequest(turn(text))).toMatchObject({
+      kind: 'memory',
+      firstToolName: 'conversations.search',
+      conversationQuery: text,
+    });
+  });
+
+  it('honors explicit memory-source prohibitions without suppressing a public URL request', () => {
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'Read https://ber.berlin-airport.de/en/orientation/getting-here/public-transport.html and summarize the airport’s public transport options in three short bullets with a source link. Clearly state if that page cannot be read or does not contain the details. Do not use my email, calendar, or memories.',
+        ),
+      ),
+    ).toBeNull();
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'Do not use my email, calendar, or memories. Summarize https://ber.berlin-airport.de/en/orientation/getting-here/public-transport.html in three bullets.',
+        ),
+      ),
+    ).toBeNull();
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'Do not use my email, calendar, or memories. What do you remember about my writing preferences?',
+        ),
+      ),
+    ).toBeNull();
   });
 
   it('does not treat an unrelated question containing files as a Drive lookup', () => {
@@ -1344,6 +1568,28 @@ describe('required read sequence', () => {
     expect(nextRequiredReadTool(broad, [firstPage, secondPage, thirdPage])).toBeUndefined();
   });
 
+  it('allows five bounded email-review metadata pages and then proceeds to complete-thread reads', () => {
+    const review = detectPersonalReadRequest(
+      turn(
+        'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.',
+      ),
+    );
+    expect(review?.emailReview).toBeDefined();
+    if (!review?.emailReview) throw new Error('expected bounded email review');
+    const pages: ReadToolEvidence[] = [];
+    for (let index = 0; index < 5; index += 1) {
+      const token = index === 0 ? undefined : `page-${index + 1}`;
+      pages.push({
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        args: { query: EMAIL_REVIEW_QUERY, ...(token ? { pageToken: token } : {}) },
+        result: { complete: false, hasMore: true, nextPageToken: `page-${index + 2}`, results: [] },
+      });
+      if (index < 4) expect(nextRequiredReadTool(review, pages)).toBe('gmail.search');
+    }
+    expect(nextRequiredReadTool(review, pages)).toBeUndefined();
+  });
+
   it('binds searches to the owner wording and removes calendar narrowing', () => {
     expect(
       groundReadToolInput(
@@ -1682,6 +1928,77 @@ describe('focused flight verification follow-ups', () => {
 describe('upcoming flight discovery', () => {
   const options = { now: new Date('2026-10-09T12:00:00Z'), timeZone: 'America/Los_Angeles' };
 
+  it('recognizes a next-future-flight request without treating a current return as a new trip', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Find my next future flight using booking emails and calendar. State the date, departure time with its time zone, route and flight number, and whether it is an outbound or return flight. Check for conflicting sources. Do not assume that a return from a trip already underway is a new outbound trip. Keep it short, cite source links, and mark uncertainty. Do not book, send, or change anything.',
+      ),
+      options,
+    );
+    expect(request).toMatchObject({
+      kind: 'calendar_email',
+      answerFocus: 'flight',
+      upcomingFlightDiscovery: true,
+      firstToolName: 'calendar.list_events',
+      queryTerms: [],
+      requiresThreadRead: true,
+    });
+    expect(request?.verification).toBeUndefined();
+    expect(request?.scopeIssue).toBeUndefined();
+  });
+
+  it('still rejects a genuinely requested booking after a read', () => {
+    expect(
+      detectPersonalReadRequest(
+        turn('Find my next flight and then book it if the fare is under $500.'),
+        options,
+      ),
+    ).toBeNull();
+  });
+
+  it('runs a bounded flight-only calendar and booking-thread read without route tools', () => {
+    const request = detectPersonalReadRequest(
+      turn('Find my next future flight using booking emails and calendar.'),
+      options,
+    );
+    if (!request) throw new Error('Expected flight-only discovery');
+    expect(nextRequiredReadTool(request, [])).toBe('calendar.list_events');
+    const calendar: ReadToolEvidence = {
+      toolName: 'calendar.list_events',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: {
+        timeMin: request.timeWindow?.timeMin,
+        timeMax: request.timeWindow?.timeMax,
+        maxResults: 50,
+      },
+      result: { events: [], complete: true, calendarRosterComplete: true, unavailable: [] },
+    };
+    expect(nextRequiredReadTool(request, [calendar])).toBe('gmail.search');
+    const search: ReadToolEvidence = {
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { query: request.mailQuery, maxResults: 20 },
+      result: {
+        query: request.mailQuery,
+        complete: true,
+        hasMore: false,
+        results: [{ threadId: 'future-flight', subject: 'Flight booking confirmation' }],
+      },
+    };
+    expect(nextRequiredReadTool(request, [calendar, search])).toBe('gmail.read_thread');
+    const thread: ReadToolEvidence = {
+      toolName: 'gmail.read_thread',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { threadId: 'future-flight' },
+      result: { complete: true, messages: [] },
+    };
+    expect(nextRequiredReadTool(request, [calendar, search, thread])).toBeUndefined();
+    expect(nextRequiredReadTool(request, [calendar, search, thread])).not.toBe('maps.directions');
+  });
+
   it('does not treat the requested verification policy as a correction to an old claim', () => {
     const request = detectPersonalReadRequest(
       turn('Find my next flight, check for conflicts, and call out anything you cannot verify.'),
@@ -1696,7 +2013,7 @@ describe('upcoming flight discovery', () => {
         '{flight flights itinerary "e-ticket" "boarding pass" "booking confirmation" "reservation confirmation"}',
       timeWindow: {
         timeMin: '2026-10-09T12:00:00.000Z',
-        timeMax: '2028-10-08T07:00:00.000Z',
+        timeMax: '2027-10-09T12:00:00.000Z',
       },
     });
     expect(request?.verification).toBeUndefined();
@@ -1704,7 +2021,7 @@ describe('upcoming flight discovery', () => {
     if (!request) throw new Error('expected a bounded upcoming flight discovery');
     expect(buildReadToolInput(request, 'calendar.list_events', [])).toMatchObject({
       timeMin: '2026-10-09T12:00:00.000Z',
-      timeMax: '2028-10-08T07:00:00.000Z',
+      timeMax: '2027-10-09T12:00:00.000Z',
       maxResults: 50,
     });
     expect(buildReadToolInput(request, 'gmail.search', [])?.query).toBe(request.mailQuery);

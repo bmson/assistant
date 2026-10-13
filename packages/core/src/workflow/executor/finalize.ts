@@ -30,12 +30,17 @@ import {
   scoreboardCardSpec,
 } from '../../generative-card.js';
 import type { RecallSource } from '../../memory/recall.js';
-import { recordSkillOutcome } from '../../memory/skills.js';
+import {
+  findActiveSkillByExactName,
+  recordSkillOutcome,
+  requestedSavedSkillName,
+} from '../../memory/skills.js';
 import { truncateAtBoundary } from '../../owner-text.js';
 import { type ArtifactIntent, artifactExecutionFailure } from '../artifact-intent.js';
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
 import { CARD_NOT_BUILT, requestedCardIntent } from '../card-intent.js';
 import { responseCardSteps } from '../card-steps.js';
+import type { CompoundTripExtraction } from '../compound-trip-extraction.js';
 import { isGoalWorkEvidence } from '../goal-evidence.js';
 import {
   detectLiveLookups,
@@ -53,7 +58,9 @@ import {
   type TaskLease,
   taskState,
 } from '../machine.js';
+import { selectMemoryReadAnswer } from '../memory-read-answer.js';
 import { verifyFinalOutput } from '../output-verification.js';
+import { latestOwnerIntent } from '../owner-intent.js';
 import { PLANNER_VERSION } from '../planner.js';
 import { detectPersonalReadRequest, type PersonalReadRequest } from '../read-intent.js';
 import { requestChecklistHasUnfinished, requestChecklistSummary } from '../request-checklist.js';
@@ -436,14 +443,22 @@ export async function stageFinalResponse(
   state: TaskState,
   window: ModelMessage[],
   pending: PendingFinal,
+  options?: { verifiedCompoundTripChecklist?: boolean },
 ): Promise<ExecuteResult> {
   const correctionOwnedChecklist =
     state.requestChecklist?.revision !== undefined ||
     state.requestChecklist?.revisionAudit !== undefined;
+  const compoundTripChecklistOwned =
+    options?.verifiedCompoundTripChecklist === true &&
+    state.requestChecklist !== undefined &&
+    state.requestChecklist.items.length > 0 &&
+    state.requestChecklist.items.every(
+      (item) => item.status === 'completed' && item.evidence.length > 0,
+    );
   // Correction reads reconcile only their selected, revision-bound item after
   // typed coverage. The generic receipt matcher uses broader target terms and
   // can both lose corrected state and satisfy a same-kind sibling by accident.
-  if (!correctionOwnedChecklist)
+  if (!correctionOwnedChecklist && !compoundTripChecklistOwned)
     await refreshRequestChecklist(executionEvidence(deps), task, state);
   const checklist = state.requestChecklist;
   if (checklist && requestChecklistHasUnfinished(checklist)) {
@@ -477,6 +492,50 @@ export async function stageFinalResponse(
     if (pending.terminalStatus === 'done') {
       pending.terminalStatus = 'needs_attention';
       pending.outcome = 'needs_attention';
+    }
+  }
+  if (task.trust === 'owner' && !isForwardedIngest(task)) {
+    const intent = latestOwnerIntent(window, {
+      trust: 'owner',
+      trigger: task.trigger,
+      clarificationContinuation: state.clarificationContinuation,
+    });
+    const requestedSkill = requestedSavedSkillName(
+      intent.ownerAuthoredText,
+      latestUserText(window),
+    );
+    if (requestedSkill) {
+      let retrieved = false;
+      try {
+        const actual = await findActiveSkillByExactName(
+          deps.persistence?.skills ?? deps.db,
+          task.agentId,
+          requestedSkill,
+        );
+        retrieved = actual !== null && state.usedSkillIds.includes(actual.id);
+      } catch {
+        /* Missing evidence cannot support a use claim. */
+      }
+      const notice = retrieved
+        ? `Saved skill “${requestedSkill}” was retrieved as planning guidance.`
+        : `I could not verify retrieval of the saved skill “${requestedSkill}”; the answer does not establish that it was used.`;
+      // The durable task state and exact owner-scoped repository lookup provide
+      // the receipt; a model's claim is not evidence that a skill was retrieved.
+      pending.text = pending.text
+        .split(/(?<=[.!?])\s+|\n/)
+        .filter(
+          (line) =>
+            !(
+              line.includes(requestedSkill) && /\b(?:used|applied|followed|retrieved)\b/i.test(line)
+            ),
+        )
+        .join('\n')
+        .trim();
+      pending.text = `${notice}\n\n${pending.text}`;
+      if (!retrieved) {
+        pending.terminalStatus = 'needs_attention';
+        pending.outcome = 'needs_attention';
+      }
     }
   }
   state.pendingFinal = pending;
@@ -561,6 +620,8 @@ export async function stageModelFinalResponse(
    */
   readContext?: {
     readRequest?: PersonalReadRequest | null;
+    compoundTripExtraction?: CompoundTripExtraction;
+    verifiedCompoundTripChecklist?: boolean;
     groundingCorpus?: string;
     /** The owner's clock, which resolves "my 3pm" to one calendar event. */
     lookupContext?: LookupContext;
@@ -708,11 +769,25 @@ export async function stageModelFinalResponse(
       .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
       .join('\n'),
   ].join('\n');
+  const classifiedRead = readContext ? readContext.readRequest : detectPersonalReadRequest(window);
+  const memoryReadSelection =
+    classifiedRead?.kind === 'memory'
+      ? await selectMemoryReadAnswer({
+          router: deps.router,
+          taskId: task.id,
+          request: latestUserText(window) ?? '',
+          evidence,
+        })
+      : undefined;
   const contractOptions = {
+    ...(memoryReadSelection ? { memoryReadSelection } : {}),
     requestText:
       task.trust === 'owner' && !isForwardedIngest(task) ? latestUserText(window) : undefined,
     urlCorpus: sourceCorpus,
-    readRequest: readContext ? readContext.readRequest : detectPersonalReadRequest(window),
+    readRequest: classifiedRead,
+    ...(readContext?.compoundTripExtraction
+      ? { compoundTripExtraction: readContext.compoundTripExtraction }
+      : {}),
     groundingCorpus: readContext?.groundingCorpus,
     liveCorpus: liveLookups.length > 0 ? liveLookupCorpus(rows) : undefined,
   };
@@ -979,7 +1054,11 @@ export async function stageModelFinalResponse(
   // A transparent replacement is a truthful reply, not proof the requested
   // work finished. Keep unresolved effects visible and re-queueable. Grounded
   // factual corrections with no missing effect may still complete normally.
-  if (checked.qualityFallback || checked.unsupported.length > 0) {
+  if (
+    checked.qualityFallback ||
+    checked.unsupported.length > 0 ||
+    (checked.blocked && contractOptions.readRequest)
+  ) {
     pending.terminalStatus = 'needs_attention';
     pending.outcome = 'needs_attention';
   }
@@ -992,7 +1071,10 @@ export async function stageModelFinalResponse(
       contractOptions.readRequest,
       evidence,
     ).weeklyPlanAssessment;
-    if (assessment?.coverageComplete !== true || assessment.slotCount < 3) {
+    if (
+      assessment?.coverageComplete !== true ||
+      assessment.slotCount < (contractOptions.readRequest.calendarPlanOptions?.slotCount ?? 3)
+    ) {
       pending.terminalStatus = 'needs_attention';
       pending.outcome = 'needs_attention';
       pending.preserveCheckedReadResponse = true;
@@ -1043,12 +1125,22 @@ export async function stageModelFinalResponse(
   // A known contact's plain answer would otherwise dead-end in the dashboard;
   // propose it back to them (owner-approved) so the thread does not go silent.
   await maybeEnqueueKnownSenderReply(deps, task, text);
-  return stageFinalResponse(deps, task, state, window, {
-    ...pending,
-    text,
-    progress: text.slice(0, 200),
-    contractNotice: checked.blocked || undefined,
-  });
+  return stageFinalResponse(
+    deps,
+    task,
+    state,
+    window,
+    {
+      ...pending,
+      text,
+      progress: text.slice(0, 200),
+      contractNotice: checked.blocked || undefined,
+    },
+    {
+      verifiedCompoundTripChecklist:
+        readContext?.verifiedCompoundTripChecklist === true && !checked.blocked,
+    },
+  );
 }
 
 /**

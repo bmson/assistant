@@ -20,6 +20,7 @@ import { TaskStateSchema } from '../../events.js';
 import * as generatedCardModule from '../../generative-card.js';
 import { GenerativeCardSpecV1Schema } from '../../generative-card.js';
 import { refreshRequestChecklist } from '../executor/checklist.js';
+import { detectPersonalReadRequest } from '../read-intent.js';
 import {
   buildRequestChecklist,
   recordOwnerChecklistCancellation,
@@ -152,6 +153,429 @@ function gmailThreadPage(input: {
 }
 
 describe('golden tasks', () => {
+  it('executes a compound trip read through the real task dispatcher and returns a source-grounded itinerary', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const prompt =
+      'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
+    const detected = detectPersonalReadRequest([{ role: 'user', content: prompt }]);
+    if (!detected?.compoundTripDiscovery || !detected.mailQuery)
+      throw new Error('Exact owner prompt did not enter the compound-trip read path');
+    const departure = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const departureDay = departure.toISOString().slice(0, 10);
+    const checkout = new Date(departure.getTime() + 2 * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    const address = '5 Alexanderplatz, 10178 Berlin';
+    const outboundQuote = `Outbound flight LH 777 departs from SFO to FRA on ${departureDay} at 10:10 Europe/Berlin and arrives at 11:45 Europe/Berlin. Booking FLIGHT-728.`;
+    const connectionQuote = `Connection flight LH 101 departs from FRA to BER on ${departureDay} at 12:30 Europe/Berlin and arrives at 13:20 Europe/Berlin. Booking FLIGHT-728.`;
+    const hotelQuote = `Your reserved Hotel Linden at ${address} in Berlin covers ${departureDay} through ${checkout}; confirmation HOTEL-55123.`;
+    const toolsSeen: Array<{ toolName: string; args: Record<string, unknown> }> = [];
+    const emptySchema = z.object({}).passthrough();
+    const result = await runGoldenTask(db, agentId, {
+      name: 'compound-trip-read-exact-owner-request',
+      event: {
+        source: 'chat',
+        trust: 'owner',
+        payload: { text: prompt },
+      },
+      taskType: 'chat_turn',
+      plan: workflowPlan,
+      pinOwnerRequest: true,
+      compoundTripExtraction: {
+        messages: [
+          {
+            threadId: 'flight-thread',
+            messageId: 'flight-confirmation-message',
+            segments: [
+              {
+                flightNumber: 'LH 777',
+                role: 'outbound',
+                departureDate: departureDay,
+                departureTime: '10:10',
+                departureTimeZone: 'Europe/Berlin',
+                arrivalDate: departureDay,
+                arrivalTime: '11:45',
+                arrivalTimeZone: 'Europe/Berlin',
+                originAirport: 'SFO',
+                destinationAirport: 'FRA',
+                bookingReference: 'FLIGHT-728',
+                quote: outboundQuote,
+              },
+              {
+                flightNumber: 'LH 101',
+                role: 'connection',
+                departureDate: departureDay,
+                departureTime: '12:30',
+                departureTimeZone: 'Europe/Berlin',
+                arrivalDate: departureDay,
+                arrivalTime: '13:20',
+                arrivalTimeZone: 'Europe/Berlin',
+                originAirport: 'FRA',
+                destinationAirport: 'BER',
+                bookingReference: 'FLIGHT-728',
+                quote: connectionQuote,
+              },
+            ],
+            hotels: [],
+          },
+          {
+            threadId: 'hotel-thread',
+            messageId: 'hotel-confirmation-message',
+            segments: [],
+            hotels: [
+              {
+                name: 'Hotel Linden',
+                address,
+                city: 'Berlin',
+                checkIn: departureDay,
+                checkOut: checkout,
+                bookingReference: 'HOTEL-55123',
+                quote: hotelQuote,
+              },
+            ],
+          },
+        ],
+      },
+      script: [
+        { toolCalls: [{ toolName: 'calendar.list_events', input: {} }] },
+        { toolCalls: [{ toolName: 'gmail.search', input: { query: detected.mailQuery } }] },
+        {
+          toolCalls: [
+            {
+              toolName: 'gmail.search',
+              input: { query: detected.mailQuery, pageToken: 'search-page-2' },
+            },
+          ],
+        },
+        { toolCalls: [{ toolName: 'gmail.read_thread', input: { threadId: 'flight-thread' } }] },
+        { toolCalls: [{ toolName: 'gmail.read_thread', input: { threadId: 'hotel-thread' } }] },
+        {
+          toolCalls: [
+            {
+              toolName: 'maps.directions',
+              input: { origin: 'BER Airport', destination: address, mode: 'driving' },
+            },
+          ],
+        },
+        {
+          toolCalls: [
+            {
+              toolName: 'web.search',
+              input: {
+                query: '"BER" public transport taxi "Hotel Linden" "Berlin" official',
+                count: 5,
+              },
+            },
+          ],
+        },
+        { toolCalls: [{ toolName: 'web.fetch', input: { url: 'https://transit.example/ber' } }] },
+        { toolCalls: [{ toolName: 'web.fetch', input: { url: 'https://taxi.example/ber' } }] },
+        { text: 'Here is your verified complete trip plan.' },
+      ],
+      tools: {
+        'calendar.list_events': {
+          schema: emptySchema,
+          execute: async (args) => {
+            toolsSeen.push({
+              toolName: 'calendar.list_events',
+              args: args as Record<string, unknown>,
+            });
+            return {
+              events: [
+                {
+                  eventId: 'trip-flight-event',
+                  summary: 'Outbound flight LH 777 to Berlin',
+                  description: 'Arrival airport: BER. Booking reference: FLIGHT-728',
+                  location: 'Berlin Brandenburg Airport',
+                  start: `${departureDay}T10:10:00+02:00`,
+                  timeZone: 'Europe/Berlin',
+                  status: 'confirmed',
+                  links: [
+                    {
+                      type: 'calendar',
+                      url: 'https://calendar.google.com/calendar/event?eid=golden-trip',
+                    },
+                  ],
+                },
+              ],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            };
+          },
+        },
+        'gmail.search': {
+          schema: z.object({
+            query: z.string(),
+            maxResults: z.number().int().default(10),
+            pageToken: z.string().optional(),
+          }),
+          execute: async (args) => {
+            const parsed = z
+              .object({
+                query: z.string(),
+                maxResults: z.number().int().default(10),
+                pageToken: z.string().optional(),
+              })
+              .parse(args);
+            toolsSeen.push({ toolName: 'gmail.search', args: parsed });
+            const firstPage = !parsed.pageToken;
+            const results = firstPage
+              ? [
+                  { threadId: 'newsletter-1', subject: 'Weekly newsletter' },
+                  { threadId: 'newsletter-2', subject: 'Weekly newsletter' },
+                  { threadId: 'newsletter-3', subject: 'Weekly newsletter' },
+                  { threadId: 'newsletter-4', subject: 'Weekly newsletter' },
+                  { threadId: 'newsletter-5', subject: 'Weekly newsletter' },
+                ]
+              : [
+                  { threadId: 'newsletter-6', subject: 'Travel deals' },
+                  { threadId: 'newsletter-7', subject: 'Travel deals' },
+                  { threadId: 'flight-thread', subject: 'Airline booking confirmation LH 777' },
+                  { threadId: 'hotel-thread', subject: 'Hotel reservation confirmed' },
+                  { threadId: 'newsletter-8', subject: 'Travel deals' },
+                ];
+            const nextPageToken = firstPage ? 'search-page-2' : 'search-page-3';
+            return {
+              query: parsed.query,
+              results,
+              complete: false,
+              hasMore: true,
+              nextPageToken,
+              continuation: {
+                tool: 'gmail.search',
+                input: {
+                  query: parsed.query,
+                  maxResults: parsed.maxResults,
+                  pageToken: nextPageToken,
+                },
+              },
+              unavailable: [],
+              coverage: {
+                requested: parsed.maxResults,
+                discovered: firstPage ? 18 : 13,
+                returned: results.length,
+                unavailable: 0,
+                hasMore: true,
+                complete: false,
+              },
+              receipt: {
+                version: 1,
+                source: { kind: 'gmail-search', id: parsed.query },
+                requested: {
+                  limit: parsed.maxResults,
+                  ...(parsed.pageToken ? { cursor: parsed.pageToken } : {}),
+                  scope: 'query-page',
+                },
+                covered: { count: results.length, total: results.length, unavailable: 0 },
+                complete: false,
+                losses: ['provider-page'],
+                continuation: {
+                  tool: 'gmail.search',
+                  input: {
+                    query: parsed.query,
+                    maxResults: parsed.maxResults,
+                    pageToken: nextPageToken,
+                  },
+                },
+              },
+            };
+          },
+        },
+        'gmail.read_thread': {
+          schema: z.object({
+            threadId: z.string(),
+            startMessageIndex: z.number().int().default(0),
+            startMessageOffset: z.number().int().default(0),
+            maxMessages: z.number().int().default(20),
+            maxChars: z.number().int().default(20_000),
+          }),
+          execute: async (args) => {
+            const parsed = z
+              .object({
+                threadId: z.string(),
+                startMessageIndex: z.number().int().default(0),
+                startMessageOffset: z.number().int().default(0),
+                maxMessages: z.number().int().default(20),
+                maxChars: z.number().int().default(20_000),
+              })
+              .parse(args);
+            const { threadId } = parsed;
+            toolsSeen.push({ toolName: 'gmail.read_thread', args: parsed });
+            const messages =
+              threadId === 'flight-thread'
+                ? [
+                    {
+                      messageId: 'flight-confirmation-message',
+                      subject: 'Airline booking confirmation LH 777',
+                      text: `${outboundQuote}\n${connectionQuote}`,
+                    },
+                  ]
+                : threadId === 'hotel-thread'
+                  ? [
+                      {
+                        messageId: 'hotel-confirmation-message',
+                        subject: 'Reservation confirmed: Hotel Linden, Berlin',
+                        text: hotelQuote,
+                      },
+                    ]
+                  : undefined;
+            if (messages)
+              return {
+                threadId,
+                complete: true,
+                hasMore: false,
+                messages: messages.map((message) => ({
+                  ...message,
+                  sourceLength: message.text.length,
+                  truncated: false,
+                })),
+                coverage: {
+                  requested: parsed.maxMessages,
+                  discovered: messages.length,
+                  returned: messages.length,
+                  unavailable: 0,
+                  complete: true,
+                },
+                receipt: {
+                  version: 1,
+                  source: { kind: 'gmail-thread', id: threadId },
+                  requested: {
+                    start: parsed.startMessageIndex,
+                    offset: parsed.startMessageOffset,
+                    limit: parsed.maxMessages,
+                    scope: 'thread-messages',
+                  },
+                  covered: {
+                    start: parsed.startMessageIndex,
+                    offset: parsed.startMessageOffset,
+                    end: parsed.startMessageIndex + messages.length,
+                    count: messages.length,
+                    total: messages.length,
+                    unavailable: 0,
+                  },
+                  complete: true,
+                  losses: [],
+                  continuation: null,
+                },
+              };
+            throw new Error(`Unexpected thread read: ${threadId}`);
+          },
+        },
+        'maps.directions': {
+          schema: z.object({
+            origin: z.string(),
+            destination: z.string(),
+            mode: z.literal('driving'),
+          }),
+          execute: async (args) => {
+            const parsed = z
+              .object({ origin: z.string(), destination: z.string(), mode: z.literal('driving') })
+              .parse(args);
+            toolsSeen.push({ toolName: 'maps.directions', args: parsed });
+            return { durationSeconds: 1500, mapsUrl: 'https://maps.example/route', ...parsed };
+          },
+        },
+        'web.search': {
+          schema: z.object({ query: z.string(), count: z.number().optional() }),
+          execute: async (args) => {
+            const parsed = z
+              .object({ query: z.string(), count: z.number().optional() })
+              .parse(args);
+            toolsSeen.push({ toolName: 'web.search', args: parsed });
+            return {
+              query: parsed.query,
+              results: [
+                {
+                  title: 'Berlin airport rail',
+                  url: 'https://transit.example/ber',
+                  snippet:
+                    'Public transport from BER Airport to Hotel Linden, 5 Alexanderplatz, Berlin.',
+                },
+                {
+                  title: 'Berlin airport taxi',
+                  url: 'https://taxi.example/ber',
+                  snippet: 'Taxi from BER Airport to Hotel Linden, 5 Alexanderplatz, Berlin.',
+                },
+              ],
+            };
+          },
+        },
+        'web.fetch': {
+          schema: z.object({ url: z.string() }),
+          execute: async (args) => {
+            const url = z.object({ url: z.string() }).parse(args).url;
+            toolsSeen.push({ toolName: 'web.fetch', args: { url } });
+            return {
+              status: 200,
+              finalUrl: url,
+              contentType: 'text/html',
+              text:
+                url === 'https://transit.example/ber'
+                  ? 'Public transport from BER Airport to Hotel Linden at 5 Alexanderplatz, Berlin takes 35 minutes and costs EUR 4.90 for this route.'
+                  : 'Taxi from BER Airport to Hotel Linden at 5 Alexanderplatz, Berlin usually takes 45 minutes and costs EUR 62.00.',
+              truncated: false,
+            };
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+
+    expect(result.toolNames).toEqual([
+      'calendar.list_events',
+      'gmail.search',
+      'gmail.search',
+      'gmail.read_thread',
+      'gmail.read_thread',
+      'maps.directions',
+      'web.search',
+      'web.fetch',
+      'web.fetch',
+    ]);
+    expect(result.status).toBe('needs_attention');
+    expect(result.extractCalls).toBe(1);
+    expect(result.finalText).toContain(
+      `Dated outbound leg: LH777 SFO→FRA; departs ${departureDay} 10:10 Europe/Berlin; arrives ${departureDay} 11:45 Europe/Berlin`,
+    );
+    expect(result.finalText).toContain(
+      `Source-backed connected flight segments: LH777 SFO→FRA; departs ${departureDay} 10:10 Europe/Berlin; arrives ${departureDay} 11:45 Europe/Berlin; LH101 FRA→BER; departs ${departureDay} 12:30 Europe/Berlin; arrives ${departureDay} 13:20 Europe/Berlin`,
+    );
+    expect(result.finalText).toContain('Separately sourced hotel candidate: Hotel Linden, Berlin');
+    expect(result.finalText).toContain('treated the connection as an inference');
+    expect(result.finalText).toContain('the clocks agree after time-zone conversion');
+    expect(result.finalText).toContain('Booking-email search or thread coverage is incomplete');
+    expect(result.finalText).toContain('Dated outbound leg: LH777 SFO→FRA');
+    expect(result.finalText).toContain('source-reported fare EUR 4.90');
+    expect(result.finalText).toContain('source-reported fare EUR 62.00');
+    expect(result.finalText).toContain(
+      'https://calendar.google.com/calendar/event?eid=golden-trip',
+    );
+    expect(result.finalText).toContain('https://mail.google.com/mail/u/0/#all/flight-thread');
+    expect(result.finalText).toContain('https://mail.google.com/mail/u/0/#all/hotel-thread');
+    expect(result.finalText).toContain('https://transit.example/ber');
+    expect(result.finalText).toContain('https://taxi.example/ber');
+    expect(result.finalText).not.toContain('verified complete trip plan');
+    expect(toolsSeen.filter(({ toolName }) => toolName === 'gmail.search')).toHaveLength(2);
+    expect(
+      toolsSeen.every(({ toolName }) =>
+        [
+          'calendar.list_events',
+          'gmail.search',
+          'gmail.read_thread',
+          'maps.directions',
+          'web.search',
+          'web.fetch',
+        ].includes(toolName),
+      ),
+    ).toBe(true);
+    expect(toolsSeen.find(({ toolName }) => toolName === 'maps.directions')?.args).toEqual({
+      origin: 'BER Airport',
+      destination: address,
+      mode: 'driving',
+    });
+  }, 15_000); // Nine dispatcher/tool rounds plus persistence; leave bounded parallel-CI headroom.
+
   it('ranks bounded mail metadata, reads only selected complete threads, and drafts in chat without mail writes', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const prompt =
@@ -279,6 +703,31 @@ describe('golden tasks', () => {
     expect(result.finalText).toContain('Thanks for your note.');
     expect(result.finalText).not.toContain('Weekly product newsletter');
     expect(result.finalText).not.toContain('sent the reply');
+
+    const metadataFallback = await runGoldenTask(db, agentId, {
+      ...fixture,
+      name: 'bounded-email-review-uses-verified-metadata-fallback-after-ranker-failure',
+      objects: [
+        { role: 'reason', value: {}, unavailable: true },
+        fixture.objects?.[1] ?? { role: 'reason', value: { items: [] } },
+      ],
+    });
+    createdTaskIds.push(metadataFallback.taskId);
+    expect(metadataFallback.status).toBe('done');
+    expect(metadataFallback.toolNames).toEqual(['gmail.search', 'gmail.read_thread']);
+    expect(metadataFallback.finalText).toContain('Automated ranking was unavailable');
+    expect(metadataFallback.finalText).toContain('Draft for review — not saved or sent');
+    expect(metadataFallback.finalText).toContain('Thanks for your note.');
+    expect(metadataFallback.finalText).not.toContain('Weekly product newsletter');
+    const [fallbackTask] = await db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, metadataFallback.taskId));
+    expect(TaskStateSchema.parse(fallbackTask?.state).plannerState.emailReview).toMatchObject({
+      rankingSource: 'recent_metadata_fallback',
+      rankingFailureReason: 'invalid_result',
+      selectedThreadIds: ['request-a'],
+    });
 
     const reviewChecklist = RequestChecklistSchema.parse({
       version: 1,
@@ -507,6 +956,119 @@ describe('golden tasks', () => {
       rankedThreadIds: rankedIds,
       attemptedThreadIds: rankedIds,
       excludedThreadIds: ['answered-a'],
+    });
+  });
+
+  it('completes five verified fallback reads within the default budget after five search pages', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const prompt =
+      'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.';
+    const threadIds = ['request-a', 'request-b', 'request-c', 'request-d', 'request-e'];
+    let searchPages = 0;
+    const readThreadIds: string[] = [];
+    const result = await runGoldenTask(db, agentId, {
+      name: 'bounded-email-review-five-pages-five-thread-default-budget',
+      event: { source: 'chat', trust: 'owner', payload: { text: prompt } },
+      taskType: 'chat_turn',
+      pinOwnerRequest: true,
+      plan: workflowPlan,
+      objects: [
+        { role: 'reason', value: {}, unavailable: true },
+        { role: 'reason', value: { items: threadIds.map(emailReviewDraft) } },
+      ],
+      script: [],
+      tools: {
+        'gmail.search': {
+          schema: z.object({
+            query: z.string(),
+            maxResults: z.number().optional(),
+            pageToken: z.string().optional(),
+          }),
+          execute: async (input) => {
+            const { pageToken } = z.object({ pageToken: z.string().optional() }).parse(input);
+            const page = pageToken ? Number(pageToken.replace('page-', '')) : 1;
+            searchPages += 1;
+            return {
+              query: 'newer_than:7d -from:me',
+              mailboxSearched: 'assistant-bot@example.com',
+              configuredOwnerMailbox: 'owner@example.com',
+              complete: false,
+              hasMore: true,
+              nextPageToken: `page-${page + 1}`,
+              unavailable: [],
+              results:
+                page === 1
+                  ? threadIds.map((threadId, index) => ({
+                      messageId: `search-${threadId}`,
+                      threadId,
+                      from: 'sender@example.net',
+                      to: 'owner@example.com',
+                      date: `2026-10-12T${String(15 - index).padStart(2, '0')}:00:00Z`,
+                      subject: `Request ${threadId}`,
+                      snippet: `Could you confirm request ${threadId}?`,
+                    }))
+                  : [],
+            };
+          },
+        },
+        'gmail.read_thread': {
+          schema: z.object({
+            threadId: z.string(),
+            startMessageIndex: z.number().optional(),
+            startMessageOffset: z.number().optional(),
+            maxMessages: z.number().optional(),
+            maxChars: z.number().optional(),
+          }),
+          execute: async (input) => {
+            const { threadId, startMessageIndex = 0 } = input as {
+              threadId: string;
+              startMessageIndex?: number;
+            };
+            readThreadIds.push(threadId);
+            const text = `Could you confirm request ${threadId}?`;
+            return gmailThreadPage({
+              threadId,
+              startMessageIndex,
+              totalMessages: 1,
+              complete: true,
+              messages: [
+                {
+                  messageId: `latest-${threadId}`,
+                  from: 'sender@example.net',
+                  to: 'owner@example.com',
+                  date: '2026-10-12T10:00:00Z',
+                  subject: `Request ${threadId}`,
+                  text,
+                  sourceLength: text.length,
+                  truncated: false,
+                },
+              ],
+            });
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+
+    expect(searchPages).toBe(5);
+    expect(readThreadIds).toHaveLength(5);
+    expect(new Set(readThreadIds).size).toBe(5);
+    expect(result.stepCount).toBeLessThanOrEqual(12);
+    expect(result.toolNames.filter((name) => name === 'gmail.search')).toHaveLength(5);
+    expect(result.toolNames.filter((name) => name === 'gmail.read_thread')).toHaveLength(5);
+    expect(
+      result.toolNames.every((name) => ['gmail.search', 'gmail.read_thread'].includes(name)),
+    ).toBe(true);
+    expect(result.finalText).toContain('Automated ranking was unavailable');
+    expect(result.finalText).toContain('beyond the bounded page limit');
+    expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(5);
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
+    expect(task?.maxSteps).toBe(12);
+    expect(TaskStateSchema.parse(task?.state).plannerState.emailReview).toMatchObject({
+      rankingSource: 'recent_metadata_fallback',
+      rankingFailureReason: 'invalid_result',
+      selectedThreadIds: expect.arrayContaining(threadIds),
+      attemptedThreadIds: expect.arrayContaining(threadIds),
     });
   });
 
@@ -2120,6 +2682,107 @@ describe('golden tasks', () => {
       .from(responseChecks)
       .where(eq(responseChecks.taskId, result.taskId));
     expect(check?.blocked).toBe(false);
+  });
+
+  it('answers a dated calendar overview from the calendar alone, without a Gmail search', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const eventUrl = 'https://calendar.google.com/calendar/event?eid=calendar-day-review';
+    let calendarReads = 0;
+    let gmailSearches = 0;
+    const answer = `Tomorrow you have one event: Design review, 16:00–16:30 ([calendar event](${eventUrl})). No overlaps were found.`;
+    const result = await runGoldenTask(db, agentId, {
+      name: 'calendar-day-overview-does-not-search-email',
+      event: {
+        source: 'chat',
+        trust: 'owner',
+        payload: {
+          text: 'What is on my calendar tomorrow? Use my local time zone, include event times and calendar names, and point out overlaps. Give a compact answer with source links. Do not edit anything.',
+        },
+      },
+      taskType: 'chat_turn',
+      plan: workflowPlan,
+      script: [{ text: answer }],
+      tools: {
+        'calendar.list_events': {
+          schema: z.object({}).passthrough(),
+          execute: async () => {
+            calendarReads += 1;
+            return {
+              complete: true,
+              calendarsSearched: ['Assistant'],
+              events: [
+                {
+                  eventId: 'evt-design-review',
+                  calendarId: 'primary',
+                  calendar: 'Assistant',
+                  summary: 'Design review',
+                  start: `${tomorrow}T16:00:00Z`,
+                  end: `${tomorrow}T16:30:00Z`,
+                  htmlLink: eventUrl,
+                },
+              ],
+            };
+          },
+        },
+        'gmail.search': {
+          schema: z.object({}).passthrough(),
+          execute: async () => {
+            gmailSearches += 1;
+            return { complete: true, results: [] };
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+
+    expect(calendarReads).toBe(1);
+    expect(gmailSearches).toBe(0);
+    expect(result.toolNames).toEqual(['calendar.list_events']);
+    expect(result.status).toBe('done');
+    expect(result.finalText).toContain('Design review');
+    expect(result.finalText).toContain('16:00–16:30');
+    expect(result.finalText).not.toMatch(/let me read|let me check|email results/i);
+  });
+
+  it('plans the hypothetical work schedule without searching the owner calendar', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const request =
+      'Plan a hypothetical work morning from 09:00 to 12:30. Include a 90-minute deep-work block, a 45-minute review, a 30-minute meeting at 11:30, and two 15-minute breaks. Show a compact table with start and end times, identify any unused time, and check that nothing overlaps. Do not look at or change my real calendar.';
+    const answer = [
+      '| Time | Plan |',
+      '|---|---|',
+      '| 09:00–10:30 | Deep work |',
+      '| 10:30–10:45 | Break |',
+      '| 10:45–11:30 | Review |',
+      '| 11:30–12:00 | Meeting |',
+      '| 12:00–12:15 | Break |',
+      '| 12:15–12:30 | Unused time |',
+      '',
+      'The blocks do not overlap. The review is 45 minutes, deep work is 90 minutes, and 15 minutes remain unused.',
+    ].join('\n');
+    const result = await runGoldenTask(db, agentId, {
+      name: 'hypothetical-schedule-does-not-read-private-calendar',
+      event: { source: 'chat', trust: 'owner', payload: { text: request } },
+      taskType: 'chat_turn',
+      plan: {
+        action: 'reply',
+        reasoning: 'Answer the hypothetical schedule request.',
+        steps: [],
+        missingInfo: [],
+      },
+      script: [{ text: answer }],
+      tools: {},
+    });
+    createdTaskIds.push(result.taskId);
+
+    expect(result.toolNames).toEqual([]);
+    expect(result.stepCount).toBe(1);
+    expect(result.status).toBe('done');
+    expect(result.finalText).toContain('09:00–10:30');
+    expect(result.finalText).toContain('12:15–12:30');
+    expect(result.finalText).not.toContain("That's everything I could actually see");
+    expect(result.finalText).not.toContain('I could not get to');
   });
 
   it('blocks an invented flight return time before the calendar tool executes', async (ctx) => {

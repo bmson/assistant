@@ -5,7 +5,14 @@
  * model room to invent a plausible calendar or inbox answer.
  */
 
+import { type CalendarPlanOptions, requestedCalendarPlanOptions } from './calendar-plan-intent.js';
 import { requestedCardIntent } from './card-intent.js';
+import {
+  compoundTripFetchTargets,
+  compoundTripReadProjection,
+  compoundTripRoute,
+  MAX_COMPOUND_TRIP_TOOL_CALLS,
+} from './compound-trip-read.js';
 import {
   EMAIL_REVIEW_MAX_SEARCH_PAGES,
   EMAIL_REVIEW_QUERY,
@@ -49,14 +56,20 @@ export interface PersonalReadRequest {
   kind: PersonalReadKind;
   /** Deterministic review-only proposal requiring availability and event-list reads. */
   weeklyCalendarPlan?: boolean;
+  calendarPlanOptions?: CalendarPlanOptions;
   /** Literal subject terms to bind into calendar/Gmail searches. */
   queryTerms: string[];
+  /** Full bounded owner question for semantic memory retrieval. */
+  memoryQuery?: string;
+  /** Full bounded owner question for an explicitly requested past-chat search. */
+  conversationQuery?: string;
   /** First read tool the executor must call. */
   firstToolName:
     | 'calendar.list_events'
     | 'calendar.search_events'
     | 'calendar.availability'
     | 'gmail.search'
+    | 'conversations.search'
     | 'drive.search'
     | 'memory.recall'
     | 'memory.graph_snapshot';
@@ -85,13 +98,15 @@ export interface PersonalReadRequest {
   /** Explicit owner-supplied lodging scope used only to rank returned mail metadata. */
   mailRelevanceTerms?: string[];
   /** Specific question to answer, rather than turning every lookup into an agenda. */
-  answerFocus?: 'lodging' | 'applications' | 'flight';
+  answerFocus?: 'lodging' | 'applications' | 'flight' | 'trip';
   /** Broad mail-history requests use a bounded metadata-page continuation. */
   requiresExhaustiveMail?: boolean;
   /** Current/upcoming mail questions prioritize the newest matching thread. */
   preferLatestMail?: boolean;
   /** A bounded future lookup, distinct from correcting a prior flight claim. */
   upcomingFlightDiscovery?: boolean;
+  /** A bounded read-only itinerary lookup spanning flight, hotel, and ground transport. */
+  compoundTripDiscovery?: boolean;
   /** Explicit no-send review of a bounded recent-email sample. */
   emailReview?: {
     windowDays: 7;
@@ -108,6 +123,8 @@ export interface PersonalReadRequest {
     excludedThreadIds?: string[];
     backfillShortfall?: 'rank_pool_exhausted' | 'step_budget';
     rankingFailed?: boolean;
+    rankingSource?: 'model' | 'recent_metadata_fallback';
+    rankingFailureReason?: 'router_error' | 'invalid_result';
   };
 }
 
@@ -127,6 +144,7 @@ export interface ReadToolEvidence {
   id?: string;
   toolName: string;
   status: string;
+  fromCurrentTask?: boolean;
   args?: unknown;
   result?: unknown;
   error?: string | null;
@@ -145,6 +163,39 @@ const SAME_SUBJECT_LOOKUP_OFFER =
   /\b(?:would you like me to|shall i|should i|i can)\s+(?:check|verify|look up|read|search for)\s+(?:that|it|the (?:details|confirmation)|(?:your|the|our) hotel(?: confirmation| reservation)?)\b/i;
 const MUTATING_OFFER =
   /\b(?:add|archive|book|cancel|create|delete|edit|forward|invite|move|reply|reschedule|save|schedule|send|submit|update)\b/i;
+const NEGATED_LOOKUP_VERB = String.raw`(?:look(?:\s+up)?|check|search|read|open|access|review|scan|inspect|consult|use)`;
+
+function explicitlyProhibitsPrivateRead(
+  text: string,
+  surface: 'calendar' | 'email' | 'memory',
+): boolean {
+  const accountSurface =
+    surface === 'calendar'
+      ? String.raw`(?:google\s+)?(?:calendars?|schedules?|agendas?)`
+      : surface === 'email'
+        ? `(?:gmail|e-?mails?|mail|inboxes|mailboxes|messages?|threads?)`
+        : String.raw`(?:memories|memory|saved\s+(?:facts?|memories)|what\s+you\s+know)`;
+  const sourceOwner = String.raw`(?:my|our)\s+(?:(?:real|actual|personal)\s+)?`;
+  const clause = String.raw`[^.!?\n]{0,180}`;
+  const prefix = String.raw`\b(?:do\s+not|don['’]?t|never)\s+${NEGATED_LOOKUP_VERB}\b`;
+  const negatedClause = new RegExp(`${prefix}(${clause})`, 'i').exec(text)?.[1] ?? '';
+  const direct = new RegExp(`\\b${sourceOwner}${accountSurface}\\b`, 'i');
+  const allPrivateSurfaces = String.raw`(?:gmail|e-?mails?|mail|inboxes|mailboxes|messages?|threads?|(?:google\s+)?calendars?|schedules?|agendas?|memories|memory|saved\s+(?:facts?|memories)|what\s+you\s+know)`;
+  const firstOwnedSource = new RegExp(`\\b${sourceOwner}${allPrivateSurfaces}\\b`, 'i').exec(
+    negatedClause,
+  );
+  const listed = firstOwnedSource
+    ? negatedClause
+        .slice(firstOwnedSource.index + firstOwnedSource[0].length)
+        .split(/,|\b(?:and|or)\b/i)
+        .some((item) => new RegExp(`^\\s*(?:${sourceOwner})?${accountSurface}\\b`, 'i').test(item))
+    : false;
+  const without = new RegExp(
+    String.raw`\bwithout\s+${NEGATED_LOOKUP_VERB}(?:ing)?\b${clause}\b${sourceOwner}${accountSurface}\b`,
+    'i',
+  );
+  return direct.test(negatedClause) || listed || without.test(text);
+}
 
 /**
  * Use the nearest substantive OWNER turn to resolve a short detail question.
@@ -235,12 +286,16 @@ const KNOWLEDGE_GRAPH_SURFACE =
   /\b(?:(?:memory|knowledge)\s+graph|graph\s+(?:my\s+)?(?:memory|knowledge)|saved\s+connections?)\b/i;
 const MEMORY_SURFACE =
   /\b(?:memor(?:y|ies)|remember(?:ed)?|saved facts?|what you know|knowledge about me)\b/i;
+const CONVERSATION_HISTORY_REQUEST =
+  /\b(?:earlier|previous|prior|past)\s+(?:owner\s+)?(?:conversations?|chats?)\b|\b(?:previously|before)\s+(?:told|said|mentioned)\s+you\b|\bwhat\s+(?:did|have)\s+i\s+(?:tell|say|mention)\s+you\b/i;
 const AUTOBIOGRAPHICAL_READ =
   /\b(?:when|where)\s+did\s+i\b|\bhave\s+i\s+ever\b|\bdid\s+i\s+(?:attend|visit|see|go|meet|live|work|travel)\b/i;
 const AVAILABILITY_SURFACE =
   /\b(?:availability|available|busy|conflicts?|free|open\s+(?:time|slots?)|(?:calendar|schedule|agenda)\s+(?:(?:is|looks|appears)\s+)?(?:clear|empty))\b/i;
 const CALENDAR_TIME_REFERENCE =
   /\b(?:today|tomorrow|weekends?|weeks?|months?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|20\d{2}-\d{2}-\d{2})\b/i;
+const CALENDAR_DAY_OVERVIEW =
+  /\bwhat(?:\s+is|['’]s)?\s+on\s+(?:(?:my|our|the)\s+)?(?:calendar|schedule|agenda)\b/i;
 const SCHEDULED_THING =
   /\b(interviews?|meetings?|appointments?|calls?|chats?|flights?|reservations?|bookings?|events?)\b/i;
 const READ_OR_QUESTION =
@@ -274,6 +329,21 @@ const EMAIL_COMMAND_LEAD =
   /^\s*(?:(?:please|can you|could you|would you|i want you to)\s+)*(?:email|e-mail)\s+\S/iu;
 const READ_THEN_MUTATION =
   /(?:\b(?:and|then|also)\s+|[,;.!?\n]\s*)(?:please\s+)?(?:add|archive|block|book|cancel|compose|create|delete|draft|edit|email|flag|forward|hold|invite|label|make|mark|move|prepare|remember|remind|reply|reschedule|save|schedule|send|update|write)\b/i;
+
+/**
+ * Action words in an explicit prohibition do not turn an otherwise read-only
+ * lookup into a mixed workflow. Strip only the prohibited sentence before
+ * applying the positive read-then-write guard; a requested action elsewhere
+ * remains visible to the guard.
+ */
+function readThenMutationText(text: string): string {
+  return text
+    .replace(
+      /\b(?:do\s+not|don['’]?t|never)\s+(?:add|archive|block|book|cancel|compose|create|delete|draft|edit|email|flag|forward|hold|invite|label|make|mark|move|prepare|remember|remind|reply|reschedule|save|schedule|send|update|write)\b[^.!?\n]*/gi,
+      ' ',
+    )
+    .replace(/\bmark\s+(?:anything\s+)?(?:as\s+)?(?:uncertain|uncertainty|unverified)\b/gi, ' ');
+}
 
 function directEmailReviewIntent(text: string): boolean {
   if (
@@ -638,12 +708,71 @@ function isNextEventRequest(text: string): boolean {
 }
 
 function isUpcomingFlightDiscovery(text: string): boolean {
-  const nextFlight = /\b(?:next|upcoming|soonest)\s+(?:flight|flights|airline|itinerary)\b/i.test(
-    text,
-  );
+  const nextFlight =
+    /\b(?:next|upcoming|soonest)\s+(?:future\s+)?(?:flight|flights|airline|itinerary)\b/i.test(
+      text,
+    );
   const nextTripWithFlight =
-    /\b(?:next|upcoming|soonest)\s+trip\b/i.test(text) && /\bflight\b/i.test(text);
+    /\b(?:next|upcoming|soonest)\s+(?:future\s+)?trip\b/i.test(text) && /\bflight\b/i.test(text);
   return (nextFlight || nextTripWithFlight) && (READ_OR_QUESTION.test(text) || VERIFY.test(text));
+}
+
+function isCompoundTripDiscovery(text: string): boolean {
+  return (
+    /\bnext\s+trip\b/i.test(text) &&
+    /\b(?:flight|flights)\b/i.test(text) &&
+    /\b(?:hotel|accommodation)\b/i.test(text) &&
+    /\b(?:airport|public transport|taxi)\b/i.test(text) &&
+    /\b(?:find|check|compare|plan|look up|search)\b/i.test(text)
+  );
+}
+
+function compoundTripWindow(now: Date): PersonalReadTimeWindow {
+  const start = new Date(now.getTime());
+  const end = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000);
+  return {
+    timeMin: start.toISOString(),
+    timeMax: end.toISOString(),
+    label: 'the next 365 days',
+  };
+}
+
+function upcomingFlightWindow(now: Date): PersonalReadTimeWindow {
+  return {
+    timeMin: now.toISOString(),
+    timeMax: new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+    label: 'the next 365 days',
+  };
+}
+
+function calendarPlanWindow(
+  options: PersonalReadDetectionOptions,
+  plan: CalendarPlanOptions,
+): PersonalReadTimeWindow {
+  const timeZone = options.timeZone ?? 'UTC';
+  const now = options.now ?? new Date();
+  if (!plan.workingDays) {
+    return (
+      resolveTimeWindowBounds('next week', 'calendar', false, {
+        ...options,
+        timeZone,
+      }) ??
+      timeWindow(
+        civilDateAt(now, timeZone),
+        addCivilDays(civilDateAt(now, timeZone), 7),
+        'next week',
+        timeZone,
+      )
+    );
+  }
+  const start = civilDateAt(now, timeZone);
+  let cursor = start;
+  let weekdays = 0;
+  while (weekdays < plan.workingDays) {
+    if (civilWeekday(cursor) !== 0 && civilWeekday(cursor) !== 6) weekdays += 1;
+    if (weekdays < plan.workingDays) cursor = addCivilDays(cursor, 1);
+  }
+  return timeWindow(start, addCivilDays(cursor, 1), plan.windowLabel, timeZone);
 }
 
 function hasExplicitTemporalPhrase(text: string): boolean {
@@ -1081,6 +1210,8 @@ const QUERY_MODIFIERS = new Set([
   'weeks',
   'yesterday',
 ]);
+const MAX_MEMORY_RECALL_QUERY_CHARS = 1200;
+const MAX_CONVERSATION_SEARCH_QUERY_CHARS = 500;
 
 function contentText(content: unknown): string {
   if (typeof content === 'string') return content;
@@ -1310,8 +1441,11 @@ function detectPersonalReadRequestInternal(
   }
   if (latestIndex === -1) return null;
   const latest = readIntentText(messages[latestIndex]);
+  const calendarReadProhibited = explicitlyProhibitsPrivateRead(latest, 'calendar');
+  const emailReadProhibited = explicitlyProhibitsPrivateRead(latest, 'email');
+  const memoryReadProhibited = explicitlyProhibitsPrivateRead(latest, 'memory');
   const flightContinuation =
-    clarificationDepth < 2
+    clarificationDepth < 2 && !calendarReadProhibited && !emailReadProhibited
       ? flightScopeClarificationContinuation(
           messages,
           latestIndex,
@@ -1341,6 +1475,7 @@ function detectPersonalReadRequestInternal(
   // mutation, so enforcing its source reads must not turn it into a tool-less
   // answer or authorize any other follow-through.
   if (
+    !emailReadProhibited &&
     requestedCardIntent(latest) &&
     /^\s*(?:(?:please|can you|could you|would you)\s+)*(?:create|make|save)\b/i.test(latest) &&
     /\b(?:my|our)\s+(?:hotel|reservation|booking)\b/i.test(latest) &&
@@ -1357,7 +1492,7 @@ function detectPersonalReadRequestInternal(
       answerFocus: 'lodging',
     };
   }
-  if (directEmailReviewIntent(latest)) {
+  if (!emailReadProhibited && directEmailReviewIntent(latest)) {
     return {
       kind: 'email',
       queryTerms: [],
@@ -1370,7 +1505,7 @@ function detectPersonalReadRequestInternal(
   if (
     !latest ||
     /^\s*i\s+(?:read|checked|reviewed|looked|searched|scanned|opened)\b/i.test(latest) ||
-    READ_THEN_MUTATION.test(latest) ||
+    READ_THEN_MUTATION.test(readThenMutationText(latest)) ||
     EMAIL_COMMAND_LEAD.test(latest) ||
     (MUTATION_LEAD.test(latest) && !/\b(?:check|find|search|look|show)\b/i.test(latest))
   ) {
@@ -1381,7 +1516,8 @@ function detectPersonalReadRequestInternal(
     .slice(Math.max(0, latestIndex - 4), latestIndex)
     .map(messageText)
     .join('\n');
-  const upcomingFlightDiscovery = isUpcomingFlightDiscovery(latest);
+  const compoundTripDiscovery = isCompoundTripDiscovery(latest);
+  const upcomingFlightDiscovery = !compoundTripDiscovery && isUpcomingFlightDiscovery(latest);
   // A phrase such as "find my next flight and verify anything uncertain" is
   // discovery, not a correction to an assistant claim. Only terse challenges
   // without an independently named upcoming flight inherit prior scope.
@@ -1434,30 +1570,56 @@ function detectPersonalReadRequestInternal(
     }
     return [];
   };
-  const graphRead = KNOWLEDGE_GRAPH_SURFACE.test(latest);
+  const graphRead = !memoryReadProhibited && KNOWLEDGE_GRAPH_SURFACE.test(latest);
   const driveRead =
     !graphRead &&
     (DRIVE_SURFACE.test(latest) || MEDIA_FILE_READ.test(latest)) &&
     (READ_OR_QUESTION.test(latest) || /^\s*(?:pull|open|find|show)\b/i.test(latest));
   const memoryRead =
+    !memoryReadProhibited &&
     !graphRead &&
     !driveRead &&
     ((MEMORY_SURFACE.test(latest) && (READ_OR_QUESTION.test(latest) || verification)) ||
+      (CONVERSATION_HISTORY_REQUEST.test(latest) && READ_OR_QUESTION.test(latest)) ||
       AUTOBIOGRAPHICAL_READ.test(latest));
   if (graphRead || driveRead || memoryRead) {
     const kind: PersonalReadKind = graphRead ? 'knowledge_graph' : driveRead ? 'drive' : 'memory';
+    const conversationHistoryRequested =
+      kind === 'memory' && CONVERSATION_HISTORY_REQUEST.test(latest);
     return {
       kind,
       queryTerms: contextualPrivateTerms(),
+      ...(kind === 'memory' ? { memoryQuery: latest.slice(0, MAX_MEMORY_RECALL_QUERY_CHARS) } : {}),
+      ...(conversationHistoryRequested
+        ? { conversationQuery: latest.slice(0, MAX_CONVERSATION_SEARCH_QUERY_CHARS) }
+        : {}),
       firstToolName:
         kind === 'knowledge_graph'
           ? 'memory.graph_snapshot'
           : kind === 'drive'
             ? 'drive.search'
-            : 'memory.recall',
+            : conversationHistoryRequested
+              ? 'conversations.search'
+              : 'memory.recall',
       requiresThreadRead: false,
       ...(options.timeZone ? { timeZone: options.timeZone } : {}),
       ...(verification ? { verification: true } : {}),
+    };
+  }
+  if (compoundTripDiscovery) {
+    const timeWindow = compoundTripWindow(options.now ?? new Date());
+    return {
+      kind: 'calendar_email',
+      queryTerms: [],
+      firstToolName: 'calendar.list_events',
+      requiresThreadRead: true,
+      timeWindow,
+      ...(options.timeZone ? { timeZone: options.timeZone } : {}),
+      answerFocus: 'trip',
+      compoundTripDiscovery: true,
+      maxResults: 50,
+      mailQuery:
+        '{flight flights itinerary "e-ticket" "boarding pass" "booking confirmation" "reservation confirmation" hotel lodging accommodation "check-in" "check-out"}',
     };
   }
   // A terse correction such as "was that made up?" carries no subject of its
@@ -1519,12 +1681,16 @@ function detectPersonalReadRequestInternal(
     WHY_LOOKUP.test(latest) &&
     /\b(?:my|our|you said|said i|i had|i have|calendar|schedule)\b/i.test(latest);
   const nextEventQuestion = isNextEventRequest(latest);
-  if (nextEventQuestion) terms = [];
+  const calendarDayList =
+    CALENDAR_DAY_OVERVIEW.test(latest) && CALENDAR_TIME_REFERENCE.test(latest);
+  if (nextEventQuestion || calendarDayList) terms = [];
   const personalSchedule =
     /\b(?:my|our|the|this|that|do i|did i|is there|are there)\b/i.test(latest) ||
     (verification && flightLanguage.test(latest)) ||
     terms.some((term) => !SCHEDULED_THING.test(term));
   const namedSchedule =
+    !calendarReadProhibited &&
+    !calendarDayList &&
     !genericScheduleList &&
     !nextEventQuestion &&
     (SCHEDULED_THING.test(latest) || (verification && SCHEDULED_THING.test(recentContext))) &&
@@ -1532,18 +1698,21 @@ function detectPersonalReadRequestInternal(
     (READ_OR_QUESTION.test(latest) || verification || whyLookup);
   const daySchedule = DAY_SCHEDULE.test(latest);
   const calendar =
-    upcomingFlightDiscovery ||
-    daySchedule ||
-    namedSchedule ||
-    (CALENDAR_SURFACE.test(latest) &&
-      (READ_OR_QUESTION.test(latest) || verification || whyLookup)) ||
-    (verification && CALENDAR_SURFACE.test(recentContext));
+    !calendarReadProhibited &&
+    (upcomingFlightDiscovery ||
+      daySchedule ||
+      namedSchedule ||
+      (CALENDAR_SURFACE.test(latest) &&
+        (READ_OR_QUESTION.test(latest) || verification || whyLookup)) ||
+      (verification && CALENDAR_SURFACE.test(recentContext)));
   const email =
-    upcomingFlightDiscovery ||
-    (EMAIL_SURFACE.test(latest) &&
-      (READ_OR_QUESTION.test(latest) || receiptQuestion(latest) || verification)) ||
-    (verification && EMAIL_SURFACE.test(recentContext));
+    !emailReadProhibited &&
+    (upcomingFlightDiscovery ||
+      (EMAIL_SURFACE.test(latest) &&
+        (READ_OR_QUESTION.test(latest) || receiptQuestion(latest) || verification)) ||
+      (verification && EMAIL_SURFACE.test(recentContext)));
   const availability =
+    !calendarReadProhibited &&
     AVAILABILITY_SURFACE.test(latest) &&
     !namedSchedule &&
     (!EMAIL_SURFACE.test(latest) ||
@@ -1552,10 +1721,10 @@ function detectPersonalReadRequestInternal(
     (/\b(?:am i|are|check|do i|find|is|show|what|when|which)\b/i.test(latest) ||
       CALENDAR_TIME_REFERENCE.test(latest));
 
-  const weeklyCalendarPlan =
-    /\b(?:focus blocks?|focus time|overloaded days?|scheduling conflicts?)\b/i.test(latest) &&
-    /\b(?:next week|coming week|following week)\b/i.test(latest) &&
-    /\b(?:calendar|schedule)\b/i.test(latest);
+  const calendarPlanOptions = !calendarReadProhibited
+    ? requestedCalendarPlanOptions(latest)
+    : undefined;
+  const weeklyCalendarPlan = calendarPlanOptions !== undefined;
 
   if (!calendar && !email && !availability && !weeklyCalendarPlan) return null;
   if (terms.length === 0 && email) terms = emailQueryTerms(hypothesis);
@@ -1563,13 +1732,14 @@ function detectPersonalReadRequestInternal(
   // Named appointments are commonly confirmed in email before (or instead of)
   // appearing on a calendar. Search both configured sources without asking the
   // owner which provider/account contains the answer.
-  const kind: PersonalReadKind = availability
-    ? 'calendar'
-    : namedSchedule || (calendar && email)
-      ? 'calendar_email'
-      : email
-        ? 'email'
-        : 'calendar';
+  const kind: PersonalReadKind =
+    weeklyCalendarPlan || availability
+      ? 'calendar'
+      : namedSchedule || (calendar && email)
+        ? 'calendar_email'
+        : email
+          ? 'email'
+          : 'calendar';
   const firstToolName =
     weeklyCalendarPlan || availability
       ? 'calendar.availability'
@@ -1581,7 +1751,7 @@ function detectPersonalReadRequestInternal(
 
   const request: PersonalReadRequest = {
     kind,
-    ...(weeklyCalendarPlan ? { weeklyCalendarPlan: true } : {}),
+    ...(weeklyCalendarPlan ? { weeklyCalendarPlan: true, calendarPlanOptions } : {}),
     queryTerms: weeklyCalendarPlan ? [] : terms,
     ...(upcomingFlightDiscovery ||
     (namedSchedule && (flightLanguage.test(latest) || Boolean(ownerFlight)))
@@ -1594,7 +1764,9 @@ function detectPersonalReadRequestInternal(
       (kind === 'email' &&
         (verification || /\b(?:when|where|what time|details?|what does|what did)\b/i.test(latest))),
   };
-  if (upcomingFlightDiscovery) {
+  if (weeklyCalendarPlan && calendarPlanOptions) {
+    request.timeWindow = calendarPlanWindow(options, calendarPlanOptions);
+  } else if (upcomingFlightDiscovery) {
     // Search a small set of booking-specific OR terms. ANDing the full owner
     // sentence misses confirmations, while a generic "trip" term finds old
     // unrelated itinerary mail.
@@ -1615,7 +1787,7 @@ function detectPersonalReadRequestInternal(
     // letting an earlier dentist appointment consume a one-result page.
     request.maxResults = 50;
   }
-  if (kind !== 'email') {
+  if (kind !== 'email' && !weeklyCalendarPlan && !upcomingFlightDiscovery) {
     const temporal = resolveTemporalIntent(
       temporalText,
       kind,
@@ -1631,7 +1803,9 @@ function detectPersonalReadRequestInternal(
       if (issue) request.temporalIssue = issue;
     }
   }
-  if (kind !== 'calendar') {
+  if (upcomingFlightDiscovery) {
+    request.timeWindow = upcomingFlightWindow(options.now ?? new Date());
+  } else if (kind !== 'calendar' && !weeklyCalendarPlan && !upcomingFlightDiscovery) {
     if (!upcomingFlightDiscovery) request.mailQuery = gmailQuery(hypothesis, terms);
     // A relative travel date describes the itinerary, not when its confirmation
     // arrived. Older booking confirmations can still be authoritative for a
@@ -1732,6 +1906,7 @@ export function gmailSearchThreadIds(
 ): string[] {
   const ids: string[] = [];
   for (const row of evidence) {
+    if (hasTypedTripRead(request) && row.fromCurrentTask === false) continue;
     if (
       !succeeded(row) ||
       row.toolName !== 'gmail.search' ||
@@ -1749,9 +1924,63 @@ export function gmailSearchThreadIds(
     }
   }
   const unique = [...new Set(ids)];
-  if (request?.answerFocus === 'flight' || request?.answerFocus === 'lodging') {
+  if (request?.compoundTripDiscovery) {
+    const metadata = new Map<string, { subject: string; snippet: string }>();
+    for (const row of evidence) {
+      if (row.fromCurrentTask === false || !succeeded(row) || row.toolName !== 'gmail.search')
+        continue;
+      const results = objectRecord(row.result)?.results;
+      if (!Array.isArray(results)) continue;
+      for (const item of results) {
+        const result = objectRecord(item);
+        const id = typeof result?.threadId === 'string' ? result.threadId : undefined;
+        if (!id) continue;
+        const prior = metadata.get(id);
+        metadata.set(id, {
+          subject: [prior?.subject, typeof result?.subject === 'string' ? result.subject : '']
+            .filter(Boolean)
+            .join(' '),
+          snippet: [prior?.snippet, typeof result?.snippet === 'string' ? result.snippet : '']
+            .filter(Boolean)
+            .join(' '),
+        });
+      }
+    }
+    const flightThreads = unique
+      .map((threadId, index) => {
+        const item = metadata.get(threadId);
+        const source = `${item?.subject ?? ''} ${item?.snippet ?? ''}`;
+        const flight =
+          /\b(?:flight|airline|itinerary|boarding pass|e-?ticket|record locator)\b/i.test(source);
+        const booking =
+          /\b(?:booking|confirmation|reservation|ticket|itinerary|record locator)\b/i.test(source);
+        return { threadId, index, score: flight && booking ? 1 : 0 };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => a.index - b.index);
+    const hotelThreads = unique
+      .map((threadId, index) => {
+        const item = metadata.get(threadId);
+        const source = `${item?.subject ?? ''} ${item?.snippet ?? ''}`;
+        const hotel = /\b(?:hotel|lodging|accommodation|airbnb)\b/i.test(source);
+        const booking = /\b(?:booking|confirmation|reservation|check[- ]?in)\b/i.test(source);
+        return { threadId, index, score: hotel && booking ? 1 : 0 };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => a.index - b.index);
+    const selected = [flightThreads[0]?.threadId, hotelThreads[0]?.threadId].filter(
+      (threadId): threadId is string => Boolean(threadId),
+    );
+    return [...new Set([...selected, ...unique])];
+  }
+  if (
+    request?.answerFocus === 'flight' ||
+    request?.answerFocus === 'lodging' ||
+    request?.answerFocus === 'trip'
+  ) {
     const scores = new Map<string, number>();
     for (const row of evidence) {
+      if (hasTypedTripRead(request) && row.fromCurrentTask === false) continue;
       if (
         !succeeded(row) ||
         row.toolName !== 'gmail.search' ||
@@ -1767,26 +1996,40 @@ export function gmailSearchThreadIds(
         if (typeof metadata.threadId !== 'string') continue;
         const subject = typeof metadata.subject === 'string' ? metadata.subject : '';
         const snippet = typeof metadata.snippet === 'string' ? metadata.snippet : '';
+        const flightScore =
+          (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass|flight|airline)\b/i.test(
+            subject,
+          )
+            ? 2
+            : 0) +
+          (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass|departure|flight|airline)\b/i.test(
+            snippet,
+          )
+            ? 1
+            : 0);
+        const hotelScore = /\b(?:hotel|lodging|accommodation|airbnb)\b/i.test(subject) ? 3 : 0;
         const score =
-          request.answerFocus === 'flight'
-            ? (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass)\b/i.test(
-                subject,
-              )
-                ? 2
-                : 0) +
-              (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass|departure)\b/i.test(
-                snippet,
-              )
-                ? 1
-                : 0)
-            : lodgingMetadataScore(
-                subject,
-                snippet,
-                request.mailRelevanceTerms ?? [],
-                request.mailTemporalLabel,
-                request.timeWindow,
-                request.timeZone,
-              );
+          request.answerFocus === 'trip'
+            ? flightScore + hotelScore
+            : request.answerFocus === 'flight'
+              ? (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass)\b/i.test(
+                  subject,
+                )
+                  ? 2
+                  : 0) +
+                (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass|departure)\b/i.test(
+                  snippet,
+                )
+                  ? 1
+                  : 0)
+              : lodgingMetadataScore(
+                  subject,
+                  snippet,
+                  request.mailRelevanceTerms ?? [],
+                  request.mailTemporalLabel,
+                  request.timeWindow,
+                  request.timeZone,
+                );
         scores.set(metadata.threadId, Math.max(scores.get(metadata.threadId) ?? 0, score));
       }
     }
@@ -1993,18 +2236,27 @@ function metadataDateIntervals(text: string): Array<{ start: string; endExclusiv
 
 export const MAX_GMAIL_THREADS_TO_READ = 3;
 export const MAX_GMAIL_SEARCH_PAGES = 3;
+export const MAX_COMPOUND_CALENDAR_PAGES = 2;
+
+function hasTypedTripRead(request: PersonalReadRequest | undefined): boolean {
+  return Boolean(request?.compoundTripDiscovery || request?.upcomingFlightDiscovery);
+}
 
 export function gmailThreadIdsToRead(
   evidence: ReadonlyArray<ReadToolEvidence>,
   request?: PersonalReadRequest,
 ): string[] {
   if (request?.emailReview) return request.emailReview.selectedThreadIds ?? [];
-  return gmailSearchThreadIds(evidence, request).slice(0, MAX_GMAIL_THREADS_TO_READ);
+  const limit = hasTypedTripRead(request) ? 2 : MAX_GMAIL_THREADS_TO_READ;
+  return gmailSearchThreadIds(evidence, request).slice(0, limit);
 }
 
 function gmailReadThreadIds(evidence: ReadonlyArray<ReadToolEvidence>): string[] {
   return evidence
-    .filter((row) => succeeded(row) && row.toolName === 'gmail.read_thread')
+    .filter(
+      (row) =>
+        row.fromCurrentTask !== false && succeeded(row) && row.toolName === 'gmail.read_thread',
+    )
     .map((row) =>
       row.args && typeof row.args === 'object'
         ? (row.args as { threadId?: unknown }).threadId
@@ -2016,6 +2268,7 @@ function gmailReadThreadIds(evidence: ReadonlyArray<ReadToolEvidence>): string[]
 function gmailThreadAttempts(evidence: ReadonlyArray<ReadToolEvidence>, threadId: string): number {
   return evidence.filter(
     (row) =>
+      row.fromCurrentTask !== false &&
       row.toolName === 'gmail.read_thread' &&
       row.args &&
       typeof row.args === 'object' &&
@@ -2038,13 +2291,76 @@ function nextGmailThreadId(
   );
 }
 
+function compoundThreadReadInput(
+  evidence: ReadonlyArray<ReadToolEvidence>,
+  request: PersonalReadRequest,
+): Record<string, unknown> | undefined {
+  if (!hasTypedTripRead(request)) return undefined;
+  const targets = gmailThreadIdsToRead(evidence, request).slice(0, 2);
+  for (const threadId of targets) {
+    const attempts = evidence.filter(
+      (row) =>
+        row.fromCurrentTask !== false &&
+        row.toolName === 'gmail.read_thread' &&
+        objectRecord(row.args)?.threadId === threadId,
+    ).length;
+    const pages = evidence.filter(
+      (row) =>
+        row.fromCurrentTask !== false &&
+        succeeded(row) &&
+        row.toolName === 'gmail.read_thread' &&
+        objectRecord(row.args)?.threadId === threadId,
+    );
+    if (pages.length === 0) {
+      if (attempts >= 2) continue;
+      return {
+        threadId,
+        startMessageIndex: 0,
+        startMessageOffset: 0,
+        maxMessages: 20,
+        maxChars: 20_000,
+      };
+    }
+    const latest = pages.at(-1);
+    const result = objectRecord(latest?.result);
+    if (result?.complete === true) continue;
+    if (pages.length >= 2 || attempts >= 2) continue;
+    const continuation = objectRecord(result?.continuation);
+    const input = objectRecord(continuation?.input);
+    if (
+      continuation?.tool === 'gmail.read_thread' &&
+      input?.threadId === threadId &&
+      Number.isInteger(input.startMessageIndex) &&
+      Number(input.startMessageIndex) >= 0 &&
+      Number(input.startMessageIndex) <= 100_000 &&
+      Number.isInteger(input.startMessageOffset) &&
+      Number(input.startMessageOffset) >= 0 &&
+      Number(input.startMessageOffset) <= 100_000 &&
+      Number.isInteger(input.maxMessages) &&
+      Number(input.maxMessages) >= 1 &&
+      Number(input.maxMessages) <= 100 &&
+      Number.isInteger(input.maxChars) &&
+      Number(input.maxChars) >= 100 &&
+      Number(input.maxChars) <= 50_000
+    )
+      return { ...input };
+  }
+  return undefined;
+}
+
 function nextGmailSearchPage(
   request: PersonalReadRequest,
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): string | undefined {
   if (!request.requiresThreadRead && !request.requiresExhaustiveMail) return undefined;
-  const searches = evidence.filter((row) => matchingGmailSearch(row, request));
-  const pageLimit = request.emailReview ? EMAIL_REVIEW_MAX_SEARCH_PAGES : MAX_GMAIL_SEARCH_PAGES;
+  const searches = evidence.filter(
+    (row) => row.fromCurrentTask !== false && matchingGmailSearch(row, request),
+  );
+  const pageLimit = request.emailReview
+    ? EMAIL_REVIEW_MAX_SEARCH_PAGES
+    : hasTypedTripRead(request)
+      ? 2
+      : MAX_GMAIL_SEARCH_PAGES;
   if (searches.length >= pageLimit) return undefined;
   const latest = searches.at(-1);
   if (!latest?.result || typeof latest.result !== 'object') return undefined;
@@ -2052,6 +2368,23 @@ function nextGmailSearchPage(
   return result.hasMore === true && typeof result.nextPageToken === 'string'
     ? result.nextPageToken
     : undefined;
+}
+
+/**
+ * The compound-trip extractor runs only after the bounded search selection is
+ * stable and each selected thread has either completed its exact continuation
+ * chain or exhausted its bounded retry. A provider's remaining pages do not
+ * block extraction once the two-page search budget is reached.
+ */
+export function compoundTripSourceReadsSettled(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): boolean {
+  if (!hasTypedTripRead(request) || nextGmailSearchPage(request, evidence)) return false;
+  return (
+    compoundThreadReadInput(evidence, request) === undefined &&
+    nextGmailThreadId(evidence, request) === undefined
+  );
 }
 
 /**
@@ -2143,6 +2476,71 @@ export function nextRequiredReadTool(
     if (evidence.some((row) => matchingPrivateRead(row, request))) return undefined;
     return attempts(evidence, request.firstToolName) < 2 ? request.firstToolName : undefined;
   }
+  if (hasTypedTripRead(request)) {
+    const currentEvidence = evidence.filter((row) => row.fromCurrentTask !== false);
+    const tripReadTools = new Set([
+      'calendar.list_events',
+      'gmail.search',
+      'gmail.read_thread',
+      ...(request.compoundTripDiscovery ? ['maps.directions', 'web.search', 'web.fetch'] : []),
+    ]);
+    if (
+      currentEvidence.filter((row) => tripReadTools.has(row.toolName)).length >=
+      (request.compoundTripDiscovery ? MAX_COMPOUND_TRIP_TOOL_CALLS : 8)
+    )
+      return undefined;
+    const calendarRows = currentEvidence.filter((row) => matchingCalendarRead(row, request));
+    if (calendarRows.length === 0 && attempts(currentEvidence, request.firstToolName) < 2)
+      return request.firstToolName;
+    const lastCalendar = calendarRows.at(-1);
+    const calendarResult = objectRecord(lastCalendar?.result);
+    if (
+      typeof calendarResult?.nextPageToken === 'string' &&
+      calendarResult.paginationUnavailable !== true &&
+      calendarRows.length < MAX_COMPOUND_CALENDAR_PAGES
+    )
+      return request.firstToolName;
+
+    const searches = currentEvidence.filter((row) => matchingGmailSearch(row, request));
+    if (searches.length === 0 && attempts(currentEvidence, 'gmail.search') < 2)
+      return 'gmail.search';
+    if (nextGmailSearchPage(request, currentEvidence)) return 'gmail.search';
+    if (gmailThreadIdsToRead(currentEvidence, request).length > 0) {
+      const pagedThread = compoundThreadReadInput(currentEvidence, request);
+      if (pagedThread) return 'gmail.read_thread';
+      const threadId = nextGmailThreadId(currentEvidence, request);
+      if (threadId) return 'gmail.read_thread';
+    }
+
+    if (!request.compoundTripDiscovery) return undefined;
+
+    const route = compoundTripRoute(request, currentEvidence);
+    if (route && !evidence.some((row) => matchingCompoundMapRoute(row, route)))
+      return 'maps.directions';
+    const projection = compoundTripReadProjection(request, currentEvidence);
+    if (
+      projection.webQuery &&
+      !evidence.some(
+        (row) =>
+          row.toolName === 'web.search' &&
+          objectRecord(row.args)?.query === projection.webQuery &&
+          row.fromCurrentTask !== false,
+      )
+    )
+      return 'web.search';
+    for (const target of compoundTripFetchTargets(request, currentEvidence)) {
+      if (
+        !evidence.some(
+          (row) =>
+            row.toolName === 'web.fetch' &&
+            objectRecord(row.args)?.url === target.url &&
+            row.fromCurrentTask !== false,
+        )
+      )
+        return 'web.fetch';
+    }
+    return undefined;
+  }
   const calendarSucceeded = evidence.some((row) => matchingCalendarRead(row, request));
   if (request.kind !== 'email' && !calendarSucceeded) {
     if (attempts(evidence, request.firstToolName) < 2) return request.firstToolName;
@@ -2172,6 +2570,9 @@ export function groundReadToolInput(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): Record<string, unknown> {
   if (request.temporalIssue || request.scopeIssue) return {};
+  if (toolName === 'conversations.search' && request.conversationQuery) {
+    return { query: request.conversationQuery, limit: 10 };
+  }
   if (toolName === 'calendar.list_events') {
     const { calendarIds: _ignored, ...unboundCalendarArgs } = input;
     const allCalendars = request.weeklyCalendarPlan
@@ -2182,36 +2583,38 @@ export function groundReadToolInput(
       ...allCalendars,
       ...(interval ? { timeMin: interval.start, timeMax: interval.endExclusive } : {}),
       maxResults: request.maxResults ?? 50,
-      ...(request.weeklyCalendarPlan
-        ? (() => {
-            const pages = evidence
-              .filter((row) => {
-                if (row.toolName !== 'calendar.list_events' || !succeeded(row)) return false;
-                const args = argsRecord(row);
-                return (
-                  args?.timeMin === interval?.start && args?.timeMax === interval?.endExclusive
-                );
-              })
-              .slice(0, 3);
-            let token: unknown;
-            let expectedPageToken: string | undefined;
-            for (const page of pages) {
-              if ((argsRecord(page)?.pageToken || undefined) !== expectedPageToken) break;
-              const result =
-                page.result && typeof page.result === 'object'
-                  ? (page.result as Record<string, unknown>)
-                  : undefined;
-              token = result?.nextPageToken;
-              expectedPageToken =
-                typeof token === 'string' && token.length > 0 && token.length <= 4096
-                  ? token
-                  : undefined;
-            }
-            return typeof token === 'string' && token.length > 0 && token.length <= 4096
-              ? { pageToken: token }
-              : {};
-          })()
-        : {}),
+      ...(hasTypedTripRead(request)
+        ? { pageToken: compoundCalendarPageToken(request, evidence) }
+        : request.weeklyCalendarPlan
+          ? (() => {
+              const pages = evidence
+                .filter((row) => {
+                  if (row.toolName !== 'calendar.list_events' || !succeeded(row)) return false;
+                  const args = argsRecord(row);
+                  return (
+                    args?.timeMin === interval?.start && args?.timeMax === interval?.endExclusive
+                  );
+                })
+                .slice(0, 3);
+              let token: unknown;
+              let expectedPageToken: string | undefined;
+              for (const page of pages) {
+                if ((argsRecord(page)?.pageToken || undefined) !== expectedPageToken) break;
+                const result =
+                  page.result && typeof page.result === 'object'
+                    ? (page.result as Record<string, unknown>)
+                    : undefined;
+                token = result?.nextPageToken;
+                expectedPageToken =
+                  typeof token === 'string' && token.length > 0 && token.length <= 4096
+                    ? token
+                    : undefined;
+              }
+              return typeof token === 'string' && token.length > 0 && token.length <= 4096
+                ? { pageToken: token }
+                : {};
+            })()
+          : {}),
     };
   }
   if (toolName === 'calendar.search_events') {
@@ -2238,7 +2641,31 @@ export function groundReadToolInput(
       ...(pageToken ? { pageToken } : {}),
     };
   }
+  if (request.compoundTripDiscovery && toolName === 'maps.directions') {
+    const route = compoundTripRoute(request, evidence);
+    return route ? { ...route, mode: 'driving' } : {};
+  }
+  if (request.compoundTripDiscovery && toolName === 'web.search') {
+    const projection = compoundTripReadProjection(request, evidence);
+    return projection.webQuery ? { query: projection.webQuery, count: 5 } : {};
+  }
+  if (request.compoundTripDiscovery && toolName === 'web.fetch') {
+    const projection = compoundTripReadProjection(request, evidence);
+    const targets = compoundTripFetchTargets(request, evidence);
+    const target = targets.find(
+      (candidate) =>
+        !evidence.some(
+          (row) =>
+            row.toolName === 'web.fetch' &&
+            objectRecord(row.args)?.url === candidate.url &&
+            row.fromCurrentTask !== false,
+        ),
+    );
+    return target && projection.webQuery ? { url: target.url } : {};
+  }
   if (toolName === 'gmail.read_thread') {
+    const compoundPage = compoundThreadReadInput(evidence, request);
+    if (compoundPage) return compoundPage;
     if (request.emailReview) {
       const next = emailReviewNextThreadRead(request.emailReview.selectedThreadIds ?? [], evidence);
       return next?.input ?? {};
@@ -2247,16 +2674,53 @@ export function groundReadToolInput(
       nextGmailThreadId(evidence, request) ?? gmailThreadIdsToRead(evidence, request)[0];
     if (target) return { ...input, threadId: target };
   }
+  if (request.compoundTripDiscovery && toolName === 'maps.directions') {
+    const route = compoundTripRoute(request, evidence);
+    return route ? { ...route, mode: 'driving' } : {};
+  }
+  if (request.compoundTripDiscovery && toolName === 'web.search') {
+    const projection = compoundTripReadProjection(request, evidence);
+    return projection.webQuery ? { query: projection.webQuery, count: 5 } : {};
+  }
   if (toolName === 'drive.search') {
     return { query: request.queryTerms.join(' ') || 'recent', maxResults: 20 };
   }
   if (toolName === 'memory.recall') {
-    return { query: request.queryTerms.join(' ') || 'owner history', limit: 10 };
+    return {
+      query: request.memoryQuery ?? (request.queryTerms.join(' ') || 'owner history'),
+      limit: 10,
+    };
   }
   if (toolName === 'memory.graph_snapshot') {
     return { query: request.queryTerms.join(' ') || 'owner', limit: 20 };
   }
   return input;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function compoundCalendarPageToken(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): string | undefined {
+  const last = evidence
+    .filter((row) => row.fromCurrentTask !== false && matchingCalendarRead(row, request))
+    .at(-1);
+  const token = objectRecord(last?.result)?.nextPageToken;
+  return typeof token === 'string' ? token : undefined;
+}
+
+function matchingCompoundMapRoute(
+  row: ReadToolEvidence,
+  route: { origin: string; destination: string },
+): boolean {
+  if (row.fromCurrentTask === false || row.toolName !== 'maps.directions') return false;
+  const args = objectRecord(row.args);
+  return args?.origin === route.origin && args?.destination === route.destination;
 }
 
 /** Build exact forced-read arguments without asking a model to invent them. */
@@ -2275,6 +2739,37 @@ export function buildReadToolInput(
       null
     );
   }
-  if (toolName === 'gmail.read_thread' && !nextGmailThreadId(evidence, request)) return null;
+  if (
+    toolName === 'gmail.read_thread' &&
+    !(request.compoundTripDiscovery
+      ? compoundThreadReadInput(evidence, request)
+      : nextGmailThreadId(evidence, request))
+  )
+    return null;
+  if (
+    request.compoundTripDiscovery &&
+    toolName === 'maps.directions' &&
+    !compoundTripRoute(request, evidence)
+  )
+    return null;
+  if (
+    request.compoundTripDiscovery &&
+    toolName === 'web.search' &&
+    !compoundTripReadProjection(request, evidence).webQuery
+  )
+    return null;
+  if (
+    request.compoundTripDiscovery &&
+    toolName === 'web.fetch' &&
+    compoundTripFetchTargets(request, evidence).every((target) =>
+      evidence.some(
+        (row) =>
+          row.toolName === 'web.fetch' &&
+          objectRecord(row.args)?.url === target.url &&
+          row.fromCurrentTask !== false,
+      ),
+    )
+  )
+    return null;
   return groundReadToolInput(request, toolName, {}, evidence);
 }

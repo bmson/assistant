@@ -50,6 +50,24 @@ describe('Firestore mobile and web ingress', () => {
     expect(status(`/api/mobile/v1/documents/${documentId}`, 'DELETE')).toBe(200);
   });
 
+  it('passes advertised workspace continuation reads without exposing unsupported sections or writes', () => {
+    for (const section of [
+      'chats',
+      'skills',
+      'anomalies',
+      'improvements',
+      'import-sources',
+      'import-files',
+    ]) {
+      const path = `/api/mobile/v1/workspace/sections/${section}`;
+      expect(status(`${path}?limit=100&cursor=owner-bound-cursor`, 'GET')).toBe(200);
+      for (const method of ['POST', 'PATCH', 'DELETE']) expect(status(path, method)).toBe(503);
+      expect(status(`${path}/extra`, 'GET')).toBe(503);
+    }
+    expect(status('/api/mobile/v1/workspace/sections/unknown', 'GET')).toBe(503);
+    expect(status('/api/mobile/v1/workspace/sections', 'GET')).toBe(503);
+  });
+
   it('keeps malformed IDs, unsupported methods, and SQL-only routes blocked', () => {
     expect(status('/api/mobile/v1/anomalies/not-a-uuid', 'POST')).toBe(503);
     expect(status('/api/mobile/v1/suggestions/not-a-uuid', 'POST')).toBe(503);

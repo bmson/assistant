@@ -15,6 +15,7 @@ import {
 } from '@assistant/firestore';
 import {
   conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
   type EmbeddingSpace,
   type Records,
 } from '@assistant/persistence';
@@ -726,6 +727,14 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
             messageId: 'b',
             conversationId: 'mine',
             sourceRevision: conversationMessageSourceRevision('b', 'kitchen quote'),
+            role: 'user',
+            origin: 'unknown',
+            speakerRevision: conversationMessageSpeakerRevision(
+              'b',
+              'kitchen quote',
+              'user',
+              'unknown',
+            ),
             text: 'kitchen quote',
             createdAt: now,
           },
@@ -733,6 +742,14 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
             messageId: 'a',
             conversationId: 'mine',
             sourceRevision: conversationMessageSourceRevision('a', 'The Kitchen tiles arrived'),
+            role: 'user',
+            origin: 'unknown',
+            speakerRevision: conversationMessageSpeakerRevision(
+              'a',
+              'The Kitchen tiles arrived',
+              'user',
+              'unknown',
+            ),
             text: 'The Kitchen tiles arrived',
             createdAt: earlier,
           },

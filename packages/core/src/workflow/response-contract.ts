@@ -6,8 +6,15 @@ import {
   repairPresentationDefects,
 } from '../model-router/audit-graders.js';
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
+import type { CompoundTripExtraction } from './compound-trip-extraction.js';
+import { compoundTripReadProjection, upcomingFlightReadProjection } from './compound-trip-read.js';
 import { correctFlightWriteClaims } from './flight-write-contract.js';
 import { detectFutureWatchIntent, type FutureWatchIntent } from './future-watch-intent.js';
+import {
+  type MemoryReadSelection,
+  renderMemoryReadAnswer,
+  validMemoryReadSelection,
+} from './memory-read-answer.js';
 import type { PersonalReadRequest } from './read-intent.js';
 import { effectiveReminders } from './reminder-state.js';
 import { isDurableSave, isMemoryWriteRequest, savedWorkSummary } from './saved-work.js';
@@ -79,10 +86,14 @@ export interface ResponseContractResult {
 }
 
 interface ResponseContractOptions {
+  /** Runtime-selected exact historical quotes; revalidated against the current ledger. */
+  memoryReadSelection?: MemoryReadSelection;
   requestText?: string;
   urlCorpus?: string;
   /** Deterministically detected from the latest owner turn. */
   readRequest?: PersonalReadRequest | null;
+  /** Task-local, quote-validated facts extracted from complete booking messages. */
+  compoundTripExtraction?: CompoundTripExtraction;
   /**
    * Context the turn legitimately supplied that is not itself a tool result —
    * chiefly the ambient weather/location block, which v25 invites the answer
@@ -1275,8 +1286,39 @@ function matchingPrivateReadRows(
 function requiredReadGaps(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
+  compoundTripExtraction?: CompoundTripExtraction,
 ): { labels: string[]; unsupported: ActionKind[] } {
   const current = currentSuccessfulEvidence(evidence);
+  if (request.upcomingFlightDiscovery) {
+    const projection = upcomingFlightReadProjection(request, evidence, compoundTripExtraction);
+    const unsupported: ActionKind[] = [];
+    if (!projection.calendarComplete) unsupported.push('calendar_read');
+    if (!projection.gmailSearchComplete || !projection.threadsComplete)
+      unsupported.push('inbox_read');
+    return {
+      labels: projection.blocked
+        ? projection.text.split('\n\n').filter((line) => line.startsWith('Needs confirmation:'))
+        : [],
+      unsupported,
+    };
+  }
+  if (request.compoundTripDiscovery) {
+    const projection = compoundTripReadProjection(request, evidence, compoundTripExtraction);
+    const labels = projection.blocked
+      ? projection.text.split('\n\n').filter((line) => line.startsWith('Needs confirmation:'))
+      : [];
+    const unsupported: ActionKind[] = [];
+    if (!projection.calendarRows.length || !projection.calendarComplete)
+      unsupported.push('calendar_read');
+    if (
+      !projection.gmailSearchRows.length ||
+      !projection.gmailSearchComplete ||
+      !projection.threadsComplete
+    )
+      unsupported.push('inbox_read');
+    if (!projection.mapRoute || !projection.webSearch) unsupported.push('research');
+    return { labels: [...new Set(labels)], unsupported };
+  }
   if (request.kind === 'drive' || request.kind === 'memory' || request.kind === 'knowledge_graph') {
     if (matchingPrivateReadRows(request, current).length > 0) {
       return { labels: [], unsupported: [] };
@@ -3003,9 +3045,14 @@ export function groundReadDraft(
 export function verifiedReadResponse(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
+  compoundTripExtraction?: CompoundTripExtraction,
 ): string {
   if (request.temporalIssue || request.scopeIssue)
     return request.temporalIssue ?? request.scopeIssue ?? '';
+  if (request.upcomingFlightDiscovery)
+    return upcomingFlightReadProjection(request, evidence, compoundTripExtraction).text;
+  if (request.compoundTripDiscovery)
+    return compoundTripReadProjection(request, evidence, compoundTripExtraction).text;
   const current = currentSuccessfulEvidence(evidence);
   if (request.weeklyCalendarPlan) {
     const interval =
@@ -3019,6 +3066,7 @@ export function verifiedReadResponse(
           timeMax: interval.endExclusive,
           timeZone: request.timeZone,
           evidence: current,
+          plan: request.calendarPlanOptions,
         })
       : 'I couldn’t safely resolve the calendar window for next week. Please confirm the date range and time zone.';
   }
@@ -3318,7 +3366,15 @@ export function verifiedReadResponse(
                 .join(' · ');
           // A window ending on a different day than it started is the one case
           // the plain clock cannot express on its own.
-          const spanNote = allDay && end && end !== start ? ` (through ${end})` : '';
+          const spansDates =
+            rawEnd &&
+            eventLocalDay(rawStart, request.timeZone) !== eventLocalDay(rawEnd, request.timeZone);
+          const spanNote =
+            allDay && end && end !== start
+              ? ` (through ${end})`
+              : spansDates
+                ? ` (starts ${start}; ends ${end})`
+                : '';
           lines.push(
             `- **${when || start || '(no time returned)'}** — ${summary}${spanNote}${location ? ` — ${location}` : ''}${attendeeText ? ` — with ${attendeeText}` : ''}${eventLinks ? ` — ${eventLinks}` : ''}${calendar && manyCalendars ? ` (${calendar})` : ''}`,
           );
@@ -3483,7 +3539,15 @@ function coverageGapResponse(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
   gaps: { labels: string[]; unsupported: ActionKind[] },
+  compoundTripExtraction?: CompoundTripExtraction,
 ): ResponseContractResult {
+  if (request.compoundTripDiscovery) {
+    return {
+      text: compoundTripReadProjection(request, evidence, compoundTripExtraction).text,
+      blocked: true,
+      unsupported: gaps.unsupported,
+    };
+  }
   const verified = currentSuccessfulEvidence(evidence).length
     ? `${verifiedReadResponse(request, evidence)}\n\n`
     : '';
@@ -3525,6 +3589,7 @@ export function enforcePersonalReadResponse(
         timeMax: weeklyInterval.endExclusive,
         timeZone: request.timeZone,
         evidence: currentSuccessfulEvidence(evidence),
+        plan: request.calendarPlanOptions,
       })
     : request.weeklyCalendarPlan
       ? { text: '', coverageComplete: false, slotCount: 0 }
@@ -3587,10 +3652,51 @@ function enforcePersonalReadGrounding(
       blocked: true,
       unsupported: ['calendar_read'],
     };
-  const gaps = requiredReadGaps(request, evidence);
-  if (gaps.labels.length > 0) return coverageGapResponse(request, evidence, gaps);
+  const gaps = requiredReadGaps(request, evidence, opts?.compoundTripExtraction);
+  if (gaps.labels.length > 0) {
+    if (request.upcomingFlightDiscovery)
+      return {
+        text: upcomingFlightReadProjection(request, evidence, opts?.compoundTripExtraction).text,
+        blocked: true,
+        unsupported: gaps.unsupported,
+      };
+    return coverageGapResponse(request, evidence, gaps, opts?.compoundTripExtraction);
+  }
+  if (request.kind === 'memory' && opts?.memoryReadSelection)
+    return {
+      text: renderMemoryReadAnswer(opts.memoryReadSelection, currentSuccessfulEvidence(evidence)),
+      blocked: !validMemoryReadSelection(
+        opts.memoryReadSelection,
+        currentSuccessfulEvidence(evidence),
+      ),
+      unsupported: validMemoryReadSelection(
+        opts.memoryReadSelection,
+        currentSuccessfulEvidence(evidence),
+      )
+        ? []
+        : ['memory'],
+      groundingFallback: ['historical answer rendered from exact selected source passages'],
+    };
+  if (request.upcomingFlightDiscovery) {
+    const projection = upcomingFlightReadProjection(
+      request,
+      evidence,
+      opts?.compoundTripExtraction,
+    );
+    return { text: projection.text, blocked: projection.blocked, unsupported: [] };
+  }
   if (request.answerFocus === 'flight')
-    return { text: verifiedReadResponse(request, evidence), blocked: false, unsupported: [] };
+    return {
+      text: verifiedReadResponse(request, evidence, opts?.compoundTripExtraction),
+      blocked: false,
+      unsupported: [],
+    };
+  if (request.compoundTripDiscovery)
+    return {
+      text: verifiedReadResponse(request, evidence, opts?.compoundTripExtraction),
+      blocked: false,
+      unsupported: [],
+    };
   if (request.kind === 'memory' || request.kind === 'knowledge_graph') {
     const rows = matchingPrivateReadRows(request, currentSuccessfulEvidence(evidence));
     const facts = rows.flatMap((row) =>

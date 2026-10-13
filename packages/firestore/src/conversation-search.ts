@@ -2,6 +2,7 @@ import {
   type ConversationSearchMatch,
   type ConversationSearchRepository,
   conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
   type EmbeddingSpace,
   historyLimit,
   type Records,
@@ -44,6 +45,14 @@ function match(doc: DocumentSnapshot): ConversationSearchMatch | null {
     sourceRevision: conversationMessageSourceRevision(row.id, row.text),
     conversationId: row.conversationId,
     text: row.text,
+    role: typeof row.role === 'string' ? row.role : 'unknown',
+    origin: typeof row.origin === 'string' ? row.origin : 'unknown',
+    speakerRevision: conversationMessageSpeakerRevision(
+      row.id,
+      row.text,
+      typeof row.role === 'string' ? row.role : 'unknown',
+      typeof row.origin === 'string' ? row.origin : 'unknown',
+    ),
     createdAt: row.createdAt,
   };
 }
@@ -162,7 +171,8 @@ export class FirestoreConversationSearchRepository implements ConversationSearch
         !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
           ref.conversationId,
         ) ||
-        !/^[a-f0-9]{64}$/.test(ref.sourceRevision)
+        !/^[a-f0-9]{64}$/.test(ref.sourceRevision) ||
+        (ref.speakerRevision !== undefined && !/^[a-f0-9]{64}$/.test(ref.speakerRevision))
       )
         throw new Error('Invalid conversation source identity');
     }
@@ -184,7 +194,9 @@ export class FirestoreConversationSearchRepository implements ConversationSearch
     const unchangedSourceRefs = input.sourceRefs.map((ref) => {
       const row = byId.get(ref.messageId);
       return (
-        row?.conversationId === ref.conversationId && row.sourceRevision === ref.sourceRevision
+        row?.conversationId === ref.conversationId &&
+        row.sourceRevision === ref.sourceRevision &&
+        (ref.speakerRevision === undefined || row.speakerRevision === ref.speakerRevision)
       );
     });
     await assertPrivacyErasureFenceUnchanged(this.store, input.agentId, fence);
@@ -209,7 +221,8 @@ export class FirestoreConversationSearchRepository implements ConversationSearch
         !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
           ref.conversationId,
         ) ||
-        !/^[a-f0-9]{64}$/.test(ref.sourceRevision)
+        !/^[a-f0-9]{64}$/.test(ref.sourceRevision) ||
+        (ref.speakerRevision !== undefined && !/^[a-f0-9]{64}$/.test(ref.speakerRevision))
       )
         throw new Error('Invalid resumed conversation source identity');
     }
@@ -233,7 +246,8 @@ export class FirestoreConversationSearchRepository implements ConversationSearch
       return (
         row !== undefined &&
         row.conversationId === ref.conversationId &&
-        row.sourceRevision === ref.sourceRevision
+        row.sourceRevision === ref.sourceRevision &&
+        (ref.speakerRevision === undefined || row.speakerRevision === ref.speakerRevision)
       );
     });
     const matches = await this.textAtFence({

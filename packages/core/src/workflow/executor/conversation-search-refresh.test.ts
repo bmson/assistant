@@ -1,5 +1,8 @@
 import type { ConversationSearchRepository, ExecutionEvidenceRecord } from '@assistant/persistence';
-import { conversationMessageSourceRevision } from '@assistant/persistence';
+import {
+  conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
+} from '@assistant/persistence';
 import type { ModelMessage } from 'ai';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -59,6 +62,14 @@ function originalWindow(): ModelMessage[] {
                   messageId: ids.message,
                   conversationId: ids.conversation,
                   sourceRevision: oldRevision,
+                  role: 'user',
+                  origin: 'owner',
+                  speakerRevision: conversationMessageSpeakerRevision(
+                    ids.message,
+                    oldSourceText,
+                    'user',
+                    'owner',
+                  ),
                   text: oldSourceText,
                   createdAt: '2026-10-01T00:00:00.000Z',
                 },
@@ -168,7 +179,19 @@ describe('resumed conversations.search refresh', () => {
       query: 'newsletter',
       limit: 5,
       sourceRefs: [
-        { messageId: ids.message, conversationId: ids.conversation, sourceRevision: oldRevision },
+        {
+          messageId: ids.message,
+          conversationId: ids.conversation,
+          sourceRevision: oldRevision,
+          role: 'user',
+          origin: 'owner',
+          speakerRevision: conversationMessageSpeakerRevision(
+            ids.message,
+            oldSourceText,
+            'user',
+            'owner',
+          ),
+        },
       ],
     });
     const serialized = JSON.stringify(window);
@@ -573,7 +596,8 @@ describe('resumed conversations.search refresh', () => {
     });
     const serialized = JSON.stringify(window);
     expect(serialized).toContain('Old private newsletter content');
-    expect(serialized.match(/"mode":"text"/gu)).toHaveLength(2);
+    expect(serialized.match(/"mode":"semantic"/gu)).toHaveLength(1);
+    expect(serialized.match(/"mode":"text"/gu)).toHaveLength(1);
   });
 
   it('rejects source text whose bytes do not match the stored revision and refreshes by validated query', async () => {
@@ -783,6 +807,98 @@ describe('resumed conversations.search refresh', () => {
       result: { deliveryStatus: 'accepted', providerMessageId: 'fake-1' },
     });
     expect(JSON.stringify(durableRows)).toBe(before);
+  });
+
+  it('retains revalidated semantic hits when literal refresh returns an unrelated text match', async () => {
+    const window = originalWindow();
+    const unrelated = {
+      messageId: '70000000-0000-4000-8000-000000000007',
+      conversationId: ids.conversation,
+      sourceRevision: conversationMessageSourceRevision(
+        '70000000-0000-4000-8000-000000000007',
+        'The current owner question repeats the literal search query.',
+      ),
+      text: 'The current owner question repeats the literal search query.',
+      createdAt: new Date('2026-10-02T00:00:00.000Z'),
+    };
+    const refresh = {
+      semantic: vi.fn(async () => []),
+      text: vi.fn(async () => []),
+      refreshForResume: vi.fn(async () => ({
+        unchangedSourceRefs: [true],
+        matches: [unrelated],
+        mode: 'text' as const,
+        observationGeneration: 'generation-2',
+      })),
+    } as unknown as ConversationSearchRepository;
+
+    const result = await refreshResumedConversationSearch(window, {
+      agentId: ids.task,
+      currentConversationId: ids.conversation,
+      repository: refresh,
+    });
+
+    expect(result.invalidatedToolCallIds).toEqual([]);
+    expect(searchResult(window, 'search-1')).toMatchObject({
+      mode: 'semantic',
+      matches: [
+        {
+          messageId: ids.message,
+          text: oldSourceText,
+          sourceRevision: oldRevision,
+          role: 'user',
+          origin: 'owner',
+          speakerRevision: conversationMessageSpeakerRevision(
+            ids.message,
+            oldSourceText,
+            'user',
+            'owner',
+          ),
+        },
+      ],
+    });
+    expect(JSON.stringify(window)).not.toContain(unrelated.text);
+  });
+
+  it('does not retain an empty semantic result as validated historical evidence', async () => {
+    const window = originalWindow();
+    const tool = window[2] as { role: string; content: Array<Record<string, unknown>> };
+    const output = tool.content[0]?.output as {
+      type: string;
+      value: { matches: unknown[] };
+    };
+    output.value.matches = [];
+    const unrelated = {
+      messageId: '70000000-0000-4000-8000-000000000007',
+      conversationId: ids.conversation,
+      sourceRevision: conversationMessageSourceRevision(
+        '70000000-0000-4000-8000-000000000007',
+        'A current owner question, not a historical source.',
+      ),
+      text: 'A current owner question, not a historical source.',
+      createdAt: new Date('2026-10-02T00:00:00.000Z'),
+    };
+    const refresh = {
+      semantic: vi.fn(async () => []),
+      text: vi.fn(async () => []),
+      refreshForResume: vi.fn(async () => ({
+        unchangedSourceRefs: [],
+        matches: [unrelated],
+        mode: 'text' as const,
+        observationGeneration: 'generation-2',
+      })),
+    } as unknown as ConversationSearchRepository;
+
+    await refreshResumedConversationSearch(window, {
+      agentId: ids.task,
+      currentConversationId: ids.conversation,
+      repository: refresh,
+    });
+
+    expect(searchResult(window, 'search-1')).toMatchObject({
+      mode: 'text',
+      matches: [{ messageId: unrelated.messageId, text: unrelated.text }],
+    });
   });
 
   it('does nothing when a context has no completed conversation search call', async () => {

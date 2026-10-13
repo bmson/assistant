@@ -15,6 +15,15 @@ describe('requestedArtifactIntent', () => {
     ['Create a Google Document for the project plan', 'docs.create'],
     ['make a spreadsheet for the budget', 'sheets.create'],
     ['prepare slides for the customer briefing', 'slides.create'],
+    [
+      'Create a new private Google Doc titled QA. Include a heading Project Aurora. Do not send messages or edit any existing file.',
+      'docs.create',
+    ],
+    ['Make a spreadsheet for the budget; never update an existing sheet.', 'sheets.create'],
+    [
+      'Prepare a Google Doc with the plan, but do not share it or add anything to the existing document.',
+      'docs.create',
+    ],
   ])('routes an explicit artifact request to %s', (text, toolName) => {
     expect(requestedArtifactIntent(text)?.toolName).toBe(toolName);
   });
@@ -23,6 +32,8 @@ describe('requestedArtifactIntent', () => {
     'can it create docs, sheets, and slides?',
     'how do I create a Google Doc?',
     "don't create a document yet",
+    'Create a Google Doc later, but do not create it now.',
+    'Create a document and update the existing sheet.',
     'create a document and a spreadsheet',
     'write this into the existing Google Doc',
     'write rows into this sheet',
