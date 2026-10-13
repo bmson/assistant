@@ -1,12 +1,13 @@
 import { type Db, messages, tasks, toolCalls } from '@assistant/db';
 import { eq } from 'drizzle-orm';
 import type { ZodType } from 'zod';
-import type { InboundEvent, Plan } from '../../events.js';
+import { type InboundEvent, type Plan, TaskStateSchema } from '../../events.js';
 import type { GenerativeCardSpecV1 } from '../../generative-card.js';
 import type { ModelRouter, StepCallOutcome } from '../../model-router/router.js';
 import type { DispatcherPort, ExecutorDeps } from '../executor.js';
 import { executeTask } from '../executor.js';
 import { enqueueTask } from '../machine.js';
+import type { RequestChecklist } from '../request-checklist-schema.js';
 
 /**
  * A golden task: a scripted conversation with the model plus assertions about
@@ -35,6 +36,8 @@ export interface GoldenFixture {
   afterFirstExecution?: (input: { db: Db; taskId: string; agentId: string }) => Promise<void>;
   /** Give this synthetic chat the durable pinned owner-message shape of a production admission. */
   pinOwnerRequest?: boolean;
+  /** Seed a validated checklist state to exercise composed finalization behavior. */
+  initialRequestChecklist?: RequestChecklist;
   /** One entry per model step: tool calls to propose and/or final text. */
   script: Array<{
     text?: string;
@@ -42,6 +45,8 @@ export interface GoldenFixture {
     qualityFailure?: boolean;
     finishReason?: string;
   }>;
+  /** Structured results for executor-owned rank/answer stages, in call order. */
+  objects?: Array<{ role: string; value: unknown; unavailable?: boolean }>;
   /** Optional self-review result after the final scripted model step. */
   verification?: GoldenVerification;
   /** Optional grounded card composition; persistence still uses the real database. */
@@ -81,14 +86,19 @@ export interface GoldenResult {
   /** The durable terminal task status. */
   status: string;
   taskId: string;
+  objectRoles: string[];
+  stepCount: number;
 }
 
 class ScriptedRouter {
   private index = 0;
+  private objectIndex = 0;
+  readonly objectRoles: string[] = [];
   constructor(
     private script: GoldenFixture['script'],
     private verification: GoldenVerification = { decision: 'publish' },
     private card?: GenerativeCardSpecV1,
+    private objects: NonNullable<GoldenFixture['objects']> = [],
   ) {}
 
   async step(): Promise<StepCallOutcome> {
@@ -110,6 +120,14 @@ class ScriptedRouter {
   }
 
   async object<T>(role: string, options?: { system?: string }): Promise<unknown> {
+    this.objectRoles.push(role);
+    const scripted = this.objects[this.objectIndex];
+    if (scripted?.role === role) {
+      this.objectIndex += 1;
+      return scripted.unavailable
+        ? { ok: false, decision: { mode: 'park', reason: 'golden structured result unavailable' } }
+        : { ok: true, modelId: 'golden/structured', degraded: false, object: scripted.value };
+    }
     if (role === 'rewrite') {
       if (options?.system?.startsWith('You compose a native information card')) {
         return {
@@ -212,6 +230,7 @@ export async function runGoldenTask(
     fixture.script,
     fixture.verification,
     fixture.card,
+    fixture.objects,
   ) as unknown as ModelRouter;
   const { task } = await enqueueTask(db, {
     event: { ...fixture.event, agentId } as InboundEvent,
@@ -219,6 +238,11 @@ export async function runGoldenTask(
     ...(fixture.plan ? { plan: fixture.plan } : {}),
     ...(fixture.maxSteps ? { maxSteps: fixture.maxSteps } : {}),
   });
+  if (fixture.initialRequestChecklist) {
+    const state = TaskStateSchema.parse(task.state);
+    state.requestChecklist = fixture.initialRequestChecklist;
+    await db.update(tasks).set({ state }).where(eq(tasks.id, task.id));
+  }
   if (fixture.pinOwnerRequest && task.conversationId) {
     const payload = (fixture.event as { payload?: Record<string, unknown> }).payload ?? {};
     const text = payload.text;
@@ -276,5 +300,7 @@ export async function runGoldenTask(
     finalText: pendingFinal?.text ?? finished?.progress ?? '',
     status: finished?.status ?? 'missing',
     taskId: task.id,
+    objectRoles: (router as unknown as ScriptedRouter).objectRoles,
+    stepCount: Number((finished?.state as { step?: unknown } | null)?.step ?? 0),
   };
 }

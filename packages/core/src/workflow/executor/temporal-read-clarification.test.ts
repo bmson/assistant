@@ -151,6 +151,10 @@ async function runFlightContinuation(
     withoutFlightCandidate?: boolean;
     withRequestChecklist?: boolean;
     upcomingFlight?: boolean;
+    weeklyCalendarPlan?: boolean;
+    weeklyCalendarIncomplete?: boolean;
+    weeklyBusy?: unknown[];
+    modelIgnoresNoTools?: boolean;
   } = {},
 ) {
   const rows: Array<Record<string, unknown>> = [];
@@ -160,7 +164,10 @@ async function runFlightContinuation(
       modelId: 'synthetic/flight-continuation',
       degraded: false as const,
       text: '',
-      toolCalls: [],
+      toolCalls: options.modelIgnoresNoTools
+        ? [{ toolCallId: 'forbidden-provider-call', toolName: 'calendar.create_event', input: {} }]
+        : [],
+      ...(options.modelIgnoresNoTools ? { finishReason: 'tool-calls' as const } : {}),
     })),
     object: vi.fn(async () => {
       throw new Error('private-read route should skip planning');
@@ -176,7 +183,45 @@ async function runFlightContinuation(
   const dispatch = vi.fn(
     async ({ toolName, args }: { toolName: string; args: Record<string, unknown> }) => {
       let result: Record<string, unknown>;
-      if (toolName === 'calendar.list_events') {
+      if (toolName === 'calendar.availability' && options.weeklyCalendarPlan) {
+        result = {
+          busy: options.weeklyBusy ?? [],
+          complete: !options.weeklyCalendarIncomplete,
+          calendarsChecked: ['Work', 'Personal'],
+          unavailable: options.weeklyCalendarIncomplete ? ['Holidays in United States'] : [],
+        };
+      } else if (toolName === 'calendar.list_events' && options.weeklyCalendarPlan) {
+        const secondPage = args.pageToken === 'weekly-page-2';
+        result = {
+          events: secondPage
+            ? [
+                {
+                  eventId: 'weekly-event-2',
+                  calendarId: 'work',
+                  summary: 'Focus review',
+                  start: '2026-10-14T17:00:00.000Z',
+                  end: '2026-10-14T18:00:00.000Z',
+                  ownerResponse: 'accepted',
+                  blocksTime: true,
+                },
+              ]
+            : [
+                {
+                  eventId: 'weekly-event-1',
+                  calendarId: 'work',
+                  summary: 'Team meeting',
+                  start: '2026-10-12T17:00:00.000Z',
+                  end: '2026-10-12T18:00:00.000Z',
+                  ownerResponse: 'accepted',
+                  blocksTime: true,
+                },
+              ],
+          complete: secondPage,
+          calendarRosterComplete: true,
+          unavailable: [],
+          ...(!secondPage ? { nextPageToken: 'weekly-page-2' } : {}),
+        };
+      } else if (toolName === 'calendar.list_events') {
         result = {
           events: [
             ...(options.upcomingFlight
@@ -403,6 +448,7 @@ async function runFlightContinuation(
     },
   );
   const toolDefs = vi.fn(() => [
+    { name: 'calendar.availability', description: 'fixture availability', inputSchema: {} },
     { name: 'calendar.list_events', description: 'fixture calendar', inputSchema: {} },
     { name: 'calendar.search_events', description: 'fixture calendar', inputSchema: {} },
     { name: 'gmail.search', description: 'fixture Gmail search', inputSchema: {} },
@@ -468,6 +514,89 @@ async function runFlightContinuation(
 }
 
 describe('unsupported temporal requests through the actual executor step loop', () => {
+  it('finishes a checked read when the provider ignores the no-tool boundary', async () => {
+    const request =
+      'Review my calendar for next week and identify scheduling conflicts and overloaded days. Find three realistic 90-minute focus blocks during working hours, allowing time for travel and breaks. Recommend changes, but show me the plan before editing my calendar.';
+    const { result, state, router, dispatch } = await runFlightContinuation([], request, {
+      weeklyCalendarPlan: true,
+      weeklyCalendarIncomplete: true,
+      modelIgnoresNoTools: true,
+    });
+    expect(result.outcome).toBe('needs_attention');
+    expect(router.step).toHaveBeenCalledTimes(1);
+    expect(dispatch.mock.calls.map(([call]) => call.toolName)).toEqual([
+      'calendar.availability',
+      'calendar.list_events',
+      'calendar.list_events',
+    ]);
+    expect(state.pendingFinal?.text).toContain('review-only plan for next week');
+    expect(state.pendingFinal?.text).toContain('Holidays in United States');
+    expect(state.pendingFinal?.responseCards ?? []).toEqual([]);
+  });
+
+  it('reads availability and every bounded event page before proposing a review-only week', async () => {
+    const request =
+      'Review my calendar for next week and identify scheduling conflicts and overloaded days. Find three realistic 90-minute focus blocks during working hours, allowing time for travel and breaks. Recommend changes, but show me the plan before editing my calendar.';
+    const { result, state, dispatch } = await runFlightContinuation([], request, {
+      weeklyCalendarPlan: true,
+    });
+    expect(result.outcome).toBe('done');
+    expect(dispatch.mock.calls.map(([call]) => call.toolName)).toEqual([
+      'calendar.availability',
+      'calendar.list_events',
+      'calendar.list_events',
+    ]);
+    expect(dispatch.mock.calls[0]?.[0].args).toMatchObject({
+      timeMin: '2026-10-12T07:00:00.000Z',
+      timeMax: '2026-10-19T07:00:00.000Z',
+    });
+    expect(dispatch.mock.calls[1]?.[0].args.pageToken).toBeUndefined();
+    expect(dispatch.mock.calls[2]?.[0].args.pageToken).toBe('weekly-page-2');
+    expect(state.pendingFinal?.text).toContain('review-only plan for next week');
+    expect(state.pendingFinal?.text.match(/\(90 minutes\)/g)).toHaveLength(3);
+    expect(state.pendingFinal?.text).toContain('I haven’t changed your calendar.');
+    // The fixture returns an empty model final after the source reads. Keep
+    // the checked plan, without reconstructing a raw agenda or busy-block dump.
+    expect(state.pendingFinal?.responseCards ?? []).toEqual([]);
+    expect(
+      dispatch.mock.calls.some(([call]) =>
+        /calendar\.(?:create|update|delete)/.test(call.toolName),
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps an incomplete-coverage proposal in Activity for owner review', async () => {
+    const request =
+      'Review my calendar for next week and identify scheduling conflicts and overloaded days. Find three realistic 90-minute focus blocks during working hours, allowing time for travel and breaks. Recommend changes, but show me the plan before editing my calendar.';
+    const { result, state } = await runFlightContinuation([], request, {
+      weeklyCalendarPlan: true,
+      weeklyCalendarIncomplete: true,
+    });
+    expect(result.outcome).toBe('needs_attention');
+    expect(state.pendingFinal?.terminalStatus).toBe('needs_attention');
+    expect(state.pendingFinal?.preserveCheckedReadResponse).toBe(true);
+    expect(state.pendingFinal?.text).toContain('Holidays in United States');
+    expect(state.pendingFinal?.text).toContain('not confirmed free');
+  });
+
+  it('keeps a complete-coverage plan in Activity when fewer than three focus blocks fit', async () => {
+    const request =
+      'Review my calendar for next week and identify scheduling conflicts and overloaded days. Find three realistic 90-minute focus blocks during working hours, allowing time for travel and breaks. Recommend changes, but show me the plan before editing my calendar.';
+    const { result, state } = await runFlightContinuation([], request, {
+      weeklyCalendarPlan: true,
+      weeklyBusy: [
+        { start: '2026-10-12T16:00:00Z', end: '2026-10-13T00:00:00Z' },
+        { start: '2026-10-13T17:45:00Z', end: '2026-10-14T00:00:00Z' },
+        { start: '2026-10-14T16:00:00Z', end: '2026-10-15T00:00:00Z' },
+        { start: '2026-10-15T16:00:00Z', end: '2026-10-16T00:00:00Z' },
+        { start: '2026-10-16T16:00:00Z', end: '2026-10-17T00:00:00Z' },
+      ],
+    });
+    expect(result.outcome).toBe('needs_attention');
+    expect(state.pendingFinal?.terminalStatus).toBe('needs_attention');
+    expect(state.pendingFinal?.text).toContain('I found 1 of 3 requested focus blocks');
+  });
+
   it.each([
     {
       request: 'There is nothing in the calendar about 9:15 flight.',
