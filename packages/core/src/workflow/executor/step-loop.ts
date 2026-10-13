@@ -1896,20 +1896,29 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           return outcome.ok ? { ok: true, value: outcome.object } : { ok: false };
         });
         const validated = generation.answer;
+        const assessmentGaps = bounded.threads.length - (validated?.items.length ?? 0);
         state.plannerState.emailReviewGeneration = {
           attempts: generation.attempts,
-          status: validated ? 'validated' : 'unavailable',
+          status: validated ? (assessmentGaps > 0 ? 'partial' : 'validated') : 'unavailable',
+          assessmentGaps,
           issues: generation.issues,
         };
         const finalText = validated
-          ? formatEmailReviewAnswer(validated.items, coverage)
+          ? `${formatEmailReviewAnswer(validated.items, coverage)}${
+              assessmentGaps > 0
+                ? `\n\n${assessmentGaps} other complete ${assessmentGaps === 1 ? 'thread could' : 'threads could'} not be assessed reliably after a bounded retry. No drafts were prepared for those threads.`
+                : ''
+            }`
           : `${formatEmailReviewAnswer([], coverage)}\n\nThe complete-thread assessment could not be verified after a bounded retry, so I prepared no reply drafts.`;
         state.step += 1;
         if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
         rc.window.push({ role: 'assistant', content: finalText } as ModelMessage);
         return stageEmailReviewResponse(
           finalText,
-          validated !== undefined && validated.deadlineGaps === 0 && reviewCoverageComplete,
+          validated !== undefined &&
+            assessmentGaps === 0 &&
+            validated.deadlineGaps === 0 &&
+            reviewCoverageComplete,
         );
       }
       const checked = enforcePersonalReadResponse(

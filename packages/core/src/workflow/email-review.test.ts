@@ -160,6 +160,35 @@ function required<T>(value: T | undefined, label: string): T {
 }
 
 describe('bounded no-send email review', () => {
+  it('keeps independently verified items when another thread fails both assessments', async () => {
+    const threads = ['thread-a', 'thread-b'].map((id) =>
+      required(
+        emailReviewCompleteThread(id, 'owner@example.com', [search(id), read(id, messages(id))]),
+        'complete thread',
+      ),
+    );
+    const good = required(validAnswer('thread-a').items[0], 'good item');
+    const bad = required(validAnswer('thread-b').items[0], 'bad item');
+    bad.draftBody = 'I will approve it tomorrow.';
+    const result = await generateValidatedEmailReview(threads, async () => ({
+      ok: true,
+      value: { items: [good, bad] },
+    }));
+    expect(result.attempts).toBe(2);
+    expect(result.answer?.items.map((item) => item.thread.threadId)).toEqual(['thread-a']);
+    expect(result.answer?.items[0]?.draftBody).toBe('Thanks for your note.');
+    expect(result.issues).toContain('item_1:no_unsupplied_facts_or_owner_commitments');
+    const wrongCount = await generateValidatedEmailReview(threads, async () => ({
+      ok: true,
+      value: { items: [good] },
+    }));
+    expect(wrongCount.answer).toBeUndefined();
+    const wrongIdentity = await generateValidatedEmailReview(threads, async () => ({
+      ok: true,
+      value: { items: [bad, good] },
+    }));
+    expect(wrongIdentity.answer).toBeUndefined();
+  });
   it('repairs a rejected owner commitment using the same complete source threads', async () => {
     const thread = required(
       emailReviewCompleteThread('thread-a', 'owner@example.com', [

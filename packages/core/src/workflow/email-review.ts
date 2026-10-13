@@ -853,7 +853,35 @@ export async function generateValidatedEmailReview(
     const validated = outcome.ok ? validateEmailReviewAnswer(outcome.value, threads) : undefined;
     if (validated && validated.deadlineGaps === 0)
       return { answer: validated, attempts: attempt + 1, issues: [] };
-    if (validated) partial = validated;
+    // An invalid item must not erase independently verified assessments of
+    // other threads. Keep the same positional identity and the full validator
+    // for each item; never salvage malformed, missing, or additional items.
+    const parsed = outcome.ok ? EmailReviewAnswerSchema.safeParse(outcome.value) : undefined;
+    const checkedItems =
+      parsed?.success && parsed.data.items.length === threads.length
+        ? parsed.data.items.flatMap((item, index) => {
+            const thread = threads[index];
+            if (!thread) return [];
+            const checked = validateEmailReviewAnswer({ items: [item] }, [thread]);
+            return checked?.items ?? [];
+          })
+        : [];
+    const candidate =
+      validated ??
+      (checkedItems.length
+        ? {
+            items: checkedItems,
+            deadlineGaps: checkedItems.filter((item) => item.deadlineNeedsReview).length,
+          }
+        : undefined);
+    if (
+      candidate &&
+      (!partial ||
+        candidate.items.length > partial.items.length ||
+        (candidate.items.length === partial.items.length &&
+          candidate.deadlineGaps < partial.deadlineGaps))
+    )
+      partial = candidate;
   }
   return { ...(partial ? { answer: partial } : {}), attempts: 2, issues };
 }
