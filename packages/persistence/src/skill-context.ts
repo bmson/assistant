@@ -40,6 +40,11 @@ export interface SkillRecallInput {
   minSimilarity?: number;
 }
 
+export interface SkillNameLookupInput {
+  agentId: string;
+  name: string;
+}
+
 export interface SkillUseInput {
   agentId: string;
   ids: string[];
@@ -55,6 +60,8 @@ export interface SkillOutcomeInput {
 export interface SkillContextRepository {
   readonly kind: 'skill-context-repository';
   recall(input: SkillRecallInput): Promise<SkillContextMatch[]>;
+  /** Resolve one exact active skill name within the authenticated owner's library. */
+  findByName(input: SkillNameLookupInput): Promise<LearnedSkill | null>;
   bumpUse(input: SkillUseInput): Promise<void>;
   recordOutcome(input: SkillOutcomeInput): Promise<void>;
 }
