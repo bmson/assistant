@@ -42,6 +42,8 @@ export interface GoldenFixture {
     qualityFailure?: boolean;
     finishReason?: string;
   }>;
+  /** Structured results for executor-owned rank/answer stages, in call order. */
+  objects?: Array<{ role: string; value: unknown; unavailable?: boolean }>;
   /** Optional self-review result after the final scripted model step. */
   verification?: GoldenVerification;
   /** Optional grounded card composition; persistence still uses the real database. */
@@ -81,14 +83,19 @@ export interface GoldenResult {
   /** The durable terminal task status. */
   status: string;
   taskId: string;
+  objectRoles: string[];
+  stepCount: number;
 }
 
 class ScriptedRouter {
   private index = 0;
+  private objectIndex = 0;
+  readonly objectRoles: string[] = [];
   constructor(
     private script: GoldenFixture['script'],
     private verification: GoldenVerification = { decision: 'publish' },
     private card?: GenerativeCardSpecV1,
+    private objects: NonNullable<GoldenFixture['objects']> = [],
   ) {}
 
   async step(): Promise<StepCallOutcome> {
@@ -110,6 +117,14 @@ class ScriptedRouter {
   }
 
   async object<T>(role: string, options?: { system?: string }): Promise<unknown> {
+    this.objectRoles.push(role);
+    const scripted = this.objects[this.objectIndex];
+    if (scripted?.role === role) {
+      this.objectIndex += 1;
+      return scripted.unavailable
+        ? { ok: false, decision: { mode: 'park', reason: 'golden structured result unavailable' } }
+        : { ok: true, modelId: 'golden/structured', degraded: false, object: scripted.value };
+    }
     if (role === 'rewrite') {
       if (options?.system?.startsWith('You compose a native information card')) {
         return {
@@ -212,6 +227,7 @@ export async function runGoldenTask(
     fixture.script,
     fixture.verification,
     fixture.card,
+    fixture.objects,
   ) as unknown as ModelRouter;
   const { task } = await enqueueTask(db, {
     event: { ...fixture.event, agentId } as InboundEvent,
@@ -276,5 +292,7 @@ export async function runGoldenTask(
     finalText: pendingFinal?.text ?? finished?.progress ?? '',
     status: finished?.status ?? 'missing',
     taskId: task.id,
+    objectRoles: (router as unknown as ScriptedRouter).objectRoles,
+    stepCount: Number((finished?.state as { step?: unknown } | null)?.step ?? 0),
   };
 }

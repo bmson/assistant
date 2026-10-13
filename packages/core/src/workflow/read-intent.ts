@@ -6,6 +6,11 @@
  */
 
 import { requestedCardIntent } from './card-intent.js';
+import {
+  EMAIL_REVIEW_MAX_SEARCH_PAGES,
+  EMAIL_REVIEW_QUERY,
+  emailReviewNextThreadRead,
+} from './email-review.js';
 import { detectFutureWatchIntent } from './future-watch-intent.js';
 
 export type PersonalReadKind =
@@ -85,6 +90,16 @@ export interface PersonalReadRequest {
   preferLatestMail?: boolean;
   /** A bounded future lookup, distinct from correcting a prior flight claim. */
   upcomingFlightDiscovery?: boolean;
+  /** Explicit no-send review of a bounded recent-email sample. */
+  emailReview?: {
+    windowDays: 7;
+    requestedCount: 5;
+    /** Runtime-selected IDs, validated against this task's successful searches. */
+    selectedThreadIds?: string[];
+    /** Exact bounded metadata pool shown to the structured ranker. */
+    rankedCandidateIds?: string[];
+    rankingFailed?: boolean;
+  };
 }
 
 export interface PersonalReadDetectionOptions {
@@ -250,6 +265,41 @@ const EMAIL_COMMAND_LEAD =
   /^\s*(?:(?:please|can you|could you|would you|i want you to)\s+)*(?:email|e-mail)\s+\S/iu;
 const READ_THEN_MUTATION =
   /(?:\b(?:and|then|also)\s+|[,;.!?\n]\s*)(?:please\s+)?(?:add|archive|block|book|cancel|compose|create|delete|draft|edit|email|flag|forward|hold|invite|label|make|mark|move|prepare|remember|remind|reply|reschedule|save|schedule|send|update|write)\b/i;
+
+function directEmailReviewIntent(text: string): boolean {
+  if (
+    text.length > 2_000 ||
+    /^\s*>/m.test(text) ||
+    /^\s*(?:from:|begin forwarded message|on .{1,160}wrote:)/im.test(text) ||
+    /\b(?:if|whether|hypothetically|what if|should i|could i|would i)\b/i.test(text)
+  )
+    return false;
+  const asksToReviewRecentMail =
+    /\b(?:review|look through|go through)\s+(?:my\s+)?(?:recent\s+)?emails?\b/i.test(text) &&
+    /\b(?:last|past)\s+(?:seven|7)\s+days?\b/i.test(text);
+  const asksForFiveReplyWorthyRequests =
+    /\b(?:find|identify|list)\s+(?:the\s+)?(?:five|5)\s+most\s+important\s+requests?\b/i.test(
+      text,
+    ) && /\b(?:still\s+)?need\s+my\s+(?:response|reply)\b/i.test(text);
+  const asksForContextualDrafts =
+    /\b(?:explain|say)\s+why\s+each\s+matters\b/i.test(text) &&
+    /\b(?:identify|include|note)\s+(?:any\s+)?deadlines?\b/i.test(text) &&
+    /\bdraft\s+repl(?:y|ies)\b/i.test(text) &&
+    /\b(?:using|with)\s+(?:the\s+)?relevant\s+thread\s+context\b/i.test(text);
+  const explicitNoSend =
+    /\b(?:don['’]?t|do\s+not)\s+send\s+anything\s+yet\b/i.test(text) &&
+    !/\b(?:send|email|reply)\s+(?:it|them|those|the\s+drafts?)\b/i.test(text);
+  const otherMutationText = text
+    .replace(/\b(?:and\s+)?draft\s+repl(?:y|ies)\b/gi, '')
+    .replace(/\b(?:don['’]?t|do\s+not)\s+send\s+anything\s+yet\b/gi, '');
+  return (
+    asksToReviewRecentMail &&
+    asksForFiveReplyWorthyRequests &&
+    asksForContextualDrafts &&
+    explicitNoSend &&
+    !READ_THEN_MUTATION.test(otherMutationText)
+  );
+}
 
 const WEEKDAYS = [
   'sunday',
@@ -1298,6 +1348,16 @@ function detectPersonalReadRequestInternal(
       answerFocus: 'lodging',
     };
   }
+  if (directEmailReviewIntent(latest)) {
+    return {
+      kind: 'email',
+      queryTerms: [],
+      firstToolName: 'gmail.search',
+      requiresThreadRead: true,
+      mailQuery: EMAIL_REVIEW_QUERY,
+      emailReview: { windowDays: 7, requestedCount: 5 },
+    };
+  }
   if (
     !latest ||
     /^\s*i\s+(?:read|checked|reviewed|looked|searched|scanned|opened)\b/i.test(latest) ||
@@ -1920,6 +1980,7 @@ export function gmailThreadIdsToRead(
   evidence: ReadonlyArray<ReadToolEvidence>,
   request?: PersonalReadRequest,
 ): string[] {
+  if (request?.emailReview) return request.emailReview.selectedThreadIds ?? [];
   return gmailSearchThreadIds(evidence, request).slice(0, MAX_GMAIL_THREADS_TO_READ);
 }
 
@@ -1965,7 +2026,8 @@ function nextGmailSearchPage(
 ): string | undefined {
   if (!request.requiresThreadRead && !request.requiresExhaustiveMail) return undefined;
   const searches = evidence.filter((row) => matchingGmailSearch(row, request));
-  if (searches.length >= MAX_GMAIL_SEARCH_PAGES) return undefined;
+  const pageLimit = request.emailReview ? EMAIL_REVIEW_MAX_SEARCH_PAGES : MAX_GMAIL_SEARCH_PAGES;
+  if (searches.length >= pageLimit) return undefined;
   const latest = searches.at(-1);
   if (!latest?.result || typeof latest.result !== 'object') return undefined;
   const result = latest.result as { hasMore?: unknown; nextPageToken?: unknown };
@@ -1984,6 +2046,17 @@ export function nextRequiredReadTool(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): string | undefined {
   if (request.temporalIssue || request.scopeIssue) return undefined;
+  if (request.emailReview) {
+    const gmailSearchSucceeded = evidence.some((row) => matchingGmailSearch(row, request));
+    if (!gmailSearchSucceeded)
+      return attempts(evidence, 'gmail.search') < 2 ? 'gmail.search' : undefined;
+    if (nextGmailSearchPage(request, evidence)) return 'gmail.search';
+    if (request.emailReview.rankingFailed || request.emailReview.selectedThreadIds === undefined)
+      return undefined;
+    return emailReviewNextThreadRead(request.emailReview.selectedThreadIds, evidence)
+      ? 'gmail.read_thread'
+      : undefined;
+  }
   if (request.kind === 'drive' || request.kind === 'memory' || request.kind === 'knowledge_graph') {
     if (evidence.some((row) => matchingPrivateRead(row, request))) return undefined;
     return attempts(evidence, request.firstToolName) < 2 ? request.firstToolName : undefined;
@@ -2051,6 +2124,10 @@ export function groundReadToolInput(
     };
   }
   if (toolName === 'gmail.read_thread') {
+    if (request.emailReview) {
+      const next = emailReviewNextThreadRead(request.emailReview.selectedThreadIds ?? [], evidence);
+      return next?.input ?? {};
+    }
     const target =
       nextGmailThreadId(evidence, request) ?? gmailThreadIdsToRead(evidence, request)[0];
     if (target) return { ...input, threadId: target };
@@ -2077,6 +2154,12 @@ export function buildReadToolInput(
   if (toolName === 'calendar.list_events' && !request.timeWindow) return null;
   if (toolName === 'calendar.search_events' && request.queryTerms.length === 0) return null;
   if (toolName === 'calendar.availability' && !request.timeWindow) return null;
+  if (toolName === 'gmail.read_thread' && request.emailReview) {
+    return (
+      emailReviewNextThreadRead(request.emailReview.selectedThreadIds ?? [], evidence)?.input ??
+      null
+    );
+  }
   if (toolName === 'gmail.read_thread' && !nextGmailThreadId(evidence, request)) return null;
   return groundReadToolInput(request, toolName, {}, evidence);
 }

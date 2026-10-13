@@ -16,6 +16,38 @@ const turn = (text: string, prior = '') => [
 ];
 
 describe('detectPersonalReadRequest', () => {
+  it('recognizes only the direct, bounded, explicitly no-send email review request', () => {
+    const prompt =
+      'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.';
+    expect(detectPersonalReadRequest(turn(prompt))).toMatchObject({
+      kind: 'email',
+      firstToolName: 'gmail.search',
+      mailQuery: 'newer_than:7d -from:me',
+      requiresThreadRead: true,
+      emailReview: { windowDays: 7, requestedCount: 5 },
+    });
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'Review my recent emails from the past 7 days. Identify the 5 most important requests that still need my reply. Say why each matters, note any deadlines, and draft replies with the relevant thread context. Do not send anything yet.',
+        ),
+      ),
+    ).toMatchObject({ emailReview: { windowDays: 7, requestedCount: 5 } });
+  });
+
+  it.each([
+    'If I asked you to review my emails from the last seven days, find the five most important requests that still need my response, explain why each matters, identify deadlines, draft replies using the relevant thread context, and don’t send anything yet.',
+    'Should I review my emails from the last seven days and draft replies to the five most important requests that need my response? Don’t send anything yet.',
+    '> Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.',
+    'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet. Also email Riley the results.',
+    'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context.',
+  ])(
+    'does not widen the no-send review intent to quoted, conditional, or mixed requests',
+    (text) => {
+      expect(detectPersonalReadRequest(turn(text))).toBeNull();
+    },
+  );
+
   it('requires mailbox source reads for a requested reservation card while keeping other actions separate', () => {
     expect(
       detectPersonalReadRequest(

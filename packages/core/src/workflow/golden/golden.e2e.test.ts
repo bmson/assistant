@@ -87,7 +87,382 @@ const workflowPlan = {
   missingInfo: [],
 };
 
+function gmailThreadPage(input: {
+  threadId: string;
+  messages: Array<Record<string, unknown>>;
+  startMessageIndex: number;
+  startMessageOffset?: number;
+  totalMessages: number;
+  complete: boolean;
+  continuation?: Record<string, unknown>;
+}) {
+  const startMessageOffset = input.startMessageOffset ?? 0;
+  const end = input.startMessageIndex + input.messages.length;
+  return {
+    threadId: input.threadId,
+    messages: input.messages,
+    complete: input.complete,
+    hasMore: !input.complete,
+    coverage: {
+      requested: 20,
+      discovered: input.totalMessages,
+      returned: input.messages.length,
+      unavailable: 0,
+      complete: input.complete,
+    },
+    ...(input.continuation ? { continuation: input.continuation } : {}),
+    receipt: {
+      version: 1,
+      source: { kind: 'gmail-thread', id: input.threadId },
+      requested: {
+        start: input.startMessageIndex,
+        offset: startMessageOffset,
+        limit: 20,
+        scope: 'thread-messages',
+      },
+      covered: {
+        start: input.startMessageIndex,
+        offset: startMessageOffset,
+        end,
+        count: input.messages.length,
+        total: input.totalMessages,
+        unavailable: 0,
+      },
+      complete: input.complete,
+      losses: input.complete ? [] : ['provider-page'],
+      continuation: input.continuation ?? null,
+    },
+  };
+}
+
 describe('golden tasks', () => {
+  it('ranks bounded mail metadata, reads only selected complete threads, and drafts in chat without mail writes', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const prompt =
+      'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.';
+    const result = await runGoldenTask(db, agentId, {
+      name: 'bounded-email-review-no-send-executor',
+      event: { source: 'chat', trust: 'owner', payload: { text: prompt } },
+      taskType: 'chat_turn',
+      pinOwnerRequest: true,
+      plan: workflowPlan,
+      maxSteps: 12,
+      objects: [
+        { role: 'reason', value: { threadIds: ['request-a'] } },
+        {
+          role: 'reason',
+          value: {
+            items: [
+              {
+                threadId: 'request-a',
+                latestMessageId: 'request-a-latest',
+                disposition: 'draft',
+                recipient: 'vendor@example.net',
+                why: 'The sender asks for confirmation.',
+                whyMessageId: 'request-a-latest',
+                whyQuote: 'Could you confirm by Friday?',
+                deadline: { messageId: 'request-a-latest', quote: 'by Friday' },
+                draftBody: 'Thanks for your note.',
+                draftSourceMessageIds: ['request-a-old', 'request-a-latest'],
+              },
+            ],
+          },
+        },
+      ],
+      script: [],
+      tools: {
+        'gmail.search': {
+          schema: z.object({
+            query: z.string(),
+            maxResults: z.number().optional(),
+            pageToken: z.string().optional(),
+          }),
+          execute: async (args) => {
+            expect(args).toMatchObject({ query: 'newer_than:7d -from:me', maxResults: 20 });
+            return {
+              query: 'newer_than:7d -from:me',
+              mailboxSearched: 'owner@example.com',
+              complete: true,
+              hasMore: false,
+              unavailable: [],
+              results: [
+                {
+                  messageId: 'newsletter-message',
+                  threadId: 'newsletter',
+                  from: 'news@example.org',
+                  to: 'owner@example.com',
+                  date: '2026-10-12T08:00:00Z',
+                  subject: 'Weekly product newsletter',
+                  snippet: 'This week in product news.',
+                },
+                {
+                  messageId: 'request-a-search',
+                  threadId: 'request-a',
+                  from: 'vendor@example.net',
+                  to: 'owner@example.com',
+                  date: '2026-10-11T16:00:00Z',
+                  subject: 'Please confirm renewal',
+                  snippet: 'Could you confirm by Friday?',
+                },
+              ],
+            };
+          },
+        },
+        'gmail.read_thread': {
+          schema: z.object({
+            threadId: z.string(),
+            startMessageIndex: z.number().optional(),
+            startMessageOffset: z.number().optional(),
+            maxMessages: z.number().optional(),
+            maxChars: z.number().optional(),
+          }),
+          execute: async (input) => {
+            expect(input).toMatchObject({ threadId: 'request-a', startMessageIndex: 0 });
+            return gmailThreadPage({
+              threadId: 'request-a',
+              startMessageIndex: 0,
+              totalMessages: 2,
+              complete: true,
+              messages: [
+                {
+                  messageId: 'request-a-old',
+                  from: 'owner@example.com',
+                  to: 'vendor@example.net',
+                  date: '2026-10-10T10:00:00Z',
+                  subject: 'Renewal',
+                  text: 'Could you send the current terms?',
+                  sourceLength: 'Could you send the current terms?'.length,
+                  truncated: false,
+                },
+                {
+                  messageId: 'request-a-latest',
+                  from: 'vendor@example.net',
+                  to: 'owner@example.com',
+                  date: '2026-10-11T16:00:00Z',
+                  subject: 'Please confirm renewal',
+                  text: 'Could you confirm by Friday? The renewal remains available.',
+                  sourceLength: 'Could you confirm by Friday? The renewal remains available.'
+                    .length,
+                  truncated: false,
+                },
+              ],
+            });
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+
+    expect(result.toolNames).toEqual(['gmail.search', 'gmail.read_thread']);
+    expect(result.objectRoles).toEqual(['reason', 'reason']);
+    expect(result.status).toBe('done');
+    expect(result.finalText).toContain('Draft for review — not saved or sent');
+    expect(result.finalText).toContain('Thanks for your note.');
+    expect(result.finalText).not.toContain('Weekly product newsletter');
+    expect(result.finalText).not.toContain('sent the reply');
+  });
+
+  it('uses at most twelve executor steps for three metadata pages, five threads, two continuations, and the final review', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const prompt =
+      'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.';
+    const selectedIds = ['request-a', 'request-b', 'request-c', 'request-d', 'request-e'];
+    const messagesFor = (threadId: string) => [
+      {
+        messageId: `${threadId}-latest`,
+        from: 'sender@example.net',
+        to: 'owner@example.com',
+        date: '2026-10-12T10:00:00Z',
+        subject: `Request ${threadId}`,
+        text: `Could you confirm request ${threadId}?`,
+      },
+    ];
+    const rankedAnswer = {
+      items: selectedIds.map((threadId) =>
+        threadId === 'request-a'
+          ? {
+              threadId,
+              latestMessageId: 'request-a-latest',
+              disposition: 'draft',
+              recipient: 'sender@example.net',
+              why: 'The latest message asks for the revised start date.',
+              whyMessageId: 'request-a-latest',
+              whyQuote: 'Please confirm November 15 by Friday.',
+              deadline: { messageId: 'request-a-latest', quote: 'by Friday' },
+              draftBody: 'Thanks. I can confirm the revised start date of November 15.',
+              draftSourceMessageIds: ['request-a-owner', 'request-a-middle', 'request-a-latest'],
+            }
+          : {
+              threadId,
+              latestMessageId: `${threadId}-latest`,
+              disposition: 'draft',
+              recipient: 'sender@example.net',
+              why: 'The latest message asks for confirmation.',
+              whyMessageId: `${threadId}-latest`,
+              whyQuote: `Could you confirm request ${threadId}?`,
+              deadline: null,
+              draftBody: 'Thanks for the details.',
+              draftSourceMessageIds: [`${threadId}-latest`],
+            },
+      ),
+    };
+    const result = await runGoldenTask(db, agentId, {
+      name: 'bounded-email-review-twelve-step-cap',
+      event: { source: 'chat', trust: 'owner', payload: { text: prompt } },
+      taskType: 'chat_turn',
+      pinOwnerRequest: true,
+      plan: workflowPlan,
+      maxSteps: 12,
+      objects: [
+        { role: 'reason', value: { threadIds: selectedIds } },
+        { role: 'reason', value: rankedAnswer },
+      ],
+      script: [],
+      tools: {
+        'gmail.search': {
+          schema: z.object({
+            query: z.string(),
+            maxResults: z.number().optional(),
+            pageToken: z.string().optional(),
+          }),
+          execute: async (args) => {
+            const pageToken = (args as { pageToken?: string }).pageToken;
+            const page = !pageToken ? 1 : pageToken === 'page-2' ? 2 : 3;
+            const ids =
+              page === 1
+                ? ['request-a', 'newsletter']
+                : page === 2
+                  ? ['request-b', 'request-c']
+                  : ['request-d', 'request-e'];
+            return {
+              query: 'newer_than:7d -from:me',
+              mailboxSearched: 'owner@example.com',
+              complete: page === 3,
+              hasMore: page < 3,
+              ...(page < 3 ? { nextPageToken: `page-${page + 1}` } : {}),
+              unavailable: [],
+              results: ids.map((threadId) => ({
+                messageId: `${threadId}-search`,
+                threadId,
+                from: threadId === 'newsletter' ? 'news@example.org' : 'sender@example.net',
+                to: 'owner@example.com',
+                date: '2026-10-12T08:00:00Z',
+                subject: threadId === 'newsletter' ? 'Weekly newsletter' : `Request ${threadId}`,
+                snippet:
+                  threadId === 'newsletter'
+                    ? 'This week in product news.'
+                    : `Could you confirm request ${threadId}?`,
+              })),
+            };
+          },
+        },
+        'gmail.read_thread': {
+          schema: z.object({
+            threadId: z.string(),
+            startMessageIndex: z.number().optional(),
+            startMessageOffset: z.number().optional(),
+            maxMessages: z.number().optional(),
+            maxChars: z.number().optional(),
+          }),
+          execute: async (input) => {
+            const { threadId, startMessageIndex = 0 } = input as {
+              threadId: string;
+              startMessageIndex?: number;
+            };
+            if (threadId === selectedIds[0] && startMessageIndex < 2) {
+              const nextIndex = startMessageIndex + 1;
+              const pageMessage =
+                startMessageIndex === 0
+                  ? {
+                      messageId: 'request-a-owner',
+                      from: 'owner@example.com',
+                      to: 'sender@example.net',
+                      date: '2026-10-10T09:00:00Z',
+                      subject: 'Renewal date',
+                      text: 'I can confirm once you provide the revised date.',
+                    }
+                  : {
+                      messageId: 'request-a-middle',
+                      from: 'sender@example.net',
+                      to: 'owner@example.com',
+                      date: '2026-10-11T09:00:00Z',
+                      subject: 'Revised renewal date',
+                      text: 'We can offer November 15 instead of November 1.',
+                    };
+              const continuation = {
+                tool: 'gmail.read_thread',
+                input: {
+                  threadId,
+                  startMessageIndex: nextIndex,
+                  startMessageOffset: 0,
+                },
+              };
+              return gmailThreadPage({
+                threadId,
+                messages: [
+                  { ...pageMessage, sourceLength: pageMessage.text.length, truncated: false },
+                ],
+                startMessageIndex,
+                totalMessages: 3,
+                complete: false,
+                continuation,
+              });
+            }
+            if (threadId === selectedIds[0]) {
+              const latest = {
+                messageId: 'request-a-latest',
+                from: 'sender@example.net',
+                to: 'owner@example.com',
+                date: '2026-10-12T10:00:00Z',
+                subject: 'Confirm revised renewal date',
+                text: 'Please confirm November 15 by Friday.',
+              };
+              return gmailThreadPage({
+                threadId,
+                messages: [{ ...latest, sourceLength: latest.text.length, truncated: false }],
+                startMessageIndex,
+                totalMessages: 3,
+                complete: true,
+              });
+            }
+            const otherMessages = messagesFor(threadId).map((message) => ({
+              ...message,
+              sourceLength: message.text.length,
+              truncated: false,
+            }));
+            return gmailThreadPage({
+              threadId,
+              messages: otherMessages,
+              startMessageIndex,
+              totalMessages: otherMessages.length,
+              complete: true,
+            });
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+
+    expect(result.stepCount).toBe(12);
+    expect(result.toolNames).toEqual([
+      'gmail.search',
+      'gmail.search',
+      'gmail.search',
+      'gmail.read_thread',
+      'gmail.read_thread',
+      'gmail.read_thread',
+      'gmail.read_thread',
+      'gmail.read_thread',
+      'gmail.read_thread',
+      'gmail.read_thread',
+    ]);
+    expect(result.objectRoles).toEqual(['reason', 'reason']);
+    expect(result.status).toBe('done');
+    expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(5);
+    expect(result.finalText).toContain('I can confirm the revised start date of November 15.');
+    expect(result.finalText).not.toContain('Weekly newsletter');
+  });
+
   it('prefers the grounded shipment answer to the raw email lookup card', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const card = GenerativeCardSpecV1Schema.parse({
