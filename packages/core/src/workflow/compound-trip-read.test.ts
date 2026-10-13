@@ -858,15 +858,16 @@ describe('compound trip read projection', () => {
     expect(projection.text).toContain('Partial source details, kept separate');
     expect(projection.text).toContain('LX102 ZRH→SFO; departs 2026-10-17 10:10 Europe/Zurich');
     expect(projection.text).toContain(
-      '[Booking email](https://mail.google.com/mail/u/0/#all/partial-flight-thread)',
+      '[Email source](https://mail.google.com/mail/u/0/#all/partial-flight-thread)',
     );
     expect(projection.text).toContain(
-      '(Zurich; 2026-10-17 to 2026-10-19); it is not linked to a flight: Hotel Alpine House',
+      '(Zurich; 2026-10-17 to 2026-10-19); the reservation is not verified or linked to a flight: Hotel Alpine House',
     );
     expect(projection.text).toContain(
-      '[Booking email](https://mail.google.com/mail/u/0/#all/partial-hotel-thread)',
+      '[Email source](https://mail.google.com/mail/u/0/#all/partial-hotel-thread)',
     );
-    expect(projection.text).toContain('it is not linked to a flight');
+    expect(projection.text).toContain('not verified as a booking, the next trip, or a match');
+    expect(projection.text).toContain('the reservation is not verified or linked to a flight');
     expect(projection.text).toContain('A hotel candidate appears in a partially read email');
     expect(projection.text).not.toContain(
       'I could not identify one hotel booking candidate in the checked email threads',
