@@ -704,6 +704,31 @@ describe('golden tasks', () => {
     expect(result.finalText).not.toContain('Weekly product newsletter');
     expect(result.finalText).not.toContain('sent the reply');
 
+    const metadataFallback = await runGoldenTask(db, agentId, {
+      ...fixture,
+      name: 'bounded-email-review-uses-verified-metadata-fallback-after-ranker-failure',
+      objects: [
+        { role: 'reason', value: {}, unavailable: true },
+        fixture.objects?.[1] ?? { role: 'reason', value: { items: [] } },
+      ],
+    });
+    createdTaskIds.push(metadataFallback.taskId);
+    expect(metadataFallback.status).toBe('done');
+    expect(metadataFallback.toolNames).toEqual(['gmail.search', 'gmail.read_thread']);
+    expect(metadataFallback.finalText).toContain('Automated ranking was unavailable');
+    expect(metadataFallback.finalText).toContain('Draft for review — not saved or sent');
+    expect(metadataFallback.finalText).toContain('Thanks for your note.');
+    expect(metadataFallback.finalText).not.toContain('Weekly product newsletter');
+    const [fallbackTask] = await db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, metadataFallback.taskId));
+    expect(TaskStateSchema.parse(fallbackTask?.state).plannerState.emailReview).toMatchObject({
+      rankingSource: 'recent_metadata_fallback',
+      rankingFailureReason: 'invalid_result',
+      selectedThreadIds: ['request-a'],
+    });
+
     const reviewChecklist = RequestChecklistSchema.parse({
       version: 1,
       request: prompt,

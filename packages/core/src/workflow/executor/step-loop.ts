@@ -46,6 +46,7 @@ import {
 import {
   boundEmailReviewThreads,
   EMAIL_REVIEW_MAX_CANDIDATES,
+  EMAIL_REVIEW_MAX_RANK_CANDIDATES,
   EMAIL_REVIEW_MAX_RANK_POOL,
   EmailReviewAnswerSchema,
   EmailReviewRankSchema,
@@ -55,6 +56,7 @@ import {
   emailReviewOwnerMailbox,
   emailReviewPrompt,
   emailReviewRankContext,
+  emailReviewRecentMetadataFallback,
   emailReviewSelectionWithinAuthorizedPool,
   emailReviewVerifiedAnsweredThreadIds,
   formatEmailReviewAnswer,
@@ -492,7 +494,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       let malformed = false;
       for (const [key, max] of [
         ['selectedThreadIds', EMAIL_REVIEW_MAX_RANK_POOL],
-        ['rankedCandidateIds', 60],
+        ['rankedCandidateIds', EMAIL_REVIEW_MAX_RANK_CANDIDATES],
         ['rankedThreadIds', EMAIL_REVIEW_MAX_RANK_POOL],
         ['attemptedThreadIds', EMAIL_REVIEW_MAX_RANK_POOL],
         ['excludedThreadIds', EMAIL_REVIEW_MAX_RANK_POOL],
@@ -521,6 +523,22 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       } else if ('backfillShortfall' in record && record.backfillShortfall !== undefined) {
         malformed = true;
       }
+      if (record.rankingSource === 'model' || record.rankingSource === 'recent_metadata_fallback')
+        readRequest.emailReview = {
+          ...readRequest.emailReview,
+          rankingSource: record.rankingSource,
+        };
+      else if ('rankingSource' in record && record.rankingSource !== undefined) malformed = true;
+      if (
+        record.rankingFailureReason === 'router_error' ||
+        record.rankingFailureReason === 'invalid_result'
+      )
+        readRequest.emailReview = {
+          ...readRequest.emailReview,
+          rankingFailureReason: record.rankingFailureReason,
+        };
+      else if ('rankingFailureReason' in record && record.rankingFailureReason !== undefined)
+        malformed = true;
       if (record.rankingFailed === true)
         readRequest.emailReview = { ...readRequest.emailReview, rankingFailed: true };
       if (malformed)
@@ -1438,6 +1456,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               ? { backfillShortfall: nextReview.backfillShortfall }
               : {}),
             ...(nextReview.rankingFailed ? { rankingFailed: true } : {}),
+            ...(nextReview.rankingSource ? { rankingSource: nextReview.rankingSource } : {}),
+            ...(nextReview.rankingFailureReason
+              ? { rankingFailureReason: nextReview.rankingFailureReason }
+              : {}),
           };
           if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state)))
             return LOST_LEASE;
@@ -1639,6 +1661,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             ...(next.excludedThreadIds ? { excludedThreadIds: next.excludedThreadIds } : {}),
             ...(next.backfillShortfall ? { backfillShortfall: next.backfillShortfall } : {}),
             ...(next.rankingFailed ? { rankingFailed: true } : {}),
+            ...(next.rankingSource ? { rankingSource: next.rankingSource } : {}),
+            ...(next.rankingFailureReason
+              ? { rankingFailureReason: next.rankingFailureReason }
+              : {}),
           };
           return checkpointTask(deps.persistence?.tasks ?? db, lease, state);
         };
@@ -1678,7 +1704,11 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             return stageEmailReviewResponse(finalText, false);
           } else {
             const rankingContext = emailReviewRankContext(reviewEvidence);
-            let ranked: { ok: boolean; threadIds?: string[] };
+            let ranked: {
+              ok: boolean;
+              threadIds?: string[];
+              failureReason?: 'router_error' | 'invalid_result';
+            } = { ok: false, failureReason: 'invalid_result' };
             try {
               const outcome = await router.object('reason', {
                 taskId: task.id,
@@ -1690,20 +1720,12 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               });
               ranked = outcome.ok
                 ? { ok: true, threadIds: outcome.object.threadIds }
-                : { ok: false };
+                : { ok: false, failureReason: 'invalid_result' };
             } catch {
-              if (
-                !(await persistReview({
-                  ...review,
-                  selectedThreadIds: [],
-                  rankingFailed: true,
-                }))
-              )
-                return LOST_LEASE;
-              state.step += 1;
-              if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state)))
-                return LOST_LEASE;
-              continue;
+              // A model failure is not evidence that no thread needs a reply.
+              // Continue with task-local metadata IDs as read candidates; the
+              // complete-thread checks below remain the eligibility boundary.
+              ranked = { ok: false, failureReason: 'router_error' };
             }
             const rankedIds =
               ranked.ok &&
@@ -1714,15 +1736,29 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               )
                 ? ranked.threadIds
                 : undefined;
-            const nextReview: typeof review = rankedIds
+            const fallbackIds = rankedIds
+              ? undefined
+              : emailReviewRecentMetadataFallback(
+                  reviewEvidence,
+                  rankingContext.candidateIds,
+                ).slice(0, EMAIL_REVIEW_MAX_RANK_POOL);
+            const effectiveRankedIds = rankedIds ?? (fallbackIds?.length ? fallbackIds : undefined);
+            const nextReview: typeof review = effectiveRankedIds
               ? {
                   ...review,
-                  selectedThreadIds: rankedIds.slice(0, EMAIL_REVIEW_MAX_CANDIDATES),
+                  selectedThreadIds: effectiveRankedIds.slice(0, EMAIL_REVIEW_MAX_CANDIDATES),
                   rankedCandidateIds: rankingContext.candidateIds,
-                  rankedThreadIds: rankedIds,
+                  rankedThreadIds: effectiveRankedIds,
                   attemptedThreadIds: [],
                   excludedThreadIds: [],
                   backfillShortfall: undefined,
+                  ...(rankedIds
+                    ? { rankingSource: 'model' as const, rankingFailed: false }
+                    : {
+                        rankingSource: 'recent_metadata_fallback' as const,
+                        rankingFailed: false,
+                        rankingFailureReason: ranked.failureReason ?? 'invalid_result',
+                      }),
                 }
               : {
                   ...review,
@@ -1805,6 +1841,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           bounded.omittedThreadIds.length,
           answeredIds,
           backfillShortfall,
+          readRequest.emailReview.rankingSource === 'recent_metadata_fallback',
         );
         const rankedCandidateIds = readRequest.emailReview.rankedCandidateIds;
         const nonNewsletterCandidates = Math.max(

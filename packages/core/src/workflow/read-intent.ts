@@ -123,6 +123,8 @@ export interface PersonalReadRequest {
     excludedThreadIds?: string[];
     backfillShortfall?: 'rank_pool_exhausted' | 'step_budget';
     rankingFailed?: boolean;
+    rankingSource?: 'model' | 'recent_metadata_fallback';
+    rankingFailureReason?: 'router_error' | 'invalid_result';
   };
 }
 
