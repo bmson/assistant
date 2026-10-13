@@ -5,6 +5,7 @@ import {
   type EmbeddingSpace,
   type ExtractionConversation,
   type ExtractionMessage,
+  isOwnerTaskMemoryEphemeral,
   type MemoryExtractionApplied,
   type MemoryExtractionRepository,
   type PreparedMemoryExtraction,
@@ -101,6 +102,32 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
     return page.docs.map((doc) => decodeRecord<Contact>(doc.data()));
   }
 
+  private async ephemeralTaskIds(
+    rows: Array<Records['messages']>,
+    agentId: string,
+  ): Promise<Set<string>> {
+    const ids = [...new Set(rows.flatMap((row) => (row.taskId ? [row.taskId] : [])))];
+    if (ids.length === 0) return new Set();
+    const snapshots = await this.store.db.getAll(...ids.map((id) => this.store.doc('tasks', id)));
+    const ephemeral = new Set<string>();
+    for (const snapshot of snapshots) {
+      if (!snapshot.exists) continue;
+      const task = decodeRecord<Records['tasks']>(snapshot.data());
+      const linkedMessages = rows.filter((row) => row.taskId === task.id);
+      if (
+        documentKey(task.id) === snapshot.id &&
+        task.agentId === agentId &&
+        task.type === 'chat_turn' &&
+        linkedMessages.some(
+          (row) =>
+            row.conversationId === task.conversationId && isOwnerTaskMemoryEphemeral(task.trigger),
+        )
+      )
+        ephemeral.add(task.id);
+    }
+    return ephemeral;
+  }
+
   /** Read the checkpoint and fences, returning the committed keys. */
   private async begin(tx: Transaction, agentId: string, lease: CodeJobLease): Promise<string[]> {
     await assertPrivacyErasureInactiveInTransaction(tx, this.store, agentId);
@@ -132,8 +159,9 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
     await this.owner(input.agentId);
     const fence = await readPrivacyErasureFence(this.store, input.agentId);
     const privacyGeneration = timestampToken(fence);
-    const qualifies = (row: Records['messages']) =>
+    const qualifies = (row: Records['messages'], ephemeralTaskIds = new Set<string>()) =>
       (row.role === 'user' || row.role === 'assistant') &&
+      !(row.taskId && ephemeralTaskIds.has(row.taskId)) &&
       !(
         typeof row.channelMessageId === 'string' &&
         (row.channelMessageId.startsWith('visual-qa:') ||
@@ -157,10 +185,14 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
       if (cursor) query = query.startAfter(cursor);
       const page = await query.get();
       scanned += page.size;
+      const ephemeralTaskIds = await this.ephemeralTaskIds(
+        page.docs.map((doc) => decodeRecord<Records['messages']>(doc.data())),
+        input.agentId,
+      );
       const order: string[] = [];
       for (const doc of page.docs) {
         const row = decodeRecord<Records['messages']>(doc.data());
-        if (!qualifies(row) || decided.has(row.conversationId)) continue;
+        if (!qualifies(row, ephemeralTaskIds) || decided.has(row.conversationId)) continue;
         decided.add(row.conversationId);
         order.push(row.conversationId);
       }
@@ -196,9 +228,13 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
         if (after) query = query.startAfter(after);
         const page = await query.get();
         read += page.size;
+        const ephemeralTaskIds = await this.ephemeralTaskIds(
+          page.docs.map((doc) => decodeRecord<Records['messages']>(doc.data())),
+          input.agentId,
+        );
         for (const doc of page.docs) {
           const row = decodeRecord<Records['messages']>(doc.data());
-          if (row.conversationId !== conversation.id || !qualifies(row)) continue;
+          if (row.conversationId !== conversation.id || !qualifies(row, ephemeralTaskIds)) continue;
           if (messages.length < input.maxMessages)
             messages.push({
               id: row.id,

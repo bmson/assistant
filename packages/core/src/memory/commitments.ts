@@ -7,11 +7,13 @@ import {
   listEligibleOwnerCommitments,
   lockPostgresPrivacyObservationFence,
   messages,
+  tasks,
 } from '@assistant/db';
 import {
   type CommitmentMaintenanceRepository,
   type CommitmentMaintenanceResult,
   isOwnerContextRepository,
+  isOwnerTaskMemoryEphemeral,
   type OwnerCommitment,
   type OwnerContextRepository,
 } from '@assistant/persistence';
@@ -77,6 +79,7 @@ function parseDueAt(value: string): Date | null {
 const EXTRACTION_SYSTEM = [
   'Extract explicit conversational open loops from an owner/assistant transcript.',
   'Return only high-confidence items that should still matter after this conversation.',
+  'Ignore fictional or hypothetical exercises and any owner turn that explicitly asks not to save or remember its content.',
   'decision = an explicit choice or settled direction that may need to be remembered.',
   'question = an unanswered question the owner or assistant explicitly left open.',
   'promise = an explicit future task or follow-up, but only when it is concrete.',
@@ -172,7 +175,12 @@ export async function extractCommitments(
     // tells the model these come from owner conversations; this makes it true.
     if (conversation?.trust !== 'owner') continue;
     const rows = await deps.db
-      .select({ id: messages.id, role: messages.role, text: messages.text })
+      .select({
+        id: messages.id,
+        taskId: messages.taskId,
+        role: messages.role,
+        text: messages.text,
+      })
       .from(messages)
       .where(
         and(
@@ -184,7 +192,33 @@ export async function extractCommitments(
       )
       .orderBy(desc(messages.createdAt))
       .limit(MAX_MESSAGES);
-    const ordered = rows.reverse();
+    const taskIds = [...new Set(rows.flatMap((row) => (row.taskId ? [row.taskId] : [])))];
+    const ephemeralTaskIds = taskIds.length
+      ? new Set(
+          (
+            await deps.db
+              .select({
+                id: tasks.id,
+                conversationId: tasks.conversationId,
+                type: tasks.type,
+                trigger: tasks.trigger,
+              })
+              .from(tasks)
+              .where(
+                and(
+                  inArray(tasks.id, taskIds),
+                  eq(tasks.agentId, opts.agentId),
+                  eq(tasks.conversationId, conversationId),
+                ),
+              )
+          )
+            .filter((task) => task.type === 'chat_turn' && isOwnerTaskMemoryEphemeral(task.trigger))
+            .map((task) => task.id),
+        )
+      : new Set<string>();
+    const ordered = rows
+      .filter((row) => !row.taskId || !ephemeralTaskIds.has(row.taskId))
+      .reverse();
     const transcript = formatTranscript(ordered);
     if (transcript.length < 40) continue;
     conversationsScanned += 1;

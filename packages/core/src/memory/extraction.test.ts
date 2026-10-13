@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   addTombstone,
   contacts,
@@ -10,8 +10,9 @@ import {
   memoryTombstones,
   messages,
   occasions,
+  tasks,
 } from '@assistant/db';
-import { embeddingSpaceIdentityKey } from '@assistant/persistence';
+import { embeddingSpaceIdentityKey, newTaskRecord } from '@assistant/persistence';
 import { eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getAgent } from '../chat.js';
@@ -37,6 +38,7 @@ let db: Db;
 let dbUp = false;
 let agentId: string;
 const conversationIds: string[] = [];
+const retentionTaskIds: string[] = [];
 const extractionSpace = {
   provider: 'test',
   model: 'extraction',
@@ -234,6 +236,8 @@ afterAll(async () => {
             eq(maintenanceCursors.name, `prepared-memory-extraction:${agentId}:${conversationId}`),
           );
       await db.delete(messages).where(inArray(messages.conversationId, conversationIds));
+      if (retentionTaskIds.length)
+        await db.delete(tasks).where(inArray(tasks.id, retentionTaskIds));
       await db.delete(conversations).where(inArray(conversations.id, conversationIds));
     }
     // Occasions FK the contact, so clear them before deleting Solveig.
@@ -255,6 +259,110 @@ afterAll(async () => {
 });
 
 describe('memory extraction (integration)', () => {
+  it('omits an explicitly ephemeral owner task while retaining unrelated owner facts in the same chat', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const [conversation] = await db
+      .insert(conversations)
+      .values({ agentId, channel: 'chat', trust: 'owner', title: `${MARKER}-ephemeral` })
+      .returning({ id: conversations.id });
+    if (!conversation) throw new Error('retention conversation was not created');
+    conversationIds.push(conversation.id);
+    const now = new Date();
+    const ephemeralId = randomUUID();
+    const normalId = randomUUID();
+    const ephemeralText = `${MARKER} This is a fictional scenario, not personal information.`;
+    const ephemeralTask = newTaskRecord(
+      {
+        agentId,
+        conversationId: conversation.id,
+        type: 'chat_turn',
+        trust: 'owner',
+        title: ephemeralText,
+        trigger: {
+          source: 'chat',
+          agentId,
+          conversationId: conversation.id,
+          trust: 'owner',
+          payload: { text: ephemeralText },
+        },
+      },
+      ephemeralId,
+      now,
+    );
+    const normalText = `${MARKER} I prefer a quiet desk in the morning.`;
+    const normalTask = newTaskRecord(
+      {
+        agentId,
+        conversationId: conversation.id,
+        type: 'chat_turn',
+        trust: 'owner',
+        title: normalText,
+        trigger: {
+          source: 'chat',
+          agentId,
+          conversationId: conversation.id,
+          trust: 'owner',
+          payload: { text: normalText },
+        },
+      },
+      normalId,
+      new Date(now.getTime() + 1000),
+    );
+    retentionTaskIds.push(ephemeralId, normalId);
+    await db.insert(tasks).values([ephemeralTask, normalTask]);
+    await db.insert(messages).values([
+      {
+        conversationId: conversation.id,
+        taskId: ephemeralId,
+        role: 'user',
+        origin: 'owner',
+        parts: [],
+        text: ephemeralText,
+        createdAt: now,
+      },
+      {
+        conversationId: conversation.id,
+        taskId: ephemeralId,
+        role: 'assistant',
+        origin: 'assistant',
+        parts: [],
+        text: 'Understood; the fictional details are only for this exercise.',
+        createdAt: new Date(now.getTime() + 1),
+      },
+      {
+        conversationId: conversation.id,
+        taskId: normalId,
+        role: 'user',
+        origin: 'owner',
+        parts: [],
+        text: normalText,
+        createdAt: new Date(now.getTime() + 1000),
+      },
+    ]);
+    const prompts: string[] = [];
+    const router = {
+      async embeddingSpace() {
+        return extractionSpace;
+      },
+      async embeddingSpaceKey() {
+        return embeddingSpaceIdentityKey(extractionSpace);
+      },
+      async object(_role: string, opts: { prompt?: string }) {
+        prompts.push(opts.prompt ?? '');
+        return { ok: true, modelId: 'fake', degraded: false, object: { facts: [], occasions: [] } };
+      },
+      async embed(texts: string[]) {
+        return texts.map(() => new Array(1536).fill(0.01));
+      },
+    } as unknown as ModelRouter;
+
+    await runMemoryExtraction({ db, router }, { agentId, since: new Date(now.getTime() - 1000) });
+    const transcript = prompts.join('\n');
+    expect(transcript).not.toContain(ephemeralText);
+    expect(transcript).not.toContain('fictional details are only for this exercise');
+    expect(transcript).toContain(normalText);
+  });
+
   it('refuses prepared PostgreSQL vectors after the embedding space changes', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const marker = `${MARKER}-prepared-retry-${Date.now()}`;

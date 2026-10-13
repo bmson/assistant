@@ -17,12 +17,16 @@ import {
   completeChecklistCorrectionEvidence,
   composerChecklistCancellationRequestHash,
   isChatAdmissionCancellationProjection,
+  isOwnerTaskMemoryEphemeral,
   isPinnedOwnerChatRequestMessage,
   MAX_CHECKLIST_CORRECTION_LEDGER_ROWS,
   MAX_TASK_QUEUE_GENERATION,
   newTaskRecord,
   normalizeTaskBudget,
+  OWNER_TASK_MEMORY_RETENTION,
   ownerChatChecklistRequestMessageId,
+  ownerTurnReferencesEphemeralContext,
+  ownerTurnRequestsEphemeralMemory,
   recallSurfaceRefs,
   withChatAdmissionPhase,
 } from '@assistant/persistence';
@@ -1093,6 +1097,37 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
         if (!clock) throw new Error('Missing database clock');
         const now = new Date(clock.now);
         const messageId = randomUUID();
+        let inheritsEphemeralContext = false;
+        if (ownerTurnReferencesEphemeralContext(input.text)) {
+          const [previousOwnerMessage] = await tx
+            .select({ taskId: messages.taskId })
+            .from(messages)
+            .where(
+              and(
+                eq(messages.conversationId, input.conversationId),
+                eq(messages.role, 'user'),
+                eq(messages.origin, 'owner'),
+              ),
+            )
+            .orderBy(desc(messages.createdAt))
+            .limit(1);
+          if (previousOwnerMessage?.taskId) {
+            const [previousTask] = await tx
+              .select({ trigger: tasks.trigger })
+              .from(tasks)
+              .where(
+                and(
+                  eq(tasks.id, previousOwnerMessage.taskId),
+                  eq(tasks.agentId, input.agentId),
+                  eq(tasks.conversationId, input.conversationId),
+                ),
+              )
+              .limit(1);
+            inheritsEphemeralContext = isOwnerTaskMemoryEphemeral(previousTask?.trigger);
+          }
+        }
+        const ephemeralMemory =
+          ownerTurnRequestsEphemeralMemory(input.text) || inheritsEphemeralContext;
         const trigger = {
           source: 'chat',
           agentId: input.agentId,
@@ -1100,6 +1135,7 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
           trust: 'owner',
           payload: {
             text: input.text,
+            ...(ephemeralMemory ? { memoryRetention: OWNER_TASK_MEMORY_RETENTION } : {}),
             triggerMessageId: messageId,
             requestAt: now.toISOString(),
             intentRevision: 1,
