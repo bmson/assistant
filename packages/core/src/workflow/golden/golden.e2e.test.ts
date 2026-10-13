@@ -959,6 +959,118 @@ describe('golden tasks', () => {
     });
   });
 
+  it('completes five verified fallback reads within the default budget after five search pages', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const prompt =
+      'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.';
+    const threadIds = ['request-a', 'request-b', 'request-c', 'request-d', 'request-e'];
+    let searchPages = 0;
+    const readThreadIds: string[] = [];
+    const result = await runGoldenTask(db, agentId, {
+      name: 'bounded-email-review-five-pages-five-thread-default-budget',
+      event: { source: 'chat', trust: 'owner', payload: { text: prompt } },
+      taskType: 'chat_turn',
+      pinOwnerRequest: true,
+      plan: workflowPlan,
+      objects: [
+        { role: 'reason', value: {}, unavailable: true },
+        { role: 'reason', value: { items: threadIds.map(emailReviewDraft) } },
+      ],
+      script: [],
+      tools: {
+        'gmail.search': {
+          schema: z.object({
+            query: z.string(),
+            maxResults: z.number().optional(),
+            pageToken: z.string().optional(),
+          }),
+          execute: async (input) => {
+            const page = input.pageToken ? Number(String(input.pageToken).replace('page-', '')) : 1;
+            searchPages += 1;
+            return {
+              query: 'newer_than:7d -from:me',
+              mailboxSearched: 'assistant-bot@example.com',
+              configuredOwnerMailbox: 'owner@example.com',
+              complete: false,
+              hasMore: true,
+              nextPageToken: `page-${page + 1}`,
+              unavailable: [],
+              results:
+                page === 1
+                  ? threadIds.map((threadId, index) => ({
+                      messageId: `search-${threadId}`,
+                      threadId,
+                      from: 'sender@example.net',
+                      to: 'owner@example.com',
+                      date: `2026-10-12T${String(15 - index).padStart(2, '0')}:00:00Z`,
+                      subject: `Request ${threadId}`,
+                      snippet: `Could you confirm request ${threadId}?`,
+                    }))
+                  : [],
+            };
+          },
+        },
+        'gmail.read_thread': {
+          schema: z.object({
+            threadId: z.string(),
+            startMessageIndex: z.number().optional(),
+            startMessageOffset: z.number().optional(),
+            maxMessages: z.number().optional(),
+            maxChars: z.number().optional(),
+          }),
+          execute: async (input) => {
+            const { threadId, startMessageIndex = 0 } = input as {
+              threadId: string;
+              startMessageIndex?: number;
+            };
+            readThreadIds.push(threadId);
+            const text = `Could you confirm request ${threadId}?`;
+            return gmailThreadPage({
+              threadId,
+              startMessageIndex,
+              totalMessages: 1,
+              complete: true,
+              messages: [
+                {
+                  messageId: `latest-${threadId}`,
+                  from: 'sender@example.net',
+                  to: 'owner@example.com',
+                  date: '2026-10-12T10:00:00Z',
+                  subject: `Request ${threadId}`,
+                  text,
+                  sourceLength: text.length,
+                  truncated: false,
+                },
+              ],
+            });
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+
+    expect(searchPages).toBe(5);
+    expect(readThreadIds).toHaveLength(5);
+    expect(new Set(readThreadIds).size).toBe(5);
+    expect(result.stepCount).toBeLessThanOrEqual(12);
+    expect(result.toolNames.filter((name) => name === 'gmail.search')).toHaveLength(5);
+    expect(result.toolNames.filter((name) => name === 'gmail.read_thread')).toHaveLength(5);
+    expect(
+      result.toolNames.every((name) => ['gmail.search', 'gmail.read_thread'].includes(name)),
+    ).toBe(true);
+    expect(result.finalText).toContain('Automated ranking was unavailable');
+    expect(result.finalText).toContain('beyond the bounded page limit');
+    expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(5);
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
+    expect(task?.maxSteps).toBe(12);
+    expect(TaskStateSchema.parse(task?.state).plannerState.emailReview).toMatchObject({
+      rankingSource: 'recent_metadata_fallback',
+      rankingFailureReason: 'invalid_result',
+      selectedThreadIds: expect.arrayContaining(threadIds),
+      attemptedThreadIds: expect.arrayContaining(threadIds),
+    });
+  });
+
   it('uses a final review step after the two-continuation cap and reports a bounded backfill shortfall', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const prompt =
