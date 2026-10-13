@@ -1054,7 +1054,11 @@ export async function stageModelFinalResponse(
   // A transparent replacement is a truthful reply, not proof the requested
   // work finished. Keep unresolved effects visible and re-queueable. Grounded
   // factual corrections with no missing effect may still complete normally.
-  if (checked.qualityFallback || checked.unsupported.length > 0) {
+  if (
+    checked.qualityFallback ||
+    checked.unsupported.length > 0 ||
+    (checked.blocked && contractOptions.readRequest)
+  ) {
     pending.terminalStatus = 'needs_attention';
     pending.outcome = 'needs_attention';
   }

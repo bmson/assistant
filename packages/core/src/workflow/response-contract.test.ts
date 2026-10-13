@@ -5,6 +5,7 @@ import { detectPersonalReadRequest } from './read-intent.js';
 import {
   type ActionEvidence,
   activeWatchReceipt,
+  enforcePersonalReadResponse,
   enforceResponseContract,
   enforceUrlProvenance,
   groundReadDraft,
@@ -3059,11 +3060,14 @@ describe('groundReadDraft', () => {
 
     const response = verifiedReadResponse(request, evidence);
     expect(response).toContain('Flight to Berlin');
-    expect(response).toContain('November 12, 2026');
-    expect(response).toContain('6:00 AM Pacific Standard Time');
+    expect(response).toContain('Nov 12, 2026');
+    expect(response).toContain('6:00 AM');
+    expect(response).toContain('America/Los_Angeles');
     expect(response).not.toContain('7:30 AM');
-    expect(response).toContain("couldn't confirm its departure time from the booking email");
-    expect(response).toContain('Connections, hotel, and ground transport remain unverified.');
+    expect(response).toContain('booking and departure time are unconfirmed');
+    expect(response).not.toContain('hotel');
+    expect(response).not.toContain('ground transport');
+    expect(enforcePersonalReadResponse(request, evidence).blocked).toBe(true);
   });
 
   it.each(['Are you sure?', 'There is nothing in the calendar about 9:15 flight.'])(
