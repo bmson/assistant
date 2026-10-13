@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 export const EMAIL_REVIEW_QUERY = 'newer_than:7d -from:me';
 export const EMAIL_REVIEW_MAX_CANDIDATES = 5;
+export const EMAIL_REVIEW_MAX_RANK_POOL = 8;
 export const EMAIL_REVIEW_MAX_SEARCH_PAGES = 3;
 export const EMAIL_REVIEW_MAX_THREAD_CONTINUATIONS = 2;
 export const EMAIL_REVIEW_MAX_CONTEXT_CHARS = 50_000;
@@ -9,7 +10,7 @@ export const EMAIL_REVIEW_MAX_RANK_CHARS = 40_000;
 
 export const EmailReviewRankSchema = z
   .object({
-    threadIds: z.array(z.string().min(3).max(128)).max(EMAIL_REVIEW_MAX_CANDIDATES),
+    threadIds: z.array(z.string().min(3).max(128)).max(EMAIL_REVIEW_MAX_RANK_POOL),
   })
   .strict()
   .refine((value) => new Set(value.threadIds).size === value.threadIds.length);
@@ -78,6 +79,11 @@ export interface EmailReviewThread {
   subject: string;
 }
 
+export type EmailReviewThreadReadResult =
+  | { kind: 'eligible'; thread: EmailReviewThread }
+  | { kind: 'already_answered'; threadId: string; latestMessageId: string }
+  | { kind: 'not_eligible' };
+
 export interface EmailReviewCoverage {
   searchPages: number;
   uniqueThreads: number;
@@ -87,7 +93,9 @@ export interface EmailReviewCoverage {
   completeThreads: number;
   contextLimitedThreads: number;
   ownerOrChronologyExcluded: number;
+  alreadyAnsweredThreads: number;
   obviousNewslettersExcluded: number;
+  backfillShortfall?: 'rank_pool_exhausted' | 'step_budget';
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -189,8 +197,8 @@ export function emailReviewRankContext(evidence: ReadonlyArray<EmailReviewEviden
     };
     const proposed = {
       purpose:
-        'Select up to five recent email threads that appear to contain a request needing the owner’s response.',
-      limit: EMAIL_REVIEW_MAX_CANDIDATES,
+        'Rank up to eight recent email threads that may need the owner’s response. The first five are the initial review set; later IDs are reserve candidates used only when a fully verified thread proves the owner already replied.',
+      limit: EMAIL_REVIEW_MAX_RANK_POOL,
       candidates: [...candidates, compact],
       additionalMetadataCandidates: Math.max(0, all.length - candidates.length - 1),
     };
@@ -200,8 +208,8 @@ export function emailReviewRankContext(evidence: ReadonlyArray<EmailReviewEviden
   const additionalMetadataCandidates = Math.max(0, all.length - candidates.length);
   const prompt = JSON.stringify({
     purpose:
-      'Select up to five recent email threads that appear to contain a request needing the owner’s response.',
-    limit: EMAIL_REVIEW_MAX_CANDIDATES,
+      'Rank up to eight recent email threads that may need the owner’s response. The first five are the initial review set; later IDs are reserve candidates used only when a fully verified thread proves the owner already replied.',
+    limit: EMAIL_REVIEW_MAX_RANK_POOL,
     candidates,
     additionalMetadataCandidates,
   });
@@ -215,7 +223,7 @@ export function validEmailReviewSelection(
 ): ids is string[] {
   if (
     !Array.isArray(ids) ||
-    ids.length > EMAIL_REVIEW_MAX_CANDIDATES ||
+    ids.length > EMAIL_REVIEW_MAX_RANK_POOL ||
     ids.some((id) => typeof id !== 'string') ||
     new Set(ids).size !== ids.length
   )
@@ -226,6 +234,23 @@ export function validEmailReviewSelection(
     return ids.every((id) => candidates.has(id) && allowed.has(id));
   }
   return ids.every((id) => candidates.has(id));
+}
+
+export function emailReviewSelectionWithinAuthorizedPool(
+  selectedThreadIds: ReadonlyArray<string>,
+  rankedThreadIds: ReadonlyArray<string> | undefined,
+  verifiedAnsweredThreadIds: ReadonlyArray<string>,
+): boolean {
+  const initialCount = rankedThreadIds
+    ? Math.min(EMAIL_REVIEW_MAX_CANDIDATES, rankedThreadIds.length)
+    : EMAIL_REVIEW_MAX_CANDIDATES;
+  const answered = [...new Set(verifiedAnsweredThreadIds)];
+  return (
+    selectedThreadIds.length <= EMAIL_REVIEW_MAX_RANK_POOL &&
+    answered.every((id) => selectedThreadIds.includes(id)) &&
+    (!rankedThreadIds || selectedThreadIds.every((id, index) => rankedThreadIds[index] === id)) &&
+    selectedThreadIds.length <= initialCount + answered.length
+  );
 }
 
 function validContinuation(value: unknown, threadId: string): Record<string, unknown> | undefined {
@@ -344,11 +369,11 @@ export function emailReviewOwnerMailbox(
   return mailboxes.size === 1 ? [...mailboxes][0] : undefined;
 }
 
-export function emailReviewCompleteThread(
+export function emailReviewThreadReadResult(
   threadId: string,
   ownerMailbox: string,
   evidence: ReadonlyArray<EmailReviewEvidenceRow>,
-): EmailReviewThread | undefined {
+): EmailReviewThreadReadResult | undefined {
   const searchCandidate = emailReviewSearchCandidates(evidence).find(
     (candidate) => candidate.threadId === threadId,
   );
@@ -548,17 +573,54 @@ export function emailReviewCompleteThread(
   const beforeLast = chronological.at(-2);
   if (!last || !singleEmail(last.from)) return undefined;
   if (beforeLast && Date.parse(beforeLast.date) === Date.parse(last.date)) return undefined;
-  if (!addressList(last.to).includes(ownerMailbox)) return undefined;
   const sender = singleEmail(last.from);
-  if (!sender || sender === ownerMailbox) return undefined;
+  if (!sender) return undefined;
+  if (sender === ownerMailbox) {
+    const answeredInbound = chronological.slice(0, -1).some((message) => {
+      const priorSender = singleEmail(message.from);
+      return (
+        priorSender !== undefined &&
+        priorSender !== ownerMailbox &&
+        addressList(message.to).includes(ownerMailbox) &&
+        addressList(last.to).includes(priorSender)
+      );
+    });
+    return answeredInbound
+      ? { kind: 'already_answered', threadId, latestMessageId: last.messageId }
+      : { kind: 'not_eligible' };
+  }
+  if (!addressList(last.to).includes(ownerMailbox)) return { kind: 'not_eligible' };
   return {
-    threadId,
-    messages: chronological,
-    ownerMailbox,
-    latestMessageId: last.messageId,
-    recipient: sender,
-    subject: last.subject || searchCandidate.subject || 'Email thread',
+    kind: 'eligible',
+    thread: {
+      threadId,
+      messages: chronological,
+      ownerMailbox,
+      latestMessageId: last.messageId,
+      recipient: sender,
+      subject: last.subject || searchCandidate.subject || 'Email thread',
+    },
   };
+}
+
+export function emailReviewCompleteThread(
+  threadId: string,
+  ownerMailbox: string,
+  evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+): EmailReviewThread | undefined {
+  const result = emailReviewThreadReadResult(threadId, ownerMailbox, evidence);
+  return result?.kind === 'eligible' ? result.thread : undefined;
+}
+
+export function emailReviewVerifiedAnsweredThreadIds(
+  threadIds: ReadonlyArray<string>,
+  ownerMailbox: string,
+  evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+): string[] {
+  return threadIds.filter(
+    (threadId) =>
+      emailReviewThreadReadResult(threadId, ownerMailbox, evidence)?.kind === 'already_answered',
+  );
 }
 
 export function emailReviewCoverage(
@@ -566,6 +628,8 @@ export function emailReviewCoverage(
   eligibleThreads: ReadonlyArray<EmailReviewThread>,
   evidence: ReadonlyArray<EmailReviewEvidenceRow>,
   contextLimitedThreads = 0,
+  alreadyAnsweredThreadIds: ReadonlyArray<string> = [],
+  backfillShortfall?: EmailReviewCoverage['backfillShortfall'],
 ): EmailReviewCoverage {
   const searches = emailReviewSearchRows(evidence);
   const lastSearch = object(searches.at(-1)?.result);
@@ -585,13 +649,18 @@ export function emailReviewCoverage(
     unavailableMetadata,
     selectedThreads: selectedThreadIds.length,
     completeThreads: selectedCompleted.size,
+    alreadyAnsweredThreads: new Set(alreadyAnsweredThreadIds).size,
     contextLimitedThreads,
     ownerOrChronologyExcluded: Math.max(
       0,
-      selectedThreadIds.length - selectedCompleted.size - contextLimitedThreads,
+      selectedThreadIds.length -
+        selectedCompleted.size -
+        new Set(alreadyAnsweredThreadIds).size -
+        contextLimitedThreads,
     ),
     obviousNewslettersExcluded:
       emailReviewSearchCandidates(evidence).filter(obviousNewsletter).length,
+    ...(backfillShortfall ? { backfillShortfall } : {}),
   };
 }
 
@@ -763,6 +832,18 @@ export function formatEmailReviewAnswer(
   if (coverage.ownerOrChronologyExcluded > 0)
     lines.push(
       `${coverage.ownerOrChronologyExcluded} selected ${coverage.ownerOrChronologyExcluded === 1 ? 'thread was' : 'threads were'} not used because the latest message could not be safely confirmed as an incoming message to your mailbox.`,
+    );
+  if (coverage.alreadyAnsweredThreads > 0)
+    lines.push(
+      `${coverage.alreadyAnsweredThreads} selected ${coverage.alreadyAnsweredThreads === 1 ? 'thread had' : 'threads had'} a later reply from your mailbox and ${coverage.alreadyAnsweredThreads === 1 ? 'was' : 'were'} skipped as already answered.`,
+    );
+  if (coverage.backfillShortfall === 'rank_pool_exhausted')
+    lines.push(
+      'The bounded ranked candidate pool had no more threads to replace those already answered.',
+    );
+  else if (coverage.backfillShortfall === 'step_budget')
+    lines.push(
+      'The task reached its step limit before another replacement thread could be read while keeping a step for the final review.',
     );
   if (coverage.obviousNewslettersExcluded > 0)
     lines.push(
