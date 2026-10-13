@@ -40,6 +40,8 @@ const CONSEQUENTIAL_GMAIL_LABELS = new Set(['INBOX', 'TRASH', 'SPAM', 'SENT', 'D
 export interface GmailToolDeps {
   client: GoogleClient;
   botEmail: string;
+  /** Trusted owner identity from server configuration; distinct from the Gmail bot mailbox. */
+  ownerEmail?: string;
   /** Display name stamped on outbound From headers (falls back to the bare address). */
   botName?: string;
   /** Voice pipeline hook — rewrites outbound body text before approval/execution. */
@@ -146,6 +148,9 @@ export function registerGmailTools(registry: ToolRegistry, deps: GmailToolDeps):
         return {
           query: args.query,
           mailboxSearched: deps.botEmail,
+          ...(deps.ownerEmail?.trim()
+            ? { configuredOwnerMailbox: deps.ownerEmail.trim().toLowerCase() }
+            : {}),
           complete,
           coverage: {
             requested: args.maxResults,

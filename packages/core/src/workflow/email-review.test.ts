@@ -26,7 +26,8 @@ const search = (threadId: string, overrides: Record<string, unknown> = {}) => ({
   result: {
     ok: true,
     query: EMAIL_REVIEW_QUERY,
-    mailboxSearched: 'owner@example.com',
+    mailboxSearched: 'assistant-bot@example.com',
+    configuredOwnerMailbox: 'owner@example.com',
     complete: true,
     hasMore: false,
     unavailable: [],
@@ -319,7 +320,7 @@ describe('bounded no-send email review', () => {
     });
   });
 
-  it('requires one mailbox and an unambiguous latest inbound message addressed to it', () => {
+  it('uses the configured owner identity, not the Gmail bot mailbox or forwarded headers', () => {
     const base: EmailReviewEvidenceRow[] = [search('thread-a')];
     expect(emailReviewOwnerMailbox(base)).toBe('owner@example.com');
     expect(
@@ -348,7 +349,34 @@ describe('bounded no-send email review', () => {
         ...base,
         {
           ...search('thread-b'),
-          result: { ...search('thread-b').result, mailboxSearched: 'other@example.com' },
+          result: {
+            ...search('thread-b').result,
+            configuredOwnerMailbox: 'other@example.com',
+          },
+        },
+      ]),
+    ).toBeUndefined();
+    expect(
+      emailReviewOwnerMailbox([
+        {
+          ...search('thread-a'),
+          result: {
+            ...search('thread-a').result,
+            configuredOwnerMailbox: undefined,
+            mailboxSearched: 'assistant-bot@example.com',
+          },
+        },
+      ]),
+    ).toBeUndefined();
+    expect(
+      emailReviewOwnerMailbox([
+        ...base,
+        {
+          ...search('thread-b'),
+          result: {
+            ...search('thread-b').result,
+            configuredOwnerMailbox: undefined,
+          },
         },
       ]),
     ).toBeUndefined();
