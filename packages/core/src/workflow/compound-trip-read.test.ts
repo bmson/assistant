@@ -49,7 +49,7 @@ function row(
       result: {
         ...result,
         query,
-        continuation,
+        ...(Object.hasOwn(result, 'continuation') ? { continuation: result.continuation } : {}),
         unavailable,
         receipt: result.receipt ?? {
           version: 1,
@@ -220,7 +220,7 @@ function calendarFlight(): Record<string, unknown> {
     start: '2026-10-17T10:10:00+02:00',
     timeZone: 'Europe/Berlin',
     status: 'confirmed',
-    links: [{ type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=abc' }],
+    links: [{ type: 'calendar', url: 'https://www.google.com/calendar/event?eid=abc' }],
   };
 }
 
@@ -310,9 +310,9 @@ describe('compound trip read projection', () => {
     const threadId = 'yearless-berlin-booking';
     const event = {
       eventId: 'yearless-berlin-flight',
-      summary: 'Flight to Berlin',
+      summary: 'Flight to Berlin (United)',
       start: '2026-11-12T14:00:00Z',
-      links: [{ type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=yearless' }],
+      links: [{ type: 'calendar', url: 'https://www.google.com/calendar/event?eid=yearless' }],
     };
     const evidence = [
       completeCalendarEvents([event], flightRequest),
@@ -350,12 +350,20 @@ describe('compound trip read projection', () => {
     });
 
     expect(projection.flight).toBeUndefined();
-    expect(projection.calendarCandidate?.event.summary).toBe('Flight to Berlin');
-    expect(projection.text).toContain('Next future calendar flight candidate: Flight to Berlin');
+    expect(projection.calendarCandidate?.event.summary).toBe('Flight to Berlin (United)');
+    expect(projection.text).toContain(
+      'Next future calendar flight candidate: Flight to Berlin (United)',
+    );
     expect(projection.text).toContain('calendar date 2026-11-12');
     expect(projection.text).toContain('calendar time in America/Los_Angeles');
     expect(projection.text).toContain('[Calendar source]');
-    expect(projection.text).toContain('booking and departure time are unconfirmed');
+    expect(projection.text).toContain(
+      'booking identity, flight number, and direction are unconfirmed',
+    );
+    expect(projection.text).toContain(
+      '[Calendar source](https://www.google.com/calendar/event?eid=yearless)',
+    );
+    expect(projection.text).not.toContain('\\(United\\)');
     expect(projection.text).not.toContain('7:30 AM');
     expect(projection.text).not.toContain('2026-11-12 7:30');
     expect(projection.text).not.toMatch(/hotel|taxi|public.transport|conflict/i);
@@ -588,7 +596,9 @@ describe('compound trip read projection', () => {
 
     expect(projection.flight).toBeUndefined();
     expect(projection.calendarCandidate?.event.eventId).toBe('current-return');
-    expect(projection.text).toContain('booking and departure time are unconfirmed');
+    expect(projection.text).toContain(
+      'booking identity, flight number, and direction are unconfirmed',
+    );
     expect(projection.text).not.toContain('[Booking email]');
     expect(projection.text).not.toContain('LH777');
   });
@@ -1489,7 +1499,27 @@ describe('compound trip read projection', () => {
     expect(projection.gmailSearchComplete).toBe(false);
   });
 
-  it('accepts a long-query receipt digest across every page and rejects a digest for another query', () => {
+  it('rejects a duplicate result continuation when it disagrees with the canonical receipt', () => {
+    const read = request();
+    const first = row(
+      'gmail.search',
+      { query: read.mailQuery, maxResults: 10 },
+      {
+        results: [{ threadId: 'first-thread', subject: 'Flight booking' }],
+        complete: false,
+        hasMore: true,
+        nextPageToken: 'next-page-token',
+        continuation: {
+          tool: 'gmail.search',
+          input: { query: read.mailQuery, maxResults: 10, pageToken: 'different-page-token' },
+        },
+      },
+    );
+    const projection = compoundTripReadProjection(read, [completeCalendarEvents([]), first]);
+    expect(projection.gmailSearchComplete).toBe(false);
+  });
+
+  it('accepts receipt-only Gmail continuations across pages and rejects a digest for another query', () => {
     const detected = request();
     const flightQuery = `${'flight '.repeat(42)}flight`;
     expect(flightQuery).toHaveLength(300);
