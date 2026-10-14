@@ -179,9 +179,14 @@ export function compoundTripThreadIdsToRead(
       });
     }
   }
+  const clearlyEditorialOrPromotional = (source: string) =>
+    /\b(?:newsletters?|news|digest|offers?|deals?|advice|trends?|product\s+updates?|promotions?|marketing|market\s+news|weekly\s+guides?|coupons?|discounts?|sponsored|press\s+releases?|software\s+subscriptions?|subscription\s+(?:renewals?|receipts?|invoices?))\b/i.test(
+      source,
+    );
   const sourceMatches = (id: string, kind: 'flight' | 'lodging') => {
     const item = metadata.get(id);
     const source = `${item?.subject ?? ''} ${item?.snippet ?? ''}`;
+    if (clearlyEditorialOrPromotional(source)) return false;
     if (kind === 'flight') {
       const booking =
         /\b(?:booked|reserved|confirmation|confirmed|reservation|ticket|e-?ticket|itinerary|record locator|booking\s+(?:details|reference|receipt|number|confirmation))\b/i.test(
@@ -216,10 +221,7 @@ export function compoundTripThreadIdsToRead(
     // reservation subject (for example, "Your Online Reservation"). Read at
     // most one such candidate when no lodging-specific result is available;
     // this metadata can only prioritize a read, never establish a stay.
-    return (
-      /\b(?:reservation|booking)\b/i.test(source) &&
-      !/\b(?:news|offers?|deals?|advice|trends?|newsletter|promotion|marketing)\b/i.test(source)
-    );
+    return /\b(?:reservation|booking)\b/i.test(source) && !clearlyEditorialOrPromotional(source);
   });
   const priority = [first('flight'), first('lodging') ?? genericLodgingCandidate];
   const secondFlight = unique.find((id) => sourceMatches(id, 'flight') && id !== priority[0]);
@@ -231,7 +233,10 @@ export function compoundTripThreadIdsToRead(
       // Read a small, distinct sample from the complete category results before
       // reporting all searched mail as covered; the thread content remains the
       // only source of verified booking facts.
-      ...unique,
+      ...unique.filter((id) => {
+        const item = metadata.get(id);
+        return !clearlyEditorialOrPromotional(`${item?.subject ?? ''} ${item?.snippet ?? ''}`);
+      }),
     ]),
   ].slice(0, MAX_COMPOUND_TRIP_THREADS_TO_READ);
 }

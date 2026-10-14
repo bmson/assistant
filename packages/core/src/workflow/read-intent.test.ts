@@ -80,7 +80,7 @@ describe('detectPersonalReadRequest', () => {
     expect(nextRequiredReadTool(request, previousTask)).toBe('calendar.list_events');
   });
 
-  it('reads a flight booking, lodging booking, and second flight candidate within the trip cap', () => {
+  it('reads flight and lodging candidates while excluding an airline news result', () => {
     const requestText =
       'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
     const request = detectPersonalReadRequest([{ role: 'user', content: requestText }]);
@@ -123,7 +123,6 @@ describe('detectPersonalReadRequest', () => {
       'flight-one',
       'hotel-one',
       'hotel-two',
-      'newsletter',
     ]);
   });
 
@@ -387,7 +386,6 @@ describe('detectPersonalReadRequest', () => {
     expect(gmailThreadIdsToRead(evidence, request)).toEqual([
       'booked-flight',
       'your-reservation',
-      'flight-news',
       'generic-confirmation',
     ]);
   });
@@ -1605,7 +1603,7 @@ describe('detectPersonalReadRequest', () => {
         hasMore: false,
       },
     }));
-    expect(gmailThreadIdsToRead(evidence, request)).toEqual(['itinerary', 'hotel', 'news']);
+    expect(gmailThreadIdsToRead(evidence, request)).toEqual(['itinerary', 'hotel']);
     expect(
       gmailThreadIdsToRead(
         evidence.map((row) => ({ ...row, fromCurrentTask: false })),

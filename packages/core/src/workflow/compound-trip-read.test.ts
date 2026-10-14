@@ -277,7 +277,48 @@ function calendarFlight(): Record<string, unknown> {
 }
 
 describe('compound trip read projection', () => {
-  it('keeps promotional lodging and non-flight confirmation hits behind actual bounded booking candidates', () => {
+  it('selects only the real flight and hotel from paginated results dominated by newsletters', () => {
+    const read = request();
+    const flightQuery = read.mailQueries?.find((query) => query.category === 'flight')?.query;
+    const lodgingQuery = read.mailQueries?.find((query) => query.category === 'lodging')?.query;
+    if (!flightQuery || !lodgingQuery) throw new Error('Expected both search categories');
+    const evidence = [
+      row(
+        'gmail.search',
+        { query: flightQuery, pageToken: 'flight-page-2' },
+        {
+          results: [
+            { threadId: 'newsletter-1', subject: 'Flight booking offers - weekly news' },
+            { threadId: 'newsletter-2', subject: 'Airline booking news digest' },
+            { threadId: 'newsletter-3', subject: 'Flight booking product update' },
+            { threadId: 'newsletter-4', subject: 'Airline booking trends' },
+            { threadId: 'newsletter-5', subject: 'Flight booking newsletter' },
+            { threadId: 'newsletter-6', subject: 'Flight booking offers this week' },
+            { threadId: 'flight-thread', subject: 'Airline booking confirmation LH 777' },
+            { threadId: 'newsletter-8', subject: 'Airline booking news' },
+          ],
+        },
+      ),
+      row(
+        'gmail.search',
+        { query: lodgingQuery, pageToken: 'lodging-page-2' },
+        {
+          results: [
+            { threadId: 'newsletter-9', subject: 'Hotel booking trends' },
+            { threadId: 'newsletter-10', subject: 'Booking confirmation product update' },
+            { threadId: 'newsletter-11', subject: 'Hotel booking market news' },
+            { threadId: 'newsletter-12', subject: 'Reservation confirmation weekly guide' },
+            { threadId: 'hotel-thread', subject: 'Hotel reservation confirmed' },
+            { threadId: 'newsletter-13', subject: 'Hotel booking news' },
+          ],
+        },
+      ),
+    ];
+
+    expect(compoundTripThreadIdsToRead(evidence, read)).toEqual(['flight-thread', 'hotel-thread']);
+  });
+
+  it('excludes explicit newsletter and non-travel metadata while keeping real bookings in the bounded sample', () => {
     const read = request();
     const flightQuery = read.mailQueries?.find((query) => query.category === 'flight')?.query;
     const lodgingQuery = read.mailQueries?.find((query) => query.category === 'lodging')?.query;
@@ -293,10 +334,17 @@ describe('compound trip read projection', () => {
               threadId: 'billing-confirmation',
               subject: 'Reservation confirmation for a software subscription',
             },
-            { threadId: 'flight-offers', subject: 'Flight booking trends and market news' },
+            { threadId: 'flight-offers', subject: 'Flight booking offers - weekly news' },
+            { threadId: 'flight-digest', subject: 'Airline booking news digest' },
+            { threadId: 'flight-update', subject: 'Flight booking product update' },
+            { threadId: 'flight-guide', subject: 'Airline booking trends and weekly guide' },
             { threadId: 'outbound', subject: 'Flight booking confirmation' },
             { threadId: 'return', subject: 'Flight - BER to SFO' },
             { threadId: 'third-flight', subject: 'Flight ticket confirmation' },
+            {
+              threadId: 'software-subscription',
+              subject: 'Reservation confirmation for a software subscription',
+            },
           ],
         },
       ),
@@ -316,15 +364,8 @@ describe('compound trip read projection', () => {
     ];
     const selected = compoundTripThreadIdsToRead(evidence, read);
     expect(selected.slice(0, 3)).toEqual(['outbound', 'stay', 'return']);
-    expect(selected).toHaveLength(6);
-    expect(selected).toEqual([
-      'outbound',
-      'stay',
-      'return',
-      'billing-confirmation',
-      'flight-offers',
-      'third-flight',
-    ]);
+    expect(selected).toHaveLength(5);
+    expect(selected).toEqual(['outbound', 'stay', 'return', 'third-flight', 'another-stay']);
   });
 
   it('uses one generic lodging-query reservation hit when metadata has no hotel-specific candidate', () => {
@@ -361,7 +402,6 @@ describe('compound trip read projection', () => {
       'outbound',
       'generic-reservation',
       'return',
-      'hotel-news',
     ]);
   });
 
@@ -568,27 +608,24 @@ describe('compound trip read projection', () => {
     'booking receipt',
     'booking number',
     'booking confirmation',
-  ])(
-    'prioritizes explicit lodging evidence while keeping category hits in the bounded read set (%s)',
-    (cue) => {
-      const read = request();
-      const query = read.mailQueries?.find((entry) => entry.category === 'lodging')?.query;
-      const evidence = [
-        row(
-          'gmail.search',
-          { query },
-          {
-            complete: true,
-            results: [
-              { threadId: 'generic', subject: 'Hotel booking advice and trends' },
-              { threadId: 'source', subject: `Hotel ${cue}` },
-            ],
-          },
-        ),
-      ];
-      expect(compoundTripThreadIdsToRead(evidence, read)).toEqual(['source', 'generic']);
-    },
-  );
+  ])('prioritizes explicit lodging evidence and excludes editorial generic hits (%s)', (cue) => {
+    const read = request();
+    const query = read.mailQueries?.find((entry) => entry.category === 'lodging')?.query;
+    const evidence = [
+      row(
+        'gmail.search',
+        { query },
+        {
+          complete: true,
+          results: [
+            { threadId: 'generic', subject: 'Hotel booking advice and trends' },
+            { threadId: 'source', subject: `Hotel ${cue}` },
+          ],
+        },
+      ),
+    ];
+    expect(compoundTripThreadIdsToRead(evidence, read)).toEqual(['source']);
+  });
 
   it('counts only actual complete search-matched reads, including previously read thin-metadata hits', () => {
     const read = request();
