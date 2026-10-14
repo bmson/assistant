@@ -226,6 +226,105 @@ describe('weeklyCalendarPlan', () => {
     expect(text).toContain('not a route estimate');
   });
 
+  it('adds the configured meeting gap to estimated travel around in-person events', () => {
+    const start = '2026-10-12T07:00:00.000Z';
+    const end = '2026-10-13T07:00:00.000Z';
+    const event = {
+      eventId: 'in-person-review',
+      calendarId: 'Work',
+      summary: 'In-person review',
+      start: '2026-10-12T16:00:00Z',
+      end: '2026-10-12T16:10:00Z',
+      ownerResponse: 'accepted',
+      blocksTime: true,
+      location: '120 Example Street',
+    };
+    const result = weeklyCalendarPlanResult({
+      timeMin: start,
+      timeMax: end,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        timeMin: start,
+        timeMax: end,
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin: start, timeMax: end },
+            result: {
+              events: [event],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+      plan: {
+        focusMinutes: 60,
+        slotCount: 1,
+        breakMinutes: 15,
+        meetingBufferMinutes: 15,
+        workingDays: 1,
+        windowLabel: 'Monday',
+      },
+    });
+
+    expect(result.text).toContain('- Mon, Oct 12, 10:00 AM');
+    expect(result.text).not.toContain('- Mon, Oct 12, 9:45 AM');
+    expect(result.text).toContain('15-minute breaks on both sides of meetings');
+    expect(result.text).toContain('30-minute travel buffer on each side');
+  });
+
+  it('keeps a nonblocking reminder out of busy-time and overlap claims', () => {
+    const start = '2026-10-12T07:00:00.000Z';
+    const end = '2026-10-13T07:00:00.000Z';
+    const reminder = {
+      eventId: 'pay-reminder',
+      calendarId: 'Personal',
+      summary: 'Payday reminder',
+      start: '2026-10-12T16:00:00Z',
+      end: '2026-10-12T18:00:00Z',
+      ownerResponse: 'accepted',
+      blocksTime: false,
+    };
+    const result = weeklyCalendarPlanResult({
+      timeMin: start,
+      timeMax: end,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        timeMin: start,
+        timeMax: end,
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin: start, timeMax: end },
+            result: {
+              events: [reminder],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+      plan: {
+        focusMinutes: 60,
+        slotCount: 1,
+        breakMinutes: 15,
+        meetingBufferMinutes: 15,
+        workingDays: 1,
+        windowLabel: 'Monday',
+      },
+    });
+
+    expect(result.slotCount).toBe(1);
+    expect(result.text).toContain('- Mon, Oct 12, 9:00 AM');
+    expect(result.text).not.toContain('Possible overlap: Payday reminder');
+    expect(result.text).not.toContain('Scheduling conflict: Payday reminder');
+  });
+
   it('keeps focus candidates and overlap notes consistent with offset-bearing event timestamps', () => {
     const weekStart = '2026-10-19T07:00:00.000Z';
     const weekEnd = '2026-10-26T07:00:00.000Z';
@@ -460,7 +559,7 @@ describe('weeklyCalendarPlan', () => {
     expect(text).not.toContain('Scheduling conflict: Hotel stay');
   });
 
-  it('does not treat a multi-day hotel reservation as an attendance conflict or travel event', () => {
+  it('keeps a title-only multi-day hotel event in overlap review', () => {
     const rows = evidence({
       pages: [
         {
@@ -502,9 +601,8 @@ describe('weeklyCalendarPlan', () => {
       timeZone: 'America/Los_Angeles',
       evidence: rows as never,
     });
-    expect(text).not.toContain('Possible overlap: Hotel stay');
-    expect(text).not.toContain('Scheduling conflict: Hotel stay');
-    expect(text).not.toContain('travel buffer around explicitly in-person events');
+    expect(text).toContain('Possible overlap: Hotel stay and Planning meeting');
+    expect(text).toContain('estimated 30-minute travel buffer on each side');
   });
 
   it('recognizes a long stay from explicit lodging description when the property title is not generic', () => {
@@ -920,6 +1018,7 @@ describe('requested focus-plan variations', () => {
       calendar: 'Travel',
       calendarId: 'travel-calendar',
       summary: 'Hotel stay in Berlin',
+      description: 'Hotel reservation. Check-in: October 10. Check-out: October 17.',
       start: '2026-10-10T06:00:00-07:00',
       end: '2026-10-17T02:00:00-07:00',
       blocksTime: true,
@@ -1396,6 +1495,7 @@ describe('requested focus-plan variations', () => {
       calendar: 'Travel',
       calendarId: 'travel-calendar',
       summary: 'Hotel stay in Berlin',
+      description: 'Hotel reservation. Check-in: October 10. Check-out: October 17.',
       start: '2026-10-10T06:00:00-07:00',
       end: '2026-10-17T02:00:00-07:00',
       blocksTime: true,

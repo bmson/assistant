@@ -168,6 +168,11 @@ function isExtendedContext(interval: { start: number; end: number }): boolean {
 
 function isExtendedLodging(event: PlainRecord, interval: { start: number; end: number }): boolean {
   if (!isExtendedContext(interval)) return false;
+  const start = typeof event.start === 'string' ? event.start : '';
+  const end = typeof event.end === 'string' ? event.end : '';
+  const explicitInstant = (value: string) =>
+    /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) && dateMs(value) !== undefined;
+  if (!explicitInstant(start) || !explicitInstant(end)) return false;
   const metadata = record(event.sourceMetadata);
   const source = record(event.source);
   const details = [
@@ -191,7 +196,7 @@ function isExtendedLodging(event: PlainRecord, interval: { start: number; end: n
     ) || /\b(?:overnight|multi[- ]night)\s+(?:hotel\s+)?stay\b/i.test(details);
   const explicitCheckInAndOut =
     /\bcheck[ -]?in\b/i.test(details) && /\bcheck[ -]?out\b/i.test(details);
-  return explicitStayOrReservation || explicitCheckInAndOut;
+  return explicitStayOrReservation && explicitCheckInAndOut;
 }
 
 /**
@@ -504,17 +509,11 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     const inPerson = location && !hasVideo && !remoteLocation;
     if (inPerson) travelBufferCount += 1;
     if (inPerson && attendance(event) === 'potential') potentialTravelBufferCount += 1;
+    const meetingBufferMs = (input.plan?.meetingBufferMinutes ?? 0) * 60_000;
+    const surroundingBufferMs = meetingBufferMs + (inPerson ? TRAVEL_MS : 0);
     const blockingInterval = {
-      start: Math.max(
-        start,
-        interval.start -
-          Math.max(inPerson ? TRAVEL_MS : 0, (input.plan?.meetingBufferMinutes ?? 0) * 60_000),
-      ),
-      end: Math.min(
-        end,
-        interval.end +
-          Math.max(inPerson ? TRAVEL_MS : 0, (input.plan?.meetingBufferMinutes ?? 0) * 60_000),
-      ),
+      start: Math.max(start, interval.start - surroundingBufferMs),
+      end: Math.min(end, interval.end + surroundingBufferMs),
     };
     eventBusy.push(blockingInterval);
     eventBusySources.push({ event, interval: blockingInterval });
