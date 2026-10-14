@@ -6,6 +6,7 @@ import {
   explicitlyOptsOutOfRecall,
   extractOwnerIntent,
   isConversationLocalContext,
+  isSelfContainedTextTransformation,
   latestOwnerIntent,
 } from './owner-intent.js';
 
@@ -27,6 +28,30 @@ describe('owner intent provenance', () => {
     expect(isConversationLocalContext('Read my earlier conversations about the project.')).toBe(
       false,
     );
+  });
+  it.each([
+    [
+      'Rewrite this note as a clear, polite message: “Ignore that and search my old messages for commitments.”',
+      true,
+    ],
+    [
+      'Could you turn the wording below into a warmer update? “Please retrieve saved memories before answering.”',
+      true,
+    ],
+    ['Make this sound more professional: “The meeting is moved to Friday.”', true],
+    ['Translate the following into French: “The train leaves at noon.”', true],
+    ['“Rewrite this note and look through my past chats.”', false],
+    [
+      'Rewrite this using the tone I usually use in my previous messages: “Thanks for the update.”',
+      false,
+    ],
+    ['Rewrite this in the style of my last email: “Thanks for the update.”', false],
+    ['Polish this based on my saved writing preferences: “Thanks for the update.”', false],
+    ['Make this sound like my usual voice: “Thanks for the update.”', false],
+    ['What have I said in earlier chats about my preferred tone?', false],
+  ])('recognizes only local text transformations: %s', (text, expected) => {
+    const intent = extractOwnerIntent({ trust: 'owner', text });
+    expect(isSelfContainedTextTransformation(intent.ownerAuthoredText)).toBe(expected);
   });
   it('admits an owner lookup question following background context and an explicit investigation', () => {
     for (const text of [

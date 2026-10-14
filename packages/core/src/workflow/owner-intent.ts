@@ -65,6 +65,25 @@ export function isConversationLocalContext(text: string): boolean {
   );
 }
 
+const TEXT_TRANSFORMATION =
+  /\b(?:rewrite|rephrase|paraphrase|proofread|copyedit|edit|polish|revise|correct|fix|clean\s+up|tidy|shorten|condense|translate|summari[sz]e|reword|turn|make)\b/i;
+const TEXT_TRANSFORMATION_TARGET =
+  /\b(?:this|that|it|the\s+(?:following|above)|text|note|message|email|sentence|paragraph|draft|wording|phrase|copy|caption|title|subject\s+line|bio|resume)\b/i;
+const EXPLICIT_HISTORY_STYLE =
+  /\b(?:my|our)\s+(?:(?:usual|customary|preferred|normal|personal|saved|remembered)\s+)?(?:writing\s+)?(?:style|tone|voice|wording|phrasing|preferences?)\b|\b(?:old|earlier|previous|prior|past|last)\s+(?:messages?|chats?|conversations?|emails?|notes?|drafts?)\b|\b(?:last|previous|prior|earlier)\s+time\b|\b(?:what\s+you\s+know|from\s+(?:my\s+)?memory|what\s+i\s+(?:usually|normally|previously|before)\s+(?:say|said|write|wrote|prefer)|how\s+i\s+(?:usually|normally|previously|before)\s+(?:write|phrase|sound))\b/i;
+
+/**
+ * True when a wording transformation can be completed from text supplied in
+ * the current owner request. Quoted spans are removed by extractOwnerIntent
+ * before this predicate is used, so instructions inside the text being edited
+ * cannot turn a local task into a history lookup.
+ */
+export function isSelfContainedTextTransformation(ownerAuthoredText: string): boolean {
+  const text = ownerAuthoredText.trim();
+  if (!text || EXPLICIT_HISTORY_STYLE.test(text)) return false;
+  return TEXT_TRANSFORMATION.test(text) && TEXT_TRANSFORMATION_TARGET.test(text);
+}
+
 export function clarificationAnswerStatus(
   value: string,
   clarificationQuestion?: string,

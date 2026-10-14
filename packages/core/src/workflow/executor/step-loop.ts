@@ -93,7 +93,12 @@ import {
   renewTaskLease,
   sleepTask,
 } from '../machine.js';
-import { latestOwnerIntent, type OwnerIntent, ownerAuthoredWindow } from '../owner-intent.js';
+import {
+  isSelfContainedTextTransformation,
+  latestOwnerIntent,
+  type OwnerIntent,
+  ownerAuthoredWindow,
+} from '../owner-intent.js';
 import { isConceptualNoToolRequest, PLANNER_VERSION } from '../planner.js';
 import {
   buildReadToolInput,
@@ -440,6 +445,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     !isForwardedIngest(task) &&
     ownerIntent.separation !== 'unknown' &&
     ownerText.length > 0;
+  const localTransformation =
+    directOwner &&
+    ownerIntent.authorizedScopes.length === 0 &&
+    isSelfContainedTextTransformation(ownerText);
   const futureWatchIntent =
     directOwner && !restrictedChecklistResume ? detectFutureWatchIntent(ownerText) : null;
   const memoryWrite = directOwner && !restrictedChecklistResume && isMemoryWriteRequest(ownerText);
@@ -754,6 +763,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   if (
     loadConfig().CHAT_RECALL_ENABLED &&
     state.plannerState.planningRecall === undefined &&
+    !localTransformation &&
     !restrictedChecklistResume &&
     !readRequest &&
     privilegedTask &&
@@ -825,6 +835,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
 
   if (
     !restrictedChecklistResume &&
+    !localTransformation &&
     privilegedTask &&
     !state.untrustedContext &&
     task.conversationId
