@@ -44,7 +44,18 @@ function calendarIdIn(url: string): string {
  * calendar. `events` maps a calendar id to its items; a calendar mapped to an
  * Error rejects, standing in for a revoked share.
  */
-function apiFor(events: Record<string, unknown[] | Error>, calendars = CALENDARS) {
+function apiFor(
+  events: Record<string, unknown[] | Error>,
+  calendars: Array<{
+    id: string;
+    summary?: string;
+    summaryOverride?: string;
+    primary?: boolean;
+    accessRole?: string;
+    timeZone?: string;
+    deleted?: boolean;
+  }> = CALENDARS,
+) {
   return vi.fn(async (url: string) => {
     if (url.includes('/users/me/calendarList')) return { items: calendars };
     const id = calendarIdIn(url);
@@ -125,6 +136,7 @@ describe('calendar.list_events', () => {
       events: Array<{ eventId: string; start: string }>;
       complete: boolean;
       nextPageToken?: string;
+      chronologicalPrefixThrough?: string;
     };
 
     const eventQueries = api.mock.calls
@@ -148,6 +160,90 @@ describe('calendar.list_events', () => {
     expect(
       cursor.calendars.flatMap((calendar) => calendar.buffered.map((item) => item.eventId)),
     ).toEqual(expect.arrayContaining(['later-bot', 'later-work']));
+    expect(result.chronologicalPrefixThrough).toBe('2026-07-24T12:00:00.000Z');
+  });
+
+  it('merges all-day events using their calendar timezone before proving a prefix', async () => {
+    const calendars = [
+      { id: 'east', summary: 'East', timeZone: 'Pacific/Kiritimati', accessRole: 'reader' },
+      { id: 'west', summary: 'West', timeZone: 'Etc/GMT+10', accessRole: 'reader' },
+    ];
+    const api = apiFor(
+      {
+        east: [{ id: 'all-day', summary: 'Flight all day', start: { date: '2026-07-25' } }],
+        west: [event('timed', 'Timed event', '2026-07-24T10:00:00-10:00')],
+      },
+      calendars,
+    );
+    const result = (await toolsWith(api)
+      .get('calendar.list_events')
+      ?.tool.execute(
+        {
+          timeMin: '2026-07-24T00:00:00Z',
+          timeMax: '2026-07-26T00:00:00Z',
+          maxResults: 1,
+        },
+        {} as never,
+      )) as {
+      events: Array<{ eventId: string }>;
+      chronologicalPrefixThrough?: string;
+    };
+
+    expect(result.events.map((item) => item.eventId)).toEqual(['all-day']);
+    expect(result.chronologicalPrefixThrough).toBe('2026-07-24T10:00:00.000Z');
+  });
+
+  it('does not publish a prefix when a provider cursor has no buffered event', async () => {
+    const api = vi.fn(async (url: string) => {
+      if (url.includes('/users/me/calendarList')) return { items: [CALENDARS[0]] };
+      return { items: [], nextPageToken: 'more-events' };
+    });
+    const result = (await toolsWith(api)
+      .get('calendar.list_events')
+      ?.tool.execute(
+        {
+          timeMin: '2026-07-24T00:00:00Z',
+          timeMax: '2026-07-25T00:00:00Z',
+          maxResults: 1,
+        },
+        {} as never,
+      )) as { events: unknown[]; nextPageToken?: string; chronologicalPrefixThrough?: string };
+
+    expect(result.events).toEqual([]);
+    expect(result.nextPageToken).toBeTruthy();
+    expect(result.chronologicalPrefixThrough).toBeUndefined();
+  });
+
+  it.each([
+    ['a daylight-saving gap', '2026-03-08T02:30:00'],
+    ['an invalid civil date', '2026-02-30T12:00:00'],
+    ['a daylight-saving fold', '2026-11-01T01:30:00'],
+  ])('does not publish a prefix for %s in an offsetless event time', async (_label, start) => {
+    const api = apiFor(
+      {
+        owner: [
+          {
+            id: 'unresolved-local-time',
+            summary: 'Flight event',
+            start: { dateTime: start },
+          },
+        ],
+      },
+      [{ id: 'owner', summary: 'Owner', timeZone: 'America/Los_Angeles', accessRole: 'reader' }],
+    );
+    const result = (await toolsWith(api)
+      .get('calendar.list_events')
+      ?.tool.execute(
+        {
+          timeMin: '2026-01-01T00:00:00Z',
+          timeMax: '2027-01-01T00:00:00Z',
+          maxResults: 1,
+        },
+        {} as never,
+      )) as { events: unknown[]; chronologicalPrefixThrough?: string };
+
+    expect(result.events).toHaveLength(1);
+    expect(result.chronologicalPrefixThrough).toBeUndefined();
   });
 
   it('addresses each calendar by id rather than the hardcoded primary', async () => {

@@ -993,12 +993,25 @@ describe('requested focus-plan variations', () => {
     expect(result.text).not.toContain('provider still reports busy across this window');
   });
 
-  it('does not discount a whole-window busy interval when a same-calendar meeting overlaps it', () => {
+  it('rebuilds an overlapping timed meeting as a separate blocker when explaining a stay interval', () => {
     const result = weeklyCalendarPlanResult({
       timeMin: threeDayStart,
       timeMax: threeDayEnd,
       timeZone: 'America/Los_Angeles',
       evidence: stayEvidence({
+        availabilityBusy: [
+          { start: threeDayStart, end: threeDayEnd, calendar: 'Travel' },
+          {
+            start: '2026-10-14T07:00:00.000Z',
+            end: '2026-10-15T07:00:00.000Z',
+            calendar: 'Other busy calendar',
+          },
+          {
+            start: '2026-10-15T07:00:00.000Z',
+            end: '2026-10-16T07:00:00.000Z',
+            calendar: 'Other busy calendar',
+          },
+        ],
         extraEvents: [
           {
             eventId: 'meeting',
@@ -1012,12 +1025,381 @@ describe('requested focus-plan variations', () => {
           },
         ],
       }) as never,
+      plan: { ...threeDayPlan, slotCount: 1 },
+    });
+
+    expect(result.slotCount).toBe(1);
+    expect(result.text).toContain('Focus candidates for review (not availability-cleared)');
+    expect(result.text).toContain('Tue, Oct 13, 10:15 AM');
+    expect(result.text).not.toContain('Tue, Oct 13, 9:00 AM');
+    expect(result.text).toContain('provider still reports busy');
+  });
+
+  it('keeps the full provider interval blocking when an all-day event overlaps the stay', () => {
+    const result = weeklyCalendarPlanResult({
+      timeMin: threeDayStart,
+      timeMax: threeDayEnd,
+      timeZone: 'America/Los_Angeles',
+      evidence: stayEvidence({
+        extraEvents: [
+          {
+            eventId: 'all-day-hold',
+            calendar: 'Travel',
+            calendarId: 'travel-calendar',
+            calendarTimeZone: 'America/Los_Angeles',
+            summary: 'Travel day hold',
+            start: '2026-10-13',
+            end: '2026-10-16',
+            allDay: true,
+            ownerResponse: 'accepted',
+            blocksTime: true,
+          },
+        ],
+      }) as never,
       plan: threeDayPlan,
     });
 
     expect(result.slotCount).toBe(0);
     expect(result.text).toContain('I couldn’t identify suitable 60-minute blocks');
     expect(result.text).not.toContain('Focus candidates for review (not availability-cleared)');
+  });
+
+  it.each([
+    {
+      label: 'a same-calendar offsetless local event',
+      extraEvents: [
+        {
+          eventId: 'local-event',
+          calendar: 'Travel',
+          calendarId: 'travel-calendar',
+          summary: 'Local time meeting',
+          start: '2026-10-13T09:00:00',
+          end: '2026-10-13T10:00:00',
+          ownerResponse: 'accepted',
+          blocksTime: true,
+        },
+      ],
+    },
+    {
+      label: 'a declined event still present in provider busy',
+      extraEvents: [
+        {
+          eventId: 'declined-event',
+          calendar: 'Travel',
+          calendarId: 'travel-calendar',
+          summary: 'Declined but busy event',
+          start: '2026-10-13T09:00:00-07:00',
+          end: '2026-10-13T10:00:00-07:00',
+          ownerResponse: 'declined',
+          blocksTime: true,
+        },
+      ],
+    },
+  ])('keeps provider busy for $label', ({ extraEvents }) => {
+    const result = weeklyCalendarPlanResult({
+      timeMin: threeDayStart,
+      timeMax: threeDayEnd,
+      timeZone: 'America/Los_Angeles',
+      evidence: stayEvidence({ extraEvents }) as never,
+      plan: threeDayPlan,
+    });
+
+    expect(result.slotCount).toBe(0);
+    expect(result.text).not.toContain('Focus candidates for review (not availability-cleared)');
+  });
+
+  it('finds review-only weekday candidates from the captured complete event roster while retaining the missing free/busy limit', () => {
+    const start = '2026-10-14T07:00:00.000Z';
+    const end = '2026-10-17T07:00:00.000Z';
+    const stay = {
+      eventId: 'hotel',
+      calendar: 'bot@bmson.com',
+      calendarId: 'bot@bmson.com',
+      summary: 'NH Collection Berlin Mitte am Checkpoint Charlie',
+      description:
+        'Hotel stay booked via Egencia\nCheck-in: October 10, 2026\nCheck-out: October 17, 2026 (7 nights)',
+      start: '2026-10-10T06:00:00-07:00',
+      end: '2026-10-17T02:00:00-07:00',
+      blocksTime: true,
+    };
+    const event = (
+      eventId: string,
+      calendar: string,
+      calendarId: string,
+      summary: string,
+      eventStart: string,
+      eventEnd: string,
+      extra: Record<string, unknown> = {},
+    ) => ({
+      eventId,
+      calendar,
+      calendarId,
+      summary,
+      start: eventStart,
+      end: eventEnd,
+      blocksTime: true,
+      ...extra,
+    });
+    const rows = [
+      {
+        toolName: 'calendar.availability',
+        status: 'succeeded',
+        args: { timeMin: start, timeMax: end },
+        result: {
+          busy: [
+            { start, end, calendar: 'bot@bmson.com' },
+            {
+              start: '2026-10-14T16:00:00Z',
+              end: '2026-10-14T16:10:00Z',
+              calendar: 'Family',
+            },
+            {
+              start: '2026-10-14T22:30:00Z',
+              end: '2026-10-14T23:00:00Z',
+              calendar: 'Family',
+            },
+            {
+              start: '2026-10-15T00:15:00Z',
+              end: '2026-10-15T00:45:00Z',
+              calendar: 'Family',
+            },
+            {
+              start: '2026-10-15T16:50:00Z',
+              end: '2026-10-15T19:00:00Z',
+              calendar: 'Family',
+            },
+            {
+              start: '2026-10-16T00:00:00Z',
+              end: '2026-10-17T00:00:00Z',
+              calendar: 'Baldvin’s iPhone',
+            },
+            {
+              start: '2026-10-16T00:00:00Z',
+              end: '2026-10-16T01:30:00Z',
+              calendar: 'SF United Soccer',
+            },
+            {
+              start: '2026-10-16T20:20:00Z',
+              end: '2026-10-16T23:10:00Z',
+              calendar: 'Family',
+            },
+            {
+              start: '2026-10-17T00:30:00Z',
+              end: '2026-10-17T01:30:00Z',
+              calendar: 'Family',
+            },
+          ],
+          calendarsChecked: ['bot@bmson.com', 'Family', 'Holidays in United States'],
+          complete: false,
+          unavailable: ['Holidays in United States'],
+        },
+      },
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        args: { timeMin: start, timeMax: end, maxResults: 50 },
+        result: {
+          events: [
+            stay,
+            event(
+              'vaccine',
+              'Family',
+              'family-calendar',
+              'Brynjar - Flu Vaccine',
+              '2026-10-14T16:00:00Z',
+              '2026-10-14T16:10:00Z',
+              { location: 'SF Bay Pediatrics' },
+            ),
+            event(
+              'orthodontist',
+              'Family',
+              'family-calendar',
+              'Orthodontist',
+              '2026-10-14T22:30:00Z',
+              '2026-10-14T23:00:00Z',
+              { location: 'Oviedo Orthodontics' },
+            ),
+            event(
+              'swim',
+              'Family',
+              'family-calendar',
+              'Freyja Swim',
+              '2026-10-15T00:15:00Z',
+              '2026-10-15T00:45:00Z',
+              { location: 'La Petite Baleen Swim Schools' },
+            ),
+            event(
+              'field-trip',
+              'Family',
+              'family-calendar',
+              'Freyja - Library Field Trip',
+              '2026-10-15T16:50:00Z',
+              '2026-10-15T19:00:00Z',
+              { location: 'Richmond Library' },
+            ),
+            event(
+              'all-day-hold',
+              'Baldvin’s iPhone',
+              'iphone-calendar',
+              'Útborgun',
+              '2026-10-16',
+              '2026-10-17',
+              { allDay: true },
+            ),
+            event(
+              'paycheck-family',
+              'Family',
+              'family-calendar',
+              'Paycheck from Zendesk',
+              '2026-10-16',
+              '2026-10-17',
+              { allDay: true, blocksTime: false },
+            ),
+            event(
+              'soccer',
+              'SF United Soccer',
+              'soccer-calendar',
+              '26/27 U13B Azul - Fall Practice',
+              '2026-10-16T00:00:00-07:00',
+              '2026-10-16T01:30:00-07:00',
+              { location: 'Gellert Park' },
+            ),
+            event(
+              'exam',
+              'Family',
+              'family-calendar',
+              'Dr. Chan - Annual Exam',
+              '2026-10-16T20:20:00Z',
+              '2026-10-16T21:20:00Z',
+              { location: '450 Sutter St' },
+            ),
+            event(
+              'wheel-kids',
+              'Family',
+              'family-calendar',
+              'Wheel Kids at Alamo',
+              '2026-10-16T21:10:00Z',
+              '2026-10-16T23:10:00Z',
+              { location: 'Alamo Elementary School' },
+            ),
+            event(
+              'goalie',
+              'Family',
+              'family-calendar',
+              'Goalie Training',
+              '2026-10-17T00:30:00Z',
+              '2026-10-17T01:30:00Z',
+              { location: 'Crocker Amazon Soccer Fields' },
+            ),
+            event(
+              'flight',
+              'bot@bmson.com',
+              'bot@bmson.com',
+              'BER → SFO flight (United)',
+              '2026-10-16T21:10:00-07:00',
+              '2026-10-17T08:15:00-07:00',
+              { description: 'Operated by United' },
+            ),
+          ],
+          complete: true,
+          calendarRosterComplete: true,
+          unavailable: [],
+        },
+      },
+    ];
+
+    const result = weeklyCalendarPlanResult({
+      timeMin: start,
+      timeMax: end,
+      timeZone: 'America/Los_Angeles',
+      evidence: rows as never,
+      plan: threeDayPlan,
+    });
+
+    expect(result.slotCount).toBe(2);
+    expect(result.coverageComplete).toBe(false);
+    expect(result.text).toContain('Unavailable calendar coverage: Holidays in United States');
+    expect(result.text).toContain('provider still reports busy');
+    expect(result.text).toContain('not confirmed free');
+    expect(result.text).toContain('Wed, Oct 14');
+    expect(result.text).toContain('Thu, Oct 15');
+    expect(result.text).not.toMatch(/^- Fri, Oct 16,/m);
+    expect(result.text).toContain('I haven’t changed your calendar');
+  });
+
+  it('keeps a timed flight blocking candidates when it overlaps a lodging-explained busy window', () => {
+    const start = '2026-10-16T20:00:00.000Z';
+    const end = '2026-10-16T21:30:00.000Z';
+    const hotel = {
+      eventId: 'hotel',
+      calendar: 'Travel',
+      calendarId: 'travel-calendar',
+      summary: 'Hotel stay in Berlin',
+      start: '2026-10-10T06:00:00-07:00',
+      end: '2026-10-17T02:00:00-07:00',
+      blocksTime: true,
+    };
+    const flight = {
+      eventId: 'flight',
+      calendar: 'Travel',
+      calendarId: 'travel-calendar',
+      summary: 'Flight home',
+      start: '2026-10-16T14:10:00-07:00',
+      end: '2026-10-16T15:15:00-07:00',
+      blocksTime: true,
+    };
+    const rows = [
+      {
+        toolName: 'calendar.availability',
+        status: 'succeeded',
+        args: { timeMin: start, timeMax: end },
+        result: {
+          busy: [{ start, end, calendar: 'Travel' }],
+          complete: true,
+          calendarsChecked: ['Travel'],
+          unavailable: [],
+        },
+      },
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        args: { timeMin: start, timeMax: end },
+        result: {
+          events: [hotel, flight],
+          complete: true,
+          calendarRosterComplete: true,
+          unavailable: [],
+        },
+      },
+    ];
+    const result = weeklyCalendarPlanResult({
+      timeMin: start,
+      timeMax: end,
+      timeZone: 'America/Los_Angeles',
+      evidence: rows as never,
+      plan: { ...threeDayPlan, slotCount: 1, windowLabel: 'Friday afternoon' },
+    });
+    const noFlightRows = rows.map((row) =>
+      row.toolName === 'calendar.list_events'
+        ? {
+            ...row,
+            result: { ...row.result, events: [hotel] },
+          }
+        : row,
+    );
+    const withoutFlight = weeklyCalendarPlanResult({
+      timeMin: start,
+      timeMax: end,
+      timeZone: 'America/Los_Angeles',
+      evidence: noFlightRows as never,
+      plan: { ...threeDayPlan, slotCount: 1, windowLabel: 'Friday afternoon' },
+    });
+
+    expect(result.slotCount).toBe(0);
+    expect(result.coverageComplete).toBe(true);
+    expect(result.text).toContain('I couldn’t identify suitable 60-minute blocks');
+    expect(result.text).not.toContain('Focus candidates for review (not availability-cleared)');
+    expect(withoutFlight.slotCount).toBe(1);
   });
 
   it.each([

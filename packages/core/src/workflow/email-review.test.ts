@@ -10,6 +10,7 @@ import {
   emailReviewCoverage,
   emailReviewNextThreadRead,
   emailReviewOwnerMailbox,
+  emailReviewPendingAssessmentThreads,
   emailReviewRankContext,
   emailReviewRecentMetadataFallback,
   emailReviewSelectionWithinAuthorizedPool,
@@ -163,6 +164,17 @@ function required<T>(value: T | undefined, label: string): T {
 }
 
 describe('bounded no-send email review', () => {
+  it('preserves validated assessments and does not repeatedly assess a rejected complete thread', () => {
+    const threads = [
+      { threadId: 'already-validated', marker: 'keep' },
+      { threadId: 'rejected-once', marker: 'stop' },
+      { threadId: 'newly-read', marker: 'assess' },
+    ];
+    expect(
+      emailReviewPendingAssessmentThreads(threads, ['already-validated'], ['rejected-once']),
+    ).toEqual([{ threadId: 'newly-read', marker: 'assess' }]);
+  });
+
   it('names ranking-context omissions within scanned metadata', () => {
     const coverage = emailReviewCoverage([], [], [search('thread-a'), search('thread-b')]);
     coverage.rankedMetadataThreads = 1;
@@ -389,7 +401,7 @@ describe('bounded no-send email review', () => {
       ...required(validAnswer(thread.threadId).items[0], 'assessment'),
       whyQuote: 'Could you volunteer tomorrow?',
       deadline: { messageId: thread.latestMessageId, quote: 'tomorrow' },
-      draftBody: 'Thanks for asking. [Choose one: available / unavailable] to volunteer tomorrow.',
+      draftBody: 'Thanks for asking. I appreciate you thinking of me.',
     };
     const checked = validateEmailReviewAnswer({ items: [assessment] }, [thread]);
     expect(checked?.items[0]?.deadlineQuote).toBe('tomorrow');
@@ -408,6 +420,32 @@ describe('bounded no-send email review', () => {
     expect(emailReviewValidationIssues(missing, [thread])).toContain(
       'item_0:possible_relevant_deadline_in_thread',
     );
+  });
+
+  it('recognizes a dated removal outcome as an explicit deadline', () => {
+    const sourceMessages = messages('donation-deadline');
+    const latest = required(sourceMessages.at(-1), 'latest message');
+    latest.text =
+      'Please let us know whether to collect the clothes; unclaimed clothes will be donated Oct 23.';
+    latest.sourceLength = latest.text.length;
+    const evidence = [search('donation-deadline'), read('donation-deadline', sourceMessages)];
+    const thread = required(
+      emailReviewCompleteThread('donation-deadline', 'owner@example.com', evidence),
+      'complete deadline thread',
+    );
+    const assessment = required(validAnswer(thread.threadId).items[0], 'assessment');
+    assessment.whyQuote = 'Please let us know whether to collect the clothes';
+    assessment.deadline = {
+      messageId: thread.latestMessageId,
+      quote: 'unclaimed clothes will be donated Oct 23',
+    };
+
+    expect(validateEmailReviewAnswer({ items: [assessment] }, [thread])?.items[0]).toMatchObject({
+      deadlineQuote: 'unclaimed clothes will be donated Oct 23',
+    });
+    expect(
+      emailReviewValidationIssues({ items: [{ ...assessment, deadline: null }] }, [thread]),
+    ).toContain('item_0:possible_relevant_deadline_in_thread');
   });
 
   it('counts completed source assessments separately from complete thread reads', () => {
@@ -436,6 +474,32 @@ describe('bounded no-send email review', () => {
     expect(text).toContain('verified reply checks for 1 of 2 selected threads');
     expect(text).toContain('Complete reads are not the same as completed assessments.');
     expect(text).not.toContain('2 of 2 selected threads');
+  });
+
+  it('discloses mailbox mismatch and complete threads left unassessed without leaking addresses', () => {
+    const evidence = [
+      search('thread-a', {
+        mailboxSearched: 'connected-alias@example.net',
+        configuredOwnerMailbox: 'owner@example.com',
+      }),
+    ];
+    const coverage = emailReviewCoverage(
+      ['thread-a'],
+      [],
+      evidence,
+      0,
+      [],
+      [],
+      undefined,
+      false,
+      1,
+    );
+    expect(coverage).toMatchObject({ searchMailboxMismatch: true, unassessedCompleteThreads: 1 });
+    const formatted = formatEmailReviewAnswer([], coverage);
+    expect(formatted).toContain('connected mailbox used for search differs');
+    expect(formatted).toContain('1 complete thread could not be assessed reliably');
+    expect(formatted).not.toContain('connected-alias@example.net');
+    expect(formatted).not.toContain('owner@example.com');
   });
   it('repairs a rejected owner commitment using the same complete source threads', async () => {
     const thread = required(
@@ -519,7 +583,7 @@ describe('bounded no-send email review', () => {
     );
   });
 
-  it('repairs exact-source failures and prepares owner-choice placeholders for direct volunteer and RSVP asks', async () => {
+  it('repairs exact-source failures and drafts decision-free volunteer and RSVP acknowledgements', async () => {
     const makeRequestThread = (threadId: string, sender: string, subject: string, text: string) => {
       const sourceMessages = messages(threadId, sender);
       const latest = required(sourceMessages.at(-1), 'latest source message');
@@ -556,7 +620,7 @@ describe('bounded no-send email review', () => {
       latestMessageId: thread.latestMessageId,
       disposition: 'draft' as const,
       recipient: thread.recipient,
-      why: 'The latest inbound message asks for a response.',
+      why: 'The sender is waiting for a response to this request.',
       whyMessageId: thread.latestMessageId,
       whyQuote,
       deadline: { messageId: thread.latestMessageId, quote: deadlineQuote },
@@ -569,13 +633,13 @@ describe('bounded no-send email review', () => {
           volunteer,
           'Are you able to?',
           'tomorrow',
-          'Thanks for checking. [Choose one: available / unavailable] to help tomorrow.',
+          'Thanks for thinking of me. I appreciate you asking.',
         ),
         assessment(
           rsvp,
           "If you have not yet RSVP'd, please click this link to RSVP",
           'by October 18',
-          'Thanks for the reminder. [Add your RSVP choice here] for the October 21 PTA meeting.',
+          'Thanks for the reminder. I appreciate you checking with me.',
         ),
       ],
     };
@@ -606,9 +670,34 @@ describe('bounded no-send email review', () => {
       'by October 18',
     ]);
     expect(result.answer?.items.map((item) => item.draftBody)).toEqual([
-      'Thanks for checking. [Choose one: available / unavailable] to help tomorrow.',
-      'Thanks for the reminder. [Add your RSVP choice here] for the October 21 PTA meeting.',
+      'Thanks for thinking of me. I appreciate you asking.',
+      'Thanks for the reminder. I appreciate you checking with me.',
     ]);
+    for (const placeholder of [
+      'Thanks for checking. [Choose one: available / unavailable].',
+      'Thanks. [available / unavailable]',
+    ]) {
+      const unresolvedChoice = structuredClone(valid);
+      const placeholderAssessment = required(unresolvedChoice.items[0], 'placeholder control');
+      placeholderAssessment.draftBody = placeholder;
+      expect(emailReviewValidationIssues(unresolvedChoice, [volunteer, rsvp])).toContain(
+        'item_0:no_unresolved_draft_placeholders',
+      );
+      expect(validateEmailReviewAnswer(unresolvedChoice, [volunteer, rsvp])).toBeUndefined();
+    }
+    const linkThread = structuredClone(volunteer);
+    const latestLinkMessage = required(
+      linkThread.messages.find((message) => message.messageId === linkThread.latestMessageId),
+      'latest link source message',
+    );
+    latestLinkMessage.text += ' Details: https://example.org/details';
+    const sourceBackedMarkdownLink = structuredClone(
+      required(valid.items[0], 'valid source-bound draft'),
+    );
+    sourceBackedMarkdownLink.draftBody = '[Event details](https://example.org/details)';
+    expect(
+      emailReviewValidationIssues({ items: [sourceBackedMarkdownLink] }, [linkThread]),
+    ).toEqual([]);
     const formatted = formatEmailReviewAnswer(
       result.answer?.items ?? [],
       emailReviewCoverage(
@@ -633,6 +722,12 @@ describe('bounded no-send email review', () => {
     expect(parsedPrompt.instruction).toContain(
       'Use no_reply only when the complete thread shows no unanswered direct request',
     );
+    expect(parsedPrompt.instruction).toContain('do not use brackets, choice placeholders');
+    expect(parsedPrompt.instruction).toContain('brief neutral acknowledgement');
+    expect(parsedPrompt.instruction).toContain(
+      'one concise sentence explaining what response is needed',
+    );
+    expect(parsedPrompt.instruction).not.toContain('[Choose one: available / unavailable]');
     expect(parsedPrompt.threads[0]?.messages).toHaveLength(2);
     expect(parsedPrompt.threads[0]?.messages[0]?.promptRole).toBe('thread_context');
     expect(parsedPrompt.threads[0]?.messages[1]?.promptRole).toBe('latest_inbound');
@@ -857,7 +952,7 @@ describe('bounded no-send email review', () => {
     expect(validEmailReviewSelection(['invented'], evidence)).toBe(false);
   });
 
-  it('allows a bounded eight-ID reserve pool while keeping final answers capped at five', () => {
+  it('allows a bounded ten-ID reserve pool while keeping final answers capped at five', () => {
     const evidence = Array.from({ length: EMAIL_REVIEW_MAX_RANK_POOL }, (_, index) =>
       search(`request-${index}`),
     );
@@ -867,7 +962,7 @@ describe('bounded no-send email review', () => {
     );
     expect(validEmailReviewSelection(ids, evidence)).toBe(true);
     expect(validEmailReviewSelection([...ids, 'request-8'], evidence)).toBe(false);
-    expect(JSON.parse(emailReviewRankContext(evidence).prompt)).toMatchObject({ limit: 8 });
+    expect(JSON.parse(emailReviewRankContext(evidence).prompt)).toMatchObject({ limit: 10 });
   });
 
   it('rejects resumed selected IDs beyond the verified backfill authorization', () => {
@@ -879,6 +974,31 @@ describe('bounded no-send email review', () => {
     expect(
       emailReviewSelectionWithinAuthorizedPool(ranked.slice(0, 6), ranked, ['request-0']),
     ).toBe(true);
+    expect(
+      emailReviewSelectionWithinAuthorizedPool(ranked.slice(0, 6), ranked, [], ['request-5']),
+    ).toBe(true);
+    expect(
+      emailReviewSelectionWithinAuthorizedPool(ranked.slice(0, 6), ranked, [], ['foreign-failure']),
+    ).toBe(false);
+    expect(
+      emailReviewSelectionWithinAuthorizedPool(ranked.slice(0, 6), ranked, [], ['request-6']),
+    ).toBe(false);
+    expect(
+      emailReviewSelectionWithinAuthorizedPool(
+        ranked.slice(0, 6),
+        ranked,
+        ['request-0'],
+        ['request-5'],
+      ),
+    ).toBe(true);
+    expect(
+      emailReviewSelectionWithinAuthorizedPool(
+        ranked.slice(0, 6),
+        ranked,
+        ['request-0'],
+        ['request-0'],
+      ),
+    ).toBe(false);
     expect(emailReviewSelectionWithinAuthorizedPool(ranked, ranked, [])).toBe(false);
     expect(emailReviewSelectionWithinAuthorizedPool(ranked.slice(0, 6), ranked, [])).toBe(false);
     expect(emailReviewSelectionWithinAuthorizedPool(ranked.slice(0, 6), undefined, [])).toBe(false);
@@ -1264,24 +1384,39 @@ describe('bounded no-send email review', () => {
       emailReviewCompleteThread('thread-a', 'owner@example.com', evidence),
       'complete review thread',
     );
-    const validated = validateEmailReviewAnswer(
-      {
-        items: [
-          {
-            ...validAnswer('thread-a').items[0],
-            why: 'Your account will be closed tomorrow unless you pay.',
-          },
-        ],
-      },
-      [thread],
-    );
+    const validated = validateEmailReviewAnswer(validAnswer('thread-a'), [thread]);
     expect(validated?.items).toHaveLength(1);
     const formatted = formatEmailReviewAnswer(
       required(validated?.items, 'validated source-bound review'),
       emailReviewCoverage(['thread-a'], [thread], [search('thread-a')]),
     );
-    expect(formatted).toContain('The latest message says: “Could you confirm by Friday?”');
-    expect(formatted).not.toContain('Your account will be closed tomorrow');
+    expect(formatted).toContain('Request in the latest message: “Could you confirm by Friday?”');
+    expect(formatted).toContain(
+      'Why it matters: A response is requested, with the stated deadline “by Friday”.',
+    );
+    for (const unsupportedWhy of [
+      'Your account will be closed tomorrow unless you pay.',
+      'The sender asks for confirmation, so a delay will cancel your membership.',
+    ]) {
+      const assessmentWithUnsupportedWhy = {
+        items: [
+          {
+            ...required(validAnswer('thread-a').items[0], 'source-bound assessment'),
+            why: unsupportedWhy,
+          },
+        ],
+      };
+      const stillValidated = validateEmailReviewAnswer(assessmentWithUnsupportedWhy, [thread]);
+      expect(stillValidated).toBeDefined();
+      const safeFormatted = formatEmailReviewAnswer(
+        required(stillValidated?.items, 'validated assessment with untrusted rationale'),
+        emailReviewCoverage(['thread-a'], [thread], [search('thread-a')]),
+      );
+      expect(safeFormatted).not.toContain(unsupportedWhy);
+      expect(safeFormatted).toContain(
+        'Why it matters: A response is requested, with the stated deadline “by Friday”.',
+      );
+    }
     expect(
       validateEmailReviewAnswer(
         { items: [{ ...validAnswer('thread-a').items[0], latestMessageId: 'old-thread-a' }] },
@@ -1450,7 +1585,7 @@ describe('bounded no-send email review', () => {
       emailReviewSelectionWithinAuthorizedPool(
         [...ranked, 'reserve-g', 'reserve-h', 'reserve-i'],
         [...ranked, 'reserve-g', 'reserve-h', 'reserve-i'],
-        ['request-a', 'request-b', 'request-c', 'request-d'],
+        ['request-a', 'request-b', 'request-c'],
       ),
     ).toBe(false);
 
