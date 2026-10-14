@@ -1968,6 +1968,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             finalText,
             reviewCoverageComplete &&
               checkedAssessments.items.length === bounded.threads.length &&
+              checkedAssessments.items.every((item) => !item.deadlineNeedsReview) &&
               checkedAssessments.items.filter((item) => item.disposition === 'draft').length ===
                 initialCandidateCount,
           );
@@ -2003,7 +2004,9 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         state.step += 1;
         if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
         const newlyExcluded =
-          validated?.items.filter((item) => item.disposition === 'no_reply') ?? [];
+          validated?.items.filter(
+            (item) => item.disposition === 'no_reply' && !item.deadlineNeedsReview,
+          ) ?? [];
         // Re-enter with the checkpointed source items. This revalidates the
         // exclusion before choosing a reserve and recomputes any shortfall.
         if (newlyExcluded.length > 0) continue;

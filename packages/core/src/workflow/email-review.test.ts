@@ -225,6 +225,45 @@ describe('bounded no-send email review', () => {
     ).toBeUndefined();
   });
 
+  it('retains an uncertain no-reply assessment without authorizing a reserve', () => {
+    const source = messages('thread-a');
+    const latest = required(source.at(-1), 'latest');
+    latest.text += ' The discount offer is available through Jun. 6th.';
+    latest.sourceLength = latest.text.length;
+    const evidence = [search('thread-a'), read('thread-a', source)];
+    const noReply = {
+      ...required(validAnswer('thread-a').items[0], 'assessment'),
+      disposition: 'no_reply' as const,
+      recipient: null,
+      deadline: null,
+      draftBody: null,
+      draftSourceMessageIds: [],
+    };
+    const checked = revalidateEmailReviewAssessmentBatches(
+      [[noReply]],
+      ['thread-a'],
+      'owner@example.com',
+      evidence,
+    );
+    expect(checked?.items[0]?.deadlineNeedsReview).toBe(true);
+    expect(checked?.noReplyThreadIds).toEqual([]);
+    expect(
+      formatEmailReviewAnswer(
+        checked?.items ?? [],
+        emailReviewCoverage(
+          ['thread-a'],
+          [
+            required(
+              emailReviewCompleteThread('thread-a', 'owner@example.com', evidence),
+              'thread',
+            ),
+          ],
+          evidence,
+        ),
+      ),
+    ).toContain('unresolved possible deadline');
+  });
+
   it('marks an explicit dated offer window for review unless its body quote is supplied', () => {
     const thread = required(
       emailReviewCompleteThread('thread-a', 'owner@example.com', [

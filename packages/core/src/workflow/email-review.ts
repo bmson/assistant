@@ -299,7 +299,7 @@ export function revalidateEmailReviewSourceItems(
   return {
     items: validated.items,
     noReplyThreadIds: validated.items
-      .filter((item) => item.disposition === 'no_reply')
+      .filter((item) => item.disposition === 'no_reply' && !item.deadlineNeedsReview)
       .map((item) => item.thread.threadId),
   };
 }
@@ -331,7 +331,7 @@ export function revalidateEmailReviewAssessmentBatches(
   return {
     items,
     noReplyThreadIds: items
-      .filter((item) => item.disposition === 'no_reply')
+      .filter((item) => item.disposition === 'no_reply' && !item.deadlineNeedsReview)
       .map((item) => item.thread.threadId),
   };
 }
@@ -1074,13 +1074,22 @@ export function formatEmailReviewAnswer(
   const fullyChecked =
     coverage.completeThreads + coverage.alreadyAnsweredThreads + coverage.notEligibleThreads;
   const drafts = items.filter((item) => item.disposition === 'draft' && item.draftBody);
-  const noReplies = items.length - drafts.length;
+  const noReplies = items.filter(
+    (item) => item.disposition === 'no_reply' && !item.deadlineNeedsReview,
+  ).length;
+  const uncertainNoReplies = items.filter(
+    (item) => item.disposition === 'no_reply' && item.deadlineNeedsReview,
+  ).length;
   const lines = [
     `I completed verified reply checks for ${fullyChecked} of ${coverage.selectedThreads} selected threads from a bounded seven-day mail scan and prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'} for review. This is a provisional prioritization of the scanned results, not a guarantee that these are the only or globally most important requests.`,
   ];
   if (noReplies > 0)
     lines.push(
       `${noReplies} fully assessed ${noReplies === 1 ? 'thread did' : 'threads did'} not clearly require a response, so ${noReplies === 1 ? 'it was' : 'they were'} not counted among the reply requests.`,
+    );
+  if (uncertainNoReplies > 0)
+    lines.push(
+      `${uncertainNoReplies} ${uncertainNoReplies === 1 ? 'thread had' : 'threads had'} an unresolved possible deadline, so ${uncertainNoReplies === 1 ? 'its no-reply assessment was' : 'their no-reply assessments were'} not used to authorize replacement threads. Please check the source before relying on ${uncertainNoReplies === 1 ? 'that assessment' : 'those assessments'}.`,
     );
   if (coverage.searchPages === 0)
     lines.push('The mailbox search did not return a usable result, so I prepared no reply drafts.');
