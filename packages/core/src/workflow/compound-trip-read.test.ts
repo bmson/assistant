@@ -730,6 +730,7 @@ describe('compound trip read projection', () => {
     expect(projection.text).toContain('no separately identified connecting leg');
     expect(projection.text).toContain('not a taxi quote');
     expect(projection.blocked).toBe(true);
+    expect(projection.text).not.toContain('Calendar observations —');
   });
 
   it('accepts common stay-date summaries but does not infer a street address or route from a city alone', () => {
@@ -2592,5 +2593,190 @@ describe('compound trip read projection', () => {
     ]);
     const projection = compoundTripReadProjection(read, [calendar, ...bookingEmailEvidence()]);
     expect(projection.text).toContain('clocks conflict after time-zone conversion');
+  });
+
+  it('shows bounded calendar-only observations when coverage is partial without promoting them', () => {
+    const read = request();
+    const flight = {
+      ...calendarFlight(),
+      summary: 'Flight <Lufthansa> [fake](https://attacker.example)',
+      description: 'Not a return flight. Private notes must not be copied into the observation.',
+      eventId: 'partial-flight',
+      links: [{ type: 'calendar', url: 'https://www.google.com/calendar/event?eid=partial' }],
+    };
+    const lodging = {
+      eventId: 'active-stay',
+      summary: 'Hotel [fake](https://attacker.example) <Berlin>',
+      description: 'Private lodging details are not part of the short observation.',
+      start: { date: '2026-10-10' },
+      end: { date: '2026-10-20' },
+      status: 'confirmed',
+      links: [{ type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=stay' }],
+    };
+    const rejectedEvents = [
+      {
+        ...calendarFlight(),
+        eventId: 'cancelled-flight',
+        summary: 'Flight cancelled',
+        status: 'cancelled',
+      },
+      {
+        ...calendarFlight(),
+        eventId: 'unsafe-link-flight',
+        summary: 'Unsafe-link flight',
+        start: '2026-10-18T10:10:00+02:00',
+        links: [{ type: 'calendar', url: 'https://attacker.example/calendar/event?eid=x' }],
+      },
+      {
+        ...calendarFlight(),
+        eventId: 'missing-link-flight',
+        summary: 'Missing-link flight',
+        start: '2026-10-19T10:10:00+02:00',
+        links: [],
+      },
+      {
+        ...calendarFlight(),
+        eventId: 'out-of-window-flight',
+        summary: 'Out-of-window flight',
+        start: '2027-02-10T10:10:00+01:00',
+      },
+      {
+        eventId: 'cancelled-hotel',
+        summary: 'Cancelled hotel stay',
+        start: { date: '2026-10-10' },
+        end: { date: '2026-10-20' },
+        status: 'cancelled',
+        links: [{ type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=cancel' }],
+      },
+      {
+        eventId: 'out-of-window-hotel',
+        summary: 'Out-of-window hotel stay',
+        start: { date: '2027-02-10' },
+        end: { date: '2027-02-12' },
+        status: 'confirmed',
+        links: [{ type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=future' }],
+      },
+    ];
+    const partialPage = (events: unknown[], pageToken: string) =>
+      row(
+        'calendar.list_events',
+        { timeMin: read.timeWindow?.timeMin, timeMax: read.timeWindow?.timeMax },
+        {
+          events,
+          complete: false,
+          calendarRosterComplete: true,
+          unavailable: [],
+          nextPageToken: pageToken,
+        },
+      );
+    const projection = compoundTripReadProjection(read, [
+      partialPage([flight, lodging, ...rejectedEvents], 'page-2'),
+      partialPage([flight], 'page-3'),
+      {
+        ...partialPage([calendarFlight()], 'page-ignored'),
+        args: {
+          timeMin: new Date(Date.parse(read.timeWindow?.timeMin ?? '') + 1_000).toISOString(),
+          timeMax: read.timeWindow?.timeMax,
+        },
+      },
+      {
+        ...partialPage([calendarFlight()], 'page-other-task'),
+        fromCurrentTask: false,
+      },
+    ]);
+
+    expect(projection.calendarComplete).toBe(false);
+    expect(projection.blocked).toBe(true);
+    expect(projection.text).toContain('Calendar observations — not a verified next-trip itinerary');
+    expect(projection.text).toContain('Flight calendar observation only');
+    expect(projection.text).toContain('The calendar does not state its direction.');
+    expect(projection.text).toContain('Lodging calendar observation only');
+    expect(projection.text).toContain(
+      'recorded calendar date/time fields 2026\\-10\\-10 to 2026\\-10\\-20',
+    );
+    expect(projection.text).toContain(
+      'The end field is shown as recorded, not interpreted as checkout.',
+    );
+    expect(projection.text.match(/Flight calendar observation only/g)).toHaveLength(1);
+    expect(projection.text.match(/Lodging calendar observation only/g)).toHaveLength(1);
+    expect(projection.text).toContain('https://www.google.com/calendar/event?eid=partial');
+    expect(projection.text).toContain('https://calendar.google.com/calendar/event?eid=stay');
+    expect(projection.text).toContain('\\[fake\\]');
+    expect(projection.text).not.toMatch(/(?<!\\)\[fake\]\(https:/);
+    expect(projection.text).not.toContain('Private notes must not be copied');
+    expect(projection.text).not.toContain('Private lodging details');
+    expect(projection.text).not.toContain('Flight cancelled');
+    expect(projection.text).not.toContain('Unsafe-link flight');
+    expect(projection.text).not.toContain('Missing-link flight');
+    expect(projection.text).not.toContain('Out-of-window flight');
+    expect(projection.text).not.toContain('Cancelled hotel stay');
+    expect(projection.text).not.toContain('Out-of-window hotel stay');
+    expect(projection.text).not.toContain('Outbound flight LH 777 to Berlin');
+    expect(projection.text).not.toContain('The next flight is');
+  });
+
+  it('labels an explicitly returned calendar flight without calling it the next itinerary', () => {
+    const read = request();
+    const returned = {
+      ...calendarFlight(),
+      summary: 'Flight LH 777',
+      description: 'Return flight to SFO',
+      eventId: 'calendar-return-only',
+    };
+    const projection = compoundTripReadProjection(read, [
+      row(
+        'calendar.list_events',
+        { timeMin: read.timeWindow?.timeMin, timeMax: read.timeWindow?.timeMax },
+        {
+          events: [returned],
+          complete: false,
+          calendarRosterComplete: true,
+          unavailable: [],
+          nextPageToken: 'more-calendar-pages',
+        },
+      ),
+    ]);
+
+    expect(projection.text).toContain('Flight calendar observation only');
+    expect(projection.text).toContain('The calendar labels its direction as a return.');
+    expect(projection.text).not.toContain('Next matched future return flight');
+  });
+
+  it('keeps a one-day all-day lodging observation date-only', () => {
+    const read = request();
+    const projection = compoundTripReadProjection(read, [
+      row(
+        'calendar.list_events',
+        { timeMin: read.timeWindow?.timeMin, timeMax: read.timeWindow?.timeMax },
+        {
+          events: [
+            {
+              eventId: 'one-day-stay',
+              summary: 'Hotel reservation day',
+              start: { date: '2026-10-17' },
+              status: 'confirmed',
+              links: [{ type: 'calendar', url: 'https://www.google.com/calendar/event?eid=day' }],
+            },
+          ],
+          complete: false,
+          calendarRosterComplete: true,
+          unavailable: [],
+          nextPageToken: 'more-calendar-pages',
+        },
+      ),
+    ]);
+
+    expect(projection.text).toContain('recorded calendar date/time fields 2026\\-10\\-17');
+    expect(projection.text).not.toContain('to 2026\\-10\\-18');
+    expect(projection.text).toContain('No end or checkout date is inferred.');
+  });
+
+  it('does not invent calendar observations when a complete range has no matching records', () => {
+    const projection = compoundTripReadProjection(request(), [completeCalendarEvents([])]);
+
+    expect(projection.calendarComplete).toBe(true);
+    expect(projection.text).not.toContain('Calendar observations —');
+    expect(projection.text).not.toContain('Flight calendar observation only');
+    expect(projection.text).not.toContain('Lodging calendar observation only');
   });
 });

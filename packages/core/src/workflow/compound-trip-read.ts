@@ -1539,6 +1539,145 @@ function calendarSource(event: Record<string, unknown>): string {
   }
 }
 
+function calendarField(event: Record<string, unknown>, edge: 'start' | 'end'): string {
+  const value = event[edge];
+  const wrapped = object(value);
+  return text(wrapped?.dateTime ?? wrapped?.date ?? value, 80);
+}
+
+function calendarObservationOverlaps(
+  event: Record<string, unknown>,
+  request: PersonalReadRequest,
+): boolean {
+  const start = calendarField(event, 'start');
+  const end = calendarField(event, 'end');
+  const windowStart = Date.parse(request.timeWindow?.timeMin ?? '');
+  const windowEnd = Date.parse(request.timeWindow?.timeMax ?? '');
+  if (!start || !Number.isFinite(windowStart) || !Number.isFinite(windowEnd)) return false;
+
+  const startInstant = Date.parse(start);
+  const endInstant = Date.parse(end);
+  const hasExplicitOffset = (value: string) => /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+  const startIsInstant =
+    /T/.test(start) && hasExplicitOffset(start) && Number.isFinite(startInstant);
+  const endIsInstant = /T/.test(end) && hasExplicitOffset(end) && Number.isFinite(endInstant);
+  if (startIsInstant) {
+    return (
+      startInstant < windowEnd &&
+      (endIsInstant ? endInstant > windowStart : startInstant >= windowStart)
+    );
+  }
+
+  // All-day Calendar dates are civil dates, not UTC instants. Compare their
+  // recorded half-open range against the requested window's civil dates and
+  // do not reinterpret the end as a checkout date.
+  if (!/^20\d{2}-\d{2}-\d{2}$/.test(start) || !validDate(start)) return false;
+  const zone = validTimeZone(event.timeZone) ? String(event.timeZone) : (request.timeZone ?? 'UTC');
+  const windowStartDate = civilDateInTimeZone(new Date(windowStart).toISOString(), zone);
+  const windowEndDate = civilDateInTimeZone(new Date(windowEnd - 1).toISOString(), zone);
+  if (!windowStartDate || !windowEndDate) return false;
+  const explicitEnd = /^20\d{2}-\d{2}-\d{2}$/.test(end) && validDate(end);
+  if (end && !explicitEnd) return false;
+  const recordedEnd = explicitEnd
+    ? end
+    : new Date(Date.parse(`${start}T00:00:00.000Z`) + 24 * 60 * 60_000).toISOString().slice(0, 10);
+  if (recordedEnd <= start) return false;
+  return start <= windowEndDate && recordedEnd > windowStartDate;
+}
+
+function calendarObservationDirection(
+  event: Record<string, unknown>,
+): 'return' | 'outbound' | 'unknown' {
+  const labels = `${text(event.summary, 240)}\n${text(event.description, 1200)}`;
+  const returnLabel =
+    /\b(?:return|inbound|homebound)\s+flight\b|\bflight\s+direction\s*[:=-]\s*(?:return|inbound|homebound)\b/i.test(
+      labels,
+    ) &&
+    !/\b(?:not|no|never|isn't|is not)\s+(?:a\s+)?(?:return|inbound|homebound)\s+flight\b/i.test(
+      labels,
+    );
+  const outboundLabel =
+    /\b(?:outbound|departing)\s+flight\b|\bflight\s+direction\s*[:=-]\s*outbound\b/i.test(labels) &&
+    !/\b(?:not|no|never|isn't|is not)\s+(?:an?\s+)?(?:outbound|departing)\s+flight\b/i.test(labels);
+  if (returnLabel === outboundLabel) return 'unknown';
+  return returnLabel ? 'return' : 'outbound';
+}
+
+function calendarObservationLines(
+  request: PersonalReadRequest,
+  rows: ReadonlyArray<ReadToolEvidence>,
+  representedFlights: ReadonlyArray<CompoundTripFlightCandidate | undefined>,
+  hasVerifiedHotel: boolean,
+  allowFlightObservation: boolean,
+): string[] {
+  const events = rows.flatMap((row) => {
+    const resultEvents = object(row.result)?.events;
+    return Array.isArray(resultEvents) ? resultEvents.map(object).filter(Boolean) : [];
+  });
+  const unique = new Map<string, Record<string, unknown>>();
+  for (const event of events) {
+    if (!event || text(event.status).toLowerCase() === 'cancelled') continue;
+    const id = text(event.eventId, 160);
+    const start = calendarField(event, 'start');
+    const summary = text(event.summary, 240);
+    if (!id || !start || !summary || !calendarObservationOverlaps(event, request)) continue;
+    if (!unique.has(id)) unique.set(id, event);
+  }
+
+  const representedEventIds = new Set(
+    representedFlights.map((flight) => text(flight?.event.eventId, 160)).filter(Boolean),
+  );
+  const flightCandidate = allowFlightObservation
+    ? flightCandidates(request, rows)
+        .filter(
+          (candidate) =>
+            !representedEventIds.has(text(candidate.event.eventId, 160)) &&
+            Boolean(calendarSource(candidate.event)),
+        )
+        .sort((left, right) => Date.parse(left.instant) - Date.parse(right.instant))[0]
+    : undefined;
+
+  const lodgingEvent = hasVerifiedHotel
+    ? undefined
+    : [...unique.values()]
+        .filter((event) => {
+          const details = `${text(event.summary, 240)}\n${text(event.location, 300)}`;
+          return (
+            /\b(?:hotel|lodging|accommodation|stay|check[ -]in|check[ -]out)\b/i.test(details) &&
+            Boolean(calendarSource(event))
+          );
+        })
+        .sort((left, right) =>
+          calendarField(left, 'start').localeCompare(calendarField(right, 'start')),
+        )[0];
+
+  const lines: string[] = [];
+  if (flightCandidate) {
+    const event = flightCandidate.event;
+    const start = calendarField(event, 'start');
+    const title = markdownText(text(event.summary, 100));
+    const direction =
+      calendarObservationDirection(event) === 'return'
+        ? 'The calendar labels its direction as a return.'
+        : calendarObservationDirection(event) === 'outbound'
+          ? 'The calendar labels its direction as outbound.'
+          : 'The calendar does not state its direction.';
+    lines.push(
+      `Flight calendar observation only — not a verified next-flight or itinerary match: ${title}; recorded start ${markdownText(start)}. ${direction} [Calendar source](${calendarSource(event)}).`,
+    );
+  }
+  if (lodgingEvent) {
+    const title = markdownText(text(lodgingEvent.summary, 100));
+    const start = markdownText(calendarField(lodgingEvent, 'start'));
+    const end = calendarField(lodgingEvent, 'end');
+    const recordedRange = end ? `${start} to ${markdownText(end)}` : start;
+    lines.push(
+      `Lodging calendar observation only — not a booking confirmation or link to a flight: ${title}; recorded calendar date/time fields ${recordedRange}. ${end ? 'The end field is shown as recorded, not interpreted as checkout.' : 'No end or checkout date is inferred.'} [Calendar source](${calendarSource(lodgingEvent)}).`,
+    );
+  }
+  return lines;
+}
+
 export function compoundTripWebQuery(
   flight: CompoundTripFlightCandidate,
   hotel: CompoundTripHotelCandidate,
@@ -1951,6 +2090,16 @@ export function compoundTripReadProjection(
   }
   if (!transitEvidence || !taxiEvidence)
     gaps.push('I did not find checked source text that supports both sides of a route comparison.');
+  const partialCalendarLines =
+    gaps.length > 0
+      ? calendarObservationLines(
+          request,
+          calendarRows,
+          [flight, returnFlight, currentTripReturn],
+          hotel !== undefined,
+          flight === undefined && returnFlight === undefined && currentTripReturn === undefined,
+        )
+      : [];
   const calendarUrl = flight
     ? calendarSource(flight.event)
     : currentTripReturn
@@ -1976,6 +2125,9 @@ export function compoundTripReadProjection(
       : '',
     partialSourceLines.length > 0
       ? `Partial source details, kept separate from the unverified trip selection:\n${partialSourceLines.map((line) => `- ${line}`).join('\n')}`
+      : '',
+    partialCalendarLines.length > 0
+      ? `Calendar observations — not a verified next-trip itinerary:\n${partialCalendarLines.map((line) => `- ${line}`).join('\n')}`
       : '',
     ...unmatchedBookingSegments.map((segment) => {
       const sourceLink = mailLinks.get(segment.threadId);
@@ -2034,7 +2186,9 @@ export function compoundTripReadProjection(
     comparison,
     blocked: gaps.length > 0 || !webSearch,
     text: [
-      `I checked the available trip sources. Here is the ${gaps.length === 0 ? 'source-checked' : 'supported partial'} itinerary:`,
+      partialCalendarLines.length > 0 && !flight
+        ? 'I checked the available trip sources. Here are limited calendar observations, not a verified itinerary:'
+        : `I checked the available trip sources. Here is the ${gaps.length === 0 ? 'source-checked' : 'supported partial'} itinerary:`,
       ...itinerary,
       'I did not book, change, or send anything.',
     ].join('\n\n'),
