@@ -3,9 +3,11 @@ import {
   type ConversationSearchRepository,
   conversationMessageSourceRevision,
   conversationMessageSpeakerRevision,
+  conversationSearchCandidateLimit,
   type EmbeddingSpace,
   historyLimit,
   type Records,
+  selectConversationSearchMatches,
   snapshotEmbeddingSpace,
   validateEmbedding,
   validateSkillEmbeddingSpace,
@@ -276,7 +278,7 @@ export class FirestoreConversationSearchRepository implements ConversationSearch
       throw new Error('Conversation search embedding space changed');
     validateEmbedding(this.space, input.embedding);
     const fence = await readPrivacyErasureFence(this.store, input.agentId);
-    const candidateLimit = Math.min(200, input.limit * 4);
+    const candidateLimit = Math.min(200, conversationSearchCandidateLimit(input.limit) * 4);
     const result = await this.store
       .collection('messages')
       .where('embeddingSpace', '==', embeddingSpaceKey(this.space))
@@ -305,7 +307,10 @@ export class FirestoreConversationSearchRepository implements ConversationSearch
     if (rows.length < input.limit && result.size === candidateLimit)
       throw new Error('Conversation search candidate bound reached');
     await assertPrivacyErasureFenceUnchanged(this.store, input.agentId, fence);
-    return rows.slice(0, input.limit);
+    return selectConversationSearchMatches(
+      rows.slice(0, conversationSearchCandidateLimit(input.limit)),
+      input.limit,
+    );
   }
 
   async text(

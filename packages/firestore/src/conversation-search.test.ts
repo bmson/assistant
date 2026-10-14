@@ -130,6 +130,59 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       ).rejects.toThrow('embedding space changed');
     });
 
+    it('diversifies owned semantic candidates before the public limit', async () => {
+      const chats = ['diversity-qa-one', 'diversity-qa-two', 'diversity-preference'];
+      for (const id of chats)
+        await store
+          .doc('conversations', id)
+          .set({ id, agentId: 'diversity-owner', trust: 'owner' });
+      const lowerRanked: number[] = [...vector];
+      lowerRanked[0] = 0.9;
+      lowerRanked[1] = 0.1;
+      for (let index = 0; index < 24; index++) {
+        const ownerQuestion = index < 4;
+        await store.doc('messages', `diversity-${index}`).set({
+          id: `diversity-${index}`,
+          conversationId: chats[index % 2],
+          role: ownerQuestion ? 'user' : 'assistant',
+          origin: ownerQuestion ? 'owner' : 'assistant',
+          text: ownerQuestion
+            ? 'What are my display preferences?'
+            : `Earlier assistant claim ${index}`,
+          createdAt: new Date('2026-10-01T00:00:00Z'),
+          embedding: FieldValue.vector(vector),
+          embeddingSpace: spaceKey,
+        });
+      }
+      await store.doc('messages', 'diversity-preference-message').set({
+        id: 'diversity-preference-message',
+        conversationId: chats[2],
+        role: 'user',
+        origin: 'owner',
+        text: 'Please keep the display compact and easy to scan.',
+        createdAt: new Date('2026-09-30T00:00:00Z'),
+        embedding: FieldValue.vector(lowerRanked),
+        embeddingSpace: spaceKey,
+      });
+      const matches = await new FirestoreConversationSearchRepository(store, space).semantic({
+        agentId: 'diversity-owner',
+        embedding: vector,
+        embeddingSpaceKey: spaceKey,
+        limit: 20,
+      });
+      expect(matches.length).toBeLessThanOrEqual(20);
+      expect(matches.filter((row) => row.text === 'What are my display preferences?')).toHaveLength(
+        1,
+      );
+      expect(matches.map((row) => row.text)).toContain(
+        'Please keep the display compact and easy to scan.',
+      );
+      expect(matches.some((row) => row.role === 'assistant')).toBe(true);
+      expect(
+        matches.find((row) => row.messageId === 'diversity-preference-message')?.speakerRevision,
+      ).toMatch(/^[a-f0-9]{64}$/);
+    });
+
     it('applies the owner erasure cutoff while keeping only the trusted current conversation exception', async () => {
       const before = new Date(Date.now() - 10_000);
       const after = new Date(Date.now() + 10_000);

@@ -2,7 +2,9 @@ import type { ConversationSearchRepository } from '@assistant/persistence';
 import {
   conversationMessageSourceRevision,
   conversationMessageSpeakerRevision,
+  conversationSearchCandidateLimit,
   historyLimit,
+  selectConversationSearchMatches,
   validateSkillEmbedding,
 } from '@assistant/persistence';
 import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
@@ -241,20 +243,23 @@ export function createPostgresConversationSearchRepository(db: Db): Conversation
             ),
           )
           .orderBy(sql`${messages.embedding} <=> ${vector}::vector`, asc(messages.id))
-          .limit(input.limit);
-        return rows.map(({ messageId, text, ...row }) => ({
-          ...row,
-          messageId,
-          text,
-          sourceRevision: conversationMessageSourceRevision(messageId, text),
-          origin: row.origin ?? 'unknown',
-          speakerRevision: conversationMessageSpeakerRevision(
+          .limit(conversationSearchCandidateLimit(input.limit));
+        return selectConversationSearchMatches(
+          rows.map(({ messageId, text, ...row }) => ({
+            ...row,
             messageId,
             text,
-            row.role,
-            row.origin ?? 'unknown',
-          ),
-        }));
+            sourceRevision: conversationMessageSourceRevision(messageId, text),
+            origin: row.origin ?? 'unknown',
+            speakerRevision: conversationMessageSpeakerRevision(
+              messageId,
+              text,
+              row.role,
+              row.origin ?? 'unknown',
+            ),
+          })),
+          input.limit,
+        );
       });
     },
 

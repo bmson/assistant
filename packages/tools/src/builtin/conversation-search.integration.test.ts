@@ -272,6 +272,80 @@ describe('conversations.search PostgreSQL owner and privacy filters', () => {
     expect(fallback.matches.some((row) => row.text.includes('readability'))).toBe(false);
   });
 
+  it('finds a lower-ranked owner statement beyond repeated question and assistant matches', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const isolatedAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: isolatedAgentId,
+      name: `conversation-diversity-${isolatedAgentId.slice(0, 8)}`,
+      email: `${isolatedAgentId}@conversation-search.invalid`,
+      workspacePrefix: `conversation-search/${isolatedAgentId}`,
+    });
+    additionalAgentIds.push(isolatedAgentId);
+    const created = await db
+      .insert(conversations)
+      .values(
+        ['qa-one', 'qa-two', 'preference'].map((title) => ({
+          agentId: isolatedAgentId,
+          channel: 'chat' as const,
+          trust: 'owner' as const,
+          title,
+        })),
+      )
+      .returning({ id: conversations.id });
+    conversationIds.push(...created.map((row) => row.id));
+    const [qaOne, qaTwo, preference] = created;
+    if (!qaOne || !qaTwo || !preference) throw new Error('Missing diversity fixtures');
+    const lowerRanked: number[] = [...related];
+    lowerRanked[0] = 0.9;
+    lowerRanked[1] = 0.1;
+    const rows = [
+      ...Array.from({ length: 24 }, (_, index) => ({
+        conversationId: index % 2 ? qaOne.id : qaTwo.id,
+        role: index < 4 ? ('user' as const) : ('assistant' as const),
+        origin: index < 4 ? ('owner' as const) : ('assistant' as const),
+        parts: [],
+        text: index < 4 ? 'What are my display preferences?' : `Earlier assistant claim ${index}`,
+        embedding: related,
+        embeddingSpaceKey: spaceKey,
+      })),
+      {
+        conversationId: preference.id,
+        role: 'user' as const,
+        origin: 'owner' as const,
+        parts: [],
+        text: 'Please keep the display compact and easy to scan.',
+        embedding: lowerRanked,
+        embeddingSpaceKey: spaceKey,
+      },
+    ];
+    const inserted = await db.insert(messages).values(rows).returning({ id: messages.id });
+    messageIds.push(...inserted.map((row) => row.id));
+    const matches = await createPostgresConversationSearchRepository(db).semantic({
+      agentId: isolatedAgentId,
+      embedding: related,
+      embeddingSpaceKey: spaceKey,
+      limit: 20,
+    });
+    expect(matches.length).toBeLessThanOrEqual(20);
+    expect(matches.filter((row) => row.text === 'What are my display preferences?')).toHaveLength(
+      1,
+    );
+    expect(matches.map((row) => row.text)).toContain(
+      'Please keep the display compact and easy to scan.',
+    );
+    expect(matches.some((row) => row.role === 'assistant')).toBe(true);
+    const source = matches.find((row) => row.conversationId === preference.id);
+    expect(source?.speakerRevision).toBe(
+      conversationMessageSpeakerRevision(
+        source?.messageId ?? '',
+        source?.text ?? '',
+        'user',
+        'owner',
+      ),
+    );
+  });
+
   it('applies active and completed erasure fences without trusting a foreign current conversation', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const [owned] = await db
