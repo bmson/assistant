@@ -222,8 +222,14 @@ function explicitlyProhibitsPrivateRead(
 function explicitlyRequestsCalendarOverlapSummary(text: string): boolean {
   const overlap = `(?:overlaps?|conflicts?|double[ -]?booked|clashes?)`;
   if (!new RegExp(`\\b${overlap}\\b`, 'i').test(text)) return false;
-  const negation = String.raw`(?:do\s+not|don['’]?t|never|skip|no\s+need\s+to)`;
-  return !new RegExp(`\\b${negation}\\b[^.!?\\n]{0,80}\\b${overlap}\\b`, 'i').test(text);
+  const negatedAction = String.raw`(?:do\s+not|don['’]?t|never)\s+(?:check|look\s+for|include|mention|point\s+out|identify|analy[sz]e|review|report)`;
+  const negatedNeed = String.raw`(?:skip|no\s+need\s+to\s+(?:check|look\s+for|include|mention|identify|analy[sz]e|review))`;
+  const negatedWithout = String.raw`without\s+(?:checking|looking\s+for|including|mentioning|identifying|analy[sz]ing|reviewing)`;
+  const negation = new RegExp(
+    `\\b(?:${negatedAction}|${negatedNeed}|${negatedWithout})\\b[^.!?;\\n]{0,60}\\b${overlap}\\b`,
+    'i',
+  );
+  return !negation.test(text);
 }
 
 /**

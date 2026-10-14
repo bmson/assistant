@@ -757,6 +757,8 @@ describe('detectPersonalReadRequest', () => {
   it.each([
     'Check my calendar tomorrow for overlaps.',
     'Review my schedule next week and identify conflicts.',
+    'Don’t just look for overlaps; check conflicts too.',
+    'Do not change my calendar, but check for conflicts.',
   ])('includes overlap analysis when explicitly requested: %s', (text) => {
     expect(detectPersonalReadRequest(turn(text))?.includeCalendarOverlapSummary).toBe(true);
   });
