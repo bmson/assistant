@@ -318,18 +318,32 @@ export async function fetchPublicWebPage(
 }
 
 /**
- * Crude visible-text extraction (v1): drop scripts/styles/tags and collapse
- * whitespace so a page fingerprints stably across loads. Non-HTML bodies pass
- * through unchanged. Shared by `web.fetch` and the web-watch poller so both see
- * exactly the same normalized text — a real readability pass is a later step.
+ * Conservative visible-text extraction: remove scripts/styles/markup while
+ * retaining generic heading, paragraph, and list boundaries. Those boundaries
+ * help downstream readers keep attributes attached to the entity/list item
+ * that states them. Non-HTML bodies pass through unchanged. Shared by
+ * `web.fetch` and the web-watch poller so both see the same normalized text.
  */
 export function extractWebText(contentType: string, body: string): string {
   if (!contentType.includes('html')) return body;
   return body
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(
+      /<\/?(address|article|aside|blockquote|br|dd|dl|dt|div|figcaption|figure|footer|form|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|tbody|td|tfoot|th|thead|tr|ul)\b[^>]*>/gi,
+      (tag) => {
+        const name = /^<\/?([a-z0-9]+)/i.exec(tag)?.[1]?.toLowerCase();
+        if (name === 'br' || name === 'hr') return '\n';
+        if (name === 'td' || name === 'th') return ' | ';
+        if (name === 'li' && !/^<\//.test(tag)) return '\n- ';
+        return '\n';
+      },
+    )
     .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
+    .replace(/[\t\f\v ]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .replace(/\n{2,}/g, '\n')
     .trim();
 }
 
