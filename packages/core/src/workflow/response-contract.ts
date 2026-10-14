@@ -23,7 +23,7 @@ import {
   renderMemoryReadAnswer,
   validMemoryReadSelection,
 } from './memory-read-answer.js';
-import type { PersonalReadRequest } from './read-intent.js';
+import { matchesHistoricalMemorySearch, type PersonalReadRequest } from './read-intent.js';
 import { effectiveReminders } from './reminder-state.js';
 import { isDurableSave, isMemoryWriteRequest, savedWorkSummary } from './saved-work.js';
 import {
@@ -840,12 +840,28 @@ function claimedKinds(text: string): ActionKind[] {
 
 /** Only this task's failures — an earlier turn's error is not this attempt. */
 function failureDetails(evidence: ActionEvidence[]): string[] {
-  return evidence
-    .filter((item) => item.fromCurrentTask !== false && !successful(item))
-    .slice(-2)
-    .map(
-      (item) => `${item.toolName}: ${item.error || 'the tool did not return a successful result'}`,
-    );
+  return [
+    ...new Set(
+      evidence
+        .filter((item) => item.fromCurrentTask !== false && !successful(item))
+        .slice(-2)
+        .map((item) => {
+          if (/BudgetReservationError:.*daily budget/i.test(item.error ?? ''))
+            return 'the daily spending limit prevented another lookup';
+          if (/BudgetReservationError:.*monthly budget/i.test(item.error ?? ''))
+            return 'the monthly spending limit prevented another lookup';
+          const cause = plainCause(item.error);
+          const kind = toolKind(item.toolName);
+          const step =
+            item.toolName === 'conversations.search' || item.toolName === 'memory.recall'
+              ? 'the history lookup'
+              : kind
+                ? PLAIN_STEP[kind]
+                : 'one of the lookup steps';
+          return `${step} did not complete${cause ? ` (${cause})` : ''}`;
+        }),
+    ),
+  ];
 }
 
 /**
@@ -1318,6 +1334,8 @@ function matchingPrivateReadRows(
   current: ActionEvidence[],
 ): ActionEvidence[] {
   return current.filter((row) => {
+    if (request.kind === 'memory' && request.conversationQuery)
+      return matchesHistoricalMemorySearch(request, row);
     if (row.toolName !== request.firstToolName) return false;
     const query = record(row.args)?.query;
     if (typeof query !== 'string') return false;
@@ -4100,11 +4118,7 @@ function enforcePersonalReadGrounding(
     };
   if (request.kind === 'memory' && opts?.memoryReadSelection)
     return {
-      text: renderMemoryReadAnswer(
-        opts.memoryReadSelection,
-        currentSuccessfulEvidence(evidence),
-        opts.requestText,
-      ),
+      text: renderMemoryReadAnswer(opts.memoryReadSelection, evidence, opts.requestText),
       blocked: !validMemoryReadSelection(
         opts.memoryReadSelection,
         currentSuccessfulEvidence(evidence),

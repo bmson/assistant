@@ -843,7 +843,12 @@ export async function stageModelFinalResponse(
   // grounding recovery, or stripped links) are already the safest available
   // answer and must not be reworded by a discretionary model call.
   let initialCheck = enforceResponseContract(pending.text, evidence, contractOptions);
-  if (calendarSkillAdvice && !initialCheck.blocked && initialCheck.groundingFallback) {
+  if (
+    calendarSkillAdvice &&
+    !initialCheck.blocked &&
+    initialCheck.groundingFallback &&
+    !/^Next step:/m.test(initialCheck.text)
+  ) {
     try {
       const advice = await deps.router.object<{ nextStep: string }>('rewrite', {
         taskId: task.id,

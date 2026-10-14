@@ -477,7 +477,18 @@ function deterministicComparisonSelection(
     }
   }
   pairs.sort((left, right) => right.score - left.score);
-  if (!pairs.length || pairs[0]?.score === pairs[1]?.score) return undefined;
+  if (!pairs.length) return undefined;
+  const tied = pairs.filter((pair) => pair.score === pairs[0]?.score);
+  // Repeated exercises may record the same exact owner/assistant pair in
+  // several chats. One complete pair is sufficient only when all equally
+  // relevant pairs agree verbatim; do not merge speakers across contexts.
+  const signature = (pair: (typeof pairs)[number]) =>
+    JSON.stringify(
+      [pair.owner, pair.assistant].map((rows) =>
+        [...new Set(rows.map((source) => normalizedText(source.body)))].sort(),
+      ),
+    );
+  if (new Set(tied.map(signature)).size !== 1) return undefined;
   const chosen = pairs[0];
   if (!chosen) return undefined;
   const selected = [...chosen.owner, ...chosen.assistant];
@@ -963,6 +974,16 @@ export function renderMemoryReadAnswer(
       if (!source) return '';
       return `- **${source.speaker}:** “${item.quote.replace(/[\r\n]+/g, ' ')}”\n  Source: ${source.provenance}.`;
     }),
+    ...(evidence.some(
+      (row) =>
+        row.fromCurrentTask !== false &&
+        ['conversations.search', 'memory.recall'].includes(row.toolName) &&
+        row.status === 'failed',
+    )
+      ? [
+          'This answer uses the successful historical lookup; additional searches could not run, so coverage is limited to the returned sources.',
+        ]
+      : []),
     'These are historical records, not a fresh check of your current calendar, inbox, or bookings.',
   ].join('\n');
 }

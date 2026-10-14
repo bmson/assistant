@@ -1412,6 +1412,33 @@ function historicalSearchQueries(request: PersonalReadRequest): string[] {
   return [...new Set(queries)];
 }
 
+/** A current successful history pass is coverage even if a later semantic pass failed.
+ * Bind to the runtime's exact allowed query and literal-anchor mode; generic
+ * query-term inclusion cannot represent a named anchor such as a project name.
+ */
+export function matchesHistoricalMemorySearch(
+  request: PersonalReadRequest,
+  row: ReadToolEvidence,
+): boolean {
+  if (
+    request.kind !== 'memory' ||
+    !request.conversationQuery ||
+    row.fromCurrentTask === false ||
+    row.toolName !== 'conversations.search' ||
+    !succeeded(row)
+  )
+    return false;
+  const args = argsRecord(row);
+  const query = args?.query;
+  const result = objectRecord(row.result);
+  return (
+    typeof query === 'string' &&
+    historicalSearchQueries(request).slice(0, MAX_MEMORY_SEARCH_PASSES).includes(query) &&
+    (query !== request.conversationAnchorQuery || args?.mode === 'text') &&
+    Array.isArray(result?.matches)
+  );
+}
+
 function namedHistoricalAnchor(text: string): string | undefined {
   // Search an explicit name literally; a generic semantic hit is not proof that
   // the earlier named exercise or the owner's original statement was found.
