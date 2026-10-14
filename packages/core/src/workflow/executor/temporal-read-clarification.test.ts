@@ -899,9 +899,8 @@ describe('flight clarification through the actual executor step loop', () => {
     expect(state.pendingFinal?.text).toContain(
       'calendar time in America/Los_Angeles: Nov 12, 2026, 9:00 AM',
     );
-    expect(state.pendingFinal?.text).toContain('Its booking and departure time are unconfirmed.');
     expect(state.pendingFinal?.text).toContain(
-      'I could not match it to a fully dated booking segment',
+      'The calendar time is not verified as departure time; booking identity, flight number, and direction are unconfirmed.',
     );
     expect(state.pendingFinal?.text).toContain(
       '[Calendar source](https://calendar.google.com/calendar/event?eid=lisbon)',
@@ -909,6 +908,7 @@ describe('flight clarification through the actual executor step loop', () => {
     expect(state.pendingFinal?.text).not.toContain('Booking email candidate');
     expect(state.pendingFinal?.text).not.toContain('This request is not fully completed.');
     expect(state.pendingFinal?.text).not.toContain('Not completed:');
+    expect(state.pendingFinal?.text).not.toMatch(/hotel|route details|ground transport/i);
     expect(state.pendingFinal?.terminalStatus).toBe('needs_attention');
     expect(state.pendingFinal?.text).not.toMatch(/September 8|flight-newsletter|taxi|transit/);
     expect(
@@ -930,7 +930,7 @@ describe('flight clarification through the actual executor step loop', () => {
       'gmail.search',
     ]);
     expect(state.pendingFinal?.text).toContain(
-      'Booking-email search or thread coverage is incomplete.',
+      'Booking-email search or reads were incomplete, so a matching booking may be missing.',
     );
     expect(state.pendingFinal?.text).toContain(
       'Next future calendar flight candidate: Flight to Lisbon; calendar date 2026-11-12',
@@ -938,7 +938,10 @@ describe('flight clarification through the actual executor step loop', () => {
     expect(state.pendingFinal?.text).toContain(
       '[Calendar source](https://calendar.google.com/calendar/event?eid=lisbon)',
     );
-    expect(state.pendingFinal?.text).toContain('Its booking and departure time are unconfirmed.');
+    expect(state.pendingFinal?.text).toContain(
+      'booking identity, flight number, and direction are unconfirmed',
+    );
+    expect(state.pendingFinal?.text).not.toMatch(/hotel|route details|ground transport/i);
     expect(state.pendingFinal?.terminalStatus).toBe('needs_attention');
   });
 
@@ -951,7 +954,10 @@ describe('flight clarification through the actual executor step loop', () => {
     expect(state.pendingFinal?.text).toContain(
       'Next future calendar flight candidate: Flight to Lisbon',
     );
-    expect(state.pendingFinal?.text).toContain('Calendar coverage is incomplete');
+    expect(state.pendingFinal?.text).toContain(
+      'Calendar search coverage is incomplete, so an earlier flight may be missing.',
+    );
+    expect(state.pendingFinal?.text).not.toMatch(/hotel|route details|ground transport/i);
   });
 
   it('does not infer that no next flight exists from an incomplete calendar search', async () => {
@@ -961,11 +967,14 @@ describe('flight clarification through the actual executor step loop', () => {
       withoutFlightCandidate: true,
     });
     expect(result.outcome).toBe('needs_attention');
-    expect(state.pendingFinal?.text).toContain('I cannot establish which flight is next.');
+    expect(state.pendingFinal?.text).toContain(
+      'Calendar search coverage is incomplete, so an earlier flight may be missing.',
+    );
     expect(state.pendingFinal?.text).not.toContain('I found no dated flight candidate');
     expect(state.pendingFinal?.text).toContain(
       'I could not identify a dated future flight candidate in the checked calendar.',
     );
+    expect(state.pendingFinal?.text).not.toMatch(/hotel|route details|ground transport/i);
   });
 
   it('treats a missing calendar-roster completeness flag as partial coverage', async () => {
@@ -975,10 +984,13 @@ describe('flight clarification through the actual executor step loop', () => {
     });
     expect(result.outcome).toBe('needs_attention');
     expect(state.pendingFinal?.text).toContain('Next future calendar flight candidate');
-    expect(state.pendingFinal?.text).toContain('Calendar coverage is incomplete');
     expect(state.pendingFinal?.text).toContain(
-      'Booking-email search or thread coverage is incomplete.',
+      'Calendar search coverage is incomplete, so an earlier flight may be missing.',
     );
+    expect(state.pendingFinal?.text).toContain(
+      'Booking-email search or reads were incomplete, so a matching booking may be missing.',
+    );
+    expect(state.pendingFinal?.text).not.toMatch(/hotel|route details|ground transport/i);
   });
 
   it('does not use a same-route newsletter to confirm a departure clock', async () => {
@@ -988,7 +1000,9 @@ describe('flight clarification through the actual executor step loop', () => {
       newsletterLisbonSource: true,
     });
     expect(state.pendingFinal?.text).toContain('Next future calendar flight candidate');
-    expect(state.pendingFinal?.text).toContain('Its booking and departure time are unconfirmed.');
+    expect(state.pendingFinal?.text).toContain(
+      'booking identity, flight number, and direction are unconfirmed',
+    );
     expect(state.pendingFinal?.text).not.toMatch(/7:30 AM|9:30 AM|Booking email candidate/);
   });
 
@@ -999,7 +1013,9 @@ describe('flight clarification through the actual executor step loop', () => {
       yearlessLisbonConfirmation: true,
     });
     expect(state.pendingFinal?.text).toContain('Next future calendar flight candidate');
-    expect(state.pendingFinal?.text).toContain('Its booking and departure time are unconfirmed.');
+    expect(state.pendingFinal?.text).toContain(
+      'booking identity, flight number, and direction are unconfirmed',
+    );
     expect(state.pendingFinal?.text).not.toMatch(/7:30 AM|9:30 AM|Booking email candidate/);
   });
 
@@ -1007,11 +1023,13 @@ describe('flight clarification through the actual executor step loop', () => {
     const request = 'Find my next flight and call out anything you cannot verify.';
     const { state } = await runFlightContinuation([], request, {
       incompleteMailSearch: true,
-      hostileCalendarTitle: 'Flight to Lisbon [click](https://evil.example)',
+      hostileCalendarTitle: 'Flight to Lisbon (United) [click](https://evil.example)',
     });
     expect(state.pendingFinal?.text).toContain(
-      String.raw`Flight to Lisbon \[click\]\(https://evil.example\)`,
+      String.raw`Flight to Lisbon (United) \[click\](https://evil.example)`,
     );
     expect(state.pendingFinal?.text).not.toContain('[click](https://evil.example)');
+    expect(state.pendingFinal?.text).not.toContain(String.raw`\(United`);
+    expect(state.pendingFinal?.text).not.toContain(String.raw`(United\)`);
   });
 });
