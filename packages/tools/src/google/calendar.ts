@@ -84,6 +84,7 @@ interface CalendarEntry {
   name: string;
   primary: boolean;
   accessRole: string;
+  timeZone?: string;
 }
 
 interface RawEvent {
@@ -175,6 +176,7 @@ async function fetchCalendarPage(
       summaryOverride?: string;
       primary?: boolean;
       accessRole?: string;
+      timeZone?: string;
       deleted?: boolean;
     }>;
     nextPageToken?: string;
@@ -187,6 +189,7 @@ async function fetchCalendarPage(
         name: c.summaryOverride || c.summary || c.id,
         primary: c.primary === true,
         accessRole: c.accessRole ?? 'reader',
+        ...(c.timeZone ? { timeZone: c.timeZone } : {}),
       })),
     ...(res.nextPageToken ? { nextPageToken: res.nextPageToken } : {}),
   };
@@ -249,6 +252,7 @@ function normalizeEvent(raw: RawEvent, calendar: CalendarEntry) {
     // whether something is on the work calendar or the family one.
     calendar: calendar.name,
     calendarId: calendar.id,
+    ...(calendar.timeZone ? { calendarTimeZone: calendar.timeZone } : {}),
     summary: raw.summary ?? '',
     location: raw.location ?? '',
     description: (raw.description ?? '').slice(0, 4000),
@@ -501,7 +505,11 @@ async function collectEvents(
   return {
     events,
     calendarsRequested: requestedNames,
-    calendarsResolved: resolved.map(({ id, name }) => ({ id, name })),
+    calendarsResolved: resolved.map(({ id, name, timeZone }) => ({
+      id,
+      name,
+      ...(timeZone ? { timeZone } : {}),
+    })),
     calendarsSearched,
     unavailable,
     calendarRosterComplete: !rosterTruncated,

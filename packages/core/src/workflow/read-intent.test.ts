@@ -80,7 +80,7 @@ describe('detectPersonalReadRequest', () => {
     expect(nextRequiredReadTool(request, previousTask)).toBe('calendar.list_events');
   });
 
-  it('spends its two-thread budget on distinct flight and hotel booking candidates', () => {
+  it('reads a flight booking, lodging booking, and second flight candidate within the trip cap', () => {
     const requestText =
       'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
     const request = detectPersonalReadRequest([{ role: 'user', content: requestText }]);
@@ -120,6 +120,87 @@ describe('detectPersonalReadRequest', () => {
       },
     ];
     expect(gmailThreadIdsToRead(evidence, request)).toEqual(['flight-one', 'hotel-one']);
+  });
+
+  it('selects a second distinct flight itinerary before competing lodging hits', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Find my next trip from booking emails and calendar, confirm flights and hotel, and compare public transport and taxi to my hotel.',
+      ),
+    );
+    if (!request?.compoundTripDiscovery || !request.mailQueries)
+      throw new Error('Expected compound discovery');
+    const evidence: ReadToolEvidence[] = request.mailQueries.map(({ query, category }) => ({
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { query },
+      result: {
+        results:
+          category === 'flight'
+            ? [
+                { threadId: 'future-flight', subject: 'Flight booking confirmation' },
+                { threadId: 'return-flight', subject: 'Airline itinerary confirmation' },
+              ]
+            : [
+                { threadId: 'hotel-reservation', subject: 'Hotel reservation confirmation' },
+                { threadId: 'other-hotel', subject: 'Hotel booking confirmation' },
+              ],
+        complete: true,
+        hasMore: false,
+      },
+    }));
+    expect(gmailThreadIdsToRead(evidence, request)).toEqual([
+      'future-flight',
+      'hotel-reservation',
+      'return-flight',
+    ]);
+  });
+
+  it('continues trip calendar pages through three pages, then keeps incomplete roster coverage honest', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Find my next trip from booking emails and calendar, confirm flights and hotel, and compare public transport and taxi to my hotel.',
+      ),
+      { now: new Date('2026-10-13T18:00:00Z'), timeZone: 'America/Los_Angeles' },
+    );
+    if (!request?.compoundTripDiscovery) throw new Error('Expected compound trip discovery');
+    const args = { timeMin: request.timeWindow?.timeMin, timeMax: request.timeWindow?.timeMax };
+    const pages: ReadToolEvidence[] = [
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args,
+        result: { events: [], complete: false, nextPageToken: 'calendar-2' },
+      },
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { ...args, pageToken: 'calendar-2' },
+        result: { events: [], complete: false, nextPageToken: 'calendar-3' },
+      },
+    ];
+    expect(nextRequiredReadTool(request, pages)).toBe('calendar.list_events');
+    expect(groundReadToolInput(request, 'calendar.list_events', {}, pages)).toMatchObject({
+      ...args,
+      pageToken: 'calendar-3',
+      maxResults: 50,
+    });
+    pages.push({
+      toolName: 'calendar.list_events',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { ...args, pageToken: 'calendar-3' },
+      result: {
+        events: [],
+        complete: true,
+        calendarRosterComplete: false,
+        unavailable: ['unavailable-calendar'],
+      },
+    });
+    expect(nextRequiredReadTool(request, pages)).toBe('gmail.search');
   });
 
   it('binds trip searches and continuation cursors to each booking-intent category', () => {
@@ -188,7 +269,7 @@ describe('detectPersonalReadRequest', () => {
     ).toMatchObject({ query: flight.query, pageToken: 'flight-next' });
   });
 
-  it('uses the two-thread trip budget for one source-matched flight and one source-matched lodging candidate', () => {
+  it('uses the bounded trip budget for distinct flight and lodging booking candidates', () => {
     const request = detectPersonalReadRequest(
       turn(
         'Find my next trip from my booking emails and calendar. Confirm the flight and hotel. Plan the route from the destination airport to my hotel.',
@@ -228,7 +309,29 @@ describe('detectPersonalReadRequest', () => {
     expect(gmailThreadIdsToRead(evidence, request)).toEqual([
       'flight-candidate-a',
       'lodging-candidate',
+      'flight-candidate-b',
     ]);
+    const afterTwoReads: ReadToolEvidence[] = [
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { timeMin: request.timeWindow?.timeMin, timeMax: request.timeWindow?.timeMax },
+        result: { events: [], complete: true, calendarRosterComplete: true, unavailable: [] },
+      },
+      ...evidence,
+      ...['flight-candidate-a', 'lodging-candidate'].map((threadId) => ({
+        toolName: 'gmail.read_thread',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { threadId },
+        result: { complete: true },
+      })),
+    ];
+    expect(nextRequiredReadTool(request, afterTwoReads)).toBe('gmail.read_thread');
+    expect(buildReadToolInput(request, 'gmail.read_thread', afterTwoReads)).toMatchObject({
+      threadId: 'flight-candidate-b',
+    });
   });
 
   it('finds booked flight and generic reservation subjects only when returned metadata substantiates each category', () => {

@@ -191,6 +191,27 @@ describe('compound trip source extraction', () => {
     expect(options.prompt).toContain('booking-message-1');
   });
 
+  it('keeps a full ten-thousand-character booking message available for exact extraction', async () => {
+    const body = `${flightQuote}\n${'Additional fare conditions apply to this itinerary. '.repeat(210)}\n${hotelQuote}`;
+    expect(body.length).toBeGreaterThan(10_000);
+    expect(body.length).toBeLessThan(20_000);
+    const object = vi.fn().mockResolvedValue({ ok: true, object: extractedFacts() });
+    const result = await extractCompoundTripBookings({
+      router: { object } as never,
+      taskId: 'task-trip-long-booking-message',
+      request,
+      evidence: evidence(body),
+    });
+
+    expect(result.status).toBe('complete');
+    expect(result.segments).toHaveLength(1);
+    expect(result.hotels).toHaveLength(1);
+    const prompt = (object.mock.calls[0]?.[1] as { prompt: string } | undefined)?.prompt;
+    expect(prompt).toContain(flightQuote);
+    expect(prompt).toContain(hotelQuote);
+    expect(prompt?.length).toBeGreaterThan(body.length);
+  });
+
   it('extracts complete selected threads from a valid search prefix while later provider pages remain', async () => {
     const rows = evidence();
     const search = rows.find((row) => row.toolName === 'gmail.search');

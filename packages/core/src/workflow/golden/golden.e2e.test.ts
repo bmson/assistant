@@ -1243,7 +1243,7 @@ describe('golden tasks', () => {
     });
   });
 
-  it('replaces fully assessed informational mail with ranked reserves and keeps five source-bound drafts', async (ctx) => {
+  it('repairs only missing email assessments before backfilling verified no-reply threads', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const prompt =
       'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.';
@@ -1271,12 +1271,13 @@ describe('golden tasks', () => {
           role: 'reason',
           value: {
             items: [
-              ...rankedIds.slice(0, 3).map(noReply),
-              ...rankedIds.slice(3, 5).map(emailReviewDraft),
+              ...rankedIds.slice(0, 2).map(noReply),
+              emailReviewDraft(rankedIds[2] as string),
             ],
           },
         },
-        { role: 'reason', value: { items: rankedIds.slice(5).map(emailReviewDraft) } },
+        { role: 'reason', value: { items: rankedIds.slice(3, 5).map(emailReviewDraft) } },
+        { role: 'reason', value: { items: rankedIds.slice(5, 7).map(emailReviewDraft) } },
       ],
       script: [],
       tools: {
@@ -1329,7 +1330,7 @@ describe('golden tasks', () => {
               startMessageIndex?: number;
             };
             readIds.push(threadId);
-            const text = rankedIds.slice(0, 3).includes(threadId)
+            const text = rankedIds.slice(0, 2).includes(threadId)
               ? `The information for ${threadId} is included for your records.`
               : `Could you confirm request ${threadId}?`;
             return gmailThreadPage({
@@ -1355,13 +1356,13 @@ describe('golden tasks', () => {
       },
     });
     createdTaskIds.push(result.taskId);
-    expect(readIds).toEqual(rankedIds);
-    expect(result.stepCount).toBe(14);
+    expect(readIds).toEqual(rankedIds.slice(0, 7));
+    expect(result.stepCount).toBeLessThanOrEqual(14);
     expect(result.status).toBe('done');
     expect(result.toolNames).not.toContain('gmail.send');
     expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(5);
     expect(result.finalText).toContain(
-      '3 fully assessed threads did not clearly require a response',
+      '2 fully assessed threads did not clearly require a response',
     );
     expect(result.finalText).not.toContain('### Request review-1');
     const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));

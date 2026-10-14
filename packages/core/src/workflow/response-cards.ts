@@ -1,4 +1,5 @@
 import { sameCalendarOccurrence } from '@assistant/persistence';
+import { calendarSourceDateLabel, calendarWindowMembership } from './calendar-read-window.js';
 import type { LiveLookup } from './live-lookup.js';
 import type { PersonalReadRequest } from './read-intent.js';
 import { effectiveReminders } from './reminder-state.js';
@@ -174,6 +175,7 @@ export function calendarResponseCards(
       ? result.events
           .map(record)
           .filter((event): event is RecordValue => !!event)
+          .filter((event) => calendarWindowMembership(event, request) === 'confirmed')
           // A successful update supersedes a flight row read before the write.
           // Keep its canonical receipt card; omit obsolete calendar copies.
           .filter(
@@ -209,7 +211,11 @@ export function calendarResponseCards(
         title: string(event.summary) || 'Untitled event',
         start,
         end,
-        time: allDay ? 'All day' : calendarTimeRange(start, end, request?.timeZone),
+        time: allDay
+          ? request?.timeWindow
+            ? `All day · ${calendarSourceDateLabel(event)}`
+            : 'All day'
+          : calendarTimeRange(start, end, request?.timeZone),
         allDay,
         location: string(event.location),
         attendees: Array.isArray(event.attendees)
@@ -1353,6 +1359,7 @@ export function responseCardsForFinal(input: {
   // normal cards below.
   const synthesizedRead = Boolean(
     input.readRequest?.emailReview ||
+      input.readRequest?.includeCalendarBriefing ||
       input.readRequest?.weeklyCalendarPlan ||
       input.readRequest?.calendarEventAnalysis ||
       input.readRequest?.compoundTripDiscovery,

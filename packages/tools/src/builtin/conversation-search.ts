@@ -18,14 +18,24 @@ export function registerPortableConversationSearchTool(
     registry,
     {
       name: 'conversations.search',
-      description: 'Search past conversations semantically ("where did we discuss X").',
+      description: 'Search past conversations semantically or by an explicit name or phrase.',
       inputSchema: z.object({
         query: z.string().min(2).max(500),
         limit: z.number().int().min(1).max(20).default(5),
+        mode: z.enum(['semantic', 'text']).optional(),
       }),
       risk: 'autonomous',
       acceptsUntrustedInput: true,
       execute: async (args, ctx) => {
+        if (args.mode === 'text') {
+          const matches = await deps.conversations.text({
+            agentId: ctx.agentId,
+            query: args.query,
+            limit: args.limit,
+            ...(ctx.conversationId ? { currentConversationId: ctx.conversationId } : {}),
+          });
+          return { matches, mode: 'text' };
+        }
         const result = await deps.embed([args.query]);
         if (result.embeddings.length !== 1)
           throw new Error('conversation search requires exactly one query embedding');

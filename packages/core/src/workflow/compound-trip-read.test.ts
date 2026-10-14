@@ -4,6 +4,7 @@ import {
   compoundTripFetchTargets,
   compoundTripReadProjection,
   compoundTripRoute,
+  compoundTripThreadIdsToRead,
   upcomingFlightReadProjection,
 } from './compound-trip-read.js';
 import {
@@ -227,6 +228,187 @@ function calendarFlight(): Record<string, unknown> {
 }
 
 describe('compound trip read projection', () => {
+  it('accepts three consecutive bounded calendar pages while preserving an incomplete roster gap', () => {
+    const read = request();
+    const range = { timeMin: read.timeWindow?.timeMin, timeMax: read.timeWindow?.timeMax };
+    const pages = [
+      row('calendar.list_events', range, {
+        events: [],
+        complete: false,
+        nextPageToken: 'page-2',
+        calendarRosterComplete: true,
+        unavailable: [],
+      }),
+      row(
+        'calendar.list_events',
+        { ...range, pageToken: 'page-2' },
+        {
+          events: [],
+          complete: false,
+          nextPageToken: 'page-3',
+          calendarRosterComplete: true,
+          unavailable: [],
+        },
+      ),
+      row(
+        'calendar.list_events',
+        { ...range, pageToken: 'page-3' },
+        {
+          events: [],
+          complete: true,
+          calendarRosterComplete: false,
+          unavailable: ['calendar-unavailable'],
+        },
+      ),
+    ];
+    const projection = compoundTripReadProjection(read, pages);
+    expect(projection.calendarComplete).toBe(false);
+    expect(projection.text).toContain('Calendar coverage is incomplete');
+
+    const completePages = pages.map((page, index) =>
+      index === 2
+        ? {
+            ...page,
+            result: {
+              ...(page.result as Record<string, unknown>),
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          }
+        : page,
+    );
+    expect(compoundTripReadProjection(read, completePages).calendarComplete).toBe(true);
+    const firstPage = pages[0];
+    const thirdPage = pages[2];
+    if (!firstPage || !thirdPage) throw new Error('Expected three calendar pages');
+    expect(compoundTripReadProjection(read, [firstPage, thirdPage]).calendarComplete).toBe(false);
+  });
+
+  it('uses the same selected-thread boundary for reading and coverage, and reports unread candidates', () => {
+    const read = request();
+    const [flightQuery, lodgingQuery] = read.mailQueries ?? [];
+    if (!flightQuery || !lodgingQuery) throw new Error('Expected typed flight and lodging queries');
+    const evidence = [
+      row(
+        'gmail.search',
+        { query: flightQuery.query },
+        {
+          results: [
+            { threadId: 'next-flight', subject: 'Flight booking confirmation' },
+            { threadId: 'return-itinerary', subject: 'Airline itinerary confirmation' },
+            { threadId: 'unread-flight', subject: 'Flight reservation confirmation' },
+          ],
+          complete: true,
+          hasMore: false,
+        },
+      ),
+      row(
+        'gmail.search',
+        { query: lodgingQuery.query },
+        {
+          results: [{ threadId: 'hotel-booking', subject: 'Hotel reservation confirmation' }],
+          complete: true,
+          hasMore: false,
+        },
+      ),
+      ...['next-flight', 'hotel-booking', 'return-itinerary'].map((threadId) =>
+        row('gmail.read_thread', { threadId }, { complete: true, messages: [] }),
+      ),
+    ];
+    expect(compoundTripThreadIdsToRead(evidence, read)).toEqual([
+      'next-flight',
+      'hotel-booking',
+      'return-itinerary',
+    ]);
+    const projection = compoundTripReadProjection(read, evidence);
+    expect(projection.threadsComplete).toBe(true);
+    expect(projection.text).toContain('1 other matching email thread remain unread');
+  });
+
+  it('keeps an exact dated hotel reservation visible when calendar coverage is partial', () => {
+    const read = request();
+    const flightQuery = read.mailQueries?.find((query) => query.category === 'flight');
+    const lodgingQuery = read.mailQueries?.find((query) => query.category === 'lodging');
+    if (!flightQuery || !lodgingQuery)
+      throw new Error('Expected typed flight and lodging searches');
+    const flightEvent = {
+      ...calendarFlight(),
+      start: '2026-10-16T10:10:00+02:00',
+    };
+    const evidence = [
+      row(
+        'calendar.list_events',
+        { timeMin: read.timeWindow?.timeMin, timeMax: read.timeWindow?.timeMax },
+        {
+          events: [flightEvent],
+          complete: false,
+          nextPageToken: 'later-calendar-page',
+          calendarRosterComplete: true,
+          unavailable: [],
+        },
+      ),
+      row(
+        'gmail.search',
+        { query: flightQuery.query },
+        {
+          results: [{ threadId: 'flight-source', subject: 'Lufthansa booking confirmation' }],
+          complete: true,
+          hasMore: false,
+        },
+      ),
+      row(
+        'gmail.search',
+        { query: lodgingQuery.query },
+        {
+          results: [{ threadId: 'hotel-source', subject: 'Hotel reservation confirmation' }],
+          complete: true,
+          hasMore: false,
+        },
+      ),
+      row(
+        'gmail.read_thread',
+        { threadId: 'flight-source' },
+        {
+          complete: true,
+          messages: [
+            {
+              messageId: 'flight-message',
+              subject: 'Lufthansa booking confirmation LH777',
+              text: 'Outbound\nFlight number: LH777\nDeparture date: 2026-10-16\nDeparture time: 10:10 Europe/Berlin\nArrival date: 2026-10-16\nArrival time: 13:10 Europe/Berlin\nFrom: SFO\nTo: BER\nArrival airport: BER\nBooking reference: FLIGHT-728',
+            },
+          ],
+        },
+      ),
+      row(
+        'gmail.read_thread',
+        { threadId: 'hotel-source' },
+        {
+          complete: true,
+          messages: [
+            {
+              messageId: 'hotel-message',
+              subject: 'Hotel reservation confirmation',
+              text: 'Reservation confirmed: NH Collection Berlin Mitte, Berlin.\nDates: October 10–17, 2026.\nAddress: Leipziger Straße 10, 10117 Berlin.\nBooking reference: HOTEL-55123',
+            },
+          ],
+        },
+      ),
+    ];
+    const projection = compoundTripReadProjection(read, evidence);
+    expect(projection.calendarComplete).toBe(false);
+    expect(
+      projection.readThreads.map((thread) => (thread.args as { threadId?: string }).threadId),
+    ).toContain('hotel-source');
+    expect(projection.text).toContain(
+      'Dated hotel reservation observed separately from the selected flight',
+    );
+    expect(projection.text).toContain('2026-10-10 to 2026-10-17');
+    expect(projection.text).toContain('https://mail.google.com/mail/u/0/#all/hotel-source');
+    expect(projection.routeOrigin).toBeUndefined();
+    expect(projection.webQuery).toBeUndefined();
+  });
+
   it('projects a verified next flight without requiring hotel or ground-transport sources', () => {
     const flightRequest = detectPersonalReadRequest(
       [{ role: 'user', content: 'Find my next future flight using booking emails and calendar.' }],
@@ -2312,8 +2494,11 @@ describe('compound trip read projection', () => {
   it('reconciles one dated return leg by exact booking reference and reports calendar conflicts', () => {
     const read = request();
     const reference = 'TRIP-44119';
+    const outboundQuote = `Outbound flight KL1701. Departure date: 2026-10-10. Departure time: 07:00 Europe/Amsterdam. Arrival date: 2026-10-10. Arrival time: 08:10 Europe/Berlin. From: AMS. To: BER. Booking reference: ${reference}.`;
     const returnQuote = `Return flight KL1770. Departure date: 2026-10-17. Departure time: 06:00 Europe/Berlin. Arrival date: 2026-10-17. Arrival time: 08:20 Europe/Amsterdam. From: BER. To: AMS. Booking reference: ${reference}.`;
     const connectionQuote = `Connecting flight KL605. Departure date: 2026-10-17. Departure time: 09:50 Europe/Amsterdam. Arrival date: 2026-10-17. Arrival time: 11:45 America/Los_Angeles. From: AMS. To: SFO. Booking reference: ${reference}.`;
+    const hotelQuote =
+      'Hotel reservation: Northstar Collection, Berlin. Check-in 2026-10-10; check-out 2026-10-17.';
     const calendar = {
       ...calendarFlight(),
       eventId: 'return-event-conflicting-metadata',
@@ -2372,7 +2557,7 @@ describe('compound trip read projection', () => {
             {
               messageId: 'return-leg-source',
               subject: 'Airline itinerary',
-              text: `${returnQuote}\n${connectionQuote}`,
+              text: `${outboundQuote}\n${returnQuote}\n${connectionQuote}\n${hotelQuote}`,
             },
           ],
         },
@@ -2381,6 +2566,23 @@ describe('compound trip read projection', () => {
     const extraction = {
       status: 'complete' as const,
       segments: [
+        {
+          threadId: 'round-trip-source',
+          messageId: 'return-leg-source',
+          subject: 'Airline itinerary',
+          flightNumber: 'KL1701',
+          direction: 'outbound' as const,
+          departureDate: '2026-10-10',
+          departureTime: '07:00',
+          departureTimeZone: 'Europe/Amsterdam',
+          arrivalDate: '2026-10-10',
+          arrivalTime: '08:10',
+          arrivalTimeZone: 'Europe/Berlin',
+          originAirport: 'AMS',
+          destinationAirport: 'BER',
+          bookingReference: reference,
+          excerpt: outboundQuote,
+        },
         {
           threadId: 'round-trip-source',
           messageId: 'return-leg-source',
@@ -2416,7 +2618,18 @@ describe('compound trip read projection', () => {
           excerpt: connectionQuote,
         },
       ],
-      hotels: [],
+      hotels: [
+        {
+          threadId: 'round-trip-source',
+          messageId: 'return-leg-source',
+          sourceSubject: 'Airline itinerary',
+          name: 'Northstar Collection',
+          city: 'Berlin',
+          checkIn: '2026-10-10',
+          checkOut: '2026-10-17',
+          quote: hotelQuote,
+        },
+      ],
       rejectedFacts: 0,
       sourceMessageIds: ['return-leg-source'],
     };
@@ -2427,7 +2640,7 @@ describe('compound trip read projection', () => {
     expect(projection.currentTripReturn?.calendarConflicts).toEqual(
       expect.arrayContaining(['flight-number', 'arrival-airport']),
     );
-    expect(projection.flightSegments).toHaveLength(2);
+    expect(projection.flightSegments).toHaveLength(3);
     expect(projection.text).toContain('does not identify a new outbound trip');
     expect(projection.text).toContain('clock times conflict');
     expect(projection.text).toContain('arrival airport conflicts');
@@ -2438,21 +2651,28 @@ describe('compound trip read projection', () => {
       'Calendar lists arrival at JFK; the booking chain ends at SFO.',
     );
     expect(projection.text).toContain('Source-backed return connections');
+    expect(projection.text).toContain(
+      'Dated hotel reservation observed separately from the selected flight',
+    );
+    expect(projection.text).toContain('Northstar Collection, Berlin (2026-10-10 to 2026-10-17)');
+    expect(projection.text).toContain('not linked to the selected flight');
+    expect(projection.hotel).toBeUndefined();
     expect(projection.calendarLodgingObservation).toMatchObject({
       title: 'Northstar Collection',
       dateStart: '2026-10-10',
       dateEnd: '2026-10-18',
       association: 'date_city_candidate',
     });
-    expect(projection.text).toContain('not a confirmed hotel booking');
+    expect(projection.calendarLodgingObservation).toBeDefined();
     expect(projection.text.match(/Northstar Collection/g)).toHaveLength(1);
     expect(projection.text).not.toContain('Lodging calendar observation only');
-    expect(projection.text).toContain(
+    expect(projection.text).not.toContain(
       '[Calendar source](https://calendar.google.com/calendar/event?eid=lodging)',
     );
     expect(projection.text).not.toContain(stayDescription);
     expect(projection.calendarComplete).toBe(false);
-    expect(projection.threadsComplete).toBe(false);
+    expect(projection.threadsComplete).toBe(true);
+    expect(projection.text).toContain('1 other matching email thread remain unread');
     expect(projection.blocked).toBe(true);
     expect(projection.routeOrigin).toBeUndefined();
     expect(projection.webQuery).toBeUndefined();
@@ -2478,7 +2698,9 @@ describe('compound trip read projection', () => {
 
     const withoutSource = withStay({ ...stay, links: [], htmlLink: undefined });
     expect(withoutSource.calendarLodgingObservation).toBeUndefined();
-    expect(withoutSource.text).not.toContain('Northstar Collection');
+    expect(withoutSource.text).toContain(
+      'Dated hotel reservation observed separately from the selected flight',
+    );
 
     const linkedStay = {
       ...stay,

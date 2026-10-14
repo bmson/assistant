@@ -2,8 +2,9 @@ import { gmailSearchReceiptSourceId } from '@assistant/persistence/gmail-search-
 import type { CompoundTripExtraction, CompoundTripHotelFact } from './compound-trip-extraction.js';
 import type { PersonalReadRequest, ReadToolEvidence } from './read-intent.js';
 
-const MAX_COMPOUND_CALENDAR_COVERAGE_PAGES = 2;
+export const MAX_COMPOUND_CALENDAR_COVERAGE_PAGES = 3;
 export const MAX_COMPOUND_TRIP_TOOL_CALLS = 12;
+export const MAX_COMPOUND_TRIP_THREADS_TO_READ = 3;
 
 export interface CompoundTripFlightSegment {
   threadId: string;
@@ -131,6 +132,76 @@ function object(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+/**
+ * Select a bounded, source-diverse set of trip mail threads. Search metadata
+ * only ranks candidates; the selected threads still require complete reads
+ * before any booking facts are used.
+ */
+export function compoundTripThreadIdsToRead(
+  evidence: ReadonlyArray<ReadToolEvidence>,
+  request: PersonalReadRequest,
+): string[] {
+  const metadata = new Map<string, { subject: string; snippet: string; categories: Set<string> }>();
+  const unique: string[] = [];
+  for (const row of evidence) {
+    if (row.fromCurrentTask === false || !successful(row) || row.toolName !== 'gmail.search')
+      continue;
+    const query = text(object(row.args)?.query, 4096).toLowerCase();
+    const category = request.mailQueries?.find(
+      (entry) => entry.query.toLowerCase() === query,
+    )?.category;
+    if (!category && request.mailQueries?.length) continue;
+    const results = object(row.result)?.results;
+    if (!Array.isArray(results)) continue;
+    for (const item of results) {
+      const result = object(item);
+      const id = text(result?.threadId, 100);
+      if (!id) continue;
+      if (!metadata.has(id)) unique.push(id);
+      const prior = metadata.get(id);
+      const categories = prior?.categories ?? new Set<string>();
+      if (category) categories.add(category);
+      metadata.set(id, {
+        subject: [prior?.subject, text(result?.subject, 240)].filter(Boolean).join(' '),
+        snippet: [prior?.snippet, text(result?.snippet, 500)].filter(Boolean).join(' '),
+        categories,
+      });
+    }
+  }
+  const sourceMatches = (id: string, kind: 'flight' | 'lodging') => {
+    const item = metadata.get(id);
+    const source = `${item?.subject ?? ''} ${item?.snippet ?? ''}`;
+    if (kind === 'flight') {
+      const booking =
+        /\b(?:booked|reserved|confirmation|confirmed|reservation|ticket|e-?ticket|itinerary|record locator|booking\s+(?:details|reference|receipt|number|confirmation))\b/i.test(
+          source,
+        );
+      const itinerarySubject = /^(?:(?:fw|fwd|re)\s*:\s*)*flight\s*[-–—:]/i.test(
+        item?.subject ?? '',
+      );
+      const flightTerm =
+        /\b(?:flight|airline|itinerary|boarding pass|e-?ticket|record locator)\b/i.test(source);
+      return (
+        (item?.categories.has('flight') === true && (booking || itinerarySubject)) ||
+        (!request.mailQueries?.length && flightTerm && (booking || itinerarySubject))
+      );
+    }
+    return (
+      (item?.categories.has('lodging') === true || !request.mailQueries?.length) &&
+      /\b(?:hotel|accommodation|lodging|guesthouse|hostel|inn|resort)\b/i.test(source) &&
+      /\b(?:booked|reserved|booking|reservation|confirmation|check[- ]?in)\b/i.test(source)
+    );
+  };
+  const first = (kind: 'flight' | 'lodging') => unique.find((id) => sourceMatches(id, kind));
+  const priority = [first('flight'), first('lodging')];
+  const secondFlight = unique.find((id) => sourceMatches(id, 'flight') && id !== priority[0]);
+  if (secondFlight) priority.push(secondFlight);
+  return [...new Set(priority.filter((id): id is string => Boolean(id)))].slice(
+    0,
+    MAX_COMPOUND_TRIP_THREADS_TO_READ,
+  );
+}
+
 function text(value: unknown, max = 500): string {
   return typeof value === 'string' ? value.trim().slice(0, max) : '';
 }
@@ -166,6 +237,34 @@ function currentCalendarRows(
     (row) =>
       successful(row) && row.toolName === 'calendar.list_events' && hasExactRange(row, request),
   );
+}
+
+function calendarPageChainComplete(rows: ReadonlyArray<ReadToolEvidence>): boolean {
+  if (rows.length === 0 || rows.length > MAX_COMPOUND_CALENDAR_COVERAGE_PAGES) return false;
+  const remaining = new Set(rows);
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  for (let index = 0; index < rows.length; index += 1) {
+    const cursorKey = cursor ?? '<first-page>';
+    if (seen.has(cursorKey)) return false;
+    seen.add(cursorKey);
+    const page = rows.find(
+      (row) =>
+        remaining.has(row) && (text(object(row.args)?.pageToken, 4096) || undefined) === cursor,
+    );
+    if (!page) return false;
+    remaining.delete(page);
+    const result = object(page.result);
+    if (!result) return false;
+    const next = text(result.nextPageToken, 4096);
+    if (next) {
+      if (index === rows.length - 1 || seen.has(next)) return false;
+      cursor = next;
+      continue;
+    }
+    return result.complete === true && index === rows.length - 1 && remaining.size === 0;
+  }
+  return false;
 }
 
 function currentGmailRows(
@@ -1166,6 +1265,66 @@ function extractedHotelCandidates(
   });
 }
 
+function hotelFitsCurrentTripStay(
+  hotel: CompoundTripHotelCandidate,
+  currentTripReturn: CompoundTripFlightCandidate | undefined,
+  segments: ReadonlyArray<CompoundTripFlightSegment>,
+): boolean {
+  const returning = currentTripReturn?.segment;
+  if (
+    !returning?.bookingReference ||
+    hotel.threadId !== returning.threadId ||
+    !hotel.city ||
+    !hotel.checkIn ||
+    !hotel.checkOut
+  )
+    return false;
+  const returnCity = calendarFlightOriginCity(currentTripReturn?.event);
+  if (!returnCity || normalizePlace(hotel.city) !== normalizePlace(returnCity)) return false;
+
+  // A checkout-day stay can be relevant to a current trip even though it does
+  // not overlap the return departure date. Keep this as a sourced observation:
+  // require the outbound and return legs in the same verified booking thread,
+  // a complete chronological flight chain, and an explicit matching city.
+  const outbound = segments.find(
+    (segment) =>
+      segment.threadId === returning.threadId &&
+      segment.bookingReference === returning.bookingReference &&
+      segment.direction === 'outbound',
+  );
+  if (!outbound) return false;
+  const outboundConnections = connectionSegments(outbound, segments);
+  const outboundChain = [outbound, ...outboundConnections];
+  if (
+    !outbound.destinationAirport ||
+    flightChronology(outboundChain) !== 'valid' ||
+    (outboundConnections.length > 0 && !connectionChainSummary(outbound, outboundConnections))
+  )
+    return false;
+
+  const arrival = outboundChain[outboundChain.length - 1];
+  const arrivalInstant = sourceLocalDateTimeInstant(
+    arrival?.arrivalDate,
+    arrival?.arrivalTime,
+    arrival?.arrivalTimeZone,
+  );
+  const returnInstant = sourceLocalInstant(returning);
+  if (
+    !arrival?.arrivalDate ||
+    !returning.departureDate ||
+    arrivalInstant === undefined ||
+    returnInstant === undefined ||
+    arrivalInstant >= returnInstant
+  )
+    return false;
+
+  return (
+    hotel.checkIn >= arrival.arrivalDate &&
+    hotel.checkOut > hotel.checkIn &&
+    hotel.checkOut <= returning.departureDate
+  );
+}
+
 function labeledCivilDate(line: string, label: string): string | undefined {
   const value = new RegExp(`\\b(?:${label})\\s*[:=-]?\\s*(.+)$`, 'i').exec(line)?.[1]?.trim();
   if (!value) return undefined;
@@ -1498,6 +1657,7 @@ function hotelAddress(body: string): string | undefined {
 
 function hotelNameAndCity(source: string): { name?: string; city?: string } {
   const patterns = [
+    /\b(?:reservation|booking)\s+(?:confirmed|confirmation|details)\s*:\s*(?:hotel\s+)?([^\n,.;]{2,100}),\s*([^\n,.;]{2,80})/i,
     /\b(?:reservation|booking)\s+(?:confirmed|confirmation|details)?\s*(?:for|at)\s+(?:hotel\s+)?([^\n,.;]{2,100}),\s*([^\n,.;]{2,80})/i,
     /\b(?:hotel\s+)?reservation\s*:\s*([^\n,.;]{2,100}),\s*([^\n,.;]{2,80})/i,
     /\bhotel\s+([^\n,.;]{2,100}),\s*([^\n,.;]{2,80})/i,
@@ -1869,8 +2029,7 @@ export function compoundTripReadProjection(
   const gmailSearchRows = currentGmailRows(request, evidence);
   const readThreads = currentGmailThreads(gmailSearchRows, evidence);
   const calendarComplete =
-    calendarRows.length > 0 &&
-    calendarRows.length <= MAX_COMPOUND_CALENDAR_COVERAGE_PAGES &&
+    calendarPageChainComplete(calendarRows) &&
     calendarRows.every((row) => {
       const result = object(row.result);
       return (
@@ -1879,9 +2038,7 @@ export function compoundTripReadProjection(
         Array.isArray(result.unavailable) &&
         result.unavailable.length === 0
       );
-    }) &&
-    object(calendarRows.at(-1)?.result)?.complete === true &&
-    typeof object(calendarRows.at(-1)?.result)?.nextPageToken !== 'string';
+    });
   const mailQueries =
     request.mailQueries?.map((entry) => entry.query) ??
     (request.mailQuery ? [request.mailQuery] : []);
@@ -1895,7 +2052,9 @@ export function compoundTripReadProjection(
         query,
       ),
     );
-  const threadIds = new Set(
+  const selectedThreadIds = compoundTripThreadIdsToRead(gmailSearchRows, request);
+  const completeIds = completeThreadIds(readThreads);
+  const searchedThreadIds = new Set(
     gmailSearchRows.flatMap((row) => {
       const results = object(row.result)?.results;
       return Array.isArray(results)
@@ -1903,11 +2062,21 @@ export function compoundTripReadProjection(
         : [];
     }),
   );
-  const completeIds = completeThreadIds(readThreads);
   const allThreadsRead =
-    threadIds.size === 0
-      ? gmailSearchRows.length > 0
-      : [...threadIds].every((id) => completeIds.has(id));
+    selectedThreadIds.length > 0
+      ? selectedThreadIds.every((id) => completeIds.has(id))
+      : searchedThreadIds.size === 0 && gmailSearchRows.length > 0;
+  const unselectedThreadCount = Math.max(
+    0,
+    new Set(
+      gmailSearchRows.flatMap((row) => {
+        const results = object(row.result)?.results;
+        return Array.isArray(results)
+          ? results.map((item) => text(object(item)?.threadId, 100)).filter(Boolean)
+          : [];
+      }),
+    ).size - selectedThreadIds.length,
+  );
   const completeThreads = readThreads.filter((row) =>
     completeIds.has(text(object(row.args)?.threadId, 100)),
   );
@@ -1947,6 +2116,14 @@ export function compoundTripReadProjection(
           (returnFlight ?? currentTripReturn)?.segment?.threadId,
       )
     : undefined;
+  const selectedItineraryLead = flight?.segment ?? currentTripReturn?.segment;
+  const selectedBookingSegments = selectedItineraryLead
+    ? flightSegments.filter(
+        (segment) =>
+          segment.threadId === selectedItineraryLead.threadId &&
+          segment.bookingReference === selectedItineraryLead.bookingReference,
+      )
+    : [];
   const hotelFlightContext = flight ?? currentTripReturn;
   const hotels = dedupeHotels(
     tripExtraction
@@ -1955,6 +2132,24 @@ export function compoundTripReadProjection(
         : []
       : hotelCandidates(completeThreads, hotelFlightContext),
   );
+  const tripHotelAnchorDate = flight
+    ? destinationCivilDate(flight)
+    : currentTripReturn?.segment?.departureDate;
+  const standaloneHotelObservations = hotels.filter((candidate) => {
+    if (!candidate.city || !tripHotelAnchorDate || !candidate.checkIn || !candidate.checkOut)
+      return false;
+    const tripCity = flight?.destinationCity ?? calendarFlightOriginCity(currentTripReturn?.event);
+    const overlapsAnchor =
+      Boolean(tripCity) &&
+      normalizePlace(candidate.city) === normalizePlace(tripCity ?? '') &&
+      candidate.checkIn <= tripHotelAnchorDate &&
+      tripHotelAnchorDate < candidate.checkOut;
+    return (
+      overlapsAnchor ||
+      (candidate.association === 'unlinked' &&
+        hotelFitsCurrentTripStay(candidate, currentTripReturn, selectedBookingSegments))
+    );
+  });
   const relatedUnconfirmedHotels = hotels.filter(
     (candidate) =>
       candidate.association === 'unlinked' &&
@@ -1970,6 +2165,21 @@ export function compoundTripReadProjection(
   ];
   const hotel = relevantHotels.length === 1 ? relevantHotels[0] : undefined;
   const calendarLodging = calendarLodgingObservation(calendarRows, flight, currentTripReturn);
+  const calendarLodgingCoveredByEmail = Boolean(
+    calendarLodging &&
+      standaloneHotelObservations.some(
+        (candidate) =>
+          normalizePlace(candidate.hotelName ?? candidate.subject) ===
+            normalizePlace(calendarLodging.title) &&
+          normalizePlace(candidate.city ?? '') === normalizePlace(calendarLodging.city ?? '') &&
+          Boolean(
+            candidate.checkIn &&
+              candidate.checkOut &&
+              candidate.checkIn <= (calendarLodging.dateEnd ?? calendarLodging.dateStart) &&
+              calendarLodging.dateStart <= candidate.checkOut,
+          ),
+      ),
+  );
   // Partial reads may still contain exact, source-local details. Keep these
   // separate from verified trip selection: they never establish which trip is
   // next, connect flight and hotel records, or enable a route query.
@@ -2014,14 +2224,6 @@ export function compoundTripReadProjection(
       ];
     }),
   ];
-  const selectedItineraryLead = flight?.segment ?? currentTripReturn?.segment;
-  const selectedBookingSegments = selectedItineraryLead
-    ? flightSegments.filter(
-        (segment) =>
-          segment.threadId === selectedItineraryLead.threadId &&
-          segment.bookingReference === selectedItineraryLead.bookingReference,
-      )
-    : [];
   const legs = connectionSegments(flight?.segment, selectedBookingSegments);
   const connectionSummary = connectionChainSummary(flight?.segment, legs);
   const returnLead = returnFlight?.segment ?? (!flight ? currentTripReturn?.segment : undefined);
@@ -2125,6 +2327,10 @@ export function compoundTripReadProjection(
     gaps.push('Calendar coverage is incomplete, so I cannot establish which flight is next.');
   if (!gmailSearchComplete || !allThreadsRead)
     gaps.push('Booking-email search or thread coverage is incomplete.');
+  if (unselectedThreadCount > 0)
+    gaps.push(
+      `I read the selected booking candidates; ${unselectedThreadCount} other matching email thread${unselectedThreadCount === 1 ? '' : 's'} remain unread.`,
+    );
   if (selectedFlight.ambiguous)
     gaps.push(
       'The checked booking and calendar evidence has more than one plausible flight candidate or an unresolved source clock, so I could not choose which leg is next.',
@@ -2156,6 +2362,10 @@ export function compoundTripReadProjection(
   else if (!hotel && partialHotelCandidates.length > 0)
     gaps.push(
       'A hotel candidate appears in a partially read email, so I could not verify its full reservation or link it to a flight.',
+    );
+  else if (!hotel && standaloneHotelObservations.length > 0)
+    gaps.push(
+      'I found a separately dated hotel reservation, but could not link it to the selected flight.',
     );
   else if (!hotel && completeThreads.length > 0)
     gaps.push('I did not identify a hotel booking candidate in the complete email threads I read.');
@@ -2341,7 +2551,15 @@ export function compoundTripReadProjection(
     hotel
       ? `Separately sourced hotel candidate: ${markdownText(hotel.hotelName || hotel.subject)}${hotel.city ? `, ${markdownText(hotel.city)}` : ''}${hotel.address ? ` — ${markdownText(hotel.address)}` : ''}${hotel.checkIn && hotel.checkOut ? ` (${hotel.checkIn} to ${hotel.checkOut})` : ''}${mailLinks.has(hotel.threadId) ? ` [Booking email](${mailLinks.get(hotel.threadId)})` : ''}.`
       : '',
-    calendarLodging
+    !hotel
+      ? standaloneHotelObservations
+          .filter((candidate) => candidate.association === 'unlinked')
+          .map(
+            (candidate) =>
+              `Dated hotel reservation observed separately from the selected flight: ${markdownText(candidate.hotelName || candidate.subject)}${candidate.city ? `, ${markdownText(candidate.city)}` : ''}${candidate.address ? ` — ${markdownText(candidate.address)}` : ''}${candidate.checkIn && candidate.checkOut ? ` (${candidate.checkIn} to ${candidate.checkOut})` : ''}${mailLinks.has(candidate.threadId) ? ` [Booking email](${mailLinks.get(candidate.threadId)})` : ''}. It is not linked to the selected flight.`,
+          )
+      : [],
+    calendarLodging && !calendarLodgingCoveredByEmail
       ? `Calendar lodging candidate, not a confirmed hotel booking: ${markdownText(calendarLodging.title)}${calendarLodging.city ? `, ${markdownText(calendarLodging.city)}` : ''} (calendar range ${calendarLodging.dateStart}${calendarLodging.dateEnd ? ` to ${calendarLodging.dateEnd}` : ''})${calendarLodging.sourceUrl ? ` [Calendar source](${calendarLodging.sourceUrl})` : ''}. ${calendarLodging.association === 'shared_reference' ? 'The calendar entry carries the same booking reference.' : 'Its city and date overlap make it a candidate, not proof of the same stay.'}`
       : '',
     hotel?.association === 'shared_reference'
