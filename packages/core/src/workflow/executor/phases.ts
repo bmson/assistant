@@ -177,7 +177,8 @@ export async function preparePlanningRecall(rc: RunContext): Promise<boolean> {
   const noRead = explicitlyOptsOutOfRecall(text);
   const privateRead = task.trust === 'owner' && detectPersonalReadRequest(ownerWindow) !== null;
   const localTransformation =
-    intent.authorizedScopes.length === 0 && isSelfContainedTextTransformation(text);
+    intent.authorizedScopes.length === 0 &&
+    isSelfContainedTextTransformation(text, intent.externalText);
   const eligible =
     loadConfig().CHAT_RECALL_ENABLED &&
     !noRead &&

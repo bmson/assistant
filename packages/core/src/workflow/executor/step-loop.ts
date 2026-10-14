@@ -448,7 +448,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   const localTransformation =
     directOwner &&
     ownerIntent.authorizedScopes.length === 0 &&
-    isSelfContainedTextTransformation(ownerText);
+    isSelfContainedTextTransformation(ownerText, ownerIntent.externalText);
   const futureWatchIntent =
     directOwner && !restrictedChecklistResume ? detectFutureWatchIntent(ownerText) : null;
   const memoryWrite = directOwner && !restrictedChecklistResume && isMemoryWriteRequest(ownerText);
