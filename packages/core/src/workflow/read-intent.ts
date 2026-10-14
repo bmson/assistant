@@ -221,15 +221,17 @@ function explicitlyProhibitsPrivateRead(
 
 function explicitlyRequestsCalendarOverlapSummary(text: string): boolean {
   const overlap = `(?:overlaps?|conflicts?|double[ -]?booked|clashes?)`;
-  if (!new RegExp(`\\b${overlap}\\b`, 'i').test(text)) return false;
+  const overlapPattern = new RegExp(`\\b${overlap}\\b`, 'i');
   const negatedAction = String.raw`(?:do\s+not|don['’]?t|never)\s+(?:check|look\s+for|include|mention|point\s+out|identify|analy[sz]e|review|report)`;
   const negatedNeed = String.raw`(?:skip|no\s+need\s+to\s+(?:check|look\s+for|include|mention|identify|analy[sz]e|review))`;
   const negatedWithout = String.raw`without\s+(?:checking|looking\s+for|including|mentioning|identifying|analy[sz]ing|reviewing)`;
   const negation = new RegExp(
-    `\\b(?:${negatedAction}|${negatedNeed}|${negatedWithout})\\b[^.!?;\\n]{0,60}\\b${overlap}\\b`,
+    `\\b(?:${negatedAction}|${negatedNeed}|${negatedWithout})\\b[^.!?\\n]{0,60}\\b${overlap}\\b`,
     'i',
   );
-  return !negation.test(text);
+  return text
+    .split(/[;.!?\n]+|\b(?:but|instead|however)\b/i)
+    .some((clause) => overlapPattern.test(clause) && !negation.test(clause));
 }
 
 /**
