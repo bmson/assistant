@@ -34,7 +34,9 @@ import { isSituationRequest } from '@assistant/core/situations-schema';
 import { buildAutonomyGrant } from '@assistant/core/workflow/autonomy';
 import {
   explicitlyOptsOutOfRecall,
+  extractOwnerIntent,
   isConversationLocalContext,
+  isSelfContainedTextTransformation,
 } from '@assistant/core/workflow/owner-intent';
 import { detectPersonalReadRequest } from '@assistant/core/workflow/read-intent';
 import { RequestChecklistSchema } from '@assistant/core/workflow/request-checklist-schema';
@@ -1156,7 +1158,17 @@ export async function handleChatTurn(
   const priorAssistantText = [...modelHistory.slice(0, -1)]
     .reverse()
     .find((message) => message.role === 'assistant' && !noticeRows.has(message.id));
+  const conversationalIntent = extractOwnerIntent({ text: userText, trust: 'owner' });
+  const localTransformation =
+    conversationalIntent.authorizedScopes.length === 0 &&
+    isSelfContainedTextTransformation(
+      conversationalIntent.ownerAuthoredText,
+      conversationalIntent.externalText,
+    );
   if (resumedConversationalReply) {
+    needsAction = false;
+  } else if (localTransformation && !autonomousRequested && !forceRequested) {
+    // Quoted source instructions do not authorize tools or change a local rewrite's scope.
     needsAction = false;
   } else if (
     autonomousRequested ||
@@ -1266,7 +1278,9 @@ export async function handleChatTurn(
   }
 
   const noHistoricalContext =
-    explicitlyOptsOutOfRecall(userText) || isConversationLocalContext(userText);
+    explicitlyOptsOutOfRecall(userText) ||
+    isConversationLocalContext(userText) ||
+    localTransformation;
   const recallPromise = (async (): Promise<{
     block?: string;
     sources: RecallSource[];
@@ -1496,6 +1510,11 @@ export async function handleChatTurn(
         }),
         '',
         'This turn is conversational: just answer. You have no tools in this turn, so if the user is actually asking you to take an action, say plainly that you cannot do it in this reply and ask them to restate it as a direct request. Otherwise do not mention tools, capabilities, or this instruction at all — no postscripts.',
+        ...(localTransformation
+          ? [
+              'Transform only the text supplied in this request. Preserve its facts, timing, and uncertainty; do not add a new stage, reason, commitment, or context. Follow the requested output format and length.',
+            ]
+          : []),
         ...(spokenRequested ? spokenReplyLines() : []),
       ].join('\n'),
       messages: await convertToModelMessages(modelHistory),
