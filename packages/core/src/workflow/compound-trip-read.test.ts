@@ -888,6 +888,74 @@ describe('compound trip read projection', () => {
     expect(projection.text).not.toContain('your next trip is');
   });
 
+  it('does not claim booking threads were checked when the email search results were never read', () => {
+    const read = request();
+    const evidence = [
+      completeCalendarEvents([calendarFlight()]),
+      row(
+        'gmail.search',
+        { query: read.mailQuery },
+        {
+          results: [{ threadId: 'unread-hotel-booking', subject: 'Hotel reservation details' }],
+          complete: true,
+          hasMore: false,
+        },
+      ),
+    ];
+
+    const projection = compoundTripReadProjection(read, evidence);
+
+    expect(projection.threadsComplete).toBe(false);
+    expect(projection.hotel).toBeUndefined();
+    expect(projection.routeOrigin).toBeUndefined();
+    expect(projection.blocked).toBe(true);
+    expect(projection.text).toContain(
+      'I could not verify a hotel booking because no complete booking-email thread was read.',
+    );
+    expect(projection.text).not.toContain('checked email threads');
+    expect(projection.text).not.toContain('Dated outbound leg:');
+  });
+
+  it('limits a no-hotel finding to the complete email threads actually read', () => {
+    const read = request();
+    const threadId = 'complete-flight-only-thread';
+    const evidence = [
+      completeCalendarEvents([calendarFlight()]),
+      row(
+        'gmail.search',
+        { query: read.mailQuery },
+        {
+          results: [{ threadId, subject: 'Airline itinerary update' }],
+          complete: true,
+          hasMore: false,
+        },
+      ),
+      row(
+        'gmail.read_thread',
+        { threadId },
+        {
+          complete: true,
+          messages: [
+            {
+              messageId: 'flight-only-message',
+              subject: 'Airline itinerary update',
+              text: 'Your airline itinerary was updated. Booking reference: FLIGHT-728.',
+            },
+          ],
+        },
+      ),
+    ];
+
+    const projection = compoundTripReadProjection(read, evidence);
+
+    expect(projection.threadsComplete).toBe(true);
+    expect(projection.hotel).toBeUndefined();
+    expect(projection.text).toContain(
+      'I did not identify a hotel booking candidate in the complete email threads I read.',
+    );
+    expect(projection.text).not.toContain('no complete booking-email thread was read');
+  });
+
   it('matches an explicitly outbound booking to an ordinary sparse calendar flight only by exact route and time', () => {
     const read = request();
     const evidence = [

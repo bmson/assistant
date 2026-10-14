@@ -1852,8 +1852,12 @@ export function compoundTripReadProjection(
     gaps.push(
       'A hotel candidate appears in a partially read email, so I could not verify its full reservation or link it to a flight.',
     );
+  else if (!hotel && completeThreads.length > 0)
+    gaps.push('I did not identify a hotel booking candidate in the complete email threads I read.');
   else if (!hotel)
-    gaps.push('I could not identify one hotel booking candidate in the checked email threads.');
+    gaps.push(
+      'I could not verify a hotel booking because no complete booking-email thread was read.',
+    );
   else if (!hotel.address) gaps.push('The hotel candidate did not include an explicit address.');
   else if (hotel.association === 'unlinked')
     gaps.push(
