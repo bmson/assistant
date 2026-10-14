@@ -323,7 +323,7 @@ jobs:
       # adding an action this repo has not pinned. They carry the same content
       # under the same release sha.
       - name: Upload the release SBOM
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4
         with:
           name: release-sboms-${{ needs.plan.outputs.sha }}-${{ matrix.entry.name }}
           path: sbom/*.spdx.json
@@ -429,7 +429,7 @@ jobs:
           --receipt "${RUNNER_TEMP}/assistant-firestore-delivery-guard-${{ needs.plan.outputs.sha }}.json"
       - name: Archive Firestore delivery guard receipt
         if: always() && steps.release_path.outputs.firestore_pair == 'true'
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4
         with:
           name: firestore-delivery-guard-${{ needs.plan.outputs.sha }}
           path: ${{ runner.temp }}/assistant-firestore-delivery-guard-${{ needs.plan.outputs.sha }}*.json
@@ -437,7 +437,7 @@ jobs:
           retention-days: 90
       - name: Archive the immutable release manifest
         if: always()
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4
         with:
           name: release-manifest-${{ needs.plan.outputs.sha }}
           path: ${{ runner.temp }}/assistant-release-${{ needs.plan.outputs.sha }}.json

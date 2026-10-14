@@ -141,14 +141,14 @@ jobs:
         run: echo 'Investigation completed; no PR will be created.'
       - name: Preserve investigation result
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: repair-investigation
           path: |
             ${{ runner.temp }}/repair-result.json
             ${{ runner.temp }}/repair-codex.log
           retention-days: 7
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.patch.outputs.outcome == 'patch'
         with:
           name: repair-candidate
@@ -232,7 +232,7 @@ jobs:
           REPAIR_EXPECTED_PATCH: ${{ runner.temp }}/candidate/repair.patch
           REPAIR_ALLOW_EXECUTOR: ${{ inputs.allow_executor }}
         run: node "$RUNNER_TEMP/repair-patch.mjs"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: repair-verified
           path: ${{ runner.temp }}/publish.patch
