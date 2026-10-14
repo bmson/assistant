@@ -1,4 +1,7 @@
-import { conversationMessageSpeakerRevision } from '@assistant/persistence';
+import {
+  conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
+} from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import {
   memoryReadSources,
@@ -465,6 +468,84 @@ describe('exact historical source projection', () => {
     expect(sources).toHaveLength(13);
     expect(sources.some((source) => source.key === 'message:owner-0')).toBe(true);
     expect(sources.some((source) => source.key === 'message:old-assistant-claim')).toBe(true);
+  });
+  it('keeps a later-pass owner correction and earlier assistant claim selectable across noisy search passes', async () => {
+    const request = 'Separate my correction from your earlier claim about the flight time.';
+    const claimText = 'I previously claimed the flight was at 09:15.';
+    const correctionText = 'I corrected the flight time to 13:45.';
+    const claim = {
+      ...message('earlier-claim', claimText, 'assistant', 'assistant'),
+      sourceRevision: conversationMessageSourceRevision('earlier-claim', claimText),
+    };
+    const correction = {
+      ...message('later-correction', correctionText, 'user', 'owner'),
+      sourceRevision: conversationMessageSourceRevision('later-correction', correctionText),
+    };
+    const passes: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: {
+          matches: [
+            ...Array.from({ length: 12 }, (_, index) =>
+              message(`first-owner-${index}`, `Unrelated owner note ${index}.`, 'user', 'owner'),
+            ),
+            claim,
+          ],
+        },
+      },
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: {
+          matches: Array.from({ length: 12 }, (_, index) =>
+            message(
+              `second-owner-${index}`,
+              `Another unrelated owner note ${index}.`,
+              'user',
+              'owner',
+            ),
+          ),
+        },
+      },
+      { toolName: 'conversations.search', status: 'succeeded', result: { matches: [correction] } },
+    ];
+    const sources = memoryReadSources(passes, request);
+    expect(sources.filter((source) => source.speaker === 'Recorded owner message')).toHaveLength(
+      12,
+    );
+    expect(sources.map((source) => source.key)).toContain('message:later-correction');
+    expect(sources.map((source) => source.key)).toContain('message:earlier-claim');
+    expect(correction.speakerRevision).toBe(
+      conversationMessageSpeakerRevision('later-correction', correctionText, 'user', 'owner'),
+    );
+    expect(correction.sourceRevision).toBe(
+      conversationMessageSourceRevision('later-correction', correctionText),
+    );
+    const object = vi.fn(async (_role: string, options: { prompt: string }) => {
+      const prompt = JSON.parse(options.prompt) as { sources: Array<{ key: string }> };
+      expect(prompt.sources.map((source) => source.key)).toContain('message:later-correction');
+      expect(prompt.sources.map((source) => source.key)).toContain('message:earlier-claim');
+      return {
+        ok: true,
+        object: {
+          selections: [
+            { sourceKey: 'message:later-correction', quote: correctionText },
+            { sourceKey: 'message:earlier-claim', quote: claimText },
+          ],
+        },
+      };
+    });
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence: passes,
+    });
+    expect(result.status).toBe('complete');
+    expect(result.selections).toHaveLength(2);
+    expect(validMemoryReadSelection(result, passes, request)).toBe(true);
+    expect(object).toHaveBeenCalledTimes(1);
   });
   it('fails closed when the bounded comparison cannot select both speaker sides', async () => {
     const request = 'Compare what I told you with your earlier claim about the flight time.';

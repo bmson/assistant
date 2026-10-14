@@ -42,11 +42,44 @@ function memorySourcePriority(source: { speaker: string }): number {
   return 3;
 }
 
+/** Give each successful search pass a chance before one pass fills the source budget. */
+function interleaveSourcePasses<T extends { key: string }>(
+  rows: T[],
+  passByKey: Map<string, number>,
+  limit: number,
+): T[] {
+  const byPass = new Map<number, T[]>();
+  for (const row of rows) {
+    const pass = passByKey.get(row.key) ?? -1;
+    const bucket = byPass.get(pass) ?? [];
+    bucket.push(row);
+    byPass.set(pass, bucket);
+  }
+  const selected: T[] = [];
+  while (selected.length < limit) {
+    let added = false;
+    for (const bucket of byPass.values()) {
+      const row = bucket.shift();
+      if (!row) continue;
+      selected.push(row);
+      added = true;
+      if (selected.length === limit) break;
+    }
+    if (!added) break;
+  }
+  return selected;
+}
+
 /** Source identity and speaker come from the current ledger, never the selector. */
 export function memoryReadSources(evidence: ActionEvidence[], excludeExactRequest?: string) {
   const sources: Array<{ key: string; body: string; speaker: string; provenance: string }> = [];
+  const passByKey = new Map<string, number>();
+  const append = (source: (typeof sources)[number], pass: number) => {
+    sources.push(source);
+    if (!passByKey.has(source.key)) passByKey.set(source.key, pass);
+  };
   const excluded = excludeExactRequest ? normalizedText(excludeExactRequest) : undefined;
-  for (const row of evidence) {
+  for (const [pass, row] of evidence.entries()) {
     if (row.fromCurrentTask === false || row.status !== 'succeeded') continue;
     const result = record(row.result);
     if (!result || result.error || result.ok === false) continue;
@@ -57,16 +90,19 @@ export function memoryReadSources(evidence: ActionEvidence[], excludeExactReques
         const confirmed = fact.ownerConfirmed === true && fact.unconfirmed !== true;
         const inference = fact.source === 'dream' || fact.originTrust === 'assistant';
         const confidence = Number(fact.confidence);
-        sources.push({
-          key: `memory:${text(fact.id)}`,
-          body: text(fact.content).slice(0, 4000),
-          speaker: inference
-            ? 'Saved assistant inference'
-            : confirmed
-              ? 'Saved fact marked owner-confirmed'
-              : 'Unconfirmed saved fact',
-          provenance: `memory ${text(fact.id)}; ${text(fact.source) || 'source type unknown'}${Number.isFinite(confidence) ? `; confidence ${Math.round(confidence * 100)}%` : ''}${text(fact.sourceTaskId) ? `; source task ${text(fact.sourceTaskId)}` : ''}`,
-        });
+        append(
+          {
+            key: `memory:${text(fact.id)}`,
+            body: text(fact.content).slice(0, 4000),
+            speaker: inference
+              ? 'Saved assistant inference'
+              : confirmed
+                ? 'Saved fact marked owner-confirmed'
+                : 'Unconfirmed saved fact',
+            provenance: `memory ${text(fact.id)}; ${text(fact.source) || 'source type unknown'}${Number.isFinite(confidence) ? `; confidence ${Math.round(confidence * 100)}%` : ''}${text(fact.sourceTaskId) ? `; source task ${text(fact.sourceTaskId)}` : ''}`,
+          },
+          pass,
+        );
       }
     }
     if (row.toolName === 'conversations.search' && Array.isArray(result.matches)) {
@@ -75,22 +111,25 @@ export function memoryReadSources(evidence: ActionEvidence[], excludeExactReques
         if (!match || !text(match.messageId) || !text(match.conversationId) || !text(match.text))
           continue;
         if (excluded && normalizedText(text(match.text)) === excluded) continue;
-        sources.push({
-          key: `message:${text(match.messageId)}`,
-          body: text(match.text).slice(0, 4000),
-          speaker:
-            validConversationSpeaker(match) &&
-            match.speakerRevision &&
-            match.role === 'user' &&
-            match.origin === 'owner'
-              ? 'Recorded owner message'
-              : validConversationSpeaker(match) &&
-                  match.speakerRevision &&
-                  match.role === 'assistant'
-                ? 'Earlier assistant claim (not verified fact)'
-                : 'Historical message (authorship not confirmed)',
-          provenance: `conversation ${text(match.conversationId)}; message ${text(match.messageId)}${text(match.createdAt) ? `; ${text(match.createdAt).slice(0, 10)}` : ''}`,
-        });
+        append(
+          {
+            key: `message:${text(match.messageId)}`,
+            body: text(match.text).slice(0, 4000),
+            speaker:
+              validConversationSpeaker(match) &&
+              match.speakerRevision &&
+              match.role === 'user' &&
+              match.origin === 'owner'
+                ? 'Recorded owner message'
+                : validConversationSpeaker(match) &&
+                    match.speakerRevision &&
+                    match.role === 'assistant'
+                  ? 'Earlier assistant claim (not verified fact)'
+                  : 'Historical message (authorship not confirmed)',
+            provenance: `conversation ${text(match.conversationId)}; message ${text(match.messageId)}${text(match.createdAt) ? `; ${text(match.createdAt).slice(0, 10)}` : ''}`,
+          },
+          pass,
+        );
       }
     }
   }
@@ -98,17 +137,24 @@ export function memoryReadSources(evidence: ActionEvidence[], excludeExactReques
     (left, right) => memorySourcePriority(left) - memorySourcePriority(right),
   );
   if (excludeExactRequest && requiresOwnerAssistantContrast(excludeExactRequest)) {
-    const owner = ordered
-      .filter((source) => source.speaker === 'Recorded owner message')
-      .slice(0, 12);
-    const assistant = ordered
-      .filter((source) => source.speaker === 'Earlier assistant claim (not verified fact)')
-      .slice(0, 8);
-    return [...owner, ...assistant].sort(
-      (left, right) => memorySourcePriority(left) - memorySourcePriority(right),
+    const owner = ordered.filter((source) => source.speaker === 'Recorded owner message');
+    const assistant = ordered.filter(
+      (source) => source.speaker === 'Earlier assistant claim (not verified fact)',
     );
+    return [
+      ...interleaveSourcePasses(owner, passByKey, 12),
+      ...interleaveSourcePasses(assistant, passByKey, 8),
+    ].sort((left, right) => memorySourcePriority(left) - memorySourcePriority(right));
   }
-  return ordered.slice(0, 20);
+  return [0, 1, 2, 3]
+    .flatMap((priority) =>
+      interleaveSourcePasses(
+        ordered.filter((source) => memorySourcePriority(source) === priority),
+        passByKey,
+        20,
+      ),
+    )
+    .slice(0, 20);
 }
 
 function selectorVisibleSources(
