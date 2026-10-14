@@ -172,6 +172,35 @@ describe('native document verification', () => {
     );
   });
 
+  it('starts a new formatting scope after a conjunction following a heading topic', () => {
+    const verify = (detail: string, shape = structure) =>
+      createdDocumentVerification(
+        `Create a Google Doc titled "Study plan" with ${detail}.`,
+        [
+          { ...create, result: { ...create.result, contentStructure: shape } },
+          { ...read, result: { ...read.result, structure: shape } },
+        ],
+        'Verified.',
+      )?.verified;
+    const noTable = { ...structure, tables: [] };
+    expect(verify('a heading about our project and a two-column table', noTable)).toBe(false);
+    expect(verify('a heading about our project and a two-column table')).toBe(true);
+    expect(verify('a heading about our project and two tables')).toBe(false);
+    expect(verify('a heading about our project and exactly four bullets')).toBe(false);
+    expect(verify('a table about our project and a heading', { ...structure, headings: [] })).toBe(
+      false,
+    );
+    expect(
+      verify('a heading about our project and a two-column table containing three data rows'),
+    ).toBe(false);
+    expect(
+      verify('a heading about our project and a two-column table containing two data rows'),
+    ).toBe(true);
+    expect(
+      verify('a heading about headings and tables and include a two-column table', noTable),
+    ).toBe(false);
+  });
+
   it('checks explicit heading and table counts against the owner request', () => {
     const ownerRequest =
       'Create a new Google Doc titled "Study plan" with two headings, exactly three bullets, and two tables.';
@@ -235,6 +264,9 @@ describe('native document verification', () => {
       'with exactly three bullets and a paragraph saying "two headings and three tables with five data rows".',
       'with exactly three bullets discussing two headings, and a paragraph comparing four tables with five data rows.',
       'with exactly three bullets. Explain two headings and three tables.',
+      'with exactly three bullets about headings and tables.',
+      'with exactly three bullets about two headings and three tables.',
+      'with a paragraph about headings and a table plus exactly three bullets.',
       'with exactly three bullets. Do not include headings or tables.',
       'with exactly three bullets and a table of contents.',
     ]) {

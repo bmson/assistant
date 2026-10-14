@@ -99,14 +99,43 @@ function formattingRequirements(request: string): string {
     .join('\n');
 }
 
+const PROSE_TOPIC =
+  /\b(?:about|discuss(?:ing)?|describ(?:e|ing)|compar(?:e|ing|ison)|mention(?:ing)?|summari[sz](?:e|ing)|explain(?:ing)?|refer(?:ring)? to)\b/i;
+const STRUCTURAL_NOUN = /\b(?:headings?|tables?|bullets?|lists?|rows?|columns?)\b/i;
+
 function isFormattingNoun(requirements: string, index: number): boolean {
   const before = requirements.slice(0, index);
-  const clause = before.slice(
-    Math.max(before.lastIndexOf(','), before.lastIndexOf(';'), before.lastIndexOf('\n')) + 1,
+  const start =
+    Math.max(before.lastIndexOf(','), before.lastIndexOf(';'), before.lastIndexOf('\n')) + 1;
+  const clause = requirements.slice(start);
+  const target = index - start;
+  let scopeStart = 0;
+  const conjunctions = new RegExp(
+    `\\b(?:and|also|plus)\\s+(?=(?:an?|the|exactly|\\d+|${COUNT_WORDS.join('|')}|include|add|insert|use)\\b)`,
+    'gi',
   );
-  return !/\b(?:about|discuss(?:ing)?|describ(?:e|ing)|compar(?:e|ing|ison)|mention(?:ing)?|summari[sz](?:e|ing)|explain(?:ing)?|refer(?:ring)? to)\b/i.test(
-    clause,
-  );
+  for (const conjunction of clause.matchAll(conjunctions)) {
+    if (conjunction.index >= target) break;
+    const prefix = clause.slice(scopeStart, conjunction.index);
+    const topic = PROSE_TOPIC.exec(prefix);
+    if (topic) {
+      const beforeTopic = prefix.slice(0, topic.index);
+      const topicText = prefix.slice(topic.index + topic[0].length);
+      const explicitDirective = /^(?:include|add|insert|use)\b/i.test(
+        clause.slice(conjunction.index + conjunction[0].length),
+      );
+      // A heading's subject can end before another requested block. A prose
+      // topic that already names structures ("about headings and tables")
+      // stays a topic unless a new formatting verb explicitly starts a request.
+      if (
+        !explicitDirective &&
+        (!STRUCTURAL_NOUN.test(beforeTopic) || STRUCTURAL_NOUN.test(topicText))
+      )
+        continue;
+    }
+    scopeStart = conjunction.index + conjunction[0].length;
+  }
+  return !PROSE_TOPIC.test(clause.slice(scopeStart, target));
 }
 
 function requestedCount(requirements: string, noun: string): number | undefined {
