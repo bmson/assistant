@@ -979,6 +979,16 @@ describe('detectPersonalReadRequest', () => {
     ).toBeUndefined();
   });
 
+  it('routes direct questions about what the owner said to conversation history', () => {
+    const request = detectPersonalReadRequest(turn('What did I say about my UI preferences?'));
+    expect(request).toMatchObject({
+      kind: 'memory',
+      firstToolName: 'conversations.search',
+      conversationQuery: 'UI preferences',
+      searchSavedMemory: false,
+    });
+  });
+
   it('bounds repeated failed history searches and never adds unrequested saved-memory reads', () => {
     const request = detectPersonalReadRequest(
       turn('What did I tell you earlier about how I prefer meeting summaries?'),

@@ -324,7 +324,7 @@ const KNOWLEDGE_GRAPH_SURFACE =
 const MEMORY_SURFACE =
   /\b(?:memor(?:y|ies)|remember(?:ed)?|saved facts?|what you know|knowledge about me)\b/i;
 const CONVERSATION_HISTORY_REQUEST =
-  /\b(?:earlier|previous|prior|past)\s+(?:owner\s+)?(?:conversations?|chats?)\b|\b(?:previously|before)\s+(?:told|said|mentioned)\s+you\b|\bwhat\s+(?:did|have)\s+i\s+(?:tell|say|mention)\s+you\b/i;
+  /\b(?:earlier|previous|prior|past)\s+(?:owner\s+)?(?:conversations?|chats?)\b|\b(?:previously|before)\s+(?:told|said|mentioned)\s+you\b|\bwhat\s+(?:did|have)\s+i\s+(?:tell|say|mention)\s+you\b|\bwhat\s+did\s+i\s+say\s+about\b/i;
 const AUTOBIOGRAPHICAL_READ =
   /\b(?:when|where)\s+did\s+i\b|\bhave\s+i\s+ever\b|\bdid\s+i\s+(?:attend|visit|see|go|meet|live|work|travel)\b/i;
 const AVAILABILITY_SURFACE =
