@@ -1,6 +1,7 @@
 export interface CalendarEventAnalysisRequest {
   weekdayCount: number;
   minimumDurationMinutes?: number;
+  durationCountMode?: 'days' | 'events';
   minimumInPersonGapMinutes?: number;
 }
 
@@ -67,9 +68,26 @@ export function requestedCalendarEventAnalysis(
   if (minimumDurationMinutes === undefined && minimumInPersonGapMinutes === undefined)
     return undefined;
 
+  const asksForDayCount =
+    /\bhow\s+many\s+(?:week)?days?\b[^.!?\n]{0,100}\b(?:have|had|with|contain|include)\b[^.!?\n]{0,80}\b(?:event|appointment)s?\b/i.test(
+      text,
+    ) ||
+    /\bhow\s+many\s+(?:of\s+)?(?:the\s+)?(?:next\s+)?(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+weekdays?\b[^.!?\n]{0,100}\b(?:have|had|with|contain|include)\b[^.!?\n]{0,80}\b(?:event|appointment)s?\b/i.test(
+      text,
+    ) ||
+    /\bcount\s+(?:the\s+)?(?:week)?days?\b[^.!?\n]{0,100}\b(?:have|had|with|contain|include)\b[^.!?\n]{0,80}\b(?:event|appointment)s?\b/i.test(
+      text,
+    ) ||
+    /\b(?:number|count)\s+of\s+(?:week)?days?\b[^.!?\n]{0,80}\b(?:with|having|containing|including)\b[^.!?\n]{0,80}\b(?:event|appointment)s?\b/i.test(
+      text,
+    );
+  const durationCountMode =
+    minimumDurationMinutes === undefined ? undefined : asksForDayCount ? 'days' : 'events';
+
   return {
     weekdayCount,
     ...(minimumDurationMinutes !== undefined ? { minimumDurationMinutes } : {}),
+    ...(minimumDurationMinutes !== undefined ? { durationCountMode } : {}),
     ...(minimumInPersonGapMinutes !== undefined ? { minimumInPersonGapMinutes } : {}),
   };
 }
@@ -330,16 +348,26 @@ export function calendarEventAnalysisResponse(input: {
   const countsComplete = input.coverageComplete && missingTimeCount === 0;
   const durationThreshold = input.request.minimumDurationMinutes;
   if (durationThreshold !== undefined) {
-    lines.push(
-      `Events lasting at least ${durationThreshold} minutes (counted on each local day they overlap):`,
-    );
-    for (const day of days) {
-      const matching = timed.filter(
+    const dailyMatches = days.map((day) => ({
+      day,
+      matching: timed.filter(
         (event) =>
           event.end > day.start &&
           event.start < day.end &&
           (event.end - event.start) / 60_000 >= durationThreshold,
-      );
+      ),
+    }));
+    if (input.request.durationCountMode === 'days') {
+      const matchingDays = dailyMatches.filter(({ matching }) => matching.length > 0).length;
+      const tally = countsComplete
+        ? `${matchingDays} of ${days.length} requested weekdays`
+        : `at least ${matchingDays} in the checked subset of ${days.length} requested weekdays`;
+      lines.push(`Days with at least one event lasting ${durationThreshold} minutes: ${tally}.`);
+    }
+    lines.push(
+      `Events lasting at least ${durationThreshold} minutes (counted on each local day they overlap):`,
+    );
+    for (const { day, matching } of dailyMatches) {
       const countText = countsComplete
         ? `${matching.length}`
         : `at least ${matching.length} in the checked subset`;

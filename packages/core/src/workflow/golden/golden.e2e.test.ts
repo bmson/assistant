@@ -2926,11 +2926,12 @@ describe('golden tasks', () => {
     });
     if (!request?.calendarEventAnalysis || !request.timeWindow)
       throw new Error('Weekday analysis did not resolve its bounded owner-timezone window');
+    expect(request.calendarEventAnalysis.durationCountMode).toBe('days');
 
     const firstStart = new Date(Date.parse(request.timeWindow.timeMin) + 2 * 60 * 60 * 1000);
     const firstEnd = new Date(firstStart.getTime() + 45 * 60 * 1000);
     const secondStart = new Date(firstEnd.getTime() + 75 * 60 * 1000);
-    const secondEnd = new Date(secondStart.getTime() + 30 * 60 * 1000);
+    const secondEnd = new Date(secondStart.getTime() + 45 * 60 * 1000);
     const sourceUrl = 'https://calendar.google.com/calendar/event?eid=weekday-review';
     const firstEvent = {
       eventId: 'weekday-review',
@@ -2953,19 +2954,31 @@ describe('golden tasks', () => {
       start: secondStart.toISOString(),
       end: secondEnd.toISOString(),
     };
+    const thirdStart = new Date(firstStart.getTime() + 26 * 60 * 60 * 1000);
+    const thirdEnd = new Date(thirdStart.getTime() + 45 * 60 * 1000);
+    const thirdEvent = {
+      eventId: 'weekday-followup',
+      calendarId: 'primary',
+      calendar: 'Assistant',
+      summary: 'Next-day planning',
+      description: 'Attendance mode: in person',
+      location: 'Conference room C',
+      start: thirdStart.toISOString(),
+      end: thirdEnd.toISOString(),
+    };
     const ownerClock = new Intl.DateTimeFormat('en-US', {
       timeZone: owner.timezone,
       hour: 'numeric',
       minute: '2-digit',
     });
     const modelAnswer = [
-      `Planning review ${ownerClock.format(firstStart)}–${ownerClock.format(firstEnd)} and Consultation meeting ${ownerClock.format(secondStart)}–${ownerClock.format(secondEnd)}.`,
-      'There are 99 qualifying events and a 1-minute gap.',
+      `Planning review ${ownerClock.format(firstStart)}–${ownerClock.format(firstEnd)}, Consultation meeting ${ownerClock.format(secondStart)}–${ownerClock.format(secondEnd)}, and Next-day planning ${ownerClock.format(thirdStart)}–${ownerClock.format(thirdEnd)}.`,
+      'There are 99 qualifying days and a 1-minute gap.',
     ].join(' ');
     const listCalls: Array<Record<string, unknown>> = [];
     const pages = [
       { nextPageToken: 'weekday-page-2', events: [] },
-      { nextPageToken: 'weekday-page-3', events: [firstEvent, secondEvent] },
+      { nextPageToken: 'weekday-page-3', events: [firstEvent, secondEvent, thirdEvent] },
       { events: [firstEvent] }, // A duplicate across pages must not inflate the count.
     ];
 
@@ -3028,12 +3041,18 @@ describe('golden tasks', () => {
       true,
     );
     expect(listCalls.every((call) => call.maxResults === 50)).toBe(true);
-    expect(result.finalText).toContain('1 qualifying event');
+    expect(result.finalText).toContain(
+      'Days with at least one event lasting 45 minutes: 2 of 3 requested weekdays.',
+    );
+    expect(result.finalText).toContain('2 qualifying events.');
+    expect(result.finalText).toContain('1 qualifying event.');
+    expect(result.finalText).toContain('0 qualifying events.');
     expect(result.finalText).toContain('75 minutes');
     expect(result.finalText).toContain('Planning review');
     expect(result.finalText).toContain('Consultation meeting');
+    expect(result.finalText).toContain('Next\\-day planning');
     expect(result.finalText).toContain(sourceUrl);
-    expect(result.finalText).not.toContain('99 qualifying events');
+    expect(result.finalText).not.toContain('99 qualifying days');
     expect(result.finalText).not.toContain('1-minute gap');
     expect(result.finalText).not.toContain('checked subset');
 

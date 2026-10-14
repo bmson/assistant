@@ -92,8 +92,23 @@ describe('calendar weekday event analysis', () => {
     ).toMatchObject({
       weekdayCount: 3,
       minimumDurationMinutes: 45,
+      durationCountMode: 'events',
       minimumInPersonGapMinutes: 30,
     });
+    expect(
+      requestedCalendarEventAnalysis(
+        'For my calendar, over the next two weekdays, how many days have an event lasting at least 45 minutes?',
+      ),
+    ).toMatchObject({
+      weekdayCount: 2,
+      minimumDurationMinutes: 45,
+      durationCountMode: 'days',
+    });
+    expect(
+      requestedCalendarEventAnalysis(
+        'For my calendar, over the next 3 weekdays, what is the number of days with one or more appointments lasting 60 minutes?',
+      ),
+    ).toMatchObject({ durationCountMode: 'days' });
     expect(
       requestedCalendarEventAnalysis(
         'Review my calendar next two weekdays for a 90-minute focus block.',
@@ -182,7 +197,11 @@ describe('calendar weekday event analysis', () => {
 
   it('keeps missing-time results as a lower bound rather than guessing a duration', () => {
     const text = calendarEventAnalysisResponse({
-      request: { weekdayCount: 2, minimumDurationMinutes: 45 },
+      request: {
+        weekdayCount: 2,
+        minimumDurationMinutes: 45,
+        durationCountMode: 'days',
+      },
       timeWindow: {
         timeMin: '2026-11-02T08:00:00.000Z',
         timeMax: '2026-11-04T08:00:00.000Z',
@@ -201,9 +220,54 @@ describe('calendar weekday event analysis', () => {
     });
     expect(text).toContain('at least 0 in the checked subset');
     expect(text).toContain(
+      'Days with at least one event lasting 45 minutes: at least 0 in the checked subset of 2 requested weekdays.',
+    );
+    expect(text).toContain(
       '2 event(s) with missing, all-day, or invalid start/end times were excluded',
     );
     expect(text).not.toContain('0 qualifying events.');
+  });
+
+  it('counts qualifying weekdays separately from qualifying events', () => {
+    const text = calendarEventAnalysisResponse({
+      request: {
+        weekdayCount: 3,
+        minimumDurationMinutes: 45,
+        durationCountMode: 'days',
+      },
+      timeWindow: {
+        timeMin: '2026-11-02T08:00:00.000Z',
+        timeMax: '2026-11-05T08:00:00.000Z',
+      },
+      timeZone: 'America/Los_Angeles',
+      coverageComplete: true,
+      events: [
+        event({
+          eventId: 'monday-a',
+          summary: 'Monday planning',
+          start: '2026-11-02T17:00:00.000Z',
+          end: '2026-11-02T17:45:00.000Z',
+        }),
+        event({
+          eventId: 'monday-b',
+          summary: 'Monday review',
+          start: '2026-11-02T18:00:00.000Z',
+          end: '2026-11-02T18:45:00.000Z',
+        }),
+        event({
+          eventId: 'tuesday-a',
+          summary: 'Tuesday planning',
+          start: '2026-11-03T17:00:00.000Z',
+          end: '2026-11-03T17:45:00.000Z',
+        }),
+      ],
+    });
+    expect(text).toContain(
+      'Days with at least one event lasting 45 minutes: 2 of 3 requested weekdays.',
+    );
+    expect(text).toContain('Monday, Nov 2, 2026: 2 qualifying events.');
+    expect(text).toContain('Tuesday, Nov 3, 2026: 1 qualifying event.');
+    expect(text).toContain('Wednesday, Nov 4, 2026: 0 qualifying events.');
   });
 
   it('reports only explicit in-person gaps and never infers mode from an address', () => {
