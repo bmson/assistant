@@ -37,7 +37,9 @@ function answerItem(threadId: string, kind: 'draft' | 'no_reply') {
     whyQuote: text,
     deadline: null,
     draftBody:
-      kind === 'draft' ? 'Thanks for reaching out. I appreciate you checking with me.' : null,
+      kind === 'draft'
+        ? 'Owner decision required: choose whether to confirm this request before sending.\n\nIf clarification is needed: “Please clarify what confirmation is required for this request.”'
+        : null,
     draftSourceMessageIds: kind === 'draft' ? [`latest-${threadId}`] : [],
   };
 }
@@ -222,6 +224,12 @@ describe('executor email review composition', () => {
     expect(readIds).toEqual(rankedIds.slice(0, 9));
     expect(result.toolNames).toContain('gmail.read_thread');
     expect(result.toolNames).not.toContain('gmail.send');
+    expect(result.finalText).toContain(
+      'Owner decision required: choose whether to confirm this request before sending.',
+    );
+    expect(result.finalText).toContain(
+      'Please clarify what confirmation is required for this request.',
+    );
     expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(5);
     expect(result.finalText).toContain(
       '3 fully assessed threads did not clearly require a response',
