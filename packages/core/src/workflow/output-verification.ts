@@ -299,6 +299,46 @@ export function publicWebClaimFindings(
             const frequencyText = normalized(
               (text.match(/(?:^|\n)\s*-?\s*Frequency:[^\n]*/gi) ?? []).join(' '),
             );
+            const jointPattern = /\([^()]*\bjoint(?:ly)?\b[^()]*\)/gi;
+            const jointNotes = frequencyText.match(jointPattern) ?? [];
+            const sections = frequencyText.replace(jointPattern, '').split(';');
+            const jointSections = sections.filter((section) => /\bjoint(?:ly)?\b/i.test(section));
+            // Parenthetical/secondary combined cadences do not qualify the
+            // independent literal cadence (e.g. hourly with a joint 4/hour note).
+            const primary = sections
+              .filter((section, index) => index === 0 || !jointSections.includes(section))
+              .join(';');
+            const combined = [...jointNotes, ...jointSections].join(' ');
+            const preservesQualifiers = (attribute: string) => {
+              const until = attribute.match(/\buntil ([a-z]+) (\d{4})\b/i);
+              const isJoint = /\bjoint(?:ly)?\b/i.test(attribute);
+              const jointPreserved =
+                !isJoint || /\b(?:joint(?:ly)?|shared|combined)\b/i.test(topic);
+              const requestedUntil =
+                normalized(unit).match(/\buntil ([a-z]+) (\d{4})\b/i) ??
+                (isJoint && jointPreserved
+                  ? normalized(topic).match(/\buntil ([a-z]+) (\d{4})\b/i)
+                  : null);
+              return (
+                jointPreserved &&
+                (!until ||
+                  (requestedUntil?.[1]?.slice(0, 3) === until[1]?.slice(0, 3) &&
+                    requestedUntil?.[2] === until[2]))
+              );
+            };
+            const describesJointCadence =
+              /\b(?:joint(?:ly)?|shared|combined)\b[^,;.]{0,35}\b(?:every \d+(?:[-–]\d+)? minutes|hourly)\b|\b(?:every \d+(?:[-–]\d+)? minutes|hourly)\b[^,;.]{0,35}\b(?:joint(?:ly)?|shared|combined)\b/i.test(
+                unit,
+              );
+            const primaryMatch =
+              primary.includes(claim) ||
+              (claim === 'every 60 minutes' && /\bhourly\b/.test(primary));
+            if (
+              primaryMatch &&
+              (!describesJointCadence || /\bjoint(?:ly)?\b/i.test(primary)) &&
+              preservesQualifiers(primary)
+            )
+              return true;
             const words: Record<string, number> = {
               one: 1,
               two: 2,
@@ -313,32 +353,16 @@ export function publicWebClaimFindings(
               eleven: 11,
               twelve: 12,
             };
-            const statedCadence = frequencyText.match(
+            const statedCadence = combined.match(
               /joint[^.]*?\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+services per hour\b/i,
             )?.[1];
             const count = statedCadence ? (words[statedCadence] ?? Number(statedCadence)) : 0;
             const minutes = claim.match(/^every (\d+) minutes$/)?.[1];
-            const until = frequencyText.match(/\buntil ([a-z]+) (\d{4})\b/i);
-            const isJoint = /\bjoint(?:ly)?\b/i.test(frequencyText);
-            const jointPreserved = !isJoint || /\b(?:joint(?:ly)?|shared|combined)\b/i.test(topic);
-            const requestedUntil =
-              normalized(unit).match(/\buntil ([a-z]+) (\d{4})\b/i) ??
-              (isJoint && jointPreserved
-                ? normalized(topic).match(/\buntil ([a-z]+) (\d{4})\b/i)
-                : null);
-            const qualifierPreserved =
-              !until ||
-              (requestedUntil?.[1]?.slice(0, 3) === until[1]?.slice(0, 3) &&
-                requestedUntil?.[2] === until[2]);
             return (
-              qualifierPreserved &&
-              jointPreserved &&
-              (frequencyText.includes(claim) ||
-                (claim === 'every 60 minutes' && /\bhourly\b/.test(frequencyText)) ||
-                (/\bjoint(?:ly)?\b/i.test(unit) &&
-                  count > 0 &&
-                  Number(minutes) === 60 / count &&
-                  qualifierPreserved))
+              describesJointCadence &&
+              count > 0 &&
+              Number(minutes) === 60 / count &&
+              preservesQualifiers(combined)
             );
           });
           if (!supported)

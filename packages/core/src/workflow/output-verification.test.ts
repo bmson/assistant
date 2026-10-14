@@ -767,3 +767,58 @@ describe('public service claim scope and attribute boundaries', () => {
     expect(publicWebClaimFindings('R10 takes 15 minutes.', subroutes)).not.toEqual([]);
   });
 });
+
+describe('independent and combined service cadence qualifiers', () => {
+  const evidence = (frequency: string) => [
+    {
+      toolName: 'web.fetch',
+      status: 'succeeded',
+      result: { status: 200, truncated: false, text: `RE20\n- Frequency: ${frequency}` },
+    },
+  ];
+
+  it('allows the independent hourly cadence without inheriting a combined parenthetical cutoff', () => {
+    const rows = evidence('hourly (jointly four services per hour with FEX until December 2026)');
+    expect(publicWebClaimFindings('RE20 runs hourly.', rows)).toEqual([]);
+    expect(publicWebClaimFindings('RE20 runs every 60 minutes.', rows)).toEqual([]);
+    expect(publicWebClaimFindings('RE20 runs every 15 minutes.', rows)).not.toEqual([]);
+    expect(publicWebClaimFindings('RE20 runs jointly every 15 minutes.', rows)).not.toEqual([]);
+    expect(
+      publicWebClaimFindings('RE20 runs jointly every 15 minutes until December 2027.', rows),
+    ).not.toEqual([]);
+    expect(
+      publicWebClaimFindings('RE20 runs jointly every 15 minutes until December 2026.', rows),
+    ).toEqual([]);
+    expect(
+      publicWebClaimFindings('RE20 runs jointly hourly until December 2026.', rows),
+    ).not.toEqual([]);
+  });
+
+  it('keeps a cutoff on the individual primary cadence even when a separate combined note exists', () => {
+    const rows = evidence(
+      'hourly until May 2027 (jointly four services per hour with FEX until December 2026)',
+    );
+    expect(publicWebClaimFindings('RE20 runs hourly.', rows)).not.toEqual([]);
+    expect(publicWebClaimFindings('RE20 runs hourly until May 2028.', rows)).not.toEqual([]);
+    expect(publicWebClaimFindings('RE20 runs hourly until May 2027.', rows)).toEqual([]);
+    expect(
+      publicWebClaimFindings('RE20 runs jointly every 15 minutes until December 2026.', rows),
+    ).toEqual([]);
+  });
+
+  it('preserves standalone individual cutoffs and secondary semicolon combined qualifiers', () => {
+    const literal = evidence('every 30 minutes until May 2027');
+    expect(publicWebClaimFindings('RE20 runs every 30 minutes until May 2027.', literal)).toEqual(
+      [],
+    );
+    expect(publicWebClaimFindings('RE20 runs every 30 minutes.', literal)).not.toEqual([]);
+    const separate = evidence(
+      'hourly; until May 2027 both lines jointly run two services per hour',
+    );
+    expect(publicWebClaimFindings('RE20 runs hourly.', separate)).toEqual([]);
+    expect(publicWebClaimFindings('RE20 runs jointly every 30 minutes.', separate)).not.toEqual([]);
+    expect(
+      publicWebClaimFindings('RE20 runs jointly every 30 minutes until May 2027.', separate),
+    ).toEqual([]);
+  });
+});
