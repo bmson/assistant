@@ -66,25 +66,77 @@ export function nextCreatedDocumentRead(
   return { documentId, startOffset: 0, maxChars: 50_000 };
 }
 
-function requestedCount(request: string, noun: string): number | undefined {
-  const words = [
-    'zero',
-    'one',
-    'two',
-    'three',
-    'four',
-    'five',
-    'six',
-    'seven',
-    'eight',
-    'nine',
-    'ten',
-  ];
-  const match = new RegExp(`\\b(?:exactly\\s+)?(\\d+|${words.join('|')})[ -]+${noun}\\b`, 'i').exec(
-    request,
+const COUNT_WORDS = [
+  'zero',
+  'one',
+  'two',
+  'three',
+  'four',
+  'five',
+  'six',
+  'seven',
+  'eight',
+  'nine',
+  'ten',
+];
+
+/** Only formatting clauses count; titles, quoted content and prose topics are data. */
+function formattingRequirements(request: string): string {
+  const unquoted = request
+    .replace(/```[\s\S]*?```|`[^`]*`|"[^"]*"|“[^”]*”/g, '')
+    .replace(/\b(?:do not|don['’]t|never|without)\b[^.!?;\n]*/gi, '');
+  return unquoted
+    .split(/[.!?]/)
+    .flatMap((statement) => {
+      const directive =
+        /\b(?:with|include|including|contain|containing|add|use|insert|have)\b/i.exec(statement);
+      if (directive) return [statement.slice(directive.index)];
+      const colon = /\b(?:create|make|write|prepare)\b[^:]{0,120}\b(?:doc|document)\b[^:]*:/i.exec(
+        statement,
+      );
+      return colon ? [statement.slice(colon.index + colon[0].length)] : [];
+    })
+    .join('\n');
+}
+
+function isFormattingNoun(requirements: string, index: number): boolean {
+  const before = requirements.slice(0, index);
+  const clause = before.slice(
+    Math.max(before.lastIndexOf(','), before.lastIndexOf(';'), before.lastIndexOf('\n')) + 1,
   );
-  if (!match?.[1]) return undefined;
-  return /^\d+$/.test(match[1]) ? Number(match[1]) : words.indexOf(match[1].toLowerCase());
+  return !/\b(?:about|discuss(?:ing)?|describ(?:e|ing)|compar(?:e|ing|ison)|mention(?:ing)?|summari[sz](?:e|ing)|explain(?:ing)?|refer(?:ring)? to)\b/i.test(
+    clause,
+  );
+}
+
+function requestedCount(requirements: string, noun: string): number | undefined {
+  const pattern = new RegExp(
+    `\\b(?:exactly\\s+)?(\\d+|${COUNT_WORDS.join('|')})[ -]+${noun}\\b`,
+    'gi',
+  );
+  for (const match of requirements.matchAll(pattern)) {
+    if (!match[1] || !isFormattingNoun(requirements, match.index)) continue;
+    if (
+      noun.includes('table') &&
+      /^\s+of\s+contents\b/i.test(requirements.slice(match.index + match[0].length))
+    )
+      continue;
+    return /^\d+$/.test(match[1]) ? Number(match[1]) : COUNT_WORDS.indexOf(match[1].toLowerCase());
+  }
+  return undefined;
+}
+
+function requestsStructure(requirements: string, noun: 'heading' | 'table'): boolean {
+  for (const match of requirements.matchAll(new RegExp(`\\b${noun}s?\\b`, 'gi'))) {
+    if (!isFormattingNoun(requirements, match.index)) continue;
+    if (
+      noun === 'table' &&
+      /^\s+of\s+contents\b/i.test(requirements.slice(match.index + match[0].length))
+    )
+      continue;
+    return true;
+  }
+  return false;
 }
 
 /** A successful text read proves words, not native paragraph/list/table formatting. */
@@ -130,8 +182,27 @@ export function createdDocumentVerification(
   const title = record(created.args)?.title;
   const titleFromRequest = /\btitled\s+["“]([^"”]+)["”]/i.exec(request)?.[1];
   const headingFromRequest = /\bheading\s+["“]([^"”]+)["”]/i.exec(request)?.[1];
-  const bullets = requestedCount(request, 'bullets?');
-  const columns = requestedCount(request, 'columns?');
+  const requirements = formattingRequirements(request);
+  const headings = requestedCount(requirements, '(?:native[ -]+)?headings?');
+  const tables = requestedCount(requirements, '(?:native[ -]+)?tables?');
+  const bullets = requestedCount(requirements, 'bullets?');
+  const needsHeading = requestsStructure(requirements, 'heading');
+  const needsTable = requestsStructure(requirements, 'table');
+  const columns = needsTable ? requestedCount(requirements, 'columns?') : undefined;
+  const dataRows = needsTable
+    ? (requestedCount(requirements, '(?:data|body)[ -]+rows?') ??
+      (/\ban?[ -]+(?:data|body)[ -]+row\b/i.test(requirements) ? 1 : undefined))
+    : undefined;
+  const rows = needsTable ? requestedCount(requirements, 'rows?') : undefined;
+  const nativeTables = observed.data.tables;
+  const rowCountsMatch = (count: number, dataOnly: boolean) => {
+    const counts = nativeTables.map((table) => table.rows.length - (dataOnly ? 1 : 0));
+    return /\brows?[ -]+(?:in[ -]+)?total\b|\btotal[ -]+(?:data[ -]+|body[ -]+)?rows?\b/i.test(
+      requirements,
+    )
+      ? counts.reduce((sum, value) => sum + value, 0) === count
+      : counts.every((value) => value === count);
+  };
   const expectedRows = expected.data.tables;
   const matches =
     typeof title === 'string' &&
@@ -139,9 +210,21 @@ export function createdDocumentVerification(
     (!titleFromRequest || title === titleFromRequest) &&
     (!headingFromRequest ||
       observed.data.headings.some((heading) => heading.text === headingFromRequest)) &&
+    (headings === undefined
+      ? !needsHeading || observed.data.headings.length > 0
+      : observed.data.headings.length === headings) &&
+    (tables === undefined
+      ? !needsTable || nativeTables.length > 0
+      : nativeTables.length === tables) &&
     (bullets === undefined || observed.data.bullets.length === bullets) &&
+    (!needsTable ||
+      nativeTables.every(
+        (table) => table.rows.length > 0 && table.rows.every((row) => row.length > 0),
+      )) &&
     (columns === undefined ||
-      observed.data.tables.every((table) => table.rows.every((row) => row.length === columns))) &&
+      nativeTables.every((table) => table.rows.every((row) => row.length === columns))) &&
+    (dataRows === undefined || rowCountsMatch(dataRows, true)) &&
+    (rows === undefined || rowCountsMatch(rows, false)) &&
     JSON.stringify(observed.data.headings) === JSON.stringify(expected.data.headings) &&
     JSON.stringify(observed.data.bullets) === JSON.stringify(expected.data.bullets) &&
     JSON.stringify(observed.data.tables) === JSON.stringify(expectedRows);

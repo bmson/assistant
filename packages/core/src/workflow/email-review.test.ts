@@ -952,7 +952,7 @@ describe('bounded no-send email review', () => {
     expect(
       formatted.match(/Draft alternatives — choose one and remove the other before sending:/g),
     ).toHaveLength(2);
-    expect(formatted).toContain('Response route: Use the RSVP link');
+    expect(formatted).toContain('Response route: Follow the RSVP instructions');
     const parsedPrompt = JSON.parse(required(calls[0], 'first model call').prompt) as {
       threads: Array<{
         messages: Array<{ messageId: string; promptRole: string; text: string }>;
@@ -1456,9 +1456,43 @@ describe('bounded no-send email review', () => {
       emailReviewCoverage([thread.threadId], [thread], [search(thread.threadId)]),
     );
     expect(rendered).toContain('food or attendance count');
-    expect(rendered).toContain('An email reply does not register attendance.');
+    expect(rendered).toContain('These unsent draft alternatives have not registered attendance.');
     expect(rendered).not.toContain('stated deadline');
     expect(rendered).not.toContain('prepared 5 reply');
+  });
+
+  it('preserves a source-authorized email RSVP alternative alongside the platform route', () => {
+    const source = messages('email-or-link-rsvp');
+    const earlier = required(source[0], 'owner source');
+    earlier.text = 'I can attend.';
+    earlier.sourceLength = earlier.text.length;
+    const latest = required(source.at(-1), 'latest');
+    latest.text =
+      'Please RSVP using the link or reply to this email to register attendance. RSVP form: https://example.org/rsvp';
+    latest.sourceLength = latest.text.length;
+    const thread = required(
+      emailReviewCompleteThread('email-or-link-rsvp', 'owner@example.com', [
+        search('email-or-link-rsvp'),
+        read('email-or-link-rsvp', source),
+      ]),
+      'complete thread',
+    );
+    const item = {
+      ...required(validAnswer(thread.threadId).items[0], 'item'),
+      whyQuote: latest.text,
+      deadline: null,
+      draftBody: 'I can attend.',
+    };
+    const checked = validateEmailReviewAnswer({ items: [item] }, [thread]);
+    expect(emailReviewValidationIssues({ items: [item] }, [thread])).toEqual([]);
+    expect(checked?.items[0]?.draftBody).toBe('I can attend.');
+    const rendered = formatEmailReviewAnswer(
+      checked?.items ?? [],
+      emailReviewCoverage([thread.threadId], [thread], [search(thread.threadId)]),
+    );
+    expect(rendered).toContain('Follow the RSVP instructions in the source.');
+    expect(rendered).toContain('These unsent draft alternatives have not registered attendance.');
+    expect(rendered).not.toContain('An email reply does not register');
   });
 
   it('rejects unsupported positive and negative owner attendance decisions', () => {

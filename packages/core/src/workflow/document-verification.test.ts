@@ -131,6 +131,127 @@ describe('native document verification', () => {
     ).toBe(false);
   });
 
+  it('requires unquoted singular headings and tables even when both receipts omit them', () => {
+    const ownerRequest =
+      'Create a new Google Doc titled "Study plan" with a heading, exactly three bullets, and a two-column table.';
+    for (const shape of [
+      { ...structure, headings: [], tables: [] },
+      { ...structure, headings: [] },
+      { ...structure, tables: [] },
+      { ...structure, tables: [{ rows: [] }] },
+    ]) {
+      expect(
+        createdDocumentVerification(
+          ownerRequest,
+          [
+            { ...create, result: { ...create.result, contentStructure: shape } },
+            { ...read, result: { ...read.result, structure: shape } },
+          ],
+          'Verified.',
+        )?.verified,
+      ).toBe(false);
+    }
+    expect(createdDocumentVerification(ownerRequest, [create, read], 'Verified.')?.verified).toBe(
+      true,
+    );
+    const checklist =
+      'Create a new Google Doc titled "Study plan":\n- A heading\n- Exactly three bullets\n- A two-column table';
+    const omitted = { ...structure, headings: [], tables: [] };
+    expect(
+      createdDocumentVerification(
+        checklist,
+        [
+          { ...create, result: { ...create.result, contentStructure: omitted } },
+          { ...read, result: { ...read.result, structure: omitted } },
+        ],
+        'Verified.',
+      )?.verified,
+    ).toBe(false);
+    expect(createdDocumentVerification(checklist, [create, read], 'Verified.')?.verified).toBe(
+      true,
+    );
+  });
+
+  it('checks explicit heading and table counts against the owner request', () => {
+    const ownerRequest =
+      'Create a new Google Doc titled "Study plan" with two headings, exactly three bullets, and two tables.';
+    expect(createdDocumentVerification(ownerRequest, [create, read], 'Verified.')?.verified).toBe(
+      false,
+    );
+    const shape = {
+      ...structure,
+      headings: [...structure.headings, { text: 'Next', style: 'HEADING_2' }],
+      tables: [...structure.tables, ...structure.tables],
+    };
+    expect(
+      createdDocumentVerification(
+        ownerRequest,
+        [
+          { ...create, result: { ...create.result, contentStructure: shape } },
+          { ...read, result: { ...read.result, structure: shape } },
+        ],
+        'Verified.',
+      )?.verified,
+    ).toBe(true);
+  });
+
+  it('distinguishes requested data rows from total table rows and verifies row counts', () => {
+    const verify = (detail: string, shape = structure) =>
+      createdDocumentVerification(
+        `Create a Google Doc titled "Study plan" with a two-column table containing ${detail}.`,
+        [
+          { ...create, result: { ...create.result, contentStructure: shape } },
+          { ...read, result: { ...read.result, structure: shape } },
+        ],
+        'Verified.',
+      )?.verified;
+    expect(verify('two data rows')).toBe(true);
+    expect(verify('three rows')).toBe(true);
+    expect(verify('three data rows')).toBe(false);
+    expect(verify('two rows')).toBe(false);
+    expect(verify('a data row')).toBe(false);
+    const missingRow = {
+      ...structure,
+      tables: [
+        {
+          rows: [
+            ['Task', 'Owner'],
+            ['Read', 'Morgan'],
+          ],
+        },
+      ],
+    };
+    expect(verify('two data rows', missingRow)).toBe(false);
+    expect(verify('a data row', missingRow)).toBe(true);
+    const twoTables = { ...structure, tables: [...structure.tables, ...structure.tables] };
+    expect(verify('two data rows each', twoTables)).toBe(true);
+    expect(verify('four data rows total', twoTables)).toBe(true);
+    expect(verify('two data rows total', twoTables)).toBe(false);
+  });
+
+  it('does not treat quoted content, prose topics, prohibitions, or a table of contents as native requirements', () => {
+    const shape = { ...structure, headings: [], tables: [] };
+    for (const detail of [
+      'with exactly three bullets and a paragraph saying "two headings and three tables with five data rows".',
+      'with exactly three bullets discussing two headings, and a paragraph comparing four tables with five data rows.',
+      'with exactly three bullets. Explain two headings and three tables.',
+      'with exactly three bullets. Do not include headings or tables.',
+      'with exactly three bullets and a table of contents.',
+    ]) {
+      expect(
+        createdDocumentVerification(
+          `Create a Google Doc titled "Study plan" ${detail}`,
+          [
+            { ...create, result: { ...create.result, contentStructure: shape } },
+            { ...read, result: { ...read.result, structure: shape } },
+          ],
+          'Verified.',
+        )?.verified,
+        detail,
+      ).toBe(true);
+    }
+  });
+
   it('requires a matching read after creation, not a prior read or another document', () => {
     for (const evidence of [
       [read, create],

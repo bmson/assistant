@@ -1116,7 +1116,7 @@ function directReplyFallbackDraft(thread: EmailReviewThread): string | undefined
     return [
       'If you plan to attend: “Thanks for the RSVP reminder. I plan to attend.”',
       'If you cannot attend: “Thanks for the reminder. I cannot attend.”',
-      'Owner decision required: choose the accurate option. Follow the RSVP instructions in the source; these alternatives do not register attendance.',
+      'Owner decision required: choose the accurate option. Follow the RSVP instructions in the source; these unsent draft alternatives have not registered attendance.',
     ].join('\n\n');
 
   const requestQuote = directReplyRequestQuote(thread);
@@ -1150,7 +1150,7 @@ function draftAnswersLatestRequest(thread: EmailReviewThread, draft: string): bo
     .trim();
   if (!substantive) return false;
   const body = latestUnquotedBody(thread) ?? '';
-  if (/\brsvp\b/i.test(body) && sourceRsvpRoute(thread))
+  if (/\brsvp\b/i.test(body) && sourceRsvpRoute(thread) && !sourceAllowsEmailRsvp(thread))
     return (
       /\b(?:source|link|button|form|platform|rsvp)\b/i.test(substantive) &&
       /\b(?:owner decision|required|choose|if you|not register|does not register|submit)\b/i.test(
@@ -1158,6 +1158,16 @@ function draftAnswersLatestRequest(thread: EmailReviewThread, draft: string): bo
       )
     );
   return true;
+}
+
+function sourceAllowsEmailRsvp(thread: EmailReviewThread): boolean {
+  const body = latestUnquotedBody(thread) ?? '';
+  return (
+    /\brsvp\b/i.test(body) &&
+    /\b(?:or|also|please|you (?:can|may))\s+(?:reply|respond)(?:\s+to\s+(?:this|the)\s+(?:email|message)|\s+(?:by|via)\s+email)\b|(?:^|\n)\s*(?:reply|respond)\s+to\s+(?:this|the)\s+(?:email|message)\b/i.test(
+      body,
+    )
+  );
 }
 
 function sourceRsvpRoute(thread: EmailReviewThread): string | undefined {
@@ -1168,7 +1178,7 @@ function sourceRsvpRoute(thread: EmailReviewThread): string | undefined {
       body,
     )
   )
-    return 'Use the RSVP link, button, or platform specified in the source. An email reply does not register attendance.';
+    return 'Follow the RSVP instructions in the source. These unsent draft alternatives have not registered attendance.';
   return undefined;
 }
 
