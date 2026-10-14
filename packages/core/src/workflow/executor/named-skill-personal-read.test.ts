@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import type { TaskState } from '../../events.js';
 import { TaskStateSchema } from '../../events.js';
 import { skillRetrievalReceipt } from '../../memory/skills.js';
+import type { PersonalReadRequest } from '../read-intent.js';
+import { verifiedReadResponse } from '../response-contract.js';
 import { stageFinalResponse, stageModelFinalResponse } from './finalize.js';
 import type { RunContext } from './phases.js';
 import { runStepLoop } from './step-loop.js';
@@ -205,11 +207,18 @@ describe('named saved skill use during a personal read', () => {
 
   it.each([
     'valid',
+    'valid with existing advice',
+    'missing receipt with existing advice',
+    'provider failure with existing advice',
     'missing receipt',
     'changed advice',
     'invented free time',
     'claimed write',
     'provider failure',
+    'provider budget',
+    'truncated advice',
+    'multiline advice',
+    'duplicate next step',
     'skill-only invented place',
     'skill-only invented time',
   ])(
@@ -226,7 +235,7 @@ describe('named saved skill use during a personal read', () => {
         f.skills.findByName.mockResolvedValue(staleGuidance);
         f.state.skillRetrievalReceipts = [skillRetrievalReceipt(staleGuidance)];
       }
-      if (condition === 'missing receipt') f.state.skillRetrievalReceipts = [];
+      if (condition.startsWith('missing receipt')) f.state.skillRetrievalReceipts = [];
       if (condition === 'changed advice')
         f.skills.findByName.mockResolvedValue({ ...skill, steps: 'Different advice' });
       const nextStep =
@@ -239,10 +248,22 @@ describe('named saved skill use during a personal read', () => {
               : condition === 'skill-only invented time'
                 ? 'Consider preparation at 15:00.'
                 : 'Check date coverage and unavailable calendars before preparing for Design review.';
+      const proposedAdvice =
+        condition === 'multiline advice'
+          ? `${nextStep}\nCheck sources.`
+          : condition === 'duplicate next step'
+            ? `${nextStep} Next step: Check sources.`
+            : nextStep;
       f.router.object.mockClear();
       f.router.object.mockImplementation(async () => {
-        if (condition === 'provider failure') throw new Error('Unavailable');
-        return { ok: true, object: { nextStep }, finishReason: 'stop' } as never;
+        if (condition.startsWith('provider failure')) throw new Error('Unavailable');
+        if (condition === 'provider budget')
+          return { ok: false, decision: { mode: 'park', reason: 'budget' } } as never;
+        return {
+          ok: true,
+          object: { nextStep: proposedAdvice },
+          finishReason: condition === 'truncated advice' ? 'length' : 'stop',
+        } as never;
       });
       const pending = {
         text: 'No timed commitments today.',
@@ -250,6 +271,24 @@ describe('named saved skill use during a personal read', () => {
         terminalStatus: 'done' as const,
         outcome: 'done' as const,
       };
+      const readRequest: PersonalReadRequest = {
+        kind: 'calendar',
+        queryTerms: [],
+        requiresThreadRead: false,
+        firstToolName: 'calendar.list_events',
+        includeCalendarBriefing: true,
+        timeZone: 'America/Los_Angeles',
+        timeWindow: {
+          label: 'today',
+          timeMin: '2026-10-13T07:00:00.000Z',
+          timeMax: '2026-10-14T07:00:00.000Z',
+        },
+      };
+      const canonical = verifiedReadResponse(readRequest, f.rows as never);
+      const canonicalStep = canonical.match(/^Next step: [^\r\n]*$/m)?.[0];
+      expect(canonicalStep).toBeDefined();
+      if (condition.includes('existing advice'))
+        pending.text = `${canonical}\n\nNext step: Review preparation for Design review.`;
       await stageModelFinalResponse(
         f.deps as unknown as import('./types.js').ExecutorDeps,
         { ...f.task, type: 'scheduled_task', conversationId: null } as never,
@@ -258,19 +297,7 @@ describe('named saved skill use during a personal read', () => {
         pending,
         undefined,
         {
-          readRequest: {
-            kind: 'calendar',
-            queryTerms: [],
-            requiresThreadRead: false,
-            firstToolName: 'calendar.list_events',
-            includeCalendarBriefing: true,
-            timeZone: 'America/Los_Angeles',
-            timeWindow: {
-              label: 'today',
-              timeMin: '2026-10-13T07:00:00.000Z',
-              timeMax: '2026-10-14T07:00:00.000Z',
-            },
-          },
+          readRequest,
         },
       );
       const final = f.state.pendingFinal;
@@ -278,14 +305,23 @@ describe('named saved skill use during a personal read', () => {
       expect(final?.text).toContain('09:00–09:30');
       expect(final?.text).not.toContain('No timed commitments');
       expect(f.dispatch).toHaveBeenCalledOnce();
-      if (condition === 'valid') {
+      if (condition.startsWith('valid')) {
         expect(final?.text).toContain(`Next step: ${nextStep}`);
         expect(f.router.object).toHaveBeenCalledOnce();
         expect(f.router.object.mock.calls[0]?.[1]).toMatchObject({
           prompt: expect.stringContaining(skill.steps),
         });
-      } else expect(final?.text).not.toContain('Next step:');
-      if (condition === 'missing receipt' || condition === 'changed advice')
+      } else {
+        expect(final?.text).toContain(canonicalStep);
+        expect(final?.text).not.toContain(`Next step: ${proposedAdvice}`);
+      }
+      expect(final?.text.match(/^Next step:/gm)).toHaveLength(1);
+      expect(final?.text).not.toMatch(/Meridian Hall|15:00|you are free|I cancelled/);
+      const factualLines = canonical
+        .split('\n')
+        .filter((line) => line && !line.startsWith('Next step:'));
+      for (const line of factualLines) expect(final?.text).toContain(line);
+      if (condition.startsWith('missing receipt') || condition === 'changed advice')
         expect(f.router.object).not.toHaveBeenCalled();
       expect(final?.responseCards).toBeUndefined();
     },

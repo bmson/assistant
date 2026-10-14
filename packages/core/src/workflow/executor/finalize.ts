@@ -844,10 +844,24 @@ export async function stageModelFinalResponse(
   // answer and must not be reworded by a discretionary model call.
   let initialCheck = enforceResponseContract(pending.text, evidence, contractOptions);
   if (
-    calendarSkillAdvice &&
+    classifiedRead?.includeCalendarBriefing &&
     !initialCheck.blocked &&
-    initialCheck.groundingFallback &&
-    !/^Next step:/m.test(initialCheck.text)
+    (initialCheck.text.match(/^Next step:/gm)?.length ?? 0) > 1
+  ) {
+    // An already-checked model tail may coexist with the canonical default.
+    // Restore the ledger projection before selecting one receipt-bound step.
+    initialCheck = enforceResponseContract(
+      verifiedReadResponse(classifiedRead, evidence),
+      evidence,
+      contractOptions,
+    );
+  }
+
+  if (
+    calendarSkillAdvice &&
+    classifiedRead?.includeCalendarBriefing &&
+    !initialCheck.blocked &&
+    initialCheck.groundingFallback
   ) {
     try {
       const advice = await deps.router.object<{ nextStep: string }>('rewrite', {
@@ -866,7 +880,12 @@ export async function stageModelFinalResponse(
       });
       if (advice.ok && advice.finishReason !== 'length') {
         const nextStep = advice.object.nextStep?.trim();
-        if (nextStep && nextStep.length <= 360 && !nextStep.includes('\n')) {
+        if (
+          nextStep &&
+          nextStep.length <= 360 &&
+          !/[\r\n]/.test(nextStep) &&
+          !/\bNext step:/i.test(nextStep)
+        ) {
           const candidate = `${initialCheck.text}\n\nNext step: ${nextStep}`;
           // Procedure text supplies advice, never fresh personal facts. Keep
           // named places and times grounded only in calendar/owner evidence.
@@ -875,8 +894,18 @@ export async function stageModelFinalResponse(
             !checkedAdvice.blocked &&
             !checkedAdvice.groundingFallback &&
             checkedAdvice.text === candidate
-          )
-            initialCheck = { ...initialCheck, text: candidate };
+          ) {
+            // Validate the added advisory tail against the full canonical
+            // projection first. Only after validation replace its source-derived
+            // default step; event facts/links remain byte-for-byte unchanged.
+            const canonicalStep = /^Next step: [^\r\n]*$/m;
+            initialCheck = {
+              ...initialCheck,
+              text: canonicalStep.test(initialCheck.text)
+                ? initialCheck.text.replace(canonicalStep, () => `Next step: ${nextStep}`)
+                : candidate,
+            };
+          }
         }
       }
     } catch {
