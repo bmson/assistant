@@ -940,7 +940,7 @@ function hasPossibleSourceDeadline(thread: EmailReviewThread): boolean {
   )
     return true;
   const deadlineCue =
-    /\b(?:early[- ]?bird|offer|discount|registration|applications?|rsvp|response|reply|volunteer(?:ing)?)\b[^.!?\n]{0,160}\b(?:through|until|by|before|due)\s+(?:(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?|\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}|today|tomorrow|tonight|end of (?:day|week))\b/i;
+    /\b(?:early[- ]?bird|offer|discount|registration|applications?|rsvp|response|reply|volunteer(?:ing)?)\b[^.!?\n]{0,160}\b(?:through|until|by|before|due)\s+(?:(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?|\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}|today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|end of (?:day|week))\b/i;
   const datedOutcomeCue =
     /\b(?:donat(?:e|ed|ion)|discard(?:ed)?|destroy(?:ed)?|remove[sd]?|auction(?:ed)?|recycl(?:e|ed)|expire[sd]?|cancel(?:led|ed)?)\b.{0,80}\b(?:on\s+)?(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d{1,2}[/-]\d{1,2}|\d{4}-\d{2}-\d{2})\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d{1,2}[/-]\d{1,2}|\d{4}-\d{2}-\d{2})\b.{0,80}\b(?:donat(?:e|ed|ion)|discard(?:ed)?|destroy(?:ed)?|remove[sd]?|auction(?:ed)?|recycl(?:e|ed)|expire[sd]?|cancel(?:led|ed)?)\b/i;
   if (deadlineCue.test(latest.text) || datedOutcomeCue.test(latest.text)) return true;
@@ -994,6 +994,15 @@ function latestMessageNeedsReply(thread: EmailReviewThread): boolean {
     /\bplease\s+confirm\b[^.!?\n]{0,100}\b(?:which|whether|if|your\s+(?:choice|selection|preference|availability|schedule)|(?:time|option)\s+works\s+for\s+you)\b/i.test(
       currentBody,
     );
+  const promotionalSubjectOrSender =
+    /\b(?:newsletter|digest|coupon|promotion|promotional|sale|shop)\b/i.test(
+      `${latest.subject} ${latest.from}`,
+    );
+  const imperativeReplyWithDeadline =
+    !promotionalSubjectOrSender &&
+    /\bplease\s+(?:reply|respond)\b[^.!?\n]{0,80}\b(?:by|before|until|no later than)\s+(?:today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}[/-]\d{1,2}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2})\b/i.test(
+      currentBody,
+    );
   return (
     /\bif you (?:have not|haven't) (?:yet )?rsvp(?:'d|ed)?\b/i.test(currentBody) ||
     /\b(?:could|would|can) you\b[^.!?\n]{0,120}\b(?:rsvp|reply|respond|confirm|volunteer|help|attend|join|sign up)\b/i.test(
@@ -1012,7 +1021,8 @@ function latestMessageNeedsReply(thread: EmailReviewThread): boolean {
       /\b(?:volunteer|sign(?:ed|ing)? up|help|attend|join)\b/i.test(currentBody)) ||
     imperativeAvailabilityAsk ||
     imperativeChoiceReply ||
-    imperativeChoiceConfirmation
+    imperativeChoiceConfirmation ||
+    imperativeReplyWithDeadline
   );
 }
 
@@ -1031,19 +1041,74 @@ function directReplyRequestQuote(thread: EmailReviewThread): string | undefined 
   return undefined;
 }
 
-function directReplyAcknowledgement(body: string): string {
-  if (/\b(?:volunteer|sign(?:ed|ing)? up|help)\b/i.test(body)) {
-    const timing = /\b(?:today|tomorrow|tonight)\b/i.exec(body)?.[0];
-    return timing
-      ? `Thanks for checking about the volunteer need ${timing}. I appreciate the reminder.`
-      : 'Thanks for checking about the volunteer need. I appreciate the reminder.';
+function directReplyDeadlineQuote(thread: EmailReviewThread): string | undefined {
+  if (!hasPossibleSourceDeadline(thread)) return undefined;
+  const body = latestUnquotedBody(thread) ?? '';
+  const explicit =
+    /\b(?:by|before|until|no later than)\s+(?:today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}[/-]\d{1,2}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2})\b/i.exec(
+      body,
+    )?.[0];
+  if (explicit) return explicit;
+  return /\b(?:today|tomorrow|tonight)\b/i.exec(body)?.[0];
+}
+
+function directReplyFallbackDraft(thread: EmailReviewThread): string | undefined {
+  const body = latestUnquotedBody(thread) ?? '';
+  const timing = /\b(?:today|tomorrow|tonight)\b/i.exec(body)?.[0];
+  const participationAsk =
+    /\b(?:are you|could you|would you|can you)\s+(?:(?:be\s+)?(?:able|available|willing|interested)\s+to\s+)?(?:volunteer|sign(?:ed|ing)? up|help|attend|join)\b/i.test(
+      body,
+    ) ||
+    (/\bare you able to\s*\??/i.test(body) &&
+      /\b(?:volunteer|sign(?:ed|ing)? up|help|attend|join)\b/i.test(body)) ||
+    /\bplease\s+(?:let me know|confirm)\s+(?:whether|if) you\b[^.!?\n]{0,100}\b(?:can|could|will|are)\b[^.!?\n]{0,60}\b(?:attend|join|help|volunteer|available)\b/i.test(
+      body,
+    );
+  if (participationAsk) {
+    const when = timing ? ` ${timing}` : '';
+    if (/\b(?:attend|join)\b/i.test(body))
+      return [
+        `If you plan to attend: “Thanks for asking about the event${when}. I plan to attend.”`,
+        'If you cannot attend: “Thanks for asking. I cannot attend.”',
+        'Owner decision required: choose the accurate option, remove the other, and edit before sending.',
+      ].join('\n\n');
+    const subject = /\b(?:volunteer|sign(?:ed|ing)? up)\b/i.test(body)
+      ? 'the volunteer need'
+      : 'help';
+    return [
+      `If you can help: “Thanks for checking about ${subject}${when}. I can help.”`,
+      `If you cannot: “Thanks for checking about ${subject}${when}. I’m not available.”`,
+      'Owner decision required: choose the accurate option, remove the other, and edit before sending.',
+    ].join('\n\n');
   }
-  if (/\brsvp\b/i.test(body)) return 'Thanks for the RSVP reminder. I appreciate you reaching out.';
-  if (/\b(?:availability|schedule)\b/i.test(body))
-    return 'Thanks for asking about my availability. I appreciate you checking in.';
-  if (/\b(?:confirm|confirmation)\b/i.test(body))
-    return 'Thanks for the reminder to confirm. I appreciate you checking in.';
-  return 'Thanks for reaching out with your request. I appreciate you checking in.';
+
+  if (
+    /\brsvp\b/i.test(body) &&
+    /\bplease\s+(?:click|use|submit)\b[^.!?\n]{0,120}\b(?:link|rsvp)\b/i.test(body)
+  )
+    return [
+      'If you plan to attend: “Thanks for the RSVP reminder. I plan to attend.”',
+      'If you cannot attend: “Thanks for the reminder. I cannot attend.”',
+      'Owner decision required: choose the accurate option and submit the RSVP through the source link; this draft does not register it.',
+    ].join('\n\n');
+
+  const requestQuote = directReplyRequestQuote(thread);
+  if (!requestQuote) return undefined;
+  const requestType = /\b(?:availability|schedule)\b/i.test(body)
+    ? 'availability'
+    : /\b(?:confirm|confirmation|approve|approval)\b/i.test(body)
+      ? 'whether to confirm or approve'
+      : /\b(?:preferred|your)\s+(?:option|choice|selection)\b/i.test(body)
+        ? 'your preferred option'
+        : /\b(?:reply|respond)\b/i.test(body)
+          ? 'your reply'
+          : 'your answer';
+  const due = directReplyDeadlineQuote(thread);
+  return `Thanks for asking about ${requestType}${due ? ` ${due}` : ''}. [OWNER DECISION REQUIRED: add your ${requestType === 'availability' ? 'availability' : 'answer'} before sending.]`;
+}
+
+function isDirectReplyFallbackDraft(thread: EmailReviewThread, draft: string): boolean {
+  return directReplyFallbackDraft(thread) === draft;
 }
 
 /** Fill only a missing or rejected direct-request item from source-verified facts. */
@@ -1067,8 +1132,7 @@ function completeDirectReplyAssessments(
     const whyQuote = directReplyRequestQuote(thread);
     if (!whyQuote) return item;
     const body = latestUnquotedBody(thread) ?? '';
-    const deadlineWord = /\b(?:today|tomorrow|tonight)\b/i.exec(body)?.[0];
-    const possibleRelativeDeadline = hasPossibleSourceDeadline(thread) ? deadlineWord : undefined;
+    const sourceDeadlineQuote = directReplyDeadlineQuote(thread);
     return {
       threadId: thread.threadId,
       latestMessageId: thread.latestMessageId,
@@ -1079,10 +1143,10 @@ function completeDirectReplyAssessments(
         : 'The latest message directly asks for a response.',
       whyMessageId: thread.latestMessageId,
       whyQuote,
-      deadline: possibleRelativeDeadline
-        ? { messageId: thread.latestMessageId, quote: possibleRelativeDeadline }
+      deadline: sourceDeadlineQuote
+        ? { messageId: thread.latestMessageId, quote: sourceDeadlineQuote }
         : null,
-      draftBody: directReplyAcknowledgement(body),
+      draftBody: directReplyFallbackDraft(thread) ?? item.draftBody ?? '',
       draftSourceMessageIds: [thread.latestMessageId],
     };
   });
@@ -1117,6 +1181,7 @@ function draftClaimsStayInsideThread(
     )
   )
     return false;
+  if (isDirectReplyFallbackDraft(thread, draft)) return true;
   const ownerText = sourceMessages
     .filter((message) => singleEmail(message.from) === thread.ownerMailbox)
     .map((message) => message.text.toLowerCase())
@@ -1211,7 +1276,11 @@ export function emailReviewValidationIssues(
         .filter((message) => item.draftSourceMessageIds.includes(message.messageId))
         .map((message) => message.text)
         .join('\n');
-      if (item.draftBody && hasUnresolvedDraftPlaceholder(item.draftBody, sourceText))
+      if (
+        item.draftBody &&
+        hasUnresolvedDraftPlaceholder(item.draftBody, sourceText) &&
+        !isDirectReplyFallbackDraft(thread, item.draftBody)
+      )
         issues.push(`item_${index}:no_unresolved_draft_placeholders`);
       if (
         (item.draftBody?.match(/https?:\/\/\S+/gi) ?? []).some(
@@ -1384,7 +1453,11 @@ export function validateEmailReviewAnswer(
         .filter((message) => item.draftSourceMessageIds.includes(message.messageId))
         .map((message) => message.text)
         .join('\n');
-      if (hasUnresolvedDraftPlaceholder(item.draftBody, sourceText)) return undefined;
+      if (
+        hasUnresolvedDraftPlaceholder(item.draftBody, sourceText) &&
+        !isDirectReplyFallbackDraft(thread, item.draftBody)
+      )
+        return undefined;
       if (draftLinks.some((link) => !sourceText.includes(link.replace(/[.,;!?)]*$/, ''))))
         return undefined;
     } else if (item.draftBody !== null || item.recipient !== null) {
@@ -1554,8 +1627,15 @@ export function formatEmailReviewAnswer(
             }`
           : 'No deadline was identified in this review.',
     );
-    lines.push('**Draft for review — not saved or sent:**');
-    lines.push(item.draftBody as string);
+    const draftBody = item.draftBody as string;
+    lines.push(
+      isDirectReplyFallbackDraft(thread, draftBody)
+        ? draftBody.includes('If you can help:') || draftBody.includes('If you plan to attend:')
+          ? '**Draft alternatives — choose one and remove the other before sending:**'
+          : '**Draft incomplete — owner decision required before sending:**'
+        : '**Draft for review — not saved or sent:**',
+    );
+    lines.push(draftBody);
     if (/^[A-Za-z0-9_-]{3,128}$/.test(thread.threadId))
       lines.push(
         `[Open the source thread](https://mail.google.com/mail/u/0/#all/${thread.threadId})`,

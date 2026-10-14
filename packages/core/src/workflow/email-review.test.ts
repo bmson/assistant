@@ -518,10 +518,116 @@ describe('bounded no-send email review', () => {
     expect(repaired.answer?.items[0]).toMatchObject({
       disposition: 'draft',
       deadlineQuote: 'tomorrow',
-      draftBody:
-        'Thanks for checking about the volunteer need tomorrow. I appreciate the reminder.',
+      draftBody: [
+        'If you can help: “Thanks for checking about the volunteer need tomorrow. I can help.”',
+        'If you cannot: “Thanks for checking about the volunteer need tomorrow. I’m not available.”',
+        'Owner decision required: choose the accurate option, remove the other, and edit before sending.',
+      ].join('\n\n'),
     });
     expect(repaired.issues).toEqual([]);
+    const formatted = formatEmailReviewAnswer(
+      repaired.answer?.items ?? [],
+      emailReviewCoverage([thread.threadId], [thread], [search(thread.threadId)]),
+    );
+    expect(formatted).toContain(
+      '**Draft alternatives — choose one and remove the other before sending:**',
+    );
+  });
+
+  it('marks generic reply-by requests incomplete and does not draft marketing mail', async () => {
+    const byFridayMessages = messages('please-reply-by-friday');
+    const byFridayLatest = required(byFridayMessages.at(-1), 'latest message');
+    byFridayLatest.text = 'Please reply by Friday with your preferred option.';
+    byFridayLatest.sourceLength = byFridayLatest.text.length;
+    const byFridayThread = required(
+      emailReviewCompleteThread('please-reply-by-friday', 'owner@example.com', [
+        search('please-reply-by-friday'),
+        read('please-reply-by-friday', byFridayMessages),
+      ]),
+      'complete reply-by deadline thread',
+    );
+    const byFridayNoReply = {
+      ...required(validAnswer(byFridayThread.threadId).items[0], 'by-Friday assessment'),
+      disposition: 'no_reply' as const,
+      recipient: null,
+      whyQuote: byFridayLatest.text,
+      deadline: { messageId: byFridayThread.latestMessageId, quote: 'by Friday' },
+      draftBody: null,
+      draftSourceMessageIds: [],
+    };
+    const byFridayRepair = await generateValidatedEmailReview([byFridayThread], async () => ({
+      ok: true,
+      value: { items: [byFridayNoReply] },
+    }));
+    expect(byFridayRepair.answer?.items[0]).toMatchObject({
+      disposition: 'draft',
+      deadlineQuote: 'by Friday',
+      draftBody: expect.stringMatching(/OWNER DECISION REQUIRED: add your answer before sending/),
+    });
+    expect(byFridayRepair.answer?.items[0]?.draftBody).toContain('your preferred option by Friday');
+
+    const promotionalMessages = messages('promotional-reply-by-friday');
+    const promotionalLatest = required(promotionalMessages.at(-1), 'latest message');
+    promotionalLatest.subject = 'Weekly newsletter coupon';
+    promotionalLatest.text = 'Please reply by Friday to claim this coupon.';
+    promotionalLatest.sourceLength = promotionalLatest.text.length;
+    const promotionalThread = required(
+      emailReviewCompleteThread('promotional-reply-by-friday', 'owner@example.com', [
+        search('promotional-reply-by-friday'),
+        read('promotional-reply-by-friday', promotionalMessages),
+      ]),
+      'complete promotional thread',
+    );
+    const promotionalNoReply = {
+      ...required(validAnswer(promotionalThread.threadId).items[0], 'promotional assessment'),
+      disposition: 'no_reply' as const,
+      recipient: null,
+      whyQuote: promotionalLatest.text,
+      deadline: { messageId: promotionalThread.latestMessageId, quote: 'by Friday' },
+      draftBody: null,
+      draftSourceMessageIds: [],
+    };
+    expect(
+      emailReviewValidationIssues({ items: [promotionalNoReply] }, [promotionalThread]),
+    ).not.toContain('item_0:direct_latest_request_requires_review_draft');
+  });
+
+  it('offers owner-chosen alternatives for direct help and attendance questions', async () => {
+    for (const [id, text, expected] of [
+      ['direct-help-question', 'Could you help at the event tomorrow?', 'If you can help:'],
+      [
+        'confirmed-attendance-question',
+        'Please confirm whether you can attend tomorrow.',
+        'If you plan to attend:',
+      ],
+    ] as const) {
+      const sourceMessages = messages(id);
+      const latest = required(sourceMessages.at(-1), 'latest message');
+      latest.text = text;
+      latest.sourceLength = text.length;
+      const thread = required(
+        emailReviewCompleteThread(id, 'owner@example.com', [search(id), read(id, sourceMessages)]),
+        `complete ${id} thread`,
+      );
+      const noReply = {
+        ...required(validAnswer(thread.threadId).items[0], `${id} assessment`),
+        disposition: 'no_reply' as const,
+        recipient: null,
+        whyQuote: text,
+        deadline: null,
+        draftBody: null,
+        draftSourceMessageIds: [],
+      };
+      const repaired = await generateValidatedEmailReview([thread], async () => ({
+        ok: true,
+        value: { items: [noReply] },
+      }));
+      expect(repaired.answer?.items[0]?.draftBody).toContain(expected);
+      expect(repaired.answer?.items[0]?.draftBody).toContain(
+        'Owner decision required: choose the accurate option',
+      );
+      expect(repaired.answer?.items[0]?.draftBody).not.toContain('[OWNER DECISION REQUIRED:');
+    }
   });
 
   it('does not turn a bare event date into a deadline', () => {
