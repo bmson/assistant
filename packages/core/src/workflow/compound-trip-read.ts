@@ -2081,6 +2081,67 @@ function egenciaItineraryReference(value: string): string | undefined {
   return /\bEgencia(?:\s+(?:reference|ref)(?:\s*#)?)?\s+([0-9]{6,16})\b/i.exec(value)?.[1];
 }
 
+function sameSourceTableLeg(
+  left: CompoundTripFlightSegment,
+  right: CompoundTripFlightSegment,
+): boolean {
+  const clock = parseClockMinutes(left.departureTime);
+  return (
+    left.threadId === right.threadId &&
+    left.messageId === right.messageId &&
+    left.flightNumber === right.flightNumber &&
+    left.departureDate === right.departureDate &&
+    clock !== undefined &&
+    clock === parseClockMinutes(right.departureTime)
+  );
+}
+
+function compatibleTableFields(
+  segment: CompoundTripFlightSegment,
+  table: CompoundTripFlightSegment,
+): boolean {
+  return !(['originAirport', 'destinationAirport', 'arrivalDate', 'arrivalTime'] as const).some(
+    (field) => {
+      const current = segment[field];
+      const candidate = table[field];
+      return (
+        current !== undefined &&
+        candidate !== undefined &&
+        (field === 'arrivalTime'
+          ? parseClockMinutes(current) !== parseClockMinutes(candidate)
+          : current !== candidate)
+      );
+    },
+  );
+}
+
+/** Enrich only one compatible exact row from the same completely read message. */
+function mergeSourceTableSegments(
+  extracted: ReadonlyArray<CompoundTripFlightSegment>,
+  tables: ReadonlyArray<CompoundTripFlightSegment>,
+): CompoundTripFlightSegment[] {
+  const used = new Set<CompoundTripFlightSegment>();
+  const merged = extracted.map((segment) => {
+    const matches = tables.filter((table) => sameSourceTableLeg(segment, table));
+    const table = matches.length === 1 ? matches[0] : undefined;
+    if (!table) return segment;
+    const fields = ['originAirport', 'destinationAirport', 'arrivalDate', 'arrivalTime'] as const;
+    if (!compatibleTableFields(segment, table)) return segment;
+    used.add(table);
+    const enriched = { ...segment };
+    for (const field of fields) {
+      if (enriched[field] === undefined && table[field] !== undefined)
+        enriched[field] = table[field];
+    }
+    // This table identifier supports observations only; it does not supply a
+    // missing booking identity, direction or time zone for route selection.
+    if (!enriched.itineraryReference && table.itineraryReference)
+      enriched.itineraryReference = table.itineraryReference;
+    return enriched;
+  });
+  return [...merged, ...tables.filter((table) => !used.has(table))];
+}
+
 function sourceLocalBookingLines(
   request: PersonalReadRequest,
   threads: ReadonlyArray<ReadToolEvidence>,
@@ -2088,6 +2149,7 @@ function sourceLocalBookingLines(
   segments: ReadonlyArray<CompoundTripFlightSegment>,
 ): string[] {
   const links = threadSourceLinks(threads);
+  const tableSources = threadMessages(threads).flatMap(parseEgenciaTableSegments);
   const day = request.timeWindow?.timeMin.slice(0, 10);
   const observed = segments.filter(
     (segment) =>
@@ -2127,23 +2189,57 @@ function sourceLocalBookingLines(
           segment.bookingReference === candidate.bookingReference) ||
         (itineraryReference !== undefined && segment.itineraryReference === itineraryReference),
     );
-    const calendarCarrier = explicitCarrierLabel(text(candidate.event.summary, 240));
-    const bookingCarriers = [
-      ...new Set(
-        sameReference.flatMap((segment) => {
-          const carrier =
-            /\bOperated by ([^\r\n]{1,48})/i.exec(segment.excerpt)?.[1]?.trim() ??
-            explicitCarrierLabel(segment.excerpt, segment.flightNumber);
-          return carrier ? [carrier] : [];
-        }),
-      ),
-    ];
-    if (calendarCarrier && bookingCarriers.length === 1 && bookingCarriers[0] !== calendarCarrier)
-      lines.push(
-        `Source conflict within the same booking reference: the calendar names ${markdownText(calendarCarrier)}, while the checked booking email names ${markdownText(bookingCarriers[0] ?? '')}. The exact calendar-to-leg match and departure time zone remain unverified.`,
+    const calendarCarrier = carrierRoleLabel(
+      `${text(candidate.event.summary, 240)}\n${text(candidate.event.description, 1200)}`,
+    );
+    for (const segment of sameReference.slice(0, 4)) {
+      const tables = tableSources.filter(
+        (table) => sameSourceTableLeg(table, segment) && compatibleTableFields(segment, table),
       );
+      const bookingCarrier = carrierRoleLabel(
+        tables.length === 1 ? (tables[0]?.excerpt ?? segment.excerpt) : segment.excerpt,
+        segment.flightNumber,
+      );
+      if (!calendarCarrier || !bookingCarrier || calendarCarrier.name === bookingCarrier.name)
+        continue;
+      const bookedInstant = sourceLocalInstant(segment);
+      const exactLeg =
+        candidate.flightNumber === segment.flightNumber &&
+        candidate.originAirport !== undefined &&
+        candidate.originAirport === segment.originAirport &&
+        candidate.arrivalAirport !== undefined &&
+        candidate.arrivalAirport === segment.destinationAirport &&
+        bookedInstant !== undefined &&
+        Math.abs(Date.parse(candidate.instant) - bookedInstant) <= 5 * 60_000;
+      const comparableRoles =
+        calendarCarrier.role !== 'unspecified' && calendarCarrier.role === bookingCarrier.role;
+      lines.push(
+        `${exactLeg && comparableRoles ? 'Source conflict for the same dated flight leg' : 'Unresolved carrier difference under the same itinerary reference'}: calendar names ${markdownText(calendarCarrier.name)} (${carrierRoleDescription(calendarCarrier.role)}); booking email names ${markdownText(bookingCarrier.name)} (${carrierRoleDescription(bookingCarrier.role)}) for ${segment.flightNumber} ${segment.originAirport ?? 'origin not stated'}→${segment.destinationAirport ?? 'destination not stated'}.${exactLeg && comparableRoles ? '' : ' Comparable carrier roles and the exact calendar-to-leg match are not both established; these may be different legs or a codeshare.'}`,
+      );
+    }
   }
   return lines;
+}
+
+function carrierRoleLabel(
+  value: string,
+  flightNumber?: string,
+): { name: string; role: 'operating' | 'marketing' | 'unspecified' } | undefined {
+  const explicit =
+    /\b(operated by|operating carrier\s*:|marketed by|marketing carrier\s*:)\s*([^\r\n.;]{1,48})/i.exec(
+      value,
+    );
+  if (explicit?.[1] && explicit[2])
+    return {
+      name: explicit[2].trim(),
+      role: /^operat/i.test(explicit[1]) ? 'operating' : 'marketing',
+    };
+  const name = explicitCarrierLabel(value, flightNumber);
+  return name ? { name, role: 'unspecified' } : undefined;
+}
+
+function carrierRoleDescription(role: 'operating' | 'marketing' | 'unspecified'): string {
+  return role === 'unspecified' ? 'carrier role unspecified' : `${role} carrier`;
 }
 
 function hotelCandidates(
@@ -2756,23 +2852,10 @@ export function compoundTripReadProjection(
       ? tripExtraction.segments
       : []
     : parseFlightSegments(sourceMessages);
-  const flightSegments = [
-    ...extractedSegments,
-    ...sourceMessages
-      .flatMap(parseEgenciaTableSegments)
-      .filter(
-        (segment) =>
-          !extractedSegments.some(
-            (existing) =>
-              existing.threadId === segment.threadId &&
-              existing.messageId === segment.messageId &&
-              existing.flightNumber === segment.flightNumber &&
-              existing.departureDate === segment.departureDate &&
-              parseClockMinutes(existing.departureTime) ===
-                parseClockMinutes(segment.departureTime),
-          ),
-      ),
-  ];
+  const flightSegments = mergeSourceTableSegments(
+    extractedSegments,
+    sourceMessages.flatMap(parseEgenciaTableSegments),
+  );
   const candidates = flightCandidates(request, calendarRows);
   const selectedFlight = nextOutboundFlight(request, candidates, flightSegments);
   const flight = selectedFlight.flight;

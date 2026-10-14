@@ -4864,7 +4864,12 @@ San Francisco (SFO-San Francisco Intl.)`;
     expect(projection.text).toContain(
       'A return is an inference from those reversed itinerary groups',
     );
-    expect(projection.text).toContain('Source conflict within the same booking reference');
+    expect(projection.text).toContain(
+      'Unresolved carrier difference under the same itinerary reference',
+    );
+    expect(projection.text).toContain('carrier role unspecified');
+    expect(projection.text).toContain('operating carrier');
+    expect(projection.text).not.toContain('Source conflict');
     expect(projection.text).toContain('United');
     expect(projection.text).toContain('Lufthansa');
     expect(projection.text).toContain('https://mail.google.com/mail/u/0/#all/egencia-table');
@@ -4873,6 +4878,115 @@ San Francisco (SFO-San Francisco Intl.)`;
     expect(projection.text).not.toContain('Europe/Berlin');
     expect(compoundTripRoute(read, evidence)).toBeUndefined();
   });
+  const thinQuote = 'LH LH778\nOperated by Lufthansa\nDEPARTURE\nOct 17, 2026 at 6:00 am';
+  function thinExtraction(threadId = 'egencia-table', excerpt = thinQuote): CompoundTripExtraction {
+    return {
+      status: 'complete',
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: ['table-message'],
+      segments: [
+        {
+          threadId,
+          messageId: 'table-message',
+          subject: 'Flight - BOOKED - Berlin',
+          flightNumber: 'LH778',
+          departureDate: '2026-10-17',
+          departureTime: '06:00 AM',
+          direction: 'unknown',
+          excerpt,
+        },
+      ],
+    };
+  }
+  it('preserves complementary airports and arrival fields when valid extraction has only departure fields', () => {
+    const { read, evidence } = sources();
+    const projection = upcomingFlightReadProjection(read, evidence, thinExtraction());
+    expect(projection.text).toContain('LH778 BER→SFO; departs 2026-10-17 06:00 AM');
+    expect(projection.text).toContain('arrives 2026-10-17 11:45 AM');
+    expect(projection.text.match(/Booking email observation/g)).toHaveLength(1);
+    expect(projection.flight).toBeUndefined();
+    expect(projection.text).toContain('departure time zone not stated');
+    expect(projection.text).toContain('direction not explicitly stated');
+    expect(compoundTripRoute(read, evidence)).toBeUndefined();
+  });
+  it('never fills a thin extraction with another thread’s table fields even when message and leg keys match', () => {
+    const { read, evidence } = sources();
+    evidence[1] = row(
+      'gmail.search',
+      { query: read.mailQuery },
+      {
+        complete: true,
+        hasMore: false,
+        results: [
+          { threadId: 'egencia-table', subject: 'Flight - BOOKED - Berlin' },
+          { threadId: 'thin-source', subject: 'Flight - BOOKED - Berlin' },
+        ],
+      },
+    );
+    evidence.push(
+      row(
+        'gmail.read_thread',
+        { threadId: 'thin-source' },
+        {
+          complete: true,
+          hasMore: false,
+          messages: [
+            { messageId: 'table-message', subject: 'Flight - BOOKED - Berlin', text: thinQuote },
+          ],
+        },
+      ),
+    );
+    const projection = upcomingFlightReadProjection(read, evidence, thinExtraction('thin-source'));
+    const foreignLine = projection.text
+      .split('\n')
+      .find((line) => line.includes('#all/thin-source'));
+    expect(foreignLine).toContain('LH778 origin not stated→destination not stated');
+    expect(foreignLine).toContain('arrival date or clock time not stated');
+    expect(foreignLine).not.toContain('BER→SFO');
+    expect(projection.text).toContain('LH778 BER→SFO');
+  });
+  it.each(['marketing', 'operating'] as const)(
+    'requires comparable carrier roles and an exact dated leg before reporting a conflict (%s calendar role)',
+    (role) => {
+      const { read, evidence } = sources();
+      const zonedQuote = 'Flight LH778 departs 2026-10-17 at 6:00 AM UTC.';
+      evidence[2] = row(
+        'gmail.read_thread',
+        { threadId: 'egencia-table' },
+        {
+          complete: true,
+          hasMore: false,
+          messages: [
+            {
+              messageId: 'table-message',
+              subject: 'Flight - BOOKED - Berlin',
+              text: `${table}\n${zonedQuote}`,
+            },
+          ],
+        },
+      );
+      const calendar = evidence[0]?.result as { events: Array<Record<string, unknown>> };
+      const event = calendar.events[1];
+      if (!event) throw new Error('Missing calendar flight');
+      event.summary = 'BER → SFO flight (United); flight LH778';
+      event.start = '2026-10-17T06:00:00Z';
+      event.description = `Egencia 555666777888. ${role === 'operating' ? 'Operated by' : 'Marketed by'} United.`;
+      const extraction = thinExtraction('egencia-table', zonedQuote);
+      const segment = extraction.segments[0];
+      if (!segment) throw new Error('Missing source segment');
+      segment.departureTimeZone = 'UTC';
+      const projection = upcomingFlightReadProjection(read, evidence, extraction);
+      expect(projection.text).toContain(`${role} carrier`);
+      expect(projection.text).toContain('Lufthansa (operating carrier)');
+      if (role === 'marketing') {
+        expect(projection.text).toContain('Unresolved carrier difference');
+        expect(projection.text).not.toContain('Source conflict');
+      } else {
+        expect(projection.text).toContain('Source conflict for the same dated flight leg');
+      }
+    },
+  );
   it('retains checked table facts when the optional extractor is unavailable or returns no facts', () => {
     const { read, evidence } = sources();
     for (const status of ['complete', 'unavailable'] as const) {
