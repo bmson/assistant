@@ -1,3 +1,7 @@
+import {
+  conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
+} from '@assistant/persistence';
 import { describe, expect, it } from 'vitest';
 import { EMAIL_REVIEW_QUERY } from './email-review.js';
 import {
@@ -39,7 +43,16 @@ describe('detectPersonalReadRequest', () => {
     expect(request?.verification).toBeUndefined();
     expect(request?.scopeIssue).toBeUndefined();
     expect(request?.upcomingFlightDiscovery).toBeUndefined();
-    expect(request?.mailQuery).toContain('hotel');
+    expect(request?.mailQueries?.map((entry) => entry.category)).toEqual(['flight', 'lodging']);
+    expect(request?.mailQueries?.[0]?.query).toContain('subject:(flight booking)');
+    expect(request?.mailQueries?.[0]?.query).toContain('subject:(flight booked)');
+    expect(request?.mailQueries?.[0]?.query).toContain('subject:(flight reserved)');
+    expect(request?.mailQueries?.[1]?.query).toContain('subject:(hotel reservation)');
+    expect(request?.mailQueries?.[1]?.query).toContain('subject:(hotel reserved)');
+    expect(request?.mailQueries?.[1]?.query).toContain('subject:(booking confirmation)');
+    expect(request?.mailQueries?.[1]?.query).toContain('subject:(reservation confirmation)');
+    expect(request?.mailQueries?.[1]?.query).toContain('subject:(your reservation)');
+    expect(request?.mailQuery).not.toContain('hotel');
   });
 
   it('caps compound trip reads and never resumes from other-task search or calendar receipts', () => {
@@ -72,17 +85,34 @@ describe('detectPersonalReadRequest', () => {
       'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
     const request = detectPersonalReadRequest([{ role: 'user', content: requestText }]);
     if (!request?.mailQuery) throw new Error('Expected the compound trip read query');
+    const flightQuery = request.mailQueries?.[0]?.query;
+    const lodgingQuery = request.mailQueries?.[1]?.query;
+    if (!flightQuery || !lodgingQuery) throw new Error('Expected separate trip mail queries');
     const evidence: ReadToolEvidence[] = [
       {
         toolName: 'gmail.search',
         status: 'succeeded',
         fromCurrentTask: true,
-        args: { query: request.mailQuery },
+        args: { query: lodgingQuery },
         result: {
           results: [
             { threadId: 'hotel-one', subject: 'Hotel reservation confirmation' },
             { threadId: 'hotel-two', subject: 'Hotel booking confirmation' },
-            { threadId: 'flight-one', subject: 'Flight LH 777 booking confirmation' },
+            { threadId: 'flight-one', subject: 'Flight booking confirmation' },
+          ],
+          complete: true,
+          hasMore: false,
+        },
+      },
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: flightQuery },
+        result: {
+          results: [
+            { threadId: 'newsletter', subject: 'Airline news: flight routes this week' },
+            { threadId: 'flight-one', subject: 'Flight booking confirmation' },
           ],
           complete: true,
           hasMore: false,
@@ -90,6 +120,162 @@ describe('detectPersonalReadRequest', () => {
       },
     ];
     expect(gmailThreadIdsToRead(evidence, request)).toEqual(['flight-one', 'hotel-one']);
+  });
+
+  it('binds trip searches and continuation cursors to each booking-intent category', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Find my next trip from my booking emails and calendar. Confirm the flight and hotel. Plan the route from the destination airport to my hotel.',
+      ),
+      { now: new Date('2026-10-13T18:00:00.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    if (!request?.mailQueries?.length) throw new Error('Expected typed trip queries');
+    const [flight, lodging] = request.mailQueries;
+    if (!flight || !lodging) throw new Error('Expected flight and lodging query entries');
+    expect(groundReadToolInput(request, 'gmail.search', { query: 'untrusted' }, [])).toMatchObject({
+      query: flight.query,
+      maxResults: 20,
+    });
+    const flightPage: ReadToolEvidence = {
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { query: flight.query, maxResults: 20 },
+      result: { results: [], complete: true, hasMore: false },
+    };
+    const calendarPage: ReadToolEvidence = {
+      toolName: 'calendar.list_events',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: {
+        timeMin: request.timeWindow?.timeMin,
+        timeMax: request.timeWindow?.timeMax,
+        calendarIds: [],
+      },
+      result: { events: [], complete: true },
+    };
+    expect(nextRequiredReadTool(request, [calendarPage, flightPage])).toBe('gmail.search');
+    expect(
+      groundReadToolInput(request, 'gmail.search', { query: 'untrusted', pageToken: 'fake' }, [
+        flightPage,
+      ]),
+    ).toMatchObject({ query: lodging.query, maxResults: 20 });
+    const lodgingPage: ReadToolEvidence = {
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { query: lodging.query, maxResults: 20 },
+      result: { results: [], complete: false, hasMore: true, nextPageToken: 'lodging-next' },
+    };
+    expect(
+      groundReadToolInput(request, 'gmail.search', { query: 'untrusted', pageToken: 'fake' }, [
+        flightPage,
+        lodgingPage,
+      ]),
+    ).toMatchObject({ query: lodging.query, maxResults: 20, pageToken: 'lodging-next' });
+    expect(
+      groundReadToolInput(request, 'gmail.search', { query: 'untrusted' }, [
+        {
+          ...flightPage,
+          result: {
+            results: [],
+            complete: false,
+            hasMore: true,
+            nextPageToken: 'flight-next',
+          },
+        },
+      ]),
+    ).toMatchObject({ query: flight.query, pageToken: 'flight-next' });
+  });
+
+  it('uses the two-thread trip budget for one source-matched flight and one source-matched lodging candidate', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Find my next trip from my booking emails and calendar. Confirm the flight and hotel. Plan the route from the destination airport to my hotel.',
+      ),
+    );
+    if (!request?.mailQueries?.length) throw new Error('Expected typed trip queries');
+    const flightQuery = request.mailQueries.find((entry) => entry.category === 'flight')?.query;
+    const lodgingQuery = request.mailQueries.find((entry) => entry.category === 'lodging')?.query;
+    if (!flightQuery || !lodgingQuery) throw new Error('Expected flight and lodging searches');
+    const evidence: ReadToolEvidence[] = [
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: flightQuery },
+        result: {
+          results: [
+            { threadId: 'flight-candidate-a', subject: 'Flight booking confirmation' },
+            { threadId: 'flight-candidate-b', subject: 'Airline itinerary confirmation' },
+          ],
+          complete: true,
+          hasMore: false,
+        },
+      },
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: lodgingQuery },
+        result: {
+          results: [{ threadId: 'lodging-candidate', subject: 'Hotel reservation confirmation' }],
+          complete: true,
+          hasMore: false,
+        },
+      },
+    ];
+    expect(gmailThreadIdsToRead(evidence, request)).toEqual([
+      'flight-candidate-a',
+      'lodging-candidate',
+    ]);
+  });
+
+  it('finds booked flight and generic reservation subjects only when returned metadata substantiates each category', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Find my next trip from my booking emails and calendar. Confirm the flight and hotel. Plan the route from the destination airport to my hotel.',
+      ),
+    );
+    if (!request?.mailQueries?.length) throw new Error('Expected typed trip queries');
+    const flightQuery = request.mailQueries.find((entry) => entry.category === 'flight')?.query;
+    const lodgingQuery = request.mailQueries.find((entry) => entry.category === 'lodging')?.query;
+    if (!flightQuery || !lodgingQuery) throw new Error('Expected flight and lodging searches');
+    const evidence: ReadToolEvidence[] = [
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: flightQuery },
+        result: {
+          results: [
+            { threadId: 'booked-flight', subject: 'Fwd: Flight - BOOKED - City details' },
+            { threadId: 'flight-news', subject: 'Flight booking offers for next summer' },
+          ],
+          complete: true,
+          hasMore: false,
+        },
+      },
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: lodgingQuery },
+        result: {
+          results: [
+            { threadId: 'generic-confirmation', subject: 'Booking confirmation' },
+            {
+              threadId: 'your-reservation',
+              subject: 'Your reservation',
+              snippet: 'Hotel accommodation and check-in details',
+            },
+          ],
+          complete: true,
+          hasMore: false,
+        },
+      },
+    ];
+    expect(gmailThreadIdsToRead(evidence, request)).toEqual(['booked-flight', 'your-reservation']);
   });
 
   it('recognizes only the direct, bounded, explicitly no-send email review request', () => {
@@ -525,6 +711,7 @@ describe('detectPersonalReadRequest', () => {
       queryTerms: [],
       firstToolName: 'calendar.list_events',
       requiresThreadRead: false,
+      includeCalendarOverlapSummary: true,
       timeWindow: {
         timeMin: '2026-10-14T07:00:00.000Z',
         timeMax: '2026-10-15T07:00:00.000Z',
@@ -536,6 +723,29 @@ describe('detectPersonalReadRequest', () => {
       timeMin: '2026-10-14T07:00:00.000Z',
       timeMax: '2026-10-15T07:00:00.000Z',
     });
+  });
+
+  it('detects a concise practical calendar briefing without coupling to a named skill', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Use my saved skill "Clear task planning" to review my calendar for tomorrow and give me a short practical briefing. Say which saved skill you used, or clearly say if that skill could not be retrieved. Use actual calendar evidence, show source links, and do not change anything.',
+      ),
+      {
+        now: new Date('2026-10-13T18:08:55.000Z'),
+        timeZone: 'America/Los_Angeles',
+      },
+    );
+    expect(request).toMatchObject({
+      kind: 'calendar',
+      firstToolName: 'calendar.list_events',
+      includeCalendarBriefing: true,
+      includeCalendarOverlapSummary: true,
+      timeWindow: {
+        timeMin: '2026-10-14T07:00:00.000Z',
+        timeMax: '2026-10-15T07:00:00.000Z',
+      },
+    });
+    expect(request?.mailQuery).toBeUndefined();
   });
 
   it.each(['Make this sentence clear.', 'Is the explanation clear?', 'Empty my inbox tomorrow.'])(
@@ -663,7 +873,7 @@ describe('detectPersonalReadRequest', () => {
     });
   });
 
-  it('preserves the bounded owner question as the semantic memory search', () => {
+  it('uses focused history passes and searches saved memory only when allowed', () => {
     const text =
       'What preferences have I previously told you about the Assistant’s UI and how its replies should look? Use saved memory or our earlier conversations. Distinguish what I actually said from your inference, mention your sources, and do not guess or save new memories.';
     const request = detectPersonalReadRequest(turn(text));
@@ -671,21 +881,47 @@ describe('detectPersonalReadRequest', () => {
       kind: 'memory',
       firstToolName: 'conversations.search',
       memoryQuery: text,
-      conversationQuery: text,
+      conversationQuery: 'preferences UI replies',
+      conversationFollowupQuery:
+        'Owner-authored statements and corrections about preferences UI replies',
+      searchSavedMemory: true,
+      memorySearchQuery: 'preferences UI replies',
     });
     if (!request) throw new Error('Expected a personal memory request');
-    expect(buildReadToolInput(request, 'conversations.search', [])).toEqual({
-      query: text,
+    const first = buildReadToolInput(request, 'conversations.search', []);
+    expect(first).toEqual({
+      query: 'preferences UI replies',
+      limit: 20,
+    });
+    expect(JSON.stringify(first)).not.toContain('Do not guess or save new memories');
+    expect(JSON.stringify(first)).not.toMatch(/\b(?:guess|save|source)\b/i);
+
+    const firstRead = {
+      toolName: 'conversations.search',
+      status: 'succeeded',
+      args: first,
+      result: { matches: [] },
+    };
+    expect(nextRequiredReadTool(request, [firstRead])).toBe('conversations.search');
+    const second = buildReadToolInput(request, 'conversations.search', [firstRead]);
+    expect(second).toEqual({
+      query: 'Owner-authored statements and corrections about preferences UI replies',
+      limit: 20,
+    });
+    const bothReads = [firstRead, { ...firstRead, args: second }];
+    expect(nextRequiredReadTool(request, bothReads)).toBe('memory.recall');
+    expect(buildReadToolInput(request, 'memory.recall', bothReads)).toEqual({
+      query: 'preferences UI replies',
       limit: 10,
     });
-    const input = buildReadToolInput(request, 'conversations.search', []) ?? {};
     expect(
       nextRequiredReadTool(request, [
+        ...bothReads,
         {
-          toolName: 'conversations.search',
+          toolName: 'memory.recall',
           status: 'succeeded',
-          args: input,
-          result: { matches: [] },
+          args: { query: 'preferences UI replies', limit: 10 },
+          result: { memories: [] },
         },
       ]),
     ).toBeUndefined();
@@ -693,11 +929,171 @@ describe('detectPersonalReadRequest', () => {
 
   it('routes a direct earlier-conversation question to a bounded history search', () => {
     const text = 'What did I tell you earlier about how I prefer meeting summaries?';
-    expect(detectPersonalReadRequest(turn(text))).toMatchObject({
+    const request = detectPersonalReadRequest(turn(text));
+    expect(request).toMatchObject({
       kind: 'memory',
       firstToolName: 'conversations.search',
-      conversationQuery: text,
+      conversationQuery: 'prefer meeting summaries',
+      searchSavedMemory: false,
     });
+    if (!request) throw new Error('Expected historical conversation search');
+    const first = buildReadToolInput(request, 'conversations.search', []);
+    if (!first) throw new Error('Expected the first bounded history query');
+    for (const term of request.queryTerms)
+      expect(String(first.query).toLowerCase()).toContain(term);
+    const firstRead = {
+      toolName: 'conversations.search',
+      status: 'succeeded',
+      args: first,
+      result: { matches: [] },
+    };
+    const second = buildReadToolInput(request, 'conversations.search', [firstRead]);
+    expect(nextRequiredReadTool(request, [firstRead])).toBe('conversations.search');
+    expect(second).toMatchObject({ query: request.conversationFollowupQuery, limit: 20 });
+    expect(
+      nextRequiredReadTool(request, [firstRead, { ...firstRead, args: second }]),
+    ).toBeUndefined();
+  });
+
+  it('bounds repeated failed history searches and never adds unrequested saved-memory reads', () => {
+    const request = detectPersonalReadRequest(
+      turn('What did I tell you earlier about how I prefer meeting summaries?'),
+    );
+    if (!request) throw new Error('Expected historical conversation search');
+    const firstArgs = buildReadToolInput(request, 'conversations.search', []);
+    const failedFirst = {
+      toolName: 'conversations.search',
+      status: 'failed',
+      args: firstArgs,
+      result: { error: 'private backend detail' },
+    };
+    expect(nextRequiredReadTool(request, [failedFirst])).toBe('conversations.search');
+    expect(buildReadToolInput(request, 'conversations.search', [failedFirst])).toEqual(firstArgs);
+
+    const failedSecond = { ...failedFirst };
+    expect(nextRequiredReadTool(request, [failedFirst, failedSecond])).toBe('conversations.search');
+    const followup = buildReadToolInput(request, 'conversations.search', [
+      failedFirst,
+      failedSecond,
+    ]);
+    if (!followup) throw new Error('Expected a bounded follow-up search');
+    expect(followup.query).toBe(request.conversationFollowupQuery);
+    const failedFollowup = { ...failedFirst, args: followup };
+    expect(
+      nextRequiredReadTool(request, [failedFirst, failedSecond, failedFollowup, failedFollowup]),
+    ).toBeUndefined();
+    expect(request.searchSavedMemory).toBe(false);
+    expect(
+      nextRequiredReadTool(request, [failedFirst, failedSecond, failedFollowup, failedFollowup]),
+    ).not.toBe('memory.recall');
+  });
+
+  it('forces only current-task continuation pages for a truncated historical search', () => {
+    const request = detectPersonalReadRequest(
+      turn('What did I tell you earlier about my meeting-summary format?'),
+    );
+    if (!request) throw new Error('Expected historical conversation search');
+    const sourceId = '2a4ebf42-1753-4f5a-8ddc-8cc15b2271b8';
+    const sourceConversationId = 'd6c376b5-0532-40d7-a5f1-9efc86781af4';
+    const sourceText = `I prefer concise meeting summaries with decisions at the top. ${'context '.repeat(5_000)}`;
+    const searchResult = {
+      mode: 'semantic',
+      matches: [
+        {
+          messageId: sourceId,
+          conversationId: sourceConversationId,
+          text: sourceText,
+          role: 'user',
+          origin: 'owner',
+          speakerRevision: conversationMessageSpeakerRevision(
+            sourceId,
+            sourceText,
+            'user',
+            'owner',
+          ),
+          sourceRevision: conversationMessageSourceRevision(sourceId, sourceText),
+          createdAt: '2026-10-10T12:00:00.000Z',
+        },
+      ],
+    };
+    const searchJson = JSON.stringify(searchResult);
+    expect(searchJson.length).toBeGreaterThan(8_000);
+    const search = {
+      id: '4a4f71b4-efaa-49f4-b29b-5821f7becc77',
+      toolName: 'conversations.search',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { query: request.conversationQuery, limit: 20 },
+      result: searchResult,
+    };
+    const firstPageInput = buildReadToolInput(request, 'tools.read_result', [search]);
+    expect(nextRequiredReadTool(request, [search])).toBe('tools.read_result');
+    expect(firstPageInput).toEqual({ toolCallId: search.id, offset: 8_000 });
+    const unboundSearch = { ...search, fromCurrentTask: false };
+    expect(nextRequiredReadTool(request, [unboundSearch])).toBe('conversations.search');
+    expect(buildReadToolInput(request, 'tools.read_result', [unboundSearch])).toEqual({});
+
+    const foreignPage = {
+      id: 'f7fd2e17-9ef3-4f2a-b686-ff702aa71bf1',
+      toolName: 'tools.read_result',
+      status: 'succeeded',
+      fromCurrentTask: false,
+      args: firstPageInput,
+      result: {
+        offset: 8_000,
+        totalChars: searchJson.length,
+        chunk: searchJson.slice(8_000, 22_000),
+        hasMore: true,
+      },
+    };
+    expect(buildReadToolInput(request, 'tools.read_result', [search, foreignPage])).toEqual(
+      firstPageInput,
+    );
+
+    const firstPage = {
+      ...foreignPage,
+      id: 'a0749114-0ee8-432b-bf85-4d9b6e695204',
+      fromCurrentTask: true,
+    };
+    const secondPageInput = buildReadToolInput(request, 'tools.read_result', [search, firstPage]);
+    expect(nextRequiredReadTool(request, [search, firstPage])).toBe('tools.read_result');
+    expect(secondPageInput).toEqual({ toolCallId: search.id, offset: 22_000 });
+
+    const secondPage = {
+      id: '710ab90e-a552-41b4-b934-d1d43fae9ef0',
+      toolName: 'tools.read_result',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: secondPageInput,
+      result: {
+        offset: 22_000,
+        totalChars: searchJson.length,
+        chunk: searchJson.slice(22_000, 36_000),
+        hasMore: 36_000 < searchJson.length,
+      },
+    };
+    const thirdPageInput = buildReadToolInput(request, 'tools.read_result', [
+      search,
+      firstPage,
+      secondPage,
+    ]);
+    expect(thirdPageInput).toEqual({ toolCallId: search.id, offset: 36_000 });
+    const thirdPage = {
+      id: '968184c5-0f75-4f8a-98e2-9d0b00ad3c46',
+      toolName: 'tools.read_result',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: thirdPageInput,
+      result: {
+        offset: 36_000,
+        totalChars: searchJson.length,
+        chunk: searchJson.slice(36_000, 50_000),
+        hasMore: 50_000 < searchJson.length,
+      },
+    };
+    const allPages = [search, firstPage, secondPage, thirdPage];
+    expect(nextRequiredReadTool(request, allPages)).toBe('conversations.search');
+    expect(buildReadToolInput(request, 'tools.read_result', allPages)).toEqual({});
   });
 
   it('honors explicit memory-source prohibitions without suppressing a public URL request', () => {
@@ -1997,6 +2393,70 @@ describe('upcoming flight discovery', () => {
     };
     expect(nextRequiredReadTool(request, [calendar, search, thread])).toBeUndefined();
     expect(nextRequiredReadTool(request, [calendar, search, thread])).not.toBe('maps.directions');
+  });
+
+  it('continues a partially read booking thread during flight-only discovery', () => {
+    const request = detectPersonalReadRequest(
+      turn('Find my next future flight using booking emails and calendar.'),
+      options,
+    );
+    if (!request) throw new Error('Expected flight-only discovery');
+    const calendar: ReadToolEvidence = {
+      toolName: 'calendar.list_events',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: {
+        timeMin: request.timeWindow?.timeMin,
+        timeMax: request.timeWindow?.timeMax,
+        maxResults: 50,
+      },
+      result: { events: [], complete: true, calendarRosterComplete: true, unavailable: [] },
+    };
+    const search: ReadToolEvidence = {
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { query: request.mailQuery, maxResults: 20 },
+      result: {
+        query: request.mailQuery,
+        complete: true,
+        hasMore: false,
+        results: [
+          { threadId: 'complete-flight', subject: 'Flight booking confirmation' },
+          { threadId: 'paged-flight', subject: 'Flight booking confirmation' },
+        ],
+      },
+    };
+    const completeThread: ReadToolEvidence = {
+      toolName: 'gmail.read_thread',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { threadId: 'complete-flight', startMessageIndex: 0, startMessageOffset: 0 },
+      result: { complete: true, messages: [{ messageId: 'complete-message' }] },
+    };
+    const continuation = {
+      threadId: 'paged-flight',
+      startMessageIndex: 0,
+      startMessageOffset: 8_000,
+      maxMessages: 20,
+      maxChars: 20_000,
+    };
+    const partialThread: ReadToolEvidence = {
+      toolName: 'gmail.read_thread',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { threadId: 'paged-flight', startMessageIndex: 0, startMessageOffset: 0 },
+      result: {
+        complete: false,
+        hasMore: true,
+        messages: [{ messageId: 'partial-message' }],
+        continuation: { tool: 'gmail.read_thread', input: continuation },
+      },
+    };
+    const evidence = [calendar, search, completeThread, partialThread];
+
+    expect(nextRequiredReadTool(request, evidence)).toBe('gmail.read_thread');
+    expect(buildReadToolInput(request, 'gmail.read_thread', evidence)).toEqual(continuation);
   });
 
   it('does not treat the requested verification policy as a correction to an old claim', () => {

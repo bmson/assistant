@@ -10,6 +10,7 @@ import {
   memories,
   messages,
   resolveSubjectContact,
+  tasks,
 } from '@assistant/db';
 import type {
   CodeJobLease,
@@ -19,7 +20,7 @@ import type {
   MemoryExtractionRepository,
   PreparedMemoryExtraction,
 } from '@assistant/persistence';
-import { embeddingSpaceIdentityKey } from '@assistant/persistence';
+import { embeddingSpaceIdentityKey, isOwnerTaskMemoryEphemeral } from '@assistant/persistence';
 import { and, eq, gte, inArray, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { getAgent } from '../chat.js';
@@ -465,6 +466,7 @@ function extractionSystem(contactChoices: ExtractionContactChoice[]): string {
   const catalog = JSON.stringify(contactChoices);
   return [
     "You extract lasting memories from a personal assistant's conversations with and about its owner.",
+    'Never retain facts from fictional or hypothetical exercises, or from a conversation turn that explicitly asks not to save or remember its content.',
     'Extract ONLY genuinely useful, lasting information: facts about the owner or named people,',
     'stable preferences, projects, relationships, and notable episodes. Skip pleasantries,',
     'one-off logistics, anything already implied by another fact, and anything about the assistant itself.',
@@ -692,6 +694,8 @@ export async function runMemoryExtraction(
         db
           .select({
             conversationId: messages.conversationId,
+            id: messages.id,
+            taskId: messages.taskId,
             role: messages.role,
             text: messages.text,
             createdAt: messages.createdAt,
@@ -710,8 +714,39 @@ export async function runMemoryExtraction(
           .limit(MAX_MESSAGES_PER_CONVERSATION),
       ),
     );
+    const boundedTaskIds = [
+      ...new Set(
+        boundedRows.flatMap((rows) => rows.flatMap((row) => (row.taskId ? [row.taskId] : []))),
+      ),
+    ];
+    const boundedTasks = boundedTaskIds.length
+      ? await db
+          .select({
+            id: tasks.id,
+            agentId: tasks.agentId,
+            conversationId: tasks.conversationId,
+            type: tasks.type,
+            trigger: tasks.trigger,
+          })
+          .from(tasks)
+          .where(and(inArray(tasks.id, boundedTaskIds), eq(tasks.agentId, agentId)))
+      : [];
+    const ephemeralTaskIds = new Set(
+      boundedTasks
+        .filter(
+          (task) =>
+            task.conversationId !== null &&
+            conversationIds.includes(task.conversationId) &&
+            task.type === 'chat_turn' &&
+            isOwnerTaskMemoryEphemeral(task.trigger),
+        )
+        .map((task) => task.id),
+    );
     const byConversation = new Map(
-      boundedRows.map((rows, index) => [conversationIds[index] as string, rows.reverse()]),
+      boundedRows.map((rows, index) => [
+        conversationIds[index] as string,
+        rows.filter((row) => !row.taskId || !ephemeralTaskIds.has(row.taskId)).reverse(),
+      ]),
     );
     const convRows = await db
       .select({ id: conversations.id, trust: conversations.trust })

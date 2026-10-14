@@ -15,6 +15,7 @@ import {
   emailReviewSelectionWithinAuthorizedPool,
   emailReviewThreadReadResult,
   formatEmailReviewAnswer,
+  generateValidatedEmailReview,
   validateEmailReviewAnswer,
   validEmailReviewSelection,
 } from './email-review.js';
@@ -159,6 +160,100 @@ function required<T>(value: T | undefined, label: string): T {
 }
 
 describe('bounded no-send email review', () => {
+  it('keeps independently verified items when another thread fails both assessments', async () => {
+    const threads = ['thread-a', 'thread-b'].map((id) =>
+      required(
+        emailReviewCompleteThread(id, 'owner@example.com', [search(id), read(id, messages(id))]),
+        'complete thread',
+      ),
+    );
+    const good = required(validAnswer('thread-a').items[0], 'good item');
+    const bad = required(validAnswer('thread-b').items[0], 'bad item');
+    bad.draftBody = 'I will approve it tomorrow.';
+    const result = await generateValidatedEmailReview(threads, async () => ({
+      ok: true,
+      value: { items: [good, bad] },
+    }));
+    expect(result.attempts).toBe(2);
+    expect(result.answer?.items.map((item) => item.thread.threadId)).toEqual(['thread-a']);
+    expect(result.answer?.items[0]?.draftBody).toBe('Thanks for your note.');
+    expect(result.issues).toContain('item_1:no_unsupplied_facts_or_owner_commitments');
+    const wrongCount = await generateValidatedEmailReview(threads, async () => ({
+      ok: true,
+      value: { items: [good] },
+    }));
+    expect(wrongCount.answer).toBeUndefined();
+    const wrongIdentity = await generateValidatedEmailReview(threads, async () => ({
+      ok: true,
+      value: { items: [bad, good] },
+    }));
+    expect(wrongIdentity.answer).toBeUndefined();
+  });
+  it('repairs a rejected owner commitment using the same complete source threads', async () => {
+    const thread = required(
+      emailReviewCompleteThread('thread-a', 'owner@example.com', [
+        search('thread-a'),
+        read('thread-a', messages('thread-a')),
+      ]),
+      'complete thread',
+    );
+    const invalid = validAnswer('thread-a');
+    required(invalid.items[0], 'assessment item').draftBody = 'I will approve it tomorrow.';
+    const calls: Array<{ prompt: string; repair: boolean }> = [];
+    const result = await generateValidatedEmailReview([thread], async (input) => {
+      calls.push(input);
+      return { ok: true, value: calls.length === 1 ? invalid : validAnswer('thread-a') };
+    });
+    expect(result.answer?.items[0]?.draftBody).toBe('Thanks for your note.');
+    expect(result.attempts).toBe(2);
+    const repair = required(calls[1], 'repair call');
+    expect(repair.repair).toBe(true);
+    expect(repair.prompt).toContain('no_unsupplied_facts_or_owner_commitments');
+    expect(repair.prompt).not.toContain('I will approve it tomorrow.');
+  });
+
+  it('bounds repeated invalid assessments and does not weaken exact source validation', async () => {
+    const thread = required(
+      emailReviewCompleteThread('thread-a', 'owner@example.com', [
+        search('thread-a'),
+        read('thread-a', messages('thread-a')),
+      ]),
+      'complete thread',
+    );
+    const invalid = validAnswer('thread-a');
+    required(invalid.items[0], 'assessment item').whyQuote = 'Invented source sentence';
+    let calls = 0;
+    const result = await generateValidatedEmailReview([thread], async () => {
+      calls += 1;
+      return { ok: true, value: invalid };
+    });
+    expect(calls).toBe(2);
+    expect(result.answer).toBeUndefined();
+    expect(result.issues).toContain('item_0:literal_why_quote_from_named_message');
+  });
+
+  it('does not repeat a valid assessment and survives a failed first generation', async () => {
+    const thread = required(
+      emailReviewCompleteThread('thread-a', 'owner@example.com', [
+        search('thread-a'),
+        read('thread-a', messages('thread-a')),
+      ]),
+      'complete thread',
+    );
+    let calls = 0;
+    const success = await generateValidatedEmailReview([thread], async () => {
+      calls += 1;
+      return { ok: true, value: validAnswer('thread-a') };
+    });
+    expect(calls).toBe(1);
+    expect(success.attempts).toBe(1);
+    const recovered = await generateValidatedEmailReview([thread], async (input) => {
+      if (!input.repair) throw new Error('provider unavailable');
+      return { ok: true, value: validAnswer('thread-a') };
+    });
+    expect(recovered.answer).toBeDefined();
+    expect(recovered.attempts).toBe(2);
+  });
   it('ranks only IDs present in successful exact-query metadata and rejects duplicates or invented IDs', () => {
     const evidence: EmailReviewEvidenceRow[] = [
       search('thread-a'),

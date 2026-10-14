@@ -2246,7 +2246,14 @@ enum CalendarEventPresentation {
         let style = Date.FormatStyle(locale: locale, timeZone: timeZone).hour().minute()
         let first = date.formatted(style)
         guard let end, let last = timestamp(end), last > date else { return first }
-        return "\(first)–\(last.formatted(style))"
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        guard !calendar.isDate(date, inSameDayAs: last) else {
+            return "\(first)–\(last.formatted(style))"
+        }
+        let datedStyle = Date.FormatStyle(locale: locale, timeZone: timeZone)
+            .weekday(.abbreviated).month(.abbreviated).day().year().hour().minute()
+        return "\(date.formatted(datedStyle)) – \(last.formatted(datedStyle))"
     }
 
     static func dateCaption(_ start: String, timeZone: TimeZone = .current,

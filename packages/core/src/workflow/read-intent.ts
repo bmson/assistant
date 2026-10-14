@@ -18,6 +18,7 @@ import {
   EMAIL_REVIEW_QUERY,
   emailReviewNextThreadRead,
 } from './email-review.js';
+import { DEFAULT_TOOL_RESULT_CHAR_LIMIT, toolResultCharacterLimit } from './executor/util.js';
 import { detectFutureWatchIntent } from './future-watch-intent.js';
 
 export type PersonalReadKind =
@@ -63,6 +64,12 @@ export interface PersonalReadRequest {
   memoryQuery?: string;
   /** Full bounded owner question for an explicitly requested past-chat search. */
   conversationQuery?: string;
+  /** One bounded follow-up query that emphasizes owner-authored historical evidence. */
+  conversationFollowupQuery?: string;
+  /** Saved facts are searched only when the owner explicitly permits that source. */
+  searchSavedMemory?: boolean;
+  /** Focused semantic query for saved-memory retrieval, separate from the answer prompt. */
+  memorySearchQuery?: string;
   /** First read tool the executor must call. */
   firstToolName:
     | 'calendar.list_events'
@@ -87,6 +94,8 @@ export interface PersonalReadRequest {
   scopeContext?: { kind: 'flight'; date?: string };
   /** Gmail query derived from the owner's words, not model-proposed narrowing. */
   mailQuery?: string;
+  /** Typed trip discovery keeps flight and lodging coverage independently bound. */
+  mailQueries?: ReadonlyArray<{ category: 'flight' | 'lodging'; query: string }>;
   /** Explicit trip period used only to rank returned lodging metadata. */
   mailTemporalLabel?: string;
   /** Used only to render returned timestamps for the owner. */
@@ -126,6 +135,10 @@ export interface PersonalReadRequest {
     rankingSource?: 'model' | 'recent_metadata_fallback';
     rankingFailureReason?: 'router_error' | 'invalid_result';
   };
+  /** Include a bounded, source-backed overlap note when the owner asks for one. */
+  includeCalendarOverlapSummary?: boolean;
+  /** Use a concise agenda format for a requested calendar briefing. */
+  includeCalendarBriefing?: boolean;
 }
 
 export interface PersonalReadDetectionOptions {
@@ -1212,6 +1225,253 @@ const QUERY_MODIFIERS = new Set([
 ]);
 const MAX_MEMORY_RECALL_QUERY_CHARS = 1200;
 const MAX_CONVERSATION_SEARCH_QUERY_CHARS = 500;
+const MAX_MEMORY_SEARCH_PASSES = 2;
+const MAX_CONVERSATION_RESULT_PAGES = 8;
+const MAX_CONVERSATION_RESULT_CHARS = 1_000_000;
+// Must match tools.read_result's page size. Half of its tool-result clip leaves
+// room for worst-case JSON escaping in the page envelope.
+const CONVERSATION_RESULT_PAGE_CHARS = 14_000;
+const TOOL_CALL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+type ResultContinuation = { toolCallId: string; offset: number } | null | false;
+const MEMORY_SEARCH_STOP_WORDS = new Set([
+  'about',
+  'actually',
+  'after',
+  'again',
+  'and',
+  'any',
+  'are',
+  'assistant',
+  'before',
+  'being',
+  'can',
+  'could',
+  'did',
+  'do',
+  'does',
+  'during',
+  'earlier',
+  'ever',
+  'from',
+  'have',
+  'having',
+  'historical',
+  'how',
+  'i',
+  'if',
+  'in',
+  'inference',
+  'into',
+  'is',
+  'it',
+  'its',
+  'look',
+  'me',
+  'mention',
+  'mentioned',
+  'memories',
+  'memory',
+  'my',
+  'new',
+  'of',
+  'on',
+  'or',
+  'our',
+  'please',
+  'previous',
+  'previously',
+  'prior',
+  'said',
+  'save',
+  'saved',
+  'say',
+  'should',
+  'source',
+  'sources',
+  'tell',
+  'told',
+  'the',
+  'them',
+  'then',
+  'this',
+  'those',
+  'to',
+  'use',
+  'using',
+  'verified',
+  'we',
+  'what',
+  'when',
+  'where',
+  'which',
+  'who',
+  'why',
+  'with',
+  'would',
+  'you',
+  'your',
+  'claim',
+  'claims',
+  'conversation',
+  'conversations',
+  'distinguish',
+  'current',
+  'not',
+  'guess',
+  'answer',
+  'relevant',
+  'cite',
+  'clearly',
+  'different',
+]);
+
+function focusedMemoryTopic(text: string): string {
+  const tokens = text.match(/[\p{L}\p{N}][\p{L}\p{N}'’_-]*/gu) ?? [];
+  const focused = tokens
+    .map((token) => token.trim())
+    .filter((token) => {
+      const normalized = token.toLowerCase().replace(/['’]s$/u, '');
+      return token.length >= 2 && !MEMORY_SEARCH_STOP_WORDS.has(normalized);
+    })
+    .slice(0, 14);
+  return (focused.length ? focused.join(' ') : text.trim()).slice(
+    0,
+    MAX_CONVERSATION_SEARCH_QUERY_CHARS,
+  );
+}
+
+function historicalSearchQueries(request: PersonalReadRequest): string[] {
+  if (!request.conversationQuery) return [];
+  const queries = [request.conversationQuery, request.conversationFollowupQuery].filter(
+    (query): query is string => typeof query === 'string' && query.length > 0,
+  );
+  return [...new Set(queries)];
+}
+
+function nextHistoricalSearchQuery(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): string | undefined {
+  for (const query of historicalSearchQueries(request).slice(0, MAX_MEMORY_SEARCH_PASSES)) {
+    const attemptsForQuery = evidence.filter(
+      (row) =>
+        row.fromCurrentTask !== false &&
+        row.toolName === 'conversations.search' &&
+        argsRecord(row)?.query === query,
+    );
+    if (attemptsForQuery.some(succeeded)) continue;
+    if (attemptsForQuery.length < 2) return query;
+  }
+  return undefined;
+}
+
+function conversationSearchResultContinuation(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): { toolCallId: string; offset: number } | undefined {
+  const currentPages = evidence.filter(
+    (row) => row.fromCurrentTask === true && row.toolName === 'tools.read_result',
+  );
+  for (const query of historicalSearchQueries(request)) {
+    const search = evidence.find(
+      (row) =>
+        row.fromCurrentTask === true &&
+        row.toolName === 'conversations.search' &&
+        succeeded(row) &&
+        argsRecord(row)?.query === query,
+    );
+    if (!search?.id || !TOOL_CALL_ID.test(search.id)) continue;
+    let totalChars: number;
+    try {
+      totalChars = JSON.stringify(search.result ?? null).length;
+    } catch {
+      continue;
+    }
+    if (totalChars <= DEFAULT_TOOL_RESULT_CHAR_LIMIT || totalChars > MAX_CONVERSATION_RESULT_CHARS)
+      continue;
+
+    const pending = nextResultPage(search, currentPages);
+    if (pending === false) return undefined;
+    if (pending) return pending;
+  }
+  return undefined;
+}
+
+function nextResultPage(
+  target: ReadToolEvidence,
+  pages: ReadonlyArray<ReadToolEvidence>,
+  seen = new Set<string>(),
+  depth = 0,
+): ResultContinuation {
+  if (!target.id || !TOOL_CALL_ID.test(target.id) || seen.has(target.id) || depth > 3) return false;
+  seen.add(target.id);
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(target.result ?? null);
+  } catch {
+    return false;
+  }
+  if (
+    target.toolName === 'conversations.search' &&
+    serialized.length > MAX_CONVERSATION_RESULT_CHARS
+  )
+    return false;
+  const limit = toolResultCharacterLimit(target.toolName);
+  if (serialized.length <= limit) return null;
+
+  let offset = limit;
+  let pageCount = 0;
+  while (offset < serialized.length && pageCount < MAX_CONVERSATION_RESULT_PAGES) {
+    const attempts = pages.filter(
+      (row) => argsRecord(row)?.toolCallId === target.id && argsRecord(row)?.offset === offset,
+    );
+    const validPage = [...attempts].reverse().find((row) => {
+      if (!succeeded(row)) return false;
+      const result = objectRecord(row.result);
+      if (
+        !result ||
+        result.offset !== offset ||
+        result.totalChars !== serialized.length ||
+        typeof result.chunk !== 'string' ||
+        result.chunk.length === 0 ||
+        result.chunk.length > CONVERSATION_RESULT_PAGE_CHARS ||
+        typeof result.hasMore !== 'boolean'
+      )
+        return false;
+      const nextOffset = offset + result.chunk.length;
+      return nextOffset <= serialized.length && result.hasMore === nextOffset < serialized.length;
+    });
+    if (!validPage) {
+      if (attempts.length < 2 && pages.length < MAX_CONVERSATION_RESULT_PAGES)
+        return { toolCallId: target.id, offset };
+      return false;
+    }
+    pageCount += 1;
+    const nested = nextResultPage(validPage, pages, seen, depth + 1);
+    if (nested !== null) return nested;
+    const page = objectRecord(validPage.result);
+    if (!page) return false;
+    offset += (page.chunk as string).length;
+  }
+  return offset >= serialized.length ? null : false;
+}
+
+function nextSavedMemorySearchQuery(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): string | undefined {
+  if (!request.searchSavedMemory) return undefined;
+  const query = request.memorySearchQuery ?? request.memoryQuery;
+  if (!query) return undefined;
+  const attemptsForQuery = evidence.filter(
+    (row) =>
+      row.fromCurrentTask !== false &&
+      row.toolName === 'memory.recall' &&
+      argsRecord(row)?.query === query,
+  );
+  if (attemptsForQuery.some(succeeded) || attemptsForQuery.length >= 2) return undefined;
+  return query;
+}
 
 function contentText(content: unknown): string {
   if (typeof content === 'string') return content;
@@ -1586,13 +1846,29 @@ function detectPersonalReadRequestInternal(
     const kind: PersonalReadKind = graphRead ? 'knowledge_graph' : driveRead ? 'drive' : 'memory';
     const conversationHistoryRequested =
       kind === 'memory' && CONVERSATION_HISTORY_REQUEST.test(latest);
+    const savedMemoryRequested =
+      kind === 'memory' &&
+      (!conversationHistoryRequested ||
+        /\b(?:saved|long[- ]term|personal)\s+memor(?:y|ies)\b/i.test(latest));
+    const focusedQuery = kind === 'memory' ? focusedMemoryTopic(latest) : undefined;
     return {
       kind,
-      queryTerms: contextualPrivateTerms(),
+      queryTerms: conversationHistoryRequested
+        ? privateQueryTerms(focusedQuery ?? latest)
+        : contextualPrivateTerms(),
       ...(kind === 'memory' ? { memoryQuery: latest.slice(0, MAX_MEMORY_RECALL_QUERY_CHARS) } : {}),
+      ...(focusedQuery ? { memorySearchQuery: focusedQuery } : {}),
       ...(conversationHistoryRequested
-        ? { conversationQuery: latest.slice(0, MAX_CONVERSATION_SEARCH_QUERY_CHARS) }
+        ? {
+            conversationQuery: focusedQuery,
+            conversationFollowupQuery:
+              `Owner-authored statements and corrections about ${focusedQuery}`.slice(
+                0,
+                MAX_CONVERSATION_SEARCH_QUERY_CHARS,
+              ),
+          }
         : {}),
+      ...(kind === 'memory' ? { searchSavedMemory: savedMemoryRequested } : {}),
       firstToolName:
         kind === 'knowledge_graph'
           ? 'memory.graph_snapshot'
@@ -1618,8 +1894,20 @@ function detectPersonalReadRequestInternal(
       answerFocus: 'trip',
       compoundTripDiscovery: true,
       maxResults: 50,
+      mailQueries: [
+        {
+          category: 'flight',
+          query:
+            '{subject:(flight booking) subject:(flight booked) subject:(flight reserved) subject:(flight confirmation) subject:(airline booking) subject:(airline booked) subject:(airline reserved) subject:(airline confirmation) subject:(e-ticket) subject:(itinerary confirmation) subject:(boarding pass)}',
+        },
+        {
+          category: 'lodging',
+          query:
+            '{subject:(hotel booking) subject:(hotel booked) subject:(hotel reserved) subject:(hotel reservation) subject:(lodging booked) subject:(lodging reservation) subject:(accommodation booking) subject:(accommodation reservation) subject:(check-in confirmation) subject:(stay confirmation) subject:(booking confirmation) subject:(reservation confirmation) subject:(your reservation) subject:(reservation details)}',
+        },
+      ],
       mailQuery:
-        '{flight flights itinerary "e-ticket" "boarding pass" "booking confirmation" "reservation confirmation" hotel lodging accommodation "check-in" "check-out"}',
+        '{subject:(flight booking) subject:(flight booked) subject:(flight reserved) subject:(flight confirmation) subject:(airline booking) subject:(airline booked) subject:(airline reserved) subject:(airline confirmation) subject:(e-ticket) subject:(itinerary confirmation) subject:(boarding pass)}',
     };
   }
   // A terse correction such as "was that made up?" carries no subject of its
@@ -1748,6 +2036,10 @@ function detectPersonalReadRequestInternal(
         : kind === 'calendar_email' || terms.length > 0
           ? 'calendar.search_events'
           : 'calendar.list_events';
+  const calendarBriefing =
+    kind === 'calendar' &&
+    /\b(?:calendar|agenda|schedule)\b/i.test(latest) &&
+    /\b(?:briefing|brief me|practical briefing|quick overview|short summary|recap)\b/i.test(latest);
 
   const request: PersonalReadRequest = {
     kind,
@@ -1763,6 +2055,10 @@ function detectPersonalReadRequestInternal(
       kind === 'calendar_email' ||
       (kind === 'email' &&
         (verification || /\b(?:when|where|what time|details?|what does|what did)\b/i.test(latest))),
+    ...(calendarBriefing ? { includeCalendarBriefing: true } : {}),
+    ...(calendarBriefing || /\b(?:overlaps?|conflicts?|double[ -]?booked|clashes?)\b/i.test(latest)
+      ? { includeCalendarOverlapSummary: true }
+      : {}),
   };
   if (weeklyCalendarPlan && calendarPlanOptions) {
     request.timeWindow = calendarPlanWindow(options, calendarPlanOptions);
@@ -1890,6 +2186,12 @@ function matchingCalendarRead(row: ReadToolEvidence, request: PersonalReadReques
 function matchingGmailSearch(row: ReadToolEvidence, request: PersonalReadRequest): boolean {
   if (!succeeded(row) || row.toolName !== 'gmail.search') return false;
   const query = argsRecord(row)?.query;
+  if (request.mailQueries?.length) {
+    return (
+      typeof query === 'string' &&
+      request.mailQueries.some((entry) => query.trim().toLowerCase() === entry.query.toLowerCase())
+    );
+  }
   return request.mailQuery
     ? typeof query === 'string' && query.trim().toLowerCase() === request.mailQuery.toLowerCase()
     : queryIncludes(query, request.queryTerms);
@@ -1925,17 +2227,33 @@ export function gmailSearchThreadIds(
   }
   const unique = [...new Set(ids)];
   if (request?.compoundTripDiscovery) {
-    const metadata = new Map<string, { subject: string; snippet: string }>();
+    const metadata = new Map<
+      string,
+      { subject: string; snippet: string; categories: Set<string> }
+    >();
     for (const row of evidence) {
-      if (row.fromCurrentTask === false || !succeeded(row) || row.toolName !== 'gmail.search')
+      if (
+        row.fromCurrentTask === false ||
+        !succeeded(row) ||
+        row.toolName !== 'gmail.search' ||
+        !matchingGmailSearch(row, request)
+      )
         continue;
       const results = objectRecord(row.result)?.results;
       if (!Array.isArray(results)) continue;
+      const query = String(argsRecord(row)?.query ?? '')
+        .trim()
+        .toLowerCase();
+      const category = request.mailQueries?.find(
+        (entry) => entry.query.toLowerCase() === query,
+      )?.category;
       for (const item of results) {
         const result = objectRecord(item);
         const id = typeof result?.threadId === 'string' ? result.threadId : undefined;
         if (!id) continue;
         const prior = metadata.get(id);
+        const categories = prior?.categories ?? new Set<string>();
+        if (category) categories.add(category);
         metadata.set(id, {
           subject: [prior?.subject, typeof result?.subject === 'string' ? result.subject : '']
             .filter(Boolean)
@@ -1943,6 +2261,7 @@ export function gmailSearchThreadIds(
           snippet: [prior?.snippet, typeof result?.snippet === 'string' ? result.snippet : '']
             .filter(Boolean)
             .join(' '),
+          categories,
         });
       }
     }
@@ -1953,8 +2272,14 @@ export function gmailSearchThreadIds(
         const flight =
           /\b(?:flight|airline|itinerary|boarding pass|e-?ticket|record locator)\b/i.test(source);
         const booking =
-          /\b(?:booking|confirmation|reservation|ticket|itinerary|record locator)\b/i.test(source);
-        return { threadId, index, score: flight && booking ? 1 : 0 };
+          /\b(?:booked|reserved|confirmation|confirmed|reservation|ticket|e-?ticket|itinerary|record locator|booking\s+(?:details|reference|receipt|number|confirmation))\b/i.test(
+            source,
+          );
+        return {
+          threadId,
+          index,
+          score: item?.categories.has('flight') && flight && booking ? 1 : 0,
+        };
       })
       .filter((item) => item.score > 0)
       .sort((a, b) => a.index - b.index);
@@ -1963,8 +2288,15 @@ export function gmailSearchThreadIds(
         const item = metadata.get(threadId);
         const source = `${item?.subject ?? ''} ${item?.snippet ?? ''}`;
         const hotel = /\b(?:hotel|lodging|accommodation|airbnb)\b/i.test(source);
-        const booking = /\b(?:booking|confirmation|reservation|check[- ]?in)\b/i.test(source);
-        return { threadId, index, score: hotel && booking ? 1 : 0 };
+        const booking =
+          /\b(?:booked|reserved|confirmation|confirmed|reservation|check[- ]?in|booking\s+(?:details|reference|receipt|number|confirmation))\b/i.test(
+            source,
+          );
+        return {
+          threadId,
+          index,
+          score: item?.categories.has('lodging') && hotel && booking ? 1 : 0,
+        };
       })
       .filter((item) => item.score > 0)
       .sort((a, b) => a.index - b.index);
@@ -2353,6 +2685,44 @@ function nextGmailSearchPage(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): string | undefined {
   if (!request.requiresThreadRead && !request.requiresExhaustiveMail) return undefined;
+  const target = nextGmailSearchTarget(request, evidence);
+  return target ? (target.pageToken ?? target.query) : undefined;
+}
+
+function nextGmailSearchTarget(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): { query: string; pageToken?: string } | undefined {
+  if (request.mailQueries?.length && hasTypedTripRead(request)) {
+    for (const { query } of request.mailQueries) {
+      const attempts = evidence.filter(
+        (row) =>
+          row.fromCurrentTask !== false &&
+          row.toolName === 'gmail.search' &&
+          typeof argsRecord(row)?.query === 'string' &&
+          String(argsRecord(row)?.query).trim().toLowerCase() === query.toLowerCase(),
+      );
+      const searches = evidence.filter(
+        (row) =>
+          row.fromCurrentTask !== false &&
+          succeeded(row) &&
+          row.toolName === 'gmail.search' &&
+          typeof argsRecord(row)?.query === 'string' &&
+          String(argsRecord(row)?.query).trim().toLowerCase() === query.toLowerCase(),
+      );
+      if (searches.length === 0) {
+        if (attempts.length >= 2) continue;
+        return { query };
+      }
+      if (searches.length >= 2) continue;
+      const latest = searches.at(-1);
+      const result = objectRecord(latest?.result);
+      if (result?.hasMore === true && typeof result.nextPageToken === 'string')
+        return { query, pageToken: result.nextPageToken };
+      if (result?.complete === true && result.hasMore !== true) continue;
+    }
+    return undefined;
+  }
   const searches = evidence.filter(
     (row) => row.fromCurrentTask !== false && matchingGmailSearch(row, request),
   );
@@ -2362,11 +2732,12 @@ function nextGmailSearchPage(
       ? 2
       : MAX_GMAIL_SEARCH_PAGES;
   if (searches.length >= pageLimit) return undefined;
+  if (searches.length === 0 && request.mailQuery) return { query: request.mailQuery };
   const latest = searches.at(-1);
   if (!latest?.result || typeof latest.result !== 'object') return undefined;
   const result = latest.result as { hasMore?: unknown; nextPageToken?: unknown };
   return result.hasMore === true && typeof result.nextPageToken === 'string'
-    ? result.nextPageToken
+    ? { query: request.mailQuery ?? '', pageToken: result.nextPageToken }
     : undefined;
 }
 
@@ -2472,7 +2843,13 @@ export function nextRequiredReadTool(
     }
     return undefined;
   }
-  if (request.kind === 'drive' || request.kind === 'memory' || request.kind === 'knowledge_graph') {
+  if (request.kind === 'memory') {
+    if (conversationSearchResultContinuation(request, evidence)) return 'tools.read_result';
+    if (nextHistoricalSearchQuery(request, evidence)) return 'conversations.search';
+    if (nextSavedMemorySearchQuery(request, evidence)) return 'memory.recall';
+    return undefined;
+  }
+  if (request.kind === 'drive' || request.kind === 'knowledge_graph') {
     if (evidence.some((row) => matchingPrivateRead(row, request))) return undefined;
     return attempts(evidence, request.firstToolName) < 2 ? request.firstToolName : undefined;
   }
@@ -2570,8 +2947,11 @@ export function groundReadToolInput(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): Record<string, unknown> {
   if (request.temporalIssue || request.scopeIssue) return {};
+  if (toolName === 'tools.read_result' && request.kind === 'memory')
+    return conversationSearchResultContinuation(request, evidence) ?? {};
   if (toolName === 'conversations.search' && request.conversationQuery) {
-    return { query: request.conversationQuery, limit: 10 };
+    const query = nextHistoricalSearchQuery(request, evidence);
+    return query ? { query, limit: 20 } : {};
   }
   if (toolName === 'calendar.list_events') {
     const { calendarIds: _ignored, ...unboundCalendarArgs } = input;
@@ -2632,13 +3012,14 @@ export function groundReadToolInput(
     return interval ? { timeMin: interval.start, timeMax: interval.endExclusive } : input;
   }
   if (toolName === 'gmail.search') {
-    const pageToken = nextGmailSearchPage(request, evidence);
+    const target = nextGmailSearchTarget(request, evidence);
     const { pageToken: _untrustedPageToken, ...searchInput } = input;
     return {
       ...searchInput,
-      query: request.mailQuery || request.queryTerms.join(' ') || '-in:spam -in:trash',
+      query:
+        target?.query || request.mailQuery || request.queryTerms.join(' ') || '-in:spam -in:trash',
       maxResults: 20,
-      ...(pageToken ? { pageToken } : {}),
+      ...(target?.pageToken ? { pageToken: target.pageToken } : {}),
     };
   }
   if (request.compoundTripDiscovery && toolName === 'maps.directions') {
@@ -2687,7 +3068,10 @@ export function groundReadToolInput(
   }
   if (toolName === 'memory.recall') {
     return {
-      query: request.memoryQuery ?? (request.queryTerms.join(' ') || 'owner history'),
+      query:
+        request.memorySearchQuery ??
+        request.memoryQuery ??
+        (request.queryTerms.join(' ') || 'owner history'),
       limit: 10,
     };
   }
@@ -2741,7 +3125,7 @@ export function buildReadToolInput(
   }
   if (
     toolName === 'gmail.read_thread' &&
-    !(request.compoundTripDiscovery
+    !(hasTypedTripRead(request)
       ? compoundThreadReadInput(evidence, request)
       : nextGmailThreadId(evidence, request))
   )

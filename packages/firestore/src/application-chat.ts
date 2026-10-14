@@ -19,12 +19,16 @@ import {
   completeChecklistCorrectionEvidence,
   composerChecklistCancellationRequestHash,
   isChatAdmissionCancellationProjection,
+  isOwnerTaskMemoryEphemeral,
   isPinnedOwnerChatRequestMessage,
   MAX_CHECKLIST_CORRECTION_LEDGER_ROWS,
   MAX_TASK_QUEUE_GENERATION,
   newTaskRecord,
   normalizeTaskBudget,
+  OWNER_TASK_MEMORY_RETENTION,
   ownerChatChecklistRequestMessageId,
+  ownerTurnReferencesEphemeralContext,
+  ownerTurnRequestsEphemeralMemory,
   recallSurfaceRefs,
   withChatAdmissionPhase,
 } from '@assistant/persistence';
@@ -1317,6 +1321,34 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
         } as const;
       }
 
+      let inheritsEphemeralContext = false;
+      if (ownerTurnReferencesEphemeralContext(input.text)) {
+        const recent = await tx.get(
+          this.store
+            .collection('messages')
+            .where('conversationId', '==', input.conversationId)
+            .orderBy('createdAt', 'desc')
+            .limit(12),
+        );
+        const previousOwnerMessage = recent.docs.find(
+          (doc) => doc.get('role') === 'user' && doc.get('origin') === 'owner',
+        );
+        const previousTaskId = previousOwnerMessage?.get('taskId');
+        if (typeof previousTaskId === 'string') {
+          const priorSnapshot = await tx.get(this.store.doc('tasks', previousTaskId));
+          if (priorSnapshot.exists) {
+            const prior = decodeRecord<Records['tasks']>(priorSnapshot.data());
+            inheritsEphemeralContext =
+              documentKey(prior.id) === priorSnapshot.id &&
+              prior.agentId === input.agentId &&
+              prior.conversationId === input.conversationId &&
+              isOwnerTaskMemoryEphemeral(prior.trigger);
+          }
+        }
+      }
+      const ephemeralMemory =
+        ownerTurnRequestsEphemeralMemory(input.text) || inheritsEphemeralContext;
+
       const budget = await tx.get(this.store.doc('budgets', 'task_default'));
       const now = this.store.now();
       const trigger = {
@@ -1326,6 +1358,7 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
         trust: 'owner',
         payload: {
           text: input.text,
+          ...(ephemeralMemory ? { memoryRetention: OWNER_TASK_MEMORY_RETENTION } : {}),
           triggerMessageId: messageId,
           requestAt: now.toISOString(),
           intentRevision: 1,

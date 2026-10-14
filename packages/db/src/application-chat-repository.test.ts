@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { chatAdmissionCancellationPayload, chatAdmissionPayload } from '@assistant/persistence';
+import {
+  chatAdmissionCancellationPayload,
+  chatAdmissionPayload,
+  OWNER_TASK_MEMORY_RETENTION,
+} from '@assistant/persistence';
 import { inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPostgresApplicationChatPersistence } from './application-chat-repository.js';
@@ -165,6 +169,133 @@ describe('PostgreSQL application chat persistence', () => {
         triagedActionable: true,
       }),
     ).toBeNull();
+  });
+
+  it('keeps fictional retention policy on its owner task and only inherits an explicit same-chat reference', async () => {
+    const repository = createPostgresApplicationChatPersistence(db);
+    const agent = await repository.resolveAgent();
+    const conversation = await repository.createConversation(agent.id);
+    conversationIds.push(conversation.id);
+    const admit = (text: string) =>
+      repository.admitChatTurn({
+        agentId: agent.id,
+        conversationId: conversation.id,
+        clientOperationId: randomUUID(),
+        requestHash: 'd'.repeat(64),
+        text,
+        autonomous: false,
+        force: false,
+        spoken: false,
+      });
+
+    const seed = await admit('This is a fictional test document, not personal information.');
+    const followup = await admit(
+      'Using the project details I just gave you in this conversation, summarize the plan.',
+    );
+    const unrelated = await admit('I moved to Oslo last month.');
+    const staleFollowup = await admit(
+      'Using the project details I just gave you in this conversation, summarize that exercise.',
+    );
+    const explicitOptOut = await admit(
+      'Using the project details I just gave you in this conversation, do not save anything from that fictional exercise.',
+    );
+    if (
+      seed.kind !== 'admitted' ||
+      followup.kind !== 'admitted' ||
+      unrelated.kind !== 'admitted' ||
+      staleFollowup.kind !== 'admitted' ||
+      explicitOptOut.kind !== 'admitted'
+    )
+      throw new Error('expected owner chat admissions');
+    expect(
+      (seed.task.trigger as { payload?: Record<string, unknown> }).payload?.memoryRetention,
+    ).toBe(OWNER_TASK_MEMORY_RETENTION);
+    expect(
+      (followup.task.trigger as { payload?: Record<string, unknown> }).payload?.memoryRetention,
+    ).toBe(OWNER_TASK_MEMORY_RETENTION);
+    expect(
+      (unrelated.task.trigger as { payload?: Record<string, unknown> }).payload?.memoryRetention,
+    ).toBeUndefined();
+    expect(
+      (staleFollowup.task.trigger as { payload?: Record<string, unknown> }).payload
+        ?.memoryRetention,
+    ).toBeUndefined();
+    expect(
+      (explicitOptOut.task.trigger as { payload?: Record<string, unknown> }).payload
+        ?.memoryRetention,
+    ).toBe(OWNER_TASK_MEMORY_RETENTION);
+    expect(seed.message.taskId).toBe(seed.task.id);
+    expect(followup.message.taskId).toBe(followup.task.id);
+    expect(unrelated.message.taskId).toBe(unrelated.task.id);
+    expect(staleFollowup.message.taskId).toBe(staleFollowup.task.id);
+    expect(explicitOptOut.message.taskId).toBe(explicitOptOut.task.id);
+  });
+
+  it('does not let an assistant-authored opt-out set owner retention policy', async () => {
+    const repository = createPostgresApplicationChatPersistence(db);
+    const agent = await repository.resolveAgent();
+    const conversation = await repository.createConversation(agent.id);
+    conversationIds.push(conversation.id);
+    await repository.appendOwned(agent.id, {
+      conversationId: conversation.id,
+      role: 'assistant',
+      origin: 'assistant',
+      parts: [{ type: 'text', text: 'Do not save any personal facts from this conversation.' }],
+      text: 'Do not save any personal facts from this conversation.',
+    });
+    const admission = await repository.admitChatTurn({
+      agentId: agent.id,
+      conversationId: conversation.id,
+      clientOperationId: randomUUID(),
+      requestHash: 'e'.repeat(64),
+      text: 'Can you explain why the sky is blue?',
+      autonomous: false,
+      force: false,
+      spoken: false,
+    });
+    if (admission.kind !== 'admitted') throw new Error('expected owner chat admission');
+    expect(admission.task.trigger).not.toMatchObject({
+      payload: { memoryRetention: OWNER_TASK_MEMORY_RETENTION },
+    });
+  });
+
+  it('does not inherit across an immediately preceding unbound owner message', async () => {
+    const repository = createPostgresApplicationChatPersistence(db);
+    const agent = await repository.resolveAgent();
+    const conversation = await repository.createConversation(agent.id);
+    conversationIds.push(conversation.id);
+    const seed = await repository.admitChatTurn({
+      agentId: agent.id,
+      conversationId: conversation.id,
+      clientOperationId: randomUUID(),
+      requestHash: 'f'.repeat(64),
+      text: 'This is a fictional test document, not personal information.',
+      autonomous: false,
+      force: false,
+      spoken: false,
+    });
+    if (seed.kind !== 'admitted') throw new Error('expected owner chat admission');
+    await repository.appendOwned(agent.id, {
+      conversationId: conversation.id,
+      role: 'user',
+      origin: 'owner',
+      parts: [{ type: 'text', text: 'I moved to Oslo last month.' }],
+      text: 'I moved to Oslo last month.',
+    });
+    const followup = await repository.admitChatTurn({
+      agentId: agent.id,
+      conversationId: conversation.id,
+      clientOperationId: randomUUID(),
+      requestHash: 'a'.repeat(64),
+      text: 'Using the project details I just gave you in this conversation, summarize that exercise.',
+      autonomous: false,
+      force: false,
+      spoken: false,
+    });
+    if (followup.kind !== 'admitted') throw new Error('expected owner chat admission');
+    expect(followup.task.trigger).not.toMatchObject({
+      payload: { memoryRetention: OWNER_TASK_MEMORY_RETENTION },
+    });
   });
 
   it('durably cancels before admission and replays without creating owner content', async () => {

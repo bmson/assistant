@@ -295,13 +295,23 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       const first = await run('tools.read_result', { toolCallId: callId }, { taskId });
       expect(first).toMatchObject({ offset: 0, hasMore: true });
       expect(first.totalChars).toBe(JSON.stringify(result).length);
-      expect(String(first.chunk)).toHaveLength(30_000);
-      const rest = await run(
+      expect(String(first.chunk)).toHaveLength(14_000);
+      const secondPage = await run(
         'tools.read_result',
-        { toolCallId: callId, offset: 30_000 },
+        { toolCallId: callId, offset: 14_000 },
         { taskId },
       );
-      expect(rest.hasMore).toBe(false);
+      expect(secondPage).toMatchObject({ offset: 14_000, hasMore: true });
+      expect(String(secondPage.chunk)).toHaveLength(14_000);
+      const finalPage = await run(
+        'tools.read_result',
+        { toolCallId: callId, offset: 28_000 },
+        { taskId },
+      );
+      expect(finalPage).toMatchObject({ offset: 28_000, hasMore: false });
+      expect(`${String(first.chunk)}${String(secondPage.chunk)}${String(finalPage.chunk)}`).toBe(
+        JSON.stringify(result),
+      );
       expect(await run('tools.read_result', { toolCallId: otherCallId }, { taskId })).toEqual({
         error: 'no such tool call in this task',
       });
@@ -574,11 +584,25 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect(first).toMatchObject({ offset: 0, hasMore: true });
       const second = await run(
         'tools.read_result',
-        { toolCallId: callId, offset: 30_000 },
+        { toolCallId: callId, offset: 14_000 },
         { taskId },
       );
-      expect(second).toMatchObject({ offset: 30_000, hasMore: false });
-      expect(`${String(first.chunk)}${String(second.chunk)}`).toBe(JSON.stringify(result));
+      expect(second).toMatchObject({ offset: 14_000, hasMore: true });
+      const third = await run(
+        'tools.read_result',
+        { toolCallId: callId, offset: 28_000 },
+        { taskId },
+      );
+      expect(third).toMatchObject({ offset: 28_000, hasMore: true });
+      const fourth = await run(
+        'tools.read_result',
+        { toolCallId: callId, offset: 42_000 },
+        { taskId },
+      );
+      expect(fourth).toMatchObject({ offset: 42_000, hasMore: false });
+      expect(
+        `${String(first.chunk)}${String(second.chunk)}${String(third.chunk)}${String(fourth.chunk)}`,
+      ).toBe(JSON.stringify(result));
       const storedAfter = (await store.doc('toolCalls', callId).get()).get('result');
       expect(JSON.stringify(storedAfter)).toEqual(JSON.stringify(storedBefore));
     });

@@ -10,7 +10,10 @@ import { z } from 'zod';
 import { register } from '../register.js';
 import type { ToolRegistry } from '../registry.js';
 
-const PAGE_CHARS = 30_000;
+// `tools.read_result` tool results are clipped at 32k before the model sees
+// them. The smaller page leaves room for JSON escaping of the chunk itself,
+// so a page does not require an endless read_result-of-read_result chain.
+const PAGE_CHARS = 14_000;
 const SEARCH_LIMIT = 20;
 // Search results are paged later, so bound the full untrusted payload before
 // hashing source text or serializing it. 128 KiB of message text leaves ample

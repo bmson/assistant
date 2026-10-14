@@ -1,4 +1,10 @@
-import { collapseWhitespace, ownerDate, ownerTime, truncateAtBoundary } from '../owner-text.js';
+import {
+  collapseWhitespace,
+  ownerDate,
+  ownerEventWhen,
+  ownerTime,
+  truncateAtBoundary,
+} from '../owner-text.js';
 import type { EventSalience } from '../proactive/calendar-salience.js';
 import type { BriefingCalendarEvent, CalendarConflict } from './briefing.js';
 import { calendarRelationshipNote } from './calendar-relationship.js';
@@ -20,7 +26,7 @@ import { calendarRelationshipNote } from './calendar-relationship.js';
 export interface BriefingAgendaItem {
   /** "Today", "Tomorrow", or "Thu, Sep 24". */
   day: string;
-  /** "9:30 AM – 10:15 AM" or "All day". */
+  /** A local clock range, a date-aware multi-day range, or "All day". */
   time: string;
   title: string;
   location?: string;
@@ -89,7 +95,9 @@ function eventTime(event: BriefingCalendarEvent, timeZone: string): string {
   const sameDay =
     ownerDate(event.start, timeZone, new Date(event.start)) ===
     ownerDate(event.end, timeZone, new Date(event.start));
-  return sameDay ? `${start} – ${ownerTime(event.end, timeZone)}` : start;
+  return sameDay
+    ? `${start} – ${ownerTime(event.end, timeZone)}`
+    : ownerEventWhen({ start: event.start, end: event.end }, timeZone);
 }
 
 /**

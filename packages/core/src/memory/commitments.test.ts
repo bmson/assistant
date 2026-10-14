@@ -8,7 +8,9 @@ import {
   type Db,
   maintenanceCursors,
   messages,
+  tasks,
 } from '@assistant/db';
+import { newTaskRecord } from '@assistant/persistence';
 import { and, eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ModelRouter } from '../model-router/router.js';
@@ -28,6 +30,8 @@ import {
 const DATABASE_URL =
   process.env.DATABASE_URL ?? 'postgres://assistant:assistant@localhost:5432/assistant';
 const MARKER = `xtest-commitment-${Date.now()}`;
+const retentionConversationIds: string[] = [];
+const retentionTaskIds: string[] = [];
 
 let db: Db;
 let dbUp = false;
@@ -44,9 +48,11 @@ let extractedCommitments: Array<{
   dueAt: string;
   confidence: number;
 }> = [];
+const extractionPrompts: string[] = [];
 
 const fakeRouter = {
   async object(_role: string, opts: { prompt?: string }) {
+    extractionPrompts.push(opts.prompt ?? '');
     extractionModelCalls += 1;
     const relevant = opts.prompt?.includes(extractionPromptMarker);
     const ownerMessageIds = [
@@ -105,6 +111,11 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (dbUp && retentionConversationIds.length) {
+    await db.delete(messages).where(inArray(messages.conversationId, retentionConversationIds));
+    if (retentionTaskIds.length) await db.delete(tasks).where(inArray(tasks.id, retentionTaskIds));
+    await db.delete(conversations).where(inArray(conversations.id, retentionConversationIds));
+  }
   if (dbUp) {
     await db.delete(messages).where(eq(messages.conversationId, conversationId));
     await db.delete(conversations).where(eq(conversations.id, conversationId));
@@ -156,6 +167,97 @@ describe('open-loop rendering', () => {
 });
 
 describe('commitment lifecycle', () => {
+  it('does not mine fictional owner-task loops but still reads unrelated owner turns in the same chat', async () => {
+    if (!dbUp) return;
+    const [conversation] = await db
+      .insert(conversations)
+      .values({ agentId, channel: 'chat', trust: 'owner', title: `${MARKER}-ephemeral` })
+      .returning({ id: conversations.id });
+    if (!conversation) throw new Error('retention conversation was not created');
+    retentionConversationIds.push(conversation.id);
+    const now = new Date();
+    const ephemeralId = randomUUID();
+    const normalId = randomUUID();
+    const ephemeralText = 'For this fictional exercise, decide which invented hotel to book.';
+    const normalText = 'I promised to send the real quarterly report to Maya.';
+    const ephemeralTask = newTaskRecord(
+      {
+        agentId,
+        conversationId: conversation.id,
+        type: 'chat_turn',
+        trust: 'owner',
+        title: ephemeralText,
+        trigger: {
+          source: 'chat',
+          agentId,
+          conversationId: conversation.id,
+          trust: 'owner',
+          payload: { text: ephemeralText },
+        },
+      },
+      ephemeralId,
+      now,
+    );
+    const normalTask = newTaskRecord(
+      {
+        agentId,
+        conversationId: conversation.id,
+        type: 'chat_turn',
+        trust: 'owner',
+        title: normalText,
+        trigger: {
+          source: 'chat',
+          agentId,
+          conversationId: conversation.id,
+          trust: 'owner',
+          payload: { text: normalText },
+        },
+      },
+      normalId,
+      new Date(now.getTime() + 1000),
+    );
+    retentionTaskIds.push(ephemeralId, normalId);
+    await db.insert(tasks).values([ephemeralTask, normalTask]);
+    await db.insert(messages).values([
+      {
+        conversationId: conversation.id,
+        taskId: ephemeralId,
+        role: 'user',
+        origin: 'owner',
+        parts: [],
+        text: ephemeralText,
+        createdAt: now,
+      },
+      {
+        conversationId: conversation.id,
+        taskId: ephemeralId,
+        role: 'assistant',
+        origin: 'assistant',
+        parts: [],
+        text: 'No fictional plan has been booked.',
+        createdAt: new Date(now.getTime() + 1),
+      },
+      {
+        conversationId: conversation.id,
+        taskId: normalId,
+        role: 'user',
+        origin: 'owner',
+        parts: [],
+        text: normalText,
+        createdAt: new Date(now.getTime() + 1000),
+      },
+    ]);
+    const before = extractionPrompts.length;
+    await extractCommitments(
+      { db, router: fakeRouter },
+      { agentId, since: new Date(now.getTime() - 1000) },
+    );
+    const relevant = extractionPrompts.slice(before).join('\n');
+    expect(relevant).not.toContain(ephemeralText);
+    expect(relevant).not.toContain('No fictional plan has been booked.');
+    expect(relevant).toContain(normalText);
+  });
+
   it('does not resolve a merely overlapping title, but resolves one exact title', async () => {
     if (!dbUp) return;
     const iceland = `${MARKER} Confirm travel dates for Iceland`;

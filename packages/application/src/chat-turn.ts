@@ -32,7 +32,10 @@ import type { ModelRouter, StreamOutcome } from '@assistant/core/model-router';
 import { getQueueNotifier } from '@assistant/core/queue';
 import { isSituationRequest } from '@assistant/core/situations-schema';
 import { buildAutonomyGrant } from '@assistant/core/workflow/autonomy';
-import { explicitlyOptsOutOfRecall } from '@assistant/core/workflow/owner-intent';
+import {
+  explicitlyOptsOutOfRecall,
+  isConversationLocalContext,
+} from '@assistant/core/workflow/owner-intent';
 import { detectPersonalReadRequest } from '@assistant/core/workflow/read-intent';
 import { RequestChecklistSchema } from '@assistant/core/workflow/request-checklist-schema';
 import {
@@ -1251,7 +1254,8 @@ export async function handleChatTurn(
     throw new Error('Chat admission lease was lost before streaming');
   }
 
-  const noHistoricalContext = explicitlyOptsOutOfRecall(userText);
+  const noHistoricalContext =
+    explicitlyOptsOutOfRecall(userText) || isConversationLocalContext(userText);
   const recallPromise = (async (): Promise<{
     block?: string;
     sources: RecallSource[];

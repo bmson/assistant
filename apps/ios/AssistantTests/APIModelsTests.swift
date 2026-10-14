@@ -1865,6 +1865,24 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(time, "All day")
     }
 
+    func testCrossDayCalendarCardShowsBothLocalDatesAndTimes() throws {
+        let zone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        let locale = Locale(identifier: "en_US")
+        let range = CalendarEventPresentation.timeLabel(
+            start: "2026-10-10T13:00:00Z",
+            end: "2026-10-17T09:00:00Z",
+            fallback: "6:00 AM–2:00 AM",
+            timeZone: zone,
+            locale: locale
+        )
+        let normalizedRange = range.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        XCTAssertTrue(normalizedRange.contains("Oct 10, 2026"), range)
+        XCTAssertTrue(normalizedRange.contains("6:00 AM"), range)
+        XCTAssertTrue(normalizedRange.contains("Oct 17, 2026"), range)
+        XCTAssertTrue(normalizedRange.contains("2:00 AM"), range)
+        XCTAssertFalse(normalizedRange.contains("6:00 AM–2:00 AM"), range)
+    }
+
     func testProactiveAlertCardDecodesGroundedDetails() {
         let part = MessagePart(
             type: "data-card",
