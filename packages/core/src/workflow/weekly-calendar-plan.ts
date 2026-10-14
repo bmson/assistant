@@ -184,9 +184,13 @@ function isExtendedLodging(event: PlainRecord, interval: { start: number; end: n
   ]
     .filter((value): value is string => typeof value === 'string')
     .join(' ');
-  return /\b(?:hotel|lodging|accommodation|hostel|resort|airbnb|check[ -]?in|check[ -]?out|overnight stay|hotel reservation)\b/i.test(
-    details,
-  );
+  const explicitStayOrReservation =
+    /\b(?:hotel|lodging|accommodation|hostel|resort|airbnb)\s+(?:reservation|booking|stay)\b/i.test(
+      details,
+    ) || /\b(?:overnight|multi[- ]night)\s+(?:hotel\s+)?stay\b/i.test(details);
+  const explicitCheckInAndOut =
+    /\bcheck[ -]?in\b/i.test(details) && /\bcheck[ -]?out\b/i.test(details);
+  return explicitStayOrReservation || explicitCheckInAndOut;
 }
 
 /**

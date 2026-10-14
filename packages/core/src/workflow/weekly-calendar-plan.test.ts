@@ -794,6 +794,39 @@ describe('requested focus-plan variations', () => {
     expect(result.text).toContain('I haven’t changed your calendar');
   });
 
+  it.each([
+    ['Hotel leadership conference', 'Multi-day conference at the hotel venue.'],
+    ['Hotel check-in training', 'Training for staff on the hotel check-in process.'],
+  ])('does not discount provider busy for a non-stay event titled %s', (summary, description) => {
+    const result = weeklyCalendarPlanResult({
+      timeMin: threeDayStart,
+      timeMax: threeDayEnd,
+      timeZone: 'America/Los_Angeles',
+      evidence: stayEvidence({
+        stay: {
+          eventId: 'non-stay',
+          calendar: 'Travel',
+          calendarId: 'travel-calendar',
+          summary,
+          description,
+          start: '2026-10-12T07:00:00.000Z',
+          end: '2026-10-17T07:00:00.000Z',
+          ownerResponse: 'accepted',
+          blocksTime: true,
+        },
+        checked: ['Travel'],
+        unavailable: [],
+        availabilityBusy: [{ start: threeDayStart, end: threeDayEnd, calendar: 'Travel' }],
+      }) as never,
+    });
+
+    expect(result.slotCount).toBe(0);
+    expect(result.text).toContain('I couldn’t identify suitable');
+    expect(result.text).toContain('Overloaded-day estimate');
+    expect(result.text).not.toContain('Conditional on treating');
+    expect(result.text).not.toContain('provider still reports busy across this window');
+  });
+
   it('does not discount a whole-window busy interval when a same-calendar meeting overlaps it', () => {
     const result = weeklyCalendarPlanResult({
       timeMin: threeDayStart,
