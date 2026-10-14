@@ -37,6 +37,26 @@ function history(): ActionEvidence {
 }
 
 describe('successful historical evidence after a later budget failure', () => {
+  it('accepts the exact owner question for unanchored history without relaxing named anchors', () => {
+    const question = 'What did I tell you in an earlier conversation about my return date?';
+    const request = detectPersonalReadRequest([{ role: 'user', content: question }]);
+    const named = detectPersonalReadRequest([{ role: 'user', content: prompts[0] }]);
+    if (!request || !named) throw new Error('Expected historical reads');
+    const row = { ...history(), args: { query: question, limit: 5 } };
+    expect(matchesHistoricalMemorySearch(request, row)).toBe(true);
+    expect(matchesHistoricalMemorySearch(request, { ...row, fromCurrentTask: false })).toBe(false);
+    expect(matchesHistoricalMemorySearch(request, { ...row, status: 'failed' })).toBe(false);
+    expect(
+      matchesHistoricalMemorySearch(request, { ...row, args: { query: `${question} unrelated` } }),
+    ).toBe(false);
+    expect(
+      matchesHistoricalMemorySearch(named, {
+        ...row,
+        args: { query: prompts[0], mode: 'semantic' },
+      }),
+    ).toBe(false);
+  });
+
   it.each(prompts)('preserves exact attributed source passages: %s', async (requestText) => {
     const request = detectPersonalReadRequest([{ role: 'user', content: requestText }]);
     if (!request) throw new Error('Expected historical read');

@@ -1413,7 +1413,8 @@ function historicalSearchQueries(request: PersonalReadRequest): string[] {
 }
 
 /** A current successful history pass is coverage even if a later semantic pass failed.
- * Bind to the runtime's exact allowed query and literal-anchor mode; generic
+ * Bind to an exact runtime query or the owner's original unanchored question;
+ * preserve literal-anchor mode. Generic
  * query-term inclusion cannot represent a named anchor such as a project name.
  */
 export function matchesHistoricalMemorySearch(
@@ -1433,7 +1434,8 @@ export function matchesHistoricalMemorySearch(
   const result = objectRecord(row.result);
   return (
     typeof query === 'string' &&
-    historicalSearchQueries(request).slice(0, MAX_MEMORY_SEARCH_PASSES).includes(query) &&
+    (historicalSearchQueries(request).slice(0, MAX_MEMORY_SEARCH_PASSES).includes(query) ||
+      (!request.conversationAnchorQuery && query === request.memoryQuery)) &&
     (query !== request.conversationAnchorQuery || args?.mode === 'text') &&
     Array.isArray(result?.matches)
   );
