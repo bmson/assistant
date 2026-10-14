@@ -14,6 +14,7 @@ import {
   emailReviewRecentMetadataFallback,
   emailReviewSelectionWithinAuthorizedPool,
   emailReviewThreadReadResult,
+  emailReviewValidationIssues,
   emailReviewVerifiedNotEligibleThreadIds,
   formatEmailReviewAnswer,
   generateValidatedEmailReview,
@@ -175,10 +176,16 @@ describe('bounded no-send email review', () => {
       ...required(validAnswer('thread-a').items[0], 'assessment'),
       disposition: 'no_reply' as const,
       recipient: null,
+      deadline: null,
       draftBody: null,
       draftSourceMessageIds: [],
     };
-    const evidence = [search('thread-a'), read('thread-a', messages('thread-a'))];
+    const source = messages('thread-a');
+    const latest = required(source.at(-1), 'latest');
+    latest.text = 'The renewal details are attached for your records.';
+    latest.sourceLength = latest.text.length;
+    const evidence = [search('thread-a'), read('thread-a', source)];
+    item.whyQuote = latest.text;
     const checked = revalidateEmailReviewAssessmentBatches(
       [[item]],
       ['thread-a'],
@@ -228,7 +235,7 @@ describe('bounded no-send email review', () => {
   it('retains an uncertain no-reply assessment without authorizing a reserve', () => {
     const source = messages('thread-a');
     const latest = required(source.at(-1), 'latest');
-    latest.text += ' The discount offer is available through Jun. 6th.';
+    latest.text = 'The discount offer is available through Jun. 6th.';
     latest.sourceLength = latest.text.length;
     const evidence = [search('thread-a'), read('thread-a', source)];
     const noReply = {
@@ -236,6 +243,7 @@ describe('bounded no-send email review', () => {
       disposition: 'no_reply' as const,
       recipient: null,
       deadline: null,
+      whyQuote: latest.text,
       draftBody: null,
       draftSourceMessageIds: [],
     };
@@ -383,11 +391,13 @@ describe('bounded no-send email review', () => {
     expect(result.attempts).toBe(2);
     const initial = required(calls[0], 'initial call');
     expect(initial.repair).toBe(false);
-    expect(initial.prompt).toContain('verbatim, contiguous substring from the body text');
-    expect(initial.prompt).toContain('exact message identified by whyMessageId');
-    expect(initial.prompt).toContain('exact message identified by deadline.messageId');
     expect(initial.prompt).toContain(
-      'subject lines, snippets, headers, and other messages are not quote sources',
+      'copy a verbatim, contiguous substring from that exact message body',
+    );
+    expect(initial.prompt).toContain('set whyMessageId to exactly latestMessageId');
+    expect(initial.prompt).toContain('use its message ID, or return deadline: null');
+    expect(initial.prompt).toContain(
+      'Subject lines, snippets, headers, and other messages are not quote sources',
     );
     const repair = required(calls[1], 'repair call');
     expect(repair.repair).toBe(true);
@@ -398,6 +408,180 @@ describe('bounded no-send email review', () => {
     expect(repair.prompt).toContain(
       'Subject lines, snippets, headers, and other messages are not quote sources',
     );
+  });
+
+  it('repairs exact-source failures and prepares owner-choice placeholders for direct volunteer and RSVP asks', async () => {
+    const makeRequestThread = (threadId: string, sender: string, subject: string, text: string) => {
+      const sourceMessages = messages(threadId, sender);
+      const latest = required(sourceMessages.at(-1), 'latest source message');
+      latest.subject = subject;
+      latest.text = text;
+      latest.sourceLength = text.length;
+      return required(
+        emailReviewCompleteThread(threadId, 'owner@example.com', [
+          search(threadId),
+          read(threadId, sourceMessages),
+        ]),
+        'complete request thread',
+      );
+    };
+    const volunteer = makeRequestThread(
+      'volunteer-request',
+      'coach@example.org',
+      'Volunteers needed tomorrow',
+      "Hey y'all — nobody has signed up for tomorrow. Are you able to?",
+    );
+    const rsvp = makeRequestThread(
+      'pta-rsvp',
+      'pta@example.org',
+      'Please RSVP for October 21',
+      "If you have not yet RSVP'd, please click this link to RSVP by October 18 for the October 21 PTA meeting: https://example.org/pta-rsvp",
+    );
+    const assessment = (
+      thread: typeof volunteer,
+      whyQuote: string,
+      deadlineQuote: string,
+      draftBody: string,
+    ) => ({
+      threadId: thread.threadId,
+      latestMessageId: thread.latestMessageId,
+      disposition: 'draft' as const,
+      recipient: thread.recipient,
+      why: 'The latest inbound message asks for a response.',
+      whyMessageId: thread.latestMessageId,
+      whyQuote,
+      deadline: { messageId: thread.latestMessageId, quote: deadlineQuote },
+      draftBody,
+      draftSourceMessageIds: [thread.latestMessageId],
+    });
+    const valid = {
+      items: [
+        assessment(
+          volunteer,
+          'Are you able to?',
+          'tomorrow',
+          'Thanks for checking. [Choose one: available / unavailable] to help tomorrow.',
+        ),
+        assessment(
+          rsvp,
+          "If you have not yet RSVP'd, please click this link to RSVP",
+          'by October 18',
+          'Thanks for the reminder. [Add your RSVP choice here] for the October 21 PTA meeting.',
+        ),
+      ],
+    };
+    const invalid = structuredClone(valid);
+    const firstInvalid = required(invalid.items[0], 'invalid volunteer assessment');
+    firstInvalid.whyMessageId = required(volunteer.messages[0], 'earlier message').messageId;
+    firstInvalid.whyQuote = 'Nobody signed up and you can help tomorrow.';
+    if (!firstInvalid.deadline) throw new Error('missing invalid deadline fixture');
+    firstInvalid.deadline.quote = 'by tomorrow';
+
+    expect(emailReviewValidationIssues(invalid, [volunteer, rsvp])).toEqual(
+      expect.arrayContaining([
+        'item_0:why_quote_must_be_latest_inbound',
+        'item_0:literal_why_quote_from_named_message',
+        'item_0:literal_explicit_deadline_or_null',
+      ]),
+    );
+    const calls: Array<{ prompt: string; repair: boolean }> = [];
+    const result = await generateValidatedEmailReview([volunteer, rsvp], async (input) => {
+      calls.push(input);
+      return { ok: true, value: calls.length === 1 ? invalid : valid };
+    });
+
+    expect(result.attempts).toBe(2);
+    expect(result.answer?.items.map((item) => item.disposition)).toEqual(['draft', 'draft']);
+    expect(result.answer?.items.map((item) => item.deadlineQuote)).toEqual([
+      'tomorrow',
+      'by October 18',
+    ]);
+    expect(result.answer?.items.map((item) => item.draftBody)).toEqual([
+      'Thanks for checking. [Choose one: available / unavailable] to help tomorrow.',
+      'Thanks for the reminder. [Add your RSVP choice here] for the October 21 PTA meeting.',
+    ]);
+    const formatted = formatEmailReviewAnswer(
+      result.answer?.items ?? [],
+      emailReviewCoverage(
+        ['volunteer-request', 'pta-rsvp'],
+        result.answer?.items.map((item) => item.thread) ?? [],
+        [search('volunteer-request'), search('pta-rsvp')],
+      ),
+    );
+    expect(formatted.match(/Draft for review — not saved or sent:/g)).toHaveLength(2);
+    const parsedPrompt = JSON.parse(required(calls[0], 'first model call').prompt) as {
+      threads: Array<{
+        messages: Array<{ messageId: string; promptRole: string; text: string }>;
+      }>;
+      instruction: string;
+    };
+    expect(parsedPrompt.instruction).toContain(
+      'return deadline: null if none is explicitly stated',
+    );
+    expect(parsedPrompt.instruction).toContain(
+      'Keep relative wording such as "tomorrow" exactly as written',
+    );
+    expect(parsedPrompt.instruction).toContain(
+      'Use no_reply only when the complete thread shows no unanswered direct request',
+    );
+    expect(parsedPrompt.threads[0]?.messages).toHaveLength(2);
+    expect(parsedPrompt.threads[0]?.messages[0]?.promptRole).toBe('thread_context');
+    expect(parsedPrompt.threads[0]?.messages[1]?.promptRole).toBe('latest_inbound');
+    expect(parsedPrompt.threads[0]?.messages[1]?.text).toContain('Are you able to?');
+    expect(required(calls[1], 'repair model call').prompt).toContain(
+      'item_0:literal_why_quote_from_named_message',
+    );
+  });
+
+  it('rejects no_reply only for a clear unquoted direct ask, not a quoted or incidental RSVP mention', () => {
+    const makeThread = (threadId: string, text: string) => {
+      const sourceMessages = messages(threadId);
+      const latest = required(sourceMessages.at(-1), 'latest source message');
+      latest.text = text;
+      latest.sourceLength = text.length;
+      return required(
+        emailReviewCompleteThread(threadId, 'owner@example.com', [
+          search(threadId),
+          read(threadId, sourceMessages),
+        ]),
+        'complete thread',
+      );
+    };
+    const directRequest = makeThread(
+      'direct-rsvp',
+      "If you have not yet RSVP'd, please click the link below to RSVP.",
+    );
+    const incidentalMention = makeThread(
+      'newsletter-mention',
+      'The newsletter includes an RSVP link for families who are interested.',
+    );
+    const quotedOldAsk = makeThread(
+      'quoted-old-ask',
+      'Thanks for the update.\n> Are you able to help tomorrow?',
+    );
+    const noReplyFor = (thread: typeof directRequest) => ({
+      items: [
+        {
+          ...required(validAnswer(thread.threadId).items[0], 'no-reply base'),
+          disposition: 'no_reply' as const,
+          recipient: null,
+          deadline: null,
+          draftBody: null,
+          draftSourceMessageIds: [],
+          whyMessageId: thread.latestMessageId,
+          whyQuote: required(thread.messages.at(-1), 'latest').text,
+        },
+      ],
+    });
+
+    expect(validateEmailReviewAnswer(noReplyFor(directRequest), [directRequest])).toBeUndefined();
+    expect(emailReviewValidationIssues(noReplyFor(directRequest), [directRequest])).toContain(
+      'item_0:direct_latest_request_requires_review_draft',
+    );
+    expect(
+      validateEmailReviewAnswer(noReplyFor(incidentalMention), [incidentalMention]),
+    ).toBeDefined();
+    expect(validateEmailReviewAnswer(noReplyFor(quotedOldAsk), [quotedOldAsk])).toBeDefined();
   });
 
   it('bounds repeated invalid assessments and does not weaken exact source validation', async () => {
