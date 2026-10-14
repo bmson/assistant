@@ -135,12 +135,22 @@ function requiresOwnerAssistantContrast(request: string): boolean {
 }
 
 function asksAboutOwnerHistory(request: string): boolean {
-  return (
-    /\b(?:what|which|how|where|when)\b/i.test(request) &&
-    /\b(?:i|me|my|mine|we|our|previously|earlier|remember|said|told|preference|preferences)\b/i.test(
+  const asksWhatTheAssistantSaid =
+    /\b(?:what|which|how)\b.{0,100}\b(?:did|have|had)\s+you\s+(?:say|tell|mention|claim|recommend|reply|respond)\b/i.test(
       request,
-    )
-  );
+    );
+  if (asksWhatTheAssistantSaid) return false;
+
+  const asksWhatTheOwnerSaid =
+    /\b(?:what|which|how|where|when)\b.{0,140}\b(?:i|we)\s+(?:previously\s+|earlier\s+)?(?:said|tell|told|mentioned|asked|corrected|preferred|prefer)\b/i.test(
+      request,
+    );
+  const asksForOwnerPreferences =
+    /\b(?:what|which|how)\b/i.test(request) &&
+    /\b(?:my|our)\b.{0,80}\b(?:preference|preferences|style|format|choice|choices)\b/i.test(
+      request,
+    );
+  return asksWhatTheOwnerSaid || asksForOwnerPreferences;
 }
 
 function selectedSpeakers(

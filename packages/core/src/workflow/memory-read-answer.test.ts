@@ -323,6 +323,40 @@ describe('exact historical source projection', () => {
     expect(answer).not.toContain('dense dashboards');
     expect(answer).not.toContain('job application');
   });
+  it('accepts an assistant-only historical answer when asked what the assistant previously said', async () => {
+    const request = 'What did you say about my UI preferences?';
+    const assistantText = 'I previously recommended a minimal UI with clear typography.';
+    const assistantEvidence: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: {
+          matches: [message('assistant-ui', assistantText, 'assistant', 'assistant')],
+        },
+      },
+    ];
+    const object = vi.fn(async () => ({
+      ok: true,
+      object: {
+        selections: [{ sourceKey: 'message:assistant-ui', quote: assistantText }],
+      },
+    }));
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence: assistantEvidence,
+    });
+    expect(result).toMatchObject({
+      status: 'complete',
+      selections: [{ sourceKey: 'message:assistant-ui' }],
+    });
+    expect(object).toHaveBeenCalledTimes(1);
+    expect(validMemoryReadSelection(result, assistantEvidence, request)).toBe(true);
+    expect(renderMemoryReadAnswer(result, assistantEvidence, request)).toContain(
+      'Earlier assistant claim (not verified fact)',
+    );
+  });
   it('does not claim an owner-history search was complete when relevant owner sources remain unselected', async () => {
     const request = 'What did I previously tell you about accessible controls?';
     const object = vi
