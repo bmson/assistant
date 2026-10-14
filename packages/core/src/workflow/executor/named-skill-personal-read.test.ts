@@ -2,6 +2,7 @@ import type { LearnedSkill, SkillContextRepository } from '@assistant/persistenc
 import { describe, expect, it, vi } from 'vitest';
 import type { TaskState } from '../../events.js';
 import { TaskStateSchema } from '../../events.js';
+import { skillRetrievalReceipt } from '../../memory/skills.js';
 import { stageFinalResponse } from './finalize.js';
 import type { RunContext } from './phases.js';
 import { runStepLoop } from './step-loop.js';
@@ -187,7 +188,7 @@ async function runPersonalRead(request: string, foundSkill: LearnedSkill | null 
 
 describe('named saved skill use during a personal read', () => {
   it('retrieves the exact owner skill as advice without opening a write capability', async () => {
-    const { skills, systems, router, dispatch } = await runPersonalRead(
+    const { skills, systems, router, dispatch, state } = await runPersonalRead(
       'What is on my calendar today? Apply my saved skill named "Calendar review".',
     );
 
@@ -198,6 +199,8 @@ describe('named saved skill use during a personal read', () => {
     expect(systems.join('\n')).toContain('ADVICE');
     expect(dispatch.mock.calls.map(([call]) => call.toolName)).toEqual(['calendar.list_events']);
     expect(router.step).toHaveBeenCalledTimes(1);
+    expect(state.skillRetrievalReceipts).toEqual([skillRetrievalReceipt(skill)]);
+    expect(JSON.stringify(state.skillRetrievalReceipts)).not.toContain(skill.steps);
   });
 
   it('does not resolve a name that appears only as quoted external content', async () => {
@@ -260,7 +263,34 @@ describe('named saved skill use during a personal read', () => {
     expect(pending.text).toContain('Your calendar has a 9:00 design review.');
   });
 
-  it.each(['unused', 'missing', 'lookup throws'] as const)(
+  it('keeps older checkpoints readable when they predate content-hash receipts', async () => {
+    const f = await runPersonalRead(
+      'What is on my calendar today? Apply my saved skill named "Calendar review".',
+    );
+    f.state.usedSkillIds = [skill.id];
+    f.state.skillRetrievalReceipts = undefined;
+    const pending = {
+      text: 'I followed Calendar review. Your calendar has a 9:00 design review.',
+      progress: 'Calendar checked.',
+      terminalStatus: 'done' as const,
+      outcome: 'done' as const,
+    };
+
+    const result = await stageFinalResponse(
+      f.deps as unknown as import('./types.js').ExecutorDeps,
+      { ...f.task, type: 'scheduled_task', conversationId: null } as never,
+      f.state,
+      f.window as never,
+      pending,
+    );
+
+    expect(result.outcome).toBe('done');
+    expect(pending.text).toContain(
+      'Saved skill “Calendar review” was retrieved as planning guidance.',
+    );
+  });
+
+  it.each(['unused', 'missing', 'lookup throws', 'receipt missing', 'receipt changed'] as const)(
     'does not turn an unsupported model use claim into a successful receipt when skill is %s',
     async (condition) => {
       const f = await runPersonalRead(
@@ -270,6 +300,11 @@ describe('named saved skill use during a personal read', () => {
       f.state.usedSkillIds = condition === 'unused' ? [] : [skill.id];
       if (condition === 'lookup throws')
         vi.mocked(f.skills.findByName).mockRejectedValueOnce(new Error('repository unavailable'));
+      if (condition === 'receipt missing') f.state.skillRetrievalReceipts = [];
+      if (condition === 'receipt changed')
+        f.state.skillRetrievalReceipts = [
+          { ...skillRetrievalReceipt(skill), adviceSha256: 'a'.repeat(64) },
+        ];
       const pending = {
         text: 'I used Calendar review. Your calendar has a 9:00 design review.',
         progress: 'Calendar checked.',

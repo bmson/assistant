@@ -154,7 +154,7 @@ function gmailThreadPage(input: {
 }
 
 describe('golden tasks', () => {
-  it('executes a compound trip read through the real task dispatcher and returns a source-grounded itinerary', async (ctx) => {
+  it('executes a compound trip read through the scripted executor and returns a source-grounded itinerary', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const prompt =
       'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
@@ -662,7 +662,7 @@ describe('golden tasks', () => {
             pageToken: z.string().optional(),
           }),
           execute: async (args) => {
-            expect(args).toMatchObject({ query: 'newer_than:7d -from:me', maxResults: 20 });
+            expect(args).toMatchObject({ query: 'newer_than:7d -from:me', maxResults: 100 });
             return {
               query: 'newer_than:7d -from:me',
               mailboxSearched: 'assistant-bot@example.com',
@@ -1006,7 +1006,7 @@ describe('golden tasks', () => {
     });
   });
 
-  it('completes five verified fallback reads within the default budget after five search pages', async (ctx) => {
+  it('completes five verified fallback reads within the default budget after three search pages', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const prompt =
       'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.';
@@ -1014,7 +1014,7 @@ describe('golden tasks', () => {
     let searchPages = 0;
     const readThreadIds: string[] = [];
     const result = await runGoldenTask(db, agentId, {
-      name: 'bounded-email-review-five-pages-five-thread-default-budget',
+      name: 'bounded-email-review-three-pages-five-thread-default-budget',
       event: { source: 'chat', trust: 'owner', payload: { text: prompt } },
       taskType: 'chat_turn',
       pinOwnerRequest: true,
@@ -1097,11 +1097,11 @@ describe('golden tasks', () => {
     });
     createdTaskIds.push(result.taskId);
 
-    expect(searchPages).toBe(5);
+    expect(searchPages).toBe(3);
     expect(readThreadIds).toHaveLength(5);
     expect(new Set(readThreadIds).size).toBe(5);
     expect(result.stepCount).toBeLessThanOrEqual(12);
-    expect(result.toolNames.filter((name) => name === 'gmail.search')).toHaveLength(5);
+    expect(result.toolNames.filter((name) => name === 'gmail.search')).toHaveLength(3);
     expect(result.toolNames.filter((name) => name === 'gmail.read_thread')).toHaveLength(5);
     expect(
       result.toolNames.every((name) => ['gmail.search', 'gmail.read_thread'].includes(name)),
@@ -1163,9 +1163,9 @@ describe('golden tasks', () => {
               query: 'newer_than:7d -from:me',
               mailboxSearched: 'assistant-bot@example.com',
               configuredOwnerMailbox: 'owner@example.com',
-              complete: page === 5,
-              hasMore: page < 5,
-              ...(page < 5 ? { nextPageToken: `page-${page + 1}` } : {}),
+              complete: page === 3,
+              hasMore: page < 3,
+              ...(page < 3 ? { nextPageToken: `page-${page + 1}` } : {}),
               unavailable: [],
               results:
                 page === 1
@@ -1224,11 +1224,11 @@ describe('golden tasks', () => {
     });
     createdTaskIds.push(result.taskId);
 
-    expect(searchPages).toBe(5);
+    expect(searchPages).toBe(3);
     expect(readThreadIds).toEqual(rankedIds.slice(0, 7));
     expect(result.status).toBe('done');
-    expect(result.stepCount).toBe(14);
-    expect(result.toolNames.filter((name) => name === 'gmail.search')).toHaveLength(5);
+    expect(result.stepCount).toBe(12);
+    expect(result.toolNames.filter((name) => name === 'gmail.search')).toHaveLength(3);
     expect(result.toolNames.filter((name) => name === 'gmail.read_thread')).toHaveLength(7);
     expect(result.toolNames).not.toContain('gmail.send');
     expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(5);
@@ -1241,6 +1241,232 @@ describe('golden tasks', () => {
       attemptedThreadIds: rankedIds.slice(0, 7),
       notEligibleThreadIds: ['request-a', 'request-b'],
     });
+  });
+
+  it('replaces fully assessed informational mail with ranked reserves and keeps five source-bound drafts', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const prompt =
+      'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.';
+    const rankedIds = Array.from({ length: 8 }, (_, index) => `review-${index + 1}`);
+    const noReply = (threadId: string) => ({
+      ...emailReviewDraft(threadId),
+      disposition: 'no_reply' as const,
+      recipient: null,
+      draftBody: null,
+      draftSourceMessageIds: [],
+    });
+    const readIds: string[] = [];
+    const result = await runGoldenTask(db, agentId, {
+      name: 'email-review-verified-no-reply-reserve-assessment',
+      event: { source: 'chat', trust: 'owner', payload: { text: prompt } },
+      taskType: 'chat_turn',
+      pinOwnerRequest: true,
+      plan: workflowPlan,
+      maxSteps: 14,
+      objects: [
+        { role: 'reason', value: { threadIds: rankedIds } },
+        {
+          role: 'reason',
+          value: {
+            items: [
+              ...rankedIds.slice(0, 3).map(noReply),
+              ...rankedIds.slice(3, 5).map(emailReviewDraft),
+            ],
+          },
+        },
+        { role: 'reason', value: { items: rankedIds.slice(5).map(emailReviewDraft) } },
+      ],
+      script: [],
+      tools: {
+        'gmail.search': {
+          schema: z.object({
+            query: z.string(),
+            maxResults: z.number().optional(),
+            pageToken: z.string().optional(),
+          }),
+          execute: async (input) => {
+            const { pageToken: token, maxResults } = input as {
+              pageToken?: string;
+              maxResults?: number;
+            };
+            expect(maxResults).toBe(100);
+            const page = token ? Number(token.replace('page-', '')) : 1;
+            return {
+              query: 'newer_than:7d -from:me',
+              configuredOwnerMailbox: 'owner@example.com',
+              complete: page === 3,
+              hasMore: page < 3,
+              ...(page < 3 ? { nextPageToken: `page-${page + 1}` } : {}),
+              unavailable: [],
+              results:
+                page === 1
+                  ? rankedIds.map((threadId, index) => ({
+                      messageId: `search-${threadId}`,
+                      threadId,
+                      from: 'sender@example.net',
+                      to: 'owner@example.com',
+                      date: `2026-10-12T${String(15 - index).padStart(2, '0')}:00:00Z`,
+                      subject: `Request ${threadId}`,
+                      snippet: `Could you confirm request ${threadId}?`,
+                    }))
+                  : [],
+            };
+          },
+        },
+        'gmail.read_thread': {
+          schema: z.object({
+            threadId: z.string(),
+            startMessageIndex: z.number().optional(),
+            startMessageOffset: z.number().optional(),
+            maxMessages: z.number().optional(),
+            maxChars: z.number().optional(),
+          }),
+          execute: async (input) => {
+            const { threadId, startMessageIndex = 0 } = input as {
+              threadId: string;
+              startMessageIndex?: number;
+            };
+            readIds.push(threadId);
+            const text = `Could you confirm request ${threadId}?`;
+            return gmailThreadPage({
+              threadId,
+              startMessageIndex,
+              totalMessages: 1,
+              complete: true,
+              messages: [
+                {
+                  messageId: `latest-${threadId}`,
+                  from: 'sender@example.net',
+                  to: 'owner@example.com',
+                  date: '2026-10-12T10:00:00Z',
+                  subject: `Request ${threadId}`,
+                  text,
+                  sourceLength: text.length,
+                  truncated: false,
+                },
+              ],
+            });
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+    expect(readIds).toEqual(rankedIds);
+    expect(result.stepCount).toBe(14);
+    expect(result.status).toBe('done');
+    expect(result.toolNames).not.toContain('gmail.send');
+    expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(5);
+    expect(result.finalText).toContain(
+      '3 fully assessed threads did not clearly require a response',
+    );
+    expect(result.finalText).not.toContain('### Request review-1');
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
+    expect(
+      TaskStateSchema.parse(task?.state).plannerState.emailReviewAssessmentBatches,
+    ).toHaveLength(2);
+  });
+
+  it('does not read a reserve for a no-reply assessment with an unresolved dated offer', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const prompt =
+      'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.';
+    const rankedIds = Array.from({ length: 6 }, (_, index) => `review-${index + 1}`);
+    const firstAssessment = {
+      ...emailReviewDraft(rankedIds[0] ?? 'review-1'),
+      disposition: 'no_reply' as const,
+      recipient: null,
+      draftBody: null,
+      draftSourceMessageIds: [],
+    };
+    const assessments = [firstAssessment, ...rankedIds.slice(1, 5).map(emailReviewDraft)];
+    const readIds: string[] = [];
+    const result = await runGoldenTask(db, agentId, {
+      name: 'email-review-unresolved-no-reply-does-not-authorize-reserve',
+      event: { source: 'chat', trust: 'owner', payload: { text: prompt } },
+      taskType: 'chat_turn',
+      pinOwnerRequest: true,
+      plan: workflowPlan,
+      maxSteps: 14,
+      objects: [
+        { role: 'reason', value: { threadIds: rankedIds } },
+        { role: 'reason', value: { items: assessments } },
+        { role: 'reason', value: { items: assessments } },
+      ],
+      script: [],
+      tools: {
+        'gmail.search': {
+          schema: z.object({ query: z.string(), maxResults: z.number().optional() }),
+          execute: async () => ({
+            query: 'newer_than:7d -from:me',
+            configuredOwnerMailbox: 'owner@example.com',
+            complete: true,
+            hasMore: false,
+            unavailable: [],
+            results: rankedIds.map((threadId, index) => ({
+              messageId: `search-${threadId}`,
+              threadId,
+              from: 'sender@example.net',
+              to: 'owner@example.com',
+              date: `2026-10-12T${String(15 - index).padStart(2, '0')}:00:00Z`,
+              subject: `Request ${threadId}`,
+              snippet: `Could you confirm request ${threadId}?`,
+            })),
+          }),
+        },
+        'gmail.read_thread': {
+          schema: z.object({
+            threadId: z.string(),
+            startMessageIndex: z.number().optional(),
+            startMessageOffset: z.number().optional(),
+            maxMessages: z.number().optional(),
+            maxChars: z.number().optional(),
+          }),
+          execute: async (input) => {
+            const { threadId, startMessageIndex = 0 } = input as {
+              threadId: string;
+              startMessageIndex?: number;
+            };
+            readIds.push(threadId);
+            const text = `Could you confirm request ${threadId}?${
+              threadId === rankedIds[0] ? ' The discount offer is available through Jun. 6th.' : ''
+            }`;
+            return gmailThreadPage({
+              threadId,
+              startMessageIndex,
+              totalMessages: 1,
+              complete: true,
+              messages: [
+                {
+                  messageId: `latest-${threadId}`,
+                  from: 'sender@example.net',
+                  to: 'owner@example.com',
+                  date: '2026-10-12T10:00:00Z',
+                  subject: `Request ${threadId}`,
+                  text,
+                  sourceLength: text.length,
+                  truncated: false,
+                },
+              ],
+            });
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+    expect(readIds).toEqual(rankedIds.slice(0, 5));
+    expect(result.status).toBe('needs_attention');
+    expect(result.finalText).toContain('unresolved possible deadline');
+    expect(result.finalText).toContain('**Deadline needs review — Request review\\-1**');
+    expect(result.finalText).toContain(
+      '[Open the source thread](https://mail.google.com/mail/u/0/#all/review-1)',
+    );
+    expect(result.finalText).toContain('No reply draft was prepared for it');
+    expect(result.finalText).not.toContain('through Jun. 6th');
+    expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(4);
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
+    expect(
+      TaskStateSchema.parse(task?.state).plannerState.emailReviewAssessmentBatches,
+    ).toHaveLength(1);
   });
 
   it('uses a final review step after the two-continuation cap and reports a bounded backfill shortfall', async (ctx) => {

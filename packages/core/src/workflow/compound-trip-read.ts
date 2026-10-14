@@ -123,7 +123,11 @@ function text(value: unknown, max = 500): string {
 }
 
 function markdownText(value: string): string {
-  return value.replace(/[\\`*_{}[\]()<>#+\-=|!]/g, '\\$&');
+  // Parentheses are safe in ordinary text nodes. Escaping them leaks the
+  // Markdown backslashes in clients that render this projection as plain text.
+  // Brackets and other delimiters remain escaped so source text cannot create
+  // links or formatting when the same string is rendered as Markdown.
+  return value.replace(/[\\`*_{}[\]<>#+\-=|!]/g, '\\$&');
 }
 
 function successful(row: ReadToolEvidence): boolean {
@@ -193,8 +197,11 @@ function validSearchPage(row: ReadToolEvidence, query: string): boolean {
   const covered = object(receipt?.covered);
   const results = Array.isArray(result?.results) ? result.results : undefined;
   const unavailable = Array.isArray(result?.unavailable) ? result.unavailable : undefined;
-  const continuation = object(result?.continuation);
-  const continuationInput = object(continuation?.input);
+  const receiptContinuation = object(receipt?.continuation);
+  const receiptContinuationInput = object(receiptContinuation?.input);
+  const resultContinuationPresent = Boolean(result && 'continuation' in result);
+  const resultContinuation = object(result?.continuation);
+  const resultContinuationInput = object(resultContinuation?.input);
   const nextPageToken = text(result?.nextPageToken, 4096);
   if (
     !args ||
@@ -224,21 +231,22 @@ function validSearchPage(row: ReadToolEvidence, query: string): boolean {
   if (result.hasMore === true) {
     return Boolean(
       nextPageToken &&
-        continuation?.tool === 'gmail.search' &&
-        continuationInput?.query === query &&
-        continuationInput?.maxResults === args.maxResults &&
-        continuationInput?.pageToken === nextPageToken &&
-        object(receipt.continuation)?.tool === 'gmail.search' &&
-        object(object(receipt.continuation)?.input)?.query === query &&
-        object(object(receipt.continuation)?.input)?.maxResults === args.maxResults &&
-        object(object(receipt.continuation)?.input)?.pageToken === nextPageToken &&
+        receiptContinuation?.tool === 'gmail.search' &&
+        receiptContinuationInput?.query === query &&
+        receiptContinuationInput?.maxResults === args.maxResults &&
+        receiptContinuationInput?.pageToken === nextPageToken &&
+        (!resultContinuationPresent ||
+          (resultContinuation?.tool === 'gmail.search' &&
+            resultContinuationInput?.query === query &&
+            resultContinuationInput?.maxResults === args.maxResults &&
+            resultContinuationInput?.pageToken === nextPageToken)) &&
         receipt.losses.includes('provider-page'),
     );
   }
   return (
     result.complete === true &&
     !nextPageToken &&
-    !continuation &&
+    (!resultContinuationPresent || result.continuation === null) &&
     receipt.continuation === null &&
     receipt.losses.length === 0
   );
@@ -1519,7 +1527,11 @@ function calendarSource(event: Record<string, unknown>): string {
   if (typeof raw !== 'string') return '';
   try {
     const url = new URL(raw);
-    return url.protocol === 'https:' && url.hostname === 'calendar.google.com'
+    return url.protocol === 'https:' &&
+      !url.username &&
+      !url.password &&
+      ['calendar.google.com', 'www.google.com'].includes(url.hostname) &&
+      url.pathname === '/calendar/event'
       ? url.toString()
       : '';
   } catch {
@@ -2156,9 +2168,11 @@ export function upcomingFlightReadProjection(
   );
   const gaps: string[] = [];
   if (!trip.calendarComplete)
-    gaps.push('Calendar coverage is incomplete, so I cannot establish which flight is next.');
+    gaps.push('Calendar search coverage is incomplete, so an earlier flight may be missing.');
   if (!trip.gmailSearchComplete || !trip.threadsComplete)
-    gaps.push('Booking-email search or thread coverage is incomplete.');
+    gaps.push(
+      'Booking-email search or reads were incomplete, so a matching booking may be missing.',
+    );
   if (matchedFlightAmbiguous || calendarCandidateAmbiguous)
     gaps.push(
       'More than one future flight candidate has the same departure instant, so I could not choose one safely.',
@@ -2172,10 +2186,6 @@ export function upcomingFlightReadProjection(
       matchedFlightAmbiguous || calendarCandidateAmbiguous
         ? 'I could not identify one unambiguous next flight from the checked sources.'
         : 'I could not identify a dated future flight candidate in the checked calendar.',
-    );
-  else if (calendarCandidate)
-    gaps.push(
-      'This calendar event is only a flight candidate; I could not match it to a fully dated booking segment, so its booking direction and departure details are unconfirmed.',
     );
   if (selectedFlight?.segment && selectedFlight.itineraryChronology === 'impossible')
     gaps.push('The source-backed flight legs overlap or run in reverse order.');
@@ -2215,7 +2225,7 @@ export function upcomingFlightReadProjection(
       const title = markdownText(text(selectedFlight.event.summary, 160) || 'Flight event');
       const candidateDate = sourceCivilDate(selectedFlight.event);
       summary.push(
-        `Next future calendar flight candidate: ${title}${candidateDate ? `; calendar date ${candidateDate}` : ''}${calendarTime ? `; calendar time in ${displayTimeZone}: ${calendarTime}` : ''}${calendarLink ? ` [Calendar source](${calendarLink})` : ''}. Its booking and departure time are unconfirmed.`,
+        `Next future calendar flight candidate: ${title}${candidateDate ? `; calendar date ${candidateDate}` : ''}${calendarTime ? `; calendar time in ${displayTimeZone}: ${calendarTime}` : ''}${calendarLink ? ` [Calendar source](${calendarLink})` : ''}. The calendar time is not verified as departure time; booking identity, flight number, and direction are unconfirmed.`,
       );
     } else {
       const flightLabel = unmatchedCandidatePrecedesSelected
@@ -2253,7 +2263,7 @@ export function upcomingFlightReadProjection(
     ...(calendarCandidate ? { calendarCandidate } : {}),
     flightSegments: trip.flightSegments,
     unmatchedBookingSegments: unmatchedBookingCandidate ? [unmatchedBookingCandidate] : [],
-    blocked: gaps.length > 0,
+    blocked: gaps.length > 0 || calendarCandidate !== undefined,
     text: [
       summary.length > 0
         ? summary.join('\n\n')

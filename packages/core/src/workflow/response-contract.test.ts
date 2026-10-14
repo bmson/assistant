@@ -3403,7 +3403,7 @@ describe('groundReadDraft', () => {
     expect(response).toContain('6:00 AM');
     expect(response).toContain('America/Los_Angeles');
     expect(response).not.toContain('7:30 AM');
-    expect(response).toContain('booking and departure time are unconfirmed');
+    expect(response).toContain('booking identity, flight number, and direction are unconfirmed');
     expect(response).not.toContain('hotel');
     expect(response).not.toContain('ground transport');
     expect(enforcePersonalReadResponse(request, evidence).blocked).toBe(true);

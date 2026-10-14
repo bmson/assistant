@@ -32,6 +32,7 @@ import {
 import type { RecallSource } from '../../memory/recall.js';
 import {
   findActiveSkillByExactName,
+  matchesSkillRetrievalReceipt,
   recordSkillOutcome,
   requestedSavedSkillName,
 } from '../../memory/skills.js';
@@ -75,6 +76,7 @@ import { createSuggestion } from '../suggestions.js';
 import { refreshRequestChecklist } from './checklist.js';
 import { isUnattendedGoalSession, KNOWN_SENDER_REPLY_KIND } from './context-helpers.js';
 import { refreshConversationSearchEvidence } from './conversation-search-refresh.js';
+import { shouldGenerateFinalEvidenceCard } from './final-card-policy.js';
 import {
   notifyOwnerAndConversation,
   notifyOwnerOfDeliveredAnswer,
@@ -512,7 +514,15 @@ export async function stageFinalResponse(
           task.agentId,
           requestedSkill,
         );
-        retrieved = actual !== null && state.usedSkillIds.includes(actual.id);
+        const retrievalReceipts = state.skillRetrievalReceipts;
+        const receipt = retrievalReceipts?.find(
+          (item) => item.skillName === requestedSkill && item.skillId === actual?.id,
+        );
+        retrieved =
+          actual !== null &&
+          state.usedSkillIds.includes(actual.id) &&
+          (retrievalReceipts === undefined ||
+            (receipt !== undefined && matchesSkillRetrievalReceipt(receipt, actual)));
       } catch {
         /* Missing evidence cannot support a use claim. */
       }
@@ -922,11 +932,17 @@ export async function stageModelFinalResponse(
     }
   }
   if (
-    !scoreboard &&
-    (refreshCardId || cardRequested || answerCardPreferred || specializedCards.length === 0) &&
-    (!refreshCardId || refreshEvidence) &&
-    !checked.blocked &&
-    loadConfig().GENERATIVE_CARDS_ENABLED
+    shouldGenerateFinalEvidenceCard({
+      scoreboard: Boolean(scoreboard),
+      refreshCardId,
+      cardRequested,
+      answerCardPreferred,
+      specializedCardCount: specializedCards.length,
+      refreshEvidenceAvailable: Boolean(refreshEvidence),
+      blocked: checked.blocked,
+      enabled: loadConfig().GENERATIVE_CARDS_ENABLED,
+      weeklyCalendarPlan: Boolean(contractOptions.readRequest?.weeklyCalendarPlan),
+    })
   ) {
     const sourceText = refreshCardId
       ? (provenance?.requestText ?? '')

@@ -288,6 +288,12 @@ describe('detectPersonalReadRequest', () => {
       requiresThreadRead: true,
       emailReview: { windowDays: 7, requestedCount: 5 },
     });
+    const review = detectPersonalReadRequest(turn(prompt));
+    if (!review) throw new Error('Expected email review request');
+    expect(buildReadToolInput(review, 'gmail.search', [])).toMatchObject({
+      query: EMAIL_REVIEW_QUERY,
+      maxResults: 100,
+    });
     expect(
       detectPersonalReadRequest(
         turn(
@@ -739,13 +745,31 @@ describe('detectPersonalReadRequest', () => {
       kind: 'calendar',
       firstToolName: 'calendar.list_events',
       includeCalendarBriefing: true,
-      includeCalendarOverlapSummary: true,
       timeWindow: {
         timeMin: '2026-10-14T07:00:00.000Z',
         timeMax: '2026-10-15T07:00:00.000Z',
       },
     });
+    expect(request?.includeCalendarOverlapSummary).toBeUndefined();
     expect(request?.mailQuery).toBeUndefined();
+  });
+
+  it.each([
+    'Check my calendar tomorrow for overlaps.',
+    'Review my schedule next week and identify conflicts.',
+    'Don’t just look for overlaps; check conflicts too.',
+    'Do not change my calendar, but check for conflicts.',
+    'Check my calendar: don’t mention overlaps; check conflicts instead.',
+    'Review my calendar: don’t include overlaps, but report conflicts.',
+  ])('includes overlap analysis when explicitly requested: %s', (text) => {
+    expect(detectPersonalReadRequest(turn(text))?.includeCalendarOverlapSummary).toBe(true);
+  });
+
+  it.each([
+    'Brief me on my calendar tomorrow, but do not check for overlaps.',
+    'Give me a short schedule overview; no need to look for conflicts.',
+  ])('does not add overlap analysis when explicitly excluded: %s', (text) => {
+    expect(detectPersonalReadRequest(turn(text))?.includeCalendarOverlapSummary).toBeUndefined();
   });
 
   it.each(['Make this sentence clear.', 'Is the explanation clear?', 'Empty my inbox tomorrow.'])(
@@ -953,6 +977,16 @@ describe('detectPersonalReadRequest', () => {
     expect(
       nextRequiredReadTool(request, [firstRead, { ...firstRead, args: second }]),
     ).toBeUndefined();
+  });
+
+  it('routes direct questions about what the owner said to conversation history', () => {
+    const request = detectPersonalReadRequest(turn('What did I say about my UI preferences?'));
+    expect(request).toMatchObject({
+      kind: 'memory',
+      firstToolName: 'conversations.search',
+      conversationQuery: 'UI preferences',
+      searchSavedMemory: false,
+    });
   });
 
   it('bounds repeated failed history searches and never adds unrequested saved-memory reads', () => {
@@ -1964,7 +1998,7 @@ describe('required read sequence', () => {
     expect(nextRequiredReadTool(broad, [firstPage, secondPage, thirdPage])).toBeUndefined();
   });
 
-  it('allows five bounded email-review metadata pages and then proceeds to complete-thread reads', () => {
+  it('allows three bounded email-review metadata pages and then proceeds to complete-thread reads', () => {
     const review = detectPersonalReadRequest(
       turn(
         'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.',
@@ -1973,7 +2007,7 @@ describe('required read sequence', () => {
     expect(review?.emailReview).toBeDefined();
     if (!review?.emailReview) throw new Error('expected bounded email review');
     const pages: ReadToolEvidence[] = [];
-    for (let index = 0; index < 5; index += 1) {
+    for (let index = 0; index < 3; index += 1) {
       const token = index === 0 ? undefined : `page-${index + 1}`;
       pages.push({
         toolName: 'gmail.search',
@@ -1981,7 +2015,7 @@ describe('required read sequence', () => {
         args: { query: EMAIL_REVIEW_QUERY, ...(token ? { pageToken: token } : {}) },
         result: { complete: false, hasMore: true, nextPageToken: `page-${index + 2}`, results: [] },
       });
-      if (index < 4) expect(nextRequiredReadTool(review, pages)).toBe('gmail.search');
+      if (index < 2) expect(nextRequiredReadTool(review, pages)).toBe('gmail.search');
     }
     expect(nextRequiredReadTool(review, pages)).toBeUndefined();
   });

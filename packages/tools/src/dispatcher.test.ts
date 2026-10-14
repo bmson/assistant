@@ -3544,6 +3544,228 @@ describe('ToolDispatcher (integration)', () => {
     );
   });
 
+  it('allows only runtime-bound compound-trip public research and exact current-task result URLs', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const prompt =
+      'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
+    const ownerIntent = extractOwnerIntent({ trust: 'owner', text: prompt });
+    expect(ownerIntent.authorizedScopes).toContain('external_read');
+    const query = '"BER" public transport taxi "Hotel Linden" "Berlin" official';
+    const url = 'https://transit.example/ber-hotel';
+    let searchExecutions = 0;
+    let fetchExecutions = 0;
+    const registry = new ToolRegistry()
+      .register(
+        makeTool('web.search', {
+          inputSchema: z.object({ query: z.string(), count: z.number() }),
+          execute: async (args) => {
+            searchExecutions += 1;
+            const input = args as { query: string };
+            return {
+              query: input.query,
+              results: [
+                { url, title: 'Berlin public transport to Hotel Linden', snippet: 'transit' },
+              ],
+            };
+          },
+        }),
+        { networkEgress: true, returnsUntrustedContent: true, blanketAllowIneligible: true },
+      )
+      .register(
+        makeTool('web.fetch', {
+          inputSchema: z.object({ url: z.string() }),
+          execute: async (args) => {
+            fetchExecutions += 1;
+            return { fetched: (args as { url: string }).url };
+          },
+        }),
+        { networkEgress: true, returnsUntrustedContent: true, blanketAllowIneligible: true },
+      );
+    const dispatcher = new ToolDispatcher(db, registry);
+    const task = await makeTask('owner');
+    task.type = 'chat_turn';
+    task.trigger = { source: 'chat', payload: { text: prompt } };
+    await db
+      .update(tasks)
+      .set({ type: task.type, trigger: task.trigger })
+      .where(eq(tasks.id, task.id));
+    const taintedOwnerContext = {
+      ...ctxFor(task),
+      tainted: true,
+      ownerIntent,
+      authorizedCompoundTripPublicRead: {
+        taskId: task.id,
+        toolName: 'web.search' as const,
+        query,
+      },
+    };
+
+    const search = await dispatcher.dispatch({
+      task,
+      step: 1,
+      toolName: 'web.search',
+      args: { query, count: 5 },
+      ctx: taintedOwnerContext,
+      provenance,
+    });
+    expect(search.kind).toBe('executed');
+    expect(searchExecutions).toBe(1);
+    expect(
+      (
+        await dispatcher.dispatch({
+          task,
+          step: 2,
+          toolName: 'web.search',
+          args: { query: `${query} site:example.com`, count: 5 },
+          ctx: taintedOwnerContext,
+          provenance,
+        })
+      ).kind,
+    ).toBe('awaiting_approval');
+    expect(
+      (
+        await dispatcher.dispatch({
+          task,
+          step: 3,
+          toolName: 'web.search',
+          args: { query, count: 5 },
+          ctx: { ...taintedOwnerContext, authorizedCompoundTripPublicRead: undefined },
+          provenance,
+        })
+      ).kind,
+    ).toBe('awaiting_approval');
+
+    const fetchContext = {
+      ...taintedOwnerContext,
+      authorizedCompoundTripPublicRead: {
+        taskId: task.id,
+        toolName: 'web.fetch' as const,
+        query,
+        url,
+      },
+    };
+    const fetched = await dispatcher.dispatch({
+      task,
+      step: 4,
+      toolName: 'web.fetch',
+      args: { url },
+      ctx: fetchContext,
+      provenance,
+    });
+    expect(fetched.kind).toBe('executed');
+    expect(fetchExecutions).toBe(1);
+    expect(
+      (
+        await dispatcher.dispatch({
+          task,
+          step: 5,
+          toolName: 'web.fetch',
+          args: { url: 'https://other.example/ber-hotel' },
+          ctx: fetchContext,
+          provenance,
+        })
+      ).kind,
+    ).toBe('awaiting_approval');
+    expect(
+      (
+        await dispatcher.dispatch({
+          task,
+          step: 6,
+          toolName: 'web.fetch',
+          args: { url },
+          ctx: {
+            ...fetchContext,
+            authorizedCompoundTripPublicRead: {
+              taskId: task.id,
+              toolName: 'web.fetch',
+              query: `${query} site:example.com`,
+              url,
+            },
+          },
+          provenance,
+        })
+      ).kind,
+    ).toBe('awaiting_approval');
+
+    const foreignTask = await makeTask('owner');
+    foreignTask.type = 'chat_turn';
+    foreignTask.trigger = { source: 'chat', payload: { text: prompt } };
+    await db
+      .update(tasks)
+      .set({ type: foreignTask.type, trigger: foreignTask.trigger })
+      .where(eq(tasks.id, foreignTask.id));
+    expect(
+      (
+        await dispatcher.dispatch({
+          task: foreignTask,
+          step: 1,
+          toolName: 'web.fetch',
+          args: { url },
+          ctx: {
+            ...ctxFor(foreignTask),
+            tainted: true,
+            ownerIntent,
+            authorizedCompoundTripPublicRead: {
+              taskId: foreignTask.id,
+              toolName: 'web.fetch',
+              query,
+              url,
+            },
+          },
+          provenance,
+        })
+      ).kind,
+    ).toBe('awaiting_approval');
+
+    task.trigger = { source: 'email', payload: { text: prompt } };
+    await db.update(tasks).set({ trigger: task.trigger }).where(eq(tasks.id, task.id));
+    expect(
+      (
+        await dispatcher.dispatch({
+          task,
+          step: 7,
+          toolName: 'web.fetch',
+          args: { url },
+          ctx: fetchContext,
+          provenance,
+        })
+      ).kind,
+    ).toBe('awaiting_approval');
+
+    const [denyPolicy] = await db
+      .insert(approvalPolicies)
+      .values({
+        agentId,
+        toolName: 'web.fetch',
+        templateKey: 'calendar.self_only_events',
+        match: { fixture: randomUUID() },
+        effect: 'deny',
+        enabled: true,
+        createdVia: 'seed',
+      })
+      .returning();
+    if (!denyPolicy) throw new Error('public fetch deny policy fixture insert failed');
+    try {
+      task.trigger = { source: 'chat', payload: { text: prompt } };
+      await db.update(tasks).set({ trigger: task.trigger }).where(eq(tasks.id, task.id));
+      const denied = await dispatcher.dispatch({
+        task,
+        step: 8,
+        toolName: 'web.fetch',
+        args: { url },
+        ctx: fetchContext,
+        provenance,
+      });
+      expect(denied).toMatchObject({
+        kind: 'rejected',
+        reason: expect.stringContaining('denied by policy'),
+      });
+      expect(fetchExecutions).toBe(1);
+    } finally {
+      await db.delete(approvalPolicies).where(eq(approvalPolicies.id, denyPolicy.id));
+    }
+  });
+
   it('a zero-attendee calendar event stays autonomous under taint; attendees park it', async (ctx) => {
     if (!dbUp) return ctx.skip();
     // Writing to the owner's own calendar with no attendees sends no invitation

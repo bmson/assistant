@@ -3807,6 +3807,13 @@ function coverageGapResponse(
       unsupported: gaps.unsupported,
     };
   }
+  if (request.upcomingFlightDiscovery) {
+    return {
+      text: upcomingFlightReadProjection(request, evidence, compoundTripExtraction).text,
+      blocked: true,
+      unsupported: gaps.unsupported,
+    };
+  }
   const verified = currentSuccessfulEvidence(evidence).length
     ? `${verifiedReadResponse(request, evidence)}\n\n`
     : '';
@@ -3816,11 +3823,8 @@ function coverageGapResponse(
         ? 'the calendar and booking emails'
         : 'the calendar'
       : 'the booking emails';
-    const tripDetails = request.upcomingFlightDiscovery
-      ? ' Hotel and route details are still unverified.'
-      : '';
     return {
-      text: `${verified}I couldn't finish checking ${missing}, so the departure time is still unverified.${tripDetails}`,
+      text: `${verified}I couldn't finish checking ${missing}, so the departure time is still unverified.`,
       blocked: true,
       unsupported: gaps.unsupported,
     };

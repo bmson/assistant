@@ -45,6 +45,14 @@ export interface ToolContext {
   requestTimeZone?: string;
   /** Runtime-bound fixture copied from a successful current-task sports result. */
   verifiedReminderEvent?: ReminderEventDependency;
+  /**
+   * One runtime-forced public research read for an owner compound-trip request.
+   * This is created only by the executor after it replaces the matching forced
+   * read's arguments with its source-grounded query/URL. It is not model input.
+   */
+  authorizedCompoundTripPublicRead?:
+    | { taskId: string; toolName: 'web.search'; query: string }
+    | { taskId: string; toolName: 'web.fetch'; query: string; url: string };
   /** Durable booking revision bound when a mail-derived suggestion was accepted. */
   bookingOccurrence?: {
     agentId: string;

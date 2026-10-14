@@ -86,6 +86,120 @@ describe('self-reflective output verification', () => {
     expect(prompt.length).toBeLessThan(13000);
   });
 
+  it('keeps web source status separate from a bounded long evidence excerpt', async () => {
+    const longSource = `${'Opening page text. '.repeat(140)}\n\nPublic transport option: take the S-Bahn to the airport.\n${'Later page text. '.repeat(900)}`;
+    let verifierPrompt = '';
+    const router = {
+      object: async (_role: string, input: { prompt: string }) => {
+        verifierPrompt = input.prompt;
+        return {
+          ok: true as const,
+          modelId: 'test/rewrite',
+          degraded: false,
+          object: { decision: 'publish' as const, reasons: [] },
+        };
+      },
+    };
+
+    await verifyFinalOutput(router as never, {
+      taskId: 'task-long-fetch',
+      request: 'Summarize the verified transport option.',
+      draft: 'The page lists an S-Bahn option.',
+      evidence: [
+        {
+          toolName: 'web.fetch',
+          status: 'succeeded',
+          result: {
+            status: 200,
+            contentType: 'text/html',
+            finalUrl: 'https://transit.example/airport',
+            truncated: false,
+            text: longSource,
+          },
+        },
+      ],
+      critical: true,
+    });
+
+    const durable = verifierPrompt.match(
+      /<durable_evidence>\n([\s\S]*?)\n<\/durable_evidence>/,
+    )?.[1];
+    expect(durable).toBeDefined();
+    const evidence = JSON.parse(durable ?? '{}') as {
+      status: string;
+      source: {
+        httpStatus: number;
+        sourceTruncated: boolean | null;
+        sourceExcerpt: string;
+        sourceExcerptOmittedChars: number;
+      };
+    };
+    expect(evidence.status).toBe('succeeded');
+    expect(evidence.source.httpStatus).toBe(200);
+    expect(evidence.source.sourceTruncated).toBe(false);
+    expect(evidence.source.sourceExcerptOmittedChars).toBeGreaterThan(0);
+    expect(evidence.source.sourceExcerpt).toContain(
+      'Public transport option: take the S-Bahn to the airport.',
+    );
+    expect(evidence.source.sourceExcerpt).not.toContain('[truncated]');
+    expect(verifierPrompt.length).toBeLessThan(13_000);
+  });
+
+  it('preserves an actual source-truncation signal separately from excerpt clipping', () => {
+    const prompt = buildOutputVerificationPrompt({
+      request: 'What does the source say?',
+      draft: 'The source is incomplete.',
+      evidence: [
+        {
+          toolName: 'web.fetch',
+          status: 'succeeded',
+          result: {
+            status: 200,
+            finalUrl: 'https://source.example/page',
+            truncated: true,
+            text: 'The fetcher reports that the document ended at its configured limit.',
+          },
+        },
+      ],
+    });
+    const durable = prompt.match(/<durable_evidence>\n([\s\S]*?)\n<\/durable_evidence>/)?.[1];
+    const evidence = JSON.parse(durable ?? '{}') as {
+      source: { sourceTruncated: boolean | null; sourceExcerptOmittedChars: number };
+    };
+    expect(evidence.source.sourceTruncated).toBe(true);
+    expect(evidence.source.sourceExcerptOmittedChars).toBe(0);
+  });
+
+  it('keeps failed web reads distinguishable from successful or truncated source content', () => {
+    const prompt = buildOutputVerificationPrompt({
+      request: 'Check this page.',
+      draft: 'The page could not be read.',
+      evidence: [
+        {
+          toolName: 'web.fetch',
+          status: 'failed',
+          error: 'upstream request failed',
+          result: {
+            status: 503,
+            finalUrl: 'https://source.example/page',
+            truncated: false,
+            text: '',
+          },
+        },
+      ],
+    });
+    const durable = prompt.match(/<durable_evidence>\n([\s\S]*?)\n<\/durable_evidence>/)?.[1];
+    const evidence = JSON.parse(durable ?? '{}') as {
+      status: string;
+      error: string;
+      source: { httpStatus: number; sourceTruncated: boolean | null };
+    };
+    expect(evidence.status).toBe('failed');
+    expect(evidence.error).toBe('upstream request failed');
+    expect(evidence.source.httpStatus).toBe(503);
+    expect(evidence.source.sourceTruncated).toBe(false);
+  });
+
   it('treats unrequested emoji as a final-response defect', () => {
     expect(OUTPUT_VERIFICATION_SYSTEM).toMatch(/emoji are not decoration/i);
     expect(OUTPUT_VERIFICATION_SYSTEM).toMatch(/explicitly request an emoji/i);

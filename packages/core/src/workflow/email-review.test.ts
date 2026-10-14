@@ -17,6 +17,7 @@ import {
   emailReviewVerifiedNotEligibleThreadIds,
   formatEmailReviewAnswer,
   generateValidatedEmailReview,
+  revalidateEmailReviewAssessmentBatches,
   validateEmailReviewAnswer,
   validEmailReviewSelection,
 } from './email-review.js';
@@ -161,6 +162,141 @@ function required<T>(value: T | undefined, label: string): T {
 }
 
 describe('bounded no-send email review', () => {
+  it('names ranking-context omissions within scanned metadata', () => {
+    const coverage = emailReviewCoverage([], [], [search('thread-a'), search('thread-b')]);
+    coverage.rankedMetadataThreads = 1;
+    expect(formatEmailReviewAnswer([], coverage)).toContain(
+      'included 1 of 2 scanned non-newsletter threads; the others were not ranked',
+    );
+  });
+
+  it('revalidates saved no-reply assessments against complete task-local threads before reserve use', () => {
+    const item = {
+      ...required(validAnswer('thread-a').items[0], 'assessment'),
+      disposition: 'no_reply' as const,
+      recipient: null,
+      draftBody: null,
+      draftSourceMessageIds: [],
+    };
+    const evidence = [search('thread-a'), read('thread-a', messages('thread-a'))];
+    const checked = revalidateEmailReviewAssessmentBatches(
+      [[item]],
+      ['thread-a'],
+      'owner@example.com',
+      evidence,
+    );
+    expect(checked?.noReplyThreadIds).toEqual(['thread-a']);
+    expect(
+      formatEmailReviewAnswer(
+        checked?.items ?? [],
+        emailReviewCoverage(
+          ['thread-a'],
+          [
+            required(
+              emailReviewCompleteThread('thread-a', 'owner@example.com', evidence),
+              'thread',
+            ),
+          ],
+          evidence,
+        ),
+      ),
+    ).toContain('prepared 0 reply drafts');
+    expect(
+      revalidateEmailReviewAssessmentBatches([[item]], ['thread-a'], 'owner@example.com', [
+        search('thread-a'),
+        read('thread-a', messages('thread-a'), { complete: false }),
+      ]),
+    ).toBeUndefined();
+    expect(
+      revalidateEmailReviewAssessmentBatches(
+        [[{ ...item, whyQuote: 'Invented request' }]],
+        ['thread-a'],
+        'owner@example.com',
+        evidence,
+      ),
+    ).toBeUndefined();
+    expect(
+      revalidateEmailReviewAssessmentBatches(
+        [[item]],
+        ['different-thread'],
+        'owner@example.com',
+        evidence,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('retains an uncertain no-reply assessment without authorizing a reserve', () => {
+    const source = messages('thread-a');
+    const latest = required(source.at(-1), 'latest');
+    latest.text += ' The discount offer is available through Jun. 6th.';
+    latest.sourceLength = latest.text.length;
+    const evidence = [search('thread-a'), read('thread-a', source)];
+    const noReply = {
+      ...required(validAnswer('thread-a').items[0], 'assessment'),
+      disposition: 'no_reply' as const,
+      recipient: null,
+      deadline: null,
+      draftBody: null,
+      draftSourceMessageIds: [],
+    };
+    const checked = revalidateEmailReviewAssessmentBatches(
+      [[noReply]],
+      ['thread-a'],
+      'owner@example.com',
+      evidence,
+    );
+    expect(checked?.items[0]?.deadlineNeedsReview).toBe(true);
+    expect(checked?.noReplyThreadIds).toEqual([]);
+    const formatted = formatEmailReviewAnswer(
+      checked?.items ?? [],
+      emailReviewCoverage(
+        ['thread-a'],
+        [required(emailReviewCompleteThread('thread-a', 'owner@example.com', evidence), 'thread')],
+        evidence,
+      ),
+    );
+    expect(formatted).toContain('unresolved possible deadline');
+    expect(formatted).toContain('**Deadline needs review — Please confirm the renewal date**');
+    expect(formatted).toContain(
+      '[Open the source thread](https://mail.google.com/mail/u/0/#all/thread-a)',
+    );
+    expect(formatted).toContain('No reply draft was prepared for it');
+    expect(formatted).not.toContain('through Jun. 6th');
+  });
+
+  it('marks an explicit dated offer window for review unless its body quote is supplied', () => {
+    const thread = required(
+      emailReviewCompleteThread('thread-a', 'owner@example.com', [
+        search('thread-a'),
+        read('thread-a', messages('thread-a')),
+      ]),
+      'thread',
+    );
+    const latest = required(
+      thread.messages.find((message) => message.messageId === thread.latestMessageId),
+      'latest',
+    );
+    latest.text += ' The discount offer is available through Jun. 6th.';
+    const without = validateEmailReviewAnswer(validAnswer('thread-a'), [thread]);
+    expect(without?.items[0]?.deadlineNeedsReview).toBeUndefined();
+    const noDeadline = {
+      items: [{ ...required(validAnswer('thread-a').items[0], 'assessment'), deadline: null }],
+    };
+    expect(validateEmailReviewAnswer(noDeadline, [thread])?.items[0]?.deadlineNeedsReview).toBe(
+      true,
+    );
+    const quoted = {
+      items: [
+        {
+          ...required(validAnswer('thread-a').items[0], 'assessment'),
+          deadline: { messageId: latest.messageId, quote: 'through Jun. 6th' },
+        },
+      ],
+    };
+    expect(validateEmailReviewAnswer(quoted, [thread])?.items[0]?.deadlineQuote).toBe(
+      'through Jun. 6th',
+    );
+  });
   it('keeps independently verified items when another thread fails both assessments', async () => {
     const threads = ['thread-a', 'thread-b'].map((id) =>
       required(

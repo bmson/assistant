@@ -12,6 +12,7 @@ import {
 } from '@assistant/core';
 import { createApproval } from '@assistant/core/workflow/approvals';
 import { detectLiveLookups } from '@assistant/core/workflow/live-lookup';
+import { detectPersonalReadRequest } from '@assistant/core/workflow/read-intent';
 import {
   createPostgresApprovalPolicyRepository,
   createPostgresApprovalRepository,
@@ -371,15 +372,62 @@ async function authorizedPublicSourceRead(
 ): Promise<boolean> {
   const trigger = input.task.trigger as { source?: string; payload?: { text?: string } } | null;
   if (
-    input.toolName !== 'web.fetch' ||
+    (input.toolName !== 'web.fetch' && input.toolName !== 'web.search') ||
     input.task.type !== 'chat_turn' ||
     input.task.trust !== 'owner' ||
     input.ctx.trust !== 'owner' ||
     trigger?.source !== 'chat' ||
-    typeof trigger.payload?.text !== 'string' ||
-    typeof args.url !== 'string'
+    typeof trigger.payload?.text !== 'string'
   )
     return false;
+  const directRequest = detectPersonalReadRequest(
+    [{ role: 'user', content: trigger.payload.text }],
+    { now: input.task.createdAt },
+  );
+  const tripRequest = directRequest?.compoundTripDiscovery === true;
+  if (tripRequest) {
+    const authorization = input.ctx.authorizedCompoundTripPublicRead;
+    if (
+      !authorization ||
+      authorization.taskId !== input.task.id ||
+      authorization.toolName !== input.toolName ||
+      !input.ctx.ownerIntent?.authorizedScopes.includes('external_read')
+    )
+      return false;
+    if (input.toolName === 'web.search') {
+      return (
+        authorization.toolName === 'web.search' &&
+        typeof args.query === 'string' &&
+        args.query === authorization.query &&
+        args.count === 5
+      );
+    }
+    if (
+      authorization.toolName !== 'web.fetch' ||
+      typeof args.url !== 'string' ||
+      args.url !== authorization.url
+    )
+      return false;
+    const searches = await repository.searchResults(input.task.id);
+    return searches.some((result) => {
+      const value = result as {
+        query?: unknown;
+        results?: Array<{ url?: unknown }>;
+        error?: unknown;
+      } | null;
+      return (
+        !value?.error &&
+        value?.query === authorization.query &&
+        Array.isArray(value.results) &&
+        value.results.some((row) => row.url === authorization.url)
+      );
+    });
+  }
+  // A compound-trip request may only use the runtime-bound route-research
+  // capability above. Do not let the generic live-lookup path broaden it to a
+  // different search or fetched URL.
+  if (input.ctx.authorizedCompoundTripPublicRead) return false;
+  if (input.toolName !== 'web.fetch' || typeof args.url !== 'string') return false;
   let lookups = detectLiveLookups([{ role: 'user', content: trigger.payload.text }]);
   if (lookups.length === 0 && input.task.conversationId) {
     // A terse retry may refer to an earlier owner question. Resolve only
