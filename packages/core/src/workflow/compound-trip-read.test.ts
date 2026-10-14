@@ -318,6 +318,30 @@ describe('compound trip read projection', () => {
     expect(compoundTripThreadIdsToRead(evidence, read)).toEqual(['flight-thread', 'hotel-thread']);
   });
 
+  it('keeps a direct booking confirmation when its search snippet contains promotional footer text', () => {
+    const read = request();
+    const flightQuery = read.mailQueries?.find((query) => query.category === 'flight')?.query;
+    if (!flightQuery) throw new Error('Expected the flight search category');
+    const evidence = [
+      row(
+        'gmail.search',
+        { query: flightQuery },
+        {
+          complete: true,
+          results: [
+            {
+              threadId: 'confirmed-flight',
+              subject: 'Flight booking confirmation',
+              snippet: 'Your reservation is confirmed; see destination deals and airport news.',
+            },
+          ],
+        },
+      ),
+    ];
+
+    expect(compoundTripThreadIdsToRead(evidence, read)).toEqual(['confirmed-flight']);
+  });
+
   it('excludes explicit newsletter and non-travel metadata while keeping real bookings in the bounded sample', () => {
     const read = request();
     const flightQuery = read.mailQueries?.find((query) => query.category === 'flight')?.query;

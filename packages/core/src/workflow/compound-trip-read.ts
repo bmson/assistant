@@ -179,22 +179,39 @@ export function compoundTripThreadIdsToRead(
       });
     }
   }
-  const clearlyEditorialOrPromotional = (source: string) =>
-    /\b(?:newsletters?|news|digest|offers?|deals?|advice|trends?|product\s+updates?|promotions?|marketing|market\s+news|weekly\s+guides?|coupons?|discounts?|sponsored|press\s+releases?|software\s+subscriptions?|subscription\s+(?:renewals?|receipts?|invoices?))\b/i.test(
-      source,
+  const strongEditorialSubject = (subject: string) =>
+    /\b(?:newsletters?|news|digest|offers?|deals?|advice|trends?|product\s+updates?|promotions?|marketing|market\s+news|weekly\s+guides?|coupons?|discounts?|sponsored|press\s+releases?)\b/i.test(
+      subject,
     );
+  const clearlyNonTravelSubject = (subject: string) =>
+    /\b(?:software\s+subscriptions?|subscription\s+(?:renewals?|receipts?|invoices?))\b/i.test(
+      subject,
+    );
+  const bookingSubjectCue = (subject: string) =>
+    /\b(?:booked|reserved|confirmation|confirmed|reservation|ticket|e-?ticket|itinerary|record locator|booking\s+(?:details|reference|receipt|number|confirmation))\b/i.test(
+      subject,
+    );
+  const clearlyEditorialOrPromotional = (subject: string, snippet: string) => {
+    if (clearlyNonTravelSubject(subject) || strongEditorialSubject(subject)) return true;
+    // A direct booking-like subject is stronger than incidental promotional
+    // language in the snippet, which can come from a footer or search excerpt.
+    if (bookingSubjectCue(subject)) return false;
+    return /\b(?:newsletters?|news|digest|offers?|deals?|advice|trends?|product\s+updates?|promotions?|marketing|market\s+news|weekly\s+guides?|coupons?|discounts?|sponsored|press\s+releases?|software\s+subscriptions?|subscription\s+(?:renewals?|receipts?|invoices?))\b/i.test(
+      `${subject} ${snippet}`,
+    );
+  };
   const sourceMatches = (id: string, kind: 'flight' | 'lodging') => {
     const item = metadata.get(id);
-    const source = `${item?.subject ?? ''} ${item?.snippet ?? ''}`;
-    if (clearlyEditorialOrPromotional(source)) return false;
+    const subject = item?.subject ?? '';
+    const snippet = item?.snippet ?? '';
+    const source = `${subject} ${snippet}`;
+    if (clearlyEditorialOrPromotional(subject, snippet)) return false;
     if (kind === 'flight') {
       const booking =
         /\b(?:booked|reserved|confirmation|confirmed|reservation|ticket|e-?ticket|itinerary|record locator|booking\s+(?:details|reference|receipt|number|confirmation))\b/i.test(
           source,
         );
-      const itinerarySubject = /^(?:(?:fw|fwd|re)\s*:\s*)*flight\s*[-–—:]/i.test(
-        item?.subject ?? '',
-      );
+      const itinerarySubject = /^(?:(?:fw|fwd|re)\s*:\s*)*flight\s*[-–—:]/i.test(subject);
       const flightTerm =
         /\b(?:flight|airline|itinerary|boarding pass|e-?ticket|record locator)\b/i.test(source);
       return (
@@ -221,7 +238,10 @@ export function compoundTripThreadIdsToRead(
     // reservation subject (for example, "Your Online Reservation"). Read at
     // most one such candidate when no lodging-specific result is available;
     // this metadata can only prioritize a read, never establish a stay.
-    return /\b(?:reservation|booking)\b/i.test(source) && !clearlyEditorialOrPromotional(source);
+    return (
+      /\b(?:reservation|booking)\b/i.test(source) &&
+      !clearlyEditorialOrPromotional(subject, item.snippet)
+    );
   });
   const priority = [first('flight'), first('lodging') ?? genericLodgingCandidate];
   const secondFlight = unique.find((id) => sourceMatches(id, 'flight') && id !== priority[0]);
@@ -235,7 +255,7 @@ export function compoundTripThreadIdsToRead(
       // only source of verified booking facts.
       ...unique.filter((id) => {
         const item = metadata.get(id);
-        return !clearlyEditorialOrPromotional(`${item?.subject ?? ''} ${item?.snippet ?? ''}`);
+        return !clearlyEditorialOrPromotional(item?.subject ?? '', item?.snippet ?? '');
       }),
     ]),
   ].slice(0, MAX_COMPOUND_TRIP_THREADS_TO_READ);
