@@ -1973,6 +1973,7 @@ describe('response execution contract', () => {
                 {
                   eventId: 'holiday-1',
                   calendar: 'Family',
+                  calendarTimeZone: 'America/Los_Angeles',
                   summary: 'School holiday',
                   start: '2026-08-17',
                   end: '2026-08-18',
@@ -1996,7 +1997,7 @@ describe('response execution contract', () => {
           },
         },
       );
-      expect(result.text).toContain('**All day** — School holiday');
+      expect(result.text).toContain('**Mon 17 Aug · All day** — School holiday');
       expect(result.text).not.toContain('Tuesday, August 18');
       expect(result.text).not.toContain('Parent Evening');
     });

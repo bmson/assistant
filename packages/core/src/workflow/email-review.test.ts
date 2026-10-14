@@ -315,24 +315,127 @@ describe('bounded no-send email review', () => {
     const good = required(validAnswer('thread-a').items[0], 'good item');
     const bad = required(validAnswer('thread-b').items[0], 'bad item');
     bad.draftBody = 'I will approve it tomorrow.';
-    const result = await generateValidatedEmailReview(threads, async () => ({
-      ok: true,
-      value: { items: [good, bad] },
-    }));
+    const repairThreadIds: string[][] = [];
+    const result = await generateValidatedEmailReview(threads, async ({ prompt }) => {
+      const jsonPrompt = prompt.split('\n\nThe previous assessment could not pass')[0];
+      const input = JSON.parse(jsonPrompt as string) as { threads: Array<{ threadId: string }> };
+      repairThreadIds.push(input.threads.map((thread) => thread.threadId));
+      return {
+        ok: true,
+        value: {
+          items: input.threads.map((thread) => (thread.threadId === 'thread-a' ? good : bad)),
+        },
+      };
+    });
     expect(result.attempts).toBe(2);
     expect(result.answer?.items.map((item) => item.thread.threadId)).toEqual(['thread-a']);
     expect(result.answer?.items[0]?.draftBody).toBe('Thanks for your note.');
-    expect(result.issues).toContain('item_1:no_unsupplied_facts_or_owner_commitments');
-    const wrongCount = await generateValidatedEmailReview(threads, async () => ({
-      ok: true,
-      value: { items: [good] },
-    }));
-    expect(wrongCount.answer).toBeUndefined();
+    expect(repairThreadIds).toEqual([['thread-a', 'thread-b'], ['thread-b']]);
+    expect(result.issues).toContain('item_0:no_unsupplied_facts_or_owner_commitments');
+    const missingThreadAttempts: string[][] = [];
+    const wrongCount = await generateValidatedEmailReview(threads, async ({ prompt }) => {
+      const jsonPrompt = prompt.split('\n\nThe previous assessment could not pass')[0];
+      const input = JSON.parse(jsonPrompt as string) as { threads: Array<{ threadId: string }> };
+      missingThreadAttempts.push(input.threads.map((thread) => thread.threadId));
+      return {
+        ok: true,
+        value: {
+          items: input.threads.some((thread) => thread.threadId === 'thread-a') ? [good] : [],
+        },
+      };
+    });
+    expect(missingThreadAttempts).toEqual([['thread-a', 'thread-b'], ['thread-b']]);
+    expect(wrongCount.answer?.items.map((item) => item.thread.threadId)).toEqual(['thread-a']);
+    expect(wrongCount.sourceItems?.map((item) => item.threadId)).toEqual(['thread-a']);
+    expect(wrongCount.issues).toContain('one_item_per_input_thread');
+    const promptedThreadIds: string[][] = [];
+    const completedPartial = await generateValidatedEmailReview(threads, async ({ prompt }) => {
+      const jsonPrompt = prompt.split('\n\nThe previous assessment could not pass')[0];
+      const input = JSON.parse(jsonPrompt as string) as { threads: Array<{ threadId: string }> };
+      promptedThreadIds.push(input.threads.map((thread) => thread.threadId));
+      return {
+        ok: true,
+        value:
+          promptedThreadIds.length === 1
+            ? { items: [good] }
+            : { items: [required(validAnswer('thread-b').items[0], 'remaining assessment')] },
+      };
+    });
+    expect(promptedThreadIds).toEqual([['thread-a', 'thread-b'], ['thread-b']]);
+    expect(completedPartial.answer?.items.map((item) => item.thread.threadId)).toEqual([
+      'thread-a',
+      'thread-b',
+    ]);
     const wrongIdentity = await generateValidatedEmailReview(threads, async () => ({
       ok: true,
       value: { items: [bad, good] },
     }));
     expect(wrongIdentity.answer).toBeUndefined();
+  });
+
+  it('reports source-relative deadlines without converting them to guessed dates', () => {
+    const sourceMessages = messages('volunteer-tomorrow');
+    const latest = required(sourceMessages.at(-1), 'latest message');
+    latest.text = 'Could you volunteer tomorrow?';
+    latest.sourceLength = latest.text.length;
+    const thread = required(
+      emailReviewCompleteThread('volunteer-tomorrow', 'owner@example.com', [
+        search('volunteer-tomorrow'),
+        read('volunteer-tomorrow', sourceMessages),
+      ]),
+      'complete thread',
+    );
+    const assessment = {
+      ...required(validAnswer(thread.threadId).items[0], 'assessment'),
+      whyQuote: 'Could you volunteer tomorrow?',
+      deadline: { messageId: thread.latestMessageId, quote: 'tomorrow' },
+      draftBody: 'Thanks for asking. [Choose one: available / unavailable] to volunteer tomorrow.',
+    };
+    const checked = validateEmailReviewAnswer({ items: [assessment] }, [thread]);
+    expect(checked?.items[0]?.deadlineQuote).toBe('tomorrow');
+    const formatted = formatEmailReviewAnswer(
+      checked?.items ?? [],
+      emailReviewCoverage([thread.threadId], [thread], [search(thread.threadId)]),
+    );
+    expect(formatted).toContain(
+      '“tomorrow” (source message dated 2026-10-11T16:00:00Z; wording is relative)',
+    );
+    expect(formatted).not.toContain('October 11');
+
+    const missing = {
+      items: [{ ...assessment, deadline: null }],
+    };
+    expect(emailReviewValidationIssues(missing, [thread])).toContain(
+      'item_0:possible_relevant_deadline_in_thread',
+    );
+  });
+
+  it('counts completed source assessments separately from complete thread reads', () => {
+    const threads = ['assessed-a', 'unassessed-b'].map((threadId) =>
+      required(
+        emailReviewCompleteThread(threadId, 'owner@example.com', [
+          search(threadId),
+          read(threadId, messages(threadId)),
+        ]),
+        'complete thread',
+      ),
+    );
+    const first = required(threads[0], 'assessed thread');
+    const answer = validateEmailReviewAnswer(validAnswer(first.threadId), [first]);
+    const text = formatEmailReviewAnswer(
+      answer?.items ?? [],
+      emailReviewCoverage(
+        threads.map((thread) => thread.threadId),
+        threads,
+        threads.flatMap((thread) => [
+          search(thread.threadId),
+          read(thread.threadId, messages(thread.threadId)),
+        ]),
+      ),
+    );
+    expect(text).toContain('verified reply checks for 1 of 2 selected threads');
+    expect(text).toContain('Complete reads are not the same as completed assessments.');
+    expect(text).not.toContain('2 of 2 selected threads');
   });
   it('repairs a rejected owner commitment using the same complete source threads', async () => {
     const thread = required(

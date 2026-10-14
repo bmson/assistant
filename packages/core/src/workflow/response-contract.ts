@@ -7,6 +7,11 @@ import {
 } from '../model-router/audit-graders.js';
 import type { BriefingCalendarEvent } from './briefing.js';
 import { calendarEventAnalysisResponse } from './calendar-event-analysis.js';
+import {
+  calendarSourceDateLabel,
+  calendarSourceInterval,
+  calendarWindowMembership,
+} from './calendar-read-window.js';
 import { calendarRelationship, calendarRelationshipNote } from './calendar-relationship.js';
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
 import type { CompoundTripExtraction } from './compound-trip-extraction.js';
@@ -1540,66 +1545,6 @@ function intervalDateTime(value: string, timeZone?: string): string {
   }
 }
 
-function civilDayBoundary(day: string, timeZone: string): number | undefined {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
-  if (!match) return undefined;
-  const target = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-  let candidate = target;
-  try {
-    const formatter = new Intl.DateTimeFormat('en-CA', {
-      timeZone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hourCycle: 'h23',
-    });
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      const parts = formatter.formatToParts(new Date(candidate));
-      const part = (type: string) => Number(parts.find((item) => item.type === type)?.value);
-      const represented = Date.UTC(
-        part('year'),
-        part('month') - 1,
-        part('day'),
-        part('hour'),
-        part('minute'),
-        part('second'),
-      );
-      const correction = target - represented;
-      if (correction === 0) return candidate;
-      candidate += correction;
-    }
-    return undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function overlapInterval(
-  event: Record<string, unknown>,
-  timeZone: string,
-): { start: number; end: number } | undefined {
-  const start = stringField(event, 'start');
-  const end = stringField(event, 'end');
-  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(start) && /^\d{4}-\d{2}-\d{2}$/.test(end);
-  if (dateOnly) {
-    const startDay = start.slice(0, 10);
-    const endDay = end.slice(0, 10);
-    const from = civilDayBoundary(startDay, timeZone);
-    const to = civilDayBoundary(endDay, timeZone);
-    return from !== undefined && to !== undefined && to > from
-      ? { start: from, end: to }
-      : undefined;
-  }
-  const from = Date.parse(start);
-  const to = Date.parse(end);
-  return Number.isFinite(from) && Number.isFinite(to) && to > from
-    ? { start: from, end: to }
-    : undefined;
-}
-
 function overlapClock(value: number, timeZone?: string): string {
   try {
     return new Intl.DateTimeFormat('en-US', {
@@ -1626,7 +1571,7 @@ function calendarOverlapSummary(
       event.blocksTime === false
     )
       return [];
-    const interval = overlapInterval(event, zone);
+    const interval = calendarSourceInterval(event);
     if (!interval) return [];
     const projected: BriefingCalendarEvent = {
       summary: stringField(event, 'summary') || '(untitled event)',
@@ -1686,7 +1631,7 @@ function calendarOverlapSummary(
         ? `${shortDate(new Date(start).toISOString(), zone)} ${overlapClock(start, zone)}–${overlapClock(end, zone)}`
         : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
       notes.push(
-        `- ${bothAccepted ? 'Scheduling conflict' : 'Possible overlap'}: **${left.projected.summary}** and **${right.projected.summary}**, ${overlapLabel}. ${calendarRelationshipNote(relationship, bothAccepted ? 'confirmed' : 'unresolved')}`,
+        `- ${bothAccepted ? 'Scheduling conflict' : 'Possible overlap'}: **${left.projected.summary}** and **${right.projected.summary}**, ${overlapLabel}.${request.includeCalendarBriefing ? '' : ` ${calendarRelationshipNote(relationship, bothAccepted ? 'confirmed' : 'unresolved')}`}`,
       );
     }
   }
@@ -1703,6 +1648,8 @@ function calendarOverlapSummary(
     shown.push(
       `- ${notes.length - shown.length} additional overlapping pairs were found in the checked results.`,
     );
+  if (request.includeCalendarBriefing)
+    shown.push('Overlapping entries do not establish that you must attend both.');
   return shown;
 }
 
@@ -3039,7 +2986,7 @@ export function groundReadDraft(
   const current = currentSuccessfulEvidence(evidence);
   const calendarRows = matchingCalendarRows(request, current);
   const searches = matchingGmailSearchRows(request, current);
-  const events = uniqueRecords(
+  const returnedEvents = uniqueRecords(
     calendarRows.flatMap((row) => resultItems(row, 'events')),
     (event) =>
       [
@@ -3049,12 +2996,24 @@ export function groundReadDraft(
         stringField(event, 'summary'),
       ].join('|'),
   );
+  const events = returnedEvents.filter(
+    (event) =>
+      stringField(event, 'status') !== 'cancelled' &&
+      calendarWindowMembership(event, request) !== 'outside',
+  );
   const messages = [
     ...searches.flatMap((row) => resultItems(row, 'results')),
     ...matchingGmailThreadRows(searches, current).flatMap((row) => resultItems(row, 'messages')),
   ];
 
   const reasons: string[] = [];
+  if (
+    events.some((event) => calendarWindowMembership(event, request) === 'source-date-only') &&
+    !/source dates?[^\n]*(?:only|unavailable|unconfirmed)|not confirmed for (?:the )?requested local day/i.test(
+      draft,
+    )
+  )
+    reasons.push('floating source dates are not qualified against the requested local day');
 
   if (request.answerFocus === 'flight') {
     const uncertainty =
@@ -3170,18 +3129,43 @@ export function groundReadDraft(
 
   // Strip links first: a fabricated URL is enforceUrlProvenance's job, and a
   // link label would otherwise read as an invented proper noun.
-  const prose = draft
+  // A byte-for-byte deterministic agenda remains authoritative when a saved
+  // skill contributes a separately checked planning step. Only that appended
+  // paragraph is generative; its facts and action claims still need evidence.
+  const projection = request.includeCalendarBriefing ? verifiedReadResponse(request, evidence) : '';
+  const hasVerifiedPrefix = Boolean(projection && draft.startsWith(`${projection}\n\nNext step: `));
+  const generativeDraft = hasVerifiedPrefix ? draft.slice(projection.length).trim() : draft;
+  if (
+    hasVerifiedPrefix &&
+    (!/^Next step:\s*(?:consider|confirm|check|review|prepare|decide|prioriti[sz]e|keep|use|before|if|for|allow|plan|take|bring|make)\b/i.test(
+      generativeDraft,
+    ) ||
+      /\bi(?:['’]ve| have)?\s+(?:already\s+)?(?:sent|emailed|messaged|booked|scheduled|cancelled|canceled|deleted|updated|created|saved|changed|moved)\b/i.test(
+        generativeDraft,
+      ))
+  )
+    reasons.push('the appended planning step must be advice, not a claimed result');
+  const prose = generativeDraft
     .replace(MARKDOWN_LINK_RE, ' ')
     .replace(BARE_URL_RE, ' ')
     .replace(/[*_`#]/g, ' ');
   const draftWords = groundingWords(prose);
+  if (hasVerifiedPrefix) {
+    const adviceWords = new Set(
+      groundingWords(
+        'next step consider confirm check review prepare preparation preparing decide prioritize prioritise keep use before if whether for allow plan take bring make need needs necessary attend attendance involvement details sources links source dates times date time coverage calendars unavailable confirm confirmation checking reviewing preparing planning clarify verify avoid resolve conflicts overlapping relevant yourself which who can could should would may might must does do did be being been it they them these those that this their theirs we us our own only both each any more less some rather instead personal priorities priority practical required requirements materials notes organizer organiser agenda',
+      ),
+    );
+    if (draftWords.some((word) => !vocabulary.has(word) && !adviceWords.has(word)))
+      reasons.push('the appended planning step introduces detail absent from its sources');
+  }
   const draftText = draftWords.join(' ');
 
   // Every event the calendar returned has to survive into the answer. Matching
   // is deliberately loose — a shortened title is good writing, not a drop.
-  if (events.length > MAX_AGENDA_EVENTS) {
+  if (!hasVerifiedPrefix && events.length > MAX_AGENDA_EVENTS) {
     reasons.push(`${events.length} events is past the agenda shape`);
-  } else {
+  } else if (!hasVerifiedPrefix) {
     for (const event of events) {
       const summary = stringField(event, 'summary');
       if (!draftMentions(summary, draftWords, draftText)) {
@@ -3229,7 +3213,12 @@ export function groundReadDraft(
   }
 
   reasons.push(
-    ...calendarRelationshipReasons(text, request, events, evidenceClaimFacts(current, live)),
+    ...calendarRelationshipReasons(
+      generativeDraft,
+      request,
+      events,
+      evidenceClaimFacts(current, live),
+    ),
   );
   reasons.push(
     ...liveRelationshipReasons(
@@ -3550,8 +3539,18 @@ export function verifiedReadResponse(
       if (!request.timeWindow) {
         for (const range of ranges) lines.push(`- Searched ${range}`);
       }
-      const agendaEvents = events.filter((event) => stringField(event, 'status') !== 'cancelled');
-      if (agendaEvents.length === 0) {
+      const activeEvents = events.filter((event) => stringField(event, 'status') !== 'cancelled');
+      const sourceDateEvents = activeEvents.filter(
+        (event) => calendarWindowMembership(event, request) === 'source-date-only',
+      );
+      const agendaEvents = activeEvents.filter(
+        (event) => calendarWindowMembership(event, request) === 'confirmed',
+      );
+      if (request.timeWindow && request.timeZone && !spansDays(request.timeWindow))
+        lines.push(
+          `${shortDate(request.timeWindow.timeMin, request.timeZone)} (${request.timeZone}).`,
+        );
+      if (agendaEvents.length === 0 && sourceDateEvents.length === 0) {
         lines.push(
           calendarRows.length > 0 && complete
             ? `Nothing on the calendar — no matching events${calendars.size > 0 ? ` across ${[...calendars].join(', ')}` : ''}.`
@@ -3606,7 +3605,7 @@ export function verifiedReadResponse(
           // still reads like an answer rather than a dump of record fields.
           const clockStart = clockOnly(rawStart, request.timeZone);
           const clockEnd = clockOnly(rawEnd, request.timeZone);
-          const datePrefix = multiDay ? shortDate(rawStart, request.timeZone) : '';
+          const datePrefix = multiDay || dateOnly ? shortDate(rawStart, request.timeZone) : '';
           const spansDates = Boolean(
             rawEnd &&
               eventLocalDay(rawStart, request.timeZone) !== eventLocalDay(rawEnd, request.timeZone),
@@ -3614,18 +3613,25 @@ export function verifiedReadResponse(
           const intervalRange = spansDates
             ? `${intervalDateTime(rawStart, request.timeZone)} – ${intervalDateTime(rawEnd, request.timeZone)}`
             : '';
+          const continues =
+            request.includeCalendarBriefing &&
+            request.timeWindow &&
+            Date.parse(rawStart) < Date.parse(request.timeWindow.timeMin) &&
+            Date.parse(rawEnd) >= Date.parse(request.timeWindow.timeMax);
           const when = allDay
             ? [datePrefix, 'All day'].filter(Boolean).join(' · ')
-            : intervalRange ||
-              [datePrefix, clockStart ? `${clockStart}${clockEnd ? `–${clockEnd}` : ''}` : '']
-                .filter(Boolean)
-                .join(' · ');
+            : continues
+              ? `Ongoing through ${shortDate(rawEnd, request.timeZone)} ${clockEnd}`
+              : intervalRange ||
+                [datePrefix, clockStart ? `${clockStart}${clockEnd ? `–${clockEnd}` : ''}` : '']
+                  .filter(Boolean)
+                  .join(' · ');
           // A window ending on a different day than it started is the one case
           // the plain clock cannot express on its own.
           const spanNote =
             allDay && end && end !== start
               ? ` (through ${end})`
-              : spansDates
+              : spansDates && !continues
                 ? request.timeWindow &&
                   Date.parse(rawStart) < Date.parse(request.timeWindow.timeMin) &&
                   Date.parse(rawEnd) > Date.parse(request.timeWindow.timeMin)
@@ -3633,12 +3639,29 @@ export function verifiedReadResponse(
                   : ''
                 : '';
           lines.push(
-            `- **${when || start || '(no time returned)'}** — ${summary}${spanNote}${!request.includeCalendarBriefing && location ? ` — ${location}` : ''}${!request.includeCalendarBriefing && attendeeText ? ` — with ${attendeeText}` : ''}${eventLinks ? ` — ${eventLinks}` : ''}${calendar && (manyCalendars || request.includeCalendarBriefing) ? ` (${calendar})` : ''}`,
+            `- **${when || start || '(no time returned)'}** — ${summary}${spanNote}${dateOnly && request.timeWindow ? ` (${calendarSourceDateLabel(event)})` : ''}${!request.includeCalendarBriefing && location ? ` — ${location}` : ''}${!request.includeCalendarBriefing && attendeeText ? ` — with ${attendeeText}` : ''}${eventLinks ? ` — ${eventLinks}` : ''}${calendar && (manyCalendars || request.includeCalendarBriefing) ? ` (${calendar})` : ''}`,
           );
         }
       }
-      if (request.includeCalendarOverlapSummary)
-        lines.push(...calendarOverlapSummary(events, request, complete));
+      if (sourceDateEvents.length > 0) {
+        lines.push(
+          'Source dates only — these entries are not confirmed for the requested local day:',
+        );
+        for (const event of sourceDateEvents) {
+          const links = Array.isArray(event.links) ? event.links.map(record).filter(Boolean) : [];
+          const link =
+            links.find((item) => item && stringField(item, 'type') === 'calendar') ?? links[0];
+          const url = link ? stringField(link, 'url') : '';
+          lines.push(
+            `- ${stringField(event, 'summary') || '(untitled event)'} — ${calendarSourceDateLabel(event) || 'date/time unresolved'}${stringField(event, 'calendar') ? ` (${stringField(event, 'calendar')})` : ''}${url ? ` — [Source event](${url})` : ''}`,
+          );
+        }
+      }
+      if (request.includeCalendarOverlapSummary) {
+        lines.push(...calendarOverlapSummary(agendaEvents, request, complete));
+        if (sourceDateEvents.length > 0)
+          lines.push('Source-date-only entries could not be compared for local-time overlaps.');
+      }
       if (!complete || unavailable.length > 0) {
         lines.push(
           `Heads up: calendar coverage was incomplete${unavailable.length > 0 ? `; unavailable: ${[...new Set(unavailable)].join(', ')}` : ''}.`,
@@ -3866,6 +3889,17 @@ export function enforcePersonalReadResponse(
         ? { weeklyPlanAssessment: { coverageComplete: false, slotCount: 0 } }
         : {}),
     };
+  // A typed flight projection can be blocked by unverified booking identity
+  // even when every read completed and its prose has no coverage-gap paragraph.
+  // Preserve that status directly instead of deriving completion from text.
+  if (request.upcomingFlightDiscovery) {
+    const projection = upcomingFlightReadProjection(request, evidence);
+    const unsupported: ActionKind[] = [];
+    if (!projection.calendarComplete) unsupported.push('calendar_read');
+    if (!projection.gmailSearchComplete || !projection.threadsComplete)
+      unsupported.push('inbox_read');
+    return { text: projection.text, blocked: projection.blocked, unsupported };
+  }
   const gaps = requiredReadGaps(request, evidence);
   if (gaps.labels.length > 0) {
     const response = coverageGapResponse(request, evidence, gaps);

@@ -576,6 +576,168 @@ describe('weeklyCalendarPlan', () => {
     expect(result.text).toContain('I found 1 of 3 requested focus blocks');
   });
 
+  it('names a verified all-day event that blocks every requested focus window', () => {
+    const travelStart = '2026-10-12';
+    const travelEnd = '2026-10-18';
+    const result = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        busy: [
+          {
+            start: '2026-10-11T22:00:00.000Z',
+            end: '2026-10-17T22:00:00.000Z',
+            calendar: 'Travel',
+          },
+        ],
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin, timeMax, maxResults: 50 },
+            result: {
+              events: [
+                {
+                  eventId: 'all-day-travel',
+                  calendarId: 'Travel',
+                  summary: 'Conference travel',
+                  start: travelStart,
+                  end: travelEnd,
+                  allDay: true,
+                  calendarTimeZone: 'Europe/Berlin',
+                  blocksTime: true,
+                  links: [
+                    {
+                      type: 'calendar',
+                      url: 'https://calendar.google.com/calendar/event?eid=travel',
+                    },
+                  ],
+                },
+              ],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+    });
+
+    expect(result).toMatchObject({ coverageComplete: true, slotCount: 0 });
+    expect(result.text).toContain('Checked events overlapping possible focus windows include');
+    expect(result.text).toContain(
+      '[Conference travel](<https://calendar.google.com/calendar/event?eid=travel>)',
+    );
+    expect(result.text).toContain(
+      'No 90-minute focus block plus its 15-minute break fit in the checked data.',
+    );
+    expect(result.text).not.toContain('[Event 1]');
+  });
+
+  it.each([
+    {
+      description: 'unknown source time zone',
+      calendarTimeZone: undefined,
+      busyCalendar: 'Travel',
+    },
+    {
+      description: 'different busy calendar',
+      calendarTimeZone: 'Europe/Berlin',
+      busyCalendar: 'Personal',
+    },
+  ])('does not attribute an all-day busy block to an event with $description', (scenario) => {
+    const result = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        busy: [
+          {
+            start: '2026-10-11T22:00:00.000Z',
+            end: '2026-10-17T22:00:00.000Z',
+            calendar: scenario.busyCalendar,
+          },
+        ],
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin, timeMax, maxResults: 50 },
+            result: {
+              events: [
+                {
+                  eventId: 'all-day-travel',
+                  calendarId: 'Travel',
+                  summary: 'Conference travel',
+                  start: '2026-10-12',
+                  end: '2026-10-18',
+                  allDay: true,
+                  ...(scenario.calendarTimeZone
+                    ? { calendarTimeZone: scenario.calendarTimeZone }
+                    : {}),
+                  blocksTime: true,
+                },
+              ],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+    });
+
+    expect(result).toMatchObject({ coverageComplete: true, slotCount: 0 });
+    expect(result.text).not.toContain('Checked events overlapping possible focus windows include');
+    expect(result.text).toContain('I found 0 of 3 requested focus blocks');
+  });
+
+  it('does not attribute a merged weekday busy interval to an all-day event confined to Sunday', () => {
+    const result = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        busy: [
+          {
+            start: '2026-10-10T22:00:00.000Z',
+            end: '2026-10-17T22:00:00.000Z',
+            calendar: 'Travel',
+          },
+        ],
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin, timeMax, maxResults: 50 },
+            result: {
+              events: [
+                {
+                  eventId: 'sunday-only',
+                  calendarId: 'Travel',
+                  summary: 'Sunday event',
+                  start: '2026-10-11',
+                  end: '2026-10-12',
+                  allDay: true,
+                  calendarTimeZone: 'Europe/Berlin',
+                  blocksTime: true,
+                },
+              ],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+    });
+
+    expect(result).toMatchObject({ coverageComplete: true, slotCount: 0 });
+    expect(result.text).not.toContain('Checked events overlapping possible focus windows include');
+    expect(result.text).toContain('I found 0 of 3 requested focus blocks');
+  });
+
   it('uses DST-aware local labels and refuses to suggest times without a timezone', () => {
     const afterDst = weeklyCalendarPlan({
       timeMin: '2026-11-02T08:00:00.000Z',
@@ -631,7 +793,7 @@ describe('weeklyCalendarPlan', () => {
             events: [
               {
                 eventId: 'safe',
-                summary: 'Planning',
+                summary: 'Planning [Q2] *review*',
                 start: '2026-10-12T18:00:00Z',
                 end: '2026-10-12T18:30:00Z',
                 links: [
@@ -659,7 +821,11 @@ describe('weeklyCalendarPlan', () => {
       timeZone: 'America/Los_Angeles',
       evidence: rows as never,
     });
+    expect(text).toContain(
+      '[Planning \\[Q2\\] \\*review\\*](<https://calendar.google.com/calendar/event?eid=abc>)',
+    );
     expect(text).toContain('https://calendar.google.com/calendar/event?eid=abc');
+    expect(text).not.toContain('[Event 1]');
     expect(text).not.toContain('example.test');
   });
 });

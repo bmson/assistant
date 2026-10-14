@@ -115,6 +115,7 @@ describe('R15 retrieved versus displayed calendar coverage', () => {
         start: '2026-09-22',
         end: '2026-09-24',
         allDay: true,
+        calendarTimeZone: timeZone,
       };
       const text = verifiedReadResponse(request(timeZone), evidence([event]));
       expect(text).toContain('Tue 22 Sept · All day');

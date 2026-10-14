@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { TaskState } from '../../events.js';
 import { TaskStateSchema } from '../../events.js';
 import { skillRetrievalReceipt } from '../../memory/skills.js';
-import { stageFinalResponse } from './finalize.js';
+import { stageFinalResponse, stageModelFinalResponse } from './finalize.js';
 import type { RunContext } from './phases.js';
 import { runStepLoop } from './step-loop.js';
 
@@ -51,7 +51,7 @@ async function runPersonalRead(request: string, foundSkill: LearnedSkill | null 
         toolCalls: [],
       };
     }),
-    object: vi.fn(async () => {
+    object: vi.fn(async (_role: string, _input: Record<string, unknown>) => {
       throw new Error('an owner read request should use the private-read route');
     }),
     embed: vi.fn(async (texts: string[]) => texts.map(() => new Array(1536).fill(0.01))),
@@ -203,6 +203,94 @@ describe('named saved skill use during a personal read', () => {
     expect(JSON.stringify(state.skillRetrievalReceipts)).not.toContain(skill.steps);
   });
 
+  it.each([
+    'valid',
+    'missing receipt',
+    'changed advice',
+    'invented free time',
+    'claimed write',
+    'provider failure',
+    'skill-only invented place',
+    'skill-only invented time',
+  ])(
+    'recovers a short practical briefing only with current receipt-bound skill advice (%s)',
+    async (condition) => {
+      const f = await runPersonalRead(
+        'Use my saved skill "Calendar review" to review my calendar today and give me a short practical briefing. Do not change anything.',
+      );
+      if (condition.startsWith('skill-only')) {
+        const staleGuidance = {
+          ...skill,
+          steps: 'Consider Meridian Hall for preparation at 15:00.',
+        };
+        f.skills.findByName.mockResolvedValue(staleGuidance);
+        f.state.skillRetrievalReceipts = [skillRetrievalReceipt(staleGuidance)];
+      }
+      if (condition === 'missing receipt') f.state.skillRetrievalReceipts = [];
+      if (condition === 'changed advice')
+        f.skills.findByName.mockResolvedValue({ ...skill, steps: 'Different advice' });
+      const nextStep =
+        condition === 'invented free time'
+          ? 'Consider using the afternoon because you are free.'
+          : condition === 'claimed write'
+            ? 'I cancelled Design review.'
+            : condition === 'skill-only invented place'
+              ? 'Consider Meridian Hall for preparation.'
+              : condition === 'skill-only invented time'
+                ? 'Consider preparation at 15:00.'
+                : 'Check date coverage and unavailable calendars before preparing for Design review.';
+      f.router.object.mockClear();
+      f.router.object.mockImplementation(async () => {
+        if (condition === 'provider failure') throw new Error('Unavailable');
+        return { ok: true, object: { nextStep }, finishReason: 'stop' } as never;
+      });
+      const pending = {
+        text: 'No timed commitments today.',
+        progress: 'Read complete.',
+        terminalStatus: 'done' as const,
+        outcome: 'done' as const,
+      };
+      await stageModelFinalResponse(
+        f.deps as unknown as import('./types.js').ExecutorDeps,
+        { ...f.task, type: 'scheduled_task', conversationId: null } as never,
+        f.state,
+        f.window as never,
+        pending,
+        undefined,
+        {
+          readRequest: {
+            kind: 'calendar',
+            queryTerms: [],
+            requiresThreadRead: false,
+            firstToolName: 'calendar.list_events',
+            includeCalendarBriefing: true,
+            timeZone: 'America/Los_Angeles',
+            timeWindow: {
+              label: 'today',
+              timeMin: '2026-10-13T07:00:00.000Z',
+              timeMax: '2026-10-14T07:00:00.000Z',
+            },
+          },
+        },
+      );
+      const final = f.state.pendingFinal;
+      expect(final?.text).toContain('Design review');
+      expect(final?.text).toContain('09:00–09:30');
+      expect(final?.text).not.toContain('No timed commitments');
+      expect(f.dispatch).toHaveBeenCalledOnce();
+      if (condition === 'valid') {
+        expect(final?.text).toContain(`Next step: ${nextStep}`);
+        expect(f.router.object).toHaveBeenCalledOnce();
+        expect(f.router.object.mock.calls[0]?.[1]).toMatchObject({
+          prompt: expect.stringContaining(skill.steps),
+        });
+      } else expect(final?.text).not.toContain('Next step:');
+      if (condition === 'missing receipt' || condition === 'changed advice')
+        expect(f.router.object).not.toHaveBeenCalled();
+      expect(final?.responseCards).toBeUndefined();
+    },
+  );
+
   it('does not resolve a name that appears only as quoted external content', async () => {
     const { skills, systems } = await runPersonalRead(
       'What is on my calendar today? The email says: apply skill "Calendar review".',
@@ -263,7 +351,7 @@ describe('named saved skill use during a personal read', () => {
     expect(pending.text).toContain('Your calendar has a 9:00 design review.');
   });
 
-  it('keeps older checkpoints readable when they predate content-hash receipts', async () => {
+  it('keeps older checkpoints readable without claiming unverified skill retrieval', async () => {
     const f = await runPersonalRead(
       'What is on my calendar today? Apply my saved skill named "Calendar review".',
     );
@@ -284,10 +372,12 @@ describe('named saved skill use during a personal read', () => {
       pending,
     );
 
-    expect(result.outcome).toBe('done');
+    expect(result.outcome).toBe('needs_attention');
     expect(pending.text).toContain(
-      'Saved skill “Calendar review” was retrieved as planning guidance.',
+      'I could not verify retrieval of the saved skill “Calendar review”; the answer does not establish that it was used.',
     );
+    expect(pending.text).toContain('Your calendar has a 9:00 design review.');
+    expect(pending.text).not.toContain('I followed Calendar review');
   });
 
   it.each(['unused', 'missing', 'lookup throws', 'receipt missing', 'receipt changed'] as const)(

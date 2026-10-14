@@ -16,6 +16,9 @@ import {
   compoundTripFetchTargets,
   compoundTripReadProjection,
   compoundTripRoute,
+  compoundTripThreadIdsToRead,
+  MAX_COMPOUND_CALENDAR_COVERAGE_PAGES,
+  MAX_COMPOUND_TRIP_THREADS_TO_READ,
   MAX_COMPOUND_TRIP_TOOL_CALLS,
 } from './compound-trip-read.js';
 import {
@@ -73,6 +76,8 @@ export interface PersonalReadRequest {
   conversationQuery?: string;
   /** One bounded follow-up query that emphasizes owner-authored historical evidence. */
   conversationFollowupQuery?: string;
+  /** A literal name from the owner's history request, independent of semantic ranking. */
+  conversationAnchorQuery?: string;
   /** One topic-focused pass for an explicit owner-correction comparison. */
   conversationCorrectionQuery?: string;
   /** Saved facts are searched only when the owner explicitly permits that source. */
@@ -326,7 +331,7 @@ const KNOWLEDGE_GRAPH_SURFACE =
 const MEMORY_SURFACE =
   /\b(?:memor(?:y|ies)|remember(?:ed)?|saved facts?|what you know|knowledge about me)\b/i;
 const CONVERSATION_HISTORY_REQUEST =
-  /\b(?:earlier|previous|prior|past)\s+(?:owner\s+)?(?:conversations?|chats?)\b|\b(?:previously|before)\s+(?:told|said|mentioned)\s+you\b|\bwhat\s+(?:did|have)\s+i\s+(?:tell|say|mention)\s+you\b|\bwhat\s+did\s+i\s+say\s+about\b/i;
+  /\b(?:earlier|previous|prior|past)\s+(?:owner\s+)?(?:conversations?|chats?)\b|\b(?:previously|before)\s+(?:told|said|mentioned)\s+you\b|\bwhat\s+(?:did|have)\s+i\s+(?:tell|say|mention)\s+you\b|\bwhat\s+did\s+i\s+say\s+about\b|\b(?:earlier|previous|prior|past)\s+(?:(?:hypothetical|fictional)\s+)?(?:[\p{L}\p{N}_-]+\s+){0,3}(?:exercise|scenario|discussion)\b/iu;
 const AUTOBIOGRAPHICAL_READ =
   /\b(?:when|where)\s+did\s+i\b|\bhave\s+i\s+ever\b|\bdid\s+i\s+(?:attend|visit|see|go|meet|live|work|travel)\b/i;
 const AVAILABILITY_SURFACE =
@@ -334,7 +339,7 @@ const AVAILABILITY_SURFACE =
 const CALENDAR_TIME_REFERENCE =
   /\b(?:today|tomorrow|weekends?|weeks?|months?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|20\d{2}-\d{2}-\d{2})\b/i;
 const CALENDAR_DAY_OVERVIEW =
-  /\bwhat(?:\s+is|['’]s)?\s+on\s+(?:(?:my|our|the)\s+)?(?:calendar|schedule|agenda)\b/i;
+  /\bwhat(?:\s+is|['’]s)?\s+on\s+(?:(?:my|our|the)\s+)?(?:calendar|schedule|agenda)\b|\b(?:show|list|review|summari[sz]e)\s+(?:(?:my|our|the)\s+)?(?:calendar|schedule|agenda)\s+(?:for\s+)?(?:today|tomorrow|this week|next week)\b/i;
 const SCHEDULED_THING =
   /\b(interviews?|meetings?|appointments?|calls?|chats?|flights?|reservations?|bookings?|events?)\b/i;
 const READ_OR_QUESTION =
@@ -1397,11 +1402,35 @@ function focusedMemoryTopic(text: string): string {
 function historicalSearchQueries(request: PersonalReadRequest): string[] {
   if (!request.conversationQuery) return [];
   const queries = [
-    request.conversationQuery,
+    // An explicit name is a more useful first pass than a generic semantic
+    // restatement, and leaves room for both source and correction searches.
+    request.conversationAnchorQuery ?? request.conversationQuery,
     request.conversationFollowupQuery,
     request.conversationCorrectionQuery,
   ].filter((query): query is string => typeof query === 'string' && query.length > 0);
   return [...new Set(queries)];
+}
+
+function namedHistoricalAnchor(text: string): string | undefined {
+  // Search an explicit name literally; a generic semantic hit is not proof that
+  // the earlier named exercise or the owner's original statement was found.
+  const named =
+    /\b(?:called|named)\s+["“'‘]([^"”'’\n]{2,80})["”'’]|\b(?:called|named)\s+([\p{L}\p{N}][\p{L}\p{N}_-]{1,79})/iu.exec(
+      text,
+    );
+  const hypothetical =
+    /\b(?:hypothetical|fictional)\s+([A-Z][\p{L}\p{N}_-]{1,79})\s+(?:exercise|scenario|example)\b/u.exec(
+      text,
+    );
+  return (named?.[1] ?? named?.[2] ?? hypothetical?.[1])?.trim();
+}
+
+function memoryLookupText(text: string): string {
+  // A retention constraint does not request a saved-memory lookup.
+  return text.replace(
+    /\b(?:do not|don't|don’t|never)\s+(?:save|store|write|update|add|retain|record)\b[^.!?;,]*?\bmemor(?:y|ies)\b[^.!?;,]*/giu,
+    '',
+  );
 }
 
 function requestsOwnerAssistantCorrectionComparison(text: string): boolean {
@@ -1430,7 +1459,8 @@ function nextHistoricalSearchQuery(
       (row) =>
         row.fromCurrentTask !== false &&
         row.toolName === 'conversations.search' &&
-        argsRecord(row)?.query === query,
+        argsRecord(row)?.query === query &&
+        (query !== request.conversationAnchorQuery || argsRecord(row)?.mode === 'text'),
     );
     if (attemptsForQuery.some(succeeded)) continue;
     if (attemptsForQuery.length < 2) return query;
@@ -1451,7 +1481,8 @@ function conversationSearchResultContinuation(
         row.fromCurrentTask === true &&
         row.toolName === 'conversations.search' &&
         succeeded(row) &&
-        argsRecord(row)?.query === query,
+        argsRecord(row)?.query === query &&
+        (query !== request.conversationAnchorQuery || argsRecord(row)?.mode === 'text'),
     );
     if (!search?.id || !TOOL_CALL_ID.test(search.id)) continue;
     let totalChars: number;
@@ -1912,7 +1943,8 @@ function detectPersonalReadRequestInternal(
     !memoryReadProhibited &&
     !graphRead &&
     !driveRead &&
-    ((MEMORY_SURFACE.test(latest) && (READ_OR_QUESTION.test(latest) || verification)) ||
+    ((MEMORY_SURFACE.test(memoryLookupText(latest)) &&
+      (READ_OR_QUESTION.test(latest) || verification)) ||
       (CONVERSATION_HISTORY_REQUEST.test(latest) && READ_OR_QUESTION.test(latest)) ||
       AUTOBIOGRAPHICAL_READ.test(latest));
   if (graphRead || driveRead || memoryRead) {
@@ -1922,8 +1954,9 @@ function detectPersonalReadRequestInternal(
     const savedMemoryRequested =
       kind === 'memory' &&
       (!conversationHistoryRequested ||
-        /\b(?:saved|long[- ]term|personal)\s+memor(?:y|ies)\b/i.test(latest));
+        /\b(?:saved|long[- ]term|personal)\s+memor(?:y|ies)\b/i.test(memoryLookupText(latest)));
     const focusedQuery = kind === 'memory' ? focusedMemoryTopic(latest) : undefined;
+    const historyAnchor = conversationHistoryRequested ? namedHistoricalAnchor(latest) : undefined;
     return {
       kind,
       queryTerms: conversationHistoryRequested
@@ -1934,6 +1967,7 @@ function detectPersonalReadRequestInternal(
       ...(conversationHistoryRequested
         ? {
             conversationQuery: focusedQuery,
+            ...(historyAnchor ? { conversationAnchorQuery: historyAnchor } : {}),
             conversationFollowupQuery:
               `Owner-authored statements and corrections about ${focusedQuery}`.slice(
                 0,
@@ -2127,7 +2161,9 @@ function detectPersonalReadRequestInternal(
   const calendarBriefing =
     kind === 'calendar' &&
     /\b(?:calendar|agenda|schedule)\b/i.test(latest) &&
-    /\b(?:briefing|brief me|practical briefing|quick overview|short summary|recap)\b/i.test(latest);
+    /\b(?:briefing|brief me|practical briefing|quick overview|short (?:summary|answer)|recap|compact|concise)\b/i.test(
+      latest,
+    );
 
   const request: PersonalReadRequest = {
     kind,
@@ -2370,88 +2406,7 @@ export function gmailSearchThreadIds(
   }
   const unique = [...new Set(ids)];
   if (request?.compoundTripDiscovery) {
-    const metadata = new Map<
-      string,
-      { subject: string; snippet: string; categories: Set<string> }
-    >();
-    for (const row of evidence) {
-      if (
-        row.fromCurrentTask === false ||
-        !succeeded(row) ||
-        row.toolName !== 'gmail.search' ||
-        !matchingGmailSearch(row, request)
-      )
-        continue;
-      const results = objectRecord(row.result)?.results;
-      if (!Array.isArray(results)) continue;
-      const query = String(argsRecord(row)?.query ?? '')
-        .trim()
-        .toLowerCase();
-      const category = request.mailQueries?.find(
-        (entry) => entry.query.toLowerCase() === query,
-      )?.category;
-      for (const item of results) {
-        const result = objectRecord(item);
-        const id = typeof result?.threadId === 'string' ? result.threadId : undefined;
-        if (!id) continue;
-        const prior = metadata.get(id);
-        const categories = prior?.categories ?? new Set<string>();
-        if (category) categories.add(category);
-        metadata.set(id, {
-          subject: [prior?.subject, typeof result?.subject === 'string' ? result.subject : '']
-            .filter(Boolean)
-            .join(' '),
-          snippet: [prior?.snippet, typeof result?.snippet === 'string' ? result.snippet : '']
-            .filter(Boolean)
-            .join(' '),
-          categories,
-        });
-      }
-    }
-    const flightThreads = unique
-      .map((threadId, index) => {
-        const item = metadata.get(threadId);
-        const source = `${item?.subject ?? ''} ${item?.snippet ?? ''}`;
-        const flight =
-          /\b(?:flight|airline|itinerary|boarding pass|e-?ticket|record locator)\b/i.test(source);
-        const booking =
-          /\b(?:booked|reserved|confirmation|confirmed|reservation|ticket|e-?ticket|itinerary|record locator|booking\s+(?:details|reference|receipt|number|confirmation))\b/i.test(
-            source,
-          );
-        return {
-          threadId,
-          index,
-          score:
-            item?.categories.has('flight') &&
-            flight &&
-            (booking || flightItinerarySubject(item?.subject ?? ''))
-              ? 1
-              : 0,
-        };
-      })
-      .filter((item) => item.score > 0)
-      .sort((a, b) => a.index - b.index);
-    const hotelThreads = unique
-      .map((threadId, index) => {
-        const item = metadata.get(threadId);
-        const source = `${item?.subject ?? ''} ${item?.snippet ?? ''}`;
-        const hotel = /\b(?:hotel|lodging|accommodation|airbnb)\b/i.test(source);
-        const booking =
-          /\b(?:booked|reserved|confirmation|confirmed|reservation|check[- ]?in|booking\s+(?:details|reference|receipt|number|confirmation))\b/i.test(
-            source,
-          );
-        return {
-          threadId,
-          index,
-          score: item?.categories.has('lodging') && hotel && booking ? 1 : 0,
-        };
-      })
-      .filter((item) => item.score > 0)
-      .sort((a, b) => a.index - b.index);
-    const selected = [flightThreads[0]?.threadId, hotelThreads[0]?.threadId].filter(
-      (threadId): threadId is string => Boolean(threadId),
-    );
-    return [...new Set([...selected, ...unique])];
+    return compoundTripThreadIdsToRead(evidence, request);
   }
   if (
     request?.answerFocus === 'flight' ||
@@ -2719,7 +2674,7 @@ function metadataDateIntervals(text: string): Array<{ start: string; endExclusiv
 
 export const MAX_GMAIL_THREADS_TO_READ = 3;
 export const MAX_GMAIL_SEARCH_PAGES = 3;
-export const MAX_COMPOUND_CALENDAR_PAGES = 2;
+export const MAX_COMPOUND_CALENDAR_PAGES = MAX_COMPOUND_CALENDAR_COVERAGE_PAGES;
 
 function hasTypedTripRead(request: PersonalReadRequest | undefined): boolean {
   return Boolean(request?.compoundTripDiscovery || request?.upcomingFlightDiscovery);
@@ -2730,7 +2685,11 @@ export function gmailThreadIdsToRead(
   request?: PersonalReadRequest,
 ): string[] {
   if (request?.emailReview) return request.emailReview.selectedThreadIds ?? [];
-  const limit = hasTypedTripRead(request) ? 2 : MAX_GMAIL_THREADS_TO_READ;
+  const limit = request?.compoundTripDiscovery
+    ? MAX_COMPOUND_TRIP_THREADS_TO_READ
+    : request?.upcomingFlightDiscovery
+      ? 2
+      : MAX_GMAIL_THREADS_TO_READ;
   return gmailSearchThreadIds(evidence, request).slice(0, limit);
 }
 
@@ -2779,7 +2738,7 @@ function compoundThreadReadInput(
   request: PersonalReadRequest,
 ): Record<string, unknown> | undefined {
   if (!hasTypedTripRead(request)) return undefined;
-  const targets = gmailThreadIdsToRead(evidence, request).slice(0, 2);
+  const targets = gmailThreadIdsToRead(evidence, request);
   for (const threadId of targets) {
     const attempts = evidence.filter(
       (row) =>
@@ -3122,7 +3081,9 @@ export function groundReadToolInput(
     return conversationSearchResultContinuation(request, evidence) ?? {};
   if (toolName === 'conversations.search' && request.conversationQuery) {
     const query = nextHistoricalSearchQuery(request, evidence);
-    return query ? { query, limit: 20 } : {};
+    return query
+      ? { query, limit: 20, ...(query === request.conversationAnchorQuery ? { mode: 'text' } : {}) }
+      : {};
   }
   if (toolName === 'calendar.list_events') {
     const { calendarIds: _ignored, ...unboundCalendarArgs } = input;

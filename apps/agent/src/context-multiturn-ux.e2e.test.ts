@@ -1678,7 +1678,7 @@ describe.each(['postgres', 'firestore'] as const)(
           },
         ];
         const calendarTool = {
-          requestText: 'What is on my calendar Thursday?',
+          requestText: 'What is on my calendar October 8, 2026?',
           toolName: 'calendar.list_events',
           toolInput: { start: '2026-10-08', end: '2026-10-09' },
           result: { events, calendarsSearched: ['primary'], complete: true },
@@ -1701,7 +1701,7 @@ describe.each(['postgres', 'firestore'] as const)(
         expect(correctCalendar).toContain('15:00–16:00');
 
         const wrongCalendarOperation = await publishToolResult({
-          requestText: 'Add a dentist appointment Thursday at 3:00 PM at West Clinic.',
+          requestText: 'Add a dentist appointment October 8, 2026 at 3:00 PM at West Clinic.',
           toolName: 'calendar.create_event',
           toolInput: {
             summary: 'Dentist appointment',

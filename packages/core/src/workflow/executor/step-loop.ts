@@ -2011,6 +2011,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         // Re-enter with the checkpointed source items. This revalidates the
         // exclusion before choosing a reserve and recomputes any shortfall.
         if (newlyExcluded.length > 0) continue;
+        // A structured answer may be valid for only a subset of the supplied
+        // threads. Re-enter with the checkpointed subset so the next bounded
+        // call contains only the threads that remain unassessed.
+        if (assessmentGaps > 0 && state.step < task.maxSteps) continue;
         const finalText =
           assessedItems.length > 0
             ? `${formatEmailReviewAnswer(assessedItems, coverage)}${
