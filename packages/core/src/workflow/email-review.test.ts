@@ -412,17 +412,19 @@ describe('bounded no-send email review', () => {
     expect(formatted).toContain('No deadline was identified in this review.');
     expect(formatted).not.toContain('Deadline mentioned in the thread: “tomorrow”');
 
-    const falseDeadline = {
-      items: [
-        {
-          ...assessment,
-          deadline: { messageId: thread.latestMessageId, quote: 'tomorrow' },
-        },
-      ],
-    };
-    expect(emailReviewValidationIssues(falseDeadline, [thread])).toContain(
-      'item_0:literal_explicit_deadline_or_null',
-    );
+    for (const quote of ['tomorrow', 'volunteer tomorrow', 'Could you volunteer tomorrow?']) {
+      const falseDeadline = {
+        items: [
+          {
+            ...assessment,
+            deadline: { messageId: thread.latestMessageId, quote },
+          },
+        ],
+      };
+      expect(emailReviewValidationIssues(falseDeadline, [thread]), quote).toContain(
+        'item_0:literal_explicit_deadline_or_null',
+      );
+    }
     expect(
       emailReviewValidationIssues({ items: [{ ...assessment, deadline: null }] }, [thread]),
     ).not.toContain('item_0:possible_relevant_deadline_in_thread');

@@ -910,17 +910,25 @@ function isSourceBackedDeadlineQuote(
   if (!quoteExists(thread, messageId, quote)) return false;
   const source = thread.messages.find((message) => message.messageId === messageId)?.text;
   if (!source) return false;
-  if (looksLikeDeadlineQuote(quote)) {
-    if (!/^(?:today|tomorrow|tonight|asap)$/i.test(quote.trim())) return true;
-    const index = source.indexOf(quote);
-    const surroundingSource = source.slice(Math.max(0, index - 80), index + quote.length + 20);
-    if (
-      /\b(?:by|before|until|due|deadline|no later than)\s+(?:today|tomorrow|tonight)\b/i.test(
+  const relativeDeadlineToken = /\b(?:today|tomorrow|tonight|asap)\b/i.exec(quote)?.[0];
+  if (relativeDeadlineToken) {
+    const sourceIndex = source.indexOf(relativeDeadlineToken);
+    if (sourceIndex < 0) return false;
+    const surroundingSource = source.slice(
+      Math.max(0, sourceIndex - 80),
+      sourceIndex + relativeDeadlineToken.length + 20,
+    );
+    return (
+      /\b(?:by|before|until|due|deadline|no later than)\s+(?:today|tomorrow|tonight|asap)\b/i.test(
+        surroundingSource,
+      ) ||
+      /\b(?:response|reply|rsvp|volunteer|registration|applications?)\s+(?:is\s+)?(?:due|deadline)\s+(?:today|tomorrow|tonight|asap)\b/i.test(
         surroundingSource,
       )
-    )
-      return true;
-    return false;
+    );
+  }
+  if (looksLikeDeadlineQuote(quote)) {
+    return true;
   }
   const deadlineOrOutcome =
     /\b(?:due|deadline|by|before|until|no later than|last day|final day|will be donated|donat(?:e|ed|ion)|discard(?:ed)?|destroy(?:ed)?|remove[sd]?|auction(?:ed)?|recycl(?:e|ed)|expire[sd]?|cancel(?:led|ed)?)\b/i;
