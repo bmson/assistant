@@ -154,7 +154,7 @@ function gmailThreadPage(input: {
 }
 
 describe('golden tasks', () => {
-  it('executes a compound trip read through the real task dispatcher and returns a source-grounded itinerary', async (ctx) => {
+  it('executes a compound trip read through the scripted executor and returns a source-grounded itinerary', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const prompt =
       'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';

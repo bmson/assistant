@@ -44,6 +44,7 @@ import {
   compoundTripSourceMessages,
   extractCompoundTripBookings,
 } from '../compound-trip-extraction.js';
+import { compoundTripReadProjection } from '../compound-trip-read.js';
 import {
   boundEmailReviewThreads,
   EMAIL_REVIEW_MAX_CANDIDATES,
@@ -3075,13 +3076,63 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             continue;
           }
         }
+        const compoundTripPublicRead =
+          !resumingBatch &&
+          task.type === 'chat_turn' &&
+          task.trust === 'owner' &&
+          ctx.trust === 'owner' &&
+          (task.trigger as { source?: string } | null)?.source === 'chat' &&
+          readRequest?.compoundTripDiscovery &&
+          boundedForcedReadTool === tc.toolName &&
+          (tc.toolName === 'web.search' || tc.toolName === 'web.fetch')
+            ? (() => {
+                const query = compoundTripReadProjection(readRequest, readToolEvidence).webQuery;
+                if (!query) return undefined;
+                if (
+                  tc.toolName === 'web.search' &&
+                  tc.input.query === query &&
+                  tc.input.count === 5
+                ) {
+                  return {
+                    taskId: task.id,
+                    toolName: 'web.search' as const,
+                    query,
+                  };
+                }
+                if (tc.toolName === 'web.fetch' && typeof tc.input.url === 'string') {
+                  const expected = groundReadToolInput(
+                    readRequest,
+                    'web.fetch',
+                    tc.input,
+                    readToolEvidence,
+                  );
+                  if (expected.url === tc.input.url)
+                    return {
+                      taskId: task.id,
+                      toolName: 'web.fetch' as const,
+                      query,
+                      url: tc.input.url,
+                    };
+                }
+                return undefined;
+              })()
+            : undefined;
         const outcome = await dispatcher.dispatch({
           task,
           step: state.step,
           modelToolCallId: tc.toolCallId,
           toolName: tc.toolName,
           args: tc.input,
-          ctx: verifiedReminderEvent ? { ...ctx, verifiedReminderEvent } : ctx,
+          ctx:
+            verifiedReminderEvent || compoundTripPublicRead
+              ? {
+                  ...ctx,
+                  ...(verifiedReminderEvent ? { verifiedReminderEvent } : {}),
+                  ...(compoundTripPublicRead
+                    ? { authorizedCompoundTripPublicRead: compoundTripPublicRead }
+                    : {}),
+                }
+              : ctx,
           provenance: {
             plannerVersion: PLANNER_VERSION,
             promptVersion: PROMPT_VERSION,
