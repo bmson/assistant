@@ -395,6 +395,12 @@ describe('bounded no-send email review', () => {
       'copy a verbatim, contiguous substring from that exact message body',
     );
     expect(initial.prompt).toContain('set whyMessageId to exactly latestMessageId');
+    expect(initial.prompt).toContain(
+      'Do not use quoted or forwarded text as the reason for a new reply',
+    );
+    expect(initial.prompt).toContain(
+      'every message ID needed to support its factual details, links, or owner commitments',
+    );
     expect(initial.prompt).toContain('use its message ID, or return deadline: null');
     expect(initial.prompt).toContain(
       'Subject lines, snippets, headers, and other messages are not quote sources',
@@ -594,6 +600,18 @@ describe('bounded no-send email review', () => {
       validateEmailReviewAnswer(noReplyFor(incidentalMention), [incidentalMention]),
     ).toBeDefined();
     expect(validateEmailReviewAnswer(noReplyFor(quotedOldAsk), [quotedOldAsk])).toBeDefined();
+    const proposedDraftForQuotedAsk = {
+      ...required(validAnswer(quotedOldAsk.threadId).items[0], 'quoted-ask draft'),
+      whyQuote: 'Are you able to help tomorrow?',
+      deadline: null,
+      draftBody: 'Thanks for checking.',
+    };
+    expect(
+      emailReviewValidationIssues({ items: [proposedDraftForQuotedAsk] }, [quotedOldAsk]),
+    ).toContain('item_0:why_quote_must_be_from_unquoted_latest_body');
+    expect(
+      validateEmailReviewAnswer({ items: [proposedDraftForQuotedAsk] }, [quotedOldAsk]),
+    ).toBeUndefined();
   });
 
   it('reviews a linked earlier response deadline but ignores an unrelated older date', () => {
@@ -647,9 +665,21 @@ describe('bounded no-send email review', () => {
       messageId: required(linked.messages[0], 'prior deadline message').messageId,
       quote: 'RSVP by October 18',
     };
+    linkedAssessment.draftBody = 'Thanks for the reminder about October 18.';
     expect(
       validateEmailReviewAnswer({ items: [linkedAssessment] }, [linked])?.items[0]?.deadlineQuote,
     ).toBe('RSVP by October 18');
+    expect(validateEmailReviewAnswer({ items: [linkedAssessment] }, [linked])).toBeDefined();
+    const missingNamedDeadlineSource = {
+      ...linkedAssessment,
+      draftSourceMessageIds: [linked.latestMessageId],
+    };
+    expect(
+      emailReviewValidationIssues({ items: [missingNamedDeadlineSource] }, [linked]),
+    ).toContain('item_0:no_unsupplied_facts_or_owner_commitments');
+    expect(
+      validateEmailReviewAnswer({ items: [missingNamedDeadlineSource] }, [linked]),
+    ).toBeUndefined();
 
     const unrelated = makeThread(
       'unrelated-prior-date',
