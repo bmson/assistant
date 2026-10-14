@@ -681,6 +681,63 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       ([day]) =>
         `Overloaded-day estimate: ${labelDay(day)} has at least 6 merged busy hours inside 9–5. This is a planning heuristic.`,
     );
+  const eveningStats = new Map<string, { busyMs: number; events: Map<string, PlainRecord> }>();
+  for (let at = start; at + SLOT_MS <= end; at += SLOT_MS) {
+    const parts = localParts(at, timeZone);
+    if (!parts || parts.weekday === 0 || parts.weekday === 6 || parts.hour < 17) continue;
+    const slot = { start: at, end: at + SLOT_MS };
+    const stats = eveningStats.get(parts.day) ?? { busyMs: 0, events: new Map() };
+    if (busyMerged.some((interval) => overlap(interval, slot))) stats.busyMs += SLOT_MS;
+    for (const item of conflictEvents) {
+      if (overlap(item.interval, slot)) stats.events.set(eventIdentity(item.event), item.event);
+    }
+    eveningStats.set(parts.day, stats);
+  }
+  const eveningAssessments: string[] = [];
+  if (!busyValid) {
+    eveningAssessments.push(
+      'Evening-load assessment: I could not assess after-hours load from usable free/busy data.',
+    );
+  } else {
+    const evenings = [...eveningStats.entries()].filter(
+      ([, stats]) => stats.busyMs > 0 || stats.events.size > 0,
+    );
+    if (evenings.length === 0) {
+      eveningAssessments.push(
+        complete
+          ? 'Evening assessment: no checked weekday has busy time after 5 PM.'
+          : 'Evening assessment: no after-5 PM busy time appeared in the checked subset; incomplete coverage could change this.',
+      );
+    }
+    for (const [day, stats] of evenings) {
+      const hours = Math.round(stats.busyMs / 60_000 / 15) / 4;
+      if (hours >= 3)
+        eveningAssessments.push(
+          `Evening-heavy estimate: ${labelDay(day)} has ${hours} checked busy hours after 5 PM (a 3-hour planning heuristic).${complete ? '' : ' Coverage is incomplete, so this estimate may change.'}`,
+        );
+      const scheduled = [...stats.events.values()]
+        .map((event) => ({ event, interval: parseEventInterval(event) }))
+        .filter(
+          (item): item is { event: PlainRecord; interval: { start: number; end: number } } =>
+            item.interval !== undefined,
+        )
+        .sort((left, right) => left.interval.start - right.interval.start);
+      for (let index = 1; index < scheduled.length; index += 1) {
+        const previous = scheduled[index - 1];
+        const next = scheduled[index];
+        if (!previous || !next) continue;
+        const gap = next.interval.start - previous.interval.end;
+        if (gap >= 0 && gap <= 30 * 60_000)
+          eveningAssessments.push(
+            `Tight evening turnaround: ${eventTitle(previous.event)} ends ${labelTime(previous.interval.end, timeZone)}; ${eventTitle(next.event)} starts ${labelTime(next.interval.start, timeZone)} (${Math.round(gap / 60_000)} minutes between). Attendance and travel needs are not established by the calendar alone.`,
+          );
+      }
+    }
+    if (!complete && evenings.length > 0)
+      eveningAssessments.push(
+        'Evening findings use checked records only; missing calendar coverage could change them.',
+      );
+  }
   const attendanceTargets = [...new Set(potentialAttendanceEvents)].slice(0, 3);
   const attendanceCheck = attendanceTargets.length
     ? attendanceTargets.join(', ')
@@ -756,6 +813,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     lines.push(
       `Overloaded-day assessment: No checked working day reaches the 6-hour busy-time threshold inside the assumed 9–5 day.${complete ? ' This is a planning heuristic.' : ' This applies only to the checked data; missing coverage could change this assessment.'}`,
     );
+  lines.push(...eveningAssessments.slice(0, 8));
   if (overloads.length > 0)
     lines.push(
       'Recommended change: consider moving flexible work from an overloaded day to a lighter day after checking your priorities.',

@@ -139,18 +139,20 @@ describe('calendar day and practical briefing fidelity', () => {
     ).toBeUndefined();
   });
 
-  it('retains all confirmed events while shortening ongoing spans and repeated overlap caveats', () => {
+  it('retains an ongoing stay without treating the span as an appointment conflict', () => {
     const stay = {
       ...timed,
       eventId: 'stay',
       summary: 'Hotel stay',
+      description: 'Check-in: Oct 10. Check-out: Oct 17.',
       start: '2026-10-10T06:00:00-07:00',
       end: '2026-10-17T02:00:00-07:00',
     };
     const response = verifiedReadResponse(request, evidence([stay, timed]));
     expect(response).toContain('**Ongoing through Sat 17 Oct 02:00** — Hotel stay');
-    expect(response).toContain('Possible overlap: **Hotel stay** and **Project review**');
-    expect(response).toContain('do not establish that you must attend both');
+    expect(response).toContain('**09:00–10:00** — Project review');
+    expect(response).toContain('No unresolved overlaps between timed calendar entries');
+    expect(response).not.toContain('Possible overlap: **Hotel stay**');
     expect(response).not.toContain('Sat, Oct 10');
   });
 
@@ -238,4 +240,105 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain('coverage was incomplete');
     expect(response).not.toMatch(/free|working hours|09:00–17:00/i);
   });
+
+  it('keeps similar-looking all-day entries separate and reports only timed appointment overlap', () => {
+    const events = [
+      {
+        eventId: 'stay',
+        calendarId: 'travel',
+        calendar: 'Travel',
+        summary: 'Berlin hotel stay',
+        description: 'Check-in: Oct 10. Check-out: Oct 17.',
+        start: '2026-10-10T06:00:00-07:00',
+        end: '2026-10-17T02:00:00-07:00',
+        links: link('stay'),
+      },
+      {
+        eventId: 'pay-personal',
+        calendarId: 'personal',
+        calendar: 'Personal',
+        summary: 'Paycheck',
+        start: '2026-10-16',
+        end: '2026-10-17',
+        allDay: true,
+        calendarTimeZone: 'Europe/Berlin',
+        links: link('pay-personal'),
+      },
+      {
+        eventId: 'pay-family',
+        calendarId: 'family',
+        calendar: 'Family',
+        summary: 'Paycheck from Zendesk',
+        start: '2026-10-16',
+        end: '2026-10-17',
+        allDay: true,
+        calendarTimeZone: 'UTC',
+        links: link('pay-family'),
+      },
+      {
+        ...timed,
+        eventId: 'field-trip',
+        calendarId: 'family',
+        calendar: 'Family',
+        summary: 'Library field trip',
+        start: '2026-10-15T16:50:00-07:00',
+        end: '2026-10-15T19:00:00-07:00',
+        links: link('field-trip'),
+      },
+      {
+        ...timed,
+        eventId: 'soccer',
+        calendarId: 'soccer',
+        calendar: 'Soccer',
+        summary: 'Soccer practice',
+        start: '2026-10-15T17:00:00-07:00',
+        end: '2026-10-15T18:30:00-07:00',
+        links: link('soccer'),
+      },
+    ];
+    const rows = evidence(events);
+    const requestWithOverlap = { ...request, includeCalendarOverlapSummary: true };
+    const unsupportedDraft =
+      'The Personal and Family paycheck records are duplicates, and the Icelandic title is the same thing. The hotel conflicts with both appointments.';
+
+    expect(groundReadDraft(unsupportedDraft, requestWithOverlap, rows).grounded).toBe(false);
+    const checked = enforceResponseContract(unsupportedDraft, rows, {
+      requestText: 'What is on my calendar tomorrow? Give me a short practical briefing.',
+      readRequest: requestWithOverlap,
+    });
+    expect(checked.groundingFallback).toContain(
+      'calendar briefing is rendered from checked event rows',
+    );
+    for (const event of events) expect(checked.text).toContain(stringLink(event.eventId));
+    expect(checked.text).toContain('Berlin hotel stay');
+    expect(checked.text).toContain('Paycheck from Zendesk');
+    expect(checked.text).toContain('Library field trip');
+    expect(checked.text).toContain('Soccer practice');
+    expect(checked.text).toContain(
+      'Possible overlap: **Library field trip** and **Soccer practice**',
+    );
+    expect(checked.text).not.toContain('Possible overlap: **Berlin hotel stay**');
+    expect(checked.text).not.toContain('Possible overlap: **Paycheck');
+    expect(checked.text).not.toMatch(/duplicates?|same thing/i);
+  });
+
+  it('keeps an unexplained multi-day timed block in overlap review', () => {
+    const longBlock = {
+      ...timed,
+      eventId: 'conference-hold',
+      summary: 'Conference hold',
+      start: '2026-10-10T06:00:00-07:00',
+      end: '2026-10-17T02:00:00-07:00',
+      description: 'Reserved time.',
+    };
+    const response = verifiedReadResponse(request, evidence([longBlock, timed]));
+
+    expect(response).toContain('**Conference hold**');
+    expect(response).toContain('Possible overlap: **Conference hold** and **Project review**');
+    expect(response).toContain('do not establish that you must attend both');
+  });
 });
+
+function stringLink(id: string): string {
+  return `event?eid=${id}`;
+}

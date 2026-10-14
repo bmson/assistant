@@ -119,6 +119,67 @@ describe('weeklyCalendarPlan', () => {
     expect(invalid).not.toContain('No checked working day reaches');
   });
 
+  it('assesses evening load and short turnarounds outside the assumed 9–5 window', () => {
+    const first = {
+      eventId: 'evening-review',
+      calendarId: 'family',
+      calendar: 'Family',
+      summary: 'School review',
+      start: '2026-10-13T18:00:00-07:00',
+      end: '2026-10-13T18:45:00-07:00',
+      ownerResponse: 'accepted',
+      blocksTime: true,
+    };
+    const second = {
+      eventId: 'evening-practice',
+      calendarId: 'sports',
+      calendar: 'Sports',
+      summary: 'Team practice',
+      start: '2026-10-13T19:00:00-07:00',
+      end: '2026-10-13T20:00:00-07:00',
+      ownerResponse: 'tentative',
+      blocksTime: true,
+    };
+    const result = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        busy: [
+          { start: first.start, end: first.end },
+          { start: second.start, end: second.end },
+          { start: '2026-10-14T17:00:00-07:00', end: '2026-10-14T20:30:00-07:00' },
+        ],
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin, timeMax, maxResults: 50 },
+            result: {
+              events: [first, second],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+    });
+
+    expect(result.text).toContain(
+      'Evening-heavy estimate: Wed, Oct 14 has 3.5 checked busy hours after 5 PM',
+    );
+    expect(result.text).toContain(
+      'Tight evening turnaround: School review ends Tue, Oct 13, 6:45 PM',
+    );
+    expect(result.text).toContain('Team practice starts Tue, Oct 13, 7:00 PM (15 minutes between)');
+    expect(result.text).toContain(
+      'Attendance and travel needs are not established by the calendar alone.',
+    );
+    expect(result.text).toContain('assumed to be 9 AM–5 PM');
+    expect(result.text).not.toContain('calendar changed');
+  });
+
   it('reserves estimated travel time for a physical shared event while keeping attendance uncertain', () => {
     const shared = {
       eventId: 'shared-physical',
