@@ -315,18 +315,36 @@ describe('bounded no-send email review', () => {
     const good = required(validAnswer('thread-a').items[0], 'good item');
     const bad = required(validAnswer('thread-b').items[0], 'bad item');
     bad.draftBody = 'I will approve it tomorrow.';
-    const result = await generateValidatedEmailReview(threads, async () => ({
-      ok: true,
-      value: { items: [good, bad] },
-    }));
+    const repairThreadIds: string[][] = [];
+    const result = await generateValidatedEmailReview(threads, async ({ prompt }) => {
+      const jsonPrompt = prompt.split('\n\nThe previous assessment could not pass')[0];
+      const input = JSON.parse(jsonPrompt as string) as { threads: Array<{ threadId: string }> };
+      repairThreadIds.push(input.threads.map((thread) => thread.threadId));
+      return {
+        ok: true,
+        value: {
+          items: input.threads.map((thread) => (thread.threadId === 'thread-a' ? good : bad)),
+        },
+      };
+    });
     expect(result.attempts).toBe(2);
     expect(result.answer?.items.map((item) => item.thread.threadId)).toEqual(['thread-a']);
     expect(result.answer?.items[0]?.draftBody).toBe('Thanks for your note.');
-    expect(result.issues).toContain('item_1:no_unsupplied_facts_or_owner_commitments');
-    const wrongCount = await generateValidatedEmailReview(threads, async () => ({
-      ok: true,
-      value: { items: [good] },
-    }));
+    expect(repairThreadIds).toEqual([['thread-a', 'thread-b'], ['thread-b']]);
+    expect(result.issues).toContain('item_0:no_unsupplied_facts_or_owner_commitments');
+    const missingThreadAttempts: string[][] = [];
+    const wrongCount = await generateValidatedEmailReview(threads, async ({ prompt }) => {
+      const jsonPrompt = prompt.split('\n\nThe previous assessment could not pass')[0];
+      const input = JSON.parse(jsonPrompt as string) as { threads: Array<{ threadId: string }> };
+      missingThreadAttempts.push(input.threads.map((thread) => thread.threadId));
+      return {
+        ok: true,
+        value: {
+          items: input.threads.some((thread) => thread.threadId === 'thread-a') ? [good] : [],
+        },
+      };
+    });
+    expect(missingThreadAttempts).toEqual([['thread-a', 'thread-b'], ['thread-b']]);
     expect(wrongCount.answer?.items.map((item) => item.thread.threadId)).toEqual(['thread-a']);
     expect(wrongCount.sourceItems?.map((item) => item.threadId)).toEqual(['thread-a']);
     expect(wrongCount.issues).toContain('one_item_per_input_thread');

@@ -182,14 +182,17 @@ export function compoundTripThreadIdsToRead(
       const flightTerm =
         /\b(?:flight|airline|itinerary|boarding pass|e-?ticket|record locator)\b/i.test(source);
       return (
-        (item?.categories.has('flight') === true && (booking || itinerarySubject)) ||
-        (!request.mailQueries?.length && flightTerm && (booking || itinerarySubject))
+        (item?.categories.has('flight') === true || !request.mailQueries?.length) &&
+        flightTerm &&
+        (booking || itinerarySubject)
       );
     }
     return (
       (item?.categories.has('lodging') === true || !request.mailQueries?.length) &&
-      /\b(?:hotel|accommodation|lodging|guesthouse|hostel|inn|resort)\b/i.test(source) &&
-      /\b(?:booked|reserved|booking|reservation|confirmation|check[- ]?in)\b/i.test(source)
+      /\b(?:hotel|accommodation|lodging|airbnb|guesthouse|hostel|inn|resort)\b/i.test(source) &&
+      /\b(?:booked|reserved|confirmed|reservation|confirmation|check[- ]?in|booking\s+(?:details|reference|receipt|number|confirmation))\b/i.test(
+        source,
+      )
     );
   };
   const first = (kind: 'flight' | 'lodging') => unique.find((id) => sourceMatches(id, kind));
@@ -2052,7 +2055,6 @@ export function compoundTripReadProjection(
         query,
       ),
     );
-  const selectedThreadIds = compoundTripThreadIdsToRead(gmailSearchRows, request);
   const completeIds = completeThreadIds(readThreads);
   const searchedThreadIds = new Set(
     gmailSearchRows.flatMap((row) => {
@@ -2062,21 +2064,12 @@ export function compoundTripReadProjection(
         : [];
     }),
   );
-  const allThreadsRead =
-    selectedThreadIds.length > 0
-      ? selectedThreadIds.every((id) => completeIds.has(id))
-      : searchedThreadIds.size === 0 && gmailSearchRows.length > 0;
-  const unselectedThreadCount = Math.max(
-    0,
-    new Set(
-      gmailSearchRows.flatMap((row) => {
-        const results = object(row.result)?.results;
-        return Array.isArray(results)
-          ? results.map((item) => text(object(item)?.threadId, 100)).filter(Boolean)
-          : [];
-      }),
-    ).size - selectedThreadIds.length,
-  );
+  // Ranking bounds new reads, not the coverage claim. Only receipted complete
+  // reads of searched IDs count; an unselected or failed thread remains a gap.
+  // Previously completed search-matched reads still count when thin metadata
+  // provides no useful candidate rank.
+  const unreadThreadCount = [...searchedThreadIds].filter((id) => !completeIds.has(id)).length;
+  const allThreadsRead = gmailSearchRows.length > 0 && unreadThreadCount === 0;
   const completeThreads = readThreads.filter((row) =>
     completeIds.has(text(object(row.args)?.threadId, 100)),
   );
@@ -2327,9 +2320,9 @@ export function compoundTripReadProjection(
     gaps.push('Calendar coverage is incomplete, so I cannot establish which flight is next.');
   if (!gmailSearchComplete || !allThreadsRead)
     gaps.push('Booking-email search or thread coverage is incomplete.');
-  if (unselectedThreadCount > 0)
+  if (unreadThreadCount > 0)
     gaps.push(
-      `I read the selected booking candidates; ${unselectedThreadCount} other matching email thread${unselectedThreadCount === 1 ? '' : 's'} remain unread.`,
+      `${unreadThreadCount} matching email thread${unreadThreadCount === 1 ? ' remains' : 's remain'} unread or incomplete.`,
     );
   if (selectedFlight.ambiguous)
     gaps.push(

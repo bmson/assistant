@@ -211,6 +211,7 @@ export const ASSISTANT_SCENARIOS: QuestionCase[] = [
                   start: '2026-11-01',
                   end: '2026-11-02',
                   calendar: 'Family',
+                  calendarTimeZone: 'America/Los_Angeles',
                 },
               ],
             },

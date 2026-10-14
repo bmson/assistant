@@ -1,4 +1,5 @@
 import type { CalendarPlanOptions } from './calendar-plan-intent.js';
+import { calendarSourceInterval } from './calendar-read-window.js';
 import type { ActionEvidence } from './response-contract.js';
 
 const SLOT_MS = 15 * 60_000;
@@ -264,6 +265,21 @@ function eventTitle(event: PlainRecord): string {
   return safeText(event.summary, 100) || 'Untitled event';
 }
 
+function calendarSourceLabel(event: PlainRecord): string {
+  return eventTitle(event)
+    .replace(/\\/g, '\\\\')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]')
+    .replace(/`/g, '\\`')
+    .replace(/\*/g, '\\*');
+}
+
+function calendarSourceReference(event: PlainRecord): string {
+  const title = calendarSourceLabel(event);
+  const url = strictGoogleCalendarLink(event);
+  return url ? `[${title}](<${url}>)` : `**${title}**`;
+}
+
 export interface WeeklyCalendarPlanInput {
   timeMin: string;
   timeMax: string;
@@ -434,6 +450,10 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const complete = availabilityComplete && eventComplete;
 
   const eventBusy: Array<{ start: number; end: number }> = [];
+  const eventBusySources: Array<{
+    event: PlainRecord;
+    interval: { start: number; end: number };
+  }> = [];
   let travelBufferCount = 0;
   let potentialTravelBufferCount = 0;
   for (const event of uniqueEvents) {
@@ -456,7 +476,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     const inPerson = location && !hasVideo && !remoteLocation;
     if (inPerson) travelBufferCount += 1;
     if (inPerson && attendance(event) === 'potential') potentialTravelBufferCount += 1;
-    eventBusy.push({
+    const blockingInterval = {
       start: Math.max(
         start,
         interval.start -
@@ -467,7 +487,9 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         interval.end +
           Math.max(inPerson ? TRAVEL_MS : 0, (input.plan?.meetingBufferMinutes ?? 0) * 60_000),
       ),
-    });
+    };
+    eventBusy.push(blockingInterval);
+    eventBusySources.push({ event, interval: blockingInterval });
   }
   const explainedLodgingBusy = new Map<BusyInterval, PlainRecord>();
   for (const interval of busy) {
@@ -481,6 +503,28 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   }
   const candidateBusy = busy.filter((interval) => !explainedLodgingBusy.has(interval));
   const busyMerged = mergeIntervals([...candidateBusy, ...eventBusy]);
+  const allDayBusySources = uniqueEvents.flatMap((event) => {
+    if (event.allDay !== true || attendance(event) === 'not-attending') return [];
+    const eventInterval = calendarSourceInterval(event);
+    if (!eventInterval) return [];
+    const calendarIds = [event.calendar, event.calendarId].filter(
+      (value): value is string => typeof value === 'string' && value.length > 0,
+    );
+    if (calendarIds.length === 0) return [];
+    return busy
+      .filter(
+        (interval) =>
+          Boolean(interval.calendar) &&
+          calendarIds.includes(interval.calendar as string) &&
+          overlap(interval, eventInterval),
+      )
+      .flatMap((interval) => {
+        const start = Math.max(interval.start, eventInterval.start);
+        const end = Math.min(interval.end, eventInterval.end);
+        return end > start ? [{ event, interval: { start, end } }] : [];
+      });
+  });
+  const potentialFocusIntervals: Array<{ start: number; end: number }> = [];
 
   const dayStats = new Map<
     string,
@@ -507,6 +551,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     )
       continue;
     const candidate = { start: at, end: occupiedEnd };
+    potentialFocusIntervals.push(candidate);
     if (busyValid && !busyMerged.some((interval) => overlap(interval, candidate))) {
       const lodgingConditions = [
         ...new Set(
@@ -688,6 +733,20 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       'Recommended change: consider moving flexible work from an overloaded day to a lighter day after checking your priorities.',
     );
   if (chosen.length === 0) {
+    const constrainingEvents = [
+      ...new Map(
+        [...eventBusySources, ...allDayBusySources]
+          .filter(({ interval }) =>
+            potentialFocusIntervals.some((candidate) => overlap(interval, candidate)),
+          )
+          .map(({ event }) => [eventIdentity(event), event]),
+      ).values(),
+    ].slice(0, 3);
+    if (busyValid && constrainingEvents.length > 0) {
+      lines.push(
+        `Checked events overlapping possible focus windows include ${constrainingEvents.map(calendarSourceReference).join(', ')}. No ${focusMs / 60_000}-minute focus block plus its ${breakMs / 60_000}-minute break fit in the checked data.`,
+      );
+    }
     lines.push(
       busyValid
         ? `I couldn’t identify suitable ${focusMs / 60_000}-minute blocks from the available data. Please confirm coverage or working hours before I suggest more.`
@@ -710,16 +769,16 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     lines.push(
       `I found ${chosen.length} of ${requestedSlots} requested focus blocks; the remaining time did not fit without overlapping checked commitments and breaks.`,
     );
-  const sourceLinks = uniqueEvents
-    .map(strictGoogleCalendarLink)
-    .filter((value): value is string => Boolean(value));
+  const sourceLinks = [
+    ...new Map(
+      uniqueEvents.flatMap((event) => {
+        const url = strictGoogleCalendarLink(event);
+        return url ? [[url, calendarSourceReference(event)] as const] : [];
+      }),
+    ).values(),
+  ];
   if (sourceLinks.length > 0)
-    lines.push(
-      `Calendar sources: ${[...new Set(sourceLinks)]
-        .slice(0, 5)
-        .map((url, index) => `[Event ${index + 1}](<${url}>)`)
-        .join(' · ')}`,
-    );
+    lines.push(`Calendar sources: ${sourceLinks.slice(0, 5).join(' · ')}`);
   return result(lines.join('\n'), complete, chosen.length);
 }
 

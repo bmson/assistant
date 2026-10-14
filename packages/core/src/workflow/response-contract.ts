@@ -3889,6 +3889,17 @@ export function enforcePersonalReadResponse(
         ? { weeklyPlanAssessment: { coverageComplete: false, slotCount: 0 } }
         : {}),
     };
+  // A typed flight projection can be blocked by unverified booking identity
+  // even when every read completed and its prose has no coverage-gap paragraph.
+  // Preserve that status directly instead of deriving completion from text.
+  if (request.upcomingFlightDiscovery) {
+    const projection = upcomingFlightReadProjection(request, evidence);
+    const unsupported: ActionKind[] = [];
+    if (!projection.calendarComplete) unsupported.push('calendar_read');
+    if (!projection.gmailSearchComplete || !projection.threadsComplete)
+      unsupported.push('inbox_read');
+    return { text: projection.text, blocked: projection.blocked, unsupported };
+  }
   const gaps = requiredReadGaps(request, evidence);
   if (gaps.labels.length > 0) {
     const response = coverageGapResponse(request, evidence, gaps);
