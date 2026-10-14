@@ -34,6 +34,9 @@ export interface CompoundTripFlightCandidate {
   sourceOffset?: string;
   sourceTimeZone?: string;
   direction: 'outbound' | 'return' | 'connection' | 'unknown';
+  calendarDirection?: 'outbound' | 'return' | 'connection' | 'unknown';
+  calendarReportedArrivalAirport?: string;
+  calendarConflicts?: string[];
   segment?: CompoundTripFlightSegment;
   /** Arrival date after every source-linked connection, not just the first leg. */
   itineraryArrivalDate?: string;
@@ -52,6 +55,15 @@ export interface CompoundTripHotelCandidate {
   checkOut?: string;
   bookingReference?: string;
   sourceExcerpt: string;
+  association: 'shared_reference' | 'date_city_candidate' | 'unlinked';
+}
+
+export interface CompoundTripCalendarLodgingObservation {
+  title: string;
+  dateStart: string;
+  dateEnd?: string;
+  city?: string;
+  sourceUrl?: string;
   association: 'shared_reference' | 'date_city_candidate' | 'unlinked';
 }
 
@@ -77,6 +89,7 @@ export interface CompoundTripReadProjection {
   currentTripReturn?: CompoundTripFlightCandidate;
   flightConfirmationThreadId?: string;
   hotel?: CompoundTripHotelCandidate;
+  calendarLodgingObservation?: CompoundTripCalendarLodgingObservation;
   routeOrigin?: string;
   routeDestination?: string;
   webQuery?: string;
@@ -626,20 +639,16 @@ function nextOutboundFlight(
         sourceDeparture !== undefined &&
         Number.isFinite(calendarDeparture) &&
         Math.abs(sourceDeparture - calendarDeparture) <= 5 * 60_000;
-      const hasStrongIdentity =
-        (candidate.flightNumber !== undefined && candidate.flightNumber === segment.flightNumber) ||
-        referenceMatchesStrongly;
-      const eventHasNoTimeZone = !text(candidate.event.timeZone, 120);
       const departureZone = text(segment.departureTimeZone, 120);
       const boundLocalDate =
-        eventHasNoTimeZone && hasStrongIdentity && timeMatches && validTimeZone(departureZone)
+        referenceMatchesStrongly && validTimeZone(departureZone)
           ? civilDateInTimeZone(candidate.instant, departureZone)
           : undefined;
       const dateMatches =
         eventDate === segment.departureDate || boundLocalDate === segment.departureDate;
       const calendarHasSparseIdentity =
         candidate.direction === 'unknown' || candidate.flightNumber === undefined;
-      return (
+      const strictMatch =
         directionMatches &&
         numberMatches &&
         dateMatches &&
@@ -648,8 +657,27 @@ function nextOutboundFlight(
         (!calendarHasSparseIdentity ||
           (segment.direction === expectedDirection &&
             (routeMatches || referenceMatchesStrongly) &&
-            timeMatches))
+            timeMatches));
+      // An exact reference plus a departure-day match in the booking's own
+      // time zone can bind one dated leg even when the calendar has stale or
+      // conflicting flight metadata. Keep the conflict attached for reporting;
+      // do not let the same reference/date bind several itinerary legs.
+      const sameReferenceDayLegs = segments.filter(
+        (item) =>
+          item.threadId === segment.threadId &&
+          item.bookingReference === segment.bookingReference &&
+          item.direction === expectedDirection &&
+          item.departureDate === segment.departureDate,
       );
+      const strongReferenceMatch =
+        referenceMatchesStrongly &&
+        dateMatches &&
+        (candidate.direction === 'unknown' || candidate.direction === expectedDirection) &&
+        (!candidate.originAirport ||
+          !segment.originAirport ||
+          candidate.originAirport === segment.originAirport) &&
+        sameReferenceDayLegs.length === 1;
+      return strongReferenceMatch || strictMatch;
     });
     if (matchingCalendar.length > 1) return { ambiguous: true };
     const event = matchingCalendar[0];
@@ -660,10 +688,24 @@ function nextOutboundFlight(
     const itineraryArrivalDate = hasConnections
       ? chainArrival
       : (segment.arrivalDate ?? sourceCivilDate(event.event));
+    const calendarConflicts: string[] = [];
+    if (event.flightNumber && event.flightNumber !== segment.flightNumber)
+      calendarConflicts.push('flight-number');
+    if (event.direction !== 'unknown' && event.direction !== expectedDirection)
+      calendarConflicts.push('direction');
+    if (
+      event.arrivalAirport &&
+      itineraryArrivalAirport &&
+      event.arrivalAirport !== itineraryArrivalAirport
+    )
+      calendarConflicts.push('arrival-airport');
     return {
       flight: {
         ...event,
+        calendarDirection: event.direction,
+        ...(event.arrivalAirport ? { calendarReportedArrivalAirport: event.arrivalAirport } : {}),
         direction: expectedDirection,
+        ...(calendarConflicts.length ? { calendarConflicts } : {}),
         ...(hasConnections && hasCompleteChain && chain.at(-1)?.destinationAirport
           ? { arrivalAirport: chain.at(-1)?.destinationAirport }
           : {}),
@@ -1102,8 +1144,8 @@ function extractedHotelCandidates(
     );
     const sharedReference = Boolean(
       hotel.bookingReference &&
-        flight?.bookingReference &&
-        hotel.bookingReference === flight.bookingReference,
+        (flight?.segment?.bookingReference ?? flight?.bookingReference) &&
+        hotel.bookingReference === (flight?.segment?.bookingReference ?? flight?.bookingReference),
     );
     return {
       threadId: hotel.threadId,
@@ -1296,11 +1338,14 @@ function hotelCandidates(
     const { checkIn, checkOut } = hotelStayDates(body);
     const reference = bookingReference(source);
     const sharedReference = Boolean(
-      reference && flight?.bookingReference && reference === flight.bookingReference,
+      reference &&
+        (flight?.segment?.bookingReference ?? flight?.bookingReference) &&
+        reference === (flight?.segment?.bookingReference ?? flight?.bookingReference),
     );
     const flightDate = flight ? destinationCivilDate(flight) : undefined;
     const dateCityCandidate = Boolean(
-      flight &&
+      flight?.direction === 'outbound' &&
+        flight &&
         city &&
         flight.destinationCity &&
         normalizePlace(city) === normalizePlace(flight.destinationCity) &&
@@ -1328,6 +1373,107 @@ function hotelCandidates(
     });
   }
   return candidates;
+}
+
+function calendarLodgingObservation(
+  rows: ReadonlyArray<ReadToolEvidence>,
+  flight: CompoundTripFlightCandidate | undefined,
+  currentTripReturn: CompoundTripFlightCandidate | undefined,
+): CompoundTripCalendarLodgingObservation | undefined {
+  const anchor = flight ?? currentTripReturn;
+  if (!anchor) return undefined;
+  const anchorReference = anchor.segment?.bookingReference ?? anchor.bookingReference;
+  const anchorCity = flight?.destinationCity ?? calendarFlightOriginCity(currentTripReturn?.event);
+  const anchorDate = flight
+    ? destinationCivilDate(flight)
+    : currentTripReturn?.segment?.departureDate;
+  if (!anchorDate) return undefined;
+
+  const candidates = new Map<string, CompoundTripCalendarLodgingObservation>();
+  for (const row of rows) {
+    const events = object(row.result)?.events;
+    if (!Array.isArray(events)) continue;
+    for (const item of events) {
+      const event = object(item);
+      if (!event || text(event.status).toLowerCase() === 'cancelled') continue;
+      const eventId = text(event.eventId, 160);
+      if (!eventId) continue;
+      const title = text(event.summary, 180);
+      const description = text(event.description, 1_200);
+      const location = text(event.location, 240);
+      const sourceText = `${title}\n${description}\n${location}`;
+      if (!/\b(?:hotel|lodging|accommodation|guesthouse|hostel|inn|resort)\b/i.test(sourceText))
+        continue;
+      const endValue = object(event.end)?.date ?? object(event.end)?.dateTime ?? event.end;
+      const dateStart = sourceCivilDate(event);
+      const dateEnd = endValue
+        ? sourceCivilDate({ start: endValue, timeZone: event.timeZone })
+        : undefined;
+      const startIsDate = Boolean(object(event.start)?.date);
+      const endIsDate = Boolean(object(event.end)?.date);
+      const allDayRange = startIsDate && endIsDate;
+      if (
+        !dateStart ||
+        dateStart > anchorDate ||
+        (dateEnd && (allDayRange ? dateEnd <= anchorDate : dateEnd < anchorDate))
+      )
+        continue;
+      // Descriptions are untrusted and may only classify a record as lodging.
+      // Use the visible title/location fields for any candidate association.
+      const associationText = `${title}\n${location}`;
+      const reference = bookingReference(associationText);
+      const sharedReference = Boolean(anchorReference && reference === anchorReference);
+      const city = calendarLodgingCity(title, location);
+      const dateCityCandidate = Boolean(
+        !sharedReference &&
+          anchorCity &&
+          city &&
+          normalizePlace(city) === normalizePlace(anchorCity),
+      );
+      if (!sharedReference && !dateCityCandidate) continue;
+      const url = calendarSource(event);
+      if (!url) continue;
+      candidates.set(eventId, {
+        title: title || 'Lodging calendar entry',
+        dateStart,
+        ...(dateEnd ? { dateEnd } : {}),
+        ...(city ? { city } : {}),
+        ...(url ? { sourceUrl: url } : {}),
+        association: sharedReference ? 'shared_reference' : 'date_city_candidate',
+      });
+    }
+  }
+  const uniqueCandidates = [...candidates.values()];
+  const sharedReferenceCandidates = uniqueCandidates.filter(
+    (candidate) => candidate.association === 'shared_reference',
+  );
+  if (sharedReferenceCandidates.length > 1) return undefined;
+  if (sharedReferenceCandidates.length === 1) return sharedReferenceCandidates[0];
+  const cityDateCandidates = uniqueCandidates.filter(
+    (candidate) => candidate.association === 'date_city_candidate',
+  );
+  return cityDateCandidates.length === 1 ? cityDateCandidates[0] : undefined;
+}
+
+function calendarLodgingCity(title: string, location: string): string | undefined {
+  const source = title;
+  const parsed = hotelNameAndCity(source).city;
+  if (parsed) return parsed.slice(0, 80);
+  const labelled = /\b(?:hotel\s+)?city\s*:\s*([^\n,;]{2,80})/i.exec(source)?.[1]?.trim();
+  if (labelled) return labelled;
+  const locationCity = /^\s*([\p{L}][\p{L}' -]{1,60})\s*,\s*(?:[\p{L}]{2,40}|[A-Z]{2})\b/u
+    .exec(location)?.[1]
+    ?.trim();
+  return locationCity || undefined;
+}
+
+function calendarFlightOriginCity(event: Record<string, unknown> | undefined): string | undefined {
+  if (!event) return undefined;
+  const source = `${text(event.summary, 240)}\n${text(event.description, 1_200)}\n${text(event.location, 240)}`;
+  const from = /\bfrom\s+([\p{L}][\p{L}' -]{1,50}?)(?=\s+(?:to|airport|terminal)\b|[,;.\n]|$)/iu
+    .exec(source)?.[1]
+    ?.trim();
+  return from ? from.slice(0, 80) : undefined;
 }
 
 function hotelAddress(body: string): string | undefined {
@@ -1539,6 +1685,147 @@ function calendarSource(event: Record<string, unknown>): string {
   }
 }
 
+function calendarField(event: Record<string, unknown>, edge: 'start' | 'end'): string {
+  const value = event[edge];
+  const wrapped = object(value);
+  return text(wrapped?.dateTime ?? wrapped?.date ?? value, 80);
+}
+
+function calendarObservationOverlaps(
+  event: Record<string, unknown>,
+  request: PersonalReadRequest,
+): boolean {
+  const start = calendarField(event, 'start');
+  const end = calendarField(event, 'end');
+  const windowStart = Date.parse(request.timeWindow?.timeMin ?? '');
+  const windowEnd = Date.parse(request.timeWindow?.timeMax ?? '');
+  if (!start || !Number.isFinite(windowStart) || !Number.isFinite(windowEnd)) return false;
+
+  const startInstant = Date.parse(start);
+  const endInstant = Date.parse(end);
+  const hasExplicitOffset = (value: string) => /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+  const startIsInstant =
+    /T/.test(start) && hasExplicitOffset(start) && Number.isFinite(startInstant);
+  const endIsInstant = /T/.test(end) && hasExplicitOffset(end) && Number.isFinite(endInstant);
+  if (startIsInstant) {
+    return (
+      startInstant < windowEnd &&
+      (endIsInstant ? endInstant > windowStart : startInstant >= windowStart)
+    );
+  }
+
+  // All-day Calendar dates are civil dates, not UTC instants. Compare their
+  // recorded half-open range against the requested window's civil dates and
+  // do not reinterpret the end as a checkout date.
+  if (!/^20\d{2}-\d{2}-\d{2}$/.test(start) || !validDate(start)) return false;
+  const zone = validTimeZone(event.timeZone) ? String(event.timeZone) : (request.timeZone ?? 'UTC');
+  const windowStartDate = civilDateInTimeZone(new Date(windowStart).toISOString(), zone);
+  const windowEndDate = civilDateInTimeZone(new Date(windowEnd - 1).toISOString(), zone);
+  if (!windowStartDate || !windowEndDate) return false;
+  const explicitEnd = /^20\d{2}-\d{2}-\d{2}$/.test(end) && validDate(end);
+  if (end && !explicitEnd) return false;
+  const recordedEnd = explicitEnd
+    ? end
+    : new Date(Date.parse(`${start}T00:00:00.000Z`) + 24 * 60 * 60_000).toISOString().slice(0, 10);
+  if (recordedEnd <= start) return false;
+  return start <= windowEndDate && recordedEnd > windowStartDate;
+}
+
+function calendarObservationDirection(
+  event: Record<string, unknown>,
+): 'return' | 'outbound' | 'unknown' {
+  const labels = `${text(event.summary, 240)}\n${text(event.description, 1200)}`;
+  const returnLabel =
+    /\b(?:return|inbound|homebound)\s+flight\b|\bflight\s+direction\s*[:=-]\s*(?:return|inbound|homebound)\b/i.test(
+      labels,
+    ) &&
+    !/\b(?:not|no|never|isn't|is not)\s+(?:a\s+)?(?:return|inbound|homebound)\s+flight\b/i.test(
+      labels,
+    );
+  const outboundLabel =
+    /\b(?:outbound|departing)\s+flight\b|\bflight\s+direction\s*[:=-]\s*outbound\b/i.test(labels) &&
+    !/\b(?:not|no|never|isn't|is not)\s+(?:an?\s+)?(?:outbound|departing)\s+flight\b/i.test(labels);
+  if (returnLabel === outboundLabel) return 'unknown';
+  return returnLabel ? 'return' : 'outbound';
+}
+
+function calendarObservationLines(
+  request: PersonalReadRequest,
+  rows: ReadonlyArray<ReadToolEvidence>,
+  representedFlights: ReadonlyArray<CompoundTripFlightCandidate | undefined>,
+  hasDisplayedLodging: boolean,
+  allowFlightObservation: boolean,
+): string[] {
+  const events = rows.flatMap((row) => {
+    const resultEvents = object(row.result)?.events;
+    return Array.isArray(resultEvents) ? resultEvents.map(object).filter(Boolean) : [];
+  });
+  const unique = new Map<string, Record<string, unknown>>();
+  for (const event of events) {
+    if (!event || text(event.status).toLowerCase() === 'cancelled') continue;
+    const id = text(event.eventId, 160);
+    const start = calendarField(event, 'start');
+    const summary = text(event.summary, 240);
+    if (!id || !start || !summary || !calendarObservationOverlaps(event, request)) continue;
+    if (!unique.has(id)) unique.set(id, event);
+  }
+
+  const representedEventIds = new Set(
+    representedFlights.map((flight) => text(flight?.event.eventId, 160)).filter(Boolean),
+  );
+  const flightCandidate = allowFlightObservation
+    ? flightCandidates(request, rows)
+        .filter(
+          (candidate) =>
+            !representedEventIds.has(text(candidate.event.eventId, 160)) &&
+            Boolean(calendarSource(candidate.event)),
+        )
+        .sort((left, right) => Date.parse(left.instant) - Date.parse(right.instant))[0]
+    : undefined;
+
+  const lodgingEvent = hasDisplayedLodging
+    ? undefined
+    : [...unique.values()]
+        .filter((event) => {
+          // Description text is consulted only to classify a calendar record
+          // as lodging; it is never rendered or used to link it to a flight.
+          const details = `${text(event.summary, 240)}\n${text(event.location, 300)}\n${text(event.description, 1200)}`;
+          return (
+            /\b(?:hotel|lodging|accommodation|stay|check[ -]in|check[ -]out)\b/i.test(details) &&
+            Boolean(calendarSource(event))
+          );
+        })
+        .sort((left, right) =>
+          calendarField(left, 'start').localeCompare(calendarField(right, 'start')),
+        )[0];
+
+  const lines: string[] = [];
+  if (flightCandidate) {
+    const event = flightCandidate.event;
+    const start = calendarField(event, 'start');
+    const title = markdownText(text(event.summary, 100));
+    const direction =
+      calendarObservationDirection(event) === 'return'
+        ? 'The calendar labels its direction as a return.'
+        : calendarObservationDirection(event) === 'outbound'
+          ? 'The calendar labels its direction as outbound.'
+          : 'The calendar does not state its direction.';
+    lines.push(
+      `Flight calendar observation only — not a verified next-flight or itinerary match: ${title}; recorded start ${markdownText(start)}. ${direction} [Calendar source](${calendarSource(event)}).`,
+    );
+  }
+  if (lodgingEvent) {
+    const title = markdownText(text(lodgingEvent.summary, 100));
+    const start = markdownText(calendarField(lodgingEvent, 'start'));
+    const end = calendarField(lodgingEvent, 'end');
+    const recordedRange = end ? `${start} to ${markdownText(end)}` : start;
+    lines.push(
+      `Lodging calendar observation only — not a booking confirmation or link to a flight: ${title}; recorded calendar date/time fields ${recordedRange}. ${end ? 'The end field is shown as recorded, not interpreted as checkout.' : 'No end or checkout date is inferred.'} [Calendar source](${calendarSource(lodgingEvent)}).`,
+    );
+  }
+  return lines;
+}
+
 export function compoundTripWebQuery(
   flight: CompoundTripFlightCandidate,
   hotel: CompoundTripHotelCandidate,
@@ -1660,14 +1947,29 @@ export function compoundTripReadProjection(
           (returnFlight ?? currentTripReturn)?.segment?.threadId,
       )
     : undefined;
+  const hotelFlightContext = flight ?? currentTripReturn;
   const hotels = dedupeHotels(
     tripExtraction
       ? tripExtraction.status === 'complete'
-        ? extractedHotelCandidates(tripExtraction.hotels, flight)
+        ? extractedHotelCandidates(tripExtraction.hotels, hotelFlightContext)
         : []
-      : hotelCandidates(completeThreads, flight),
+      : hotelCandidates(completeThreads, hotelFlightContext),
   );
-  const hotel = hotels.length === 1 ? hotels[0] : undefined;
+  const relatedUnconfirmedHotels = hotels.filter(
+    (candidate) =>
+      candidate.association === 'unlinked' &&
+      flight?.direction === 'outbound' &&
+      flight.destinationCity &&
+      candidate.city &&
+      normalizePlace(candidate.city) === normalizePlace(flight.destinationCity) &&
+      (!candidate.checkIn || !candidate.checkOut),
+  );
+  const relevantHotels = [
+    ...hotels.filter((candidate) => candidate.association !== 'unlinked'),
+    ...relatedUnconfirmedHotels,
+  ];
+  const hotel = relevantHotels.length === 1 ? relevantHotels[0] : undefined;
+  const calendarLodging = calendarLodgingObservation(calendarRows, flight, currentTripReturn);
   // Partial reads may still contain exact, source-local details. Keep these
   // separate from verified trip selection: they never establish which trip is
   // next, connect flight and hotel records, or enable a route query.
@@ -1712,17 +2014,19 @@ export function compoundTripReadProjection(
       ];
     }),
   ];
-  const selectedBookingSegments = flight?.segment
+  const selectedItineraryLead = flight?.segment ?? currentTripReturn?.segment;
+  const selectedBookingSegments = selectedItineraryLead
     ? flightSegments.filter(
         (segment) =>
-          segment.threadId === flight.segment?.threadId &&
-          segment.bookingReference === flight.segment?.bookingReference,
+          segment.threadId === selectedItineraryLead.threadId &&
+          segment.bookingReference === selectedItineraryLead.bookingReference,
       )
     : [];
   const legs = connectionSegments(flight?.segment, selectedBookingSegments);
   const connectionSummary = connectionChainSummary(flight?.segment, legs);
-  const returnLegs = connectionSegments(returnFlight?.segment, selectedBookingSegments);
-  const returnConnectionSummary = connectionChainSummary(returnFlight?.segment, returnLegs);
+  const returnLead = returnFlight?.segment ?? (!flight ? currentTripReturn?.segment : undefined);
+  const returnLegs = connectionSegments(returnLead, selectedBookingSegments);
+  const returnConnectionSummary = connectionChainSummary(returnLead, returnLegs);
   const outboundChronology = flight?.segment
     ? flightChronology([flight.segment, ...legs])
     : 'unknown';
@@ -1753,6 +2057,7 @@ export function compoundTripReadProjection(
   const route =
     flight &&
     hotel &&
+    !flight.calendarConflicts?.includes('arrival-airport') &&
     outboundChronology === 'valid' &&
     (!returnFlight || returnChronology === 'valid') &&
     (!flight.itineraryHasConnections || flight.itineraryConnectionChainComplete)
@@ -1846,14 +2151,18 @@ export function compoundTripReadProjection(
     gaps.push(
       'I could not verify that the booked return follows the outbound itinerary because a source clock or time zone is missing or ambiguous.',
     );
-  if (hotels.length > 1)
+  if (relevantHotels.length > 1)
     gaps.push('More than one hotel booking candidate matched; I could not choose one safely.');
   else if (!hotel && partialHotelCandidates.length > 0)
     gaps.push(
       'A hotel candidate appears in a partially read email, so I could not verify its full reservation or link it to a flight.',
     );
+  else if (!hotel && completeThreads.length > 0)
+    gaps.push('I did not identify a hotel booking candidate in the complete email threads I read.');
   else if (!hotel)
-    gaps.push('I could not identify one hotel booking candidate in the checked email threads.');
+    gaps.push(
+      'I could not verify a hotel booking because no complete booking-email thread was read.',
+    );
   else if (!hotel.address) gaps.push('The hotel candidate did not include an explicit address.');
   else if (hotel.association === 'unlinked')
     gaps.push(
@@ -1877,17 +2186,46 @@ export function compoundTripReadProjection(
     gaps.push(
       'The dated return calendar event and booking email times conflict after time-zone conversion.',
     );
+  const selectedFlightConflicts = [flight, returnFlight, currentTripReturn]
+    .filter((candidate): candidate is CompoundTripFlightCandidate => Boolean(candidate))
+    .flatMap((candidate) => candidate.calendarConflicts ?? []);
+  const calendarConflictDetails = [flight, returnFlight, currentTripReturn]
+    .filter((candidate): candidate is CompoundTripFlightCandidate => Boolean(candidate))
+    .flatMap((candidate) => {
+      const segment = candidate.segment;
+      if (!segment) return [];
+      return [
+        candidate.calendarConflicts?.includes('flight-number') && candidate.flightNumber
+          ? `Calendar lists flight ${markdownText(candidate.flightNumber)}; the booking thread lists ${markdownText(segment.flightNumber)}.`
+          : '',
+        candidate.calendarConflicts?.includes('direction') && candidate.calendarDirection
+          ? `Calendar labels this leg ${candidate.calendarDirection}; the booking thread labels it ${segment.direction}.`
+          : '',
+        candidate.calendarConflicts?.includes('arrival-airport') &&
+        candidate.calendarReportedArrivalAirport &&
+        candidate.arrivalAirport
+          ? `Calendar lists arrival at ${candidate.calendarReportedArrivalAirport}; the booking chain ends at ${candidate.arrivalAirport}.`
+          : '',
+      ].filter(Boolean);
+    });
+  if (selectedFlightConflicts.includes('flight-number'))
+    gaps.push('A calendar flight number differs from the leg in the matching booking reference.');
+  if (selectedFlightConflicts.includes('direction'))
+    gaps.push('The calendar event direction label conflicts with the dated booking leg.');
+  if (selectedFlightConflicts.includes('arrival-airport'))
+    gaps.push('The calendar arrival airport conflicts with the dated booking itinerary.');
   const itinerarySegments = [
     ...(flight?.segment ? [flight.segment] : []),
     ...legs,
     ...(returnFlight?.segment ? [returnFlight.segment] : []),
     ...returnLegs,
+    ...(!flight && currentTripReturn?.segment ? [currentTripReturn.segment] : []),
   ];
   for (const segment of itinerarySegments) {
     const label =
       segment === flight?.segment
         ? 'outbound'
-        : segment === returnFlight?.segment
+        : segment === returnFlight?.segment || segment === currentTripReturn?.segment
           ? 'return'
           : 'connecting';
     if (!segment.departureTimeZone)
@@ -1947,6 +2285,16 @@ export function compoundTripReadProjection(
   }
   if (!transitEvidence || !taxiEvidence)
     gaps.push('I did not find checked source text that supports both sides of a route comparison.');
+  const partialCalendarLines =
+    gaps.length > 0
+      ? calendarObservationLines(
+          request,
+          calendarRows,
+          [flight, returnFlight, currentTripReturn],
+          hotel !== undefined || calendarLodging !== undefined,
+          flight === undefined && returnFlight === undefined && currentTripReturn === undefined,
+        )
+      : [];
   const calendarUrl = flight
     ? calendarSource(flight.event)
     : currentTripReturn
@@ -1973,6 +2321,9 @@ export function compoundTripReadProjection(
     partialSourceLines.length > 0
       ? `Partial source details, kept separate from the unverified trip selection:\n${partialSourceLines.map((line) => `- ${line}`).join('\n')}`
       : '',
+    partialCalendarLines.length > 0
+      ? `Calendar observations — not a verified next-trip itinerary:\n${partialCalendarLines.map((line) => `- ${line}`).join('\n')}`
+      : '',
     ...unmatchedBookingSegments.map((segment) => {
       const sourceLink = mailLinks.get(segment.threadId);
       return `Future booking candidate, not matched to a calendar flight: ${formatFlightSegment(segment)}${sourceLink ? ` [Booking email](${sourceLink})` : ''}.`;
@@ -1986,8 +2337,12 @@ export function compoundTripReadProjection(
     connectionSummary ? `Source-backed connected flight segments: ${connectionSummary}.` : '',
     returnConnectionSummary ? `Source-backed return connections: ${returnConnectionSummary}.` : '',
     departureTimeConflict ? 'The calendar and booking clock times conflict after conversion.' : '',
+    ...calendarConflictDetails,
     hotel
       ? `Separately sourced hotel candidate: ${markdownText(hotel.hotelName || hotel.subject)}${hotel.city ? `, ${markdownText(hotel.city)}` : ''}${hotel.address ? ` — ${markdownText(hotel.address)}` : ''}${hotel.checkIn && hotel.checkOut ? ` (${hotel.checkIn} to ${hotel.checkOut})` : ''}${mailLinks.has(hotel.threadId) ? ` [Booking email](${mailLinks.get(hotel.threadId)})` : ''}.`
+      : '',
+    calendarLodging
+      ? `Calendar lodging candidate, not a confirmed hotel booking: ${markdownText(calendarLodging.title)}${calendarLodging.city ? `, ${markdownText(calendarLodging.city)}` : ''} (calendar range ${calendarLodging.dateStart}${calendarLodging.dateEnd ? ` to ${calendarLodging.dateEnd}` : ''})${calendarLodging.sourceUrl ? ` [Calendar source](${calendarLodging.sourceUrl})` : ''}. ${calendarLodging.association === 'shared_reference' ? 'The calendar entry carries the same booking reference.' : 'Its city and date overlap make it a candidate, not proof of the same stay.'}`
       : '',
     hotel?.association === 'shared_reference'
       ? 'The hotel and flight sources share a booking reference.'
@@ -2019,6 +2374,7 @@ export function compoundTripReadProjection(
       ? { flightConfirmationThreadId: text(object(flightConfirmation.args)?.threadId, 100) }
       : {}),
     ...(hotel ? { hotel } : {}),
+    ...(calendarLodging ? { calendarLodgingObservation: calendarLodging } : {}),
     flightSegments: selectedBookingSegments,
     unmatchedBookingSegments,
     ...(connectionSummary ? { connectionSummary } : {}),
@@ -2030,7 +2386,9 @@ export function compoundTripReadProjection(
     comparison,
     blocked: gaps.length > 0 || !webSearch,
     text: [
-      `I checked the available trip sources. Here is the ${gaps.length === 0 ? 'source-checked' : 'supported partial'} itinerary:`,
+      partialCalendarLines.length > 0 && !flight
+        ? 'I checked the available trip sources. Here are limited calendar observations, not a verified itinerary:'
+        : `I checked the available trip sources. Here is the ${gaps.length === 0 ? 'source-checked' : 'supported partial'} itinerary:`,
       ...itinerary,
       'I did not book, change, or send anything.',
     ].join('\n\n'),

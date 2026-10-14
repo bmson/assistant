@@ -73,6 +73,8 @@ export interface PersonalReadRequest {
   conversationQuery?: string;
   /** One bounded follow-up query that emphasizes owner-authored historical evidence. */
   conversationFollowupQuery?: string;
+  /** One topic-focused pass for an explicit owner-correction comparison. */
+  conversationCorrectionQuery?: string;
   /** Saved facts are searched only when the owner explicitly permits that source. */
   searchSavedMemory?: boolean;
   /** Focused semantic query for saved-memory retrieval, separate from the answer prompt. */
@@ -1270,7 +1272,7 @@ const QUERY_MODIFIERS = new Set([
 ]);
 const MAX_MEMORY_RECALL_QUERY_CHARS = 1200;
 const MAX_CONVERSATION_SEARCH_QUERY_CHARS = 500;
-const MAX_MEMORY_SEARCH_PASSES = 2;
+const MAX_MEMORY_SEARCH_PASSES = 3;
 const MAX_CONVERSATION_RESULT_PAGES = 8;
 const MAX_CONVERSATION_RESULT_CHARS = 1_000_000;
 // Must match tools.read_result's page size. Half of its tool-result clip leaves
@@ -1288,6 +1290,7 @@ const MEMORY_SEARCH_STOP_WORDS = new Set([
   'are',
   'assistant',
   'before',
+  'back',
   'being',
   'can',
   'could',
@@ -1357,6 +1360,8 @@ const MEMORY_SEARCH_STOP_WORDS = new Set([
   'your',
   'claim',
   'claims',
+  'correction',
+  'corrected',
   'conversation',
   'conversations',
   'distinguish',
@@ -1368,6 +1373,10 @@ const MEMORY_SEARCH_STOP_WORDS = new Set([
   'cite',
   'clearly',
   'different',
+  'gave',
+  'separate',
+  'wrong',
+  'versus',
 ]);
 
 function focusedMemoryTopic(text: string): string {
@@ -1387,10 +1396,29 @@ function focusedMemoryTopic(text: string): string {
 
 function historicalSearchQueries(request: PersonalReadRequest): string[] {
   if (!request.conversationQuery) return [];
-  const queries = [request.conversationQuery, request.conversationFollowupQuery].filter(
-    (query): query is string => typeof query === 'string' && query.length > 0,
-  );
+  const queries = [
+    request.conversationQuery,
+    request.conversationFollowupQuery,
+    request.conversationCorrectionQuery,
+  ].filter((query): query is string => typeof query === 'string' && query.length > 0);
   return [...new Set(queries)];
+}
+
+function requestsOwnerAssistantCorrectionComparison(text: string): boolean {
+  const comparison =
+    /\b(?:separat\w*|distinguish\w*|compar\w*|contrast\w*|versus|\bvs\.?\b)\b/i.test(text);
+  const ownerCorrection =
+    /\b(?:my\s+correction|what\s+i\s+(?:actually\s+)?(?:said|told|corrected)|owner(?:'s|’s)?\s+correction)\b/i.test(
+      text,
+    );
+  const priorAssistantStatement =
+    /\b(?:your|assistant(?:'s|’s)?)\s+(?:earlier|previous|prior)\s+(?:claim|statement|reply|response|answer|recommendation)\b/i.test(
+      text,
+    ) ||
+    /\bwhat\s+(?:did\s+)?(?:you|the assistant)\s+(?:earlier|previously|before)\s+(?:say|tell|claim|recommend)\b/i.test(
+      text,
+    );
+  return comparison && ownerCorrection && priorAssistantStatement;
 }
 
 function nextHistoricalSearchQuery(
@@ -1911,6 +1939,14 @@ function detectPersonalReadRequestInternal(
                 0,
                 MAX_CONVERSATION_SEARCH_QUERY_CHARS,
               ),
+            ...(requestsOwnerAssistantCorrectionComparison(latest)
+              ? {
+                  conversationCorrectionQuery: `Owner correction ${focusedQuery}`.slice(
+                    0,
+                    MAX_CONVERSATION_SEARCH_QUERY_CHARS,
+                  ),
+                }
+              : {}),
           }
         : {}),
       ...(kind === 'memory' ? { searchSavedMemory: savedMemoryRequested } : {}),
@@ -2304,6 +2340,11 @@ function matchingPrivateRead(row: ReadToolEvidence, request: PersonalReadRequest
   return queryIncludes(argsRecord(row)?.query, request.queryTerms);
 }
 
+/** Search metadata prioritizes reads; it never verifies a booking or its fields. */
+function flightItinerarySubject(subject: string): boolean {
+  return /^(?:(?:fw|fwd|re)\s*:\s*)*flight\s*[-–—:]/i.test(subject.trim());
+}
+
 export function gmailSearchThreadIds(
   evidence: ReadonlyArray<ReadToolEvidence>,
   request?: PersonalReadRequest,
@@ -2380,7 +2421,12 @@ export function gmailSearchThreadIds(
         return {
           threadId,
           index,
-          score: item?.categories.has('flight') && flight && booking ? 1 : 0,
+          score:
+            item?.categories.has('flight') &&
+            flight &&
+            (booking || flightItinerarySubject(item?.subject ?? ''))
+              ? 1
+              : 0,
         };
       })
       .filter((item) => item.score > 0)
@@ -2451,7 +2497,10 @@ export function gmailSearchThreadIds(
                 )
                   ? 2
                   : 0) +
-                (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass|departure)\b/i.test(
+                (/\b(?:booked|reserved)\b/i.test(subject) ? 2 : 0) +
+                (/\b(?:flight|airline)\b/i.test(subject) ? 2 : 0) +
+                (flightItinerarySubject(subject) ? 4 : 0) +
+                (/\b(?:booking|booked|reserved|confirmation|itinerary|ticket|reservation|boarding pass|departure)\b/i.test(
                   snippet,
                 )
                   ? 1

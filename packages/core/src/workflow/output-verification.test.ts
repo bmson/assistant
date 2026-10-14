@@ -206,6 +206,17 @@ describe('self-reflective output verification', () => {
     expect(OUTPUT_VERIFICATION_SYSTEM).toMatch(/complete emoji-free replacement/i);
   });
 
+  it('checks entity attributes against their own source entries and honors concise formats', () => {
+    expect(OUTPUT_VERIFICATION_SYSTEM).toMatch(
+      /each entity and each claimed attribute against its own source passage/i,
+    );
+    expect(OUTPUT_VERIFICATION_SYSTEM).toMatch(
+      /a shared stop or segment does not establish another route/i,
+    );
+    expect(OUTPUT_VERIFICATION_SYSTEM).toMatch(/three concise bullets/i);
+    expect(OUTPUT_VERIFICATION_SYSTEM).toMatch(/keep source links with the bullet they support/i);
+  });
+
   it('asks the verifier to reject obvious repeated or corrupted fragments', () => {
     expect(OUTPUT_VERIFICATION_SYSTEM).toMatch(/generation loops/i);
     expect(OUTPUT_VERIFICATION_SYSTEM).toMatch(/replacement-character corruption/i);

@@ -165,6 +165,89 @@ describe('weeklyCalendarPlan', () => {
     expect(text).toContain('not a route estimate');
   });
 
+  it('keeps focus candidates and overlap notes consistent with offset-bearing event timestamps', () => {
+    const weekStart = '2026-10-19T07:00:00.000Z';
+    const weekEnd = '2026-10-26T07:00:00.000Z';
+    const events = [
+      {
+        eventId: 'monday-practice',
+        calendarId: 'soccer',
+        calendar: 'SF United Soccer',
+        summary: 'U13B practice',
+        start: '2026-10-19T10:00:00-07:00',
+        end: '2026-10-19T11:30:00-07:00',
+        blocksTime: true,
+        ownerResponse: 'accepted',
+        location: 'Gellert Park',
+      },
+      {
+        eventId: 'wednesday-site-council',
+        calendarId: 'pta',
+        calendar: 'Alamo PTA',
+        summary: 'Site Council',
+        start: '2026-10-21T10:00:00-07:00',
+        end: '2026-10-21T11:00:00-07:00',
+        blocksTime: true,
+        ownerResponse: 'accepted',
+        location: 'Alamo Elementary School',
+      },
+      {
+        eventId: 'wednesday-swim',
+        calendarId: 'family',
+        calendar: 'Family',
+        summary: 'Freyja Swim',
+        start: '2026-10-21T17:15:00-07:00',
+        end: '2026-10-21T17:45:00-07:00',
+        blocksTime: true,
+        ownerResponse: 'accepted',
+      },
+      {
+        eventId: 'saturday-festival',
+        calendarId: 'family',
+        calendar: 'Family',
+        summary: 'Volunteering at Pumpkin Fest',
+        start: '2026-10-24T10:50:00-07:00',
+        end: '2026-10-24T15:10:00-07:00',
+        blocksTime: true,
+        ownerResponse: 'accepted',
+      },
+      {
+        eventId: 'saturday-haircut',
+        calendarId: 'personal',
+        calendar: 'Personal',
+        summary: 'Hair Cut',
+        start: '2026-10-24T12:15:00-07:00',
+        end: '2026-10-24T13:45:00-07:00',
+        blocksTime: true,
+        ownerResponse: 'accepted',
+      },
+    ];
+    const rows = evidence({
+      timeMin: weekStart,
+      timeMax: weekEnd,
+      pages: [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          args: { timeMin: weekStart, timeMax: weekEnd },
+          result: { events, complete: true, calendarRosterComplete: true, unavailable: [] },
+        },
+      ],
+    });
+
+    const text = weeklyCalendarPlan({
+      timeMin: weekStart,
+      timeMax: weekEnd,
+      timeZone: 'America/Los_Angeles',
+      evidence: rows as never,
+    });
+
+    expect(text).not.toContain('- Mon, Oct 19, 9:00 AM');
+    expect(text).not.toContain('- Wed, Oct 21, 9:00 AM');
+    expect(text).not.toContain('Possible overlap: Site Council and Freyja Swim');
+    expect(text).toContain('Scheduling conflict: Volunteering at Pumpkin Fest and Hair Cut');
+  });
+
   it('does not infer free time from malformed busy intervals', () => {
     const text = weeklyCalendarPlan({
       timeMin,
@@ -584,6 +667,244 @@ describe('weeklyCalendarPlan', () => {
 describe('requested focus-plan variations', () => {
   const prompt =
     'Look at my calendar for the next three working days. Suggest two 60-minute focus slots between 09:00 and 17:00, leave 15-minute breaks around meetings, and explain any limits in the availability check. Show the plan for review without creating events.';
+  const threeDayStart = '2026-10-13T07:00:00.000Z';
+  const threeDayEnd = '2026-10-16T07:00:00.000Z';
+  const threeDayPlan = {
+    focusMinutes: 60,
+    slotCount: 2,
+    breakMinutes: 15,
+    meetingBufferMinutes: 15,
+    windowLabel: 'the next 3 working days',
+    workingDays: 3,
+  };
+
+  function stayEvidence(
+    options: {
+      stay?: Record<string, unknown>;
+      availabilityBusy?: unknown[];
+      checked?: string[];
+      unavailable?: string[];
+      eventPage?: Record<string, unknown>;
+      extraEvents?: Array<Record<string, unknown>>;
+    } = {},
+  ) {
+    const stay = options.stay ?? {
+      eventId: 'stay',
+      calendar: 'Travel',
+      calendarId: 'travel-calendar',
+      summary: 'Hotel stay in Berlin',
+      start: '2026-10-10T06:00:00-07:00',
+      end: '2026-10-17T02:00:00-07:00',
+      blocksTime: true,
+    };
+    return [
+      {
+        toolName: 'calendar.availability',
+        status: 'succeeded',
+        args: { timeMin: threeDayStart, timeMax: threeDayEnd },
+        result: {
+          busy: options.availabilityBusy ?? [
+            { start: threeDayStart, end: threeDayEnd, calendar: 'Travel' },
+          ],
+          calendarsChecked: options.checked ?? ['Travel', 'Work', 'Holidays'],
+          complete: false,
+          unavailable: options.unavailable ?? ['Holidays'],
+        },
+      },
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        args: { timeMin: threeDayStart, timeMax: threeDayEnd, maxResults: 50 },
+        result: {
+          events: [stay, ...(options.extraEvents ?? [])],
+          complete: true,
+          calendarRosterComplete: true,
+          unavailable: [],
+          ...(options.eventPage ?? {}),
+        },
+      },
+    ];
+  }
+
+  it('offers review candidates only conditionally when one complete stay explains provider busy', () => {
+    const result = weeklyCalendarPlanResult({
+      timeMin: threeDayStart,
+      timeMax: threeDayEnd,
+      timeZone: 'America/Los_Angeles',
+      evidence: stayEvidence({
+        availabilityBusy: [
+          { start: threeDayStart, end: threeDayEnd, calendar: 'Travel' },
+          {
+            start: '2026-10-13T16:00:00Z',
+            end: '2026-10-13T17:00:00Z',
+            calendar: 'Work',
+          },
+          {
+            start: '2026-10-14T16:00:00Z',
+            end: '2026-10-14T17:00:00Z',
+            calendar: 'Work',
+          },
+          {
+            start: '2026-10-15T16:00:00Z',
+            end: '2026-10-15T17:00:00Z',
+            calendar: 'Work',
+          },
+        ],
+        checked: ['Travel', 'Work', 'Holidays'],
+        extraEvents: [
+          {
+            eventId: 'work-meeting',
+            calendar: 'Work',
+            calendarId: 'work-calendar',
+            summary: 'Work meeting',
+            start: '2026-10-13T09:00:00-07:00',
+            end: '2026-10-13T10:00:00-07:00',
+            ownerResponse: 'accepted',
+            blocksTime: true,
+          },
+          ...['2026-10-14', '2026-10-15'].map((day) => ({
+            eventId: `work-meeting-${day}`,
+            calendar: 'Work',
+            calendarId: 'work-calendar',
+            summary: 'Work meeting',
+            start: `${day}T09:00:00-07:00`,
+            end: `${day}T10:00:00-07:00`,
+            ownerResponse: 'accepted',
+            blocksTime: true,
+          })),
+        ],
+      }) as never,
+      plan: threeDayPlan,
+    });
+
+    expect(result.slotCount).toBe(2);
+    expect(result.coverageComplete).toBe(false);
+    expect(result.text).toContain('Hotel stay in Berlin');
+    expect(result.text).toContain('provider still reports busy');
+    expect(result.text).toContain('not confirmed free');
+    expect(result.text).toContain('Unavailable calendar coverage: Holidays');
+    expect(result.text).toContain('Focus candidates for review (not availability-cleared)');
+    expect(result.text).toContain(
+      'Conditional on treating Hotel stay in Berlin as lodging context; free/busy still reports busy.',
+    );
+    expect(result.text.match(/\(60 minutes\)/g)).toHaveLength(2);
+    expect(result.text).toContain('Tue, Oct 13, 10:15 AM');
+    expect(result.text).toContain('Wed, Oct 14, 10:15 AM');
+    expect(result.text).not.toContain('Tue, Oct 13, 9:00 AM');
+    expect(result.text).toContain('I haven’t changed your calendar');
+  });
+
+  it.each([
+    ['Hotel leadership conference', 'Multi-day conference at the hotel venue.'],
+    ['Hotel check-in training', 'Training for staff on the hotel check-in process.'],
+  ])('does not discount provider busy for a non-stay event titled %s', (summary, description) => {
+    const result = weeklyCalendarPlanResult({
+      timeMin: threeDayStart,
+      timeMax: threeDayEnd,
+      timeZone: 'America/Los_Angeles',
+      evidence: stayEvidence({
+        stay: {
+          eventId: 'non-stay',
+          calendar: 'Travel',
+          calendarId: 'travel-calendar',
+          summary,
+          description,
+          start: '2026-10-12T07:00:00.000Z',
+          end: '2026-10-17T07:00:00.000Z',
+          ownerResponse: 'accepted',
+          blocksTime: true,
+        },
+        checked: ['Travel'],
+        unavailable: [],
+        availabilityBusy: [{ start: threeDayStart, end: threeDayEnd, calendar: 'Travel' }],
+      }) as never,
+    });
+
+    expect(result.slotCount).toBe(0);
+    expect(result.text).toContain('I couldn’t identify suitable');
+    expect(result.text).toContain('Overloaded-day estimate');
+    expect(result.text).not.toContain('Conditional on treating');
+    expect(result.text).not.toContain('provider still reports busy across this window');
+  });
+
+  it('does not discount a whole-window busy interval when a same-calendar meeting overlaps it', () => {
+    const result = weeklyCalendarPlanResult({
+      timeMin: threeDayStart,
+      timeMax: threeDayEnd,
+      timeZone: 'America/Los_Angeles',
+      evidence: stayEvidence({
+        extraEvents: [
+          {
+            eventId: 'meeting',
+            calendar: 'Travel',
+            calendarId: 'travel-calendar',
+            summary: 'Travel planning meeting',
+            start: '2026-10-13T09:00:00-07:00',
+            end: '2026-10-13T10:00:00-07:00',
+            ownerResponse: 'accepted',
+            blocksTime: true,
+          },
+        ],
+      }) as never,
+      plan: threeDayPlan,
+    });
+
+    expect(result.slotCount).toBe(0);
+    expect(result.text).toContain('I couldn’t identify suitable 60-minute blocks');
+    expect(result.text).not.toContain('Focus candidates for review (not availability-cleared)');
+  });
+
+  it.each([
+    {
+      name: 'an opaque long event',
+      stay: {
+        eventId: 'opaque',
+        calendar: 'Travel',
+        calendarId: 'travel-calendar',
+        summary: 'Berlin',
+        start: '2026-10-10T06:00:00-07:00',
+        end: '2026-10-17T02:00:00-07:00',
+        blocksTime: true,
+      },
+    },
+    {
+      name: 'an unmatched calendar label',
+      availabilityBusy: [{ start: threeDayStart, end: threeDayEnd, calendar: 'Travel' }],
+      checked: ['Another travel calendar', 'Work', 'Holidays'],
+    },
+    {
+      name: 'ambiguous duplicate calendar labels',
+      checked: ['Travel', 'Travel', 'Work', 'Holidays'],
+      extraEvents: [
+        {
+          eventId: 'transparent-other-calendar',
+          calendar: 'Travel',
+          calendarId: 'other-travel-calendar',
+          summary: 'Transparent note',
+          start: '2026-10-13T09:00:00-07:00',
+          end: '2026-10-13T10:00:00-07:00',
+          blocksTime: false,
+        },
+      ],
+    },
+    {
+      name: 'incomplete event coverage',
+      eventPage: { complete: false },
+    },
+  ])('keeps provider busy blocking for $name', (options) => {
+    const result = weeklyCalendarPlanResult({
+      timeMin: threeDayStart,
+      timeMax: threeDayEnd,
+      timeZone: 'America/Los_Angeles',
+      evidence: stayEvidence(options) as never,
+      plan: threeDayPlan,
+    });
+
+    expect(result.slotCount).toBe(0);
+    expect(result.text).not.toContain('Focus candidates for review (not availability-cleared)');
+    expect(result.text).toContain('I couldn’t identify suitable 60-minute blocks');
+  });
+
   it('keeps the requested count, duration, window and meeting break constraints', () => {
     const plan = requestedCalendarPlanOptions(prompt);
     expect(plan).toEqual({

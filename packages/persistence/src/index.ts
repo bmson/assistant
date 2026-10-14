@@ -26,6 +26,7 @@ export * from './consolidation-temporal.js';
 export * from './contact-names.js';
 export * from './contracts.js';
 export * from './conversation-memory-retention.js';
+export * from './conversation-search-selection.js';
 export * from './conversation-segmentation.js';
 export * from './cost-evidence.js';
 export * from './cost-policy.js';
