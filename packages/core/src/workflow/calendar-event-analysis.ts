@@ -366,21 +366,35 @@ export function calendarEventAnalysisResponse(input: {
         .filter((event) => event.start < day.end && event.end > day.start)
         .sort((left, right) => left.start - right.start || left.end - right.end);
       const gaps = [];
-      for (let index = 1; index < onDay.length; index += 1) {
-        const previous = onDay[index - 1];
-        const next = onDay[index];
-        if (
-          !previous ||
-          !next ||
-          !previous.explicitlyInPerson ||
-          !next.explicitlyInPerson ||
-          previous.end > next.start ||
-          previous.end < day.start ||
-          next.start > day.end
-        )
+      let frontierEnd: number | undefined;
+      let frontierEvents: TimedEvent[] = [];
+      for (const next of onDay) {
+        if (frontierEnd === undefined) {
+          frontierEnd = next.end;
+          frontierEvents = [next];
           continue;
-        const minutes = (next.start - previous.end) / 60_000;
-        if (minutes >= gapThreshold) gaps.push({ previous, next, minutes });
+        }
+        if (next.start > frontierEnd) {
+          const previous = frontierEvents.length === 1 ? frontierEvents[0] : undefined;
+          const minutes = (next.start - frontierEnd) / 60_000;
+          if (
+            previous?.explicitlyInPerson &&
+            next.explicitlyInPerson &&
+            previous.end >= day.start &&
+            next.start <= day.end &&
+            minutes >= gapThreshold
+          )
+            gaps.push({ previous, next, minutes });
+          frontierEnd = next.end;
+          frontierEvents = [next];
+        } else if (next.end > frontierEnd) {
+          frontierEnd = next.end;
+          frontierEvents = [next];
+        } else if (next.end === frontierEnd) {
+          // If multiple overlapping events establish the same end boundary,
+          // the in-person source for a later gap is ambiguous.
+          frontierEvents.push(next);
+        }
       }
       if (gaps.length === 0) continue;
       for (const gap of gaps) {

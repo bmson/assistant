@@ -257,6 +257,43 @@ describe('calendar weekday event analysis', () => {
     expect(text).toContain('A location alone was not treated as evidence');
   });
 
+  it('does not report free gaps while an overlapping event is still in progress', () => {
+    const text = calendarEventAnalysisResponse({
+      request: { weekdayCount: 1, minimumInPersonGapMinutes: 30 },
+      timeWindow: {
+        timeMin: '2026-11-02T08:00:00.000Z',
+        timeMax: '2026-11-03T08:00:00.000Z',
+      },
+      timeZone: 'America/Los_Angeles',
+      coverageComplete: true,
+      events: [
+        event({
+          eventId: 'long',
+          summary: 'Long meeting',
+          description: 'Attendance mode: in person',
+          start: '2026-11-02T17:00:00.000Z',
+          end: '2026-11-02T20:00:00.000Z',
+        }),
+        event({
+          eventId: 'nested-a',
+          summary: 'Nested review',
+          description: 'Attendance mode: in person',
+          start: '2026-11-02T17:30:00.000Z',
+          end: '2026-11-02T18:00:00.000Z',
+        }),
+        event({
+          eventId: 'nested-b',
+          summary: 'Nested follow-up',
+          description: 'Attendance mode: in person',
+          start: '2026-11-02T18:30:00.000Z',
+          end: '2026-11-02T19:00:00.000Z',
+        }),
+      ],
+    });
+    expect(text).toContain('No qualifying gaps were found');
+    expect(text).not.toMatch(/- 2026-11-02: \d+ minutes,/);
+  });
+
   it('paginates the bounded list and reports checked-subset counts when coverage is incomplete', () => {
     const request = detectPersonalReadRequest([{ role: 'user', content: prompt }], options);
     expect(request).not.toBeNull();

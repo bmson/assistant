@@ -3921,6 +3921,15 @@ function enforcePersonalReadGrounding(
       };
     return coverageGapResponse(request, evidence, gaps, opts?.compoundTripExtraction);
   }
+  if (request.calendarEventAnalysis)
+    return {
+      text: verifiedReadResponse(request, evidence),
+      blocked: false,
+      unsupported: [],
+      groundingFallback: [
+        'calendar counts and gaps rendered directly from the current task ledger',
+      ],
+    };
   if (request.kind === 'memory' && opts?.memoryReadSelection)
     return {
       text: renderMemoryReadAnswer(

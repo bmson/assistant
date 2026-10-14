@@ -2915,6 +2915,150 @@ describe('golden tasks', () => {
     expect(result.finalText).not.toMatch(/let me read|let me check|email results/i);
   });
 
+  it('runs bounded weekday analysis through persisted calendar pages and checked finalization', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const prompt =
+      'For my calendar, over the next 3 weekdays, how many days have an event lasting at least 45 minutes? Also find gaps of at least 30 minutes between events explicitly marked in person.';
+    const owner = await getAgent(db);
+    const request = detectPersonalReadRequest([{ role: 'user', content: prompt }], {
+      now: new Date(),
+      timeZone: owner.timezone,
+    });
+    if (!request?.calendarEventAnalysis || !request.timeWindow)
+      throw new Error('Weekday analysis did not resolve its bounded owner-timezone window');
+
+    const firstStart = new Date(Date.parse(request.timeWindow.timeMin) + 2 * 60 * 60 * 1000);
+    const firstEnd = new Date(firstStart.getTime() + 45 * 60 * 1000);
+    const secondStart = new Date(firstEnd.getTime() + 75 * 60 * 1000);
+    const secondEnd = new Date(secondStart.getTime() + 30 * 60 * 1000);
+    const sourceUrl = 'https://calendar.google.com/calendar/event?eid=weekday-review';
+    const firstEvent = {
+      eventId: 'weekday-review',
+      calendarId: 'primary',
+      calendar: 'Assistant',
+      summary: 'Planning review',
+      description: 'Attendance mode: in person',
+      location: 'Conference room A',
+      start: firstStart.toISOString(),
+      end: firstEnd.toISOString(),
+      links: [{ label: 'Open event', url: sourceUrl }],
+    };
+    const secondEvent = {
+      eventId: 'weekday-consult',
+      calendarId: 'primary',
+      calendar: 'Assistant',
+      summary: 'Consultation meeting',
+      description: 'Attendance mode: in person',
+      location: 'Conference room B',
+      start: secondStart.toISOString(),
+      end: secondEnd.toISOString(),
+    };
+    const ownerClock = new Intl.DateTimeFormat('en-US', {
+      timeZone: owner.timezone,
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    const modelAnswer = [
+      `Planning review ${ownerClock.format(firstStart)}–${ownerClock.format(firstEnd)} and Consultation meeting ${ownerClock.format(secondStart)}–${ownerClock.format(secondEnd)}.`,
+      'There are 99 qualifying events and a 1-minute gap.',
+    ].join(' ');
+    const listCalls: Array<Record<string, unknown>> = [];
+    const pages = [
+      { nextPageToken: 'weekday-page-2', events: [] },
+      { nextPageToken: 'weekday-page-3', events: [firstEvent, secondEvent] },
+      { events: [firstEvent] }, // A duplicate across pages must not inflate the count.
+    ];
+
+    const result = await runGoldenTask(db, agentId, {
+      name: 'calendar-weekday-analysis-pages-and-finalization',
+      event: { source: 'chat', trust: 'owner', payload: { text: prompt } },
+      taskType: 'chat_turn',
+      plan: workflowPlan,
+      pinOwnerRequest: true,
+      script: [{ text: modelAnswer }],
+      tools: {
+        'calendar.list_events': {
+          schema: z.object({}).passthrough(),
+          execute: async (value) => {
+            const args = value as Record<string, unknown>;
+            listCalls.push(args);
+            const pageIndex = listCalls.length - 1;
+            const page = pages[pageIndex];
+            if (!page) throw new Error('weekday calendar analysis exceeded its three-page cap');
+            return {
+              ...page,
+              complete: true,
+              calendarsSearched: ['Assistant'],
+              calendarRosterComplete: true,
+              unavailable: [],
+            };
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+    const [persistedTask] = await db
+      .select({ createdAt: tasks.createdAt })
+      .from(tasks)
+      .where(eq(tasks.id, result.taskId));
+    if (!persistedTask) throw new Error('weekday-analysis task was not persisted');
+    const admittedRequest = detectPersonalReadRequest([{ role: 'user', content: prompt }], {
+      now: persistedTask.createdAt,
+      timeZone: owner.timezone,
+    });
+    if (!admittedRequest?.timeWindow)
+      throw new Error('persisted weekday-analysis task has no stable calendar window');
+
+    expect(result.status).toBe('done');
+    expect(result.toolNames).toEqual([
+      'calendar.list_events',
+      'calendar.list_events',
+      'calendar.list_events',
+    ]);
+    expect(listCalls).toHaveLength(3);
+    expect(listCalls.map((call) => call.pageToken ?? null)).toEqual([
+      null,
+      'weekday-page-2',
+      'weekday-page-3',
+    ]);
+    expect(listCalls.every((call) => call.timeMin === admittedRequest.timeWindow?.timeMin)).toBe(
+      true,
+    );
+    expect(listCalls.every((call) => call.timeMax === admittedRequest.timeWindow?.timeMax)).toBe(
+      true,
+    );
+    expect(listCalls.every((call) => call.maxResults === 50)).toBe(true);
+    expect(result.finalText).toContain('1 qualifying event');
+    expect(result.finalText).toContain('75 minutes');
+    expect(result.finalText).toContain('Planning review');
+    expect(result.finalText).toContain('Consultation meeting');
+    expect(result.finalText).toContain(sourceUrl);
+    expect(result.finalText).not.toContain('99 qualifying events');
+    expect(result.finalText).not.toContain('1-minute gap');
+    expect(result.finalText).not.toContain('checked subset');
+
+    const [check] = await db
+      .select()
+      .from(responseChecks)
+      .where(eq(responseChecks.taskId, result.taskId));
+    expect(check?.blocked).toBe(false);
+    const persistedCalls = await db
+      .select({ args: toolCalls.args, result: toolCalls.result })
+      .from(toolCalls)
+      .where(eq(toolCalls.taskId, result.taskId))
+      .orderBy(toolCalls.step);
+    expect(persistedCalls).toHaveLength(3);
+    expect(
+      persistedCalls.map((call) => (call.args as Record<string, unknown>).pageToken ?? null),
+    ).toEqual([null, 'weekday-page-2', 'weekday-page-3']);
+    const [finishedTask] = await db
+      .select({ state: tasks.state })
+      .from(tasks)
+      .where(eq(tasks.id, result.taskId));
+    const finishedState = TaskStateSchema.parse(finishedTask?.state);
+    expect(finishedState.pendingFinal?.text).toBe(result.finalText);
+  }, 15_000); // Three dispatcher reads plus durable response-contract checks need bounded CI headroom.
+
   it('plans the hypothetical work schedule without searching the owner calendar', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const request =
