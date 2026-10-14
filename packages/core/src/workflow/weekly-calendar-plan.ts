@@ -251,7 +251,35 @@ function lodgingExplanationForBusy(
       (event.allDay === true || (interval !== undefined && overlap(interval, busy)))
     );
   });
-  if (blockingOthers.length > 0) return undefined;
+  // These timed events are independently added to eventBusy below. Keep the
+  // provider interval blocking when an overlapping item cannot be rebuilt as
+  // an exact instant interval (notably all-day or offsetless local events).
+  // This lets a complete event listing explain a long stay interval without
+  // erasing a flight or meeting that happens during the stay.
+  if (
+    blockingOthers.some((event) => {
+      if (event.allDay === true) return true;
+      const start = typeof event.start === 'string' ? event.start : '';
+      const end = typeof event.end === 'string' ? event.end : '';
+      const explicitInstant = (value: string) =>
+        /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) && dateMs(value) !== undefined;
+      return !explicitInstant(start) || !explicitInstant(end);
+    })
+  )
+    return undefined;
+  const declinedBusyEvent = calendarEvents.some((event) => {
+    if (
+      lodging.includes(event) ||
+      event.status === 'cancelled' ||
+      event.blocksTime === false ||
+      event.ownerResponse !== 'declined'
+    )
+      return false;
+    const interval =
+      event.allDay === true ? calendarSourceInterval(event) : parseEventInterval(event);
+    return interval === undefined ? event.allDay === true : overlap(interval, busy);
+  });
+  if (declinedBusyEvent) return undefined;
   return lodging[0];
 }
 

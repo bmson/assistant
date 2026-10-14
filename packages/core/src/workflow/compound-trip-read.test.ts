@@ -1,5 +1,6 @@
 import { gmailSearchReceiptSourceId } from '@assistant/persistence/gmail-search-identity';
 import { describe, expect, it } from 'vitest';
+import type { CompoundTripExtraction } from './compound-trip-extraction.js';
 import {
   compoundTripFetchTargets,
   compoundTripReadProjection,
@@ -159,6 +160,28 @@ function completeCalendarEvents(events: unknown[], read = request()): ReadToolEv
   );
 }
 
+function prefixCalendarEvents(
+  events: unknown[],
+  read = request(),
+  overrides: Record<string, unknown> = {},
+): ReadToolEvidence {
+  return row(
+    'calendar.list_events',
+    { timeMin: read.timeWindow?.timeMin, timeMax: read.timeWindow?.timeMax },
+    {
+      events,
+      complete: false,
+      nextPageToken: 'calendar-cursor-next',
+      chronologicalPrefixThrough: '2026-10-17T08:10:00.000Z',
+      calendarsResolved: [{ id: 'primary', name: 'Baldvin' }],
+      calendarsSearched: ['Baldvin'],
+      calendarRosterComplete: true,
+      unavailable: [],
+      ...overrides,
+    },
+  );
+}
+
 function bookingEmailEvidence(
   options: { hotelBody?: string; hotelSubject?: string; includeFlight?: boolean } = {},
 ) {
@@ -213,6 +236,29 @@ function bookingEmailEvidence(
       },
     ),
   ] as ReadToolEvidence[];
+}
+
+function addEmptyCompletedMailQueries(
+  evidence: ReadToolEvidence[],
+  read = request(),
+): ReadToolEvidence[] {
+  const present = new Set(
+    evidence
+      .filter((item) => item.toolName === 'gmail.search')
+      .map((item) => String((item.args as Record<string, unknown> | undefined)?.query ?? '')),
+  );
+  return [
+    ...evidence,
+    ...(read.mailQueries ?? [])
+      .filter((query) => !present.has(query.query))
+      .map((query) =>
+        row(
+          'gmail.search',
+          { query: query.query },
+          { complete: true, hasMore: false, results: [] },
+        ),
+      ),
+  ];
 }
 
 function calendarFlight(): Record<string, unknown> {
@@ -344,6 +390,19 @@ describe('compound trip read projection', () => {
     expect(completed.text).not.toContain('Next matched outbound flight');
   });
 
+  it('keeps the prefix claim blocked when a booking search category is incomplete', () => {
+    const read = request();
+    const projection = upcomingFlightReadProjection(read, [
+      prefixCalendarEvents([calendarFlight()], read),
+      ...bookingEmailEvidence(),
+    ]);
+
+    expect(projection.gmailSearchComplete).toBe(false);
+    expect(projection.calendarPrefixCompleteThroughCandidate).toBe(false);
+    expect(projection.blocked).toBe(true);
+    expect(projection.text).toContain('Booking-email search or reads were incomplete');
+  });
+
   it('does not count a selected but partially read thread as completed coverage', () => {
     const read = request();
     const query = read.mailQueries?.find((entry) => entry.category === 'flight')?.query;
@@ -410,6 +469,245 @@ describe('compound trip read projection', () => {
       text: projection.text,
       blocked: true,
     });
+  });
+
+  it('accepts a booking-matched flight proven earliest in a chronological calendar prefix', () => {
+    const read = request();
+    const projection = upcomingFlightReadProjection(
+      read,
+      addEmptyCompletedMailQueries(
+        [prefixCalendarEvents([calendarFlight()], read), ...bookingEmailEvidence()],
+        read,
+      ),
+    );
+
+    expect(projection).toMatchObject({
+      calendarComplete: false,
+      calendarPrefixCompleteThroughCandidate: true,
+      blocked: false,
+    });
+    expect(projection.flight?.segment).toMatchObject({ flightNumber: 'LH777' });
+    expect(projection.text).toContain(
+      'later dates in the requested 365-day window were not fully read',
+    );
+    expect(projection.text).toContain('[Booking email]');
+  });
+
+  it('rejects a prefix marker later than every event actually returned', () => {
+    const read = request();
+    const projection = upcomingFlightReadProjection(
+      read,
+      addEmptyCompletedMailQueries(
+        [
+          prefixCalendarEvents([calendarFlight()], read, {
+            chronologicalPrefixThrough: '2026-12-01T00:00:00.000Z',
+          }),
+          ...bookingEmailEvidence(),
+        ],
+        read,
+      ),
+    );
+
+    expect(projection.calendarPrefixCompleteThroughCandidate).toBe(false);
+    expect(projection.blocked).toBe(true);
+  });
+
+  it('requires every continuation page to report the exact resolved calendar roster', () => {
+    const read = request();
+    const range = { timeMin: read.timeWindow?.timeMin, timeMax: read.timeWindow?.timeMax };
+    const first = prefixCalendarEvents([calendarFlight()], read);
+    const second = row(
+      'calendar.list_events',
+      { ...range, pageToken: 'calendar-cursor-next' },
+      {
+        events: [
+          {
+            eventId: 'lookahead',
+            calendarId: 'primary',
+            start: '2026-10-17T09:10:00.000Z',
+          },
+        ],
+        complete: true,
+        chronologicalPrefixThrough: '2026-10-17T09:10:00.000Z',
+        calendarsResolved: [{ id: 'primary', name: 'Baldvin' }],
+        calendarsSearched: [],
+        calendarRosterComplete: true,
+        unavailable: [],
+      },
+    );
+    const projection = upcomingFlightReadProjection(
+      read,
+      addEmptyCompletedMailQueries([first, second, ...bookingEmailEvidence()], read),
+    );
+
+    expect(projection.calendarPrefixCompleteThroughCandidate).toBe(false);
+  });
+
+  it('blocks an earlier all-day flight-like event because it has no departure time', () => {
+    const read = request();
+    const earlierAllDay = {
+      eventId: 'all-day-flight-note',
+      summary: 'United flight itinerary',
+      start: '2026-10-16',
+      end: '2026-10-17',
+      allDay: true,
+      timeZone: 'America/Los_Angeles',
+      status: 'confirmed',
+    };
+    const projection = upcomingFlightReadProjection(
+      read,
+      addEmptyCompletedMailQueries(
+        [prefixCalendarEvents([earlierAllDay, calendarFlight()], read), ...bookingEmailEvidence()],
+        read,
+      ),
+    );
+
+    expect(projection.calendarPrefixCompleteThroughCandidate).toBe(false);
+    expect(projection.blocked).toBe(true);
+    expect(projection.text).toContain('earlier all-day calendar flight candidate');
+  });
+
+  it('blocks an earlier offsetless timed flight even when its calendar timezone is known', () => {
+    const read = request();
+    const earlierOffsetlessFlight = {
+      eventId: 'offsetless-earlier-flight',
+      summary: 'Outbound flight LH 201 to London',
+      start: '2026-10-17T08:00:00',
+      startTimeZone: 'Europe/Berlin',
+      calendarTimeZone: 'Europe/Berlin',
+      status: 'confirmed',
+    };
+    const projection = upcomingFlightReadProjection(
+      read,
+      addEmptyCompletedMailQueries(
+        [
+          prefixCalendarEvents([earlierOffsetlessFlight, calendarFlight()], read),
+          ...bookingEmailEvidence(),
+        ],
+        read,
+      ),
+    );
+
+    expect(projection.calendarPrefixCompleteThroughCandidate).toBe(false);
+    expect(projection.blocked).toBe(true);
+    expect(projection.text).toContain('no explicit time-zone offset');
+  });
+
+  it.each([
+    ['unavailable calendar', { unavailable: [{ calendar: 'Work', reason: 'forbidden' }] }],
+    ['incomplete roster', { calendarRosterComplete: false }],
+    [
+      'unsearched resolved calendar',
+      {
+        calendarsResolved: [
+          { id: 'primary', name: 'Baldvin' },
+          { id: 'work', name: 'Work' },
+        ],
+      },
+    ],
+  ])('keeps the prefix claim blocked for %s', (_label, overrides) => {
+    const read = request();
+    const projection = upcomingFlightReadProjection(
+      read,
+      addEmptyCompletedMailQueries(
+        [prefixCalendarEvents([calendarFlight()], read, overrides), ...bookingEmailEvidence()],
+        read,
+      ),
+    );
+
+    expect(projection.calendarPrefixCompleteThroughCandidate).toBe(false);
+    expect(projection.blocked).toBe(true);
+    expect(projection.text).toContain('Calendar search coverage is incomplete');
+  });
+
+  it('does not infer a prefix across a discontinuous calendar cursor', () => {
+    const read = request();
+    const first = prefixCalendarEvents([calendarFlight()], read);
+    const second = row(
+      'calendar.list_events',
+      {
+        timeMin: read.timeWindow?.timeMin,
+        timeMax: read.timeWindow?.timeMax,
+        pageToken: 'wrong-cursor',
+      },
+      {
+        events: [],
+        complete: false,
+        nextPageToken: 'calendar-cursor-third',
+        chronologicalPrefixThrough: '2026-10-17T08:10:00.000Z',
+        calendarsResolved: [{ id: 'primary', name: 'Baldvin' }],
+        calendarsSearched: ['Baldvin'],
+        calendarRosterComplete: true,
+        unavailable: [],
+      },
+    );
+    const projection = upcomingFlightReadProjection(
+      read,
+      addEmptyCompletedMailQueries([first, second, ...bookingEmailEvidence()], read),
+    );
+
+    expect(projection.calendarPrefixCompleteThroughCandidate).toBe(false);
+    expect(projection.blocked).toBe(true);
+  });
+
+  it('compares the full opaque calendar cursor when tokens share a long prefix', () => {
+    const read = request();
+    const range = { timeMin: read.timeWindow?.timeMin, timeMax: read.timeWindow?.timeMax };
+    const commonPrefix = 'c'.repeat(5_000);
+    const expectedCursor = `${commonPrefix}expected-tail`;
+    const suppliedCursor = `${commonPrefix}different-tail`;
+    const first = prefixCalendarEvents([calendarFlight()], read, {
+      nextPageToken: expectedCursor,
+    });
+    const second = row(
+      'calendar.list_events',
+      { ...range, pageToken: suppliedCursor },
+      {
+        events: [
+          {
+            eventId: 'lookahead',
+            calendarId: 'primary',
+            start: '2026-10-17T09:10:00.000Z',
+          },
+        ],
+        complete: true,
+        chronologicalPrefixThrough: '2026-10-17T09:10:00.000Z',
+        calendarsResolved: [{ id: 'primary', name: 'Baldvin' }],
+        calendarsSearched: ['Baldvin'],
+        calendarRosterComplete: true,
+        unavailable: [],
+      },
+    );
+    const projection = upcomingFlightReadProjection(
+      read,
+      addEmptyCompletedMailQueries([first, second, ...bookingEmailEvidence()], read),
+    );
+
+    expect(expectedCursor.slice(0, 4_096)).toBe(suppliedCursor.slice(0, 4_096));
+    expect(expectedCursor).not.toBe(suppliedCursor);
+    expect(projection.calendarPrefixCompleteThroughCandidate).toBe(false);
+  });
+
+  it('does not skip an earlier unmatched calendar flight inside the covered prefix', () => {
+    const read = request();
+    const earlier = {
+      eventId: 'earlier-unmatched',
+      summary: 'Outbound flight LH 201 to London',
+      start: '2026-10-16T09:00:00+02:00',
+      timeZone: 'Europe/Berlin',
+      status: 'confirmed',
+    };
+    const projection = upcomingFlightReadProjection(
+      read,
+      addEmptyCompletedMailQueries(
+        [prefixCalendarEvents([earlier, calendarFlight()], read), ...bookingEmailEvidence()],
+        read,
+      ),
+    );
+
+    expect(projection.calendarPrefixCompleteThroughCandidate).toBe(false);
+    expect(projection.blocked).toBe(true);
+    expect(projection.text).toContain('Calendar search coverage is incomplete');
   });
 
   it('accepts three consecutive bounded calendar pages while preserving an incomplete roster gap', () => {
@@ -3124,6 +3422,503 @@ describe('compound trip read projection', () => {
     expect(projection.currentTripReturn).toBeUndefined();
     expect(projection.text).toContain('could not match a dated outbound leg');
   });
+
+  it('matches a same-day connected return by its unique origin and keeps the calendar carrier and clock conflicts visible', () => {
+    const read = request();
+    const reference = 'SAMPLE-TRIP-55';
+    const firstQuote = `KLM KL 401. Return flight. Departure date: 2026-11-15. Departure time: 06:00 Europe/Amsterdam. Arrival date: 2026-11-15. Arrival time: 06:10 Europe/London. From: AMS. To: LHR. Booking reference: ${reference}.`;
+    const secondQuote = `Return flight BA 117. Departure date: 2026-11-15. Departure time: 07:15 Europe/London. Arrival date: 2026-11-15. Arrival time: 10:25 America/New_York. From: LHR. To: JFK. Booking reference: ${reference}. British Airways.`;
+    const event = {
+      eventId: 'connected-return-calendar-event',
+      summary: 'AMS → JFK flight (United Airlines)',
+      description: `Booking reference: ${reference}. AMS to JFK.`,
+      start: '2026-11-15T06:10:00+01:00',
+      timeZone: 'Europe/Amsterdam',
+      links: [
+        {
+          type: 'calendar',
+          url: 'https://calendar.google.com/calendar/event?eid=connected-return',
+        },
+      ],
+    };
+    const flightQuery = read.mailQueries?.find((query) => query.category === 'flight');
+    if (!flightQuery) throw new Error('Expected a flight booking search');
+    const evidence = addEmptyCompletedMailQueries(
+      [
+        completeCalendarEvents([event]),
+        row(
+          'gmail.search',
+          { query: flightQuery.query },
+          {
+            results: [{ threadId: 'connected-return-thread', subject: 'Return itinerary' }],
+            complete: true,
+            hasMore: false,
+          },
+        ),
+        row(
+          'gmail.read_thread',
+          { threadId: 'connected-return-thread' },
+          {
+            complete: true,
+            messages: [
+              {
+                messageId: 'connected-return-message',
+                subject: 'Return itinerary',
+                text: `${firstQuote}\n${secondQuote}`,
+              },
+            ],
+          },
+        ),
+      ],
+      read,
+    );
+    const extraction: CompoundTripExtraction = {
+      status: 'complete',
+      segments: [
+        {
+          threadId: 'connected-return-thread',
+          messageId: 'connected-return-message',
+          subject: 'Return itinerary',
+          flightNumber: 'KL401',
+          direction: 'return',
+          departureDate: '2026-11-15',
+          departureTime: '06:00',
+          departureTimeZone: 'Europe/Amsterdam',
+          arrivalDate: '2026-11-15',
+          arrivalTime: '06:10',
+          arrivalTimeZone: 'Europe/London',
+          originAirport: 'AMS',
+          destinationAirport: 'LHR',
+          bookingReference: reference,
+          excerpt: firstQuote,
+        },
+        {
+          threadId: 'connected-return-thread',
+          messageId: 'connected-return-message',
+          subject: 'Return itinerary',
+          flightNumber: 'BA117',
+          direction: 'return',
+          departureDate: '2026-11-15',
+          departureTime: '07:15',
+          departureTimeZone: 'Europe/London',
+          arrivalDate: '2026-11-15',
+          arrivalTime: '10:25',
+          arrivalTimeZone: 'America/New_York',
+          originAirport: 'LHR',
+          destinationAirport: 'JFK',
+          bookingReference: reference,
+          excerpt: secondQuote,
+        },
+      ],
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: ['connected-return-message'],
+    };
+    const projection = upcomingFlightReadProjection(read, evidence, extraction);
+    const tripProjection = compoundTripReadProjection(read, evidence, extraction);
+
+    expect(projection.flight?.segment).toMatchObject({
+      flightNumber: 'KL401',
+      direction: 'return',
+      originAirport: 'AMS',
+    });
+    expect(projection.flight?.calendarConflicts).toContain('carrier');
+    expect(projection.text).toContain('Next matched future return flight');
+    expect(projection.text).toContain('Source-backed connected flight segments');
+    expect(projection.text).toContain('KL401 AMS→LHR');
+    expect(projection.text).toContain('BA117 LHR→JFK');
+    expect(projection.text).toContain('Source conflict: the calendar names United Airlines');
+    expect(projection.text).toContain('booking email names KLM');
+    expect(projection.text).toContain(
+      'Source conflict: the calendar event time differs from the booking departure time',
+    );
+    expect(tripProjection.flight).toBeUndefined();
+    expect(tripProjection.currentTripReturn?.segment?.flightNumber).toBe('KL401');
+    expect(tripProjection.text).toContain('Source-backed return connections');
+    expect(tripProjection.text).toContain('BA117 LHR→JFK');
+    expect(tripProjection.text).toContain('This does not identify a new outbound trip.');
+  });
+
+  it('binds a calendar carrier label to the uniquely matched flight in a multi-flight title', () => {
+    const read = request();
+    const reference = 'MULTIFLIGHT56';
+    const quote = `Return flight BA117. Departure date: 2026-11-15. Departure time: 07:15 Europe/London. Arrival date: 2026-11-15. Arrival time: 10:25 America/New_York. From: LHR. To: JFK. Booking reference: ${reference}. Operated by British Airways.`;
+    const event = {
+      eventId: 'multi-flight-title-event',
+      summary: 'KL401 flight (KLM); BA117 flight (United Airlines); return LHR → JFK flight',
+      description: `Booking reference: ${reference}`,
+      start: '2026-11-15T07:15:00Z',
+      timeZone: 'Europe/London',
+    };
+    const flightQuery = read.mailQueries?.find((query) => query.category === 'flight');
+    if (!flightQuery) throw new Error('Expected a flight booking search');
+    const evidence = addEmptyCompletedMailQueries(
+      [
+        completeCalendarEvents([event]),
+        row(
+          'gmail.search',
+          { query: flightQuery.query },
+          {
+            results: [{ threadId: 'multi-flight-title-thread', subject: 'Return itinerary' }],
+            complete: true,
+            hasMore: false,
+          },
+        ),
+        row(
+          'gmail.read_thread',
+          { threadId: 'multi-flight-title-thread' },
+          {
+            complete: true,
+            messages: [
+              {
+                messageId: 'multi-flight-title-message',
+                subject: 'Return itinerary',
+                text: quote,
+              },
+            ],
+          },
+        ),
+      ],
+      read,
+    );
+    const extraction: CompoundTripExtraction = {
+      status: 'complete',
+      segments: [
+        {
+          threadId: 'multi-flight-title-thread',
+          messageId: 'multi-flight-title-message',
+          subject: 'Return itinerary',
+          flightNumber: 'BA117',
+          direction: 'return',
+          departureDate: '2026-11-15',
+          departureTime: '07:15',
+          departureTimeZone: 'Europe/London',
+          arrivalDate: '2026-11-15',
+          arrivalTime: '10:25',
+          arrivalTimeZone: 'America/New_York',
+          originAirport: 'LHR',
+          destinationAirport: 'JFK',
+          bookingReference: reference,
+          excerpt: quote,
+        },
+      ],
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: ['multi-flight-title-message'],
+    };
+
+    const projection = upcomingFlightReadProjection(read, evidence, extraction);
+
+    expect(projection.flight?.segment?.flightNumber).toBe('BA117');
+    expect(projection.flight?.calendarConflicts).toContain('carrier');
+    expect(projection.flight?.calendarConflicts).toContain('flight-number');
+    expect(projection.text).toContain('the calendar names United Airlines');
+    expect(projection.text).toContain('the booking email names British Airways');
+    expect(projection.text).not.toContain('the calendar names KLM');
+  });
+
+  it('keeps a later round-trip return separate from an outbound itinerary connection', () => {
+    const read = request();
+    const reference = 'RTDIRECTION56';
+    const outboundQuote = `Outbound flight LH401. Departure date: 2026-10-17. Departure time: 08:00 America/Los_Angeles. Arrival date: 2026-10-18. Arrival time: 09:00 Europe/Berlin. From: SFO. To: BER. Booking reference: ${reference}.`;
+    const returnQuote = `Return flight LH402. Departure date: 2026-10-19. Departure time: 12:00 Europe/Berlin. Arrival date: 2026-10-19. Arrival time: 15:00 America/Los_Angeles. From: BER. To: SFO. Booking reference: ${reference}.`;
+    const events = [
+      {
+        eventId: 'round-trip-direction-outbound',
+        summary: 'Outbound flight LH401 SFO → BER',
+        description: `Arrival airport: BER. Booking reference: ${reference}`,
+        start: '2026-10-17T08:00:00-07:00',
+        timeZone: 'America/Los_Angeles',
+      },
+      {
+        eventId: 'round-trip-direction-return',
+        summary: 'Return flight LH402 BER → SFO',
+        description: `Departure airport: BER. Booking reference: ${reference}`,
+        start: '2026-10-19T12:00:00+02:00',
+        timeZone: 'Europe/Berlin',
+      },
+    ];
+    const flightQuery = read.mailQueries?.find((query) => query.category === 'flight');
+    if (!flightQuery) throw new Error('Expected a flight booking search');
+    const evidence = addEmptyCompletedMailQueries(
+      [
+        completeCalendarEvents(events),
+        row(
+          'gmail.search',
+          { query: flightQuery.query },
+          {
+            results: [{ threadId: 'round-trip-direction-thread', subject: 'Flight itinerary' }],
+            complete: true,
+            hasMore: false,
+          },
+        ),
+        row(
+          'gmail.read_thread',
+          { threadId: 'round-trip-direction-thread' },
+          {
+            complete: true,
+            messages: [
+              {
+                messageId: 'round-trip-direction-message',
+                subject: 'Flight itinerary',
+                text: `${outboundQuote}\n${returnQuote}`,
+              },
+            ],
+          },
+        ),
+      ],
+      read,
+    );
+    const extraction: CompoundTripExtraction = {
+      status: 'complete',
+      segments: [
+        {
+          threadId: 'round-trip-direction-thread',
+          messageId: 'round-trip-direction-message',
+          subject: 'Flight itinerary',
+          flightNumber: 'LH401',
+          direction: 'outbound',
+          departureDate: '2026-10-17',
+          departureTime: '08:00',
+          departureTimeZone: 'America/Los_Angeles',
+          arrivalDate: '2026-10-18',
+          arrivalTime: '09:00',
+          arrivalTimeZone: 'Europe/Berlin',
+          originAirport: 'SFO',
+          destinationAirport: 'BER',
+          bookingReference: reference,
+          excerpt: outboundQuote,
+        },
+        {
+          threadId: 'round-trip-direction-thread',
+          messageId: 'round-trip-direction-message',
+          subject: 'Flight itinerary',
+          flightNumber: 'LH402',
+          direction: 'return',
+          departureDate: '2026-10-19',
+          departureTime: '12:00',
+          departureTimeZone: 'Europe/Berlin',
+          arrivalDate: '2026-10-19',
+          arrivalTime: '15:00',
+          arrivalTimeZone: 'America/Los_Angeles',
+          originAirport: 'BER',
+          destinationAirport: 'SFO',
+          bookingReference: reference,
+          excerpt: returnQuote,
+        },
+      ],
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: ['round-trip-direction-message'],
+    };
+
+    const upcoming = upcomingFlightReadProjection(read, evidence, extraction);
+    const trip = compoundTripReadProjection(read, evidence, extraction);
+
+    expect(upcoming.flight?.segment?.flightNumber).toBe('LH401');
+    expect(upcoming.text).not.toContain('Source-backed connected flight segments');
+    expect(trip.flight?.segment?.flightNumber).toBe('LH401');
+    expect(trip.returnFlight?.segment?.flightNumber).toBe('LH402');
+    expect(trip.text).toContain('Dated return leg from the same booking: LH402 BER→SFO');
+    expect(trip.text).not.toContain('Source-backed connection chain: LH401 SFO→BER; LH402 BER→SFO');
+  });
+
+  it('keeps a same-origin return tie ambiguous even when the calendar reference and date match', () => {
+    const read = request();
+    const reference = 'SAMPLE-TIE-55';
+    const segments = [
+      {
+        threadId: 'tied-return-thread',
+        messageId: 'tied-return-message',
+        subject: 'Itinerary',
+        flightNumber: 'KL401',
+        direction: 'return' as const,
+        departureDate: '2026-11-15',
+        departureTime: '06:00',
+        departureTimeZone: 'Europe/Amsterdam',
+        arrivalDate: '2026-11-15',
+        arrivalTime: '07:00',
+        arrivalTimeZone: 'Europe/London',
+        originAirport: 'AMS',
+        destinationAirport: 'LHR',
+        bookingReference: reference,
+        excerpt: `Return flight KL401. Departure date: 2026-11-15. Departure time: 06:00 Europe/Amsterdam. Arrival date: 2026-11-15. Arrival time: 07:00 Europe/London. From: AMS. To: LHR. Booking reference: ${reference}.`,
+      },
+      {
+        threadId: 'tied-return-thread',
+        messageId: 'tied-return-message',
+        subject: 'Itinerary',
+        flightNumber: 'KL402',
+        direction: 'return' as const,
+        departureDate: '2026-11-15',
+        departureTime: '06:00',
+        departureTimeZone: 'Europe/Amsterdam',
+        arrivalDate: '2026-11-15',
+        arrivalTime: '07:10',
+        arrivalTimeZone: 'Europe/London',
+        originAirport: 'AMS',
+        destinationAirport: 'LGW',
+        bookingReference: reference,
+        excerpt: `Return flight KL402. Departure date: 2026-11-15. Departure time: 06:00 Europe/Amsterdam. Arrival date: 2026-11-15. Arrival time: 07:10 Europe/London. From: AMS. To: LGW. Booking reference: ${reference}.`,
+      },
+    ];
+    const flightQuery = read.mailQueries?.find((query) => query.category === 'flight');
+    if (!flightQuery) throw new Error('Expected a flight booking search');
+    const evidence = addEmptyCompletedMailQueries(
+      [
+        completeCalendarEvents([
+          {
+            eventId: 'tied-return-event',
+            summary: 'AMS → JFK flight',
+            description: `Booking reference: ${reference}. AMS to JFK.`,
+            start: '2026-11-15T06:00:00+01:00',
+          },
+        ]),
+        row(
+          'gmail.search',
+          { query: flightQuery.query },
+          {
+            results: [{ threadId: 'tied-return-thread', subject: 'Itinerary' }],
+            complete: true,
+            hasMore: false,
+          },
+        ),
+        row(
+          'gmail.read_thread',
+          { threadId: 'tied-return-thread' },
+          {
+            complete: true,
+            messages: [
+              {
+                messageId: 'tied-return-message',
+                subject: 'Itinerary',
+                text: segments.map((segment) => segment.excerpt).join('\n'),
+              },
+            ],
+          },
+        ),
+      ],
+      read,
+    );
+    const projection = upcomingFlightReadProjection(read, evidence, {
+      status: 'complete',
+      segments,
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: ['tied-return-message'],
+    });
+
+    expect(projection.flight).toBeUndefined();
+    expect(projection.text).toContain(
+      'More than one separate future booking segment has the same departure instant',
+    );
+  });
+
+  it.each(['unknown continuation time', 'tied continuation routes'] as const)(
+    'does not claim a complete return connection chain when continuation evidence is %s',
+    (caseName) => {
+      const read = request();
+      const reference = 'SAMPLE-CHAIN-55';
+      const leadQuote = `KLM KL401. Return flight. Departure date: 2026-11-15. Departure time: 06:00 Europe/Amsterdam. Arrival date: 2026-11-15. Arrival time: 06:10 Europe/London. From: AMS. To: LHR. Booking reference: ${reference}.`;
+      const unknownContinuation = caseName === 'unknown continuation time';
+      const continuationQuotes = unknownContinuation
+        ? [
+            `Connecting flight BA117. Departure date: 2026-11-15. Departure time: 07:15. Arrival date: 2026-11-15. Arrival time: 10:25 America/New_York. From: LHR. To: JFK. Booking reference: ${reference}.`,
+          ]
+        : [
+            `Connecting flight BA117. Departure date: 2026-11-15. Departure time: 07:15 Europe/London. Arrival date: 2026-11-15. Arrival time: 10:25 America/New_York. From: LHR. To: JFK. Booking reference: ${reference}.`,
+            `Connecting flight BA118. Departure date: 2026-11-15. Departure time: 07:15 Europe/London. Arrival date: 2026-11-15. Arrival time: 10:40 America/New_York. From: LHR. To: EWR. Booking reference: ${reference}.`,
+          ];
+      const followUps = continuationQuotes.map((excerpt, index) => ({
+        threadId: 'uncertain-return-thread',
+        messageId: 'uncertain-return-message',
+        subject: 'Return itinerary',
+        flightNumber: index === 0 ? 'BA117' : 'BA118',
+        direction: 'connection' as const,
+        departureDate: '2026-11-15',
+        departureTime: '07:15',
+        ...(!unknownContinuation ? { departureTimeZone: 'Europe/London' } : {}),
+        arrivalDate: '2026-11-15',
+        arrivalTime: index === 0 ? '10:25' : '10:40',
+        arrivalTimeZone: 'America/New_York',
+        originAirport: 'LHR',
+        destinationAirport: index === 0 ? 'JFK' : 'EWR',
+        bookingReference: reference,
+        excerpt,
+      }));
+      const flightQuery = read.mailQueries?.find((query) => query.category === 'flight');
+      if (!flightQuery) throw new Error('Expected a flight booking search');
+      const evidence = addEmptyCompletedMailQueries(
+        [
+          completeCalendarEvents([
+            {
+              eventId: 'uncertain-return-event',
+              summary: 'AMS → JFK flight',
+              description: `Booking reference: ${reference}. AMS to JFK.`,
+              start: '2026-11-15T06:10:00+01:00',
+            },
+          ]),
+          row(
+            'gmail.search',
+            { query: flightQuery.query },
+            {
+              results: [{ threadId: 'uncertain-return-thread', subject: 'Return itinerary' }],
+              complete: true,
+              hasMore: false,
+            },
+          ),
+          row(
+            'gmail.read_thread',
+            { threadId: 'uncertain-return-thread' },
+            {
+              complete: true,
+              messages: [
+                {
+                  messageId: 'uncertain-return-message',
+                  subject: 'Return itinerary',
+                  text: [leadQuote, ...continuationQuotes].join('\n'),
+                },
+              ],
+            },
+          ),
+        ],
+        read,
+      );
+      const projection = upcomingFlightReadProjection(read, evidence, {
+        status: 'complete',
+        segments: [
+          {
+            threadId: 'uncertain-return-thread',
+            messageId: 'uncertain-return-message',
+            subject: 'Return itinerary',
+            flightNumber: 'KL401',
+            direction: 'return',
+            departureDate: '2026-11-15',
+            departureTime: '06:00',
+            departureTimeZone: 'Europe/Amsterdam',
+            arrivalDate: '2026-11-15',
+            arrivalTime: '06:10',
+            arrivalTimeZone: 'Europe/London',
+            originAirport: 'AMS',
+            destinationAirport: 'LHR',
+            bookingReference: reference,
+            excerpt: leadQuote,
+          },
+          ...followUps,
+        ],
+        hotels: [],
+        rejectedFacts: 0,
+        sourceMessageIds: ['uncertain-return-message'],
+      });
+
+      expect(projection.flight?.segment?.flightNumber).toBe('KL401');
+      expect(projection.flight?.itineraryConnectionChainComplete).toBe(false);
+      expect(projection.text).toContain(
+        'The booking source does not establish a complete dated connection chain',
+      );
+      expect(projection.text).not.toContain('Source-backed connected flight segments');
+    },
+  );
 
   it('does not use an unrelated footer year to infer hotel stay dates', () => {
     const read = request();

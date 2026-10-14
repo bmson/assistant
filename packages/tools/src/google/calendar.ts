@@ -104,7 +104,7 @@ interface RawEvent {
   conferenceData?: {
     entryPoints?: Array<{ entryPointType?: string; uri?: string; label?: string }>;
   };
-  start?: { dateTime?: string; date?: string };
+  start?: { dateTime?: string; date?: string; timeZone?: string };
   end?: { dateTime?: string; date?: string };
   attendees?: Array<{ email: string; responseStatus?: string; self?: boolean }>;
 }
@@ -209,9 +209,121 @@ async function fetchCalendars(client: GoogleClient): Promise<CalendarRoster> {
   return { calendars, ...(pageToken ? { nextPageToken: pageToken } : {}) };
 }
 
-function startedAt(event: { start: string }): number {
-  const ms = Date.parse(event.start);
-  return Number.isNaN(ms) ? Number.POSITIVE_INFINITY : ms;
+function localDateTimeInZone(value: string, timeZone: string): number {
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?)?$/.exec(
+    value,
+  );
+  if (!match) return Number.NaN;
+  const [, year, month, day, hour = '0', minute = '0', second = '0', fraction = '0'] = match;
+  const parts = {
+    year: Number(year),
+    month: Number(month),
+    day: Number(day),
+    hour: Number(hour),
+    minute: Number(minute),
+    second: Number(second),
+    millisecond: Number(fraction.padEnd(3, '0')),
+  };
+  if (
+    parts.month < 1 ||
+    parts.month > 12 ||
+    parts.day < 1 ||
+    parts.hour > 23 ||
+    parts.minute > 59 ||
+    parts.second > 59
+  )
+    return Number.NaN;
+  const target = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second,
+    parts.millisecond,
+  );
+  const targetDate = new Date(target);
+  if (
+    targetDate.getUTCFullYear() !== parts.year ||
+    targetDate.getUTCMonth() + 1 !== parts.month ||
+    targetDate.getUTCDate() !== parts.day
+  )
+    return Number.NaN;
+  try {
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      calendar: 'iso8601',
+      numberingSystem: 'latn',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    });
+    const offsetAt = (instant: number) => {
+      const wholeSecond = Math.floor(instant / 1000) * 1000;
+      const formatted = Object.fromEntries(
+        formatter.formatToParts(new Date(wholeSecond)).map((part) => [part.type, part.value]),
+      );
+      const localAsUtc = Date.UTC(
+        Number(formatted.year),
+        Number(formatted.month) - 1,
+        Number(formatted.day),
+        Number(formatted.hour),
+        Number(formatted.minute),
+        Number(formatted.second),
+      );
+      return localAsUtc - wholeSecond;
+    };
+    const offsets = new Set<number>();
+    const sampleWindow = 36 * 60 * 60 * 1000;
+    const sampleStep = 6 * 60 * 60 * 1000;
+    for (let delta = -sampleWindow; delta <= sampleWindow; delta += sampleStep)
+      offsets.add(offsetAt(target + delta));
+
+    const matchingInstants = new Set<number>();
+    for (const offset of offsets) {
+      const instant = target - offset;
+      const formatted = Object.fromEntries(
+        formatter.formatToParts(new Date(instant)).map((part) => [part.type, part.value]),
+      );
+      if (
+        Number(formatted.year) === parts.year &&
+        Number(formatted.month) === parts.month &&
+        Number(formatted.day) === parts.day &&
+        Number(formatted.hour) === parts.hour &&
+        Number(formatted.minute) === parts.minute &&
+        Number(formatted.second) === parts.second
+      )
+        matchingInstants.add(instant);
+    }
+    return matchingInstants.size === 1 ? ([...matchingInstants][0] ?? Number.NaN) : Number.NaN;
+  } catch {
+    return Number.NaN;
+  }
+}
+
+function validTimeZone(value: string | undefined): value is string {
+  if (!value) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function startedAt(event: { start: string; startTimeZone?: string }): number {
+  if (/T.*(?:Z|[+-]\d{2}:\d{2})$/i.test(event.start)) {
+    const ms = Date.parse(event.start);
+    return Number.isNaN(ms) ? Number.POSITIVE_INFINITY : ms;
+  }
+  const ms = event.startTimeZone
+    ? localDateTimeInZone(event.start, event.startTimeZone)
+    : Number.NaN;
+  return Number.isFinite(ms) ? ms : Number.POSITIVE_INFINITY;
 }
 
 function normalizeEvent(raw: RawEvent, calendar: CalendarEntry) {
@@ -252,6 +364,7 @@ function normalizeEvent(raw: RawEvent, calendar: CalendarEntry) {
     // whether something is on the work calendar or the family one.
     calendar: calendar.name,
     calendarId: calendar.id,
+    startTimeZone: raw.start?.timeZone ?? calendar.timeZone,
     ...(calendar.timeZone ? { calendarTimeZone: calendar.timeZone } : {}),
     summary: raw.summary ?? '',
     location: raw.location ?? '',
@@ -435,6 +548,7 @@ async function collectEvents(
   const candidates = [...nextCursorById.values()].flatMap((cursor) => cursor.buffered);
   candidates.sort((a, b) => startedAt(a) - startedAt(b));
   const events = candidates.slice(0, opts.maxResults);
+  const lastReturnedEvent = events.at(-1);
   const selected = new Set(
     events.map((event) => `${event.calendarId}\0${event.eventId}\0${event.start}`),
   );
@@ -446,6 +560,27 @@ async function collectEvents(
       ),
     });
   }
+
+  // `orderBy=startTime` makes each provider cursor a chronological stream.
+  // A returned prefix is proven only when every non-exhausted stream has a
+  // known buffered event strictly after the last returned event. If a stream
+  // has no such buffer, its next provider page could still contain an earlier
+  // event, so callers must retain the ordinary incomplete-coverage caveat.
+  const lastReturnedMs = lastReturnedEvent ? startedAt(lastReturnedEvent) : Number.NaN;
+  const chronologicalPrefixThrough =
+    Number.isFinite(lastReturnedMs) &&
+    [...nextCursorById.values()].every((cursor) => {
+      if (cursor.token === null && cursor.buffered.length === 0) return true;
+      if (cursor.token !== null) {
+        const calendar = targets.find((item) => item.id === cursor.id);
+        if (!validTimeZone(calendar?.timeZone)) return false;
+      }
+      const firstBuffered = cursor.buffered[0];
+      const firstBufferedMs = firstBuffered ? startedAt(firstBuffered) : Number.NaN;
+      return Number.isFinite(firstBufferedMs) && firstBufferedMs > lastReturnedMs;
+    })
+      ? new Date(lastReturnedMs).toISOString()
+      : undefined;
 
   unavailable.push(
     ...unresolved.map(({ requested, reason, candidates }) => ({
@@ -515,6 +650,7 @@ async function collectEvents(
     calendarRosterComplete: !rosterTruncated,
     ...(roster.nextPageToken ? { calendarRosterNextPageToken: roster.nextPageToken } : {}),
     ...(nextPageToken ? { nextPageToken } : {}),
+    ...(chronologicalPrefixThrough ? { chronologicalPrefixThrough } : {}),
     ...(paginationUnavailable ? { paginationUnavailable: true } : {}),
     complete:
       unresolved.length === 0 &&

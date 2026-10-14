@@ -1557,6 +1557,47 @@ function overlapClock(value: number, timeZone?: string): string {
   }
 }
 
+function calendarAllDayWindowLabel(
+  event: Record<string, unknown>,
+  request: PersonalReadRequest,
+): string | undefined {
+  const startDate = stringField(event, 'start');
+  const endDate = stringField(event, 'end');
+  const window = request.timeWindow;
+  const zone = request.timeZone ?? 'UTC';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate) || !window)
+    return undefined;
+  const interval = calendarSourceInterval(event);
+  const windowStart = Date.parse(window.timeMin);
+  const windowEnd = Date.parse(window.timeMax);
+  if (!interval || !Number.isFinite(windowStart) || !Number.isFinite(windowEnd)) return undefined;
+  const overlapStart = Math.max(interval.start, windowStart);
+  const overlapEnd = Math.min(interval.end, windowEnd);
+  if (overlapStart >= overlapEnd) return undefined;
+  const startIso = new Date(windowStart).toISOString();
+  const endIso = new Date(windowEnd).toISOString();
+  const startsAtLocalMidnight = clockOnly(startIso, zone) === '00:00';
+  const endsAtLocalMidnight = clockOnly(endIso, zone) === '00:00';
+  const sameLocalDay =
+    eventLocalDay(startIso, zone) === eventLocalDay(new Date(windowEnd - 1).toISOString(), zone);
+  const entireLocalDay =
+    overlapStart === windowStart &&
+    overlapEnd === windowEnd &&
+    startsAtLocalMidnight &&
+    endsAtLocalMidnight &&
+    sameLocalDay;
+  const sourceDate = calendarSourceDateLabel(event).replace(/^source date /, '');
+  const sourceNote = `source all-day ${sourceDate || 'date'}`;
+  if (entireLocalDay) return `${shortDate(startIso, zone)} · All day (${sourceNote})`;
+  const startDay = shortDate(new Date(overlapStart).toISOString(), zone);
+  const endDay = shortDate(new Date(overlapEnd).toISOString(), zone);
+  const range =
+    startDay === endDay
+      ? `${startDay} ${overlapClock(overlapStart, zone)}–${overlapClock(overlapEnd, zone)}`
+      : `${startDay} ${overlapClock(overlapStart, zone)}–${endDay} ${overlapClock(overlapEnd, zone)}`;
+  return `${range} (${sourceNote})`;
+}
+
 function calendarOverlapSummary(
   events: Record<string, unknown>[],
   request: PersonalReadRequest,
@@ -1610,6 +1651,7 @@ function calendarOverlapSummary(
       ? { start: requestedStart, end: requestedEnd }
       : undefined;
   const notes: string[] = [];
+  const namedPairs: string[] = [];
   for (let index = 0; index < candidates.length; index += 1) {
     const left = candidates[index];
     if (!left) continue;
@@ -1633,6 +1675,7 @@ function calendarOverlapSummary(
       notes.push(
         `- ${bothAccepted ? 'Scheduling conflict' : 'Possible overlap'}: **${left.projected.summary}** and **${right.projected.summary}**, ${overlapLabel}.${request.includeCalendarBriefing ? '' : ` ${calendarRelationshipNote(relationship, bothAccepted ? 'confirmed' : 'unresolved')}`}`,
       );
+      namedPairs.push(`**${left.projected.summary}** and **${right.projected.summary}**`);
     }
   }
   if (notes.length === 0)
@@ -1644,21 +1687,28 @@ function calendarOverlapSummary(
           : 'An overlap check was requested, but no calendar events were available to compare.',
     ];
   const shown = notes.slice(0, 3);
-  if (notes.length > shown.length)
+  if (notes.length > shown.length) {
+    const additionalPairs = namedPairs.slice(3);
+    const shownAdditionalPairs = additionalPairs.slice(0, 3);
+    const omitted = additionalPairs.length - shownAdditionalPairs.length;
     shown.push(
-      `- ${notes.length - shown.length} additional overlapping pairs were found in the checked results.`,
+      `- Additional overlapping pairs: ${shownAdditionalPairs.join('; ')}${omitted > 0 ? `; ${omitted.toLocaleString('en-US')} more not listed` : ''}.`,
     );
+  }
   if (request.includeCalendarBriefing)
     shown.push('Overlapping entries do not establish that you must attend both.');
   return shown;
 }
 
-/** Does the searched window cover more than one local day? */
-function spansDays(window: PersonalReadRequest['timeWindow']): boolean {
+/** Does the searched window cover more than one local day? The end is exclusive. */
+function spansDays(window: PersonalReadRequest['timeWindow'], timeZone?: string): boolean {
   if (!window) return true;
   const from = Date.parse(window.timeMin);
   const to = Date.parse(window.timeMax);
-  return !Number.isFinite(from) || !Number.isFinite(to) || to - from > 26 * 60 * 60 * 1000;
+  if (!timeZone || !Number.isFinite(from) || !Number.isFinite(to) || to <= from) return true;
+  const startDay = eventLocalDay(new Date(from).toISOString(), timeZone);
+  const finalIncludedDay = eventLocalDay(new Date(to - 1).toISOString(), timeZone);
+  return !startDay || !finalIncludedDay || startDay !== finalIncludedDay;
 }
 
 function calendarFreeIntervals(
@@ -3546,7 +3596,11 @@ export function verifiedReadResponse(
       const agendaEvents = activeEvents.filter(
         (event) => calendarWindowMembership(event, request) === 'confirmed',
       );
-      if (request.timeWindow && request.timeZone && !spansDays(request.timeWindow))
+      if (
+        request.timeWindow &&
+        request.timeZone &&
+        !spansDays(request.timeWindow, request.timeZone)
+      )
         lines.push(
           `${shortDate(request.timeWindow.timeMin, request.timeZone)} (${request.timeZone}).`,
         );
@@ -3559,7 +3613,7 @@ export function verifiedReadResponse(
               : '- Calendar: no successful event read.',
         );
       } else {
-        const multiDay = spansDays(request.timeWindow);
+        const multiDay = spansDays(request.timeWindow, request.timeZone);
         const manyCalendars =
           new Set(agendaEvents.map((event) => stringField(event, 'calendar')).filter(Boolean))
             .size > 1;
@@ -3613,19 +3667,25 @@ export function verifiedReadResponse(
           const intervalRange = spansDates
             ? `${intervalDateTime(rawStart, request.timeZone)} – ${intervalDateTime(rawEnd, request.timeZone)}`
             : '';
+          const briefingAllDay =
+            dateOnly && request.includeCalendarBriefing
+              ? calendarAllDayWindowLabel(event, request)
+              : undefined;
           const continues =
             request.includeCalendarBriefing &&
             request.timeWindow &&
             Date.parse(rawStart) < Date.parse(request.timeWindow.timeMin) &&
             Date.parse(rawEnd) >= Date.parse(request.timeWindow.timeMax);
-          const when = allDay
-            ? [datePrefix, 'All day'].filter(Boolean).join(' · ')
-            : continues
-              ? `Ongoing through ${shortDate(rawEnd, request.timeZone)} ${clockEnd}`
-              : intervalRange ||
-                [datePrefix, clockStart ? `${clockStart}${clockEnd ? `–${clockEnd}` : ''}` : '']
-                  .filter(Boolean)
-                  .join(' · ');
+          const when =
+            briefingAllDay ??
+            (allDay
+              ? [datePrefix, 'All day'].filter(Boolean).join(' · ')
+              : continues
+                ? `Ongoing through ${shortDate(rawEnd, request.timeZone)} ${clockEnd}`
+                : intervalRange ||
+                  [datePrefix, clockStart ? `${clockStart}${clockEnd ? `–${clockEnd}` : ''}` : '']
+                    .filter(Boolean)
+                    .join(' · '));
           // A window ending on a different day than it started is the one case
           // the plain clock cannot express on its own.
           const spanNote =
@@ -3639,7 +3699,7 @@ export function verifiedReadResponse(
                   : ''
                 : '';
           lines.push(
-            `- **${when || start || '(no time returned)'}** — ${summary}${spanNote}${dateOnly && request.timeWindow ? ` (${calendarSourceDateLabel(event)})` : ''}${!request.includeCalendarBriefing && location ? ` — ${location}` : ''}${!request.includeCalendarBriefing && attendeeText ? ` — with ${attendeeText}` : ''}${eventLinks ? ` — ${eventLinks}` : ''}${calendar && (manyCalendars || request.includeCalendarBriefing) ? ` (${calendar})` : ''}`,
+            `- **${when || start || '(no time returned)'}** — ${summary}${spanNote}${dateOnly && request.timeWindow && !briefingAllDay ? ` (${calendarSourceDateLabel(event)})` : ''}${!request.includeCalendarBriefing && location ? ` — ${location}` : ''}${!request.includeCalendarBriefing && attendeeText ? ` — with ${attendeeText}` : ''}${eventLinks ? ` — ${eventLinks}` : ''}${calendar && (manyCalendars || request.includeCalendarBriefing) ? ` (${calendar})` : ''}`,
           );
         }
       }

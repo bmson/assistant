@@ -42,11 +42,15 @@ const floating = {
   allDay: true,
   links: link('pay'),
 };
-const evidence = (events: Record<string, unknown>[], complete = true) => [
+const evidence = (
+  events: Record<string, unknown>[],
+  complete = true,
+  readRequest: PersonalReadRequest = request,
+) => [
   {
     toolName: 'calendar.list_events',
     status: 'succeeded',
-    args: request.timeWindow,
+    args: readRequest.timeWindow,
     result: {
       events,
       complete,
@@ -86,11 +90,37 @@ describe('calendar day and practical briefing fidelity', () => {
     });
     expect(calendarWindowMembership(losAngeles, request)).toBe('outside');
     const response = verifiedReadResponse(request, evidence([tokyo]));
-    expect(response).toContain('Fri 16 Oct · All day');
-    expect(response).toContain('source date 2026-10-16 (Asia/Tokyo)');
+    expect(response).toContain(
+      'Thu 15 Oct 8:00 AM–Fri 16 Oct 12:00 AM (source all-day 2026-10-16 (Asia/Tokyo))',
+    );
     expect(response).not.toContain('Thu 15 Oct · All day');
     expect(calendarResponseCards(evidence([losAngeles]), request)).toEqual([]);
     expect(verifiedReadResponse(request, evidence([losAngeles]))).not.toContain('Payday');
+  });
+
+  it('renders UTC and Berlin all-day entries by their local-day intersection and source dates', () => {
+    const utc = {
+      ...floating,
+      eventId: 'utc-day',
+      summary: 'UTC day entry',
+      calendarTimeZone: 'UTC',
+    };
+    const berlin = {
+      ...floating,
+      eventId: 'berlin-day',
+      summary: 'Berlin day entry',
+      calendarTimeZone: 'Europe/Berlin',
+    };
+    const response = verifiedReadResponse(request, evidence([utc, berlin]));
+
+    expect(response).toContain(
+      'Thu 15 Oct 5:00 PM–Fri 16 Oct 12:00 AM (source all-day 2026-10-16 (UTC))',
+    );
+    expect(response).toContain(
+      'Thu 15 Oct 3:00 PM–Fri 16 Oct 12:00 AM (source all-day 2026-10-16 (Europe/Berlin))',
+    );
+    expect(response).not.toContain('Fri 16 Oct · All day');
+    expect(response).toContain('(Personal)');
   });
 
   it('handles exclusive ends and daylight-saving source civil midnight correctly', () => {
@@ -124,7 +154,7 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).not.toContain('Sat, Oct 10');
   });
 
-  it('counts undisplayed overlap pairs independently of the shared attendance caveat', () => {
+  it('names additional overlap pairs without repeating the shared attendance caveat', () => {
     const events = Array.from({ length: 4 }, (_, index) => ({
       ...timed,
       eventId: `event-${index}`,
@@ -132,7 +162,49 @@ describe('calendar day and practical briefing fidelity', () => {
     }));
     const response = verifiedReadResponse(request, evidence(events));
     expect(response.match(/Possible overlap:/g)).toHaveLength(3);
-    expect(response).toContain('3 additional overlapping pairs');
+    expect(response).toContain(
+      'Additional overlapping pairs: **Appointment 1** and **Appointment 2**; **Appointment 1** and **Appointment 3**; **Appointment 2** and **Appointment 3**.',
+    );
+    expect(response).not.toContain('additional overlapping pairs were found');
+    expect(response.match(/do not establish that you must attend both/g)).toHaveLength(1);
+  });
+
+  it('dates events in short windows that cross local midnight', () => {
+    const overnightRequest: PersonalReadRequest = {
+      ...request,
+      timeWindow: {
+        label: 'overnight',
+        timeMin: '2026-10-16T06:00:00Z', // Thu 15 Oct, 23:00 in Los Angeles
+        timeMax: '2026-10-16T08:00:00Z', // Fri 16 Oct, 01:00; exclusive
+      },
+    };
+    const afterMidnight = {
+      ...timed,
+      eventId: 'after-midnight',
+      summary: 'Overnight review',
+      start: '2026-10-16T00:30:00-07:00',
+      end: '2026-10-16T00:45:00-07:00',
+    };
+    const response = verifiedReadResponse(
+      overnightRequest,
+      evidence([afterMidnight], true, overnightRequest),
+    );
+    expect(response).toContain('**Fri 16 Oct · 00:30–00:45** — Overnight review');
+    expect(response).not.toContain('Thu 15 Oct (America/Los_Angeles)');
+  });
+
+  it('bounds additional overlap names for a full 50-event result and reports omissions', () => {
+    const events = Array.from({ length: 50 }, (_, index) => ({
+      ...timed,
+      eventId: `appointment-${index}`,
+      summary: `Appointment ${index}`,
+    }));
+    const response = verifiedReadResponse(request, evidence(events));
+    expect(response.match(/Possible overlap:/g)).toHaveLength(3);
+    expect(response).toContain(
+      'Additional overlapping pairs: **Appointment 0** and **Appointment 4**; **Appointment 0** and **Appointment 5**; **Appointment 0** and **Appointment 6**; 1,219 more not listed.',
+    );
+    expect(response).not.toContain('Appointment 49**');
     expect(response.match(/do not establish that you must attend both/g)).toHaveLength(1);
   });
 
