@@ -825,12 +825,36 @@ function looksLikeDeadlineQuote(quote: string): boolean {
 /** A source cue asks for review; it never supplies a date or creates a deadline. */
 function hasPossibleSourceDeadline(thread: EmailReviewThread): boolean {
   const latest = thread.messages.find((message) => message.messageId === thread.latestMessageId);
-  return Boolean(
-    latest &&
-      /\b(?:early[- ]?bird|offer|discount|registration|applications?|rsvp|response|reply)\b[^.!?\n]{0,160}\b(?:through|until|by|before|due)\s+(?:(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?|\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2})\b/i.test(
-        latest.text,
-      ),
+  if (!latest) return false;
+  const deadlineCue =
+    /\b(?:early[- ]?bird|offer|discount|registration|applications?|rsvp|response|reply)\b[^.!?\n]{0,160}\b(?:through|until|by|before|due)\s+(?:(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?|\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2})\b/i;
+  if (deadlineCue.test(latest.text)) return true;
+
+  const normalizeSubject = (subject: string) =>
+    subject
+      .replace(/^(?:(?:re|fw|fwd):\s*)+/i, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLocaleLowerCase();
+  const latestSubject = normalizeSubject(latest.subject);
+  if (!latestSubject) return false;
+  const topicPattern =
+    /\b(early[- ]?bird|offer|discount|registration|applications?|rsvp|response|reply)\b/gi;
+  const latestTopics = new Set(
+    [...latest.text.matchAll(topicPattern)].map((match) => match[0].toLowerCase()),
   );
+  return thread.messages.some((message) => {
+    if (
+      message.messageId === latest.messageId ||
+      singleEmail(message.from) !== singleEmail(latest.from) ||
+      normalizeSubject(message.subject) !== latestSubject ||
+      !deadlineCue.test(message.text)
+    )
+      return false;
+    return [...message.text.matchAll(topicPattern)].some((match) =>
+      latestTopics.has(match[0].toLowerCase()),
+    );
+  });
 }
 
 /** Direct latest-message asks should receive a review draft, not a false no-reply. */
@@ -856,6 +880,12 @@ function latestMessageNeedsReply(thread: EmailReviewThread): boolean {
       currentBody,
     ) ||
     /\b(?:are you|would you|could you|can you)\s+(?:able|available|willing|interested)\b/i.test(
+      currentBody,
+    ) ||
+    /\b(?:could|would|can) you\b[^.!?\n]{0,120}\b(?:send|share|provide)\b[^.!?\n]{0,80}\b(?:your )?(?:availability|schedule)\b/i.test(
+      currentBody,
+    ) ||
+    /\bplease let me know (?:whether|if) you\b[^.!?\n]{0,100}\b(?:can|could|will|are)\b[^.!?\n]{0,60}\b(?:attend|join|help|volunteer|available)\b/i.test(
       currentBody,
     ) ||
     (/\bare you able to\s*\??/i.test(currentBody) &&
@@ -930,7 +960,7 @@ export function emailReviewValidationIssues(
     )
       issues.push(`item_${index}:literal_explicit_deadline_or_null`);
     if (item.deadline === null && hasPossibleSourceDeadline(thread))
-      issues.push(`item_${index}:possible_deadline_in_latest_message`);
+      issues.push(`item_${index}:possible_relevant_deadline_in_thread`);
     if (item.disposition === 'draft') {
       if (!item.draftBody?.trim()) issues.push(`item_${index}:nonempty_draft`);
       if (item.recipient?.toLowerCase() !== thread.recipient)

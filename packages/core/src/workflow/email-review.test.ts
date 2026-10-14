@@ -559,6 +559,14 @@ describe('bounded no-send email review', () => {
       'quoted-old-ask',
       'Thanks for the update.\n> Are you able to help tomorrow?',
     );
+    const availabilityAsk = makeThread(
+      'availability-ask',
+      'Could you send your availability for next week?',
+    );
+    const attendanceAsk = makeThread(
+      'attendance-ask',
+      'Please let me know whether you can attend.',
+    );
     const noReplyFor = (thread: typeof directRequest) => ({
       items: [
         {
@@ -575,6 +583,10 @@ describe('bounded no-send email review', () => {
     });
 
     expect(validateEmailReviewAnswer(noReplyFor(directRequest), [directRequest])).toBeUndefined();
+    expect(
+      validateEmailReviewAnswer(noReplyFor(availabilityAsk), [availabilityAsk]),
+    ).toBeUndefined();
+    expect(validateEmailReviewAnswer(noReplyFor(attendanceAsk), [attendanceAsk])).toBeUndefined();
     expect(emailReviewValidationIssues(noReplyFor(directRequest), [directRequest])).toContain(
       'item_0:direct_latest_request_requires_review_draft',
     );
@@ -582,6 +594,80 @@ describe('bounded no-send email review', () => {
       validateEmailReviewAnswer(noReplyFor(incidentalMention), [incidentalMention]),
     ).toBeDefined();
     expect(validateEmailReviewAnswer(noReplyFor(quotedOldAsk), [quotedOldAsk])).toBeDefined();
+  });
+
+  it('reviews a linked earlier response deadline but ignores an unrelated older date', () => {
+    const makeThread = (
+      threadId: string,
+      latestSubject: string,
+      latestText: string,
+      earlierSubject: string,
+      earlierText: string,
+    ) => {
+      const sourceMessages = messages(threadId, 'pta@example.org');
+      const earlier = required(sourceMessages[0], 'earlier message');
+      const latest = required(sourceMessages[1], 'latest message');
+      earlier.from = 'pta@example.org';
+      earlier.to = 'owner@example.com';
+      earlier.subject = earlierSubject;
+      earlier.text = earlierText;
+      earlier.sourceLength = earlierText.length;
+      latest.subject = latestSubject;
+      latest.text = latestText;
+      latest.sourceLength = latestText.length;
+      return required(
+        emailReviewCompleteThread(threadId, 'owner@example.com', [
+          search(threadId),
+          read(threadId, sourceMessages),
+        ]),
+        'complete thread',
+      );
+    };
+    const linked = makeThread(
+      'linked-prior-deadline',
+      'Re: PTA meeting RSVP',
+      'Following up on the PTA meeting RSVP. Could you let me know whether you plan to attend?',
+      'PTA meeting RSVP',
+      'Please RSVP by October 18 for the PTA meeting.',
+    );
+    const linkedAssessment = {
+      ...required(validAnswer(linked.threadId).items[0], 'linked assessment'),
+      deadline: null as { messageId: string; quote: string } | null,
+    };
+    linkedAssessment.whyQuote = required(linked.messages.at(-1), 'latest').text;
+    linkedAssessment.recipient = 'pta@example.org';
+    expect(
+      validateEmailReviewAnswer({ items: [linkedAssessment] }, [linked])?.items[0]
+        ?.deadlineNeedsReview,
+    ).toBe(true);
+    expect(emailReviewValidationIssues({ items: [linkedAssessment] }, [linked])).toContain(
+      'item_0:possible_relevant_deadline_in_thread',
+    );
+    linkedAssessment.deadline = {
+      messageId: required(linked.messages[0], 'prior deadline message').messageId,
+      quote: 'RSVP by October 18',
+    };
+    expect(
+      validateEmailReviewAnswer({ items: [linkedAssessment] }, [linked])?.items[0]?.deadlineQuote,
+    ).toBe('RSVP by October 18');
+
+    const unrelated = makeThread(
+      'unrelated-prior-date',
+      'Next week availability',
+      'Could you send your availability for next week?',
+      'PTA meeting RSVP',
+      'Please RSVP by October 18 for the PTA meeting.',
+    );
+    const unrelatedAssessment = {
+      ...required(validAnswer(unrelated.threadId).items[0], 'unrelated assessment'),
+      deadline: null as { messageId: string; quote: string } | null,
+    };
+    unrelatedAssessment.whyQuote = required(unrelated.messages.at(-1), 'latest').text;
+    unrelatedAssessment.recipient = 'pta@example.org';
+    expect(
+      validateEmailReviewAnswer({ items: [unrelatedAssessment] }, [unrelated])?.items[0]
+        ?.deadlineNeedsReview,
+    ).toBeUndefined();
   });
 
   it('bounds repeated invalid assessments and does not weaken exact source validation', async () => {
