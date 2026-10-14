@@ -95,7 +95,7 @@ export function registerGmailTools(registry: ToolRegistry, deps: GmailToolDeps):
       description:
         "Search all mail in the assistant's configured Gmail account with Gmail query syntax (from:, subject:, newer_than:2d, ...). This is the default for owner questions about email; do not ask which provider, inbox, or account to use. It searches all mail unless the query explicitly includes in:inbox.",
       inputSchema: z.object({
-        query: z.string().min(1).max(300),
+        query: z.string().min(1).max(1024),
         maxResults: z.number().int().min(1).max(100).default(10),
         pageToken: z.string().min(1).max(4096).optional(),
       }),

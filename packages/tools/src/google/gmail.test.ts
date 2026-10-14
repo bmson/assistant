@@ -1,3 +1,8 @@
+import {
+  buildReadToolInput,
+  detectPersonalReadRequest,
+  type ReadToolEvidence,
+} from '@assistant/core/workflow/read-intent';
 import { gmailSearchReceiptSourceId } from '@assistant/persistence/gmail-search-identity';
 import { describe, expect, it, vi } from 'vitest';
 import { ToolRegistry } from '../registry.js';
@@ -25,6 +30,50 @@ function context(tainted: boolean): ToolContext {
 }
 
 describe('gmail.search', () => {
+  it.each([
+    'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.',
+    'Find my next trip using my booking emails and calendar. Verify the flight dates, departure times, connections and hotel, then compare public transport and taxi from the arrival airport to the hotel with source links and unresolved details.',
+  ])(
+    'accepts both generated trip search queries and sends them unchanged to Gmail',
+    async (prompt) => {
+      const request = detectPersonalReadRequest([{ role: 'user', content: prompt }]);
+      expect(request?.compoundTripDiscovery).toBe(true);
+      if (!request?.mailQueries) throw new Error('Expected compound trip mail queries');
+      const api = vi.fn().mockResolvedValue({ messages: [], resultSizeEstimate: 0 });
+      const tool = registerGmailTools(new ToolRegistry(), {
+        client: { api } as never,
+        botEmail: 'bot@example.com',
+      }).get('gmail.search')?.tool;
+      if (!tool) throw new Error('Expected Gmail search tool');
+      const flightInput = buildReadToolInput(request, 'gmail.search', []);
+      const first = tool.inputSchema.parse(flightInput) as { query: string; maxResults: number };
+      expect(first.query).toBe(request.mailQueries[0]?.query);
+      expect(first.query.length).toBeLessThanOrEqual(1024);
+      await tool.execute(first, {} as never);
+      const flightEvidence: ReadToolEvidence = {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: first,
+        result: { query: first.query, complete: true, hasMore: false, results: [] },
+      };
+      const lodgingInput = buildReadToolInput(request, 'gmail.search', [flightEvidence]);
+      const second = tool.inputSchema.parse(lodgingInput) as { query: string; maxResults: number };
+      expect(second.query).toBe(request.mailQueries[1]?.query);
+      expect(second.query.length).toBeGreaterThan(300);
+      expect(second.query.length).toBeLessThanOrEqual(1024);
+      await tool.execute(second, {} as never);
+      expect(api).toHaveBeenCalledTimes(2);
+      expect(new URL(api.mock.calls[0]?.[0] as string).searchParams.get('q')).toBe(first.query);
+      expect(new URL(api.mock.calls[1]?.[0] as string).searchParams.get('q')).toBe(second.query);
+      expect(
+        (tool.inputSchema.parse({ query: 'x'.repeat(1024), maxResults: 1 }) as { query: string })
+          .query,
+      ).toHaveLength(1024);
+      expect(() => tool.inputSchema.parse({ query: 'x'.repeat(1025), maxResults: 1 })).toThrow();
+    },
+  );
+
   it('accepts a bounded 100-result metadata page and rejects larger requests', () => {
     const tool = registerGmailTools(new ToolRegistry(), {
       client: { api: vi.fn() } as never,
@@ -77,7 +126,7 @@ describe('gmail.search', () => {
     );
     expect((await read('x'.repeat(256))).receipt.source.id).toBe('x'.repeat(256));
     expect((await read('x'.repeat(257))).receipt.source.id.length).toBeLessThanOrEqual(256);
-    expect(() => tool?.inputSchema.parse({ query: 'x'.repeat(301), maxResults: 1 })).toThrow();
+    expect(() => tool?.inputSchema.parse({ query: 'x'.repeat(1025), maxResults: 1 })).toThrow();
   });
 
   it('searches all mail and marks a capped result set as partial', async () => {
