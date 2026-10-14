@@ -1,3 +1,4 @@
+import { gmailSearchReceiptSourceId } from '@assistant/persistence/gmail-search-identity';
 import { describe, expect, it, vi } from 'vitest';
 import { ToolRegistry } from '../registry.js';
 import type { ToolContext } from '../types.js';
@@ -24,6 +25,46 @@ function context(tainted: boolean): ToolContext {
 }
 
 describe('gmail.search', () => {
+  it('keeps long valid searches and continuation queries intact with bounded stable source IDs', async () => {
+    const api = vi.fn().mockResolvedValue({
+      messages: [],
+      nextPageToken: 'next-page',
+      resultSizeEstimate: 1,
+    });
+    const tool = registerGmailTools(new ToolRegistry(), {
+      client: { api } as never,
+      botEmail: 'bot@example.com',
+    }).get('gmail.search')?.tool;
+    expect(tool).toBeDefined();
+    const query = 'x'.repeat(300);
+    const read = async (value: string, pageToken?: string) =>
+      tool?.execute(
+        tool.inputSchema.parse({ query: value, maxResults: 1, pageToken }),
+        {} as never,
+      ) as Promise<{
+        query: string;
+        receipt: { source: { id: string }; continuation: { input: { query: string } } };
+      }>;
+    const first = await read(query);
+    const second = await read(query, 'next-page');
+    const different = await read(`${'x'.repeat(299)}y`);
+    expect(first.query).toBe(query);
+    expect(first.receipt.source.id).toBe(gmailSearchReceiptSourceId(query));
+    expect(first.receipt.source.id).toMatch(/^query-sha256:[a-f0-9]{64}$/);
+    expect(second.receipt.source.id).toBe(first.receipt.source.id);
+    expect(different.receipt.source.id).not.toBe(first.receipt.source.id);
+    expect(first.receipt.continuation.input.query).toBe(query);
+    expect(second.receipt.continuation.input.query).toBe(query);
+    for (const call of api.mock.calls.slice(0, 2))
+      expect(new URL(call[0] as string).searchParams.get('q')).toBe(query);
+    expect(new URL(api.mock.calls[1]?.[0] as string).searchParams.get('pageToken')).toBe(
+      'next-page',
+    );
+    expect((await read('x'.repeat(256))).receipt.source.id).toBe('x'.repeat(256));
+    expect((await read('x'.repeat(257))).receipt.source.id.length).toBeLessThanOrEqual(256);
+    expect(() => tool?.inputSchema.parse({ query: 'x'.repeat(301), maxResults: 1 })).toThrow();
+  });
+
   it('searches all mail and marks a capped result set as partial', async () => {
     const api = vi.fn(async (url: string) => {
       if (url.includes('/messages?')) {

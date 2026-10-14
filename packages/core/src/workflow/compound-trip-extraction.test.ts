@@ -1,3 +1,4 @@
+import { gmailSearchReceiptSourceId } from '@assistant/persistence/gmail-search-identity';
 import { describe, expect, it, vi } from 'vitest';
 import { extractCompoundTripBookings } from './compound-trip-extraction.js';
 import { compoundTripReadProjection } from './compound-trip-read.js';
@@ -27,6 +28,8 @@ function evidence(
   body = `${flightQuote}\n${hotelQuote}`,
   additionalBodies: string[] = [],
 ): ReadToolEvidence[] {
+  const query = request.mailQuery;
+  if (!query) throw new Error('Expected Gmail query in fixture');
   const messages = [body, ...additionalBodies].map((text, index) => ({
     messageId: index === 0 ? 'booking-message-1' : `booking-message-${index + 1}`,
     subject: 'Your Berlin trip',
@@ -39,16 +42,16 @@ function evidence(
       toolName: 'gmail.search',
       status: 'succeeded',
       fromCurrentTask: true,
-      args: { query: request.mailQuery, maxResults: 10 },
+      args: { query, maxResults: 10 },
       result: {
-        query: request.mailQuery,
+        query,
         complete: true,
         hasMore: false,
         results: [{ threadId: 'trip-thread', subject: 'Your Berlin trip' }],
         unavailable: [],
         receipt: {
           version: 1,
-          source: { kind: 'gmail-search', id: request.mailQuery },
+          source: { kind: 'gmail-search', id: gmailSearchReceiptSourceId(query) },
           requested: { limit: 10, scope: 'query-page' },
           covered: { count: 1, total: 1, unavailable: 0 },
           complete: true,

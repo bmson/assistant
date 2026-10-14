@@ -1,3 +1,4 @@
+import { gmailSearchReceiptSourceId } from '@assistant/persistence/gmail-search-identity';
 import { describe, expect, it } from 'vitest';
 import {
   compoundTripFetchTargets,
@@ -48,10 +49,11 @@ function row(
       result: {
         ...result,
         query,
+        continuation,
         unavailable,
         receipt: result.receipt ?? {
           version: 1,
-          source: { kind: 'gmail-search', id: query },
+          source: { kind: 'gmail-search', id: gmailSearchReceiptSourceId(query) },
           requested: {
             limit: maxResults,
             ...(typeof args.pageToken === 'string' ? { cursor: args.pageToken } : {}),
@@ -1485,6 +1487,86 @@ describe('compound trip read projection', () => {
     };
     const projection = compoundTripReadProjection(read, [completeCalendarEvents([]), first]);
     expect(projection.gmailSearchComplete).toBe(false);
+  });
+
+  it('accepts a long-query receipt digest across every page and rejects a digest for another query', () => {
+    const detected = request();
+    const flightQuery = `${'flight '.repeat(42)}flight`;
+    expect(flightQuery).toHaveLength(300);
+    const read = {
+      ...detected,
+      mailQuery: flightQuery,
+      mailQueries: [
+        { category: 'flight' as const, query: flightQuery },
+        ...(detected.mailQueries ?? []).filter((entry) => entry.category === 'lodging'),
+      ],
+    };
+    const firstPage = row(
+      'gmail.search',
+      { query: flightQuery, maxResults: 10 },
+      {
+        results: [{ threadId: 'long-query-flight-thread', subject: 'Flight confirmation' }],
+        complete: false,
+        hasMore: true,
+        nextPageToken: 'long-query-page-2',
+      },
+    );
+    const secondPage = row(
+      'gmail.search',
+      { query: flightQuery, maxResults: 10, pageToken: 'long-query-page-2' },
+      { results: [], complete: true, hasMore: false },
+    );
+    const lodgingQuery = read.mailQueries.find((entry) => entry.category === 'lodging')?.query;
+    if (!lodgingQuery) throw new Error('Expected a lodging query');
+    const lodgingPage = row(
+      'gmail.search',
+      { query: lodgingQuery, maxResults: 10 },
+      { results: [], complete: true, hasMore: false },
+    );
+    const thread = row(
+      'gmail.read_thread',
+      { threadId: 'long-query-flight-thread' },
+      {
+        complete: true,
+        messages: [
+          {
+            messageId: 'long-query-flight-message',
+            subject: 'Lufthansa booking confirmation',
+            text: 'Outbound\nFlight number: LH777\nDeparture date: 2026-10-17\nDeparture time: 10:10 Europe/Berlin\nArrival date: 2026-10-17\nArrival time: 13:10 Europe/Berlin\nFrom: SFO\nTo: BER\nBooking reference: FLIGHT-728',
+          },
+        ],
+      },
+    );
+    const evidence = [
+      completeCalendarEvents([calendarFlight()], read),
+      firstPage,
+      secondPage,
+      lodgingPage,
+      thread,
+    ];
+
+    const projection = compoundTripReadProjection(read, evidence);
+    expect(projection.gmailSearchComplete).toBe(true);
+    expect(projection.threadsComplete).toBe(true);
+    expect(projection.flightSegments[0]?.threadId).toBe('long-query-flight-thread');
+    expect(projection.flightSegments[0]?.flightNumber).toBe('LH777');
+
+    const mismatchedPage = structuredClone(secondPage);
+    const receipt = (mismatchedPage.result as Record<string, unknown>).receipt as Record<
+      string,
+      unknown
+    >;
+    (receipt.source as Record<string, unknown>).id = gmailSearchReceiptSourceId(
+      `${flightQuery} changed`,
+    );
+    const mismatched = compoundTripReadProjection(read, [
+      completeCalendarEvents([calendarFlight()], read),
+      firstPage,
+      mismatchedPage,
+      lodgingPage,
+      thread,
+    ]);
+    expect(mismatched.gmailSearchComplete).toBe(false);
   });
 
   it('keeps flight and lodging search coverage independent and incomplete when either category has more pages', () => {

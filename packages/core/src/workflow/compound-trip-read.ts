@@ -1,3 +1,4 @@
+import { gmailSearchReceiptSourceId } from '@assistant/persistence/gmail-search-identity';
 import type { CompoundTripExtraction, CompoundTripHotelFact } from './compound-trip-extraction.js';
 import type { PersonalReadRequest, ReadToolEvidence } from './read-intent.js';
 
@@ -210,7 +211,7 @@ function validSearchPage(row: ReadToolEvidence, query: string): boolean {
     typeof result.hasMore !== 'boolean' ||
     receipt.version !== 1 ||
     object(receipt.source)?.kind !== 'gmail-search' ||
-    object(receipt.source)?.id !== query ||
+    object(receipt.source)?.id !== gmailSearchReceiptSourceId(query) ||
     requested.scope !== 'query-page' ||
     requested.limit !== args.maxResults ||
     requested.cursor !== args.pageToken ||

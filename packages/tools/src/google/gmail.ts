@@ -1,4 +1,5 @@
 import { makeCommunicationReceipt } from '@assistant/core';
+import { gmailSearchReceiptSourceId } from '@assistant/persistence/gmail-search-identity';
 import { z } from 'zod';
 import { markdownToEmailHtml, markdownToPlainText } from '../markdown-email.js';
 import { toolOperationKey } from '../operation-identity.js';
@@ -164,7 +165,10 @@ export function registerGmailTools(registry: ToolRegistry, deps: GmailToolDeps):
           unavailable,
           receipt: sourceReadReceipt({
             version: 1,
-            source: { kind: 'gmail-search', id: args.query },
+            source: {
+              kind: 'gmail-search',
+              id: gmailSearchReceiptSourceId(args.query),
+            },
             requested: { limit: args.maxResults, cursor: args.pageToken, scope: 'query-page' },
             covered: {
               count: results.length,

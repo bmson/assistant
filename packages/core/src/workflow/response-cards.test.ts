@@ -26,6 +26,7 @@ describe('response cards', () => {
   it.each([
     'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.',
     'Review my calendar for next week and identify scheduling conflicts and overloaded days. Find three realistic 90-minute focus blocks during working hours, allowing time for travel and breaks. Recommend changes, but show me the plan before editing my calendar.',
+    'For my calendar, over the next 3 weekdays, how many days have an event lasting at least 45 minutes? Also find gaps of at least 30 minutes between events explicitly marked in person.',
     'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.',
   ])(
     'keeps a checked review concise instead of appending its raw source reads: %s',
@@ -81,6 +82,7 @@ describe('response cards', () => {
         Boolean(
           readRequest?.emailReview ||
             readRequest?.weeklyCalendarPlan ||
+            readRequest?.calendarEventAnalysis ||
             readRequest?.compoundTripDiscovery,
         ),
       ).toBe(true);
