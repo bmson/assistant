@@ -60,7 +60,9 @@ describe('owner-turn memory retention', () => {
     expect(ownerTurnRequestsEphemeralMemory('Do not invent details or send anything.')).toBe(false);
     expect(ownerTurnRequestsEphemeralMemory('Remember that I prefer concise notes.')).toBe(false);
     expect(ownerTurnRequestsEphemeralMemory('Do not forget to remember the deadline.')).toBe(false);
-    expect(ownerTurnRequestsEphemeralMemory('The document says don’t remember this story.')).toBe(false);
+    expect(ownerTurnRequestsEphemeralMemory('The document says don’t remember this story.')).toBe(
+      false,
+    );
   });
 
   it('recognizes only a bounded explicit follow-up to fictional context', () => {
