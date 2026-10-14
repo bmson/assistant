@@ -1377,6 +1377,90 @@ describe('detectPersonalReadRequest', () => {
     ]);
   });
 
+  it('reads a forwarded flight itinerary ahead of hotel confirmations in a next-flight lookup', () => {
+    const request = detectPersonalReadRequest(
+      turn('Find my next flight from booking emails and calendar.'),
+      {
+        now: new Date('2026-10-13T18:00:00Z'),
+        timeZone: 'America/Los_Angeles',
+      },
+    );
+    if (!request?.upcomingFlightDiscovery) throw new Error('Expected next-flight discovery');
+    const evidence: ReadToolEvidence[] = [
+      {
+        toolName: 'gmail.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: request.mailQuery },
+        result: {
+          results: [
+            {
+              threadId: 'hotel-a',
+              subject: 'Hotel reservation confirmation',
+              snippet: 'Booking details',
+            },
+            {
+              threadId: 'hotel-b',
+              subject: 'Hotel reservation confirmation',
+              snippet: 'Booking details',
+            },
+            {
+              threadId: 'flight-booked',
+              subject: 'Flight booked for your journey',
+              snippet: 'Your departure details',
+            },
+            {
+              threadId: 'flight-route',
+              subject: 'Fwd: Flight - Example City to Sample Traveler',
+              snippet: 'Journey details',
+            },
+          ],
+          complete: true,
+          hasMore: false,
+        },
+      },
+    ];
+    expect(gmailThreadIdsToRead(evidence, request)).toEqual(['flight-route', 'flight-booked']);
+    expect(nextRequiredReadTool(request, evidence)).toBe('calendar.list_events');
+  });
+
+  it('keeps structured flight itineraries and lodging reads distinct in compound discovery', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Find my next trip from booking emails and calendar, confirm flights and hotel, and compare public transport and taxi to my hotel.',
+      ),
+    );
+    if (!request?.compoundTripDiscovery || !request.mailQueries)
+      throw new Error('Expected compound discovery');
+    const evidence: ReadToolEvidence[] = request.mailQueries.map(({ query, category }) => ({
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { query },
+      result: {
+        results:
+          category === 'flight'
+            ? [
+                { threadId: 'news', subject: 'Flight routes newsletter' },
+                {
+                  threadId: 'itinerary',
+                  subject: 'Re: Fwd: Flight - Example City to Sample Traveler',
+                },
+              ]
+            : [{ threadId: 'hotel', subject: 'Hotel reservation confirmation' }],
+        complete: true,
+        hasMore: false,
+      },
+    }));
+    expect(gmailThreadIdsToRead(evidence, request)).toEqual(['itinerary', 'hotel']);
+    expect(
+      gmailThreadIdsToRead(
+        evidence.map((row) => ({ ...row, fromCurrentTask: false })),
+        request,
+      ),
+    ).toEqual([]);
+  });
+
   it('prioritizes a lodging confirmation for the owner-requested trip over generic and stale stays', () => {
     const request = detectPersonalReadRequest(
       turn('Where are we staying in Berlin next weekend?'),

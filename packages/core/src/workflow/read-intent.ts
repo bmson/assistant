@@ -2304,6 +2304,11 @@ function matchingPrivateRead(row: ReadToolEvidence, request: PersonalReadRequest
   return queryIncludes(argsRecord(row)?.query, request.queryTerms);
 }
 
+/** Search metadata prioritizes reads; it never verifies a booking or its fields. */
+function flightItinerarySubject(subject: string): boolean {
+  return /^(?:(?:fw|fwd|re)\s*:\s*)*flight\s*[-–—:]/i.test(subject.trim());
+}
+
 export function gmailSearchThreadIds(
   evidence: ReadonlyArray<ReadToolEvidence>,
   request?: PersonalReadRequest,
@@ -2380,7 +2385,12 @@ export function gmailSearchThreadIds(
         return {
           threadId,
           index,
-          score: item?.categories.has('flight') && flight && booking ? 1 : 0,
+          score:
+            item?.categories.has('flight') &&
+            flight &&
+            (booking || flightItinerarySubject(item?.subject ?? ''))
+              ? 1
+              : 0,
         };
       })
       .filter((item) => item.score > 0)
@@ -2451,7 +2461,10 @@ export function gmailSearchThreadIds(
                 )
                   ? 2
                   : 0) +
-                (/\b(?:booking|confirmation|itinerary|ticket|reservation|boarding pass|departure)\b/i.test(
+                (/\b(?:booked|reserved)\b/i.test(subject) ? 2 : 0) +
+                (/\b(?:flight|airline)\b/i.test(subject) ? 2 : 0) +
+                (flightItinerarySubject(subject) ? 4 : 0) +
+                (/\b(?:booking|booked|reserved|confirmation|itinerary|ticket|reservation|boarding pass|departure)\b/i.test(
                   snippet,
                 )
                   ? 1
