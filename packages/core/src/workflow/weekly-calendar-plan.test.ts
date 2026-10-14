@@ -12,6 +12,7 @@ function evidence(
     busy?: unknown[];
     availabilityComplete?: boolean;
     unavailable?: unknown[];
+    calendarsChecked?: string[];
     pages?: Array<Record<string, unknown>>;
   } = {},
 ) {
@@ -24,7 +25,7 @@ function evidence(
         busy: options.busy ?? [],
         complete: options.availabilityComplete ?? true,
         unavailable: options.unavailable ?? [],
-        calendarsChecked: ['Work', 'Personal'],
+        calendarsChecked: options.calendarsChecked ?? ['Work', 'Personal'],
       },
     },
     ...(options.pages ?? [
@@ -559,6 +560,165 @@ describe('weeklyCalendarPlan', () => {
     expect(text).not.toContain('Scheduling conflict: Hotel stay');
   });
 
+  it('blocks focus on the source-local date of a blocking all-day event without calling it a timed overlap', () => {
+    const start = '2026-10-13T07:00:00.000Z';
+    const end = '2026-10-14T07:00:00.000Z';
+    const event = {
+      eventId: 'conference-day',
+      calendar: 'Work',
+      calendarId: 'work-calendar',
+      summary: 'Conference day',
+      start: '2026-10-13',
+      end: '2026-10-14',
+      calendarTimeZone: 'America/Los_Angeles',
+      allDay: true,
+      ownerResponse: 'accepted',
+      blocksTime: true,
+    };
+    const result = weeklyCalendarPlanResult({
+      timeMin: start,
+      timeMax: end,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        timeMin: start,
+        timeMax: end,
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin: start, timeMax: end },
+            result: {
+              events: [event],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+      plan: {
+        focusMinutes: 60,
+        slotCount: 1,
+        breakMinutes: 15,
+        meetingBufferMinutes: 15,
+        workingDays: 1,
+        windowLabel: 'Tuesday',
+      },
+    });
+
+    expect(result.slotCount).toBe(0);
+    expect(result.text).toContain('Conference day');
+    expect(result.text).toContain('No 60-minute focus block plus its 15-minute break fit');
+    expect(result.text).not.toContain('Possible overlap: Conference day');
+    expect(result.text).not.toContain('Scheduling conflict: Conference day');
+  });
+
+  it('does not block focus for a source-zoned all-day lodging stay when provider busy is explained', () => {
+    const start = '2026-10-13T07:00:00.000Z';
+    const end = '2026-10-14T07:00:00.000Z';
+    const stay = {
+      eventId: 'all-day-stay',
+      calendar: 'Travel',
+      calendarId: 'travel-calendar',
+      summary: 'Hotel stay in Berlin',
+      description: 'Hotel reservation. Check-in October 12. Check-out October 16.',
+      start: '2026-10-12',
+      end: '2026-10-16',
+      calendarTimeZone: 'America/Los_Angeles',
+      allDay: true,
+      ownerResponse: 'accepted',
+      blocksTime: true,
+    };
+    const result = weeklyCalendarPlanResult({
+      timeMin: start,
+      timeMax: end,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        timeMin: start,
+        timeMax: end,
+        busy: [{ start, end, calendar: 'Travel' }],
+        calendarsChecked: ['Travel'],
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin: start, timeMax: end },
+            result: {
+              events: [stay],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+      plan: {
+        focusMinutes: 60,
+        slotCount: 1,
+        breakMinutes: 15,
+        meetingBufferMinutes: 15,
+        workingDays: 1,
+        windowLabel: 'Tuesday',
+      },
+    });
+
+    expect(result.slotCount).toBe(1);
+    expect(result.text).toContain(
+      'Conditional on treating Hotel stay in Berlin as lodging context; free/busy still reports busy.',
+    );
+    expect(result.text).not.toContain('Possible overlap: Hotel stay');
+  });
+
+  it('does not block focus for a nonblocking all-day reminder', () => {
+    const start = '2026-10-13T07:00:00.000Z';
+    const end = '2026-10-14T07:00:00.000Z';
+    const reminder = {
+      eventId: 'all-day-payday',
+      calendar: 'Personal',
+      calendarId: 'personal-calendar',
+      summary: 'Payday reminder',
+      start: '2026-10-13',
+      end: '2026-10-14',
+      calendarTimeZone: 'America/Los_Angeles',
+      allDay: true,
+      blocksTime: false,
+    };
+    const result = weeklyCalendarPlanResult({
+      timeMin: start,
+      timeMax: end,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        timeMin: start,
+        timeMax: end,
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin: start, timeMax: end },
+            result: {
+              events: [reminder],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+      plan: {
+        focusMinutes: 60,
+        slotCount: 1,
+        breakMinutes: 15,
+        meetingBufferMinutes: 15,
+        workingDays: 1,
+        windowLabel: 'Tuesday',
+      },
+    });
+
+    expect(result.slotCount).toBe(1);
+    expect(result.text).toContain('- Tue, Oct 13, 9:00 AM');
+    expect(result.text).not.toContain('Possible overlap: Payday reminder');
+  });
+
   it('keeps a title-only multi-day hotel event in overlap review', () => {
     const rows = evidence({
       pages: [
@@ -799,11 +959,15 @@ describe('weeklyCalendarPlan', () => {
       description: 'unknown source time zone',
       calendarTimeZone: undefined,
       busyCalendar: 'Travel',
+      blocksTime: true,
+      coverageComplete: false,
     },
     {
       description: 'different busy calendar',
       calendarTimeZone: 'Europe/Berlin',
       busyCalendar: 'Personal',
+      blocksTime: false,
+      coverageComplete: true,
     },
   ])('does not attribute an all-day busy block to an event with $description', (scenario) => {
     const result = weeklyCalendarPlanResult({
@@ -835,7 +999,7 @@ describe('weeklyCalendarPlan', () => {
                   ...(scenario.calendarTimeZone
                     ? { calendarTimeZone: scenario.calendarTimeZone }
                     : {}),
-                  blocksTime: true,
+                  blocksTime: scenario.blocksTime,
                 },
               ],
               complete: true,
@@ -847,7 +1011,7 @@ describe('weeklyCalendarPlan', () => {
       }) as never,
     });
 
-    expect(result).toMatchObject({ coverageComplete: true, slotCount: 0 });
+    expect(result).toMatchObject({ coverageComplete: scenario.coverageComplete, slotCount: 0 });
     expect(result.text).not.toContain('Checked events overlapping possible focus windows include');
     expect(result.text).toContain('I found 0 of 3 requested focus blocks');
   });
@@ -1404,7 +1568,7 @@ describe('requested focus-plan variations', () => {
               'Útborgun',
               '2026-10-16',
               '2026-10-17',
-              { allDay: true },
+              { allDay: true, calendarTimeZone: 'UTC', blocksTime: false },
             ),
             event(
               'paycheck-family',

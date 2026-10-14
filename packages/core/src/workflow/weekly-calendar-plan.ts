@@ -166,13 +166,7 @@ function isExtendedContext(interval: { start: number; end: number }): boolean {
   return interval.end - interval.start >= 18 * 60 * 60_000;
 }
 
-function isExtendedLodging(event: PlainRecord, interval: { start: number; end: number }): boolean {
-  if (!isExtendedContext(interval)) return false;
-  const start = typeof event.start === 'string' ? event.start : '';
-  const end = typeof event.end === 'string' ? event.end : '';
-  const explicitInstant = (value: string) =>
-    /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) && dateMs(value) !== undefined;
-  if (!explicitInstant(start) || !explicitInstant(end)) return false;
+function hasExplicitLodgingDetails(event: PlainRecord): boolean {
   const metadata = record(event.sourceMetadata);
   const source = record(event.source);
   const details = [
@@ -194,9 +188,26 @@ function isExtendedLodging(event: PlainRecord, interval: { start: number; end: n
     /\b(?:hotel|lodging|accommodation|hostel|resort|airbnb)\s+(?:reservation|booking|stay)\b/i.test(
       details,
     ) || /\b(?:overnight|multi[- ]night)\s+(?:hotel\s+)?stay\b/i.test(details);
-  const explicitCheckInAndOut =
-    /\bcheck[ -]?in\b/i.test(details) && /\bcheck[ -]?out\b/i.test(details);
-  return explicitStayOrReservation && explicitCheckInAndOut;
+  return (
+    explicitStayOrReservation &&
+    /\bcheck[ -]?in\b/i.test(details) &&
+    /\bcheck[ -]?out\b/i.test(details)
+  );
+}
+
+function isExtendedLodging(event: PlainRecord, interval: { start: number; end: number }): boolean {
+  if (!isExtendedContext(interval)) return false;
+  const start = typeof event.start === 'string' ? event.start : '';
+  const end = typeof event.end === 'string' ? event.end : '';
+  const explicitInstant = (value: string) =>
+    /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) && dateMs(value) !== undefined;
+  return explicitInstant(start) && explicitInstant(end) && hasExplicitLodgingDetails(event);
+}
+
+function isExtendedAllDayLodging(event: PlainRecord): boolean {
+  if (event.allDay !== true || !hasExplicitLodgingDetails(event)) return false;
+  const interval = calendarSourceInterval(event);
+  return interval !== undefined && isExtendedContext(interval);
 }
 
 /**
@@ -234,13 +245,14 @@ function lodgingExplanationForBusy(
   if (calendarIdentities.size !== 1) return undefined;
 
   const lodging = calendarEvents.filter((event) => {
-    const interval = parseEventInterval(event);
+    const interval =
+      event.allDay === true ? calendarSourceInterval(event) : parseEventInterval(event);
     return (
       interval !== undefined &&
       attendance(event) !== 'not-attending' &&
       interval.start <= busy.start &&
       interval.end >= busy.end &&
-      isExtendedLodging(event, interval)
+      (event.allDay === true ? isExtendedAllDayLodging(event) : isExtendedLodging(event, interval))
     );
   });
   if (lodging.length === 0) return undefined;
@@ -422,6 +434,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const allPages = eventRows.slice(0, MAX_EVENT_PAGES);
   const events: PlainRecord[] = [];
   let eventRowsValid = allPages.length > 0;
+  let unresolvedAllDayBlockingEvent = false;
   for (const row of allPages) {
     const result = resultOf(row);
     if (!Array.isArray(result?.events)) {
@@ -430,8 +443,19 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     }
     for (const value of result.events) {
       const event = record(value);
-      if (!event || !parseEventInterval(event)) eventRowsValid = false;
-      else events.push(event);
+      if (!event || !parseEventInterval(event)) {
+        eventRowsValid = false;
+        continue;
+      }
+      if (
+        event.allDay === true &&
+        attendance(event) !== 'not-attending' &&
+        !calendarSourceInterval(event)
+      ) {
+        eventRowsValid = false;
+        unresolvedAllDayBlockingEvent = true;
+      }
+      events.push(event);
     }
   }
 
@@ -529,28 +553,25 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     if (lodging) explainedLodgingBusy.set(interval, lodging);
   }
   const candidateBusy = busy.filter((interval) => !explainedLodgingBusy.has(interval));
-  const busyMerged = mergeIntervals([...candidateBusy, ...eventBusy]);
   const allDayBusySources = uniqueEvents.flatMap((event) => {
-    if (event.allDay !== true || attendance(event) === 'not-attending') return [];
-    const eventInterval = calendarSourceInterval(event);
-    if (!eventInterval) return [];
-    const calendarIds = [event.calendar, event.calendarId].filter(
-      (value): value is string => typeof value === 'string' && value.length > 0,
-    );
-    if (calendarIds.length === 0) return [];
-    return busy
-      .filter(
-        (interval) =>
-          Boolean(interval.calendar) &&
-          calendarIds.includes(interval.calendar as string) &&
-          overlap(interval, eventInterval),
-      )
-      .flatMap((interval) => {
-        const start = Math.max(interval.start, eventInterval.start);
-        const end = Math.min(interval.end, eventInterval.end);
-        return end > start ? [{ event, interval: { start, end } }] : [];
-      });
+    if (
+      event.allDay !== true ||
+      attendance(event) === 'not-attending' ||
+      isExtendedAllDayLodging(event)
+    )
+      return [];
+    const interval = calendarSourceInterval(event);
+    // Only attribute a focus block to an all-day event when its source-local
+    // date can be resolved. An unresolved blocking row still closes focus
+    // windows conservatively below, but must not be presented as a proven
+    // overlap on a guessed date.
+    if (!interval) return [];
+    const bounded = { start: Math.max(start, interval.start), end: Math.min(end, interval.end) };
+    return bounded.end > bounded.start ? [{ event, interval: bounded }] : [];
   });
+  const allDayEventBusy = allDayBusySources.map(({ interval }) => interval);
+  if (unresolvedAllDayBlockingEvent) allDayEventBusy.push({ start, end });
+  const busyMerged = mergeIntervals([...candidateBusy, ...eventBusy, ...allDayEventBusy]);
   const potentialFocusIntervals: Array<{ start: number; end: number }> = [];
 
   const dayStats = new Map<
