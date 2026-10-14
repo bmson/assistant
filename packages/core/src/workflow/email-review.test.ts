@@ -426,7 +426,7 @@ describe('bounded no-send email review', () => {
     const sourceMessages = messages('donation-deadline');
     const latest = required(sourceMessages.at(-1), 'latest message');
     latest.text =
-      'Please let us know whether to collect the clothes; unclaimed clothes will be donated Oct 23.';
+      'Please let us know whether to collect the clothes; unclaimed clothes will be donated NEXT FRIDAY, 10/23.';
     latest.sourceLength = latest.text.length;
     const evidence = [search('donation-deadline'), read('donation-deadline', sourceMessages)];
     const thread = required(
@@ -437,15 +437,116 @@ describe('bounded no-send email review', () => {
     assessment.whyQuote = 'Please let us know whether to collect the clothes';
     assessment.deadline = {
       messageId: thread.latestMessageId,
-      quote: 'unclaimed clothes will be donated Oct 23',
+      quote: 'NEXT FRIDAY, 10/23',
     };
 
     expect(validateEmailReviewAnswer({ items: [assessment] }, [thread])?.items[0]).toMatchObject({
-      deadlineQuote: 'unclaimed clothes will be donated Oct 23',
+      deadlineQuote: 'NEXT FRIDAY, 10/23',
     });
     expect(
       emailReviewValidationIssues({ items: [{ ...assessment, deadline: null }] }, [thread]),
     ).toContain('item_0:possible_relevant_deadline_in_thread');
+  });
+
+  it('requires a review draft for a direct volunteer ask without promising availability', async () => {
+    const sourceMessages = messages('volunteer-ask');
+    const latest = required(sourceMessages.at(-1), 'latest message');
+    latest.text =
+      "Hey y'all - nobody has signed up for tomorrow. Are you able to? Thanks! Volunteer now!";
+    latest.sourceLength = latest.text.length;
+    const thread = required(
+      emailReviewCompleteThread('volunteer-ask', 'owner@example.com', [
+        search('volunteer-ask'),
+        read('volunteer-ask', sourceMessages),
+      ]),
+      'complete volunteer thread',
+    );
+    const base = required(validAnswer(thread.threadId).items[0], 'draft assessment');
+    const noReply = {
+      ...base,
+      disposition: 'no_reply' as const,
+      recipient: null,
+      deadline: null,
+      draftBody: null,
+      draftSourceMessageIds: [],
+      whyQuote: 'Are you able to?',
+    };
+    expect(emailReviewValidationIssues({ items: [noReply] }, [thread])).toContain(
+      'item_0:direct_latest_request_requires_review_draft',
+    );
+
+    const groundedDraft = {
+      ...base,
+      whyQuote: 'nobody has signed up for tomorrow. Are you able to?',
+      deadline: { messageId: thread.latestMessageId, quote: 'tomorrow' },
+      draftBody: 'Thanks for the reminder. I appreciate you checking with me.',
+    };
+    expect(validateEmailReviewAnswer({ items: [groundedDraft] }, [thread])?.items[0]).toMatchObject(
+      { disposition: 'draft', draftBody: groundedDraft.draftBody },
+    );
+    expect(
+      emailReviewValidationIssues(
+        { items: [{ ...groundedDraft, draftBody: 'I can volunteer tomorrow.' }] },
+        [thread],
+      ),
+    ).toContain('item_0:no_unsupplied_facts_or_owner_commitments');
+
+    const answeredMessages = [
+      ...messages('already-answered'),
+      {
+        messageId: 'owner-reply-already-sent',
+        from: 'owner@example.com',
+        to: 'vendor@example.net',
+        date: '2026-10-12T17:00:00Z',
+        subject: 'Re: volunteer request',
+        text: 'Thanks for asking.',
+        sourceLength: 'Thanks for asking.'.length,
+        truncated: false,
+      },
+    ];
+    expect(
+      emailReviewThreadReadResult('already-answered', 'owner@example.com', [
+        search('already-answered'),
+        read('already-answered', answeredMessages),
+      ]),
+    ).toMatchObject({ kind: 'already_answered' });
+
+    const repaired = await generateValidatedEmailReview([thread], async () => ({
+      ok: true,
+      value: { items: [noReply] },
+    }));
+    expect(repaired.answer?.items[0]).toMatchObject({
+      disposition: 'draft',
+      deadlineQuote: 'tomorrow',
+      draftBody:
+        'Thanks for checking about the volunteer need tomorrow. I appreciate the reminder.',
+    });
+    expect(repaired.issues).toEqual([]);
+  });
+
+  it('does not turn a bare event date into a deadline', () => {
+    const sourceMessages = messages('event-date');
+    const latest = required(sourceMessages.at(-1), 'latest message');
+    latest.text = 'The meeting will be held on October 23.';
+    latest.sourceLength = latest.text.length;
+    const thread = required(
+      emailReviewCompleteThread('event-date', 'owner@example.com', [
+        search('event-date'),
+        read('event-date', sourceMessages),
+      ]),
+      'complete event thread',
+    );
+    const assessment = required(validAnswer(thread.threadId).items[0], 'assessment');
+    assessment.whyQuote = latest.text;
+    assessment.deadline = { messageId: thread.latestMessageId, quote: 'October 23' };
+
+    expect(validateEmailReviewAnswer({ items: [assessment] }, [thread])?.items[0]).toMatchObject({
+      deadlineNeedsReview: true,
+      unverifiedDeadlineQuote: 'October 23',
+    });
+    expect(emailReviewValidationIssues({ items: [assessment] }, [thread])).toContain(
+      'item_0:literal_explicit_deadline_or_null',
+    );
   });
 
   it('counts completed source assessments separately from complete thread reads', () => {
@@ -1072,6 +1173,20 @@ describe('bounded no-send email review', () => {
     expect(context.candidateIds.length).toBeLessThanOrEqual(EMAIL_REVIEW_MAX_RANK_CANDIDATES);
   });
 
+  it('keeps a normal 106-thread search inside the compact rank context', () => {
+    const evidence = Array.from({ length: 106 }, (_, index) => {
+      const row = search(`request-${String(index).padStart(3, '0')}`);
+      const result = row.result.results as Array<Record<string, unknown>>;
+      required(result[0], 'rank candidate').date =
+        `2026-10-${String(13 - Math.floor(index / 24)).padStart(2, '0')}T12:00:00Z`;
+      return row;
+    });
+    const context = emailReviewRankContext(evidence);
+    expect(context.prompt.length).toBeLessThanOrEqual(40_000);
+    expect(context.candidateIds).toHaveLength(106);
+    expect(JSON.parse(context.prompt).additionalMetadataCandidates).toBe(0);
+  });
+
   it('falls back only to recent non-newsletter IDs in the supplied candidate set', () => {
     const old = search('request-old');
     const recent = search('request-new');
@@ -1087,6 +1202,27 @@ describe('bounded no-send email review', () => {
       'request-new',
       'request-old',
     ]);
+  });
+
+  it('prioritizes explicit request cues before newer informational metadata in fallback', () => {
+    const request = search('direct-request');
+    const requestResult = request.result.results as Array<Record<string, unknown>>;
+    required(requestResult[0], 'request metadata').date = '2026-10-08T08:00:00Z';
+    required(requestResult[0], 'request metadata').snippet =
+      'Nobody has signed up. Are you able to?';
+    const informational = search('newer-information');
+    const informationalResult = informational.result.results as Array<Record<string, unknown>>;
+    required(informationalResult[0], 'informational metadata').date = '2026-10-12T08:00:00Z';
+    required(informationalResult[0], 'informational metadata').subject = 'Maintenance alert';
+    required(informationalResult[0], 'informational metadata').snippet =
+      'Your current mileage indicates maintenance is due.';
+
+    expect(
+      emailReviewRecentMetadataFallback(
+        [informational, request],
+        ['newer-information', 'direct-request'],
+      ),
+    ).toEqual(['direct-request', 'newer-information']);
   });
 
   it('reads only ranked threads and allows at most two exact continuation pages', () => {
