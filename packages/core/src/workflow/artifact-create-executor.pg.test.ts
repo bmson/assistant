@@ -21,6 +21,20 @@ describe('new artifact request action boundaries in the real executor', () => {
     const title = 'QA — Assistant briefing test — 2026-10-13';
     const content =
       '# Project Aurora\n\n- Budget €240\n- Deadline Friday\n- No taxi travel\n\n| Task | Owner |\n|---|---|\n| Research | Alex |\n| Review | Sam |';
+    const structure = {
+      complete: true,
+      headings: [{ text: 'Project Aurora', style: 'HEADING_1' }],
+      bullets: ['Budget €240', 'Deadline Friday', 'No taxi travel'],
+      tables: [
+        {
+          rows: [
+            ['Task', 'Owner'],
+            ['Research', 'Alex'],
+            ['Review', 'Sam'],
+          ],
+        },
+      ],
+    };
     const url = 'https://docs.google.com/document/d/DocumentQA12345/edit';
     const result = await runGoldenTask(db, agentId, {
       name: 'qa-new-doc-with-no-existing-edit',
@@ -28,7 +42,6 @@ describe('new artifact request action boundaries in the real executor', () => {
       taskType: 'adhoc',
       script: [
         { toolCalls: [{ toolName: 'docs.create', input: { title, content } }] },
-        { toolCalls: [{ toolName: 'docs.get', input: { documentId: 'DocumentQA12345' } }] },
         {
           text: `Created the document and read it back to check the heading, three bullets, and Task/Owner table. [Open document](${url})`,
         },
@@ -38,14 +51,29 @@ describe('new artifact request action boundaries in the real executor', () => {
           schema: z.object({ title: z.string(), content: z.string() }),
           execute: async (args) => {
             expect(args).toEqual({ title, content });
-            return { documentId: 'DocumentQA12345', url, title };
+            return { documentId: 'DocumentQA12345', url, title, contentStructure: structure };
           },
         },
         'docs.get': {
-          schema: z.object({ documentId: z.string() }),
+          schema: z.object({
+            documentId: z.string(),
+            startOffset: z.number(),
+            maxChars: z.number(),
+          }),
           execute: async (args) => {
-            expect(args).toEqual({ documentId: 'DocumentQA12345' });
-            return { documentId: 'DocumentQA12345', title, content, url };
+            expect(args).toEqual({
+              documentId: 'DocumentQA12345',
+              startOffset: 0,
+              maxChars: 50_000,
+            });
+            return {
+              documentId: 'DocumentQA12345',
+              title,
+              text: content,
+              url,
+              complete: true,
+              structure,
+            };
           },
         },
       },
@@ -54,6 +82,8 @@ describe('new artifact request action boundaries in the real executor', () => {
     expect(result.objectRoles).not.toContain('plan');
     expect(result.finalText).toContain(url);
     expect(result.finalText).not.toContain('What title');
+    expect(result.finalText).toContain('3 native bullets');
+    expect(result.finalText).toContain('native table with 2 data rows');
     expect(result.status).toBe('done');
   });
 });

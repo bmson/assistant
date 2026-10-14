@@ -518,3 +518,26 @@ describe('compound trip source extraction', () => {
     expect(object).not.toHaveBeenCalled();
   });
 });
+
+describe('bounded extraction outcome metadata', () => {
+  it.each([
+    ['router-unavailable', () => Promise.resolve({ ok: false })],
+    ['invalid-output', () => Promise.resolve({ ok: true, object: { messages: 'invalid' } })],
+    [
+      'extraction-error',
+      () => Promise.reject(new Error('private failure content must not be persisted')),
+    ],
+  ] as const)('records only the enumerated %s reason', async (reason, implementation) => {
+    const object = vi.fn(implementation);
+    const result = await extractCompoundTripBookings({
+      router: { object } as never,
+      taskId: 'trip-reason-test',
+      request,
+      evidence: evidence(),
+    });
+    expect(result.status).toBe('unavailable');
+    expect(result.unavailableReason).toBe(reason);
+    expect(JSON.stringify(result)).not.toContain('private failure content');
+    expect(object).toHaveBeenCalledOnce();
+  });
+});

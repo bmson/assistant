@@ -845,6 +845,74 @@ describe('calendar.availability', () => {
     expect(result).toMatchObject({ complete: false, unavailable: ['Work'] });
   });
 
+  it('retains exact IDs, windows and provider failure reasons despite duplicate display names', async () => {
+    const api = vi.fn(async (url: string) => {
+      if (url.includes('/users/me/calendarList'))
+        return { items: CALENDARS.map((calendar) => ({ ...calendar, summary: 'Same name' })) };
+      return {
+        calendars: {
+          'bot@example.com': { busy: [] },
+          'owner@example.com': { errors: [{ reason: 'notFound', domain: 'calendar' }] },
+        },
+      };
+    });
+    const range = { timeMin: '2026-07-24T00:00:00Z', timeMax: '2026-07-25T00:00:00Z' };
+    const result = await toolsWith(api)
+      .get('calendar.availability')
+      ?.tool.execute(range, {} as never);
+    expect(result).toMatchObject({
+      complete: false,
+      calendarRosterComplete: true,
+      coverageWindow: range,
+      calendarIdsRequested: ['bot@example.com', 'owner@example.com', 'work@example.com'],
+      calendarCoverage: [
+        { calendarId: 'bot@example.com', status: 'checked' },
+        {
+          calendarId: 'owner@example.com',
+          status: 'unavailable',
+          reason: 'provider-error',
+          providerErrors: [{ reason: 'notFound', domain: 'calendar' }],
+        },
+        { calendarId: 'work@example.com', status: 'unavailable', reason: 'missing-response' },
+      ],
+    });
+  });
+
+  it.each([
+    undefined,
+    [{ start: 'not-a-date', end: 'not-a-date' }],
+    [{ start: '2026-07-24T09:00:00', end: '2026-07-24T10:00:00' }],
+  ])('fails closed on malformed free/busy intervals %j', async (busy) => {
+    const api = vi.fn(async (url: string) => {
+      if (url.includes('/users/me/calendarList')) return { items: CALENDARS };
+      return {
+        calendars: {
+          'bot@example.com': { busy: [] },
+          'owner@example.com': { busy },
+          'work@example.com': { busy: [] },
+        },
+      };
+    });
+    const result = await toolsWith(api)
+      .get('calendar.availability')
+      ?.tool.execute(
+        { timeMin: '2026-07-24T00:00:00Z', timeMax: '2026-07-25T00:00:00Z' },
+        {} as never,
+      );
+    expect(result).toMatchObject({
+      complete: false,
+      unavailable: ['Baldvin'],
+      calendarCoverage: expect.arrayContaining([
+        {
+          calendarId: 'owner@example.com',
+          name: 'Baldvin',
+          status: 'malformed',
+          reason: 'malformed-busy-intervals',
+        },
+      ]),
+    });
+  });
+
   it('does not claim complete coverage when the shared-calendar roster fails', async () => {
     const api = vi.fn(async (url: string) => {
       if (url.includes('/users/me/calendarList')) throw new Error('calendar list unavailable');

@@ -1412,6 +1412,35 @@ function historicalSearchQueries(request: PersonalReadRequest): string[] {
   return [...new Set(queries)];
 }
 
+/** A current successful history pass is coverage even if a later semantic pass failed.
+ * Bind to an exact runtime query or the owner's original unanchored question;
+ * preserve literal-anchor mode. Generic
+ * query-term inclusion cannot represent a named anchor such as a project name.
+ */
+export function matchesHistoricalMemorySearch(
+  request: PersonalReadRequest,
+  row: ReadToolEvidence,
+): boolean {
+  if (
+    request.kind !== 'memory' ||
+    !request.conversationQuery ||
+    row.fromCurrentTask === false ||
+    row.toolName !== 'conversations.search' ||
+    !succeeded(row)
+  )
+    return false;
+  const args = argsRecord(row);
+  const query = args?.query;
+  const result = objectRecord(row.result);
+  return (
+    typeof query === 'string' &&
+    (historicalSearchQueries(request).slice(0, MAX_MEMORY_SEARCH_PASSES).includes(query) ||
+      (!request.conversationAnchorQuery && query === request.memoryQuery)) &&
+    (query !== request.conversationAnchorQuery || args?.mode === 'text') &&
+    Array.isArray(result?.matches)
+  );
+}
+
 function namedHistoricalAnchor(text: string): string | undefined {
   // Search an explicit name literally; a generic semantic hit is not proof that
   // the earlier named exercise or the owner's original statement was found.
@@ -2014,16 +2043,16 @@ function detectPersonalReadRequestInternal(
         {
           category: 'flight',
           query:
-            '{subject:(flight booking) subject:(flight booked) subject:(flight reserved) subject:(flight confirmation) subject:(airline booking) subject:(airline booked) subject:(airline reserved) subject:(airline confirmation) subject:(e-ticket) subject:(itinerary confirmation) subject:(boarding pass)}',
+            '{subject:(flight booking) subject:(flight booked) subject:(flight reserved) subject:(flight confirmation) subject:(airline booking) subject:(airline booked) subject:(airline reserved) subject:(airline confirmation) subject:(e-ticket) subject:(itinerary confirmation) subject:(boarding pass) subject:(confirmation code)}',
         },
         {
           category: 'lodging',
           query:
-            '{subject:(hotel booking) subject:(hotel booked) subject:(hotel reserved) subject:(hotel reservation) subject:(lodging booked) subject:(lodging reservation) subject:(accommodation booking) subject:(accommodation reservation) subject:(check-in confirmation) subject:(stay confirmation) subject:(booking confirmation) subject:(reservation confirmation) subject:(your reservation) subject:(reservation details)}',
+            '{subject:(hotel booking) subject:(hotel booked) subject:(hotel reserved) subject:(hotel reservation) subject:(lodging booked) subject:(lodging reservation) subject:(accommodation booking) subject:(accommodation reservation) subject:(check-in confirmation) subject:(stay confirmation) subject:(booking confirmation) subject:(reservation confirmation) subject:(your reservation) subject:(reservation details) subject:(travel confirmation)}',
         },
       ],
       mailQuery:
-        '{subject:(flight booking) subject:(flight booked) subject:(flight reserved) subject:(flight confirmation) subject:(airline booking) subject:(airline booked) subject:(airline reserved) subject:(airline confirmation) subject:(e-ticket) subject:(itinerary confirmation) subject:(boarding pass)}',
+        '{subject:(flight booking) subject:(flight booked) subject:(flight reserved) subject:(flight confirmation) subject:(airline booking) subject:(airline booked) subject:(airline reserved) subject:(airline confirmation) subject:(e-ticket) subject:(itinerary confirmation) subject:(boarding pass) subject:(confirmation code)}',
     };
   }
   // A terse correction such as "was that made up?" carries no subject of its
@@ -2681,6 +2710,51 @@ function hasTypedTripRead(request: PersonalReadRequest | undefined): boolean {
   return Boolean(request?.compoundTripDiscovery || request?.upcomingFlightDiscovery);
 }
 
+/** Calendar references only broaden read hypotheses; they never bind bookings. */
+function groundCompoundTripMailQueries(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): void {
+  if (!request.compoundTripDiscovery || !request.mailQueries?.length) return;
+  const references: string[] = [];
+  for (const row of evidence) {
+    if (row.fromCurrentTask === false || !matchingCalendarRead(row, request)) continue;
+    const events = objectRecord(row.result)?.events;
+    if (!Array.isArray(events)) continue;
+    for (const value of events) {
+      const event = objectRecord(value);
+      const description =
+        typeof event?.description === 'string' ? event.description.slice(0, 1200) : '';
+      if (!/\b(?:hotel|lodging|check[- ]?in|check[- ]?out)\b/i.test(description)) continue;
+      const reference =
+        /\b(?:itinerary|booking|reservation)\s*(?:#|reference\s*#?|number)\s*:\s*([A-Z0-9]{6,16})\b/i.exec(
+          description,
+        )?.[1];
+      if (reference && !references.includes(reference)) references.push(reference);
+    }
+  }
+  if (references.length === 0) return;
+  request.mailQueries = request.mailQueries.map((entry) => {
+    if (entry.category !== 'lodging' || !entry.query.startsWith('{') || !entry.query.endsWith('}'))
+      return entry;
+    const additions = references
+      .slice(0, 2)
+      .filter((reference) => !entry.query.includes(`"${reference}"`));
+    // Do not change an already admitted query after its first search page.
+    if (
+      additions.length === 0 ||
+      evidence.some(
+        (row) => row.toolName === 'gmail.search' && argsRecord(row)?.query === entry.query,
+      )
+    )
+      return entry;
+    return {
+      ...entry,
+      query: `{${entry.query.slice(1, -1)} ${additions.map((reference) => `"${reference}"`).join(' ')}}`,
+    };
+  });
+}
+
 export function gmailThreadIdsToRead(
   evidence: ReadonlyArray<ReadToolEvidence>,
   request?: PersonalReadRequest,
@@ -2940,6 +3014,7 @@ export function nextRequiredReadTool(
   }
   if (hasTypedTripRead(request)) {
     const currentEvidence = evidence.filter((row) => row.fromCurrentTask !== false);
+    groundCompoundTripMailQueries(request, currentEvidence);
     const tripReadTools = new Set([
       'calendar.list_events',
       'gmail.search',

@@ -646,6 +646,9 @@ async function collectEvents(
       ...(timeZone ? { timeZone } : {}),
     })),
     calendarsSearched,
+    calendarsSearchedIds: targets
+      .filter((calendar) => searchedIds.has(calendar.id))
+      .map((calendar) => calendar.id),
     unavailable,
     calendarRosterComplete: !rosterTruncated,
     ...(roster.nextPageToken ? { calendarRosterNextPageToken: roster.nextPageToken } : {}),
@@ -902,16 +905,56 @@ export function registerCalendarTools(
         });
 
         const calendars = res.calendars ?? {};
-        const busy: Array<{ start: string; end: string; calendar: string }> = [];
+        const busy: Array<{ start: string; end: string; calendar: string; calendarId: string }> =
+          [];
         const unavailable: string[] = [];
+        const calendarCoverage: Array<{
+          calendarId: string;
+          name: string;
+          status: string;
+          reason?: string;
+          providerErrors?: unknown[];
+        }> = [];
         for (const { id } of items) {
           const entry = calendars[id];
           const label = nameFor.get(id) ?? id;
           if (!entry || (Array.isArray(entry.errors) && entry.errors.length > 0)) {
             unavailable.push(label);
+            calendarCoverage.push({
+              calendarId: id,
+              name: label,
+              status: 'unavailable',
+              reason: !entry ? 'missing-response' : 'provider-error',
+              ...(entry?.errors ? { providerErrors: entry.errors } : {}),
+            });
             continue;
           }
-          for (const slot of entry.busy ?? []) busy.push({ ...slot, calendar: label });
+          const slots = entry.busy;
+          const valid =
+            (entry.errors === undefined || Array.isArray(entry.errors)) &&
+            Array.isArray(slots) &&
+            slots.every((slot) => {
+              if (!slot || typeof slot.start !== 'string' || typeof slot.end !== 'string')
+                return false;
+              const start = Date.parse(slot.start);
+              const end = Date.parse(slot.end);
+              return (
+                Number.isFinite(start) &&
+                Number.isFinite(end) &&
+                end > start &&
+                /(?:Z|[+-]\d{2}:?\d{2})$/i.test(slot.start) &&
+                /(?:Z|[+-]\d{2}:?\d{2})$/i.test(slot.end)
+              );
+            });
+          calendarCoverage.push({
+            calendarId: id,
+            name: label,
+            status: valid ? 'checked' : 'malformed',
+            ...(!valid ? { reason: 'malformed-busy-intervals' } : {}),
+          });
+          if (!valid) unavailable.push(label);
+          for (const slot of Array.isArray(slots) ? slots : [])
+            busy.push({ ...slot, calendar: label, calendarId: id });
         }
         busy.sort((a, b) => startedAt(a) - startedAt(b));
 
@@ -931,6 +974,10 @@ export function registerCalendarTools(
         return {
           busy,
           calendarsChecked: items.map(({ id }) => nameFor.get(id) ?? id),
+          calendarIdsRequested: [...ids],
+          calendarCoverage,
+          calendarRosterComplete,
+          coverageWindow: { timeMin: args.timeMin, timeMax: args.timeMax },
           complete,
           ...(roster.nextPageToken ? { calendarRosterNextPageToken: roster.nextPageToken } : {}),
           ...(unavailable.length > 0 ? { unavailable } : {}),

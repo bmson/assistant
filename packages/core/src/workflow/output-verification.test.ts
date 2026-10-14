@@ -3,6 +3,8 @@ import {
   buildOutputVerificationPrompt,
   OUTPUT_VERIFICATION_SYSTEM,
   type OutputVerification,
+  publicWebClaimFindings,
+  repairRequestedBullets,
   verifyFinalOutput,
 } from './output-verification.js';
 
@@ -383,5 +385,440 @@ describe('self-reflective output verification', () => {
     expect(prompt).toContain('<durable_evidence>');
     expect(prompt).toContain('messageId');
     expect(prompt).not.toContain('must-not-leak');
+  });
+});
+
+describe('source-bound public service summaries', () => {
+  const body = `Airport Express (FEX)
+- Route: Berlin Hauptbahnhof - Potsdamer Platz - Südkreuz - Airport
+- Frequency: every 15 minutes (jointly four services per hour with RE20 until December 2026)
+- Travel time: Hauptbahnhof 23 minutes; Südkreuz 14 minutes
+
+RE20
+- Route: Berlin Hauptbahnhof - Potsdamer Platz - Südkreuz - Airport
+- Frequency: hourly (jointly four services per hour with FEX until December 2026)
+- Travel time: Hauptbahnhof 23 minutes; Südkreuz 14 minutes
+
+RB22
+- Route: Potsdam - Griebnitzsee - Airport
+- Frequency: hourly
+
+RB32&nbsp;
+- Route: Oranienburg - Ostkreuz - Airport
+- Frequency: hourly
+
+S-Bahn trains (S9, S85)
+S9
+- Route: Spandau - Charlottenburg - Alexanderplatz - Airport
+- Frequency: every 20 minutes
+
+S85
+- Route: Frohnau - Ostkreuz - Airport
+- Frequency: every 20 minutes
+
+Express buses (X7, X71)
+X7&#160;
+- Route: Rudow - Airport
+- Frequency: every 5–10 minutes
+
+X71
+- Route: Alt-Mariendorf - Rudow - Airport
+- Frequency: every 20 minutes
+
+BER2 (subject to surcharge)
+- Route: Potsdam - Airport
+- Frequency: 16x daily
+- Ticket can be purchased only on the bus
+
+163
+- Route: Schöneweide - Schönefeld station
+- Frequency: every 20 minutes
+- Continue to the airport with S9/S85
+
+743&#xA0;
+- Route: Lichtenrade - Wassmannsdorf (change here to S9/S85 to Airport)
+- Frequency: hourly
+
+N7X
+- Route: Zoologischer Garten - Airport
+- Frequency: every 15 minutes
+- Runs in this direction only
+
+Frequently asked questions
+Other text.
+`;
+  const source = `${'Navigation filler. '.repeat(600)}
+${body}`;
+  const evidence = [
+    {
+      toolName: 'web.fetch',
+      status: 'succeeded',
+      result: {
+        status: 200,
+        finalUrl: 'https://transit.example/services',
+        text: source,
+        truncated: false,
+      },
+    },
+  ];
+  const request = 'Summarize this page in three short bullets with a source link.';
+  const bad =
+    '- **Rail FEX, RE20, RB22, RB32** — depart from Berlin Hauptbahnhof, Potsdamer Platz and Südkreuz to Airport; travel time ~14–23 minutes, every 15 minutes jointly until December 2026.- **S9 and S85** — from Spandau, Charlottenburg and Alexanderplatz to Airport every 20 minutes.- **Buses 163 and 743** — also serve the airport.Source: [Source](https://transit.example/services)';
+  const good = `- **Rail** — FEX links Berlin Hauptbahnhof with the airport every 15 minutes; RE20 is hourly, with the shared frequency qualified until December 2026.
+- **S-Bahn** — S9 and S85 reach the airport every 20 minutes; their city origins and stops differ.
+- **Buses** — X7 serves the airport from Rudow, while 163 requires a change to S9/S85. [Source](https://transit.example/services)`;
+
+  it('retains parenthetical IDs, NBSP/entity headings, qualifiers and original source offsets under the evidence cap', () => {
+    const draft = 'FEX RE20 RB22 RB32 S9 S85 X7 X71 BER2 163 743 N7X';
+    const prompt = buildOutputVerificationPrompt({ request, draft, evidence });
+    const durable = prompt.match(/<durable_evidence>\n([\s\S]*?)\n<\/durable_evidence>/)?.[1] ?? '';
+    const projected = JSON.parse(durable).source;
+    expect(projected.sourcePassages.map((passage: { label: string }) => passage.label)).toEqual(
+      draft.split(' '),
+    );
+    for (const passage of projected.sourcePassages) {
+      expect(source.slice(passage.startOffset, passage.endOffset)).toBe(passage.text);
+      expect(passage.omittedChars).toBe(0);
+    }
+    expect(
+      projected.sourcePassages.find((passage: { label: string }) => passage.label === 'FEX').text,
+    ).toContain('December 2026');
+    expect(
+      projected.sourcePassages.find((passage: { label: string }) => passage.label === '163').text,
+    ).toContain('Continue to the airport');
+    expect(
+      projected.sourcePassages.find((passage: { label: string }) => passage.label === '743').text,
+    ).toContain('change here');
+    expect(
+      projected.sourcePassages.find((passage: { label: string }) => passage.label === 'N7X').text,
+    ).not.toContain('Frequently asked questions');
+    expect(durable.length).toBeLessThanOrEqual(12_000);
+  });
+
+  it('detects cross-service frequency, travel-time and origin borrowing plus omitted transfers', () => {
+    const findings = publicWebClaimFindings(repairRequestedBullets(request, bad), evidence);
+    expect(findings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('RB22: the shared frequency'),
+        expect.stringContaining('RB32: the shared travel-time'),
+        expect.stringContaining('S85: the shared origin/stop'),
+        expect.stringContaining('163: its source requires'),
+        expect.stringContaining('743: its source requires'),
+      ]),
+    );
+    expect(publicWebClaimFindings(good, evidence)).toEqual([]);
+    expect(
+      publicWebClaimFindings(
+        'FEX and RE20 run jointly every 15 minutes until December 2026.',
+        evidence,
+      ),
+    ).toEqual([]);
+  });
+
+  it('derives a shared cadence only from its own service count and preserves its stated cutoff', () => {
+    const rows = [
+      {
+        toolName: 'web.fetch',
+        status: 'succeeded',
+        result: {
+          status: 200,
+          text: 'R10\n- Frequency: hourly; until May 2027 both lines jointly run two services per hour\nR20\n- Frequency: hourly',
+          truncated: false,
+        },
+      },
+    ];
+    expect(
+      publicWebClaimFindings('R10 runs jointly every 30 minutes until May 2027.', rows),
+    ).toEqual([]);
+    expect(publicWebClaimFindings('R10 runs jointly every 30 minutes.', rows)).not.toEqual([]);
+    expect(
+      publicWebClaimFindings('R10 runs jointly every 30 minutes until May 2028.', rows),
+    ).not.toEqual([]);
+  });
+
+  it('does not equate B12 with B120 or treat an HTTP error or truncated read as complete evidence', () => {
+    const rows = [
+      {
+        toolName: 'web.fetch',
+        status: 'succeeded',
+        result: { status: 200, text: 'B12\n- Frequency: hourly', truncated: false },
+      },
+    ] as const;
+    expect(publicWebClaimFindings('B120 is hourly.', rows)).toContain(
+      'B120: this identifier is absent from complete current source evidence.',
+    );
+    for (const changes of [{ status: 503 }, { truncated: true }])
+      expect(
+        publicWebClaimFindings('B12 is hourly.', [
+          { ...rows[0], result: { ...rows[0]?.result, ...changes } },
+        ]),
+      ).toContain('B12: this identifier is absent from complete current source evidence.');
+  });
+
+  it('keeps exact service boundaries when one identifier is a prefix of another', () => {
+    const rows = [
+      {
+        toolName: 'web.fetch',
+        status: 'succeeded',
+        result: {
+          status: 200,
+          text: 'B12\n- Frequency: hourly\nB120\n- Frequency: every 15 minutes',
+          truncated: false,
+        },
+      },
+    ];
+    expect(publicWebClaimFindings('B120 runs every 15 minutes.', rows)).toEqual([]);
+    expect(publicWebClaimFindings('B12 runs every 15 minutes.', rows)).toContain(
+      'B12: the shared frequency “every 15 minutes” is not stated by its own Frequency passage.',
+    );
+  });
+
+  it('does not erase independently evidenced private identifiers in a mixed-source task', () => {
+    const rows = [
+      ...evidence,
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        result: { events: [{ summary: 'Flight UA123' }] },
+      },
+    ];
+    expect(
+      publicWebClaimFindings(
+        'Flight UA123 is in the calendar. S9 reaches the airport every 20 minutes.',
+        rows,
+      ),
+    ).toEqual([]);
+    // Private flight identities remain the private grounding contract's job.
+    expect(publicWebClaimFindings('Flight UA124 is in the calendar.', rows)).toEqual([]);
+  });
+
+  it('does not interpret source-link path identifiers as service claims', () => {
+    const rows = [
+      {
+        toolName: 'web.fetch',
+        status: 'succeeded',
+        result: { status: 200, text: 'General transport information.', truncated: false },
+      },
+    ];
+    expect(publicWebClaimFindings('See [Source](https://transit.example/T99).', rows)).toEqual([]);
+  });
+
+  it('repairs only exact requested collapsed bold bullet markers, preserving words and links', () => {
+    const fixed = repairRequestedBullets(request, bad);
+    expect(fixed.match(/^-/gm)).toHaveLength(3);
+    expect(fixed).toContain('\n\nSource: [Source]');
+    expect(fixed.replace(/\s/g, '')).toBe(bad.replace(/\s/g, ''));
+    expect(repairRequestedBullets('Use two bullets.', bad)).toBe(bad);
+    expect(repairRequestedBullets('Give an overview.', bad)).toBe(bad);
+    const fenced = ['```', bad, '```'].join('\n');
+    expect(repairRequestedBullets(request, fenced)).toBe(fenced);
+    expect(
+      repairRequestedBullets(request, 'Costs: - **one** and - **two**, plus - **three**.'),
+    ).toBe('Costs: - **one** and - **two**, plus - **three**.');
+  });
+
+  it('performs one targeted correction when a reviewer publishes the same conflation', async () => {
+    const prompts: string[] = [];
+    const router = {
+      object: async (_role: string, input: { prompt: string }) => {
+        prompts.push(input.prompt);
+        return {
+          ok: true,
+          finishReason: 'stop',
+          object:
+            prompts.length === 1
+              ? { decision: 'publish', reasons: [] }
+              : { decision: 'revise', revisedText: good, reasons: ['ungrounded_fact'] },
+        };
+      },
+    };
+    const result = await verifyFinalOutput(router as never, {
+      taskId: 'web',
+      request,
+      draft: bad,
+      evidence,
+      critical: true,
+    });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain('source_attribute_findings');
+    expect(prompts[1]).toContain('RB22');
+    expect(result).toMatchObject({ text: good, revised: true, unavailable: false });
+  });
+
+  it('does not publish contradicted details after a second bad revision or unavailable correction', async () => {
+    for (const failure of ['bad', 'unavailable', 'length', 'throw']) {
+      let calls = 0;
+      const router = {
+        object: async () => {
+          calls++;
+          if (calls === 1) return { ok: true, object: { decision: 'publish', reasons: [] } };
+          if (failure === 'throw') throw new Error('Unavailable');
+          return failure === 'unavailable'
+            ? { ok: false }
+            : {
+                ok: true,
+                finishReason: failure === 'length' ? 'length' : 'stop',
+                object: { decision: 'revise', revisedText: bad, reasons: [] },
+              };
+        },
+      };
+      const result = await verifyFinalOutput(router as never, {
+        taskId: 'web',
+        request,
+        draft: bad,
+        evidence,
+        critical: true,
+      });
+      expect(calls).toBe(2);
+      expect(result.text).toContain('couldn’t verify');
+      expect(result.text).toContain('[Source](https://transit.example/services)');
+      expect(result.text).not.toMatch(/RB22|Spandau|163/);
+    }
+  });
+});
+
+describe('public service claim scope and attribute boundaries', () => {
+  const evidence = (text: string) => [
+    {
+      toolName: 'web.fetch',
+      status: 'succeeded',
+      result: { status: 200, text, truncated: false, finalUrl: 'https://transit.example/lines' },
+    },
+  ];
+
+  it('does not classify ordinary M1/A4/B2B or owner-provided facts as missing routes', async () => {
+    const rows = evidence('General web article.');
+    const draft = 'My M1 device supports A4 reports for our B2B business.';
+    expect(publicWebClaimFindings(draft, rows)).toEqual([]);
+    expect(
+      publicWebClaimFindings(
+        'The M1 processor runs a B2B app.',
+        evidence('M2\n- Frequency: 500 MHz'),
+      ),
+    ).toEqual([]);
+    const router = {
+      object: async () => ({ ok: true, object: { decision: 'publish', reasons: [] } }),
+    };
+    expect(
+      (
+        await verifyFinalOutput(router as never, {
+          taskId: 'normal-web',
+          request: 'Summarize this article for my M1 device and B2B business.',
+          draft,
+          evidence: rows,
+          critical: true,
+        })
+      ).text,
+    ).toBe(draft);
+    const services = evidence('B12\n- Route: Central - Airport\n- Frequency: hourly');
+    expect(
+      publicWebClaimFindings(
+        'Our B2B reports are updated hourly.',
+        services,
+        'Our company is B2B.',
+      ),
+    ).toEqual([]);
+    expect(publicWebClaimFindings('B120 bus service runs hourly.', services)).not.toEqual([]);
+    expect(publicWebClaimFindings('An A4 report about B120.', services)).toEqual([]);
+  });
+
+  it('requires cutoffs and joint-service qualifiers for literal as well as derived frequencies', () => {
+    const rows = evidence(
+      'R10\n- Frequency: every 30 minutes until May 2027\nR20\n- Frequency: every 20 minutes jointly until June 2028',
+    );
+    expect(publicWebClaimFindings('R10 runs every 30 minutes until May 2027.', rows)).toEqual([]);
+    expect(publicWebClaimFindings('R10 runs every 30 minutes until May 2028.', rows)).not.toEqual(
+      [],
+    );
+    expect(publicWebClaimFindings('R10 runs every 30 minutes.', rows)).not.toEqual([]);
+    expect(publicWebClaimFindings('R20 runs every 20 minutes until June 2028.', rows)).not.toEqual(
+      [],
+    );
+    expect(
+      publicWebClaimFindings('R20 runs jointly every 20 minutes until June 2028.', rows),
+    ).toEqual([]);
+  });
+
+  it('resets subjects for new bullets and topics while preserving explicit continuations', () => {
+    const rows = evidence('R10\n- Frequency: hourly\n- Travel time: 10 minutes');
+    expect(
+      publicWebClaimFindings('- R10 runs hourly.\n- Taxi travel time: 25 minutes.', rows),
+    ).toEqual([]);
+    expect(publicWebClaimFindings('R10 runs hourly. Taxi travel time: 25 minutes.', rows)).toEqual(
+      [],
+    );
+    expect(publicWebClaimFindings('R10 runs hourly; travel time: 10 minutes.', rows)).toEqual([]);
+    expect(publicWebClaimFindings('R10 runs hourly; travel time: 25 minutes.', rows)).not.toEqual(
+      [],
+    );
+  });
+
+  it('does not borrow a frequency number or later attribute as a travel duration', () => {
+    const rows = evidence(
+      'R10\n- Route: Central - Airport\n- Travel time: 10 minutes\n- Frequency: every 15 minutes\n- Waiting time: 25 minutes',
+    );
+    expect(publicWebClaimFindings('R10 takes 10 minutes.', rows)).toEqual([]);
+    expect(publicWebClaimFindings('R10 takes 15 minutes.', rows)).not.toEqual([]);
+    expect(publicWebClaimFindings('R10 takes 25 minutes.', rows)).not.toEqual([]);
+    const subroutes = evidence(
+      'R10\n- Travel time:\n- Central - Airport: approx. 10 minutes\n- North - Airport: approx. 20 minutes\n- Frequency: every 15 minutes',
+    );
+    expect(publicWebClaimFindings('R10 travel time: 10–20 minutes.', subroutes)).toEqual([]);
+    expect(publicWebClaimFindings('R10 takes 15 minutes.', subroutes)).not.toEqual([]);
+  });
+});
+
+describe('independent and combined service cadence qualifiers', () => {
+  const evidence = (frequency: string) => [
+    {
+      toolName: 'web.fetch',
+      status: 'succeeded',
+      result: { status: 200, truncated: false, text: `RE20\n- Frequency: ${frequency}` },
+    },
+  ];
+
+  it('allows the independent hourly cadence without inheriting a combined parenthetical cutoff', () => {
+    const rows = evidence('hourly (jointly four services per hour with FEX until December 2026)');
+    expect(publicWebClaimFindings('RE20 runs hourly.', rows)).toEqual([]);
+    expect(publicWebClaimFindings('RE20 runs every 60 minutes.', rows)).toEqual([]);
+    expect(publicWebClaimFindings('RE20 runs every 15 minutes.', rows)).not.toEqual([]);
+    expect(publicWebClaimFindings('RE20 runs jointly every 15 minutes.', rows)).not.toEqual([]);
+    expect(
+      publicWebClaimFindings('RE20 runs jointly every 15 minutes until December 2027.', rows),
+    ).not.toEqual([]);
+    expect(
+      publicWebClaimFindings('RE20 runs jointly every 15 minutes until December 2026.', rows),
+    ).toEqual([]);
+    expect(
+      publicWebClaimFindings('RE20 runs jointly hourly until December 2026.', rows),
+    ).not.toEqual([]);
+  });
+
+  it('keeps a cutoff on the individual primary cadence even when a separate combined note exists', () => {
+    const rows = evidence(
+      'hourly until May 2027 (jointly four services per hour with FEX until December 2026)',
+    );
+    expect(publicWebClaimFindings('RE20 runs hourly.', rows)).not.toEqual([]);
+    expect(publicWebClaimFindings('RE20 runs hourly until May 2028.', rows)).not.toEqual([]);
+    expect(publicWebClaimFindings('RE20 runs hourly until May 2027.', rows)).toEqual([]);
+    expect(
+      publicWebClaimFindings('RE20 runs jointly every 15 minutes until December 2026.', rows),
+    ).toEqual([]);
+  });
+
+  it('preserves standalone individual cutoffs and secondary semicolon combined qualifiers', () => {
+    const literal = evidence('every 30 minutes until May 2027');
+    expect(publicWebClaimFindings('RE20 runs every 30 minutes until May 2027.', literal)).toEqual(
+      [],
+    );
+    expect(publicWebClaimFindings('RE20 runs every 30 minutes.', literal)).not.toEqual([]);
+    const separate = evidence(
+      'hourly; until May 2027 both lines jointly run two services per hour',
+    );
+    expect(publicWebClaimFindings('RE20 runs hourly.', separate)).toEqual([]);
+    expect(publicWebClaimFindings('RE20 runs jointly every 30 minutes.', separate)).not.toEqual([]);
+    expect(
+      publicWebClaimFindings('RE20 runs jointly every 30 minutes until May 2027.', separate),
+    ).toEqual([]);
   });
 });

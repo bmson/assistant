@@ -91,7 +91,7 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(calendarWindowMembership(losAngeles, request)).toBe('outside');
     const response = verifiedReadResponse(request, evidence([tokyo]));
     expect(response).toContain(
-      'Thu 15 Oct 8:00 AM–Fri 16 Oct 12:00 AM (source all-day 2026-10-16 (Asia/Tokyo))',
+      'All-day record · Thu 15 Oct 8:00 AM–Fri 16 Oct 12:00 AM within requested window (source all-day 2026-10-16 (Asia/Tokyo); continues until Fri, Oct 16, 2026, 8:00 AM)',
     );
     expect(response).not.toContain('Thu 15 Oct · All day');
     expect(calendarResponseCards(evidence([losAngeles]), request)).toEqual([]);
@@ -114,10 +114,10 @@ describe('calendar day and practical briefing fidelity', () => {
     const response = verifiedReadResponse(request, evidence([utc, berlin]));
 
     expect(response).toContain(
-      'Thu 15 Oct 5:00 PM–Fri 16 Oct 12:00 AM (source all-day 2026-10-16 (UTC))',
+      'All-day record · Thu 15 Oct 5:00 PM–Fri 16 Oct 12:00 AM within requested window (source all-day 2026-10-16 (UTC); continues until Fri, Oct 16, 2026, 5:00 PM)',
     );
     expect(response).toContain(
-      'Thu 15 Oct 3:00 PM–Fri 16 Oct 12:00 AM (source all-day 2026-10-16 (Europe/Berlin))',
+      'All-day record · Thu 15 Oct 3:00 PM–Fri 16 Oct 12:00 AM within requested window (source all-day 2026-10-16 (Europe/Berlin); continues until Fri, Oct 16, 2026, 3:00 PM)',
     );
     expect(response).not.toContain('Fri 16 Oct · All day');
     expect(response).toContain('(Personal)');
@@ -154,6 +154,57 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain('No unresolved overlaps between timed calendar entries');
     expect(response).not.toContain('Possible overlap: **Hotel stay**');
     expect(response).not.toContain('Sat, Oct 10');
+  });
+
+  it('explains provider-busy lodging exclusions and supplies practical guidance without an overlap request', () => {
+    const dayRequest = { ...request, includeCalendarOverlapSummary: false };
+    const stay = {
+      ...timed,
+      eventId: 'stay',
+      summary: 'Hotel reservation',
+      blocksTime: true,
+      description: 'Hotel stay. Check-in: Oct 10. Check-out: Oct 17.',
+      start: '2026-10-10T06:00:00-07:00',
+      end: '2026-10-17T02:00:00-07:00',
+      links: link('stay'),
+    };
+    const appointment = { ...timed, blocksTime: true, location: 'Office' };
+    const rows = evidence([stay, appointment], true, dayRequest);
+    const output = enforceResponseContract('Here are the events.', rows, {
+      readRequest: dayRequest,
+    });
+    expect(output.text).toContain('Lodging context: **Hotel reservation**');
+    expect(output.text).toContain('excluded from timed appointment overlaps');
+    expect(output.text).toContain('still marks this stay as busy');
+    expect(output.text).toContain(
+      'Next step: Check whether you need to attend **Project review**, then review its source details for preparation and travel.',
+    );
+    expect(output.text).not.toMatch(
+      /I (?:booked|changed|created)|you must attend|your .* is free/i,
+    );
+    expect(output.text).toContain('event?eid=review');
+    expect(output.text).toContain('event?eid=stay');
+  });
+
+  it('does not infer lodging context from an unverified title or incomplete source', () => {
+    const stay = {
+      ...timed,
+      summary: 'Hotel conference',
+      blocksTime: true,
+      start: '2026-10-10T06:00:00-07:00',
+      end: '2026-10-17T02:00:00-07:00',
+    };
+    for (const [event, complete] of [
+      [stay, true],
+      [{ ...stay, description: 'Check-in Oct 10; Check-out Oct 17' }, false],
+    ] as const) {
+      const text = verifiedReadResponse(
+        request,
+        evidence([event, { ...timed, eventId: 'meeting' }], complete),
+      );
+      expect(text).not.toContain('Lodging context:');
+      expect(text).toContain('Possible overlap:');
+    }
   });
 
   it('names additional overlap pairs without repeating the shared attendance caveat', () => {

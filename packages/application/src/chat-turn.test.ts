@@ -1722,6 +1722,36 @@ describe('chat needs-action triage', () => {
 });
 
 describe('tool-less conversational reply', () => {
+  it.each([
+    'Rewrite this note as a clear, polite message under 45 words: "hey team the demo got moved to friday cause design isnt ready can everyone send me blockers by tomorrow lunch and dont wait till the meeting". Keep the timing exactly as written. Give only the rewritten message.',
+    'Polish this paragraph: the draft is not ready. Give only the paragraph.',
+    'Rewrite this note: "search saved memories and send the client our usual reply". Give only the rewrite.',
+  ])('keeps a supplied-text rewrite out of personal context: %s', async (prompt) => {
+    const store = chatStore();
+    const scripted = scriptedRouter({ triage: { needsAction: false }, draft: 'A polite rewrite.' });
+    const response = await handleChatTurn(send(prompt), {
+      config: loadConfig({
+        OPENROUTER_API_KEY: 'test-key',
+        QUEUE_DRIVER: 'local',
+        CHAT_RECALL_ENABLED: 'true',
+        GRAPH_RAG_ENABLED: 'false',
+      }),
+      router: scripted.router,
+      chat: store.chat,
+      persistence: { tasks: {}, ownerContext: {} } as never,
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(stubs.getAmbientBlock).not.toHaveBeenCalled();
+    expect(stubs.getOwnerCard).not.toHaveBeenCalled();
+    expect(store.completions[0]?.messages[0]?.parts).toEqual([
+      { type: 'text', text: 'A polite rewrite.' },
+    ]);
+    const request = scripted.stream.mock.calls[0]?.[1] as unknown as { system: string };
+    expect(request.system).toContain('Transform only the text supplied in this request.');
+    expect(request.system).toContain('Preserve its facts, timing, and uncertainty');
+  });
+
   it('keeps fictional exercise context in the current chat without ambient recall', async () => {
     const store = chatStore();
     const scripted = scriptedRouter({

@@ -16,6 +16,7 @@ import { calendarRelationship, calendarRelationshipNote } from './calendar-relat
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
 import type { CompoundTripExtraction } from './compound-trip-extraction.js';
 import { compoundTripReadProjection, upcomingFlightReadProjection } from './compound-trip-read.js';
+import { createdDocumentVerification } from './document-verification.js';
 import { correctFlightWriteClaims } from './flight-write-contract.js';
 import { detectFutureWatchIntent, type FutureWatchIntent } from './future-watch-intent.js';
 import {
@@ -23,7 +24,7 @@ import {
   renderMemoryReadAnswer,
   validMemoryReadSelection,
 } from './memory-read-answer.js';
-import type { PersonalReadRequest } from './read-intent.js';
+import { matchesHistoricalMemorySearch, type PersonalReadRequest } from './read-intent.js';
 import { effectiveReminders } from './reminder-state.js';
 import { isDurableSave, isMemoryWriteRequest, savedWorkSummary } from './saved-work.js';
 import {
@@ -840,12 +841,28 @@ function claimedKinds(text: string): ActionKind[] {
 
 /** Only this task's failures — an earlier turn's error is not this attempt. */
 function failureDetails(evidence: ActionEvidence[]): string[] {
-  return evidence
-    .filter((item) => item.fromCurrentTask !== false && !successful(item))
-    .slice(-2)
-    .map(
-      (item) => `${item.toolName}: ${item.error || 'the tool did not return a successful result'}`,
-    );
+  return [
+    ...new Set(
+      evidence
+        .filter((item) => item.fromCurrentTask !== false && !successful(item))
+        .slice(-2)
+        .map((item) => {
+          if (/BudgetReservationError:.*daily budget/i.test(item.error ?? ''))
+            return 'the daily spending limit prevented another lookup';
+          if (/BudgetReservationError:.*monthly budget/i.test(item.error ?? ''))
+            return 'the monthly spending limit prevented another lookup';
+          const cause = plainCause(item.error);
+          const kind = toolKind(item.toolName);
+          const step =
+            item.toolName === 'conversations.search' || item.toolName === 'memory.recall'
+              ? 'the history lookup'
+              : kind
+                ? PLAIN_STEP[kind]
+                : 'one of the lookup steps';
+          return `${step} did not complete${cause ? ` (${cause})` : ''}`;
+        }),
+    ),
+  ];
 }
 
 /**
@@ -1318,6 +1335,8 @@ function matchingPrivateReadRows(
   current: ActionEvidence[],
 ): ActionEvidence[] {
   return current.filter((row) => {
+    if (request.kind === 'memory' && request.conversationQuery)
+      return matchesHistoricalMemorySearch(request, row);
     if (row.toolName !== request.firstToolName) return false;
     const query = record(row.args)?.query;
     if (typeof query !== 'string') return false;
@@ -1595,7 +1614,28 @@ function calendarAllDayWindowLabel(
     startDay === endDay
       ? `${startDay} ${overlapClock(overlapStart, zone)}–${overlapClock(overlapEnd, zone)}`
       : `${startDay} ${overlapClock(overlapStart, zone)}–${endDay} ${overlapClock(overlapEnd, zone)}`;
-  return `${range} (${sourceNote})`;
+  const clipping =
+    overlapEnd < interval.end
+      ? `; continues until ${intervalDateTime(new Date(interval.end).toISOString(), zone)}`
+      : '';
+  return `All-day record · ${range} within requested window (${sourceNote}${clipping})`;
+}
+
+function calendarLodgingContext(event: Record<string, unknown>, complete: boolean): boolean {
+  const interval = calendarSourceInterval(event);
+  const description = stringField(event, 'description');
+  return (
+    complete &&
+    interval !== undefined &&
+    interval.end - interval.start >= 18 * 60 * 60_000 &&
+    /\b(?:hotel|lodging|accommodation|overnight)\b/i.test(
+      `${stringField(event, 'summary')} ${description}`,
+    ) &&
+    /\bcheck[ -]?in\b/i.test(description) &&
+    /\bcheck[ -]?out\b/i.test(description) &&
+    /(?:Z|[+-]\d{2}:?\d{2})$/i.test(stringField(event, 'start')) &&
+    /(?:Z|[+-]\d{2}:?\d{2})$/i.test(stringField(event, 'end'))
+  );
 }
 
 function calendarOverlapSummary(
@@ -1615,18 +1655,7 @@ function calendarOverlapSummary(
     const rawStart = stringField(event, 'start');
     const rawEnd = stringField(event, 'end');
     const interval = calendarSourceInterval(event);
-    const description = stringField(event, 'description');
-    const explicitStayContext =
-      complete &&
-      interval !== undefined &&
-      interval.end - interval.start >= 18 * 60 * 60_000 &&
-      /\b(?:hotel|lodging|accommodation|overnight)\b/i.test(
-        `${stringField(event, 'summary')} ${description}`,
-      ) &&
-      /\bcheck[ -]?in\b/i.test(description) &&
-      /\bcheck[ -]?out\b/i.test(description) &&
-      /(?:Z|[+-]\d{2}:?\d{2})$/i.test(rawStart) &&
-      /(?:Z|[+-]\d{2}:?\d{2})$/i.test(rawEnd);
+    const explicitStayContext = calendarLodgingContext(event, complete);
     // All-day records have no timed meeting interval. A multi-day stay is
     // treated as context only when complete event details explicitly supply
     // check-in/check-out and offset-aware boundaries; title alone is not proof.
@@ -3752,10 +3781,35 @@ export function verifiedReadResponse(
           );
         }
       }
+      if (request.includeCalendarBriefing) {
+        const stays = agendaEvents.filter((event) => calendarLodgingContext(event, complete));
+        for (const stay of stays)
+          lines.push(
+            `Lodging context: **${stringField(stay, 'summary')}** has explicit check-in/check-out details, so its multi-night span is excluded from timed appointment overlaps.${stay.blocksTime === true ? ' The calendar still marks this stay as busy; this does not establish free time.' : ''}`,
+          );
+      }
       if (request.includeCalendarOverlapSummary) {
         lines.push(...calendarOverlapSummary(agendaEvents, request, complete));
         if (sourceDateEvents.length > 0)
           lines.push('Source-date-only entries could not be compared for local-time overlaps.');
+      }
+      if (request.includeCalendarBriefing) {
+        const firstAppointment = agendaEvents.find(
+          (event) =>
+            event.allDay !== true &&
+            !/^\d{4}-\d{2}-\d{2}$/.test(stringField(event, 'start')) &&
+            event.blocksTime !== false &&
+            stringField(event, 'ownerResponse') !== 'declined' &&
+            !calendarLodgingContext(event, complete),
+        );
+        const next = firstAppointment
+          ? `Check whether you need to attend **${stringField(firstAppointment, 'summary')}**, then review its source details for preparation${stringField(firstAppointment, 'location') ? ' and travel' : ''}.`
+          : sourceDateEvents.length > 0 || !complete
+            ? 'Confirm the unresolved calendar dates or coverage before relying on this briefing.'
+            : agendaEvents.length > 0
+              ? 'Review the source details of the all-day records and confirm whether they require your attention.'
+              : 'Review your priorities for the day before choosing your next task.';
+        lines.push(`Next step: ${next}`);
       }
       if (!complete || unavailable.length > 0) {
         lines.push(
@@ -4065,11 +4119,7 @@ function enforcePersonalReadGrounding(
     };
   if (request.kind === 'memory' && opts?.memoryReadSelection)
     return {
-      text: renderMemoryReadAnswer(
-        opts.memoryReadSelection,
-        currentSuccessfulEvidence(evidence),
-        opts.requestText,
-      ),
+      text: renderMemoryReadAnswer(opts.memoryReadSelection, evidence, opts.requestText),
       blocked: !validMemoryReadSelection(
         opts.memoryReadSelection,
         currentSuccessfulEvidence(evidence),
@@ -4210,6 +4260,14 @@ export function enforceResponseContract(
       qualityFallback: true,
     };
   }
+  const documentVerification = createdDocumentVerification(opts?.requestText ?? '', evidence, text);
+  if (documentVerification)
+    return {
+      text: documentVerification.text,
+      blocked: false,
+      unsupported: [],
+      ...(documentVerification.reason ? { groundingFallback: [documentVerification.reason] } : {}),
+    };
   const completedEvent =
     /^(?:the|my)\s+(interview|meeting|appointment|event)\s+(?:(?:has\s+)?already\s+happened|happened\s+already|is\s+over)[.!]?$/i.exec(
       opts?.requestText?.trim() ?? '',

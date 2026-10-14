@@ -4,6 +4,7 @@ import type { GoogleClient } from './client.js';
 import {
   buildContentRequests,
   type DocsBatchRequest,
+  documentStructure,
   documentText,
   registerDocsTools,
 } from './docs.js';
@@ -150,6 +151,56 @@ describe('documentText', () => {
   });
 });
 
+describe('native document structure', () => {
+  it('reports real headings, bullets and table rows without treating text markers as formatting', () => {
+    const paragraph = (text: string, style?: string, bullet = false) => ({
+      paragraph: {
+        paragraphStyle: { namedStyleType: style },
+        ...(bullet ? { bullet: { listId: 'list-native' } } : {}),
+        elements: [{ textRun: { content: `${text}\n` } }],
+      },
+    });
+    const observed = documentStructure({
+      body: {
+        content: [
+          paragraph('Heading', 'HEADING_1'),
+          paragraph('One', 'NORMAL_TEXT', true),
+          paragraph('Two', 'NORMAL_TEXT', true),
+          paragraph('Three', 'NORMAL_TEXT', true),
+          {
+            table: {
+              tableRows: [
+                ['Task', 'Owner'],
+                ['Read', 'Morgan'],
+                ['Review', 'Taylor'],
+              ].map((row) => ({ tableCells: row.map((cell) => ({ content: [paragraph(cell)] })) })),
+            },
+          },
+        ],
+      },
+    });
+    expect(observed).toEqual({
+      complete: true,
+      headings: [{ text: 'Heading', style: 'HEADING_1' }],
+      bullets: ['One', 'Two', 'Three'],
+      tables: [
+        {
+          rows: [
+            ['Task', 'Owner'],
+            ['Read', 'Morgan'],
+            ['Review', 'Taylor'],
+          ],
+        },
+      ],
+    });
+    expect(
+      documentStructure({
+        body: { content: [paragraph('# Heading - One - Two - Three |Task|Owner| |---|---|')] },
+      }),
+    ).toEqual({ complete: true, headings: [], bullets: [], tables: [] });
+  });
+});
+
 describe('registerDocsTools', () => {
   it('creates the doc, writes styled content, and shares it with the owner', async () => {
     const api = vi
@@ -168,6 +219,12 @@ describe('registerDocsTools', () => {
       title: 'Plan',
       url: 'https://docs.google.com/document/d/DOC-123_abc/edit',
       sharedWith: 'owner@example.com',
+      contentStructure: {
+        complete: true,
+        headings: [{ text: 'Plan', style: 'HEADING_1' }],
+        bullets: ['one', 'two'],
+        tables: [],
+      },
     });
 
     const [createUrl, createInit] = api.mock.calls[0] as [string, RequestInit];
@@ -186,6 +243,118 @@ describe('registerDocsTools', () => {
       type: 'user',
       emailAddress: 'owner@example.com',
     });
+  });
+
+  it('recovers collapsed block boundaries and creates real table cells in separate insert phases', async () => {
+    let tableIndex = 0;
+    const api = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/documents') && init?.method === 'POST')
+        return { documentId: 'NATIVE_DOC_12345' };
+      if (url.endsWith(':batchUpdate')) {
+        const { requests } = JSON.parse(String(init?.body)) as {
+          requests: Array<Record<string, unknown>>;
+        };
+        const insertTable = requests.find((request) => request.insertTable)?.insertTable as
+          | { location: { index: number } }
+          | undefined;
+        if (insertTable) tableIndex = insertTable.location.index + 1;
+        return {};
+      }
+      if (url.endsWith('/NATIVE_DOC_12345'))
+        return {
+          body: {
+            content: [
+              {
+                startIndex: tableIndex,
+                table: {
+                  tableRows: Array.from({ length: 3 }, (_, row) => ({
+                    tableCells: Array.from({ length: 2 }, (_, column) => ({
+                      content: [
+                        {
+                          startIndex: tableIndex + 4 + row * 5 + column * 2,
+                          paragraph: { elements: [] },
+                        },
+                      ],
+                    })),
+                  })),
+                },
+              },
+            ],
+          },
+        };
+      return {};
+    });
+    const tool = toolsWith(api).get('docs.create')?.tool;
+    const result = await tool?.execute(
+      {
+        title: 'Study plan',
+        content:
+          '# Study plan  - Read notes  - Discuss findings  - Write summary  | Item | Reviewer |  |---|---|  | Notes | Morgan |  | Findings | Taylor |',
+      },
+      {} as never,
+    );
+    expect(result).toMatchObject({
+      contentStructure: {
+        headings: [{ text: 'Study plan', style: 'HEADING_1' }],
+        bullets: ['Read notes', 'Discuss findings', 'Write summary'],
+        tables: [
+          {
+            rows: [
+              ['Item', 'Reviewer'],
+              ['Notes', 'Morgan'],
+              ['Findings', 'Taylor'],
+            ],
+          },
+        ],
+      },
+    });
+    const batches = api.mock.calls
+      .filter(([url]) => url.endsWith(':batchUpdate'))
+      .map(([, init]) => JSON.parse(String(init?.body)).requests as DocsBatchRequest[]);
+    expect(batches).toHaveLength(3);
+    expect(insertText(batches[0] ?? [])).toBe(
+      'Study plan\nRead notes\nDiscuss findings\nWrite summary',
+    );
+    expect(batches[1]).toEqual([
+      { insertTable: { rows: 3, columns: 2, location: { index: tableIndex - 1 } } },
+    ]);
+    const cellInserts = (batches[2] ?? []).flatMap((request) =>
+      request.insertText
+        ? [request.insertText as { text: string; location: { index: number } }]
+        : [],
+    );
+    expect(cellInserts.map((insert) => insert.text)).toEqual([
+      'Taylor',
+      'Findings',
+      'Morgan',
+      'Notes',
+      'Reviewer',
+      'Item',
+    ]);
+    expect(cellInserts.map((insert) => insert.location.index)).toEqual([
+      tableIndex + 16,
+      tableIndex + 14,
+      tableIndex + 11,
+      tableIndex + 9,
+      tableIndex + 6,
+      tableIndex + 4,
+    ]);
+    expect(api.mock.calls.findIndex(([url]) => url.endsWith('/NATIVE_DOC_12345'))).toBeLessThan(
+      api.mock.calls.findLastIndex(([url]) => url.endsWith(':batchUpdate')),
+    );
+  });
+
+  it('rejects malformed collapsed tables before creating an artifact', async () => {
+    const api = vi.fn();
+    await expect(
+      toolsWith(api)
+        .get('docs.create')
+        ?.tool.execute(
+          { title: 'Bad table', content: '| A | B | |---|---| | a | b |' },
+          {} as never,
+        ),
+    ).rejects.toThrow('one row per newline');
+    expect(api).not.toHaveBeenCalled();
   });
 
   it('skips the content batchUpdate when no body is given', async () => {

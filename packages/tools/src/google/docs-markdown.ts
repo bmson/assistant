@@ -187,6 +187,24 @@ function inlineStyleRequests(runs: InlineRun[], start: number): DocsBatchRequest
   return requests;
 }
 
+/** Table cells use inline Markdown only; a leading dash is not a list block. */
+export function buildInlineContentRequests(
+  content: string,
+  startIndex: number,
+): { requests: DocsBatchRequest[]; insertedLength: number } {
+  const runs = parseInline(content);
+  const text = runs.map((run) => run.text).join('');
+  return {
+    requests: text.length
+      ? [
+          { insertText: { location: { index: startIndex }, text } },
+          ...inlineStyleRequests(runs, startIndex),
+        ]
+      : [],
+    insertedLength: text.length,
+  };
+}
+
 /**
  * Turn Markdown into Docs `batchUpdate` requests that insert it at `startIndex`.
  * `leadingNewline` pushes the content onto a fresh paragraph when appending
