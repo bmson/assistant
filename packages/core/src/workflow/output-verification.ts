@@ -83,7 +83,29 @@ function clip(value: string, limit: number): string {
  * tool arguments (which can contain secrets and do not prove an outcome).
  * Every item is length-bounded so a large fetch cannot crowd out the draft.
  */
-function webFetchEvidenceForVerifier(row: ActionEvidence, available: number): string | undefined {
+function namedSourcePassages(source: string, draft: string) {
+  const headings: { label: string; offset: number }[] = [];
+  for (const match of source.matchAll(/^([^\r\n]+)$/gm)) {
+    const label = (match[1] ?? '').replace(/&nbsp;|&#160;/g, ' ').trim();
+    // Identifier-only source headings preserve service boundaries without
+    // mistaking a number in a frequency or travel-time sentence for a route.
+    if (/^(?:[A-Z]{2,8}\d{0,4}|[A-Z]\d{1,4}|\d{2,4})$/.test(label))
+      headings.push({ label, offset: match.index });
+  }
+  return headings.flatMap((heading, index) => {
+    const escaped = heading.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (!new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'u').test(draft)) return [];
+    const end = headings[index + 1]?.offset ?? source.length;
+    const text = source.slice(heading.offset, end);
+    return [{ label: heading.label, start: heading.offset, end, text }];
+  });
+}
+
+function webFetchEvidenceForVerifier(
+  row: ActionEvidence,
+  available: number,
+  draft: string,
+): string | undefined {
   const result =
     row.result && typeof row.result === 'object' && !Array.isArray(row.result)
       ? (row.result as Record<string, unknown>)
@@ -111,7 +133,17 @@ function webFetchEvidenceForVerifier(row: ActionEvidence, available: number): st
     error: typeof row.error === 'string' ? row.error.slice(0, 300) : row.error,
   };
 
-  let excerptLength = Math.min(WEB_SOURCE_EXCERPT_LIMIT, sourceText.length);
+  const passages = namedSourcePassages(sourceText, draft);
+  // Prefix-only clipping used to hide transfer qualifiers late in a long
+  // transport page. Include separately labelled, offset-bound source units
+  // for named services; never present noncontiguous excerpts as one passage.
+  const lateNamedPassage = passages.some((passage) => passage.end > WEB_SOURCE_EXCERPT_LIMIT);
+  const selectedPassages = lateNamedPassage ? passages.slice(0, 24) : [];
+  let passageLimit = 800;
+  let excerptLength = Math.min(
+    lateNamedPassage ? 2_000 : WEB_SOURCE_EXCERPT_LIMIT,
+    sourceText.length,
+  );
   while (excerptLength >= 0) {
     const excerpt = sourceText.slice(0, excerptLength);
     const rendered = JSON.stringify({
@@ -121,18 +153,32 @@ function webFetchEvidenceForVerifier(row: ActionEvidence, available: number): st
         sourceExcerpt: excerpt,
         sourceExcerptLength: excerpt.length,
         sourceExcerptOmittedChars: Math.max(0, sourceText.length - excerpt.length),
+        ...(lateNamedPassage
+          ? {
+              sourcePassages: selectedPassages.map((passage) => ({
+                label: passage.label,
+                startOffset: passage.start,
+                endOffset: Math.min(passage.end, passage.start + passageLimit),
+                text: passage.text.slice(0, passageLimit),
+                omittedChars: Math.max(0, passage.text.length - passageLimit),
+              })),
+              sourcePassagesOmittedCount: passages.length - selectedPassages.length,
+            }
+          : {}),
       },
     });
     if (rendered.length <= available) return rendered;
-    if (excerptLength === 0) break;
-    excerptLength = Math.max(0, Math.floor(excerptLength * 0.75));
+    if (excerptLength > 0) excerptLength = Math.max(0, Math.floor(excerptLength * 0.75));
+    else if (selectedPassages.length && passageLimit > 80)
+      passageLimit = Math.max(80, Math.floor(passageLimit * 0.75));
+    else break;
   }
 
   const metadata = JSON.stringify(base);
   return metadata.length <= available ? metadata : undefined;
 }
 
-function evidenceForVerifier(evidence: ActionEvidence[]): string {
+function evidenceForVerifier(evidence: ActionEvidence[], draft: string): string {
   // Current results must survive the overall cap even when the conversation
   // contains many unrelated older tools. The newest receipts come first.
   const prioritized = [
@@ -145,7 +191,7 @@ function evidenceForVerifier(evidence: ActionEvidence[]): string {
     const available = remaining - (rendered.length ? 1 : 0);
     if (available <= 0) break;
     const web =
-      row.toolName === 'web.fetch' ? webFetchEvidenceForVerifier(row, available) : undefined;
+      row.toolName === 'web.fetch' ? webFetchEvidenceForVerifier(row, available, draft) : undefined;
     const value =
       web ??
       clip(
@@ -191,7 +237,7 @@ export function buildOutputVerificationPrompt(input: {
     clip(input.draft, DRAFT_LIMIT),
     '</proposed_response>',
     '<durable_evidence>',
-    evidenceForVerifier(input.evidence),
+    evidenceForVerifier(input.evidence, input.draft),
     '</durable_evidence>',
   ].join('\n');
 }
@@ -203,6 +249,7 @@ export const OUTPUT_VERIFICATION_SYSTEM = [
   'For current public facts, successful source content from this task is required. Search results discover sources; they do not prove every claim. HTTP error pages are failed reads even when the tool status says succeeded. A club homepage does not establish a specific youth team’s kit, formation, player numbers, strengths, or weaknesses. Separate verified facts from general suggestions; remove specifics absent from the evidence.',
   'When a response names multiple entities or routes, check each entity and each claimed attribute against its own source passage. Keep origins, destinations, times, prices, and other attributes attached to the item that states them; a shared stop or segment does not establish another route’s origin or full path. Do not infer facts from neighboring list items or merge separate entries. Preserve source headings and list-item boundaries when they distinguish entries.',
   'For public web summaries, treat every named service or route entry as a separate evidence unit. A page introduction or category heading cannot spread a frequency, destination, stop, or service pattern across all entries. Keep direct-to-destination service distinct from a route that ends at an interchange and requires a transfer. Keep each frequency attached only to the service entry that states it: if one route is hourly and another is every 20 minutes, do not summarize both as every 20 minutes. You may combine routes only when the combined wording remains true for each one; otherwise preserve their qualifiers or give a broader fact that the source supports.',
+  'Separately labelled sourcePassages are noncontiguous excerpts, not adjoining source text. Verify each named service against its own passage, including continuation or change-at qualifiers; do not call an interchange-only route a direct destination service or hide its required transfer inside a generic list. Omitted passage characters or omitted units do not prove missing attributes. For a short overview, give the few most useful verified options with their essential qualifiers rather than an exhaustive route catalogue.',
   'Use conversation context only to resolve short follow-ups and the scope of the current request. Earlier assistant claims, offers, and card labels are not evidence. Never revive a superseded topic or turn an accepted lookup offer into permission for an external action.',
   'Check each requested outcome separately: distinguish completed work, partial results, pending approval, and failed or unattempted work. A lookup is not a save, a draft is not a send, an interview is not an application receipt, and a nearby event is not a hotel booking. Do not replace the answer with a promise or ask permission for a lookup that already ran.',
   'Emoji are not decoration or status markers. If the owner did not explicitly request an emoji, any emoji in the proposed response is a defect: return decision "revise" with a complete emoji-free replacement. Never add emoji in a revision.',

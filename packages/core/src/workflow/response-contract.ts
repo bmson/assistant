@@ -1612,8 +1612,31 @@ function calendarOverlapSummary(
       event.blocksTime === false
     )
       return [];
+    const rawStart = stringField(event, 'start');
+    const rawEnd = stringField(event, 'end');
     const interval = calendarSourceInterval(event);
-    if (!interval) return [];
+    const description = stringField(event, 'description');
+    const explicitStayContext =
+      complete &&
+      interval !== undefined &&
+      interval.end - interval.start >= 18 * 60 * 60_000 &&
+      /\b(?:hotel|lodging|accommodation|overnight)\b/i.test(
+        `${stringField(event, 'summary')} ${description}`,
+      ) &&
+      /\bcheck[ -]?in\b/i.test(description) &&
+      /\bcheck[ -]?out\b/i.test(description) &&
+      /(?:Z|[+-]\d{2}:?\d{2})$/i.test(rawStart) &&
+      /(?:Z|[+-]\d{2}:?\d{2})$/i.test(rawEnd);
+    // All-day records have no timed meeting interval. A multi-day stay is
+    // treated as context only when complete event details explicitly supply
+    // check-in/check-out and offset-aware boundaries; title alone is not proof.
+    if (
+      event.allDay === true ||
+      (/^\d{4}-\d{2}-\d{2}$/.test(rawStart) && /^\d{4}-\d{2}-\d{2}$/.test(rawEnd)) ||
+      !interval ||
+      explicitStayContext
+    )
+      return [];
     const projected: BriefingCalendarEvent = {
       summary: stringField(event, 'summary') || '(untitled event)',
       start: stringField(event, 'start'),
@@ -1681,7 +1704,7 @@ function calendarOverlapSummary(
   if (notes.length === 0)
     return [
       complete
-        ? 'No unresolved overlapping event times were found in the checked calendar results.'
+        ? 'No unresolved overlaps between timed calendar entries were found in the checked results.'
         : events.length > 0
           ? 'No overlaps appeared in the checked event subset; calendar coverage is incomplete.'
           : 'An overlap check was requested, but no calendar events were available to compare.',
@@ -3023,6 +3046,18 @@ export function groundReadDraft(
 ): ReadGrounding {
   const draft = text.trim();
   if (!draft) return { grounded: false, reasons: ['empty draft'] };
+  // Calendar briefings are a ledger projection. A fluent model paragraph can
+  // still turn similar-looking events into an unsupported duplicate or
+  // attendance claim, so keep event identity and source links in the checked
+  // projection and reserve generation for the separately checked skill step.
+  if (request.includeCalendarBriefing) {
+    const projection = verifiedReadResponse(request, evidence);
+    if (!draft.startsWith(`${projection}\n\nNext step: `))
+      return {
+        grounded: false,
+        reasons: ['calendar briefing is rendered from checked event rows'],
+      };
+  }
   // "Are you sure?" is a challenge to the prose itself. The literal ledger is
   // the only answer that settles it, so prose never wins this one.
   if (request.verification) return { grounded: false, reasons: ['verification request'] };

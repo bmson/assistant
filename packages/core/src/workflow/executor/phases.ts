@@ -44,6 +44,7 @@ import {
 import { startMissionWithReceipt, wakeMission } from '../missions.js';
 import {
   explicitlyOptsOutOfRecall,
+  isSelfContainedTextTransformation,
   latestOwnerIntent,
   ownerAuthoredWindow,
 } from '../owner-intent.js';
@@ -175,10 +176,14 @@ export async function preparePlanningRecall(rc: RunContext): Promise<boolean> {
   const ownerWindow = ownerAuthoredWindow(window, intent);
   const noRead = explicitlyOptsOutOfRecall(text);
   const privateRead = task.trust === 'owner' && detectPersonalReadRequest(ownerWindow) !== null;
+  const localTransformation =
+    intent.authorizedScopes.length === 0 &&
+    isSelfContainedTextTransformation(text, intent.externalText);
   const eligible =
     loadConfig().CHAT_RECALL_ENABLED &&
     !noRead &&
     !privateRead &&
+    !localTransformation &&
     !state.untrustedContext &&
     task.trust === 'owner' &&
     (task.type === 'chat_turn' || task.type === 'sms_turn' || task.type === 'email_triage') &&

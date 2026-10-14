@@ -44,7 +44,11 @@ import {
   compoundTripSourceMessages,
   extractCompoundTripBookings,
 } from '../compound-trip-extraction.js';
-import { compoundTripReadProjection } from '../compound-trip-read.js';
+import {
+  compoundTripReadProjection,
+  compoundTripThreadReadInputs,
+  MAX_COMPOUND_TRIP_TOOL_CALLS,
+} from '../compound-trip-read.js';
 import {
   boundEmailReviewThreads,
   EMAIL_REVIEW_MAX_CANDIDATES,
@@ -93,7 +97,12 @@ import {
   renewTaskLease,
   sleepTask,
 } from '../machine.js';
-import { latestOwnerIntent, type OwnerIntent, ownerAuthoredWindow } from '../owner-intent.js';
+import {
+  isSelfContainedTextTransformation,
+  latestOwnerIntent,
+  type OwnerIntent,
+  ownerAuthoredWindow,
+} from '../owner-intent.js';
 import { isConceptualNoToolRequest, PLANNER_VERSION } from '../planner.js';
 import {
   buildReadToolInput,
@@ -440,6 +449,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     !isForwardedIngest(task) &&
     ownerIntent.separation !== 'unknown' &&
     ownerText.length > 0;
+  const localTransformation =
+    directOwner &&
+    ownerIntent.authorizedScopes.length === 0 &&
+    isSelfContainedTextTransformation(ownerText, ownerIntent.externalText);
   const futureWatchIntent =
     directOwner && !restrictedChecklistResume ? detectFutureWatchIntent(ownerText) : null;
   const memoryWrite = directOwner && !restrictedChecklistResume && isMemoryWriteRequest(ownerText);
@@ -754,6 +767,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   if (
     loadConfig().CHAT_RECALL_ENABLED &&
     state.plannerState.planningRecall === undefined &&
+    !localTransformation &&
     !restrictedChecklistResume &&
     !readRequest &&
     privilegedTask &&
@@ -825,6 +839,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
 
   if (
     !restrictedChecklistResume &&
+    !localTransformation &&
     privilegedTask &&
     !state.untrustedContext &&
     task.conversationId
@@ -2532,18 +2547,38 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           outcome: 'failed',
         });
       }
+      const readInputs =
+        readRequest.compoundTripDiscovery && boundedForcedReadTool === 'gmail.read_thread'
+          ? compoundTripThreadReadInputs(readToolEvidence, readRequest).slice(
+              0,
+              Math.max(
+                0,
+                MAX_COMPOUND_TRIP_TOOL_CALLS -
+                  readToolEvidence.filter(
+                    (row) =>
+                      row.fromCurrentTask !== false &&
+                      [
+                        'calendar.list_events',
+                        'gmail.search',
+                        'gmail.read_thread',
+                        'maps.directions',
+                        'web.search',
+                        'web.fetch',
+                      ].includes(row.toolName),
+                  ).length,
+              ),
+            )
+          : [input];
       stepResult = {
         ok: true,
         modelId: 'runtime/private-read-router',
         degraded: false,
         text: '',
-        toolCalls: [
-          {
-            toolCallId: `runtime-private-read-${task.id}-${state.step + 1}`,
-            toolName: boundedForcedReadTool,
-            input,
-          },
-        ],
+        toolCalls: readInputs.map((readInput, index) => ({
+          toolCallId: `runtime-private-read-${task.id}-${state.step + 1}${readInputs.length > 1 ? `-${index + 1}` : ''}`,
+          toolName: boundedForcedReadTool,
+          input: readInput,
+        })),
         finishReason: 'tool-calls',
       };
     } else {
@@ -2847,24 +2882,66 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     if (!resumingBatch && boundedForcedReadTool && readRequest) {
       // A forced read authorizes only that read, and runtime-owned bindings
       // remove model-invented calendar narrowing/query terms/thread ids.
-      const requiredCall = stepResult.toolCalls.find(
-        (toolCall) => toolCall.toolName === boundedForcedReadTool,
-      );
-      if (requiredCall) {
+      if (readRequest.compoundTripDiscovery && boundedForcedReadTool === 'gmail.read_thread') {
+        const remainingTripCalls = Math.max(
+          0,
+          MAX_COMPOUND_TRIP_TOOL_CALLS -
+            readToolEvidence.filter(
+              (row) =>
+                row.fromCurrentTask !== false &&
+                [
+                  'calendar.list_events',
+                  'gmail.search',
+                  'gmail.read_thread',
+                  'maps.directions',
+                  'web.search',
+                  'web.fetch',
+                ].includes(row.toolName),
+            ).length,
+        );
+        const authorizedInputs = compoundTripThreadReadInputs(readToolEvidence, readRequest).slice(
+          0,
+          remainingTripCalls,
+        );
+        const remaining = [...authorizedInputs];
+        const groundedCalls = stepResult.toolCalls.filter((toolCall) => {
+          if (toolCall.toolName !== boundedForcedReadTool) return false;
+          const index = remaining.findIndex(
+            (input) => JSON.stringify(input) === JSON.stringify(toolCall.input),
+          );
+          if (index < 0) return false;
+          remaining.splice(index, 1);
+          return true;
+        });
+        const completeRuntimeBatch =
+          stepResult.modelId === 'runtime/private-read-router' &&
+          authorizedInputs.length > 0 &&
+          stepResult.toolCalls.length === authorizedInputs.length &&
+          groundedCalls.length === authorizedInputs.length &&
+          remaining.length === 0;
         stepResult = {
           ...stepResult,
-          toolCalls: [
-            {
-              ...requiredCall,
-              input: groundReadToolInput(
-                readRequest,
-                boundedForcedReadTool,
-                requiredCall.input,
-                readToolEvidence,
-              ),
-            },
-          ],
+          toolCalls: completeRuntimeBatch ? groundedCalls : [],
         };
+      } else {
+        const requiredCall = stepResult.toolCalls.find(
+          (toolCall) => toolCall.toolName === boundedForcedReadTool,
+        );
+        if (requiredCall)
+          stepResult = {
+            ...stepResult,
+            toolCalls: [
+              {
+                ...requiredCall,
+                input: groundReadToolInput(
+                  readRequest,
+                  boundedForcedReadTool,
+                  requiredCall.input,
+                  readToolEvidence,
+                ),
+              },
+            ],
+          };
       }
     }
     if (!resumingBatch && task.goalId) {

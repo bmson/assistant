@@ -158,9 +158,25 @@ async function runFlightContinuation(
     weeklyBusy?: unknown[];
     modelIgnoresNoTools?: boolean;
     modelFinalText?: string;
+    compoundTripReadBatch?: boolean;
+    priorTripToolFailures?: number;
   } = {},
 ) {
-  const rows: Array<Record<string, unknown>> = [];
+  const rows: Array<Record<string, unknown>> = Array.from(
+    { length: options.priorTripToolFailures ?? 0 },
+    (_, index) => ({
+      id: `prior-trip-tool-failure-${index + 1}`,
+      toolName: 'maps.directions',
+      status: 'failed',
+      args: { origin: 'known source endpoint', destination: 'known source endpoint' },
+      result: null,
+      error: 'fixture prior bounded trip-tool attempt',
+      step: index + 1,
+      fromCurrentTask: true,
+    }),
+  );
+  const checkpointReadBatchSizes: number[] = [];
+  const checkpointReadBatchAfterDispatchCounts: number[] = [];
   const router = {
     step: vi.fn(async () => ({
       ok: true as const,
@@ -281,66 +297,79 @@ async function runFlightContinuation(
           calendarsSearched: ['primary'],
         };
       } else if (toolName === 'gmail.search') {
+        const priorSearchCount = rows.filter((row) => row.toolName === 'gmail.search').length;
         result = {
-          results: options.incompleteMailSearch
-            ? []
-            : options.upcomingFlight
-              ? (() => {
-                  const booking = {
-                    threadId: 'booking-upcoming',
-                    subject: 'Lisbon flight confirmation',
-                    snippet: 'Departure November 12, 2026. Fare expires December 2, 2026.',
-                  };
-                  const oslo = {
-                    threadId: 'oslo-flight-same-day',
-                    subject: 'Oslo flight confirmation',
-                    snippet: 'Departure November 12, 2026.',
-                  };
-                  const alternate = options.newsletterLisbonSource
-                    ? {
-                        threadId: 'lisbon-newsletter',
-                        subject: 'Lisbon flight deals',
-                        snippet: 'Flight departure November 12, 2026 at 7:30 AM.',
-                      }
-                    : options.yearlessLisbonConfirmation
+          results: options.compoundTripReadBatch
+            ? priorSearchCount === 0
+              ? [1, 2, 3].map((index) => ({
+                  threadId: `flight-booking-${index}`,
+                  subject: `Flight booking confirmation ${index}`,
+                  snippet: 'Flight itinerary and departure details.',
+                }))
+              : [1, 2, 3].map((index) => ({
+                  threadId: `hotel-booking-${index}`,
+                  subject: `Hotel reservation confirmation ${index}`,
+                  snippet: 'Hotel reservation and stay dates.',
+                }))
+            : options.incompleteMailSearch
+              ? []
+              : options.upcomingFlight
+                ? (() => {
+                    const booking = {
+                      threadId: 'booking-upcoming',
+                      subject: 'Lisbon flight confirmation',
+                      snippet: 'Departure November 12, 2026. Fare expires December 2, 2026.',
+                    };
+                    const oslo = {
+                      threadId: 'oslo-flight-same-day',
+                      subject: 'Oslo flight confirmation',
+                      snippet: 'Departure November 12, 2026.',
+                    };
+                    const alternate = options.newsletterLisbonSource
                       ? {
-                          threadId: 'lisbon-yearless',
-                          subject: 'Lisbon flight itinerary',
-                          snippet: 'Departure November 12 at 7:30 AM.',
+                          threadId: 'lisbon-newsletter',
+                          subject: 'Lisbon flight deals',
+                          snippet: 'Flight departure November 12, 2026 at 7:30 AM.',
                         }
-                      : { threadId: 'old-flight', subject: 'Lisbon flight itinerary' };
-                  return options.newsletterLisbonSource || options.yearlessLisbonConfirmation
-                    ? [booking, alternate, oslo]
-                    : [booking, oslo, alternate];
-                })()
-              : options.currentBookingFourth
-                ? [
-                    {
-                      threadId: 'stale-1',
-                      subject: 'Berlin flight update',
-                      snippet: 'Gate information for your earlier trip.',
-                    },
-                    {
-                      threadId: 'stale-2',
-                      subject: 'Berlin airport notice',
-                      snippet: 'Terminal information for your earlier trip.',
-                    },
-                    {
-                      threadId: 'stale-3',
-                      subject: 'Your Berlin travel details',
-                      snippet: 'Information from an earlier trip.',
-                    },
-                    {
-                      threadId: 'current',
-                      subject: 'Berlin flight confirmation',
-                      snippet: 'Your itinerary and departure details.',
-                    },
-                  ]
-                : [
-                    { threadId: 'current', subject: 'Berlin flight itinerary' },
-                    { threadId: 'old', subject: 'Berlin flight itinerary' },
-                    { threadId: 'newsletter', subject: 'Asiana newsletter' },
-                  ],
+                      : options.yearlessLisbonConfirmation
+                        ? {
+                            threadId: 'lisbon-yearless',
+                            subject: 'Lisbon flight itinerary',
+                            snippet: 'Departure November 12 at 7:30 AM.',
+                          }
+                        : { threadId: 'old-flight', subject: 'Lisbon flight itinerary' };
+                    return options.newsletterLisbonSource || options.yearlessLisbonConfirmation
+                      ? [booking, alternate, oslo]
+                      : [booking, oslo, alternate];
+                  })()
+                : options.currentBookingFourth
+                  ? [
+                      {
+                        threadId: 'stale-1',
+                        subject: 'Berlin flight update',
+                        snippet: 'Gate information for your earlier trip.',
+                      },
+                      {
+                        threadId: 'stale-2',
+                        subject: 'Berlin airport notice',
+                        snippet: 'Terminal information for your earlier trip.',
+                      },
+                      {
+                        threadId: 'stale-3',
+                        subject: 'Your Berlin travel details',
+                        snippet: 'Information from an earlier trip.',
+                      },
+                      {
+                        threadId: 'current',
+                        subject: 'Berlin flight confirmation',
+                        snippet: 'Your itinerary and departure details.',
+                      },
+                    ]
+                  : [
+                      { threadId: 'current', subject: 'Berlin flight itinerary' },
+                      { threadId: 'old', subject: 'Berlin flight itinerary' },
+                      { threadId: 'newsletter', subject: 'Asiana newsletter' },
+                    ],
           mailboxSearched: 'all mail',
           complete: !options.incompleteMailSearch,
         };
@@ -507,7 +536,16 @@ async function runFlightContinuation(
   const tasks = {
     kind: 'task-lease-repository' as const,
     renew: vi.fn(async () => true),
-    checkpoint: vi.fn(async () => true),
+    checkpoint: vi.fn(async (_lease: unknown, checkpointState: TaskState) => {
+      const batchSize = checkpointState.pendingToolBatch?.calls.filter(
+        (call) => call.toolName === 'gmail.read_thread',
+      ).length;
+      if (batchSize) {
+        checkpointReadBatchSizes.push(batchSize);
+        checkpointReadBatchAfterDispatchCounts.push(dispatch.mock.calls.length);
+      }
+      return true;
+    }),
     completeTask: vi.fn(async () => true),
     markTaskNeedsAttention: vi.fn(async () => true),
   };
@@ -599,7 +637,15 @@ async function runFlightContinuation(
     steps: [],
     missingInfo: [],
   });
-  return { result, state, rows, router, dispatch };
+  return {
+    result,
+    state,
+    rows,
+    router,
+    dispatch,
+    checkpointReadBatchSizes,
+    checkpointReadBatchAfterDispatchCounts,
+  };
 }
 
 describe('unsupported temporal requests through the actual executor step loop', () => {
@@ -1031,5 +1077,57 @@ describe('flight clarification through the actual executor step loop', () => {
     expect(state.pendingFinal?.text).not.toContain('[click](https://evil.example)');
     expect(state.pendingFinal?.text).not.toContain(String.raw`\(United`);
     expect(state.pendingFinal?.text).not.toContain(String.raw`(United\)`);
+  });
+});
+
+describe('compound trip thread-read journaling', () => {
+  const request =
+    'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
+
+  it('checkpoints and dispatches the complete grounded read batch, clamped to the remaining trip-call budget', async () => {
+    const complete = await runFlightContinuation([], request, { compoundTripReadBatch: true });
+    const completeReadIds = complete.dispatch.mock.calls
+      .filter(([call]) => call.toolName === 'gmail.read_thread')
+      .map(([call]) => call.args.threadId);
+
+    expect(new Set(completeReadIds)).toEqual(
+      new Set([
+        'flight-booking-1',
+        'flight-booking-2',
+        'flight-booking-3',
+        'hotel-booking-1',
+        'hotel-booking-2',
+        'hotel-booking-3',
+      ]),
+    );
+    expect(complete.checkpointReadBatchSizes).toContain(6);
+    expect(complete.checkpointReadBatchAfterDispatchCounts).toContain(3);
+    expect(new Set(completeReadIds).size).toBe(6);
+
+    // Eight earlier bounded trip-tool attempts plus calendar and two searches
+    // leave five of the six selected messages inside the hard 16-call ceiling.
+    const nearLimit = await runFlightContinuation([], request, {
+      compoundTripReadBatch: true,
+      priorTripToolFailures: 8,
+    });
+    const nearLimitReadIds = nearLimit.dispatch.mock.calls
+      .filter(([call]) => call.toolName === 'gmail.read_thread')
+      .map(([call]) => call.args.threadId);
+    const currentTripToolRows = nearLimit.rows.filter(
+      (row) =>
+        row.fromCurrentTask !== false &&
+        [
+          'calendar.list_events',
+          'gmail.search',
+          'gmail.read_thread',
+          'maps.directions',
+          'web.search',
+          'web.fetch',
+        ].includes(String(row.toolName)),
+    );
+
+    expect(nearLimitReadIds).toEqual(completeReadIds.slice(0, 5));
+    expect(nearLimit.checkpointReadBatchSizes).toContain(5);
+    expect(currentTripToolRows).toHaveLength(16);
   });
 });

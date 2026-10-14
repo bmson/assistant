@@ -170,6 +170,82 @@ describe('self-reflective output verification', () => {
     expect(evidence.source.sourceExcerptOmittedChars).toBe(0);
   });
 
+  it('retains separately bound late service passages and their transfer qualifiers', () => {
+    const source = [
+      'Airport transport overview',
+      'R10',
+      '- Route: Central - Airport',
+      '- Frequency: every 15 minutes',
+      'Page information. '.repeat(900),
+      '731',
+      '- Route: Town - Junction',
+      '- Frequency: hourly',
+      '- Continue to the airport with R10.',
+      'B12&nbsp;',
+      '- Route: Market - Airport',
+      '- Frequency: every 20 minutes',
+      'B120',
+      '- Route: Unrelated town - Harbor',
+    ].join('\n');
+    const prompt = buildOutputVerificationPrompt({
+      request: 'Give a short summary of the official transport options.',
+      draft: 'R10, 731 and B12 all serve the airport.',
+      evidence: [
+        { toolName: 'web.fetch', status: 'succeeded', result: { text: source, truncated: false } },
+      ],
+    });
+    const durable = prompt.match(/<durable_evidence>\n([\s\S]*?)\n<\/durable_evidence>/)?.[1];
+    const evidence = JSON.parse(durable ?? '{}') as {
+      source: {
+        sourceTruncated: boolean;
+        sourcePassages: {
+          label: string;
+          startOffset: number;
+          endOffset: number;
+          text: string;
+          omittedChars: number;
+        }[];
+        sourcePassagesOmittedCount: number;
+      };
+    };
+    expect(evidence.source.sourceTruncated).toBe(false);
+    expect(evidence.source.sourcePassages.map((passage) => passage.label)).toEqual([
+      'R10',
+      '731',
+      'B12',
+    ]);
+    const connection = evidence.source.sourcePassages.find((passage) => passage.label === '731');
+    expect(connection?.text).toContain('Continue to the airport with R10.');
+    expect(connection?.text).not.toContain('every 15 minutes');
+    expect(connection?.omittedChars).toBe(0);
+    for (const passage of evidence.source.sourcePassages)
+      expect(source.slice(passage.startOffset, passage.endOffset)).toBe(passage.text);
+    expect(evidence.source.sourcePassagesOmittedCount).toBe(0);
+    expect(prompt.length).toBeLessThan(13_000);
+  });
+
+  it('keeps the web evidence cap and records losses for many long named entries', () => {
+    const source = Array.from(
+      { length: 30 },
+      (_, i) => `B${i + 10}\n${'Service information. '.repeat(1000)}`,
+    ).join('\n');
+    const prompt = buildOutputVerificationPrompt({
+      request: 'Compare the listed options.',
+      draft: Array.from({ length: 30 }, (_, i) => `B${i + 10}`).join(', '),
+      evidence: [{ toolName: 'web.fetch', status: 'succeeded', result: { text: source } }],
+    });
+    const durable = prompt.match(/<durable_evidence>\n([\s\S]*?)\n<\/durable_evidence>/)?.[1];
+    const evidence = JSON.parse(durable ?? '{}');
+    expect(durable?.length).toBeLessThanOrEqual(12_000);
+    expect(evidence.source.sourcePassagesOmittedCount).toBe(6);
+    expect(
+      evidence.source.sourcePassages.every(
+        (passage: { omittedChars: number }) => passage.omittedChars > 0,
+      ),
+    ).toBe(true);
+    expect(evidence.source.sourceTruncated).toBeNull();
+  });
+
   it('keeps failed web reads distinguishable from successful or truncated source content', () => {
     const prompt = buildOutputVerificationPrompt({
       request: 'Check this page.',

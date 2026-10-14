@@ -52,6 +52,73 @@ const ownerSelection = { sourceKey: 'message:owner-nimbus', quote: ownerBody };
 const assistantSelection = { sourceKey: 'message:assistant-nimbus', quote: assistantBody };
 
 describe('source-backed fictional history', () => {
+  it('recovers a named fictional exercise from exact owner evidence after empty selector passes', async () => {
+    const request =
+      'Find the earlier hypothetical planning exercise called Nimbus in our past chats. Recall its project name, budget, deadline, and travel constraint, citing the conversation source. Clearly distinguish the fictional exercise from facts about me. Do not use email or calendar, and do not save new memories.';
+    const object = vi.fn().mockResolvedValue({ ok: true, object: { selections: [] } });
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'read-task',
+      request,
+      evidence,
+    });
+
+    expect(object).toHaveBeenCalledTimes(2);
+    expect(result.status).toBe('complete');
+    expect(result.selections).toEqual([
+      {
+        sourceKey: 'message:owner-nimbus',
+        quote:
+          'For this fictional exercise, the project is Nimbus, the budget is €310, the deadline is Thursday, and we must avoid taxi travel.',
+      },
+    ]);
+    expect(validMemoryReadSelection(result, evidence, request)).toBe(true);
+    const rendered = renderMemoryReadAnswer(result, evidence, request);
+    expect(rendered).toContain('fictional exercise, not facts about you');
+    expect(rendered).toContain('€310');
+    expect(rendered).toContain('Thursday');
+    expect(rendered).toContain('avoid taxi travel');
+    expect(rendered).toContain('conversation exercise-chat; message owner-nimbus');
+    expect(rendered).not.toContain('public transport options');
+  });
+
+  it('does not recover fictional recall from a question or conflicting owner assertions', async () => {
+    const request =
+      'Find the earlier hypothetical planning exercise called Nimbus. Recall its project name, budget, deadline, and travel constraint.';
+    const searchEvidence = evidence[0];
+    if (!searchEvidence) throw new Error('Expected fixture search evidence');
+    const questionOnly =
+      'For the hypothetical Nimbus exercise, I wondered what was the budget and deadline, and which travel constraint applied';
+    const conflict =
+      'For the hypothetical exercise, the project is Nimbus, the budget is €410, the deadline is Friday, and we must avoid taxi travel.';
+    const makeOwner = (messageId: string, body: string) => ({
+      messageId,
+      conversationId: 'exercise-chat',
+      text: body,
+      role: 'user',
+      origin: 'owner',
+      speakerRevision: conversationMessageSpeakerRevision(messageId, body, 'user', 'owner'),
+    });
+    const object = vi.fn().mockResolvedValue({ ok: true, object: { selections: [] } });
+    const run = (ownerRows: unknown[]) =>
+      selectMemoryReadAnswer({
+        router: { object } as never,
+        taskId: 'read-task',
+        request,
+        evidence: [{ ...searchEvidence, result: { matches: ownerRows } }],
+      });
+    const questionResult = await run([makeOwner('owner-question', questionOnly)]);
+    expect(questionResult.status).toBe('unavailable');
+    expect(questionResult.selections).toEqual([]);
+
+    const conflictResult = await run([
+      makeOwner('owner-original', ownerBody),
+      makeOwner('owner-conflict', conflict),
+    ]);
+    expect(conflictResult.status).toBe('unavailable');
+    expect(conflictResult.selections).toEqual([]);
+  });
+
   it('recovers a supplied declarative exercise from an empty first selection without treating it as personal memory', async () => {
     const request =
       'Find our earlier fictional Nimbus exercise and recall its budget, deadline and constraint.';
