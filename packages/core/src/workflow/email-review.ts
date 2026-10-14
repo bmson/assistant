@@ -908,9 +908,20 @@ function isSourceBackedDeadlineQuote(
   quote: string,
 ): boolean {
   if (!quoteExists(thread, messageId, quote)) return false;
-  if (looksLikeDeadlineQuote(quote)) return true;
   const source = thread.messages.find((message) => message.messageId === messageId)?.text;
   if (!source) return false;
+  if (looksLikeDeadlineQuote(quote)) {
+    if (!/^(?:today|tomorrow|tonight|asap)$/i.test(quote.trim())) return true;
+    const index = source.indexOf(quote);
+    const surroundingSource = source.slice(Math.max(0, index - 80), index + quote.length + 20);
+    if (
+      /\b(?:by|before|until|due|deadline|no later than)\s+(?:today|tomorrow|tonight)\b/i.test(
+        surroundingSource,
+      )
+    )
+      return true;
+    return false;
+  }
   const deadlineOrOutcome =
     /\b(?:due|deadline|by|before|until|no later than|last day|final day|will be donated|donat(?:e|ed|ion)|discard(?:ed)?|destroy(?:ed)?|remove[sd]?|auction(?:ed)?|recycl(?:e|ed)|expire[sd]?|cancel(?:led|ed)?)\b/i;
   const datePattern =
@@ -932,13 +943,6 @@ function isSourceBackedDeadlineQuote(
 function hasPossibleSourceDeadline(thread: EmailReviewThread): boolean {
   const latest = thread.messages.find((message) => message.messageId === thread.latestMessageId);
   if (!latest) return false;
-  const latestBody = latestUnquotedBody(thread) ?? '';
-  if (
-    latestMessageNeedsReply(thread) &&
-    /\b(?:today|tomorrow|tonight|end of (?:day|week))\b/i.test(latestBody) &&
-    /\b(?:help|volunteer|attend|join|rsvp|respond|confirm|reply|available)\b/i.test(latestBody)
-  )
-    return true;
   const deadlineCue =
     /\b(?:early[- ]?bird|offer|discount|registration|applications?|rsvp|response|reply|volunteer(?:ing)?)\b[^.!?\n]{0,160}\b(?:through|until|by|before|due)\s+(?:(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?|\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}|today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|end of (?:day|week))\b/i;
   const datedOutcomeCue =
@@ -1049,7 +1053,7 @@ function directReplyDeadlineQuote(thread: EmailReviewThread): string | undefined
       body,
     )?.[0];
   if (explicit) return explicit;
-  return /\b(?:today|tomorrow|tonight)\b/i.exec(body)?.[0];
+  return undefined;
 }
 
 function directReplyFallbackDraft(thread: EmailReviewThread): string | undefined {

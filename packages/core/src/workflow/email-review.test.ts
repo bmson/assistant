@@ -385,7 +385,7 @@ describe('bounded no-send email review', () => {
     expect(wrongIdentity.answer).toBeUndefined();
   });
 
-  it('reports source-relative deadlines without converting them to guessed dates', () => {
+  it('keeps event timing in context without treating it as a response deadline', () => {
     const sourceMessages = messages('volunteer-tomorrow');
     const latest = required(sourceMessages.at(-1), 'latest message');
     latest.text = 'Could you volunteer tomorrow?';
@@ -400,26 +400,32 @@ describe('bounded no-send email review', () => {
     const assessment = {
       ...required(validAnswer(thread.threadId).items[0], 'assessment'),
       whyQuote: 'Could you volunteer tomorrow?',
-      deadline: { messageId: thread.latestMessageId, quote: 'tomorrow' },
+      deadline: null,
       draftBody: 'Thanks for asking. I appreciate you thinking of me.',
     };
     const checked = validateEmailReviewAnswer({ items: [assessment] }, [thread]);
-    expect(checked?.items[0]?.deadlineQuote).toBe('tomorrow');
+    expect(checked?.items[0]?.deadlineQuote).toBeUndefined();
     const formatted = formatEmailReviewAnswer(
       checked?.items ?? [],
       emailReviewCoverage([thread.threadId], [thread], [search(thread.threadId)]),
     );
-    expect(formatted).toContain(
-      '“tomorrow” (source message dated 2026-10-11T16:00:00Z; wording is relative)',
-    );
-    expect(formatted).not.toContain('October 11');
+    expect(formatted).toContain('No deadline was identified in this review.');
+    expect(formatted).not.toContain('Deadline mentioned in the thread: “tomorrow”');
 
-    const missing = {
-      items: [{ ...assessment, deadline: null }],
+    const falseDeadline = {
+      items: [
+        {
+          ...assessment,
+          deadline: { messageId: thread.latestMessageId, quote: 'tomorrow' },
+        },
+      ],
     };
-    expect(emailReviewValidationIssues(missing, [thread])).toContain(
-      'item_0:possible_relevant_deadline_in_thread',
+    expect(emailReviewValidationIssues(falseDeadline, [thread])).toContain(
+      'item_0:literal_explicit_deadline_or_null',
     );
+    expect(
+      emailReviewValidationIssues({ items: [{ ...assessment, deadline: null }] }, [thread]),
+    ).not.toContain('item_0:possible_relevant_deadline_in_thread');
   });
 
   it('recognizes a dated removal outcome as an explicit deadline', () => {
@@ -478,7 +484,7 @@ describe('bounded no-send email review', () => {
     const groundedDraft = {
       ...base,
       whyQuote: 'nobody has signed up for tomorrow. Are you able to?',
-      deadline: { messageId: thread.latestMessageId, quote: 'tomorrow' },
+      deadline: null,
       draftBody: 'Thanks for the reminder. I appreciate you checking with me.',
     };
     expect(validateEmailReviewAnswer({ items: [groundedDraft] }, [thread])?.items[0]).toMatchObject(
@@ -517,13 +523,13 @@ describe('bounded no-send email review', () => {
     }));
     expect(repaired.answer?.items[0]).toMatchObject({
       disposition: 'draft',
-      deadlineQuote: 'tomorrow',
       draftBody: [
         'If you can help: “Thanks for checking about the volunteer need tomorrow. I can help.”',
         'If you cannot: “Thanks for checking about the volunteer need tomorrow. I’m not available.”',
         'Owner decision required: choose the accurate option, remove the other, and edit before sending.',
       ].join('\n\n'),
     });
+    expect(repaired.answer?.items[0]?.deadlineQuote).toBeUndefined();
     expect(repaired.issues).toEqual([]);
     const formatted = formatEmailReviewAnswer(
       repaired.answer?.items ?? [],
@@ -565,6 +571,32 @@ describe('bounded no-send email review', () => {
       draftBody: expect.stringMatching(/OWNER DECISION REQUIRED: add your answer before sending/),
     });
     expect(byFridayRepair.answer?.items[0]?.draftBody).toContain('your preferred option by Friday');
+
+    const byTomorrowMessages = messages('please-reply-by-tomorrow');
+    const byTomorrowLatest = required(byTomorrowMessages.at(-1), 'latest message');
+    byTomorrowLatest.text = 'Please reply by tomorrow with your preferred option.';
+    byTomorrowLatest.sourceLength = byTomorrowLatest.text.length;
+    const byTomorrowThread = required(
+      emailReviewCompleteThread('please-reply-by-tomorrow', 'owner@example.com', [
+        search('please-reply-by-tomorrow'),
+        read('please-reply-by-tomorrow', byTomorrowMessages),
+      ]),
+      'complete reply-by-tomorrow thread',
+    );
+    const byTomorrowNoReply = {
+      ...required(validAnswer(byTomorrowThread.threadId).items[0], 'by-tomorrow assessment'),
+      disposition: 'no_reply' as const,
+      recipient: null,
+      whyQuote: byTomorrowLatest.text,
+      deadline: { messageId: byTomorrowThread.latestMessageId, quote: 'by tomorrow' },
+      draftBody: null,
+      draftSourceMessageIds: [],
+    };
+    const byTomorrowRepair = await generateValidatedEmailReview([byTomorrowThread], async () => ({
+      ok: true,
+      value: { items: [byTomorrowNoReply] },
+    }));
+    expect(byTomorrowRepair.answer?.items[0]?.deadlineQuote).toBe('by tomorrow');
 
     const promotionalMessages = messages('promotional-reply-by-friday');
     const promotionalLatest = required(promotionalMessages.at(-1), 'latest message');
@@ -790,7 +822,7 @@ describe('bounded no-send email review', () => {
     );
   });
 
-  it('repairs exact-source failures and drafts decision-free volunteer and RSVP acknowledgements', async () => {
+  it('repairs exact-source failures and keeps event dates out of response deadlines', async () => {
     const makeRequestThread = (threadId: string, sender: string, subject: string, text: string) => {
       const sourceMessages = messages(threadId, sender);
       const latest = required(sourceMessages.at(-1), 'latest source message');
@@ -820,7 +852,7 @@ describe('bounded no-send email review', () => {
     const assessment = (
       thread: typeof volunteer,
       whyQuote: string,
-      deadlineQuote: string,
+      deadlineQuote: string | null,
       draftBody: string,
     ) => ({
       threadId: thread.threadId,
@@ -830,7 +862,7 @@ describe('bounded no-send email review', () => {
       why: 'The sender is waiting for a response to this request.',
       whyMessageId: thread.latestMessageId,
       whyQuote,
-      deadline: { messageId: thread.latestMessageId, quote: deadlineQuote },
+      deadline: deadlineQuote ? { messageId: thread.latestMessageId, quote: deadlineQuote } : null,
       draftBody,
       draftSourceMessageIds: [thread.latestMessageId],
     });
@@ -839,7 +871,7 @@ describe('bounded no-send email review', () => {
         assessment(
           volunteer,
           'Are you able to?',
-          'tomorrow',
+          null,
           'Thanks for thinking of me. I appreciate you asking.',
         ),
         assessment(
@@ -854,8 +886,7 @@ describe('bounded no-send email review', () => {
     const firstInvalid = required(invalid.items[0], 'invalid volunteer assessment');
     firstInvalid.whyMessageId = required(volunteer.messages[0], 'earlier message').messageId;
     firstInvalid.whyQuote = 'Nobody signed up and you can help tomorrow.';
-    if (!firstInvalid.deadline) throw new Error('missing invalid deadline fixture');
-    firstInvalid.deadline.quote = 'by tomorrow';
+    firstInvalid.deadline = { messageId: volunteer.latestMessageId, quote: 'by tomorrow' };
 
     expect(emailReviewValidationIssues(invalid, [volunteer, rsvp])).toEqual(
       expect.arrayContaining([
@@ -873,7 +904,7 @@ describe('bounded no-send email review', () => {
     expect(result.attempts).toBe(2);
     expect(result.answer?.items.map((item) => item.disposition)).toEqual(['draft', 'draft']);
     expect(result.answer?.items.map((item) => item.deadlineQuote)).toEqual([
-      'tomorrow',
+      undefined,
       'by October 18',
     ]);
     expect(result.answer?.items.map((item) => item.draftBody)).toEqual([
