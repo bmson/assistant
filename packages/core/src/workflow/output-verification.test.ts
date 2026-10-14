@@ -588,7 +588,8 @@ ${body}`;
         rows,
       ),
     ).toEqual([]);
-    expect(publicWebClaimFindings('Flight UA124 is in the calendar.', rows)).not.toEqual([]);
+    // Private flight identities remain the private grounding contract's job.
+    expect(publicWebClaimFindings('Flight UA124 is in the calendar.', rows)).toEqual([]);
   });
 
   it('does not interpret source-link path identifiers as service claims', () => {
@@ -673,5 +674,96 @@ ${body}`;
       expect(result.text).toContain('[Source](https://transit.example/services)');
       expect(result.text).not.toMatch(/RB22|Spandau|163/);
     }
+  });
+});
+
+describe('public service claim scope and attribute boundaries', () => {
+  const evidence = (text: string) => [
+    {
+      toolName: 'web.fetch',
+      status: 'succeeded',
+      result: { status: 200, text, truncated: false, finalUrl: 'https://transit.example/lines' },
+    },
+  ];
+
+  it('does not classify ordinary M1/A4/B2B or owner-provided facts as missing routes', async () => {
+    const rows = evidence('General web article.');
+    const draft = 'My M1 device supports A4 reports for our B2B business.';
+    expect(publicWebClaimFindings(draft, rows)).toEqual([]);
+    expect(
+      publicWebClaimFindings(
+        'The M1 processor runs a B2B app.',
+        evidence('M2\n- Frequency: 500 MHz'),
+      ),
+    ).toEqual([]);
+    const router = {
+      object: async () => ({ ok: true, object: { decision: 'publish', reasons: [] } }),
+    };
+    expect(
+      (
+        await verifyFinalOutput(router as never, {
+          taskId: 'normal-web',
+          request: 'Summarize this article for my M1 device and B2B business.',
+          draft,
+          evidence: rows,
+          critical: true,
+        })
+      ).text,
+    ).toBe(draft);
+    const services = evidence('B12\n- Route: Central - Airport\n- Frequency: hourly');
+    expect(
+      publicWebClaimFindings(
+        'Our B2B reports are updated hourly.',
+        services,
+        'Our company is B2B.',
+      ),
+    ).toEqual([]);
+    expect(publicWebClaimFindings('B120 bus service runs hourly.', services)).not.toEqual([]);
+    expect(publicWebClaimFindings('An A4 report about B120.', services)).toEqual([]);
+  });
+
+  it('requires cutoffs and joint-service qualifiers for literal as well as derived frequencies', () => {
+    const rows = evidence(
+      'R10\n- Frequency: every 30 minutes until May 2027\nR20\n- Frequency: every 20 minutes jointly until June 2028',
+    );
+    expect(publicWebClaimFindings('R10 runs every 30 minutes until May 2027.', rows)).toEqual([]);
+    expect(publicWebClaimFindings('R10 runs every 30 minutes until May 2028.', rows)).not.toEqual(
+      [],
+    );
+    expect(publicWebClaimFindings('R10 runs every 30 minutes.', rows)).not.toEqual([]);
+    expect(publicWebClaimFindings('R20 runs every 20 minutes until June 2028.', rows)).not.toEqual(
+      [],
+    );
+    expect(
+      publicWebClaimFindings('R20 runs jointly every 20 minutes until June 2028.', rows),
+    ).toEqual([]);
+  });
+
+  it('resets subjects for new bullets and topics while preserving explicit continuations', () => {
+    const rows = evidence('R10\n- Frequency: hourly\n- Travel time: 10 minutes');
+    expect(
+      publicWebClaimFindings('- R10 runs hourly.\n- Taxi travel time: 25 minutes.', rows),
+    ).toEqual([]);
+    expect(publicWebClaimFindings('R10 runs hourly. Taxi travel time: 25 minutes.', rows)).toEqual(
+      [],
+    );
+    expect(publicWebClaimFindings('R10 runs hourly; travel time: 10 minutes.', rows)).toEqual([]);
+    expect(publicWebClaimFindings('R10 runs hourly; travel time: 25 minutes.', rows)).not.toEqual(
+      [],
+    );
+  });
+
+  it('does not borrow a frequency number or later attribute as a travel duration', () => {
+    const rows = evidence(
+      'R10\n- Route: Central - Airport\n- Travel time: 10 minutes\n- Frequency: every 15 minutes\n- Waiting time: 25 minutes',
+    );
+    expect(publicWebClaimFindings('R10 takes 10 minutes.', rows)).toEqual([]);
+    expect(publicWebClaimFindings('R10 takes 15 minutes.', rows)).not.toEqual([]);
+    expect(publicWebClaimFindings('R10 takes 25 minutes.', rows)).not.toEqual([]);
+    const subroutes = evidence(
+      'R10\n- Travel time:\n- Central - Airport: approx. 10 minutes\n- North - Airport: approx. 20 minutes\n- Frequency: every 15 minutes',
+    );
+    expect(publicWebClaimFindings('R10 travel time: 10–20 minutes.', subroutes)).toEqual([]);
+    expect(publicWebClaimFindings('R10 takes 15 minutes.', subroutes)).not.toEqual([]);
   });
 });

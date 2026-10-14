@@ -192,6 +192,7 @@ function successfulWebSources(evidence: readonly ActionEvidence[]) {
 export function publicWebClaimFindings(
   draft: string,
   evidence: readonly ActionEvidence[],
+  ownerProvidedText = '',
 ): string[] {
   const claims = draft.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/https?:\/\/[^\s<>]+/g, '');
   const passages = successfulWebSources(evidence)
@@ -199,29 +200,66 @@ export function publicWebClaimFindings(
     .slice(0, 24);
   const findings = new Set<string>();
   const sources = successfulWebSources(evidence);
-  const webReadAttempted = evidence.some(
-    (row) => row.toolName === 'web.fetch' && row.fromCurrentTask !== false,
-  );
-  if (webReadAttempted)
-    for (const match of claims.matchAll(
-      /(?<![\p{L}\p{N}])[A-Z]{1,8}\d{1,4}[A-Z]?(?![\p{L}\p{N}])/gu,
-    )) {
+  const sourceServiceLabels = evidence
+    .flatMap((row) => {
       if (
-        !sources.some((source) =>
-          exactIdentifier(match[0]).test(decodeSourceEntities(source.text)),
-        ) &&
-        !evidence.some(
-          (row) =>
-            row.toolName !== 'web.fetch' &&
-            row.status === 'succeeded' &&
-            row.fromCurrentTask !== false &&
-            exactIdentifier(match[0]).test(JSON.stringify(row.result) ?? ''),
-        )
+        row.toolName !== 'web.fetch' ||
+        row.fromCurrentTask === false ||
+        !row.result ||
+        typeof row.result !== 'object'
       )
-        findings.add(
-          `${match[0]}: this identifier is absent from complete current source evidence.`,
-        );
-    }
+        return [];
+      const text = (row.result as Record<string, unknown>).text;
+      return typeof text === 'string'
+        ? namedSourcePassages(text, text)
+            .filter((passage) =>
+              /(?:^|\n)\s*-?\s*(?:Route:|(?:Travel time|Journey time):[^\n]*\bminutes\b|Frequency:[^\n]*\b(?:hourly|minutes|services per hour)\b)/i.test(
+                decodeSourceEntities(passage.text),
+              ),
+            )
+            .map((passage) => passage.label)
+        : [];
+    })
+    .slice(0, 24);
+  const serviceNamespaces = new Set(
+    sourceServiceLabels.map((label) => label.match(/^[A-Z]+/)?.[0]).filter(Boolean),
+  );
+  for (const match of claims.matchAll(
+    /(?<![\p{L}\p{N}])[A-Z]{1,8}\d{1,4}[A-Z]?(?![\p{L}\p{N}])/gu,
+  )) {
+    const namespace = match[0].match(/^[A-Z]+/)?.[0];
+    const unit =
+      (claims
+        .slice(0, match.index)
+        .split(/\n|[.;]/)
+        .at(-1) ?? '') + (claims.slice(match.index).split(/\n|[.;]/)[0] ?? '');
+    const serviceContext =
+      /\b(?:buses?|trains?|routes?|lines?|services?|runs?|departs?|hourly|every \d+(?:[-–]\d+)? minutes)\b/i.test(
+        unit,
+      );
+    // A service namespace plus a service claim scopes this check. Ordinary
+    // owner-provided product, paper-size and business IDs are not route claims.
+    if (
+      !namespace ||
+      !serviceNamespaces.has(namespace) ||
+      !serviceContext ||
+      exactIdentifier(match[0]).test(ownerProvidedText)
+    )
+      continue;
+    if (
+      !sources.some((source) =>
+        exactIdentifier(match[0]).test(decodeSourceEntities(source.text)),
+      ) &&
+      !evidence.some(
+        (row) =>
+          row.toolName !== 'web.fetch' &&
+          row.status === 'succeeded' &&
+          row.fromCurrentTask !== false &&
+          exactIdentifier(match[0]).test(JSON.stringify(row.result) ?? ''),
+      )
+    )
+      findings.add(`${match[0]}: this identifier is absent from complete current source evidence.`);
+  }
   const normalized = (text: string) =>
     decodeSourceEntities(text)
       .normalize('NFD')
@@ -229,122 +267,151 @@ export function publicWebClaimFindings(
       .toLowerCase()
       .replace(/[–—]/g, '-')
       .replace(/\s+/g, ' ');
-  const units = claims
-    .split(/\n\s*-\s+|;\s*|,\s*(?:while|whereas|but)\s+|(?<=[.!?])\s+(?=[A-Z*])/u)
-    .slice(0, 48);
-  let previousNamed: string[] = [];
-  for (const unit of units) {
-    let named = [
-      ...new Set(
-        passages
-          .filter((passage) => exactIdentifier(passage.label).test(unit))
-          .map((passage) => passage.label),
-      ),
-    ];
-    if (named.length) previousNamed = named;
-    else if (/\b(?:travel time|journey time|takes?|every|hourly)\b/i.test(unit))
-      named = previousNamed;
-    for (const label of named) {
-      const own = passages
-        .filter((passage) => passage.label === label)
-        .map((passage) => decodeSourceEntities(passage.text));
-      for (const frequency of unit.matchAll(
-        /\bevery\s+\d+(?:\s*[-–]\s*\d+)?\s+minutes\b|\bhourly\b/gi,
-      )) {
-        const claim = normalized(frequency[0]);
-        const supported = own.some((text) => {
-          const frequencyText = normalized(
-            (text.match(/(?:^|\n)\s*-?\s*Frequency:[^\n]*/gi) ?? []).join(' '),
-          );
-          const words: Record<string, number> = {
-            one: 1,
-            two: 2,
-            three: 3,
-            four: 4,
-            five: 5,
-            six: 6,
-            seven: 7,
-            eight: 8,
-            nine: 9,
-            ten: 10,
-            eleven: 11,
-            twelve: 12,
-          };
-          const statedCadence = frequencyText.match(
-            /joint[^.]*?\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+services per hour\b/i,
-          )?.[1];
-          const count = statedCadence ? (words[statedCadence] ?? Number(statedCadence)) : 0;
-          const minutes = claim.match(/^every (\d+) minutes$/)?.[1];
-          const until = frequencyText.match(/\buntil ([a-z]+) (\d{4})\b/i);
-          const requestedUntil = normalized(unit).match(/\buntil ([a-z]+) (\d{4})\b/i);
-          const qualifierPreserved =
-            !until ||
-            (requestedUntil?.[1]?.slice(0, 3) === until[1]?.slice(0, 3) &&
-              requestedUntil?.[2] === until[2]);
-          return (
-            frequencyText.includes(claim) ||
-            (claim === 'every 60 minutes' && /\bhourly\b/.test(frequencyText)) ||
-            (/\bjoint(?:ly)?\b/i.test(unit) &&
-              count > 0 &&
-              Number(minutes) === 60 / count &&
-              qualifierPreserved)
-          );
-        });
-        if (!supported)
-          findings.add(
-            `${label}: the shared frequency “${frequency[0]}” is not stated by its own Frequency passage.`,
-          );
-      }
-      for (const travel of unit.matchAll(
-        /\b(?:travel time|journey time|takes?)\s*[:=~]?\s*(\d+(?:\s*[-–]\s*\d+)?)\s+minutes\b/gi,
-      )) {
-        const numbers = travel[1]?.match(/\d+/g) ?? [];
-        if (
-          !own.some(
-            (text) =>
-              /Travel time:/i.test(text) &&
-              numbers.every((number) =>
-                new RegExp(`(?<!\\d)${number}(?!\\d)`).test(
-                  text.slice(text.search(/Travel time:/i)),
-                ),
-              ),
-          )
+  let comparedUnits = 0;
+  for (const topic of claims.split(/\n\s*-\s+|\n{2,}|\n\s*(?=#{1,6}\s)/).slice(0, 48)) {
+    let previousNamed: string[] = [];
+    for (const unit of topic.split(/;\s*|,\s*(?:while|whereas|but)\s+|(?<=[.!?])\s+(?=[A-Z*])/u)) {
+      if (++comparedUnits > 48) break;
+      let named = [
+        ...new Set(
+          passages
+            .filter((passage) => exactIdentifier(passage.label).test(unit))
+            .map((passage) => passage.label),
+        ),
+      ];
+      if (named.length) previousNamed = named;
+      else if (
+        /^\s*(?:\*{0,2})?(?:travel time|journey time|frequency|every|hourly|it takes|takes?)\b/i.test(
+          unit,
         )
-          findings.add(
-            `${label}: the shared travel-time claim is not established by its own passage.`,
-          );
-      }
-      for (const places of unit.matchAll(
-        /\b(?:depart(?:s)? from|from|including|via)\s+([^.;\n]+?)(?=\s+(?:to|every|running)\b|[.;\n]|$)/gi,
-      )) {
-        const names = [...(places[1] ?? '').matchAll(/(?<![\p{L}\p{N}])[\p{Lu}][\p{L}]+/gu)]
-          .map((match) => match[0])
-          .filter(
-            (name) =>
-              !/^(?:Airport|Express|Regional|Terminal|Level|Source|Route|Bus|Station|Train)$/.test(
-                name,
-              ),
-          );
-        if (
-          names.length &&
-          !own.some((text) =>
-            names.every((name) => exactIdentifier(normalized(name)).test(normalized(text))),
-          )
-        )
-          findings.add(
-            `${label}: the shared origin/stop names are not all present in its own passage.`,
-          );
-      }
-      if (
-        /\bairport\b/i.test(unit) &&
-        own.every((text) =>
-          /\b(?:continue|change|transfer)\b[^\n]{0,200}\b(?:airport|[A-Z]\d+)\b/i.test(text),
-        ) &&
-        !/\b(?:continue|change|transfer|interchange|connection)\b/i.test(unit)
       )
-        findings.add(
-          `${label}: its source requires a continuation or change; the airport summary omitted that qualifier.`,
-        );
+        named = previousNamed;
+      else previousNamed = [];
+      for (const label of named) {
+        const own = passages
+          .filter((passage) => passage.label === label)
+          .map((passage) => decodeSourceEntities(passage.text));
+        for (const frequency of unit.matchAll(
+          /\bevery\s+\d+(?:\s*[-–]\s*\d+)?\s+minutes\b|\bhourly\b/gi,
+        )) {
+          const claim = normalized(frequency[0]);
+          const supported = own.some((text) => {
+            const frequencyText = normalized(
+              (text.match(/(?:^|\n)\s*-?\s*Frequency:[^\n]*/gi) ?? []).join(' '),
+            );
+            const words: Record<string, number> = {
+              one: 1,
+              two: 2,
+              three: 3,
+              four: 4,
+              five: 5,
+              six: 6,
+              seven: 7,
+              eight: 8,
+              nine: 9,
+              ten: 10,
+              eleven: 11,
+              twelve: 12,
+            };
+            const statedCadence = frequencyText.match(
+              /joint[^.]*?\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+services per hour\b/i,
+            )?.[1];
+            const count = statedCadence ? (words[statedCadence] ?? Number(statedCadence)) : 0;
+            const minutes = claim.match(/^every (\d+) minutes$/)?.[1];
+            const until = frequencyText.match(/\buntil ([a-z]+) (\d{4})\b/i);
+            const isJoint = /\bjoint(?:ly)?\b/i.test(frequencyText);
+            const jointPreserved = !isJoint || /\b(?:joint(?:ly)?|shared|combined)\b/i.test(topic);
+            const requestedUntil =
+              normalized(unit).match(/\buntil ([a-z]+) (\d{4})\b/i) ??
+              (isJoint && jointPreserved
+                ? normalized(topic).match(/\buntil ([a-z]+) (\d{4})\b/i)
+                : null);
+            const qualifierPreserved =
+              !until ||
+              (requestedUntil?.[1]?.slice(0, 3) === until[1]?.slice(0, 3) &&
+                requestedUntil?.[2] === until[2]);
+            return (
+              qualifierPreserved &&
+              jointPreserved &&
+              (frequencyText.includes(claim) ||
+                (claim === 'every 60 minutes' && /\bhourly\b/.test(frequencyText)) ||
+                (/\bjoint(?:ly)?\b/i.test(unit) &&
+                  count > 0 &&
+                  Number(minutes) === 60 / count &&
+                  qualifierPreserved))
+            );
+          });
+          if (!supported)
+            findings.add(
+              `${label}: the shared frequency “${frequency[0]}” is not stated by its own Frequency passage.`,
+            );
+        }
+        for (const travel of unit.matchAll(
+          /\b(?:travel time|journey time|takes?)\s*[:=~]?\s*(\d+(?:\s*[-–]\s*\d+)?)\s+minutes\b/gi,
+        )) {
+          const numbers = travel[1]?.match(/\d+/g) ?? [];
+          if (
+            !own.some((text) => {
+              const lines = text.split(/\r?\n/);
+              const durations: string[] = [];
+              for (let index = 0; index < lines.length; index++) {
+                const header = lines[index]?.match(
+                  /^\s*-?\s*(?:Travel time|Journey time):\s*(.*)$/i,
+                );
+                if (!header) continue;
+                durations.push(header[1] ?? '');
+                for (let next = index + 1; next < lines.length; next++) {
+                  const line = lines[next] ?? '';
+                  // Another attribute ends the duration section. Sub-route lines
+                  // such as "Central - Airport: 10 minutes" remain its children.
+                  if (/^\s*-?\s*[\p{L}][\p{L} ]{0,50}:/u.test(line)) break;
+                  if (/\b\d+(?:\s*[-–]\s*\d+)?\s+minutes\b/i.test(line)) durations.push(line);
+                }
+              }
+              const stated = durations.flatMap((line) =>
+                [...line.matchAll(/(\d+(?:\s*[-–]\s*\d+)?)\s+minutes\b/gi)].flatMap(
+                  (match) => match[1]?.match(/\d+/g) ?? [],
+                ),
+              );
+              return numbers.every((number) => stated.includes(number));
+            })
+          )
+            findings.add(
+              `${label}: the shared travel-time claim is not established by its own passage.`,
+            );
+        }
+        for (const places of unit.matchAll(
+          /\b(?:depart(?:s)? from|from|including|via)\s+([^.;\n]+?)(?=\s+(?:to|every|running)\b|[.;\n]|$)/gi,
+        )) {
+          const names = [...(places[1] ?? '').matchAll(/(?<![\p{L}\p{N}])[\p{Lu}][\p{L}]+/gu)]
+            .map((match) => match[0])
+            .filter(
+              (name) =>
+                !/^(?:Airport|Express|Regional|Terminal|Level|Source|Route|Bus|Station|Train)$/.test(
+                  name,
+                ),
+            );
+          if (
+            names.length &&
+            !own.some((text) =>
+              names.every((name) => exactIdentifier(normalized(name)).test(normalized(text))),
+            )
+          )
+            findings.add(
+              `${label}: the shared origin/stop names are not all present in its own passage.`,
+            );
+        }
+        if (
+          /\bairport\b/i.test(unit) &&
+          own.every((text) =>
+            /\b(?:continue|change|transfer)\b[^\n]{0,200}\b(?:airport|[A-Z]\d+)\b/i.test(text),
+          ) &&
+          !/\b(?:continue|change|transfer|interchange|connection)\b/i.test(unit)
+        )
+          findings.add(
+            `${label}: its source requires a continuation or change; the airport summary omitted that qualifier.`,
+          );
+      }
     }
   }
   return [...findings].slice(0, 24).map((finding) => clip(finding, 200));
@@ -524,6 +591,13 @@ export async function verifyFinalOutput(
     context?: ReadonlyArray<ReadIntentMessage>;
   },
 ): Promise<OutputVerificationResult> {
+  const ownerFacts = [
+    clip(input.request, REQUEST_LIMIT),
+    ...(input.context ?? [])
+      .filter((message) => message.role === 'user')
+      .slice(-6)
+      .map((message) => clip(readIntentText(message), 600)),
+  ].join('\n');
   const original = repairRequestedBullets(input.request, input.draft);
   const result = (
     text: string,
@@ -556,7 +630,9 @@ export async function verifyFinalOutput(
     attempted = outcome.ok;
     if (!outcome.ok || outcome.finishReason === 'length') {
       return result(
-        publicWebClaimFindings(original, input.evidence).length ? limitation() : original,
+        publicWebClaimFindings(original, input.evidence, ownerFacts).length
+          ? limitation()
+          : original,
         outcome.ok,
         true,
       );
@@ -568,7 +644,7 @@ export async function verifyFinalOutput(
       !revisionLosesAnswer(input.draft, revision)
         ? repairRequestedBullets(input.request, revision)
         : original;
-    const findings = publicWebClaimFindings(candidate, input.evidence);
+    const findings = publicWebClaimFindings(candidate, input.evidence, ownerFacts);
     if (findings.length) {
       // One additional source-bound correction only; a second failure never
       // promotes known contradictory details from the optional reviewer.
@@ -591,7 +667,7 @@ export async function verifyFinalOutput(
       if (
         !corrected ||
         revisionLosesAnswer(input.draft, corrected) ||
-        publicWebClaimFindings(corrected, input.evidence).length
+        publicWebClaimFindings(corrected, input.evidence, ownerFacts).length
       )
         return result(limitation(), true, !correction.ok || correction.finishReason === 'length');
       candidate = corrected;
@@ -603,7 +679,7 @@ export async function verifyFinalOutput(
       error: String(error).slice(0, 300),
     });
     return result(
-      publicWebClaimFindings(original, input.evidence).length ? limitation() : original,
+      publicWebClaimFindings(original, input.evidence, ownerFacts).length ? limitation() : original,
       attempted,
       true,
     );
