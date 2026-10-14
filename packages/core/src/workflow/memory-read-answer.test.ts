@@ -357,8 +357,10 @@ describe('exact historical source projection', () => {
       'Earlier assistant claim (not verified fact)',
     );
   });
-  it('does not claim an owner-history search was complete when relevant owner sources remain unselected', async () => {
-    const request = 'What did I previously tell you about accessible controls?';
+  it.each([
+    'What did I previously tell you about accessible controls?',
+    'What did I say about accessible controls?',
+  ])('does not claim owner-history coverage with unselected sources: %s', async (request) => {
     const object = vi
       .fn()
       .mockResolvedValueOnce({ ok: true, object: { selections: [] } })

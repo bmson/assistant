@@ -142,7 +142,7 @@ function asksAboutOwnerHistory(request: string): boolean {
   if (asksWhatTheAssistantSaid) return false;
 
   const asksWhatTheOwnerSaid =
-    /\b(?:what|which|how|where|when)\b.{0,140}\b(?:i|we)\s+(?:previously\s+|earlier\s+)?(?:said|tell|told|mentioned|asked|corrected|preferred|prefer)\b/i.test(
+    /\b(?:what|which|how|where|when)\b.{0,140}\b(?:i|we)\s+(?:previously\s+|earlier\s+)?(?:say|said|tell|told|mentioned|asked|corrected|preferred|prefer)\b/i.test(
       request,
     );
   const asksForOwnerPreferences =
