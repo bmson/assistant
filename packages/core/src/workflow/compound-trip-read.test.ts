@@ -2325,13 +2325,18 @@ describe('compound trip read projection', () => {
         { type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=return-conflict' },
       ],
     };
+    const stayDescription = (
+      'Hotel reservation details for an independently booked stay in Berlin. ' +
+      'This private calendar description is used only to classify the row as lodging. '.repeat(4)
+    ).slice(0, 351);
+    expect(stayDescription).toHaveLength(351);
     const stay = {
       eventId: 'lodging-event-same-booking',
       summary: 'Northstar Collection',
-      description: `Hotel reservation. Booking reference: ${reference}.`,
+      description: stayDescription,
       location: 'Berlin, Germany',
       start: { date: '2026-10-10' },
-      end: { date: '2026-10-17' },
+      end: { date: '2026-10-18' },
       status: 'confirmed',
       links: [{ type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=lodging' }],
     };
@@ -2436,18 +2441,59 @@ describe('compound trip read projection', () => {
     expect(projection.calendarLodgingObservation).toMatchObject({
       title: 'Northstar Collection',
       dateStart: '2026-10-10',
-      dateEnd: '2026-10-17',
-      association: 'shared_reference',
+      dateEnd: '2026-10-18',
+      association: 'date_city_candidate',
     });
     expect(projection.text).toContain('not a confirmed hotel booking');
     expect(projection.text).toContain(
       '[Calendar source](https://calendar.google.com/calendar/event?eid=lodging)',
     );
+    expect(projection.text).not.toContain(stayDescription);
     expect(projection.calendarComplete).toBe(false);
     expect(projection.threadsComplete).toBe(false);
     expect(projection.blocked).toBe(true);
     expect(projection.routeOrigin).toBeUndefined();
     expect(projection.webQuery).toBeUndefined();
+
+    const withStay = (candidate: Record<string, unknown>) => {
+      const updatedEvidence = evidence.map((item, index) =>
+        index === 0
+          ? {
+              ...item,
+              result: {
+                ...(item.result as Record<string, unknown>),
+                events: [calendar, candidate],
+              },
+            }
+          : item,
+      );
+      return compoundTripReadProjection(read, updatedEvidence, extraction);
+    };
+    expect(
+      withStay({ ...stay, eventId: 'end-on-arrival-date', end: { date: '2026-10-17' } })
+        .calendarLodgingObservation,
+    ).toBeUndefined();
+
+    const linkedStay = {
+      ...stay,
+      summary: `Northstar hotel reference ${reference}`,
+      eventId: 'linked-stay-one',
+    };
+    const secondLinkedStay = { ...linkedStay, eventId: 'linked-stay-two' };
+    const ambiguousEvidence = evidence.map((item, index) =>
+      index === 0
+        ? {
+            ...item,
+            result: {
+              ...(item.result as Record<string, unknown>),
+              events: [calendar, linkedStay, secondLinkedStay],
+            },
+          }
+        : item,
+    );
+    expect(
+      compoundTripReadProjection(read, ambiguousEvidence, extraction).calendarLodgingObservation,
+    ).toBeUndefined();
   });
 
   it('rejects an unrelated reference and a same-reference event on the wrong local departure date', () => {
@@ -2549,6 +2595,70 @@ describe('compound trip read projection', () => {
     expect(projection.text).not.toContain('Orchard Suites');
     expect(projection.text).not.toContain('Sunnyvale');
     expect(compoundTripRoute(read, evidence)).toBeUndefined();
+  });
+
+  it('uses description text only to classify a source-linked lodging observation', () => {
+    const read = request();
+    const flightText =
+      'Outbound\nFlight number: LH 777\nDeparture date: 2026-10-17\nDeparture time: 10:10 Europe/Berlin\nArrival date: 2026-10-17\nArrival time: 13:10 Europe/Berlin\nFrom: SFO\nTo: BER\nBooking reference: FLIGHT-728';
+    const flightEmailEvidence = [
+      row(
+        'gmail.search',
+        { query: read.mailQuery },
+        {
+          results: [{ threadId: 'only-flight-thread', subject: 'Lufthansa booking confirmation' }],
+          complete: true,
+          hasMore: false,
+        },
+      ),
+      row(
+        'gmail.read_thread',
+        { threadId: 'only-flight-thread' },
+        {
+          complete: true,
+          messages: [
+            {
+              messageId: 'only-flight-message',
+              subject: 'Lufthansa booking confirmation',
+              text: flightText,
+            },
+          ],
+        },
+      ),
+    ];
+    const lodging = {
+      eventId: 'neutral-title-lodging',
+      summary: 'Northstar Collection',
+      description: 'Hotel reservation details include a Berlin stay and a reference TRIP-44119.',
+      location: 'Berlin, Germany',
+      start: { date: '2026-10-17' },
+      end: { date: '2026-10-19' },
+      links: [{ type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=neutral' }],
+    };
+    const evidence = [completeCalendarEvents([calendarFlight(), lodging]), ...flightEmailEvidence];
+    const projection = compoundTripReadProjection(read, evidence);
+    expect(projection.calendarLodgingObservation).toMatchObject({
+      title: 'Northstar Collection',
+      city: 'Berlin',
+      association: 'date_city_candidate',
+    });
+    expect(projection.hotel).toBeUndefined();
+    expect(projection.text).toContain('Calendar lodging candidate, not a confirmed hotel booking');
+    expect(projection.text).not.toContain('include a Berlin stay');
+    expect(compoundTripRoute(read, evidence)).toBeUndefined();
+
+    const descriptionOnlyAssociation = {
+      ...lodging,
+      eventId: 'description-only-association',
+      location: '100 Main Street',
+    };
+    const noAssociationEvidence = [
+      completeCalendarEvents([calendarFlight(), descriptionOnlyAssociation]),
+      ...flightEmailEvidence,
+    ];
+    const unassociated = compoundTripReadProjection(read, noAssociationEvidence);
+    expect(unassociated.calendarLodgingObservation).toBeUndefined();
+    expect(compoundTripRoute(read, noAssociationEvidence)).toBeUndefined();
   });
 
   it('does not route from a booking-linked flight when its calendar arrival airport conflicts', () => {

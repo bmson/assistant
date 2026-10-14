@@ -1389,13 +1389,15 @@ function calendarLodgingObservation(
     : currentTripReturn?.segment?.departureDate;
   if (!anchorDate) return undefined;
 
-  const candidates: CompoundTripCalendarLodgingObservation[] = [];
+  const candidates = new Map<string, CompoundTripCalendarLodgingObservation>();
   for (const row of rows) {
     const events = object(row.result)?.events;
     if (!Array.isArray(events)) continue;
     for (const item of events) {
       const event = object(item);
       if (!event || text(event.status).toLowerCase() === 'cancelled') continue;
+      const eventId = text(event.eventId, 160);
+      if (!eventId) continue;
       const title = text(event.summary, 180);
       const description = text(event.description, 1_200);
       const location = text(event.location, 240);
@@ -1407,10 +1409,21 @@ function calendarLodgingObservation(
       const dateEnd = endValue
         ? sourceCivilDate({ start: endValue, timeZone: event.timeZone })
         : undefined;
-      if (!dateStart || dateStart > anchorDate || (dateEnd && dateEnd < anchorDate)) continue;
-      const reference = bookingReference(sourceText);
+      const startIsDate = Boolean(object(event.start)?.date);
+      const endIsDate = Boolean(object(event.end)?.date);
+      const allDayRange = startIsDate && endIsDate;
+      if (
+        !dateStart ||
+        dateStart > anchorDate ||
+        (dateEnd && (allDayRange ? dateEnd <= anchorDate : dateEnd < anchorDate))
+      )
+        continue;
+      // Descriptions are untrusted and may only classify a record as lodging.
+      // Use the visible title/location fields for any candidate association.
+      const associationText = `${title}\n${location}`;
+      const reference = bookingReference(associationText);
       const sharedReference = Boolean(anchorReference && reference === anchorReference);
-      const city = calendarLodgingCity(title, description, location);
+      const city = calendarLodgingCity(title, location);
       const dateCityCandidate = Boolean(
         !sharedReference &&
           anchorCity &&
@@ -1419,7 +1432,7 @@ function calendarLodgingObservation(
       );
       if (!sharedReference && !dateCityCandidate) continue;
       const url = calendarSource(event);
-      candidates.push({
+      candidates.set(eventId, {
         title: title || 'Lodging calendar entry',
         dateStart,
         ...(dateEnd ? { dateEnd } : {}),
@@ -1429,19 +1442,20 @@ function calendarLodgingObservation(
       });
     }
   }
-  return candidates.sort((left, right) => {
-    if (left.association !== right.association)
-      return left.association === 'shared_reference' ? -1 : 1;
-    return left.dateStart.localeCompare(right.dateStart);
-  })[0];
+  const uniqueCandidates = [...candidates.values()];
+  const sharedReferenceCandidates = uniqueCandidates.filter(
+    (candidate) => candidate.association === 'shared_reference',
+  );
+  if (sharedReferenceCandidates.length > 1) return undefined;
+  if (sharedReferenceCandidates.length === 1) return sharedReferenceCandidates[0];
+  const cityDateCandidates = uniqueCandidates.filter(
+    (candidate) => candidate.association === 'date_city_candidate',
+  );
+  return cityDateCandidates.length === 1 ? cityDateCandidates[0] : undefined;
 }
 
-function calendarLodgingCity(
-  title: string,
-  description: string,
-  location: string,
-): string | undefined {
-  const source = `${title}\n${description}`;
+function calendarLodgingCity(title: string, location: string): string | undefined {
+  const source = title;
   const parsed = hotelNameAndCity(source).city;
   if (parsed) return parsed.slice(0, 80);
   const labelled = /\b(?:hotel\s+)?city\s*:\s*([^\n,;]{2,80})/i.exec(source)?.[1]?.trim();
