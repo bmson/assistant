@@ -154,6 +154,190 @@ function gmailThreadPage(input: {
 }
 
 describe('golden tasks', () => {
+  it.for(['complete', 'router-unavailable'] as const)(
+    'runs and checkpoints trip extraction after eight source reads (%s)',
+    async (outcome, ctx) => {
+      if (!dbUp) return ctx.skip();
+      const prompt =
+        'Find my next future flight using booking emails and calendar. State the date, departure time with its time zone, route and flight number, and whether outbound or return. Do not book, send, or change anything.';
+      const futureDay = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
+      const sourceDate = new Intl.DateTimeFormat('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        timeZone: 'UTC',
+      }).format(new Date(`${futureDay}T00:00:00Z`));
+      const booking = `Egencia\nBooking Confirmation\nTrip Booked\nItinerary/Egencia reference # 555666777888\nLufthansa LH778\nOperated by Lufthansa\nDEPARTURE\n${sourceDate} at 6:00 am\nBerlin (BER-Brandenburg)\nARRIVAL\n${sourceDate} at 11:45 am\nSan Francisco (SFO-San Francisco Intl.)`;
+      const purchase = `Ancillary purchase confirmation; flight details\n${'x'.repeat(12356)}`;
+      const schema = z.object({}).passthrough();
+      let calendarCalls = 0;
+      const result = await runGoldenTask(db, agentId, {
+        name: `focused-trip-eight-read-extraction-${outcome}`,
+        event: {
+          source: 'chat',
+          trust: 'owner',
+          payload: { text: prompt },
+        },
+        taskType: 'chat_turn',
+        plan: workflowPlan,
+        maxSteps: 12,
+        pinOwnerRequest: true,
+        script: [],
+        ...(outcome === 'complete'
+          ? { compoundTripExtraction: { messages: [] } }
+          : { objects: [{ role: 'extract', unavailable: true, value: null }] }),
+        tools: {
+          'calendar.list_events': {
+            schema,
+            execute: async () => {
+              calendarCalls += 1;
+              return {
+                events:
+                  calendarCalls === 1
+                    ? [
+                        {
+                          eventId: 'candidate',
+                          summary: 'BER → SFO flight (United)',
+                          description: 'Egencia 555666777888',
+                          start: `${futureDay}T06:00:00Z`,
+                          end: `${futureDay}T12:00:00Z`,
+                          allDay: false,
+                        },
+                      ]
+                    : [],
+                complete: false,
+                calendarRosterComplete: true,
+                unavailable: [],
+                nextPageToken: `calendar-page-${calendarCalls + 1}`,
+              };
+            },
+          },
+          'gmail.search': {
+            schema,
+            execute: async (value) => {
+              const args = value as { query: string; maxResults: number; pageToken?: string };
+              const complete = Boolean(args.pageToken);
+              const hits = complete
+                ? []
+                : [
+                    { threadId: 'table-source', subject: 'Fwd: Flight - BOOKED - Berlin' },
+                    {
+                      threadId: 'purchase-source',
+                      subject: 'Thank you for your purchase!',
+                      snippet: 'Purchase confirmation with flight details',
+                    },
+                  ];
+              const continuation = complete
+                ? null
+                : {
+                    tool: 'gmail.search',
+                    input: {
+                      query: args.query,
+                      maxResults: args.maxResults,
+                      pageToken: 'mail-page-2',
+                    },
+                  };
+              return {
+                query: args.query,
+                complete,
+                hasMore: !complete,
+                ...(complete ? {} : { nextPageToken: 'mail-page-2' }),
+                results: hits,
+                unavailable: [],
+                receipt: {
+                  version: 1,
+                  source: { kind: 'gmail-search', id: gmailSearchReceiptSourceId(args.query) },
+                  requested: {
+                    scope: 'query-page',
+                    limit: args.maxResults,
+                    ...(args.pageToken ? { cursor: args.pageToken } : {}),
+                  },
+                  covered: { count: hits.length, total: hits.length, unavailable: 0 },
+                  complete,
+                  losses: complete ? [] : ['provider-page'],
+                  continuation,
+                },
+              };
+            },
+          },
+          'gmail.read_thread': {
+            schema,
+            execute: async (value) => {
+              const args = value as { threadId: string; startMessageOffset?: number };
+              const source = args.threadId === 'table-source' ? booking : purchase;
+              const offset = args.startMessageOffset ?? 0;
+              const text = source.slice(offset, offset + 8000);
+              const complete = offset + text.length >= source.length;
+              const continuation = complete
+                ? undefined
+                : {
+                    tool: 'gmail.read_thread',
+                    input: {
+                      threadId: args.threadId,
+                      startMessageIndex: 0,
+                      startMessageOffset: offset + text.length,
+                      maxMessages: 20,
+                      maxChars: 20000,
+                    },
+                  };
+              return gmailThreadPage({
+                threadId: args.threadId,
+                messages: [
+                  {
+                    messageId: args.threadId,
+                    subject:
+                      args.threadId === 'table-source'
+                        ? 'Flight - BOOKED - Berlin'
+                        : 'Purchase confirmation',
+                    text,
+                    sourceLength: source.length,
+                    truncated: !complete,
+                  },
+                ],
+                startMessageIndex: 0,
+                startMessageOffset: offset,
+                totalMessages: 1,
+                complete,
+                continuation,
+              });
+            },
+          },
+        },
+      });
+      createdTaskIds.push(result.taskId);
+      expect(result.toolNames).toEqual([
+        'calendar.list_events',
+        'calendar.list_events',
+        'calendar.list_events',
+        'gmail.search',
+        'gmail.search',
+        'gmail.read_thread',
+        'gmail.read_thread',
+        'gmail.read_thread',
+      ]);
+      expect(result.extractCalls).toBe(1);
+      expect(result.stepCount).toBeLessThanOrEqual(12);
+      expect(result.status).toBe('needs_attention');
+      expect(result.finalText).toContain('LH778 BER→SFO');
+      expect(result.finalText).toContain('departure time zone not stated');
+      expect(result.finalText).not.toContain('Next matched');
+      const [finished] = await db
+        .select({ state: tasks.state })
+        .from(tasks)
+        .where(eq(tasks.id, result.taskId));
+      const state = TaskStateSchema.parse(finished?.state);
+      expect(state.plannerState.tripExtraction).toEqual({
+        attempted: true,
+        status: outcome === 'complete' ? 'complete' : 'unavailable',
+        ...(outcome === 'complete' ? {} : { unavailableReason: outcome }),
+        sourceCount: 2,
+        segmentCount: 0,
+        hotelCount: 0,
+        rejectedFacts: 0,
+      });
+    },
+  );
+
   it('executes a compound trip read through the scripted executor and returns a source-grounded itinerary', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const prompt =

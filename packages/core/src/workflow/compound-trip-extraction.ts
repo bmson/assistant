@@ -76,6 +76,12 @@ export interface CompoundTripHotelFact {
 
 export interface CompoundTripExtraction {
   status: 'complete' | 'unavailable';
+  unavailableReason?:
+    | 'empty-source'
+    | 'source-limit'
+    | 'router-unavailable'
+    | 'invalid-output'
+    | 'extraction-error';
   segments: CompoundTripFlightSegment[];
   hotels: CompoundTripHotelFact[];
   rejectedFacts: number;
@@ -334,11 +340,9 @@ export async function extractCompoundTripBookings(input: {
     rejectedFacts: 0,
     sourceMessageIds,
   };
-  if (
-    sources.length === 0 ||
-    sources.reduce((sum, source) => sum + source.text.length, 0) > MAX_INPUT_CHARS
-  )
-    return unavailable;
+  if (sources.length === 0) return { ...unavailable, unavailableReason: 'empty-source' };
+  if (sources.reduce((sum, source) => sum + source.text.length, 0) > MAX_INPUT_CHARS)
+    return { ...unavailable, unavailableReason: 'source-limit' };
   const sourceById = new Map(
     sources.map((source) => [`${source.threadId}:${source.messageId}`, source]),
   );
@@ -368,9 +372,9 @@ export async function extractCompoundTripBookings(input: {
       requestProfile: { tools: 'none', output: 'json_schema', streaming: false },
     });
     const parsed = record(outcome);
-    if (parsed?.ok !== true) return unavailable;
+    if (parsed?.ok !== true) return { ...unavailable, unavailableReason: 'router-unavailable' };
     const extraction = ExtractionSchema.safeParse(parsed.object);
-    if (!extraction.success) return unavailable;
+    if (!extraction.success) return { ...unavailable, unavailableReason: 'invalid-output' };
     const segments: CompoundTripFlightSegment[] = [];
     const hotels: CompoundTripHotelFact[] = [];
     let rejectedFacts = 0;
@@ -399,7 +403,7 @@ export async function extractCompoundTripBookings(input: {
       sourceMessageIds,
     };
   } catch {
-    return unavailable;
+    return { ...unavailable, unavailableReason: 'extraction-error' };
   }
 }
 

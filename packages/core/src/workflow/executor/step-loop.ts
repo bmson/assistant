@@ -1378,6 +1378,22 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             request: readRequest,
             evidence: readToolEvidence,
           });
+          // Successful model-call rows alone cannot prove whether extraction
+          // was attempted. Keep bounded outcome metadata for unavailable
+          // router/provider results without logging source or error content.
+          state.plannerState.tripExtraction = {
+            attempted: true,
+            status: compoundTripExtraction.status,
+            ...(compoundTripExtraction.unavailableReason
+              ? { unavailableReason: compoundTripExtraction.unavailableReason }
+              : {}),
+            sourceCount: completeSources.length,
+            segmentCount: compoundTripExtraction.segments.length,
+            hotelCount: compoundTripExtraction.hotels.length,
+            rejectedFacts: compoundTripExtraction.rejectedFacts,
+          };
+          if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state)))
+            return LOST_LEASE;
         }
       }
       // taskEvidence is reloaded on every executor iteration. Keep the one-shot

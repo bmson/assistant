@@ -4608,7 +4608,7 @@ describe('compound trip read projection', () => {
     expect(projection.text).toContain('The calendar does not state its direction.');
     expect(projection.text).toContain('Lodging calendar observation only');
     expect(projection.text).toContain(
-      'recorded calendar date/time fields 2026\\-10\\-10 to 2026\\-10\\-20',
+      'recorded calendar date/time fields 2026-10-10 to 2026-10-20',
     );
     expect(projection.text).toContain(
       'The end field is shown as recorded, not interpreted as checkout.',
@@ -4682,8 +4682,8 @@ describe('compound trip read projection', () => {
       ),
     ]);
 
-    expect(projection.text).toContain('recorded calendar date/time fields 2026\\-10\\-17');
-    expect(projection.text).not.toContain('to 2026\\-10\\-18');
+    expect(projection.text).toContain('recorded calendar date/time fields 2026-10-17');
+    expect(projection.text).not.toContain('to 2026-10-18');
     expect(projection.text).toContain('No end or checkout date is inferred.');
   });
 
@@ -4736,5 +4736,237 @@ describe('compound trip read projection', () => {
     expect(projection.text).not.toContain('Calendar observations —');
     expect(projection.text).not.toContain('Flight calendar observation only');
     expect(projection.text).not.toContain('Lodging calendar observation only');
+  });
+});
+
+describe('source-local Egencia table observations', () => {
+  it('uses an explicit calendar hotel reference as a bounded mail-search hypothesis', () => {
+    const read = request();
+    const calendar = completeCalendarEvents(
+      [
+        {
+          summary: 'Hotel Linden',
+          description:
+            'Hotel stay booked via Egencia\nItinerary #: 555666777888\nCheck-in: October 17, 2026',
+          start: '2026-10-17T06:00:00-07:00',
+        },
+      ],
+      read,
+    );
+    const flightQuery = read.mailQueries?.find((entry) => entry.category === 'flight')?.query;
+    if (!flightQuery) throw new Error('Expected flight query');
+    const emptyFlights = row(
+      'gmail.search',
+      { query: flightQuery },
+      { results: [], complete: true, hasMore: false },
+    );
+    expect(nextRequiredReadTool(read, [calendar, emptyFlights])).toBe('gmail.search');
+    const input = buildReadToolInput(read, 'gmail.search', [calendar, emptyFlights]);
+    if (!input) throw new Error('Expected bounded lodging search input');
+    expect(input.query).toContain('"555666777888"');
+    expect(input.maxResults).toBe(20);
+    const admittedQuery = input.query;
+    const searched = row('gmail.search', input, { results: [], complete: true, hasMore: false });
+    nextRequiredReadTool(read, [calendar, emptyFlights, searched]);
+    expect(read.mailQueries?.find((entry) => entry.category === 'lodging')?.query).toBe(
+      admittedQuery,
+    );
+  });
+
+  const focusedPrompt =
+    'Find my next future flight using booking emails and calendar. State date, departure time with its time zone, route and flight number, and whether outbound or return. Do not book, send, or change anything.';
+  const table = `Egencia
+Booking Confirmation
+Trip Booked
+Itinerary/Egencia reference # 555666777888
+[image: Flight] SFO to BER #555666777888
+LH LH777
+Operated by Lufthansa
+DEPARTURE
+Oct 9, 2026 at 1:45 pm
+San Francisco (SFO-San Francisco Intl.)
+ARRIVAL +1
+Oct 10, 2026 at 9:05 am
+Berlin (BER-Brandenburg)
+[image: Flight] BER to SFO #555666777888
+LH LH778
+Operated by Lufthansa
+DEPARTURE
+Oct 17, 2026 at 6:00 am
+Berlin (BER-Brandenburg)
+ARRIVAL
+Oct 17, 2026 at 11:45 am
+San Francisco (SFO-San Francisco Intl.)`;
+  const focused = () => {
+    const detected = detectPersonalReadRequest([{ role: 'user', content: focusedPrompt }], {
+      now: new Date('2026-10-14T15:00:00Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!detected?.upcomingFlightDiscovery) throw new Error('Expected focused flight intent');
+    return detected;
+  };
+  function sources(complete = true) {
+    const read = focused();
+    return {
+      read,
+      evidence: [
+        completeCalendarEvents(
+          [
+            {
+              eventId: 'stay',
+              summary: 'Hotel Linden',
+              description: 'Hotel stay; Itinerary #: 1122334455',
+              start: '2026-10-10T06:00:00-07:00',
+              allDay: false,
+            },
+            {
+              eventId: 'flight',
+              summary: 'BER → SFO flight (United)',
+              description: 'Egencia 555666777888',
+              start: '2026-10-16T21:10:00-07:00',
+              allDay: false,
+            },
+          ],
+          read,
+        ),
+        row(
+          'gmail.search',
+          { query: read.mailQuery },
+          {
+            complete: true,
+            hasMore: false,
+            results: [{ threadId: 'egencia-table', subject: 'Flight - BOOKED - Berlin' }],
+          },
+        ),
+        row(
+          'gmail.read_thread',
+          { threadId: 'egencia-table' },
+          {
+            complete,
+            hasMore: !complete,
+            messages: [
+              { messageId: 'table-message', subject: 'Flight - BOOKED - Berlin', text: table },
+            ],
+          },
+        ),
+      ],
+    };
+  }
+  it('keeps source clocks and route-group inference separate from verified next-flight identity', () => {
+    const { read, evidence } = sources();
+    const projection = upcomingFlightReadProjection(read, evidence);
+    expect(projection.flight).toBeUndefined();
+    expect(projection.blocked).toBe(true);
+    expect(projection.text).toContain(
+      'LH778 BER→SFO; departs 2026-10-17 6:00 AM (departure time zone not stated)',
+    );
+    expect(projection.text).toContain('direction not explicitly stated');
+    expect(projection.text).toContain(
+      'A return is an inference from those reversed itinerary groups',
+    );
+    expect(projection.text).toContain('Source conflict within the same booking reference');
+    expect(projection.text).toContain('United');
+    expect(projection.text).toContain('Lufthansa');
+    expect(projection.text).toContain('https://mail.google.com/mail/u/0/#all/egencia-table');
+    expect(projection.text).not.toContain('no explicit time-zone offset');
+    expect(projection.text).not.toContain('Next matched');
+    expect(projection.text).not.toContain('Europe/Berlin');
+    expect(compoundTripRoute(read, evidence)).toBeUndefined();
+  });
+  it('retains checked table facts when the optional extractor is unavailable or returns no facts', () => {
+    const { read, evidence } = sources();
+    for (const status of ['complete', 'unavailable'] as const) {
+      const projection = upcomingFlightReadProjection(read, evidence, {
+        status,
+        segments: [],
+        hotels: [],
+        rejectedFacts: 0,
+        sourceMessageIds: ['table-message'],
+      });
+      expect(projection.text).toContain('LH778 BER→SFO');
+      expect(projection.flight).toBeUndefined();
+      expect(projection.blocked).toBe(true);
+    }
+  });
+  it('does not promote incomplete email pages into complete booking observations', () => {
+    const { read, evidence } = sources(false);
+    expect(upcomingFlightReadProjection(read, evidence).text).not.toContain(
+      'Booking email observation',
+    );
+  });
+  it('does not mistake a future hotel itinerary for a flight or invent a missing offset', () => {
+    const { read, evidence } = sources();
+    const calendar = evidence[0]?.result as { events: Array<Record<string, unknown>> };
+    if (!calendar.events[0]) throw new Error('Missing stay');
+    calendar.events[0].start = '2026-10-15T06:00:00-07:00';
+    calendar.events[0].description += '\nAirport transfer after the flight';
+    expect(upcomingFlightReadProjection(read, evidence).calendarCandidate?.event.eventId).toBe(
+      'flight',
+    );
+    expect(upcomingFlightReadProjection(read, evidence).text).not.toContain(
+      'no explicit time-zone offset',
+    );
+  });
+  it('still blocks an actual offset-less earlier flight', () => {
+    const { read, evidence } = sources();
+    const calendar = evidence[0]?.result as { events: Array<Record<string, unknown>> };
+    calendar.events.push({
+      eventId: 'unresolved-flight',
+      summary: 'Earlier flight',
+      start: '2026-10-15T06:00:00',
+      allDay: false,
+    });
+    expect(upcomingFlightReadProjection(read, evidence).text).toContain(
+      'no explicit time-zone offset',
+    );
+  });
+  it('ranks complete itineraries and individual confirmations before generic purchases, shower and spa reads', () => {
+    const { read, evidence } = sources();
+    evidence[1] = row(
+      'gmail.search',
+      { query: read.mailQuery },
+      {
+        complete: true,
+        hasMore: false,
+        results: [
+          {
+            threadId: 'purchase',
+            subject: 'Thank you for your purchase!',
+            snippet: 'Your purchase confirmation with flight details',
+          },
+          {
+            threadId: 'shower',
+            subject: 'Your shower reservation in the Crown Lounge',
+            snippet: 'Airline reservation confirmation',
+          },
+          {
+            threadId: 'spa',
+            subject: 'Your Online Reservation',
+            snippet: 'Spa reservation and check-in',
+          },
+          {
+            threadId: 'itinerary',
+            subject: 'Fwd: Flight - BOOKED - Berlin',
+            snippet: 'Booking confirmation',
+          },
+          {
+            threadId: 'leg',
+            subject:
+              'Fwd: Passenger - LH 778 - departs 6:00 AM local time - Confirmation code: CODE77',
+          },
+          {
+            threadId: 'newsletter',
+            subject: 'Weekly flight deals',
+            snippet: 'Itinerary booking advice',
+          },
+        ],
+      },
+    );
+    expect(
+      compoundTripThreadReadInputs(evidence.slice(0, 2), read).map((input) => input.threadId),
+    ).toEqual(['itinerary', 'leg']);
+    expect(compoundTripThreadIdsToRead(evidence, read)).not.toContain('shower');
+    expect(compoundTripThreadIdsToRead(evidence, read)).not.toContain('spa');
+    expect(compoundTripThreadIdsToRead(evidence, read)).not.toContain('newsletter');
   });
 });

@@ -2041,16 +2041,16 @@ function detectPersonalReadRequestInternal(
         {
           category: 'flight',
           query:
-            '{subject:(flight booking) subject:(flight booked) subject:(flight reserved) subject:(flight confirmation) subject:(airline booking) subject:(airline booked) subject:(airline reserved) subject:(airline confirmation) subject:(e-ticket) subject:(itinerary confirmation) subject:(boarding pass)}',
+            '{subject:(flight booking) subject:(flight booked) subject:(flight reserved) subject:(flight confirmation) subject:(airline booking) subject:(airline booked) subject:(airline reserved) subject:(airline confirmation) subject:(e-ticket) subject:(itinerary confirmation) subject:(boarding pass) subject:(confirmation code)}',
         },
         {
           category: 'lodging',
           query:
-            '{subject:(hotel booking) subject:(hotel booked) subject:(hotel reserved) subject:(hotel reservation) subject:(lodging booked) subject:(lodging reservation) subject:(accommodation booking) subject:(accommodation reservation) subject:(check-in confirmation) subject:(stay confirmation) subject:(booking confirmation) subject:(reservation confirmation) subject:(your reservation) subject:(reservation details)}',
+            '{subject:(hotel booking) subject:(hotel booked) subject:(hotel reserved) subject:(hotel reservation) subject:(lodging booked) subject:(lodging reservation) subject:(accommodation booking) subject:(accommodation reservation) subject:(check-in confirmation) subject:(stay confirmation) subject:(booking confirmation) subject:(reservation confirmation) subject:(your reservation) subject:(reservation details) subject:(travel confirmation)}',
         },
       ],
       mailQuery:
-        '{subject:(flight booking) subject:(flight booked) subject:(flight reserved) subject:(flight confirmation) subject:(airline booking) subject:(airline booked) subject:(airline reserved) subject:(airline confirmation) subject:(e-ticket) subject:(itinerary confirmation) subject:(boarding pass)}',
+        '{subject:(flight booking) subject:(flight booked) subject:(flight reserved) subject:(flight confirmation) subject:(airline booking) subject:(airline booked) subject:(airline reserved) subject:(airline confirmation) subject:(e-ticket) subject:(itinerary confirmation) subject:(boarding pass) subject:(confirmation code)}',
     };
   }
   // A terse correction such as "was that made up?" carries no subject of its
@@ -2708,6 +2708,51 @@ function hasTypedTripRead(request: PersonalReadRequest | undefined): boolean {
   return Boolean(request?.compoundTripDiscovery || request?.upcomingFlightDiscovery);
 }
 
+/** Calendar references only broaden read hypotheses; they never bind bookings. */
+function groundCompoundTripMailQueries(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): void {
+  if (!request.compoundTripDiscovery || !request.mailQueries?.length) return;
+  const references: string[] = [];
+  for (const row of evidence) {
+    if (row.fromCurrentTask === false || !matchingCalendarRead(row, request)) continue;
+    const events = objectRecord(row.result)?.events;
+    if (!Array.isArray(events)) continue;
+    for (const value of events) {
+      const event = objectRecord(value);
+      const description =
+        typeof event?.description === 'string' ? event.description.slice(0, 1200) : '';
+      if (!/\b(?:hotel|lodging|check[- ]?in|check[- ]?out)\b/i.test(description)) continue;
+      const reference =
+        /\b(?:itinerary|booking|reservation)\s*(?:#|reference\s*#?|number)\s*:\s*([A-Z0-9]{6,16})\b/i.exec(
+          description,
+        )?.[1];
+      if (reference && !references.includes(reference)) references.push(reference);
+    }
+  }
+  if (references.length === 0) return;
+  request.mailQueries = request.mailQueries.map((entry) => {
+    if (entry.category !== 'lodging' || !entry.query.startsWith('{') || !entry.query.endsWith('}'))
+      return entry;
+    const additions = references
+      .slice(0, 2)
+      .filter((reference) => !entry.query.includes(`"${reference}"`));
+    // Do not change an already admitted query after its first search page.
+    if (
+      additions.length === 0 ||
+      evidence.some(
+        (row) => row.toolName === 'gmail.search' && argsRecord(row)?.query === entry.query,
+      )
+    )
+      return entry;
+    return {
+      ...entry,
+      query: `{${entry.query.slice(1, -1)} ${additions.map((reference) => `"${reference}"`).join(' ')}}`,
+    };
+  });
+}
+
 export function gmailThreadIdsToRead(
   evidence: ReadonlyArray<ReadToolEvidence>,
   request?: PersonalReadRequest,
@@ -2967,6 +3012,7 @@ export function nextRequiredReadTool(
   }
   if (hasTypedTripRead(request)) {
     const currentEvidence = evidence.filter((row) => row.fromCurrentTask !== false);
+    groundCompoundTripMailQueries(request, currentEvidence);
     const tripReadTools = new Set([
       'calendar.list_events',
       'gmail.search',
