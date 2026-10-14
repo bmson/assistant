@@ -213,6 +213,57 @@ describe('bounded no-send email review', () => {
     expect(repair.prompt).not.toContain('I will approve it tomorrow.');
   });
 
+  it('repairs quotes that appear in the subject but not the named message body', async () => {
+    const thread = required(
+      emailReviewCompleteThread('thread-a', 'owner@example.com', [
+        search('thread-a'),
+        read('thread-a', messages('thread-a')),
+      ]),
+      'complete thread',
+    );
+    const latest = required(
+      thread.messages.find((message) => message.messageId === thread.latestMessageId),
+      'latest inbound message',
+    );
+    latest.subject = 'Please confirm by October 30';
+
+    const invalid = validAnswer('thread-a');
+    const invalidItem = required(invalid.items[0], 'invalid assessment item');
+    invalidItem.whyQuote = latest.subject;
+    invalidItem.deadline = { messageId: latest.messageId, quote: latest.subject };
+    expect(validateEmailReviewAnswer(invalid, [thread])).toBeUndefined();
+
+    const calls: Array<{ prompt: string; repair: boolean }> = [];
+    const result = await generateValidatedEmailReview([thread], async (input) => {
+      calls.push(input);
+      return {
+        ok: true,
+        value: calls.length === 1 ? invalid : validAnswer('thread-a'),
+      };
+    });
+
+    expect(result.answer?.items[0]?.whyQuote).toBe('Could you confirm by Friday?');
+    expect(result.answer?.items[0]?.deadlineQuote).toBe('by Friday');
+    expect(result.attempts).toBe(2);
+    const initial = required(calls[0], 'initial call');
+    expect(initial.repair).toBe(false);
+    expect(initial.prompt).toContain('verbatim, contiguous substring from the body text');
+    expect(initial.prompt).toContain('exact message identified by whyMessageId');
+    expect(initial.prompt).toContain('exact message identified by deadline.messageId');
+    expect(initial.prompt).toContain(
+      'subject lines, snippets, headers, and other messages are not quote sources',
+    );
+    const repair = required(calls[1], 'repair call');
+    expect(repair.repair).toBe(true);
+    expect(repair.prompt).toContain('body text of the exact message identified by whyMessageId');
+    expect(repair.prompt).toContain(
+      'body text of the exact message identified by deadline.messageId',
+    );
+    expect(repair.prompt).toContain(
+      'Subject lines, snippets, headers, and other messages are not quote sources',
+    );
+  });
+
   it('bounds repeated invalid assessments and does not weaken exact source validation', async () => {
     const thread = required(
       emailReviewCompleteThread('thread-a', 'owner@example.com', [
