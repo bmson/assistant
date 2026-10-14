@@ -1,4 +1,5 @@
 import type { ExecutionEvidenceRepository, TaskLeaseRepository } from '@assistant/persistence';
+import { gmailSearchReceiptSourceId } from '@assistant/persistence/gmail-search-identity';
 import { describe, expect, it, vi } from 'vitest';
 import type { TaskState } from '../../events.js';
 import { TaskStateSchema } from '../../events.js';
@@ -421,7 +422,7 @@ async function runFlightContinuation(
           hasMore,
           receipt: {
             version: 1,
-            source: { kind: 'gmail-search', id: query },
+            source: { kind: 'gmail-search', id: gmailSearchReceiptSourceId(query) },
             requested: {
               limit: maxResults,
               ...(typeof args.pageToken === 'string' ? { cursor: args.pageToken } : {}),

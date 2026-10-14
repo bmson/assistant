@@ -1,3 +1,4 @@
+import { gmailSearchReceiptSourceId } from '@assistant/persistence/gmail-search-identity';
 import { describe, expect, it, vi } from 'vitest';
 import { ToolRegistry } from '../registry.js';
 import type { ToolContext } from '../types.js';
@@ -46,8 +47,9 @@ describe('gmail.search', () => {
       }>;
     const first = await read(query);
     const second = await read(query, 'next-page');
-    const different = await read('x'.repeat(299) + 'y');
+    const different = await read(`${'x'.repeat(299)}y`);
     expect(first.query).toBe(query);
+    expect(first.receipt.source.id).toBe(gmailSearchReceiptSourceId(query));
     expect(first.receipt.source.id).toMatch(/^query-sha256:[a-f0-9]{64}$/);
     expect(second.receipt.source.id).toBe(first.receipt.source.id);
     expect(different.receipt.source.id).not.toBe(first.receipt.source.id);

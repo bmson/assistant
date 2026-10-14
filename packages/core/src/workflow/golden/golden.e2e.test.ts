@@ -12,6 +12,7 @@ import {
   tasks,
   toolCalls,
 } from '@assistant/db';
+import { gmailSearchReceiptSourceId } from '@assistant/persistence/gmail-search-identity';
 import { eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -394,7 +395,7 @@ describe('golden tasks', () => {
               },
               receipt: {
                 version: 1,
-                source: { kind: 'gmail-search', id: parsed.query },
+                source: { kind: 'gmail-search', id: gmailSearchReceiptSourceId(parsed.query) },
                 requested: {
                   limit: parsed.maxResults,
                   ...(parsed.pageToken ? { cursor: parsed.pageToken } : {}),

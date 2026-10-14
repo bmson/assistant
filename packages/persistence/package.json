@@ -12,7 +12,8 @@
     "./occasion-trust": "./src/occasion-trust.ts",
     "./card-privacy": "./src/card-privacy.ts",
     "./card-capabilities": "./src/card-capabilities.ts",
-    "./card-form": "./src/card-form.ts"
+    "./card-form": "./src/card-form.ts",
+    "./gmail-search-identity": "./src/gmail-search-identity.ts"
   },
   "dependencies": {
     "zod": "^4.6.5"
