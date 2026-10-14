@@ -2445,6 +2445,8 @@ describe('compound trip read projection', () => {
       association: 'date_city_candidate',
     });
     expect(projection.text).toContain('not a confirmed hotel booking');
+    expect(projection.text.match(/Northstar Collection/g)).toHaveLength(1);
+    expect(projection.text).not.toContain('Lodging calendar observation only');
     expect(projection.text).toContain(
       '[Calendar source](https://calendar.google.com/calendar/event?eid=lodging)',
     );
@@ -2473,6 +2475,10 @@ describe('compound trip read projection', () => {
       withStay({ ...stay, eventId: 'end-on-arrival-date', end: { date: '2026-10-17' } })
         .calendarLodgingObservation,
     ).toBeUndefined();
+
+    const withoutSource = withStay({ ...stay, links: [], htmlLink: undefined });
+    expect(withoutSource.calendarLodgingObservation).toBeUndefined();
+    expect(withoutSource.text).not.toContain('Northstar Collection');
 
     const linkedStay = {
       ...stay,

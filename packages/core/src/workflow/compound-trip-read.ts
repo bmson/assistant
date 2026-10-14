@@ -1432,6 +1432,7 @@ function calendarLodgingObservation(
       );
       if (!sharedReference && !dateCityCandidate) continue;
       const url = calendarSource(event);
+      if (!url) continue;
       candidates.set(eventId, {
         title: title || 'Lodging calendar entry',
         dateStart,
@@ -1752,7 +1753,7 @@ function calendarObservationLines(
   request: PersonalReadRequest,
   rows: ReadonlyArray<ReadToolEvidence>,
   representedFlights: ReadonlyArray<CompoundTripFlightCandidate | undefined>,
-  hasVerifiedHotel: boolean,
+  hasDisplayedLodging: boolean,
   allowFlightObservation: boolean,
 ): string[] {
   const events = rows.flatMap((row) => {
@@ -1782,7 +1783,7 @@ function calendarObservationLines(
         .sort((left, right) => Date.parse(left.instant) - Date.parse(right.instant))[0]
     : undefined;
 
-  const lodgingEvent = hasVerifiedHotel
+  const lodgingEvent = hasDisplayedLodging
     ? undefined
     : [...unique.values()]
         .filter((event) => {
@@ -2290,7 +2291,7 @@ export function compoundTripReadProjection(
           request,
           calendarRows,
           [flight, returnFlight, currentTripReturn],
-          hotel !== undefined,
+          hotel !== undefined || calendarLodging !== undefined,
           flight === undefined && returnFlight === undefined && currentTripReturn === undefined,
         )
       : [];
