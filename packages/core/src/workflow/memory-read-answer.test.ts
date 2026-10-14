@@ -129,7 +129,9 @@ describe('exact historical source projection', () => {
     const text = renderMemoryReadAnswer({ ...selection, selections: [] }, evidence);
     expect(text).toContain('bounded historical lookup');
     expect(text).not.toContain('applications');
-    expect(text).toContain('does not establish that we never discussed it');
+    expect(text).toContain('does not establish that it was never discussed');
+    expect(text).toContain('returned 2 conversation result rows across 1 successful search');
+    expect(text).toContain('saved-memory lookup returned 2 candidate rows');
   });
   it('preserves saved inference and confidence without pretending it is an owner quote', () => {
     const text = renderMemoryReadAnswer(
@@ -237,6 +239,32 @@ describe('exact historical source projection', () => {
     const text = renderMemoryReadAnswer(result, evidence);
     expect(text).toContain('careful typography');
     expect(text).not.toContain('job applications');
+  });
+  it('does not require an assistant-side quote for an owner preference contrasted only with inference', async () => {
+    const request =
+      'What preferences have I previously told you about the Assistant’s UI and how its replies should look? Use saved memory or our earlier conversations. Distinguish what I actually said from your inference, mention your sources, and do not guess or save new memories.';
+    const object = vi.fn(async () => ({
+      ok: true,
+      object: {
+        selections: [
+          {
+            sourceKey: 'memory:ui',
+            quote: 'Owner prefers minimal UI with careful typography.',
+          },
+        ],
+      },
+    }));
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence,
+    });
+    expect(result.status).toBe('complete');
+    expect(result.selections).toHaveLength(1);
+    expect(object).toHaveBeenCalledTimes(1);
+    expect(validMemoryReadSelection(result, evidence, request)).toBe(true);
+    expect(renderMemoryReadAnswer(result, evidence, request)).toContain('careful typography');
   });
   it('rechecks bounded owner-authored sources when a history question gets an empty selection', async () => {
     const request = 'What UI and accessibility preferences have I told you about?';
@@ -407,7 +435,7 @@ describe('exact historical source projection', () => {
       recovery?: string;
       sources: Array<{ key: string }>;
     };
-    expect(prompt.recovery).toContain('both are supplied');
+    expect(prompt.recovery).toContain('from both speakers');
     expect(prompt.sources.map((source) => source.key)).toContain('message:owner-correction');
     expect(prompt.sources.map((source) => source.key)).toContain('message:assistant-claim');
     expect(result).toMatchObject({ status: 'complete' });
@@ -471,10 +499,76 @@ describe('exact historical source projection', () => {
       evidence,
     });
     expect(result).toMatchObject({ status: 'unavailable', failureReason: 'incomplete_selection' });
+    expect(object).toHaveBeenCalledTimes(2);
     expect(validMemoryReadSelection(result, evidence, request)).toBe(false);
     expect(renderMemoryReadAnswer(result, evidence, request)).toContain(
       'could not reliably select both',
     );
+  });
+  it('cites assistant-reported correction evidence as assistant-only when the owner source is absent', async () => {
+    const request = 'Separate my correction from your earlier claim about the launch time.';
+    const ownerCorrectionReport =
+      'You corrected the earlier time and said the departure was 13:45.';
+    const earlierAssistantClaim = 'I previously said the departure was 09:15.';
+    const candidates: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: {
+          matches: [
+            message('unrelated-owner', 'I like clear labels.', 'user', 'owner'),
+            message('assistant-report', ownerCorrectionReport, 'assistant', 'assistant'),
+            message('assistant-old-claim', earlierAssistantClaim, 'assistant', 'assistant'),
+          ],
+        },
+      },
+    ];
+    const assistantSelections = {
+      selections: [
+        { sourceKey: 'message:assistant-report', quote: ownerCorrectionReport },
+        { sourceKey: 'message:assistant-old-claim', quote: earlierAssistantClaim },
+      ],
+    };
+    const object = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, object: { selections: [] } })
+      .mockImplementationOnce(async (_role: string, options: Record<string, unknown>) => {
+        const prompt = JSON.parse(String(options.prompt)) as {
+          recovery?: string;
+          sources: Array<{ key: string }>;
+        };
+        expect(prompt.recovery).toContain('If no supplied owner passage is relevant');
+        expect(prompt.sources).toHaveLength(3);
+        expect(prompt.sources.map((source) => source.key)).toContain('message:unrelated-owner');
+        return { ok: true, object: assistantSelections };
+      });
+
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence: candidates,
+    });
+    expect(object).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ status: 'complete', coverage: 'assistant_only' });
+    expect(validMemoryReadSelection(result, candidates, request)).toBe(true);
+    const answer = renderMemoryReadAnswer(result, candidates, request);
+    expect(answer).toContain('Assistant records only');
+    expect(answer).toContain('not the owner’s original words');
+    expect(answer).toContain(ownerCorrectionReport);
+    expect(answer).toContain(earlierAssistantClaim);
+    expect(answer).not.toContain('Recorded owner message');
+
+    expect(
+      validMemoryReadSelection(
+        {
+          ...result,
+          selections: [{ sourceKey: 'message:unrelated-owner', quote: 'I like clear labels.' }],
+        },
+        candidates,
+        request,
+      ),
+    ).toBe(false);
   });
   it('removes an exact repeated current question and gives verified owner sources priority', async () => {
     const request = 'What did I previously tell you about my meeting-summary format?';

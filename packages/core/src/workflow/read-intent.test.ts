@@ -911,6 +911,7 @@ describe('detectPersonalReadRequest', () => {
       searchSavedMemory: true,
       memorySearchQuery: 'preferences UI replies',
     });
+    expect(request).not.toHaveProperty('conversationCorrectionQuery');
     if (!request) throw new Error('Expected a personal memory request');
     const first = buildReadToolInput(request, 'conversations.search', []);
     expect(first).toEqual({
@@ -987,6 +988,44 @@ describe('detectPersonalReadRequest', () => {
       conversationQuery: 'UI preferences',
       searchSavedMemory: false,
     });
+  });
+
+  it('adds one bounded topic-focused owner-correction pass only for an explicit comparison', () => {
+    const text =
+      'Look back at our earlier conversation about the project launch. What did I say was wrong with the rollout time you gave me? Separate my correction from your earlier claim and cite the relevant conversation source.';
+    const request = detectPersonalReadRequest(turn(text));
+    expect(request).toMatchObject({
+      kind: 'memory',
+      conversationQuery: expect.stringContaining('project launch'),
+      conversationCorrectionQuery: expect.stringMatching(/^Owner correction /),
+    });
+    if (!request) throw new Error('Expected a historical comparison read');
+    const first = {
+      toolName: 'conversations.search',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { query: request.conversationQuery, limit: 20 },
+      result: { matches: [] },
+    };
+    const second = {
+      ...first,
+      args: { query: request.conversationFollowupQuery, limit: 20 },
+    };
+    const third = {
+      ...first,
+      args: { query: request.conversationCorrectionQuery, limit: 20 },
+    };
+    expect(nextRequiredReadTool(request, [first])).toBe('conversations.search');
+    expect(buildReadToolInput(request, 'conversations.search', [first])).toMatchObject({
+      query: request.conversationFollowupQuery,
+      limit: 20,
+    });
+    expect(nextRequiredReadTool(request, [first, second])).toBe('conversations.search');
+    expect(buildReadToolInput(request, 'conversations.search', [first, second])).toMatchObject({
+      query: request.conversationCorrectionQuery,
+      limit: 20,
+    });
+    expect(nextRequiredReadTool(request, [first, second, third])).toBeUndefined();
   });
 
   it('bounds repeated failed history searches and never adds unrequested saved-memory reads', () => {

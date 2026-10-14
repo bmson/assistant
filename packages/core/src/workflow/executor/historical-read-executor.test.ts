@@ -355,6 +355,7 @@ describe('historical conversation read finalization', () => {
     const expectedQueries = [
       detectedRequest.conversationQuery,
       detectedRequest.conversationFollowupQuery,
+      detectedRequest.conversationCorrectionQuery,
     ].filter((query): query is string => Boolean(query));
     const observedQueries: string[] = [];
     const sourceConversations = vi.fn(async ({ query }: { query: string; limit: number }) => {

@@ -12,6 +12,8 @@ export interface MemoryReadSelection {
   version: 1;
   status: 'complete' | 'unavailable';
   selections: Array<{ sourceKey: string; quote: string }>;
+  /** Set by the server only when an explicit comparison has no selectable owner source. */
+  coverage?: 'assistant_only';
   /** Internal failure class; never includes provider text or private source content. */
   failureReason?:
     | 'provider_unavailable'
@@ -126,12 +128,19 @@ function selectorVisibleSources(
 type MemoryReadSource = ReturnType<typeof memoryReadSources>[number];
 
 function requiresOwnerAssistantContrast(request: string): boolean {
-  return (
-    /\b(?:assistant|you|your)\b/i.test(request) &&
-    /\b(?:separat\w*|distinguish\w*|compar\w*|contrast\w*|correct\w*|wrong|claim\w*|versus|\bvs\.?\b)\b/i.test(
+  const asksToCompare =
+    /\b(?:separat\w*|distinguish\w*|compar\w*|contrast\w*|versus|\bvs\.?\b)\b/i.test(request);
+  const namesHistoricalAssistantStatement =
+    /\b(?:your|assistant(?:['’]s)?)\s+(?:earlier|previous|prior)\s+(?:claim|statement|reply|response|answer|recommendation)\b/i.test(
       request,
-    )
-  );
+    ) ||
+    /\b(?:what|which|how)\s+(?:did\s+)?(?:you|the assistant)\s+(?:previously\s+|earlier\s+|before\s+)?(?:say|tell|claim|recommend|reply|respond)\b/i.test(
+      request,
+    );
+  const namesOwnerSide =
+    /\b(?:my|owner(?:['’]s)?)\s+(?:correction|statement|claim|version|answer)\b/i.test(request) ||
+    /\bwhat\s+i\s+(?:actually\s+)?(?:said|told|corrected)\b/i.test(request);
+  return asksToCompare && namesHistoricalAssistantStatement && namesOwnerSide;
 }
 
 function asksAboutOwnerHistory(request: string): boolean {
@@ -166,6 +175,18 @@ function selectedSpeakers(
   );
 }
 
+function selectsOnlyAssistantRecords(
+  selections: MemoryReadSelection['selections'],
+  sources: MemoryReadSource[],
+): boolean {
+  const speakers = selectedSpeakers(selections, sources);
+  return (
+    selections.length > 0 &&
+    speakers.size === 1 &&
+    speakers.has('Earlier assistant claim (not verified fact)')
+  );
+}
+
 function coversRequestedSpeakers(
   request: string,
   selections: MemoryReadSelection['selections'],
@@ -196,7 +217,7 @@ async function selectFromSources(input: {
   taskId: string;
   request: string;
   sources: MemoryReadSource[];
-  recovery?: 'owner_sources' | 'owner_assistant_contrast';
+  recovery?: 'owner_sources' | 'owner_assistant_contrast' | 'assistant_report_only';
 }): Promise<MemoryReadSelection> {
   try {
     const outcome = record(
@@ -214,9 +235,14 @@ async function selectFromSources(input: {
             : input.recovery === 'owner_assistant_contrast'
               ? {
                   recovery:
-                    'The request asks to distinguish an owner statement from an earlier assistant claim. Select at least one directly relevant exact quote from each speaker when both are supplied. The assistant quote proves only what the assistant previously said, not that the statement was true.',
+                    'The request asks to distinguish an owner statement from an earlier assistant claim. Select exact relevant passages from both speakers if the supplied owner passage directly addresses the question. If no supplied owner passage is relevant, select only relevant assistant-authored passages and do not present them as the owner original. An assistant quote proves only what the assistant wrote, not that it is true.',
                 }
-              : {}),
+              : input.recovery === 'assistant_report_only'
+                ? {
+                    recovery:
+                      'No directly relevant owner-authored source was returned by the bounded lookup. Select only assistant-authored historical passages that directly report or discuss the requested correction or earlier claim. These passages prove only what the assistant wrote; do not present them as the owner original or as a current fact.',
+                  }
+                : {}),
           sources: input.sources,
         }),
         schema: SelectionSchema,
@@ -313,6 +339,33 @@ export async function selectMemoryReadAnswer(input: {
       if (recovered.status !== 'complete') return recovered;
       if (coversRequestedSpeakers(input.request, recovered.selections, contrastSources))
         return recovered;
+      if (selectsOnlyAssistantRecords(recovered.selections, contrastSources))
+        return { ...recovered, coverage: 'assistant_only' };
+      return {
+        version: 1,
+        status: 'unavailable',
+        selections: [],
+        failureReason: 'incomplete_selection',
+      };
+    }
+    const assistantSources = selectorVisibleSources(
+      allSources.filter(
+        (source) => source.speaker === 'Earlier assistant claim (not verified fact)',
+      ),
+    );
+    if (assistantSources.length > 0) {
+      const assistantReport = await selectFromSources({
+        router: input.router,
+        taskId: input.taskId,
+        request: input.request,
+        sources: assistantSources,
+        recovery: 'assistant_report_only',
+      });
+      if (
+        assistantReport.status === 'complete' &&
+        selectsOnlyAssistantRecords(assistantReport.selections, assistantSources)
+      )
+        return { ...assistantReport, coverage: 'assistant_only' };
     }
     return {
       version: 1,
@@ -361,8 +414,17 @@ export function validMemoryReadSelection(
   );
   const sources = [...byKey.values()];
   const seen = new Set<string>();
+  const speakerCoverageValid =
+    coversRequestedSpeakers(excludeExactRequest ?? '', selection.selections, sources) ||
+    (selection.coverage === 'assistant_only' &&
+      requiresOwnerAssistantContrast(excludeExactRequest ?? '') &&
+      selection.selections.length > 0 &&
+      selectedSpeakers(selection.selections, sources).size === 1 &&
+      selectedSpeakers(selection.selections, sources).has(
+        'Earlier assistant claim (not verified fact)',
+      ));
   return (
-    coversRequestedSpeakers(excludeExactRequest ?? '', selection.selections, sources) &&
+    speakerCoverageValid &&
     coversOwnerHistory(excludeExactRequest ?? '', selection.selections, sources) &&
     selection.selections.every((item) => {
       const key = JSON.stringify(item);
@@ -388,16 +450,21 @@ export function renderMemoryReadAnswer(
   const sources = selectorVisibleSources(memoryReadSources(evidence, excludeExactRequest));
   const byKey = new Map(sources.map((source) => [source.key, source]));
   if (!validMemoryReadSelection(selection, evidence, excludeExactRequest)) {
-    if (selection.failureReason === 'incomplete_selection')
+    if (selection.failureReason === 'incomplete_selection') {
+      const coverage = boundedMemoryCoverage(evidence);
       return requiresOwnerAssistantContrast(excludeExactRequest ?? '')
-        ? 'I found historical records, but could not reliably select both the owner’s statement and the separate assistant reply from this bounded lookup. I will not treat an earlier assistant claim as a fact about what you said or what is true now.'
-        : 'I found candidate owner-authored records, but could not reliably select a passage that answers this question from the bounded lookup.';
+        ? `${coverage} I could not reliably select both a directly relevant owner-authored correction and the separate earlier assistant record. Assistant-authored wording is not proof of what you said or a current fact.`
+        : `${coverage} I found candidate owner-authored records, but could not reliably select a directly relevant passage. This does not establish that it was never discussed.`;
+    }
     return 'I retrieved historical sources, but could not reliably select passages answering your question. I have not treated unrelated records or earlier assistant claims as established facts.';
   }
-  if (!selection.selections.length)
-    return 'I could not find a relevant owner statement or supported saved fact in this bounded historical lookup. That does not establish that we never discussed it. I cannot confirm an answer from unrelated saved records or earlier assistant claims.';
+  if (!selection.selections.length) return boundedNoSelectionAnswer(evidence, excludeExactRequest);
   return [
-    'Relevant historical sources:',
+    ...(selection.coverage === 'assistant_only'
+      ? [
+          'Assistant records only: the bounded lookup did not return a validated owner-authored source for the correction. These records show what the assistant wrote, not the owner’s original words or a current fact.',
+        ]
+      : ['Relevant historical sources:']),
     ...selection.selections.map((item) => {
       const source = byKey.get(item.sourceKey);
       if (!source) return '';
@@ -405,4 +472,31 @@ export function renderMemoryReadAnswer(
     }),
     'These are historical records, not a fresh check of your current calendar, inbox, or bookings.',
   ].join('\n');
+}
+
+function boundedNoSelectionAnswer(evidence: ActionEvidence[], request?: string): string {
+  const coverage = boundedMemoryCoverage(evidence);
+  const ownerQuestion = asksAboutOwnerHistory(request ?? '');
+  return `${coverage} I could not verify a directly relevant ${ownerQuestion ? 'owner statement or owner-confirmed saved fact' : 'historical passage'} in those results. This does not establish that it was never discussed.`;
+}
+
+function boundedMemoryCoverage(evidence: ActionEvidence[]): string {
+  const current = evidence.filter(
+    (row) => row.fromCurrentTask !== false && row.status === 'succeeded',
+  );
+  const searches = current.filter((row) => row.toolName === 'conversations.search');
+  const returnedRows = searches.reduce((total, row) => {
+    const result = record(row.result);
+    return total + (Array.isArray(result?.matches) ? result.matches.length : 0);
+  }, 0);
+  const memoryReads = current.filter((row) => row.toolName === 'memory.recall');
+  const memoryRows = memoryReads.reduce((total, row) => {
+    const result = record(row.result);
+    return total + (Array.isArray(result?.memories) ? result.memories.length : 0);
+  }, 0);
+  return searches.length
+    ? `The bounded historical lookup returned ${returnedRows} conversation result rows across ${searches.length} successful ${searches.length === 1 ? 'search' : 'searches'}${memoryReads.length ? `; the saved-memory lookup returned ${memoryRows} candidate rows` : ''}.`
+    : memoryReads.length
+      ? `The bounded historical lookup had no successful conversation search; the saved-memory lookup returned ${memoryRows} candidate rows.`
+      : 'The bounded historical lookup had no successful source searches.';
 }
