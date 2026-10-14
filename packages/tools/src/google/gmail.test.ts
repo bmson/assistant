@@ -25,6 +25,21 @@ function context(tainted: boolean): ToolContext {
 }
 
 describe('gmail.search', () => {
+  it('accepts a bounded 100-result metadata page and rejects larger requests', () => {
+    const tool = registerGmailTools(new ToolRegistry(), {
+      client: { api: vi.fn() } as never,
+      botEmail: 'bot@example.com',
+    }).get('gmail.search')?.tool;
+    expect(
+      tool?.inputSchema.parse({ query: 'newer_than:7d -from:me', maxResults: 100 }),
+    ).toMatchObject({
+      maxResults: 100,
+    });
+    expect(() =>
+      tool?.inputSchema.parse({ query: 'newer_than:7d -from:me', maxResults: 101 }),
+    ).toThrow();
+  });
+
   it('keeps long valid searches and continuation queries intact with bounded stable source IDs', async () => {
     const api = vi.fn().mockResolvedValue({
       messages: [],

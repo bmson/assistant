@@ -288,6 +288,12 @@ describe('detectPersonalReadRequest', () => {
       requiresThreadRead: true,
       emailReview: { windowDays: 7, requestedCount: 5 },
     });
+    const review = detectPersonalReadRequest(turn(prompt));
+    if (!review) throw new Error('Expected email review request');
+    expect(buildReadToolInput(review, 'gmail.search', [])).toMatchObject({
+      query: EMAIL_REVIEW_QUERY,
+      maxResults: 100,
+    });
     expect(
       detectPersonalReadRequest(
         turn(
@@ -1964,7 +1970,7 @@ describe('required read sequence', () => {
     expect(nextRequiredReadTool(broad, [firstPage, secondPage, thirdPage])).toBeUndefined();
   });
 
-  it('allows five bounded email-review metadata pages and then proceeds to complete-thread reads', () => {
+  it('allows three bounded email-review metadata pages and then proceeds to complete-thread reads', () => {
     const review = detectPersonalReadRequest(
       turn(
         'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.',
@@ -1973,7 +1979,7 @@ describe('required read sequence', () => {
     expect(review?.emailReview).toBeDefined();
     if (!review?.emailReview) throw new Error('expected bounded email review');
     const pages: ReadToolEvidence[] = [];
-    for (let index = 0; index < 5; index += 1) {
+    for (let index = 0; index < 3; index += 1) {
       const token = index === 0 ? undefined : `page-${index + 1}`;
       pages.push({
         toolName: 'gmail.search',
@@ -1981,7 +1987,7 @@ describe('required read sequence', () => {
         args: { query: EMAIL_REVIEW_QUERY, ...(token ? { pageToken: token } : {}) },
         result: { complete: false, hasMore: true, nextPageToken: `page-${index + 2}`, results: [] },
       });
-      if (index < 4) expect(nextRequiredReadTool(review, pages)).toBe('gmail.search');
+      if (index < 2) expect(nextRequiredReadTool(review, pages)).toBe('gmail.search');
     }
     expect(nextRequiredReadTool(review, pages)).toBeUndefined();
   });

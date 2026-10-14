@@ -3102,7 +3102,7 @@ export function groundReadToolInput(
       ...searchInput,
       query:
         target?.query || request.mailQuery || request.queryTerms.join(' ') || '-in:spam -in:trash',
-      maxResults: 20,
+      maxResults: request.emailReview ? 100 : 20,
       ...(target?.pageToken ? { pageToken: target.pageToken } : {}),
     };
   }
