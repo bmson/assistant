@@ -531,7 +531,8 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       ]);
 
       // A full candidate page with too few owned matches fails instead of truncating.
-      for (const id of ['f1', 'f2', 'f3']) await message(id, 'theirs', 'Foreign');
+      // limit: 1 now reads 16 raw neighbors before checking conversation ownership.
+      for (let index = 1; index <= 14; index++) await message(`f${index}`, 'theirs', 'Foreign');
       await store.doc('conversations', 'mine').update({ agentId: 'foreign' });
       await expect(run('conversations.search', { query: 'kitchen', limit: 1 })).rejects.toThrow(
         'Conversation search candidate bound reached',
