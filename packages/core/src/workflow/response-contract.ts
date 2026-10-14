@@ -6,6 +6,7 @@ import {
   repairPresentationDefects,
 } from '../model-router/audit-graders.js';
 import type { BriefingCalendarEvent } from './briefing.js';
+import { calendarEventAnalysisResponse } from './calendar-event-analysis.js';
 import { calendarRelationship, calendarRelationshipNote } from './calendar-relationship.js';
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
 import type { CompoundTripExtraction } from './compound-trip-extraction.js';
@@ -1170,6 +1171,36 @@ function resultItems(row: ActionEvidence, key: string): Record<string, unknown>[
   return Array.isArray(items)
     ? items.map(record).filter((item): item is Record<string, unknown> => Boolean(item))
     : [];
+}
+
+function calendarEventAnalysisCoverageComplete(rows: ActionEvidence[]): boolean {
+  if (rows.length === 0) return false;
+  let expectedPageToken: string | undefined;
+  let finalResult: Record<string, unknown> | undefined;
+  for (const row of rows) {
+    const args = record(row.args);
+    const result = record(row.result);
+    if (
+      !args ||
+      !result ||
+      (typeof args.pageToken === 'string' ? args.pageToken : undefined) !== expectedPageToken ||
+      result.calendarRosterComplete !== true ||
+      !Array.isArray(result.unavailable) ||
+      result.unavailable.length > 0 ||
+      result.paginationUnavailable === true
+    )
+      return false;
+    expectedPageToken =
+      typeof result.nextPageToken === 'string' && result.nextPageToken.length > 0
+        ? result.nextPageToken
+        : undefined;
+    finalResult = result;
+  }
+  return (
+    finalResult?.complete === true &&
+    typeof finalResult.nextPageToken !== 'string' &&
+    expectedPageToken === undefined
+  );
 }
 
 function queryCovers(row: ActionEvidence, terms: string[]): boolean {
@@ -3241,6 +3272,27 @@ export function verifiedReadResponse(
 ): string {
   if (request.temporalIssue || request.scopeIssue)
     return request.temporalIssue ?? request.scopeIssue ?? '';
+  if (request.calendarEventAnalysis) {
+    const rows = matchingCalendarRows(request, currentSuccessfulEvidence(evidence));
+    const events = uniqueRecords(
+      rows.flatMap((row) => resultItems(row, 'events')),
+      (event) =>
+        [
+          stringField(event, 'calendarId'),
+          stringField(event, 'eventId'),
+          stringField(event, 'start'),
+          stringField(event, 'summary'),
+        ].join('|'),
+    );
+    const coverageComplete = calendarEventAnalysisCoverageComplete(rows);
+    return calendarEventAnalysisResponse({
+      request: request.calendarEventAnalysis,
+      timeWindow: request.timeWindow,
+      timeZone: request.timeZone,
+      events,
+      coverageComplete,
+    });
+  }
   if (request.upcomingFlightDiscovery)
     return upcomingFlightReadProjection(request, evidence, compoundTripExtraction).text;
   if (request.compoundTripDiscovery)
@@ -3869,6 +3921,15 @@ function enforcePersonalReadGrounding(
       };
     return coverageGapResponse(request, evidence, gaps, opts?.compoundTripExtraction);
   }
+  if (request.calendarEventAnalysis)
+    return {
+      text: verifiedReadResponse(request, evidence),
+      blocked: false,
+      unsupported: [],
+      groundingFallback: [
+        'calendar counts and gaps rendered directly from the current task ledger',
+      ],
+    };
   if (request.kind === 'memory' && opts?.memoryReadSelection)
     return {
       text: renderMemoryReadAnswer(

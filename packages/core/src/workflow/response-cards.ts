@@ -1354,6 +1354,7 @@ export function responseCardsForFinal(input: {
   const synthesizedRead = Boolean(
     input.readRequest?.emailReview ||
       input.readRequest?.weeklyCalendarPlan ||
+      input.readRequest?.calendarEventAnalysis ||
       input.readRequest?.compoundTripDiscovery,
   );
   const explicitMailRead =

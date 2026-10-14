@@ -5,6 +5,11 @@
  * model room to invent a plausible calendar or inbox answer.
  */
 
+import {
+  type CalendarEventAnalysisRequest,
+  parseCalendarWeekdayCount,
+  requestedCalendarEventAnalysis,
+} from './calendar-event-analysis.js';
 import { type CalendarPlanOptions, requestedCalendarPlanOptions } from './calendar-plan-intent.js';
 import { requestedCardIntent } from './card-intent.js';
 import {
@@ -58,6 +63,8 @@ export interface PersonalReadRequest {
   /** Deterministic review-only proposal requiring availability and event-list reads. */
   weeklyCalendarPlan?: boolean;
   calendarPlanOptions?: CalendarPlanOptions;
+  /** Read-only calendar duration and explicit in-person gap statistics. */
+  calendarEventAnalysis?: CalendarEventAnalysisRequest;
   /** Literal subject terms to bind into calendar/Gmail searches. */
   queryTerms: string[];
   /** Full bounded owner question for semantic memory retrieval. */
@@ -535,6 +542,26 @@ function resolveTimeWindowBounds(
   const range = (start: CivilDate, days: number, label: string) =>
     timeWindow(start, addCivilDays(start, days), label, timeZone);
 
+  const weekdays =
+    /\bnext\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s+weekdays?\b/i.exec(text);
+  if (weekdays?.[1]) {
+    const count = parseCalendarWeekdayCount(weekdays[1]);
+    if (!count) return undefined;
+    let cursor = today;
+    let first: CivilDate | undefined;
+    let found = 0;
+    for (let index = 0; index < 20 && found < count; index += 1) {
+      cursor = addCivilDays(cursor, 1);
+      const weekday = civilWeekday(cursor);
+      if (weekday >= 1 && weekday <= 5) {
+        first ??= cursor;
+        found += 1;
+      }
+    }
+    if (!first || found !== count) return undefined;
+    return timeWindow(first, addCivilDays(cursor, 1), `the next ${count} weekdays`, timeZone);
+  }
+
   const relativeCount = /\bnext\s+(\d{1,2})\s+(days?|weeks?)\b/i.exec(text);
   if (relativeCount) {
     const count = Math.max(1, Number(relativeCount[1]));
@@ -673,8 +700,9 @@ function resolveTimeWindowBounds(
 }
 
 const RELATIVE_PERIOD =
-  /\b(?:(?:next|last|past|previous|prior|this|coming)\s+(?:(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+)?(?:hours?|days?|weeks?|weekends?|months?|quarters?|years?|decades?)|(?:in\s+)?(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:hours?|days?|weeks?|months?|quarters?|years?|decades?)(?:\s+(?:ago|from\s+now))?)\b/i;
+  /\b(?:(?:next|last|past|previous|prior|this|coming)\s+(?:(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+)?(?:weekdays?|hours?|days?|weeks?|weekends?|months?|quarters?|years?|decades?)|(?:in\s+)?(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:hours?|days?|weeks?|months?|quarters?|years?|decades?)(?:\s+(?:ago|from\s+now))?)\b/i;
 const SUPPORTED_RELATIVE_PERIODS = [
+  /\bnext\s+(?:[1-9]|10|one|two|three|four|five|six|seven|eight|nine|ten)\s+weekdays?\b/i,
   /\bnext\s+[1-9]\d?\s+(?:days?|weeks?)\b/i,
   /\b(?:last|past)\s+[1-9]\d?\s+(?:days?|weeks?)\b/i,
   /\b(?:last|previous)\s+(?:week(?:end)?|month|year)\b/i,
@@ -706,7 +734,7 @@ function temporalGranularity(
   if (/\b(?:months?|quarters?)\b/i.test(text)) return 'month';
   if (/\bweeks?(?:ends?)?\b/i.test(text)) return 'week';
   if (
-    /\b(?:today|tomorrow|yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|20\d{2}-\d{2}-\d{2}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2})\b/i.test(
+    /\b(?:weekdays?|today|tomorrow|yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|20\d{2}-\d{2}-\d{2}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2})\b/i.test(
       text,
     )
   )
@@ -2014,6 +2042,12 @@ function detectPersonalReadRequestInternal(
   const calendarPlanOptions = !calendarReadProhibited
     ? requestedCalendarPlanOptions(latest)
     : undefined;
+  const calendarEventAnalysis =
+    !calendarReadProhibited &&
+    calendarPlanOptions === undefined &&
+    !READ_THEN_MUTATION.test(readThenMutationText(latest))
+      ? requestedCalendarEventAnalysis(latest)
+      : undefined;
   const weeklyCalendarPlan = calendarPlanOptions !== undefined;
 
   if (!calendar && !email && !availability && !weeklyCalendarPlan) return null;
@@ -2023,15 +2057,16 @@ function detectPersonalReadRequestInternal(
   // appearing on a calendar. Search both configured sources without asking the
   // owner which provider/account contains the answer.
   const kind: PersonalReadKind =
-    weeklyCalendarPlan || availability
+    calendarEventAnalysis || weeklyCalendarPlan || availability
       ? 'calendar'
       : namedSchedule || (calendar && email)
         ? 'calendar_email'
         : email
           ? 'email'
           : 'calendar';
-  const firstToolName =
-    weeklyCalendarPlan || availability
+  const firstToolName = calendarEventAnalysis
+    ? 'calendar.list_events'
+    : weeklyCalendarPlan || availability
       ? 'calendar.availability'
       : kind === 'email'
         ? 'gmail.search'
@@ -2046,7 +2081,8 @@ function detectPersonalReadRequestInternal(
   const request: PersonalReadRequest = {
     kind,
     ...(weeklyCalendarPlan ? { weeklyCalendarPlan: true, calendarPlanOptions } : {}),
-    queryTerms: weeklyCalendarPlan ? [] : terms,
+    ...(calendarEventAnalysis ? { calendarEventAnalysis } : {}),
+    queryTerms: weeklyCalendarPlan || calendarEventAnalysis ? [] : terms,
     ...(upcomingFlightDiscovery ||
     (namedSchedule && (flightLanguage.test(latest) || Boolean(ownerFlight)))
       ? { answerFocus: 'flight' as const }
@@ -2077,6 +2113,8 @@ function detectPersonalReadRequestInternal(
     if (CURRENT_MAIL.test(latest)) request.preferLatestMail = true;
   }
   if (weeklyCalendarPlan) {
+    request.maxResults = 50;
+  } else if (calendarEventAnalysis) {
     request.maxResults = 50;
   } else if (kind !== 'email' && nextEventQuestion) {
     request.maxResults = 1;
@@ -2183,6 +2221,53 @@ function matchingCalendarRead(row: ReadToolEvidence, request: PersonalReadReques
   }
   const interval = calendarReadInterval(request);
   return !interval || (args?.timeMin === interval.start && args?.timeMax === interval.endExclusive);
+}
+
+function calendarListPages(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+  limit: number,
+): ReadToolEvidence[] {
+  return evidence
+    .filter((row) => {
+      if (
+        row.fromCurrentTask === false ||
+        row.toolName !== 'calendar.list_events' ||
+        !succeeded(row)
+      )
+        return false;
+      const args = argsRecord(row);
+      const result = objectRecord(row.result);
+      const interval = calendarReadInterval(request);
+      return (
+        (!Array.isArray(args?.calendarIds) || args.calendarIds.length === 0) &&
+        Array.isArray(result?.events) &&
+        (!interval || (args?.timeMin === interval.start && args?.timeMax === interval.endExclusive))
+      );
+    })
+    .slice(0, limit);
+}
+
+function calendarEventAnalysisNextPageToken(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+  limit: number,
+): string | undefined {
+  const pages = calendarListPages(request, evidence, limit);
+  let expectedPageToken: string | undefined;
+  let nextPageToken: string | undefined;
+  for (const page of pages) {
+    if ((argsRecord(page)?.pageToken || undefined) !== expectedPageToken) return undefined;
+    const result = objectRecord(page.result);
+    const token = result?.nextPageToken;
+    if (typeof token !== 'string' || token.length === 0 || token.length > 4096) {
+      nextPageToken = undefined;
+      break;
+    }
+    nextPageToken = token;
+    expectedPageToken = token;
+  }
+  return nextPageToken;
 }
 
 function matchingGmailSearch(row: ReadToolEvidence, request: PersonalReadRequest): boolean {
@@ -2781,6 +2866,26 @@ export function nextRequiredReadTool(
       ? 'gmail.read_thread'
       : undefined;
   }
+  if (request.calendarEventAnalysis) {
+    const currentEvidence = evidence.filter((row) => row.fromCurrentTask !== false);
+    const pages = calendarListPages(request, currentEvidence, 3);
+    if (pages.length === 0) {
+      const attempted = currentEvidence.filter(
+        (row) =>
+          row.toolName === 'calendar.list_events' &&
+          (argsRecord(row)?.pageToken === undefined || argsRecord(row)?.pageToken === null),
+      ).length;
+      return attempted < 2 ? 'calendar.list_events' : undefined;
+    }
+    const token = calendarEventAnalysisNextPageToken(request, currentEvidence, 3);
+    if (token && pages.length < 3) {
+      const attempted = currentEvidence.filter(
+        (row) => row.toolName === 'calendar.list_events' && argsRecord(row)?.pageToken === token,
+      ).length;
+      return attempted < 2 ? 'calendar.list_events' : undefined;
+    }
+    return undefined;
+  }
   if (request.weeklyCalendarPlan) {
     const availabilitySucceeded = evidence.some((row) => matchingCalendarRead(row, request));
     if (!availabilitySucceeded && attempts(evidence, 'calendar.availability') < 2)
@@ -2957,9 +3062,10 @@ export function groundReadToolInput(
   }
   if (toolName === 'calendar.list_events') {
     const { calendarIds: _ignored, ...unboundCalendarArgs } = input;
-    const allCalendars = request.weeklyCalendarPlan
-      ? (({ pageToken: _untrustedPageToken, ...args }) => args)(unboundCalendarArgs)
-      : unboundCalendarArgs;
+    const allCalendars =
+      request.weeklyCalendarPlan || request.calendarEventAnalysis
+        ? (({ pageToken: _untrustedPageToken, ...args }) => args)(unboundCalendarArgs)
+        : unboundCalendarArgs;
     const interval = calendarReadInterval(request);
     return {
       ...allCalendars,
@@ -2967,34 +3073,10 @@ export function groundReadToolInput(
       maxResults: request.maxResults ?? 50,
       ...(hasTypedTripRead(request)
         ? { pageToken: compoundCalendarPageToken(request, evidence) }
-        : request.weeklyCalendarPlan
+        : request.weeklyCalendarPlan || request.calendarEventAnalysis
           ? (() => {
-              const pages = evidence
-                .filter((row) => {
-                  if (row.toolName !== 'calendar.list_events' || !succeeded(row)) return false;
-                  const args = argsRecord(row);
-                  return (
-                    args?.timeMin === interval?.start && args?.timeMax === interval?.endExclusive
-                  );
-                })
-                .slice(0, 3);
-              let token: unknown;
-              let expectedPageToken: string | undefined;
-              for (const page of pages) {
-                if ((argsRecord(page)?.pageToken || undefined) !== expectedPageToken) break;
-                const result =
-                  page.result && typeof page.result === 'object'
-                    ? (page.result as Record<string, unknown>)
-                    : undefined;
-                token = result?.nextPageToken;
-                expectedPageToken =
-                  typeof token === 'string' && token.length > 0 && token.length <= 4096
-                    ? token
-                    : undefined;
-              }
-              return typeof token === 'string' && token.length > 0 && token.length <= 4096
-                ? { pageToken: token }
-                : {};
+              const token = calendarEventAnalysisNextPageToken(request, evidence, 3);
+              return token ? { pageToken: token } : {};
             })()
           : {}),
     };
