@@ -55,7 +55,7 @@ describe('detectPersonalReadRequest', () => {
     expect(request?.mailQuery).not.toContain('hotel');
   });
 
-  it('caps compound trip reads and never resumes from other-task search or calendar receipts', () => {
+  it('caps compound trip calls at sixteen and never resumes from other-task search or calendar receipts', () => {
     const requestText =
       'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
     const request = detectPersonalReadRequest([{ role: 'user', content: requestText }], {
@@ -63,7 +63,7 @@ describe('detectPersonalReadRequest', () => {
       timeZone: 'America/Los_Angeles',
     });
     if (!request) throw new Error('Expected read request');
-    const capped: ReadToolEvidence[] = Array.from({ length: 12 }, (_, index) => ({
+    const capped: ReadToolEvidence[] = Array.from({ length: 16 }, (_, index) => ({
       toolName: index % 2 ? 'web.fetch' : 'gmail.search',
       status: 'failed',
       args: {},
@@ -71,7 +71,7 @@ describe('detectPersonalReadRequest', () => {
     }));
     expect(nextRequiredReadTool(request, capped)).toBeUndefined();
 
-    const previousTask = Array.from({ length: 12 }, (_, index) => ({
+    const previousTask = Array.from({ length: 16 }, (_, index) => ({
       ...capped[index],
       fromCurrentTask: false,
       status: 'succeeded',
@@ -119,7 +119,12 @@ describe('detectPersonalReadRequest', () => {
         },
       },
     ];
-    expect(gmailThreadIdsToRead(evidence, request)).toEqual(['flight-one', 'hotel-one']);
+    expect(gmailThreadIdsToRead(evidence, request)).toEqual([
+      'flight-one',
+      'hotel-one',
+      'hotel-two',
+      'newsletter',
+    ]);
   });
 
   it('selects a second distinct flight itinerary before competing lodging hits', () => {
@@ -154,6 +159,7 @@ describe('detectPersonalReadRequest', () => {
       'future-flight',
       'hotel-reservation',
       'return-flight',
+      'other-hotel',
     ]);
   });
 
@@ -378,7 +384,12 @@ describe('detectPersonalReadRequest', () => {
         },
       },
     ];
-    expect(gmailThreadIdsToRead(evidence, request)).toEqual(['booked-flight', 'your-reservation']);
+    expect(gmailThreadIdsToRead(evidence, request)).toEqual([
+      'booked-flight',
+      'your-reservation',
+      'flight-news',
+      'generic-confirmation',
+    ]);
   });
 
   it('recognizes only the direct, bounded, explicitly no-send email review request', () => {
@@ -1594,7 +1605,7 @@ describe('detectPersonalReadRequest', () => {
         hasMore: false,
       },
     }));
-    expect(gmailThreadIdsToRead(evidence, request)).toEqual(['itinerary', 'hotel']);
+    expect(gmailThreadIdsToRead(evidence, request)).toEqual(['itinerary', 'hotel', 'news']);
     expect(
       gmailThreadIdsToRead(
         evidence.map((row) => ({ ...row, fromCurrentTask: false })),

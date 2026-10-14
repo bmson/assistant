@@ -3,8 +3,8 @@ import type { CompoundTripExtraction, CompoundTripHotelFact } from './compound-t
 import type { PersonalReadRequest, ReadToolEvidence } from './read-intent.js';
 
 export const MAX_COMPOUND_CALENDAR_COVERAGE_PAGES = 3;
-export const MAX_COMPOUND_TRIP_TOOL_CALLS = 12;
-export const MAX_COMPOUND_TRIP_THREADS_TO_READ = 3;
+export const MAX_COMPOUND_TRIP_TOOL_CALLS = 16;
+export const MAX_COMPOUND_TRIP_THREADS_TO_READ = 6;
 const MAX_COMPOUND_CALENDAR_CURSOR_LENGTH = 2_000_000;
 
 function compoundCalendarCursor(value: unknown): string | undefined | null {
@@ -207,13 +207,91 @@ export function compoundTripThreadIdsToRead(
     );
   };
   const first = (kind: 'flight' | 'lodging') => unique.find((id) => sourceMatches(id, kind));
-  const priority = [first('flight'), first('lodging')];
+  const genericLodgingCandidate = unique.find((id) => {
+    const item = metadata.get(id);
+    if (!item?.categories.has('lodging')) return false;
+    const subject = item.subject;
+    const source = `${subject} ${item.snippet}`;
+    // Some provider results from a lodging query expose only a generic
+    // reservation subject (for example, "Your Online Reservation"). Read at
+    // most one such candidate when no lodging-specific result is available;
+    // this metadata can only prioritize a read, never establish a stay.
+    return (
+      /\b(?:reservation|booking)\b/i.test(source) &&
+      !/\b(?:news|offers?|deals?|advice|trends?|newsletter|promotion|marketing)\b/i.test(source)
+    );
+  });
+  const priority = [first('flight'), first('lodging') ?? genericLodgingCandidate];
   const secondFlight = unique.find((id) => sourceMatches(id, 'flight') && id !== priority[0]);
   if (secondFlight) priority.push(secondFlight);
-  return [...new Set(priority.filter((id): id is string => Boolean(id)))].slice(
+  return [
+    ...new Set([
+      ...priority.filter((id): id is string => Boolean(id)),
+      // Search ranking may miss a real confirmation whose metadata is generic.
+      // Read a small, distinct sample from the complete category results before
+      // reporting all searched mail as covered; the thread content remains the
+      // only source of verified booking facts.
+      ...unique,
+    ]),
+  ].slice(0, MAX_COMPOUND_TRIP_THREADS_TO_READ);
+}
+
+/** Runtime-grounded bounded batch of current-task trip thread reads. */
+export function compoundTripThreadReadInputs(
+  evidence: ReadonlyArray<ReadToolEvidence>,
+  request: PersonalReadRequest,
+): Array<Record<string, unknown>> {
+  if (!(request.compoundTripDiscovery || request.upcomingFlightDiscovery)) return [];
+  const inputs: Array<Record<string, unknown>> = [];
+  // Keep selection local to this module: read-intent imports the helper above,
+  // so calling back into gmailThreadIdsToRead here would create a runtime cycle.
+  const selectedThreadIds = compoundTripThreadIdsToRead(evidence, request).slice(
     0,
-    MAX_COMPOUND_TRIP_THREADS_TO_READ,
+    request.compoundTripDiscovery ? MAX_COMPOUND_TRIP_THREADS_TO_READ : 2,
   );
+  for (const threadId of selectedThreadIds) {
+    const attempts = evidence.filter(
+      (row) =>
+        row.fromCurrentTask !== false &&
+        row.toolName === 'gmail.read_thread' &&
+        object(row.args)?.threadId === threadId,
+    );
+    const pages = attempts.filter(successful);
+    if (pages.length === 0) {
+      if (attempts.length < 2)
+        inputs.push({
+          threadId,
+          startMessageIndex: 0,
+          startMessageOffset: 0,
+          maxMessages: 20,
+          maxChars: 20_000,
+        });
+      continue;
+    }
+    const latest = pages.at(-1);
+    const result = object(latest?.result);
+    if (result?.complete === true || pages.length >= 2 || attempts.length >= 2) continue;
+    const continuation = object(result?.continuation);
+    const input = object(continuation?.input);
+    if (
+      continuation?.tool === 'gmail.read_thread' &&
+      input?.threadId === threadId &&
+      Number.isInteger(input.startMessageIndex) &&
+      Number(input.startMessageIndex) >= 0 &&
+      Number(input.startMessageIndex) <= 100_000 &&
+      Number.isInteger(input.startMessageOffset) &&
+      Number(input.startMessageOffset) >= 0 &&
+      Number(input.startMessageOffset) <= 100_000 &&
+      Number.isInteger(input.maxMessages) &&
+      Number(input.maxMessages) >= 1 &&
+      Number(input.maxMessages) <= 100 &&
+      Number.isInteger(input.maxChars) &&
+      Number(input.maxChars) >= 100 &&
+      Number(input.maxChars) <= 50_000
+    )
+      inputs.push(input);
+  }
+  return inputs;
 }
 
 function text(value: unknown, max = 500): string {
@@ -2332,12 +2410,17 @@ function calendarObservationLines(
     const event = flightCandidate.event;
     const start = calendarField(event, 'start');
     const title = markdownText(text(event.summary, 100));
+    const observedDirection = calendarObservationDirection(event);
+    const details = `${text(event.summary, 240)}\n${text(event.description, 1200)}\n${text(event.location, 300)}`;
+    const route = airportRoute(details);
     const direction =
-      calendarObservationDirection(event) === 'return'
+      observedDirection === 'return'
         ? 'The calendar labels its direction as a return.'
-        : calendarObservationDirection(event) === 'outbound'
+        : observedDirection === 'outbound'
           ? 'The calendar labels its direction as outbound.'
-          : 'The calendar does not state its direction.';
+          : route
+            ? `The event title lists the route ${route.origin} to ${route.destination}; the calendar does not explicitly label it outbound or return.`
+            : 'The calendar does not state its direction.';
     lines.push(
       `Flight calendar observation only — not a verified next-flight or itinerary match: ${title}; recorded start ${markdownText(start)}. ${direction} [Calendar source](${calendarSource(event)}).`,
     );

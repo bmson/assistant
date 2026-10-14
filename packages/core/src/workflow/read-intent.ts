@@ -17,6 +17,7 @@ import {
   compoundTripReadProjection,
   compoundTripRoute,
   compoundTripThreadIdsToRead,
+  compoundTripThreadReadInputs,
   MAX_COMPOUND_CALENDAR_COVERAGE_PAGES,
   MAX_COMPOUND_TRIP_THREADS_TO_READ,
   MAX_COMPOUND_TRIP_TOOL_CALLS,
@@ -2722,6 +2723,10 @@ function nextGmailThreadId(
   evidence: ReadonlyArray<ReadToolEvidence>,
   request: PersonalReadRequest,
 ): string | undefined {
+  if (hasTypedTripRead(request)) {
+    const threadId = compoundTripThreadReadInputs(evidence, request)[0]?.threadId;
+    return typeof threadId === 'string' ? threadId : undefined;
+  }
   const targets = gmailThreadIdsToRead(evidence, request);
   const completed = new Set(gmailReadThreadIds(evidence));
   // Retry one isolated thread once. When several messages matched, inspect each
@@ -2737,57 +2742,7 @@ function compoundThreadReadInput(
   evidence: ReadonlyArray<ReadToolEvidence>,
   request: PersonalReadRequest,
 ): Record<string, unknown> | undefined {
-  if (!hasTypedTripRead(request)) return undefined;
-  const targets = gmailThreadIdsToRead(evidence, request);
-  for (const threadId of targets) {
-    const attempts = evidence.filter(
-      (row) =>
-        row.fromCurrentTask !== false &&
-        row.toolName === 'gmail.read_thread' &&
-        objectRecord(row.args)?.threadId === threadId,
-    ).length;
-    const pages = evidence.filter(
-      (row) =>
-        row.fromCurrentTask !== false &&
-        succeeded(row) &&
-        row.toolName === 'gmail.read_thread' &&
-        objectRecord(row.args)?.threadId === threadId,
-    );
-    if (pages.length === 0) {
-      if (attempts >= 2) continue;
-      return {
-        threadId,
-        startMessageIndex: 0,
-        startMessageOffset: 0,
-        maxMessages: 20,
-        maxChars: 20_000,
-      };
-    }
-    const latest = pages.at(-1);
-    const result = objectRecord(latest?.result);
-    if (result?.complete === true) continue;
-    if (pages.length >= 2 || attempts >= 2) continue;
-    const continuation = objectRecord(result?.continuation);
-    const input = objectRecord(continuation?.input);
-    if (
-      continuation?.tool === 'gmail.read_thread' &&
-      input?.threadId === threadId &&
-      Number.isInteger(input.startMessageIndex) &&
-      Number(input.startMessageIndex) >= 0 &&
-      Number(input.startMessageIndex) <= 100_000 &&
-      Number.isInteger(input.startMessageOffset) &&
-      Number(input.startMessageOffset) >= 0 &&
-      Number(input.startMessageOffset) <= 100_000 &&
-      Number.isInteger(input.maxMessages) &&
-      Number(input.maxMessages) >= 1 &&
-      Number(input.maxMessages) <= 100 &&
-      Number.isInteger(input.maxChars) &&
-      Number(input.maxChars) >= 100 &&
-      Number(input.maxChars) <= 50_000
-    )
-      return { ...input };
-  }
-  return undefined;
+  return compoundTripThreadReadInputs(evidence, request)[0];
 }
 
 function nextGmailSearchPage(

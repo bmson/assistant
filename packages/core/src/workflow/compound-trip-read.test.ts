@@ -6,11 +6,13 @@ import {
   compoundTripReadProjection,
   compoundTripRoute,
   compoundTripThreadIdsToRead,
+  compoundTripThreadReadInputs,
   upcomingFlightReadProjection,
 } from './compound-trip-read.js';
 import {
   buildReadToolInput,
   detectPersonalReadRequest,
+  gmailThreadIdsToRead,
   nextRequiredReadTool,
   type ReadToolEvidence,
 } from './read-intent.js';
@@ -312,8 +314,247 @@ describe('compound trip read projection', () => {
         },
       ),
     ];
-    expect(compoundTripThreadIdsToRead(evidence, read)).toEqual(['outbound', 'stay', 'return']);
-    expect(compoundTripThreadIdsToRead(evidence, read)).toHaveLength(3);
+    const selected = compoundTripThreadIdsToRead(evidence, read);
+    expect(selected.slice(0, 3)).toEqual(['outbound', 'stay', 'return']);
+    expect(selected).toHaveLength(6);
+    expect(selected).toEqual([
+      'outbound',
+      'stay',
+      'return',
+      'billing-confirmation',
+      'flight-offers',
+      'third-flight',
+    ]);
+  });
+
+  it('uses one generic lodging-query reservation hit when metadata has no hotel-specific candidate', () => {
+    const read = request();
+    const flightQuery = read.mailQueries?.find((query) => query.category === 'flight')?.query;
+    const lodgingQuery = read.mailQueries?.find((query) => query.category === 'lodging')?.query;
+    if (!flightQuery || !lodgingQuery) throw new Error('Expected both search categories');
+    const evidence = [
+      row(
+        'gmail.search',
+        { query: flightQuery },
+        {
+          complete: true,
+          results: [
+            { threadId: 'outbound', subject: 'Flight booking confirmation' },
+            { threadId: 'return', subject: 'Flight - BER to SFO' },
+          ],
+        },
+      ),
+      row(
+        'gmail.search',
+        { query: lodgingQuery },
+        {
+          complete: true,
+          results: [
+            { threadId: 'hotel-news', subject: 'Hotel booking trends and news' },
+            { threadId: 'generic-reservation', subject: 'Your Online Reservation' },
+          ],
+        },
+      ),
+    ];
+
+    expect(compoundTripThreadIdsToRead(evidence, read)).toEqual([
+      'outbound',
+      'generic-reservation',
+      'return',
+      'hotel-news',
+    ]);
+  });
+
+  it('batches only bounded current-search thread IDs and preserves per-thread continuation and retry caps', () => {
+    const read = request();
+    const flightQuery = read.mailQueries?.find((query) => query.category === 'flight')?.query;
+    const lodgingQuery = read.mailQueries?.find((query) => query.category === 'lodging')?.query;
+    if (!flightQuery || !lodgingQuery) throw new Error('Expected both search categories');
+    const searched = [
+      row(
+        'gmail.search',
+        { query: flightQuery },
+        {
+          complete: true,
+          results: [
+            { threadId: 'flight-a', subject: 'Flight booking confirmation' },
+            { threadId: 'flight-b', subject: 'Flight itinerary confirmation' },
+            { threadId: 'flight-c', subject: 'Flight ticket confirmation' },
+            { threadId: 'flight-d', subject: 'Flight reservation confirmation' },
+          ],
+        },
+      ),
+      row(
+        'gmail.search',
+        { query: lodgingQuery },
+        {
+          complete: true,
+          results: [
+            { threadId: 'stay-a', subject: 'Hotel reservation confirmation' },
+            { threadId: 'stay-b', subject: 'Your Online Reservation' },
+            { threadId: 'stay-c', subject: 'Booking confirmation' },
+          ],
+        },
+      ),
+    ];
+    const initialInputs = compoundTripThreadReadInputs(searched, read);
+    expect(initialInputs).toHaveLength(6);
+    expect(initialInputs.map((input) => input.threadId)).toEqual([
+      'flight-a',
+      'stay-a',
+      'flight-b',
+      'flight-c',
+      'flight-d',
+      'stay-b',
+    ]);
+    expect(initialInputs.some((input) => input.threadId === 'stay-c')).toBe(false);
+
+    const partialThreadId = String(initialInputs[0]?.threadId);
+    const failedThreadId = String(initialInputs[1]?.threadId);
+    const completedThreadId = String(initialInputs[2]?.threadId);
+    const continuation = {
+      threadId: partialThreadId,
+      startMessageIndex: 1,
+      startMessageOffset: 200,
+      maxMessages: 20,
+      maxChars: 20_000,
+    };
+    const partial = row('gmail.read_thread', initialInputs[0] ?? {}, {
+      complete: false,
+      continuation: { tool: 'gmail.read_thread', input: continuation },
+    });
+    const completed = row('gmail.read_thread', initialInputs[2] ?? {}, {
+      complete: true,
+      messages: [{ id: 'message-1' }],
+    });
+    const failed = {
+      ...row('gmail.read_thread', initialInputs[1] ?? {}, { ok: false }),
+      status: 'failed' as const,
+    };
+    const withPartialAndFailure = [...searched, partial, completed, failed];
+    const nextInputs = compoundTripThreadReadInputs(withPartialAndFailure, read);
+    expect(nextInputs[0]).toEqual(continuation);
+    expect(nextInputs.some((input) => input.threadId === failedThreadId)).toBe(true);
+    expect(nextInputs.some((input) => input.threadId === completedThreadId)).toBe(false);
+    const resumedEvidence = [completeCalendarEvents([], read), ...withPartialAndFailure];
+    expect(nextRequiredReadTool(read, resumedEvidence)).toBe('gmail.read_thread');
+    expect(buildReadToolInput(read, 'gmail.read_thread', resumedEvidence)).toEqual(continuation);
+
+    const retryFailed = {
+      ...failed,
+      status: 'failed' as const,
+    };
+    expect(
+      compoundTripThreadReadInputs([...withPartialAndFailure, retryFailed], read).some(
+        (input) => input.threadId === failedThreadId,
+      ),
+    ).toBe(false);
+
+    const truncated = row('gmail.read_thread', initialInputs[3] ?? {}, {
+      complete: false,
+      messages: [{ id: 'message-2' }],
+    });
+    const resumedAfterRestart = compoundTripThreadReadInputs(
+      [...withPartialAndFailure, truncated],
+      read,
+    );
+    expect(resumedAfterRestart.some((input) => input.threadId === completedThreadId)).toBe(false);
+    expect(
+      resumedAfterRestart.some((input) => input.threadId === String(initialInputs[3]?.threadId)),
+    ).toBe(false);
+    expect(
+      compoundTripReadProjection(read, [...searched, completed, truncated]).threadsComplete,
+    ).toBe(false);
+  });
+
+  it('forces the bounded reservation fallback read after the first flight and lodging candidates', () => {
+    const read = request();
+    const flightQuery = read.mailQueries?.find((query) => query.category === 'flight')?.query;
+    const lodgingQuery = read.mailQueries?.find((query) => query.category === 'lodging')?.query;
+    if (!flightQuery || !lodgingQuery || !read.timeWindow)
+      throw new Error('Expected typed queries and a bounded calendar window');
+    const evidence: ReadToolEvidence[] = [];
+    for (const [index, cursor] of [undefined, 'calendar-2', 'calendar-3'].entries()) {
+      evidence.push(
+        row(
+          'calendar.list_events',
+          {
+            timeMin: read.timeWindow.timeMin,
+            timeMax: read.timeWindow.timeMax,
+            ...(cursor ? { pageToken: cursor } : {}),
+          },
+          {
+            events: [],
+            complete: false,
+            ...(index < 2 ? { nextPageToken: `calendar-${index + 2}` } : {}),
+          },
+        ),
+      );
+    }
+    evidence.push(
+      row(
+        'gmail.search',
+        { query: flightQuery },
+        {
+          complete: true,
+          results: [
+            { threadId: 'outbound', subject: 'Flight booking confirmation' },
+            { threadId: 'return', subject: 'Flight - BER to SFO' },
+          ],
+        },
+      ),
+      row(
+        'gmail.search',
+        { query: lodgingQuery },
+        {
+          complete: true,
+          results: [{ threadId: 'generic-reservation', subject: 'Your Online Reservation' }],
+        },
+      ),
+    );
+
+    const reads: string[] = [];
+    while (nextRequiredReadTool(read, evidence) === 'gmail.read_thread') {
+      const input = buildReadToolInput(read, 'gmail.read_thread', evidence);
+      if (!input || typeof input.threadId !== 'string')
+        throw new Error('Expected a runtime-grounded trip thread read');
+      reads.push(input.threadId);
+      evidence.push(row('gmail.read_thread', input, { complete: true, messages: [] }));
+    }
+
+    expect(reads).toEqual(['outbound', 'generic-reservation', 'return']);
+  });
+
+  it('states a route shown in a calendar title without guessing outbound or return direction', () => {
+    const read = request();
+    const evidence = [
+      row(
+        'calendar.list_events',
+        { timeMin: read.timeWindow?.timeMin, timeMax: read.timeWindow?.timeMax },
+        {
+          events: [
+            {
+              eventId: 'route-observation',
+              summary: 'BER → SFO flight (United)',
+              start: '2026-10-17T10:10:00+02:00',
+              timeZone: 'Europe/Berlin',
+              links: [{ type: 'calendar', url: 'https://www.google.com/calendar/event?eid=route' }],
+            },
+          ],
+          complete: false,
+          nextPageToken: 'next',
+          calendarRosterComplete: true,
+          calendarsResolved: [{ id: 'primary', name: 'Primary' }],
+          calendarsSearched: ['Primary'],
+          unavailable: [],
+        },
+      ),
+    ];
+
+    const projection = compoundTripReadProjection(read, evidence);
+    expect(projection.text).toContain('route BER to SFO');
+    expect(projection.text).toContain('does not explicitly label it outbound or return');
+    expect(projection.text).not.toContain('The calendar does not state its direction.');
   });
 
   it.each([
@@ -327,7 +568,7 @@ describe('compound trip read projection', () => {
     'booking number',
     'booking confirmation',
   ])(
-    'accepts explicit lodging reservation evidence (%s) while rejecting bare booking chatter',
+    'prioritizes explicit lodging evidence while keeping category hits in the bounded read set (%s)',
     (cue) => {
       const read = request();
       const query = read.mailQueries?.find((entry) => entry.category === 'lodging')?.query;
@@ -344,7 +585,7 @@ describe('compound trip read projection', () => {
           },
         ),
       ];
-      expect(compoundTripThreadIdsToRead(evidence, read)).toEqual(['source']);
+      expect(compoundTripThreadIdsToRead(evidence, read)).toEqual(['source', 'generic']);
     },
   );
 
@@ -376,7 +617,7 @@ describe('compound trip read projection', () => {
       unrelatedRead,
       previousTaskRead,
     ]);
-    expect(compoundTripThreadIdsToRead([search], read)).toEqual([]);
+    expect(compoundTripThreadIdsToRead([search], read)).toEqual(['thin-a', 'thin-b']);
     expect(partial.threadsComplete).toBe(false);
     expect(partial.text).toContain('1 matching email thread remains unread or incomplete');
     const completed = compoundTripReadProjection(read, [
@@ -780,6 +1021,8 @@ describe('compound trip read projection', () => {
             { threadId: 'next-flight', subject: 'Flight booking confirmation' },
             { threadId: 'return-itinerary', subject: 'Airline itinerary confirmation' },
             { threadId: 'unread-flight', subject: 'Flight reservation confirmation' },
+            { threadId: 'flight-four', subject: 'Flight ticket confirmation' },
+            { threadId: 'flight-five', subject: 'Flight reservation confirmation' },
           ],
           complete: true,
           hasMore: false,
@@ -789,20 +1032,32 @@ describe('compound trip read projection', () => {
         'gmail.search',
         { query: lodgingQuery.query },
         {
-          results: [{ threadId: 'hotel-booking', subject: 'Hotel reservation confirmation' }],
+          results: [
+            { threadId: 'hotel-booking', subject: 'Hotel reservation confirmation' },
+            { threadId: 'unread-lodging', subject: 'Accommodation booking confirmation' },
+          ],
           complete: true,
           hasMore: false,
         },
       ),
-      ...['next-flight', 'hotel-booking', 'return-itinerary'].map((threadId) =>
-        row('gmail.read_thread', { threadId }, { complete: true, messages: [] }),
-      ),
+      ...[
+        'next-flight',
+        'hotel-booking',
+        'return-itinerary',
+        'unread-flight',
+        'flight-four',
+        'flight-five',
+      ].map((threadId) => row('gmail.read_thread', { threadId }, { complete: true, messages: [] })),
     ];
     expect(compoundTripThreadIdsToRead(evidence, read)).toEqual([
       'next-flight',
       'hotel-booking',
       'return-itinerary',
+      'unread-flight',
+      'flight-four',
+      'flight-five',
     ]);
+    expect(gmailThreadIdsToRead(evidence, read)).toHaveLength(6);
     const projection = compoundTripReadProjection(read, evidence);
     expect(projection.threadsComplete).toBe(false);
     expect(projection.text).toContain('1 matching email thread remains unread or incomplete');

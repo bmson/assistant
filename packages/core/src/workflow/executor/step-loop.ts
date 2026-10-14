@@ -44,7 +44,7 @@ import {
   compoundTripSourceMessages,
   extractCompoundTripBookings,
 } from '../compound-trip-extraction.js';
-import { compoundTripReadProjection } from '../compound-trip-read.js';
+import { compoundTripReadProjection, compoundTripThreadReadInputs } from '../compound-trip-read.js';
 import {
   boundEmailReviewThreads,
   EMAIL_REVIEW_MAX_CANDIDATES,
@@ -2543,18 +2543,20 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           outcome: 'failed',
         });
       }
+      const readInputs =
+        readRequest.compoundTripDiscovery && boundedForcedReadTool === 'gmail.read_thread'
+          ? compoundTripThreadReadInputs(readToolEvidence, readRequest)
+          : [input];
       stepResult = {
         ok: true,
         modelId: 'runtime/private-read-router',
         degraded: false,
         text: '',
-        toolCalls: [
-          {
-            toolCallId: `runtime-private-read-${task.id}-${state.step + 1}`,
-            toolName: boundedForcedReadTool,
-            input,
-          },
-        ],
+        toolCalls: readInputs.map((readInput, index) => ({
+          toolCallId: `runtime-private-read-${task.id}-${state.step + 1}${readInputs.length > 1 ? `-${index + 1}` : ''}`,
+          toolName: boundedForcedReadTool,
+          input: readInput,
+        })),
         finishReason: 'tool-calls',
       };
     } else {
