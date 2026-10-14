@@ -10,6 +10,7 @@ import type {
 } from '@assistant/persistence';
 import {
   assertChatAdmissionOperationId,
+  assertChatTurnBudgetProfile,
   boundedChatConversationLimit,
   boundedChatMessageLimit,
   chatAdmissionCancellationPayload,
@@ -18,6 +19,7 @@ import {
   chatAdmissionPayload,
   completeChecklistCorrectionEvidence,
   composerChecklistCancellationRequestHash,
+  EMAIL_REVIEW_CHAT_BUDGET_PROFILE,
   isChatAdmissionCancellationProjection,
   isOwnerTaskMemoryEphemeral,
   isPinnedOwnerChatRequestMessage,
@@ -1248,6 +1250,7 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
   }
 
   async admitChatTurn(input: Parameters<ApplicationChatPersistence['admitChatTurn']>[0]) {
+    assertChatTurnBudgetProfile(input.budgetProfile);
     const taskId = randomUUID();
     const messageId = randomUUID();
     const leaseToken = randomUUID();
@@ -1297,7 +1300,10 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
           task.conversationId !== input.conversationId ||
           !admission ||
           admission.clientOperationId !== input.clientOperationId ||
-          admission.requestHash !== input.requestHash
+          admission.requestHash !== input.requestHash ||
+          (admission.budgetProfile !== undefined &&
+            admission.budgetProfile !== input.budgetProfile) ||
+          task.maxSteps !== (admission.budgetProfile === EMAIL_REVIEW_CHAT_BUDGET_PROFILE ? 14 : 12)
         )
           throw new Error('Chat operation ID was already used for a different request');
         const messageSnapshot = await tx.get(
@@ -1372,6 +1378,7 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
             requestHash: input.requestHash,
             triggerMessageId: messageId,
             phase: 'classifying',
+            ...(input.budgetProfile ? { budgetProfile: input.budgetProfile } : {}),
           },
         },
       };
@@ -1385,6 +1392,7 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
           goalId: input.goalId,
           trigger,
           externalEventId,
+          maxSteps: input.budgetProfile === EMAIL_REVIEW_CHAT_BUDGET_PROFILE ? 14 : 12,
           budgetUsdLimit: budget.get('limitUsd') ?? '0.50',
           autonomyGrant: input.autonomyGrant,
         },

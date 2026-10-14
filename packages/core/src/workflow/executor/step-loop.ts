@@ -58,6 +58,7 @@ import {
   emailReviewRecentMetadataFallback,
   emailReviewSelectionWithinAuthorizedPool,
   emailReviewVerifiedAnsweredThreadIds,
+  emailReviewVerifiedNotEligibleThreadIds,
   formatEmailReviewAnswer,
   generateValidatedEmailReview,
   validEmailReviewSelection,
@@ -497,6 +498,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         ['rankedThreadIds', EMAIL_REVIEW_MAX_RANK_POOL],
         ['attemptedThreadIds', EMAIL_REVIEW_MAX_RANK_POOL],
         ['excludedThreadIds', EMAIL_REVIEW_MAX_RANK_POOL],
+        ['notEligibleThreadIds', EMAIL_REVIEW_MAX_RANK_POOL],
       ] as const) {
         if (!(key in record)) continue;
         const value = record[key];
@@ -1381,13 +1383,17 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       const answeredIds = ownerMailbox
         ? emailReviewVerifiedAnsweredThreadIds(selectedIds, ownerMailbox, readToolEvidence)
         : [];
+      const notEligibleIds = ownerMailbox
+        ? emailReviewVerifiedNotEligibleThreadIds(selectedIds, ownerMailbox, readToolEvidence)
+        : [];
+      const verifiedExcludedIds = [...answeredIds, ...notEligibleIds];
       const validRankedPool =
         rankedIds === undefined ||
         (rankedCandidates !== undefined &&
           validEmailReviewSelection(rankedIds, readToolEvidence, rankedCandidates));
       const validSelectedPool =
         validEmailReviewSelection(selectedIds, readToolEvidence, rankedIds ?? rankedCandidates) &&
-        emailReviewSelectionWithinAuthorizedPool(selectedIds, rankedIds, answeredIds);
+        emailReviewSelectionWithinAuthorizedPool(selectedIds, rankedIds, verifiedExcludedIds);
       const validPersistedAttempts =
         review.attemptedThreadIds === undefined ||
         (review.attemptedThreadIds.every(
@@ -1399,12 +1405,19 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         review.excludedThreadIds.every(
           (id) => selectedIds.includes(id) && answeredIds.includes(id),
         );
+      const validPersistedNotEligible =
+        review.notEligibleThreadIds === undefined ||
+        (review.notEligibleThreadIds.every(
+          (id) => selectedIds.includes(id) && notEligibleIds.includes(id),
+        ) &&
+          review.notEligibleThreadIds.every((id) => !answeredIds.includes(id)));
       if (
         review.rankingFailed ||
         !validRankedPool ||
         !validSelectedPool ||
         !validPersistedAttempts ||
-        !validPersistedExclusions
+        !validPersistedExclusions ||
+        !validPersistedNotEligible
       ) {
         readRequest.emailReview = {
           ...review,
@@ -1418,8 +1431,9 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
       } else if (rankedIds) {
         const initialCount = Math.min(EMAIL_REVIEW_MAX_CANDIDATES, rankedIds.length);
-        const desiredCount = initialCount + answeredIds.length;
-        const missing = Math.max(0, desiredCount - selectedIds.length);
+        const desiredCount = initialCount + verifiedExcludedIds.length;
+        const selectionTargetCount = Math.min(EMAIL_REVIEW_MAX_RANK_POOL, desiredCount);
+        const missing = Math.max(0, selectionTargetCount - selectedIds.length);
         const nextRankedIds = rankedIds.filter((id) => !selectedIds.includes(id));
         const remainingReadSlots = Math.max(0, task.maxSteps - state.step - 1);
         const addCount = Math.min(missing, nextRankedIds.length, remainingReadSlots);
@@ -1433,6 +1447,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           selectedThreadIds: nextSelectedIds,
           attemptedThreadIds: nextAttemptedIds,
           excludedThreadIds: answeredIds,
+          notEligibleThreadIds: notEligibleIds,
           backfillShortfall,
         };
         if (JSON.stringify(nextReview) !== JSON.stringify(review)) {
@@ -1450,6 +1465,9 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               : {}),
             ...(nextReview.excludedThreadIds
               ? { excludedThreadIds: nextReview.excludedThreadIds }
+              : {}),
+            ...(nextReview.notEligibleThreadIds
+              ? { notEligibleThreadIds: nextReview.notEligibleThreadIds }
               : {}),
             ...(nextReview.backfillShortfall
               ? { backfillShortfall: nextReview.backfillShortfall }
@@ -1658,6 +1676,9 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             ...(next.rankedThreadIds ? { rankedThreadIds: next.rankedThreadIds } : {}),
             ...(next.attemptedThreadIds ? { attemptedThreadIds: next.attemptedThreadIds } : {}),
             ...(next.excludedThreadIds ? { excludedThreadIds: next.excludedThreadIds } : {}),
+            ...(next.notEligibleThreadIds
+              ? { notEligibleThreadIds: next.notEligibleThreadIds }
+              : {}),
             ...(next.backfillShortfall ? { backfillShortfall: next.backfillShortfall } : {}),
             ...(next.rankingFailed ? { rankingFailed: true } : {}),
             ...(next.rankingSource ? { rankingSource: next.rankingSource } : {}),
@@ -1695,6 +1716,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
                 contextLimitedThreads: 0,
                 ownerOrChronologyExcluded: 0,
                 alreadyAnsweredThreads: 0,
+                notEligibleThreads: 0,
                 obviousNewslettersExcluded: 0,
               },
               true,
@@ -1750,6 +1772,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
                   rankedThreadIds: effectiveRankedIds,
                   attemptedThreadIds: [],
                   excludedThreadIds: [],
+                  notEligibleThreadIds: [],
                   backfillShortfall: undefined,
                   ...(rankedIds
                     ? { rankingSource: 'model' as const, rankingFailed: false }
@@ -1766,6 +1789,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
                   rankedThreadIds: [],
                   attemptedThreadIds: [],
                   excludedThreadIds: [],
+                  notEligibleThreadIds: [],
                   rankingFailed: true,
                 };
             if (!(await persistReview(nextReview))) return LOST_LEASE;
@@ -1801,6 +1825,9 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         const answeredIds = ownerMailbox
           ? emailReviewVerifiedAnsweredThreadIds(selectedIds, ownerMailbox, reviewEvidence)
           : [];
+        const notEligibleIds = ownerMailbox
+          ? emailReviewVerifiedNotEligibleThreadIds(selectedIds, ownerMailbox, reviewEvidence)
+          : [];
         const completeThreads = ownerMailbox
           ? selectedIds.flatMap((threadId) => {
               const thread = emailReviewCompleteThread(threadId, ownerMailbox, reviewEvidence);
@@ -1812,7 +1839,8 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         const initialCandidateCount = rankedThreadIds
           ? Math.min(EMAIL_REVIEW_MAX_CANDIDATES, rankedThreadIds.length)
           : selectedIds.length;
-        const desiredCandidateCount = initialCandidateCount + answeredIds.length;
+        const desiredCandidateCount =
+          initialCandidateCount + answeredIds.length + notEligibleIds.length;
         const rankedReadIds = rankedThreadIds?.slice(initialCandidateCount) ?? [];
         const attemptedReadIds = new Set(
           reviewEvidence.flatMap((row) => {
@@ -1839,6 +1867,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           reviewEvidence,
           bounded.omittedThreadIds.length,
           answeredIds,
+          notEligibleIds,
           backfillShortfall,
           readRequest.emailReview.rankingSource === 'recent_metadata_fallback',
         );
@@ -1854,7 +1883,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         const reviewCoverageComplete =
           !readRequest.emailReview.rankingFailed &&
           coverage.searchComplete &&
-          coverage.completeThreads + coverage.alreadyAnsweredThreads === coverage.selectedThreads &&
+          coverage.completeThreads +
+            coverage.alreadyAnsweredThreads +
+            coverage.notEligibleThreads ===
+            coverage.selectedThreads &&
           coverage.backfillShortfall === undefined &&
           coverage.contextLimitedThreads === 0 &&
           coverage.ownerOrChronologyExcluded === 0 &&

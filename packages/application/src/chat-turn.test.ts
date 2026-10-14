@@ -140,12 +140,21 @@ function chatStore(script: StoreScript = {}) {
         agentId: AGENT,
         trust: 'owner',
         type: 'chat_turn',
+        maxSteps: input.budgetProfile === 'email_review_reserve_v1' ? 14 : 12,
         title: input.text,
         status: 'running',
         createdAt: row.createdAt,
         trigger: {
           source: 'chat',
-          payload: { text: input.text, chatAdmission: { phase: 'classifying' } },
+          payload: {
+            text: input.text,
+            chatAdmission: {
+              phase: 'classifying',
+              ...(input.budgetProfile === 'email_review_reserve_v1'
+                ? { budgetProfile: input.budgetProfile }
+                : {}),
+            },
+          },
         },
       };
       const lease = {
@@ -1479,6 +1488,7 @@ describe('chat needs-action triage', () => {
           },
         },
       },
+      maxSteps: 12,
     } as never;
 
     await expect(
@@ -1537,6 +1547,27 @@ describe('chat needs-action triage', () => {
     expect(result.response.headers.get('x-async-task')).toBe('task-1');
     expect(result.stream).not.toHaveBeenCalled();
     expect(queuedPayload()[TRIAGED_ACTIONABLE]).toBe(true);
+  });
+
+  it('derives the larger admission profile only for an explicit no-send email review', async () => {
+    const review = await turn(
+      'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.',
+      { triage: { needsAction: true } },
+    );
+    expect(review.response.headers.get('x-async-task')).toBe('task-1');
+    expect(stubs.admission.mock.calls.at(-1)?.[0]).toMatchObject({
+      budgetProfile: 'email_review_reserve_v1',
+    });
+
+    await turn(
+      'What is on my calendar tomorrow?',
+      { triage: { needsAction: true } },
+      { budgetProfile: 'email_review_reserve_v1' },
+    );
+    const ordinaryInput = stubs.admission.mock.calls.at(-1)?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    expect(ordinaryInput).not.toHaveProperty('budgetProfile');
   });
 
   it.each(['Yes, go ahead', 'Please do', 'Keep going'])(

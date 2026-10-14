@@ -8,6 +8,7 @@ import type {
 } from '@assistant/persistence';
 import {
   assertChatAdmissionOperationId,
+  assertChatTurnBudgetProfile,
   boundedChatConversationLimit,
   boundedChatMessageLimit,
   chatAdmissionCancellationPayload,
@@ -16,6 +17,7 @@ import {
   chatAdmissionPayload,
   completeChecklistCorrectionEvidence,
   composerChecklistCancellationRequestHash,
+  EMAIL_REVIEW_CHAT_BUDGET_PROFILE,
   isChatAdmissionCancellationProjection,
   isOwnerTaskMemoryEphemeral,
   isPinnedOwnerChatRequestMessage,
@@ -1025,6 +1027,7 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
     },
 
     async admitChatTurn(input) {
+      assertChatTurnBudgetProfile(input.budgetProfile);
       return db.transaction(async (tx) => {
         await lockPostgresOwnerChatAction(tx, input.agentId, input.conversationId);
         const [conversation] = await tx
@@ -1064,7 +1067,11 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
             existing.conversationId !== input.conversationId ||
             !admission ||
             admission.clientOperationId !== input.clientOperationId ||
-            admission.requestHash !== input.requestHash
+            admission.requestHash !== input.requestHash ||
+            (admission.budgetProfile !== undefined &&
+              admission.budgetProfile !== input.budgetProfile) ||
+            existing.maxSteps !==
+              (admission.budgetProfile === EMAIL_REVIEW_CHAT_BUDGET_PROFILE ? 14 : 12)
           ) {
             throw new Error('Chat operation ID was already used for a different request');
           }
@@ -1149,6 +1156,7 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
               requestHash: input.requestHash,
               triggerMessageId: messageId,
               phase: 'classifying',
+              ...(input.budgetProfile ? { budgetProfile: input.budgetProfile } : {}),
             },
           },
         };
@@ -1163,6 +1171,7 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
             goalId: input.goalId,
             trigger,
             externalEventId,
+            maxSteps: input.budgetProfile === EMAIL_REVIEW_CHAT_BUDGET_PROFILE ? 14 : 12,
             budgetUsdLimit: budget?.limitUsd ?? '0.50',
             autonomyGrant: input.autonomyGrant,
           },
