@@ -1456,6 +1456,12 @@ describe('golden tasks', () => {
     expect(readIds).toEqual(rankedIds.slice(0, 5));
     expect(result.status).toBe('needs_attention');
     expect(result.finalText).toContain('unresolved possible deadline');
+    expect(result.finalText).toContain('**Deadline needs review — Request review\\-1**');
+    expect(result.finalText).toContain(
+      '[Open the source thread](https://mail.google.com/mail/u/0/#all/review-1)',
+    );
+    expect(result.finalText).toContain('No reply draft was prepared for it');
+    expect(result.finalText).not.toContain('through Jun. 6th');
     expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(4);
     const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
     expect(

@@ -247,21 +247,21 @@ describe('bounded no-send email review', () => {
     );
     expect(checked?.items[0]?.deadlineNeedsReview).toBe(true);
     expect(checked?.noReplyThreadIds).toEqual([]);
-    expect(
-      formatEmailReviewAnswer(
-        checked?.items ?? [],
-        emailReviewCoverage(
-          ['thread-a'],
-          [
-            required(
-              emailReviewCompleteThread('thread-a', 'owner@example.com', evidence),
-              'thread',
-            ),
-          ],
-          evidence,
-        ),
+    const formatted = formatEmailReviewAnswer(
+      checked?.items ?? [],
+      emailReviewCoverage(
+        ['thread-a'],
+        [required(emailReviewCompleteThread('thread-a', 'owner@example.com', evidence), 'thread')],
+        evidence,
       ),
-    ).toContain('unresolved possible deadline');
+    );
+    expect(formatted).toContain('unresolved possible deadline');
+    expect(formatted).toContain('**Deadline needs review — Please confirm the renewal date**');
+    expect(formatted).toContain(
+      '[Open the source thread](https://mail.google.com/mail/u/0/#all/thread-a)',
+    );
+    expect(formatted).toContain('No reply draft was prepared for it');
+    expect(formatted).not.toContain('through Jun. 6th');
   });
 
   it('marks an explicit dated offer window for review unless its body quote is supplied', () => {

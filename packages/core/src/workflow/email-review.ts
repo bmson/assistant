@@ -1079,7 +1079,7 @@ export function formatEmailReviewAnswer(
   ).length;
   const uncertainNoReplies = items.filter(
     (item) => item.disposition === 'no_reply' && item.deadlineNeedsReview,
-  ).length;
+  );
   const lines = [
     `I completed verified reply checks for ${fullyChecked} of ${coverage.selectedThreads} selected threads from a bounded seven-day mail scan and prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'} for review. This is a provisional prioritization of the scanned results, not a guarantee that these are the only or globally most important requests.`,
   ];
@@ -1087,9 +1087,9 @@ export function formatEmailReviewAnswer(
     lines.push(
       `${noReplies} fully assessed ${noReplies === 1 ? 'thread did' : 'threads did'} not clearly require a response, so ${noReplies === 1 ? 'it was' : 'they were'} not counted among the reply requests.`,
     );
-  if (uncertainNoReplies > 0)
+  if (uncertainNoReplies.length > 0)
     lines.push(
-      `${uncertainNoReplies} ${uncertainNoReplies === 1 ? 'thread had' : 'threads had'} an unresolved possible deadline, so ${uncertainNoReplies === 1 ? 'its no-reply assessment was' : 'their no-reply assessments were'} not used to authorize replacement threads. Please check the source before relying on ${uncertainNoReplies === 1 ? 'that assessment' : 'those assessments'}.`,
+      `${uncertainNoReplies.length} ${uncertainNoReplies.length === 1 ? 'thread had' : 'threads had'} an unresolved possible deadline, so ${uncertainNoReplies.length === 1 ? 'its no-reply assessment was' : 'their no-reply assessments were'} not used to authorize replacement threads. Please check the source before relying on ${uncertainNoReplies.length === 1 ? 'that assessment' : 'those assessments'}.`,
     );
   if (coverage.searchPages === 0)
     lines.push('The mailbox search did not return a usable result, so I prepared no reply drafts.');
@@ -1137,6 +1137,20 @@ export function formatEmailReviewAnswer(
     lines.push(
       'Automated ranking was unavailable, so I checked the newest eligible-looking threads in the scanned results. Each item below was checked against its complete thread; this fallback does not establish that the scan found every request.',
     );
+  for (const item of uncertainNoReplies) {
+    const subject = item.thread.subject
+      .replace(/[\r\n]+/g, ' ')
+      .slice(0, 160)
+      .replace(/[\\`*_{}[\]()<>#+\-=|!]/g, '\\$&');
+    lines.push(`**Deadline needs review — ${subject}**`);
+    lines.push(
+      'A possible deadline in this thread remains unresolved. No reply draft was prepared for it; check the source before deciding whether to respond.',
+    );
+    if (/^[A-Za-z0-9_-]{3,128}$/.test(item.thread.threadId))
+      lines.push(
+        `[Open the source thread](https://mail.google.com/mail/u/0/#all/${item.thread.threadId})`,
+      );
+  }
   if (rankingFailed) {
     lines.push(
       'I could not safely prioritize the returned thread metadata, so I prepared no reply drafts.',
