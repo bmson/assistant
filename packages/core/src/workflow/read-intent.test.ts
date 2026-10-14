@@ -745,13 +745,27 @@ describe('detectPersonalReadRequest', () => {
       kind: 'calendar',
       firstToolName: 'calendar.list_events',
       includeCalendarBriefing: true,
-      includeCalendarOverlapSummary: true,
       timeWindow: {
         timeMin: '2026-10-14T07:00:00.000Z',
         timeMax: '2026-10-15T07:00:00.000Z',
       },
     });
+    expect(request?.includeCalendarOverlapSummary).toBeUndefined();
     expect(request?.mailQuery).toBeUndefined();
+  });
+
+  it.each([
+    'Check my calendar tomorrow for overlaps.',
+    'Review my schedule next week and identify conflicts.',
+  ])('includes overlap analysis when explicitly requested: %s', (text) => {
+    expect(detectPersonalReadRequest(turn(text))?.includeCalendarOverlapSummary).toBe(true);
+  });
+
+  it.each([
+    'Brief me on my calendar tomorrow, but do not check for overlaps.',
+    'Give me a short schedule overview; no need to look for conflicts.',
+  ])('does not add overlap analysis when explicitly excluded: %s', (text) => {
+    expect(detectPersonalReadRequest(turn(text))?.includeCalendarOverlapSummary).toBeUndefined();
   });
 
   it.each(['Make this sentence clear.', 'Is the explanation clear?', 'Empty my inbox tomorrow.'])(

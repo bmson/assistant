@@ -219,6 +219,13 @@ function explicitlyProhibitsPrivateRead(
   return direct.test(negatedClause) || listed || without.test(text);
 }
 
+function explicitlyRequestsCalendarOverlapSummary(text: string): boolean {
+  const overlap = `(?:overlaps?|conflicts?|double[ -]?booked|clashes?)`;
+  if (!new RegExp(`\\b${overlap}\\b`, 'i').test(text)) return false;
+  const negation = String.raw`(?:do\s+not|don['’]?t|never|skip|no\s+need\s+to)`;
+  return !new RegExp(`\\b${negation}\\b[^.!?\\n]{0,80}\\b${overlap}\\b`, 'i').test(text);
+}
+
 /**
  * Use the nearest substantive OWNER turn to resolve a short detail question.
  * Assistant guesses and background notices never select the subject. Stop at
@@ -2094,7 +2101,7 @@ function detectPersonalReadRequestInternal(
       (kind === 'email' &&
         (verification || /\b(?:when|where|what time|details?|what does|what did)\b/i.test(latest))),
     ...(calendarBriefing ? { includeCalendarBriefing: true } : {}),
-    ...(calendarBriefing || /\b(?:overlaps?|conflicts?|double[ -]?booked|clashes?)\b/i.test(latest)
+    ...(explicitlyRequestsCalendarOverlapSummary(latest)
       ? { includeCalendarOverlapSummary: true }
       : {}),
   };
