@@ -2419,7 +2419,7 @@ function calendarObservationLines(
         : observedDirection === 'outbound'
           ? 'The calendar labels its direction as outbound.'
           : route
-            ? `The event title lists the route ${route.origin} to ${route.destination}; the calendar does not explicitly label it outbound or return.`
+            ? `The calendar record lists the route ${route.origin} to ${route.destination}; it does not explicitly label the flight outbound or return.`
             : 'The calendar does not state its direction.';
     lines.push(
       `Flight calendar observation only — not a verified next-flight or itinerary match: ${title}; recorded start ${markdownText(start)}. ${direction} [Calendar source](${calendarSource(event)}).`,

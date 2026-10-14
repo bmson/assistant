@@ -525,7 +525,7 @@ describe('compound trip read projection', () => {
     expect(reads).toEqual(['outbound', 'generic-reservation', 'return']);
   });
 
-  it('states a route shown in a calendar title without guessing outbound or return direction', () => {
+  it('states a route shown in calendar details without guessing outbound or return direction', () => {
     const read = request();
     const evidence = [
       row(
@@ -535,7 +535,8 @@ describe('compound trip read projection', () => {
           events: [
             {
               eventId: 'route-observation',
-              summary: 'BER → SFO flight (United)',
+              summary: 'Flight observation',
+              description: 'Route BER → SFO',
               start: '2026-10-17T10:10:00+02:00',
               timeZone: 'Europe/Berlin',
               links: [{ type: 'calendar', url: 'https://www.google.com/calendar/event?eid=route' }],
@@ -552,8 +553,8 @@ describe('compound trip read projection', () => {
     ];
 
     const projection = compoundTripReadProjection(read, evidence);
-    expect(projection.text).toContain('route BER to SFO');
-    expect(projection.text).toContain('does not explicitly label it outbound or return');
+    expect(projection.text).toContain('calendar record lists the route BER to SFO');
+    expect(projection.text).toContain('does not explicitly label the flight outbound or return');
     expect(projection.text).not.toContain('The calendar does not state its direction.');
   });
 
