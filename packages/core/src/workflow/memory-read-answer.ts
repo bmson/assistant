@@ -489,6 +489,92 @@ function deterministicComparisonSelection(
   };
 }
 
+function deterministicFictionalExerciseRecall(
+  request: string,
+  sources: MemoryReadSource[],
+): MemoryReadSelection | undefined {
+  const scope = explicitComparisonScope(request);
+  if (
+    !asksAboutOwnerHistory(request) ||
+    requiresOwnerAssistantContrast(request) ||
+    !scope ||
+    !/\b(?:hypothetical|fictional)\b[\s\S]{0,100}\b(?:exercise|scenario)\b/iu.test(request)
+  )
+    return undefined;
+
+  const asksForName = /\b(?:project\s+)?name\b|\bcalled\b/iu.test(request);
+  const asksForBudget = /\b(?:budget|cost\s+limit|spending\s+limit)\b/iu.test(request);
+  const asksForDeadline = /\b(?:deadline|due\s+date|target\s+date)\b/iu.test(request);
+  const asksForTravelConstraint =
+    /\b(?:travel|transport|taxi|transit)\b[\s\S]{0,50}\b(?:constraint|rule|restriction)\b/iu.test(
+      request,
+    ) ||
+    /\b(?:constraint|restriction)\b[\s\S]{0,50}\b(?:travel|transport|taxi|transit)\b/iu.test(
+      request,
+    );
+  const requestedFieldCount =
+    Number(asksForName) +
+    Number(asksForBudget) +
+    Number(asksForDeadline) +
+    Number(asksForTravelConstraint);
+  if (requestedFieldCount < 2) return undefined;
+
+  const ownerSources = sources.filter(
+    (source) => source.speaker === 'Recorded owner message' && source.contextId,
+  );
+  const candidates = ownerSources.flatMap((source) => {
+    const sentences = source.body
+      .split(/(?<=[.!?])\s+|[\n;]+/u)
+      .map((sentence) => sentence.trim())
+      .filter((sentence) => {
+        if (sentence.length > 800 || sentence.includes('?')) return false;
+        const normalized = sentence.toLocaleLowerCase('en-US');
+        const words: string[] = normalized.match(/[\p{L}\p{N}-]+/gu) ?? [];
+        if (!words.includes(scope.toLocaleLowerCase('en-US'))) return false;
+        if (!/\b(?:hypothetical|fictional)\b/iu.test(sentence)) return false;
+        if (
+          !/\b(?:is|are|was|were|has|have|had|must|should|will|can|includes|equals)\b/iu.test(
+            sentence,
+          )
+        )
+          return false;
+        if (asksForName && !/\b(?:name|named|called|project)\b/iu.test(sentence)) return false;
+        if (
+          asksForBudget &&
+          !/\b(?:budget|cost|spending)\b.{0,24}(?:[€$£]\s?\d|\b\d+(?:[.,]\d+)?\b)/iu.test(sentence)
+        )
+          return false;
+        if (
+          asksForDeadline &&
+          !/\b(?:deadline|due\s+date|target\s+date)\b.{0,30}(?:\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b20\d{2}-\d{2}-\d{2}\b|\b\d{1,2}(?:st|nd|rd|th)?\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b|\b(?:today|tomorrow)\b)/iu.test(
+            sentence,
+          )
+        )
+          return false;
+        if (
+          asksForTravelConstraint &&
+          (!/\b(?:travel|transport|taxi|transit|rail|flight)\b/iu.test(sentence) ||
+            !/\b(?:avoid|avoids|no|never|without|exclude|excludes|must\s+not|should\s+not)\b/iu.test(
+              sentence,
+            ))
+        )
+          return false;
+        return true;
+      });
+    return sentences.map((quote) => ({ source, quote, signature: normalizedText(quote) }));
+  });
+  if (!candidates.length) return undefined;
+  const signatures = new Set(candidates.map((candidate) => candidate.signature));
+  if (signatures.size !== 1) return undefined;
+  const chosen = candidates[0];
+  if (!chosen) return undefined;
+  return {
+    version: 1,
+    status: 'complete',
+    selections: [{ sourceKey: chosen.source.key, quote: chosen.quote }],
+  };
+}
+
 /** Guard a successful selector against equally relevant same-scope records it omitted. */
 function validateSelectedComparison(
   request: string,
@@ -674,6 +760,8 @@ export async function selectMemoryReadAnswer(input: {
   if (!sources.length) return { version: 1, status: 'complete', selections: [] };
   const validatedComparisonFallback = () =>
     deterministicComparisonSelection(input.request, sources);
+  const validatedFictionalExerciseFallback = () =>
+    deterministicFictionalExerciseRecall(input.request, sources);
   const first = validateSelectedComparison(
     input.request,
     await selectFromSources({
@@ -684,7 +772,8 @@ export async function selectMemoryReadAnswer(input: {
     }),
     sources,
   );
-  if (first.status !== 'complete') return validatedComparisonFallback() ?? first;
+  if (first.status !== 'complete')
+    return validatedComparisonFallback() ?? validatedFictionalExerciseFallback() ?? first;
 
   const ownerHistoryQuestion = asksAboutOwnerHistory(input.request);
   const ownerSources = selectorVisibleSources(
@@ -772,8 +861,10 @@ export async function selectMemoryReadAnswer(input: {
       sources: ownerSources,
       recovery: 'owner_sources',
     });
-    if (recovered.status !== 'complete') return recovered;
+    if (recovered.status !== 'complete') return validatedFictionalExerciseFallback() ?? recovered;
     if (coversOwnerHistory(input.request, recovered.selections, ownerSources)) return recovered;
+    const fallback = validatedFictionalExerciseFallback();
+    if (fallback) return fallback;
     return {
       version: 1,
       status: 'unavailable',
