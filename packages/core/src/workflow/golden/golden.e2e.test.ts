@@ -946,7 +946,7 @@ describe('golden tasks', () => {
           }),
           execute: async () => ({
             query: 'newer_than:7d -from:me',
-            mailboxSearched: 'assistant-bot@example.com',
+            mailboxSearched: 'owner@example.com',
             configuredOwnerMailbox: 'owner@example.com',
             complete: true,
             hasMore: false,
@@ -1196,7 +1196,7 @@ describe('golden tasks', () => {
             searchPages += 1;
             return {
               query: 'newer_than:7d -from:me',
-              mailboxSearched: 'assistant-bot@example.com',
+              mailboxSearched: 'owner@example.com',
               configuredOwnerMailbox: 'owner@example.com',
               complete: page === 3,
               hasMore: page < 3,
