@@ -376,5 +376,21 @@ export const TaskStateSchema = z.object({
   conceptualAnswerRetried: z.boolean().optional(),
   /** Skills whose advice was injected, so finalize can record their outcome. */
   usedSkillIds: z.array(z.string()).default([]),
+  /**
+   * Bounded, content-free evidence that a specifically requested owner skill
+   * was retrieved and its advice block injected. Optional for old checkpoints.
+   */
+  skillRetrievalReceipts: z
+    .array(
+      z.object({
+        lookup: z.literal('owner_exact_name'),
+        skillId: z.string().min(1).max(128),
+        skillName: z.string().min(1).max(200),
+        skillRevision: z.string().datetime(),
+        adviceSha256: z.string().regex(/^[a-f0-9]{64}$/),
+      }),
+    )
+    .max(8)
+    .optional(),
 });
 export type TaskState = z.infer<typeof TaskStateSchema>;

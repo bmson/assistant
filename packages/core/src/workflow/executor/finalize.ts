@@ -32,6 +32,7 @@ import {
 import type { RecallSource } from '../../memory/recall.js';
 import {
   findActiveSkillByExactName,
+  matchesSkillRetrievalReceipt,
   recordSkillOutcome,
   requestedSavedSkillName,
 } from '../../memory/skills.js';
@@ -512,7 +513,15 @@ export async function stageFinalResponse(
           task.agentId,
           requestedSkill,
         );
-        retrieved = actual !== null && state.usedSkillIds.includes(actual.id);
+        const retrievalReceipts = state.skillRetrievalReceipts;
+        const receipt = retrievalReceipts?.find(
+          (item) => item.skillName === requestedSkill && item.skillId === actual?.id,
+        );
+        retrieved =
+          actual !== null &&
+          state.usedSkillIds.includes(actual.id) &&
+          (retrievalReceipts === undefined ||
+            (receipt !== undefined && matchesSkillRetrievalReceipt(receipt, actual)));
       } catch {
         /* Missing evidence cannot support a use claim. */
       }

@@ -45,6 +45,7 @@ const REQUEST_LIMIT = 4_000;
 const DRAFT_LIMIT = 12_000;
 const EVIDENCE_LIMIT = 12_000;
 const EVIDENCE_ITEM_LIMIT = 2_000;
+const WEB_SOURCE_EXCERPT_LIMIT = 10_000;
 const CONTEXT_LIMIT = 4_000;
 
 /** An optional reviewer may shorten wording, but must not erase the answer. */
@@ -82,6 +83,55 @@ function clip(value: string, limit: number): string {
  * tool arguments (which can contain secrets and do not prove an outcome).
  * Every item is length-bounded so a large fetch cannot crowd out the draft.
  */
+function webFetchEvidenceForVerifier(row: ActionEvidence, available: number): string | undefined {
+  const result =
+    row.result && typeof row.result === 'object' && !Array.isArray(row.result)
+      ? (row.result as Record<string, unknown>)
+      : undefined;
+  if (!result) return undefined;
+
+  const sourceText = typeof result.text === 'string' ? result.text : '';
+  const base = {
+    toolName: row.toolName,
+    status: row.status,
+    fromCurrentTask: row.fromCurrentTask !== false,
+    source: {
+      finalUrl: typeof result.finalUrl === 'string' ? result.finalUrl.slice(0, 500) : undefined,
+      contentType:
+        typeof result.contentType === 'string' ? result.contentType.slice(0, 160) : undefined,
+      httpStatus:
+        typeof result.status === 'number' || typeof result.status === 'string'
+          ? result.status
+          : undefined,
+      // This is the fetcher's source-level signal. Excerpt clipping below is
+      // separate and must never be presented as a truncated source response.
+      sourceTruncated: typeof result.truncated === 'boolean' ? result.truncated : null,
+      sourceTextLength: sourceText.length,
+    },
+    error: typeof row.error === 'string' ? row.error.slice(0, 300) : row.error,
+  };
+
+  let excerptLength = Math.min(WEB_SOURCE_EXCERPT_LIMIT, sourceText.length);
+  while (excerptLength >= 0) {
+    const excerpt = sourceText.slice(0, excerptLength);
+    const rendered = JSON.stringify({
+      ...base,
+      source: {
+        ...base.source,
+        sourceExcerpt: excerpt,
+        sourceExcerptLength: excerpt.length,
+        sourceExcerptOmittedChars: Math.max(0, sourceText.length - excerpt.length),
+      },
+    });
+    if (rendered.length <= available) return rendered;
+    if (excerptLength === 0) break;
+    excerptLength = Math.max(0, Math.floor(excerptLength * 0.75));
+  }
+
+  const metadata = JSON.stringify(base);
+  return metadata.length <= available ? metadata : undefined;
+}
+
 function evidenceForVerifier(evidence: ActionEvidence[]): string {
   // Current results must survive the overall cap even when the conversation
   // contains many unrelated older tools. The newest receipts come first.
@@ -89,21 +139,30 @@ function evidenceForVerifier(evidence: ActionEvidence[]): string {
     ...evidence.filter((row) => row.fromCurrentTask !== false).reverse(),
     ...evidence.filter((row) => row.fromCurrentTask === false).reverse(),
   ];
-  const rendered = prioritized
-    .slice(0, 24)
-    .map(({ toolName, status, result, error, fromCurrentTask }) =>
+  const rendered: string[] = [];
+  let remaining = EVIDENCE_LIMIT;
+  for (const row of prioritized.slice(0, 24)) {
+    const available = remaining - (rendered.length ? 1 : 0);
+    if (available <= 0) break;
+    const web =
+      row.toolName === 'web.fetch' ? webFetchEvidenceForVerifier(row, available) : undefined;
+    const value =
+      web ??
       clip(
         JSON.stringify({
-          toolName,
-          status,
-          result,
-          error,
-          fromCurrentTask: fromCurrentTask !== false,
+          toolName: row.toolName,
+          status: row.status,
+          result: row.result,
+          error: row.error,
+          fromCurrentTask: row.fromCurrentTask !== false,
         }),
-        EVIDENCE_ITEM_LIMIT,
-      ),
-    );
-  return clip(rendered.join('\n'), EVIDENCE_LIMIT);
+        Math.min(EVIDENCE_ITEM_LIMIT, available),
+      );
+    if (value.length > available) continue;
+    rendered.push(value);
+    remaining -= value.length + (rendered.length > 1 ? 1 : 0);
+  }
+  return rendered.join('\n');
 }
 
 export function buildOutputVerificationPrompt(input: {

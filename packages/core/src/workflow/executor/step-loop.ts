@@ -22,6 +22,7 @@ import {
   recallSkills,
   renderSkillsBlock,
   requestedSavedSkillName,
+  skillRetrievalReceipt,
 } from '../../memory/skills.js';
 import type { StepCallOutcome } from '../../model-router/router.js';
 import { withSpan } from '../../otel.js';
@@ -867,6 +868,11 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       if (found) {
         skillsBlock = renderSkillsBlock([found]);
         explicitlyRequestedSkillRetrieved = true;
+        const receipt = skillRetrievalReceipt(found);
+        state.skillRetrievalReceipts = [
+          ...(state.skillRetrievalReceipts ?? []).filter((item) => item.skillId !== found.id),
+          receipt,
+        ].slice(-8);
         if (!state.usedSkillIds.includes(found.id)) {
           state.usedSkillIds = [...state.usedSkillIds, found.id];
           await bumpSkillUse(skillStorage, [found.id], agent.id);
