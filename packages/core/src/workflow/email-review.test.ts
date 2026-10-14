@@ -738,10 +738,11 @@ describe('bounded no-send email review', () => {
   });
 
   it('rejects no_reply only for a clear unquoted direct ask, not a quoted or incidental RSVP mention', () => {
-    const makeThread = (threadId: string, text: string) => {
+    const makeThread = (threadId: string, text: string, subject?: string) => {
       const sourceMessages = messages(threadId);
       const latest = required(sourceMessages.at(-1), 'latest source message');
       latest.text = text;
+      if (subject) latest.subject = subject;
       latest.sourceLength = text.length;
       return required(
         emailReviewCompleteThread(threadId, 'owner@example.com', [
@@ -771,6 +772,22 @@ describe('bounded no-send email review', () => {
       'attendance-ask',
       'Please let me know whether you can attend.',
     );
+    const imperativeAvailabilityAsks = [
+      'Please send me your availability for next week.',
+      'Please share your schedule for next week.',
+      'Please provide your availability.',
+      'Please reply with your preferred option.',
+      'Please confirm which time works for you.',
+    ].map((text, index) => makeThread(`imperative-ask-${index}`, text));
+    const quotedImperativeAsk = makeThread(
+      'quoted-imperative-ask',
+      'Thanks for the note.\n> Please send me your availability for next week.',
+    );
+    const marketingNewsletter = makeThread(
+      'marketing-newsletter',
+      'Please share our weekly schedule-planning guide with your coworkers; it includes availability tips.',
+      'Weekly newsletter: schedule-planning tips',
+    );
     const noReplyFor = (thread: typeof directRequest) => ({
       items: [
         {
@@ -791,6 +808,14 @@ describe('bounded no-send email review', () => {
       validateEmailReviewAnswer(noReplyFor(availabilityAsk), [availabilityAsk]),
     ).toBeUndefined();
     expect(validateEmailReviewAnswer(noReplyFor(attendanceAsk), [attendanceAsk])).toBeUndefined();
+    for (const thread of imperativeAvailabilityAsks)
+      expect(validateEmailReviewAnswer(noReplyFor(thread), [thread])).toBeUndefined();
+    expect(
+      validateEmailReviewAnswer(noReplyFor(quotedImperativeAsk), [quotedImperativeAsk]),
+    ).toBeDefined();
+    expect(
+      validateEmailReviewAnswer(noReplyFor(marketingNewsletter), [marketingNewsletter]),
+    ).toBeDefined();
     expect(emailReviewValidationIssues(noReplyFor(directRequest), [directRequest])).toContain(
       'item_0:direct_latest_request_requires_review_draft',
     );

@@ -931,6 +931,18 @@ function latestMessageNeedsReply(thread: EmailReviewThread): boolean {
   )
     return false;
   const currentBody = latestUnquotedBody(thread) ?? '';
+  const imperativeAvailabilityAsk =
+    /\bplease\s+(?:send|share|provide)\s+(?:(?:me|us)\s+)?your\s+(?:availability|schedule)\b/i.test(
+      currentBody,
+    );
+  const imperativeChoiceReply =
+    /\bplease\s+(?:reply|respond)\s+(?:with|about|regarding)\s+(?:(?:your|the)\s+)?(?:availability|schedule|(?:preferred\s+)?(?:time|option)|choice|selection|preference|decision|answer)\b/i.test(
+      currentBody,
+    );
+  const imperativeChoiceConfirmation =
+    /\bplease\s+confirm\b[^.!?\n]{0,100}\b(?:which|whether|if|your\s+(?:choice|selection|preference|availability|schedule)|(?:time|option)\s+works\s+for\s+you)\b/i.test(
+      currentBody,
+    );
   return (
     /\bif you (?:have not|haven't) (?:yet )?rsvp(?:'d|ed)?\b/i.test(currentBody) ||
     /\b(?:could|would|can) you\b[^.!?\n]{0,120}\b(?:rsvp|reply|respond|confirm|volunteer|help|attend|join|sign up)\b/i.test(
@@ -946,7 +958,10 @@ function latestMessageNeedsReply(thread: EmailReviewThread): boolean {
       currentBody,
     ) ||
     (/\bare you able to\s*\??/i.test(currentBody) &&
-      /\b(?:volunteer|sign(?:ed|ing)? up|help|attend|join)\b/i.test(currentBody))
+      /\b(?:volunteer|sign(?:ed|ing)? up|help|attend|join)\b/i.test(currentBody)) ||
+    imperativeAvailabilityAsk ||
+    imperativeChoiceReply ||
+    imperativeChoiceConfirmation
   );
 }
 

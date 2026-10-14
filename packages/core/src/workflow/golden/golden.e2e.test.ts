@@ -624,6 +624,7 @@ describe('golden tasks', () => {
     if (!dbUp) return ctx.skip();
     const prompt =
       'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.';
+    let searchMailbox = 'owner@example.com';
     const fixture: GoldenFixture = {
       name: 'bounded-email-review-no-send-executor',
       event: { source: 'chat', trust: 'owner', payload: { text: prompt } },
@@ -665,7 +666,7 @@ describe('golden tasks', () => {
             expect(args).toMatchObject({ query: 'newer_than:7d -from:me', maxResults: 100 });
             return {
               query: 'newer_than:7d -from:me',
-              mailboxSearched: 'assistant-bot@example.com',
+              mailboxSearched: searchMailbox,
               configuredOwnerMailbox: 'owner@example.com',
               complete: true,
               hasMore: false,
@@ -747,6 +748,26 @@ describe('golden tasks', () => {
     expect(result.finalText).toContain('Thanks for your note.');
     expect(result.finalText).not.toContain('Weekly product newsletter');
     expect(result.finalText).not.toContain('sent the reply');
+
+    searchMailbox = 'assistant-bot@example.com';
+    const mailboxMismatch = await runGoldenTask(db, agentId, {
+      ...fixture,
+      name: 'bounded-email-review-mailbox-mismatch-preserves-validated-draft',
+    });
+    createdTaskIds.push(mailboxMismatch.taskId);
+    expect(mailboxMismatch.status).toBe('needs_attention');
+    expect(mailboxMismatch.toolNames).toEqual(['gmail.search', 'gmail.read_thread']);
+    expect(mailboxMismatch.finalText).toContain('Draft for review — not saved or sent');
+    expect(mailboxMismatch.finalText).toContain('Thanks for your note.');
+    expect(mailboxMismatch.finalText).toContain(
+      'The connected mailbox used for search differs from the configured owner mailbox.',
+    );
+    expect(mailboxMismatch.finalText).toContain(
+      'Confirm that it is the intended mailbox before relying on this review as complete.',
+    );
+    expect(mailboxMismatch.finalText).not.toContain('assistant-bot@example.com');
+    expect(mailboxMismatch.finalText).not.toContain('owner@example.com');
+    searchMailbox = 'owner@example.com';
 
     const metadataFallback = await runGoldenTask(db, agentId, {
       ...fixture,
@@ -871,10 +892,24 @@ describe('golden tasks', () => {
     createdTaskIds.push(failedGeneration.taskId);
 
     expect(failedGeneration.status).toBe('needs_attention');
+    expect(failedGeneration.finalText).toContain('0 of 1 selected threads');
     expect(failedGeneration.finalText).toContain(
-      'complete-thread assessment could not be verified after a bounded retry',
+      '1 complete thread could not be assessed reliably',
     );
+    expect(failedGeneration.finalText).not.toContain('Draft for review — not saved or sent');
     expect(failedGeneration.finalText).not.toContain('Thanks for your note.');
+
+    const [failedGenerationTask] = await db
+      .select({ state: tasks.state })
+      .from(tasks)
+      .where(eq(tasks.id, failedGeneration.taskId));
+    expect(
+      TaskStateSchema.parse(failedGenerationTask?.state).plannerState.emailReviewGeneration,
+    ).toMatchObject({
+      status: 'unavailable',
+      assessmentGaps: 1,
+      unassessedThreadIds: ['request-a'],
+    });
   });
 
   it('backfills a fully verified owner-replied thread from the bounded reserve pool', async (ctx) => {

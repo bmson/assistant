@@ -1984,6 +1984,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             rankedCandidateIds.length >= nonNewsletterCandidates);
         const reviewCoverageComplete =
           !readRequest.emailReview.rankingFailed &&
+          !coverage.searchMailboxMismatch &&
           coverage.searchComplete &&
           coverage.completeThreads +
             coverage.alreadyAnsweredThreads +
