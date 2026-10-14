@@ -1252,6 +1252,8 @@ describe('golden tasks', () => {
       ...emailReviewDraft(threadId),
       disposition: 'no_reply' as const,
       recipient: null,
+      why: 'The latest message only provides information and requests no response.',
+      whyQuote: `The information for ${threadId} is included for your records.`,
       draftBody: null,
       draftSourceMessageIds: [],
     });
@@ -1327,7 +1329,9 @@ describe('golden tasks', () => {
               startMessageIndex?: number;
             };
             readIds.push(threadId);
-            const text = `Could you confirm request ${threadId}?`;
+            const text = rankedIds.slice(0, 3).includes(threadId)
+              ? `The information for ${threadId} is included for your records.`
+              : `Could you confirm request ${threadId}?`;
             return gmailThreadPage({
               threadId,
               startMessageIndex,
@@ -1375,6 +1379,8 @@ describe('golden tasks', () => {
       ...emailReviewDraft(rankedIds[0] ?? 'review-1'),
       disposition: 'no_reply' as const,
       recipient: null,
+      why: 'The latest message only provides dated offer information and requests no response.',
+      whyQuote: 'The discount offer is available through Jun. 6th.',
       draftBody: null,
       draftSourceMessageIds: [],
     };
@@ -1427,9 +1433,10 @@ describe('golden tasks', () => {
               startMessageIndex?: number;
             };
             readIds.push(threadId);
-            const text = `Could you confirm request ${threadId}?${
-              threadId === rankedIds[0] ? ' The discount offer is available through Jun. 6th.' : ''
-            }`;
+            const text =
+              threadId === rankedIds[0]
+                ? 'The discount offer is available through Jun. 6th.'
+                : `Could you confirm request ${threadId}?`;
             return gmailThreadPage({
               threadId,
               startMessageIndex,
