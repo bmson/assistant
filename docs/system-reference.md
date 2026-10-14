@@ -401,7 +401,7 @@ Versions below are **declared dependency ranges/pins in the reviewed source**, n
 
 | Technology | Role and reason visible in the implementation | Declaration or source |
 | --- | --- | --- |
-| Node.js | Server/worker JavaScript runtime; cloud images target Node 22 | Root engine `>=22`; Docker `node:22-slim` |
+| Node.js | Server/worker JavaScript runtime; cloud images target Node 22 | Root engine `>=22`; Docker `mirror.gcr.io/library/node:22-slim` (Google's Docker Hub cache) |
 | TypeScript | Shared typed domain, application and provider code | Root `^7.0.2`; web `^5.9.3` |
 | pnpm workspaces | Shared packages and deterministic dependency installation | Root `pnpm@10.34.5` |
 | Turborepo | Workspace build/typecheck/dev orchestration | Root `^2.11.4` |

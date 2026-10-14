@@ -87,7 +87,7 @@ jobs:
     steps:
       - name: Pull and verify public Node 22 base image
         run: |
-          image=public.ecr.aws/docker/library/node:22-slim
+          image=mirror.gcr.io/library/node:22-slim
           docker pull "$image"
           version=$(docker run --rm "$image" node -p 'process.versions.node')
           [[ "$version" == 22.* ]]
