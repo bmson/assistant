@@ -278,6 +278,9 @@ export class FirestoreConversationSearchRepository implements ConversationSearch
       throw new Error('Conversation search embedding space changed');
     validateEmbedding(this.space, input.embedding);
     const fence = await readPrivacyErasureFence(this.store, input.agentId);
+    // Firestore nearest-neighbor search is installation-wide. Read at most 200
+    // raw hits so foreign conversations cannot consume all 80 owned candidates.
+    // The owner/erasure filters still run before the 80-row selection window.
     const candidateLimit = Math.min(200, conversationSearchCandidateLimit(input.limit) * 4);
     const result = await this.store
       .collection('messages')

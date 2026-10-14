@@ -54,4 +54,18 @@ describe('bounded conversation source selection', () => {
     expect(selectConversationSearchMatches([], 20)).toEqual([]);
     expect(conversationSearchCandidateLimit(20)).toBe(80);
   });
+
+  it('reserves owner and assistant history when both speakers have many distinct matches', () => {
+    const ranked = [
+      ...Array.from({ length: 25 }, (_, i) => row(i, `Owner note ${i}`, `owner-${i}`)),
+      ...Array.from({ length: 15 }, (_, i) =>
+        row(i + 25, `Earlier assistant claim ${i}`, `assistant-${i}`, 'assistant', 'assistant'),
+      ),
+    ];
+    const selected = selectConversationSearchMatches(ranked, 20);
+    expect(selected).toHaveLength(20);
+    expect(selected.filter((source) => source.role === 'user')).toHaveLength(12);
+    expect(selected.filter((source) => source.role === 'assistant')).toHaveLength(8);
+    expect(selected.every((source) => ranked.includes(source))).toBe(true);
+  });
 });

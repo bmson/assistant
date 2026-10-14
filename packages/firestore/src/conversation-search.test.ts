@@ -136,6 +136,11 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         await store
           .doc('conversations', id)
           .set({ id, agentId: 'diversity-owner', trust: 'owner' });
+      await store.doc('conversations', 'diversity-foreign').set({
+        id: 'diversity-foreign',
+        agentId: 'someone-else',
+        trust: 'owner',
+      });
       const lowerRanked: number[] = [...vector];
       lowerRanked[0] = 0.9;
       lowerRanked[1] = 0.1;
@@ -154,6 +159,28 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           embeddingSpace: spaceKey,
         });
       }
+      for (let index = 0; index < 60; index++)
+        await store.doc('messages', `diversity-foreign-${index}`).set({
+          id: `diversity-foreign-${index}`,
+          conversationId: 'diversity-foreign',
+          role: 'user',
+          origin: 'owner',
+          text: `Foreign owner's display preference ${index}`,
+          createdAt: new Date('2026-10-01T00:00:00Z'),
+          embedding: FieldValue.vector(vector),
+          embeddingSpace: spaceKey,
+        });
+      await store.doc('messages', 'diversity-visual-qa').set({
+        id: 'diversity-visual-qa',
+        conversationId: chats[0],
+        channelMessageId: 'visual-qa:display-preference-test',
+        role: 'user',
+        origin: 'owner',
+        text: 'Visual test claims the owner prefers a crowded display.',
+        createdAt: new Date('2026-10-01T00:00:00Z'),
+        embedding: FieldValue.vector(vector),
+        embeddingSpace: spaceKey,
+      });
       await store.doc('messages', 'diversity-preference-message').set({
         id: 'diversity-preference-message',
         conversationId: chats[2],
@@ -178,9 +205,54 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         'Please keep the display compact and easy to scan.',
       );
       expect(matches.some((row) => row.role === 'assistant')).toBe(true);
+      expect(matches.some((row) => row.conversationId === 'diversity-foreign')).toBe(false);
+      expect(matches.some((row) => row.messageId === 'diversity-visual-qa')).toBe(false);
       expect(
         matches.find((row) => row.messageId === 'diversity-preference-message')?.speakerRevision,
       ).toMatch(/^[a-f0-9]{64}$/);
+    });
+
+    it('fails closed when the finite nearest-neighbor window is entirely foreign', async () => {
+      await store.doc('conversations', 'bound-foreign').set({
+        id: 'bound-foreign',
+        agentId: 'someone-else',
+      });
+      await store.doc('conversations', 'bound-owner').set({
+        id: 'bound-owner',
+        agentId: 'bound-owner-agent',
+      });
+      const lowerRanked: number[] = [...vector];
+      lowerRanked[0] = 0.9;
+      lowerRanked[1] = 0.1;
+      for (let index = 0; index < 16; index++)
+        await store.doc('messages', `bound-foreign-${index}`).set({
+          id: `bound-foreign-${index}`,
+          conversationId: 'bound-foreign',
+          role: 'user',
+          origin: 'owner',
+          text: `Foreign neighbor ${index}`,
+          createdAt: new Date('2026-10-01T00:00:00Z'),
+          embedding: FieldValue.vector(vector),
+          embeddingSpace: spaceKey,
+        });
+      await store.doc('messages', 'bound-owner-source').set({
+        id: 'bound-owner-source',
+        conversationId: 'bound-owner',
+        role: 'user',
+        origin: 'owner',
+        text: 'A lower-ranked owner source',
+        createdAt: new Date('2026-10-01T00:00:00Z'),
+        embedding: FieldValue.vector(lowerRanked),
+        embeddingSpace: spaceKey,
+      });
+      await expect(
+        new FirestoreConversationSearchRepository(store, space).semantic({
+          agentId: 'bound-owner-agent',
+          embedding: vector,
+          embeddingSpaceKey: spaceKey,
+          limit: 1,
+        }),
+      ).rejects.toThrow('candidate bound reached');
     });
 
     it('applies the owner erasure cutoff while keeping only the trusted current conversation exception', async () => {

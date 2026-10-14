@@ -1,6 +1,6 @@
 import type { ConversationSearchMatch } from './builtin-tools.js';
 
-/** Extra candidates are inspected locally; the public search result still has at most 20 rows. */
+/** At most 80 owned candidates are selected locally; the public result has at most 20 rows. */
 export function conversationSearchCandidateLimit(limit: number): number {
   return Math.min(80, limit * 4);
 }
