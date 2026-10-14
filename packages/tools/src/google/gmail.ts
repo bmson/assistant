@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { makeCommunicationReceipt } from '@assistant/core';
 import { z } from 'zod';
 import { markdownToEmailHtml, markdownToPlainText } from '../markdown-email.js';
@@ -164,7 +165,16 @@ export function registerGmailTools(registry: ToolRegistry, deps: GmailToolDeps):
           unavailable,
           receipt: sourceReadReceipt({
             version: 1,
-            source: { kind: 'gmail-search', id: args.query },
+            // Search input permits 300 characters, while receipt identifiers
+            // are capped at 256. Keep the full query in the result and cursor;
+            // use a stable digest for longer source identities on every page.
+            source: {
+              kind: 'gmail-search',
+              id:
+                args.query.length <= 256
+                  ? args.query
+                  : `query-sha256:${createHash('sha256').update(args.query).digest('hex')}`,
+            },
             requested: { limit: args.maxResults, cursor: args.pageToken, scope: 'query-page' },
             covered: {
               count: results.length,
