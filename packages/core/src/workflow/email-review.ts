@@ -85,7 +85,7 @@ export interface EmailReviewThread {
 export type EmailReviewThreadReadResult =
   | { kind: 'eligible'; thread: EmailReviewThread }
   | { kind: 'already_answered'; threadId: string; latestMessageId: string }
-  | { kind: 'not_eligible' };
+  | { kind: 'not_eligible'; threadId: string };
 
 export interface EmailReviewCoverage {
   searchPages: number;
@@ -97,6 +97,7 @@ export interface EmailReviewCoverage {
   contextLimitedThreads: number;
   ownerOrChronologyExcluded: number;
   alreadyAnsweredThreads: number;
+  notEligibleThreads: number;
   obviousNewslettersExcluded: number;
   backfillShortfall?: 'rank_pool_exhausted' | 'step_budget';
   metadataFallback?: boolean;
@@ -201,7 +202,7 @@ export function emailReviewRankContext(evidence: ReadonlyArray<EmailReviewEviden
     };
     const proposed = {
       purpose:
-        'Rank up to eight recent email threads that may need the owner’s response. The first five are the initial review set; later IDs are reserve candidates used only when a fully verified thread proves the owner already replied.',
+        'Rank up to eight recent email threads that may need the owner’s response. The first five are the initial review set; later IDs are reserves used only when a complete verified read proves a thread was already answered or is not eligible for a reply.',
       limit: EMAIL_REVIEW_MAX_RANK_POOL,
       candidates: [...candidates, compact],
       additionalMetadataCandidates: Math.max(0, all.length - candidates.length - 1),
@@ -212,7 +213,7 @@ export function emailReviewRankContext(evidence: ReadonlyArray<EmailReviewEviden
   const additionalMetadataCandidates = Math.max(0, all.length - candidates.length);
   const prompt = JSON.stringify({
     purpose:
-      'Rank up to eight recent email threads that may need the owner’s response. The first five are the initial review set; later IDs are reserve candidates used only when a fully verified thread proves the owner already replied.',
+      'Rank up to eight recent email threads that may need the owner’s response. The first five are the initial review set; later IDs are reserves used only when a complete verified read proves a thread was already answered or is not eligible for a reply.',
     limit: EMAIL_REVIEW_MAX_RANK_POOL,
     candidates,
     additionalMetadataCandidates,
@@ -260,17 +261,17 @@ export function validEmailReviewSelection(
 export function emailReviewSelectionWithinAuthorizedPool(
   selectedThreadIds: ReadonlyArray<string>,
   rankedThreadIds: ReadonlyArray<string> | undefined,
-  verifiedAnsweredThreadIds: ReadonlyArray<string>,
+  verifiedExcludedThreadIds: ReadonlyArray<string>,
 ): boolean {
   const initialCount = rankedThreadIds
     ? Math.min(EMAIL_REVIEW_MAX_CANDIDATES, rankedThreadIds.length)
     : EMAIL_REVIEW_MAX_CANDIDATES;
-  const answered = [...new Set(verifiedAnsweredThreadIds)];
+  const excluded = [...new Set(verifiedExcludedThreadIds)];
   return (
     selectedThreadIds.length <= EMAIL_REVIEW_MAX_RANK_POOL &&
-    answered.every((id) => selectedThreadIds.includes(id)) &&
+    excluded.every((id) => selectedThreadIds.includes(id)) &&
     (!rankedThreadIds || selectedThreadIds.every((id, index) => rankedThreadIds[index] === id)) &&
-    selectedThreadIds.length <= initialCount + answered.length
+    selectedThreadIds.length <= Math.min(EMAIL_REVIEW_MAX_RANK_POOL, initialCount + excluded.length)
   );
 }
 
@@ -610,9 +611,9 @@ export function emailReviewThreadReadResult(
     });
     return answeredInbound
       ? { kind: 'already_answered', threadId, latestMessageId: last.messageId }
-      : { kind: 'not_eligible' };
+      : { kind: 'not_eligible', threadId };
   }
-  if (!addressList(last.to).includes(ownerMailbox)) return { kind: 'not_eligible' };
+  if (!addressList(last.to).includes(ownerMailbox)) return { kind: 'not_eligible', threadId };
   return {
     kind: 'eligible',
     thread: {
@@ -646,12 +647,24 @@ export function emailReviewVerifiedAnsweredThreadIds(
   );
 }
 
+export function emailReviewVerifiedNotEligibleThreadIds(
+  threadIds: ReadonlyArray<string>,
+  ownerMailbox: string,
+  evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+): string[] {
+  return threadIds.filter(
+    (threadId) =>
+      emailReviewThreadReadResult(threadId, ownerMailbox, evidence)?.kind === 'not_eligible',
+  );
+}
+
 export function emailReviewCoverage(
   selectedThreadIds: ReadonlyArray<string>,
   eligibleThreads: ReadonlyArray<EmailReviewThread>,
   evidence: ReadonlyArray<EmailReviewEvidenceRow>,
   contextLimitedThreads = 0,
   alreadyAnsweredThreadIds: ReadonlyArray<string> = [],
+  notEligibleThreadIds: ReadonlyArray<string> = [],
   backfillShortfall?: EmailReviewCoverage['backfillShortfall'],
   metadataFallback = false,
 ): EmailReviewCoverage {
@@ -674,12 +687,14 @@ export function emailReviewCoverage(
     selectedThreads: selectedThreadIds.length,
     completeThreads: selectedCompleted.size,
     alreadyAnsweredThreads: new Set(alreadyAnsweredThreadIds).size,
+    notEligibleThreads: new Set(notEligibleThreadIds).size,
     contextLimitedThreads,
     ownerOrChronologyExcluded: Math.max(
       0,
       selectedThreadIds.length -
         selectedCompleted.size -
         new Set(alreadyAnsweredThreadIds).size -
+        new Set(notEligibleThreadIds).size -
         contextLimitedThreads,
     ),
     obviousNewslettersExcluded:
@@ -959,8 +974,10 @@ export function formatEmailReviewAnswer(
   coverage: EmailReviewCoverage,
   rankingFailed = false,
 ): string {
+  const fullyChecked =
+    coverage.completeThreads + coverage.alreadyAnsweredThreads + coverage.notEligibleThreads;
   const lines = [
-    `I reviewed ${coverage.completeThreads} of ${coverage.selectedThreads} selected threads from a bounded seven-day mail scan. This is a provisional prioritization of the scanned results, not a guarantee that these are the only or globally most important requests.`,
+    `I completed verified reply checks for ${fullyChecked} of ${coverage.selectedThreads} selected threads from a bounded seven-day mail scan and prepared ${items.length} reply-review ${items.length === 1 ? 'item' : 'items'}. This is a provisional prioritization of the scanned results, not a guarantee that these are the only or globally most important requests.`,
   ];
   if (coverage.searchPages === 0)
     lines.push('The mailbox search did not return a usable result, so I prepared no reply drafts.');
@@ -970,15 +987,19 @@ export function formatEmailReviewAnswer(
     lines.push('The mail search had incomplete metadata coverage.');
   if (coverage.ownerOrChronologyExcluded > 0)
     lines.push(
-      `${coverage.ownerOrChronologyExcluded} selected ${coverage.ownerOrChronologyExcluded === 1 ? 'thread was' : 'threads were'} not used because the latest message could not be safely confirmed as an incoming message to your mailbox.`,
+      `${coverage.ownerOrChronologyExcluded} selected ${coverage.ownerOrChronologyExcluded === 1 ? 'thread was' : 'threads were'} not used because a complete, valid read did not establish whether it qualified.`,
     );
   if (coverage.alreadyAnsweredThreads > 0)
     lines.push(
       `${coverage.alreadyAnsweredThreads} selected ${coverage.alreadyAnsweredThreads === 1 ? 'thread had' : 'threads had'} a later reply from your mailbox and ${coverage.alreadyAnsweredThreads === 1 ? 'was' : 'were'} skipped as already answered.`,
     );
+  if (coverage.notEligibleThreads > 0)
+    lines.push(
+      `${coverage.notEligibleThreads} selected ${coverage.notEligibleThreads === 1 ? 'thread was' : 'threads were'} fully checked but did not meet the criteria for a reply draft.`,
+    );
   if (coverage.backfillShortfall === 'rank_pool_exhausted')
     lines.push(
-      'The bounded ranked candidate pool had no more threads to replace those already answered.',
+      'The bounded ranked candidate pool had no more threads to replace those fully checked and excluded.',
     );
   else if (coverage.backfillShortfall === 'step_budget')
     lines.push(

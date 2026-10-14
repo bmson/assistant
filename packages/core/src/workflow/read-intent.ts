@@ -130,6 +130,8 @@ export interface PersonalReadRequest {
     attemptedThreadIds?: string[];
     /** Source-backed thread IDs with a complete later owner reply. */
     excludedThreadIds?: string[];
+    /** Source-backed threads completely read but conclusively not reply-eligible. */
+    notEligibleThreadIds?: string[];
     backfillShortfall?: 'rank_pool_exhausted' | 'step_budget';
     rankingFailed?: boolean;
     rankingSource?: 'model' | 'recent_metadata_fallback';

@@ -14,6 +14,7 @@ import {
   emailReviewRecentMetadataFallback,
   emailReviewSelectionWithinAuthorizedPool,
   emailReviewThreadReadResult,
+  emailReviewVerifiedNotEligibleThreadIds,
   formatEmailReviewAnswer,
   generateValidatedEmailReview,
   validateEmailReviewAnswer,
@@ -649,7 +650,13 @@ describe('bounded no-send email review', () => {
         search('thread-a'),
         read('thread-a', outboundWithoutMatchingInbound),
       ]),
-    ).toEqual({ kind: 'not_eligible' });
+    ).toEqual({ kind: 'not_eligible', threadId: 'thread-a' });
+    expect(
+      emailReviewVerifiedNotEligibleThreadIds(['thread-a'], 'owner@example.com', [
+        search('thread-a'),
+        read('thread-a', outboundWithoutMatchingInbound),
+      ]),
+    ).toEqual(['thread-a']);
     expect(
       emailReviewThreadReadResult('thread-a', 'owner@example.com', [
         search('thread-a'),
@@ -832,5 +839,93 @@ describe('bounded no-send email review', () => {
       completeThreads: 1,
       contextLimitedThreads: 1,
     });
+  });
+
+  it('authorizes reserve reads only for freshly verified complete exclusions', () => {
+    const ranked = ['request-a', 'request-b', 'request-c', 'request-d', 'request-e', 'reserve-f'];
+    expect(emailReviewSelectionWithinAuthorizedPool(ranked.slice(0, 5), ranked, [])).toBe(true);
+    expect(emailReviewSelectionWithinAuthorizedPool(ranked, ranked, [])).toBe(false);
+    expect(emailReviewSelectionWithinAuthorizedPool(ranked, ranked, ['request-b'])).toBe(true);
+    expect(
+      emailReviewSelectionWithinAuthorizedPool(ranked, ranked, ['request-b', 'request-c']),
+    ).toBe(true);
+    expect(
+      emailReviewSelectionWithinAuthorizedPool(
+        ['request-a', 'request-b', 'request-c', 'request-d', 'request-e', 'reserve-f'],
+        ranked,
+        [],
+      ),
+    ).toBe(false);
+    expect(
+      emailReviewSelectionWithinAuthorizedPool(
+        [...ranked, 'reserve-g', 'reserve-h', 'reserve-i'],
+        [...ranked, 'reserve-g', 'reserve-h', 'reserve-i'],
+        ['request-a', 'request-b', 'request-c', 'request-d'],
+      ),
+    ).toBe(false);
+
+    const completeNotEligible = [
+      search('not-eligible'),
+      read('not-eligible', [
+        {
+          messageId: 'owner-message',
+          from: 'owner@example.com',
+          to: 'other@example.net',
+          date: '2026-10-11T16:00:00Z',
+          subject: 'Re: Request',
+          text: 'Thanks.',
+          sourceLength: 'Thanks.'.length,
+          truncated: false,
+        },
+      ]),
+    ];
+    const failed = [search('failed'), { ...read('failed', messages('failed')), status: 'failed' }];
+    const truncated = [
+      search('truncated'),
+      read('truncated', messages('truncated'), { complete: false }),
+    ];
+    const malformed = [
+      search('malformed'),
+      { ...read('malformed', messages('malformed')), result: { threadId: 'wrong-id' } },
+    ];
+    expect(
+      emailReviewVerifiedNotEligibleThreadIds(
+        ['not-eligible'],
+        'owner@example.com',
+        completeNotEligible,
+      ),
+    ).toEqual(['not-eligible']);
+    for (const [threadId, evidence] of [
+      ['failed', failed],
+      ['truncated', truncated],
+      ['malformed', malformed],
+    ] as const) {
+      expect(
+        emailReviewVerifiedNotEligibleThreadIds([threadId], 'owner@example.com', evidence),
+      ).toEqual([]);
+    }
+  });
+
+  it('separates verified exclusions from incomplete reads and budget-omitted reserves', () => {
+    const coverage = emailReviewCoverage(
+      ['answered', 'not-eligible', 'unverified'],
+      [],
+      [],
+      0,
+      ['answered'],
+      ['not-eligible'],
+      'step_budget',
+    );
+    const text = formatEmailReviewAnswer([], coverage);
+    expect(coverage).toMatchObject({
+      alreadyAnsweredThreads: 1,
+      notEligibleThreads: 1,
+      ownerOrChronologyExcluded: 1,
+      backfillShortfall: 'step_budget',
+    });
+    expect(text).toContain('fully checked but did not meet the criteria');
+    expect(text).toContain('complete, valid read did not establish whether it qualified');
+    expect(text).toContain('step limit before another replacement thread could be read');
+    expect(text).not.toContain('no more threads to replace');
   });
 });

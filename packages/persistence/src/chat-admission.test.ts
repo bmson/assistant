@@ -6,6 +6,7 @@ import {
   chatAdmissionCancellationTrigger,
   chatAdmissionExternalEventId,
   chatAdmissionPayload,
+  EMAIL_REVIEW_CHAT_BUDGET_PROFILE,
   isChatAdmissionCancellationProjection,
 } from './chat-admission.js';
 import type { Records } from './records.js';
@@ -98,4 +99,34 @@ describe('chat admission cancellation marker', () => {
       ).toThrow('Invalid chat admission cancellation identity');
     },
   );
+});
+
+describe('server-derived chat step budget marker', () => {
+  it('parses only the supported email-review profile and rejects unknown profile values', () => {
+    const base = tombstone().task;
+    const trigger = {
+      source: 'chat',
+      payload: {
+        chatAdmission: {
+          protocol: CHAT_ADMISSION_PROTOCOL,
+          clientOperationId: randomUUID(),
+          requestHash: 'a'.repeat(64),
+          triggerMessageId: randomUUID(),
+          phase: 'classifying',
+          budgetProfile: EMAIL_REVIEW_CHAT_BUDGET_PROFILE,
+        },
+      },
+    };
+    expect(chatAdmissionPayload({ ...base, trigger })).toMatchObject({
+      budgetProfile: EMAIL_REVIEW_CHAT_BUDGET_PROFILE,
+    });
+    const unknown = {
+      ...trigger,
+      payload: {
+        ...trigger.payload,
+        chatAdmission: { ...trigger.payload.chatAdmission, budgetProfile: 'unbounded' },
+      },
+    };
+    expect(chatAdmissionPayload({ ...base, trigger: unknown })).toBeNull();
+  });
 });

@@ -1118,6 +1118,130 @@ describe('golden tasks', () => {
     });
   });
 
+  it('uses fully verified not-eligible reads for bounded email-review reserves within the review budget', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const prompt =
+      'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.';
+    const rankedIds = [
+      'request-a',
+      'request-b',
+      'request-c',
+      'request-d',
+      'request-e',
+      'reserve-f',
+      'reserve-g',
+      'reserve-h',
+    ];
+    const eligibleIds = ['request-c', 'request-d', 'request-e', 'reserve-f', 'reserve-g'];
+    const readThreadIds: string[] = [];
+    let searchPages = 0;
+    const result = await runGoldenTask(db, agentId, {
+      name: 'bounded-email-review-not-eligible-reserves-with-profile-budget',
+      event: { source: 'chat', trust: 'owner', payload: { text: prompt } },
+      taskType: 'chat_turn',
+      pinOwnerRequest: true,
+      plan: workflowPlan,
+      maxSteps: 14,
+      objects: [
+        { role: 'reason', value: { threadIds: rankedIds } },
+        { role: 'reason', value: { items: eligibleIds.map(emailReviewDraft) } },
+      ],
+      script: [],
+      tools: {
+        'gmail.search': {
+          schema: z.object({
+            query: z.string(),
+            maxResults: z.number().optional(),
+            pageToken: z.string().optional(),
+          }),
+          execute: async (input) => {
+            const { pageToken } = z.object({ pageToken: z.string().optional() }).parse(input);
+            const page = pageToken ? Number(pageToken.replace('page-', '')) : 1;
+            searchPages += 1;
+            return {
+              query: 'newer_than:7d -from:me',
+              mailboxSearched: 'assistant-bot@example.com',
+              configuredOwnerMailbox: 'owner@example.com',
+              complete: page === 5,
+              hasMore: page < 5,
+              ...(page < 5 ? { nextPageToken: `page-${page + 1}` } : {}),
+              unavailable: [],
+              results:
+                page === 1
+                  ? rankedIds.map((threadId, index) => ({
+                      messageId: `search-${threadId}`,
+                      threadId,
+                      from: 'sender@example.net',
+                      to: 'owner@example.com',
+                      date: `2026-10-12T${String(15 - index).padStart(2, '0')}:00:00Z`,
+                      subject: `Request ${threadId}`,
+                      snippet: `Could you confirm request ${threadId}?`,
+                    }))
+                  : [],
+            };
+          },
+        },
+        'gmail.read_thread': {
+          schema: z.object({
+            threadId: z.string(),
+            startMessageIndex: z.number().optional(),
+            startMessageOffset: z.number().optional(),
+            maxMessages: z.number().optional(),
+            maxChars: z.number().optional(),
+          }),
+          execute: async (input) => {
+            const { threadId, startMessageIndex = 0 } = input as {
+              threadId: string;
+              startMessageIndex?: number;
+            };
+            readThreadIds.push(threadId);
+            const ownerAuthoredLatest = threadId === 'request-a' || threadId === 'request-b';
+            const text = ownerAuthoredLatest
+              ? `I already handled ${threadId}.`
+              : `Could you confirm request ${threadId}?`;
+            return gmailThreadPage({
+              threadId,
+              startMessageIndex,
+              totalMessages: 1,
+              complete: true,
+              messages: [
+                {
+                  messageId: `latest-${threadId}`,
+                  from: ownerAuthoredLatest ? 'owner@example.com' : 'sender@example.net',
+                  to: ownerAuthoredLatest ? 'other@example.net' : 'owner@example.com',
+                  date: '2026-10-12T10:00:00Z',
+                  subject: `Request ${threadId}`,
+                  text,
+                  sourceLength: text.length,
+                  truncated: false,
+                },
+              ],
+            });
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+
+    expect(searchPages).toBe(5);
+    expect(readThreadIds).toEqual(rankedIds.slice(0, 7));
+    expect(result.status).toBe('done');
+    expect(result.stepCount).toBe(14);
+    expect(result.toolNames.filter((name) => name === 'gmail.search')).toHaveLength(5);
+    expect(result.toolNames.filter((name) => name === 'gmail.read_thread')).toHaveLength(7);
+    expect(result.toolNames).not.toContain('gmail.send');
+    expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(5);
+    expect(result.finalText).toContain('2 selected threads were fully checked but did not meet');
+    expect(result.finalText).not.toContain('request-h');
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
+    expect(task?.maxSteps).toBe(14);
+    expect(TaskStateSchema.parse(task?.state).plannerState.emailReview).toMatchObject({
+      selectedThreadIds: rankedIds.slice(0, 7),
+      attemptedThreadIds: rankedIds.slice(0, 7),
+      notEligibleThreadIds: ['request-a', 'request-b'],
+    });
+  });
+
   it('uses a final review step after the two-continuation cap and reports a bounded backfill shortfall', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const prompt =

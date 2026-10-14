@@ -2,10 +2,19 @@ import { createHash } from 'node:crypto';
 import type { Records } from './records.js';
 
 export const CHAT_ADMISSION_PROTOCOL = 'owner-chat-v1';
+export const EMAIL_REVIEW_CHAT_BUDGET_PROFILE = 'email_review_reserve_v1' as const;
+export type ChatTurnBudgetProfile = typeof EMAIL_REVIEW_CHAT_BUDGET_PROFILE;
 export type ChatAdmissionPhase = 'classifying' | 'streaming' | 'queued';
 export type ChatAdmissionTriageOutcome = 'actionable' | 'conversational';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function assertChatTurnBudgetProfile(
+  value: unknown,
+): asserts value is typeof EMAIL_REVIEW_CHAT_BUDGET_PROFILE | undefined {
+  if (value !== undefined && value !== EMAIL_REVIEW_CHAT_BUDGET_PROFILE)
+    throw new Error('Invalid chat turn budget profile');
+}
 
 export function assertChatAdmissionOperationId(value: unknown): asserts value is string {
   if (typeof value !== 'string' || !UUID_RE.test(value))
@@ -32,6 +41,7 @@ export function chatAdmissionPayload(task: Pick<Records['tasks'], 'trigger'>): {
   triggerMessageId: string;
   phase: ChatAdmissionPhase;
   triageOutcome?: ChatAdmissionTriageOutcome;
+  budgetProfile?: typeof EMAIL_REVIEW_CHAT_BUDGET_PROFILE;
 } | null {
   const trigger = task.trigger;
   if (!trigger || typeof trigger !== 'object' || Array.isArray(trigger)) return null;
@@ -45,6 +55,8 @@ export function chatAdmissionPayload(task: Pick<Records['tasks'], 'trigger'>): {
     typeof value.clientOperationId !== 'string' ||
     typeof value.requestHash !== 'string' ||
     typeof value.triggerMessageId !== 'string' ||
+    (value.budgetProfile !== undefined &&
+      value.budgetProfile !== EMAIL_REVIEW_CHAT_BUDGET_PROFILE) ||
     !['classifying', 'streaming', 'queued'].includes(String(value.phase))
   )
     return null;
@@ -55,6 +67,9 @@ export function chatAdmissionPayload(task: Pick<Records['tasks'], 'trigger'>): {
     phase: value.phase as ChatAdmissionPhase,
     ...(value.triageOutcome === 'actionable' || value.triageOutcome === 'conversational'
       ? { triageOutcome: value.triageOutcome }
+      : {}),
+    ...(value.budgetProfile === EMAIL_REVIEW_CHAT_BUDGET_PROFILE
+      ? { budgetProfile: EMAIL_REVIEW_CHAT_BUDGET_PROFILE }
       : {}),
   };
 }

@@ -59,6 +59,7 @@ import type {
 import {
   chatAdmissionPayload,
   composerChecklistCancellationRequestHash,
+  EMAIL_REVIEW_CHAT_BUDGET_PROFILE,
   embeddingSpaceIdentityKey,
 } from '@assistant/persistence';
 import {
@@ -873,6 +874,12 @@ export async function handleChatTurn(
   const requestHash = createHash('sha256')
     .update(JSON.stringify([userText, autonomousRequested, forceRequested, spokenRequested]))
     .digest('hex');
+  // Derived from the exact owner turn on the server; the request schema does
+  // not accept a client-selected step-budget profile.
+  const expectedBudgetProfile = detectPersonalReadRequest([{ role: 'user', content: userText }])
+    ?.emailReview
+    ? EMAIL_REVIEW_CHAT_BUDGET_PROFILE
+    : undefined;
   const resumeAdmission = dependencies.resumeTask
     ? chatAdmissionPayload(dependencies.resumeTask)
     : null;
@@ -884,7 +891,10 @@ export async function handleChatTurn(
       task.agentId !== agent.id ||
       task.conversationId !== conversation.id ||
       resumeAdmission.clientOperationId !== clientOperationId ||
-      resumeAdmission.requestHash !== requestHash
+      resumeAdmission.requestHash !== requestHash ||
+      (resumeAdmission.budgetProfile !== undefined &&
+        resumeAdmission.budgetProfile !== expectedBudgetProfile) ||
+      task.maxSteps !== (resumeAdmission.budgetProfile ? 14 : 12)
     )
       throw new Error('Worker admission lease does not match its triggering owner request');
     const rows = await chat.listMessagesByIds(agent.id, conversation.id, [
@@ -902,6 +912,7 @@ export async function handleChatTurn(
         ...(nativeClientId ? { clientId: nativeClientId } : {}),
         requestHash,
         text: userText,
+        ...(expectedBudgetProfile ? { budgetProfile: expectedBudgetProfile } : {}),
         autonomous: autonomousRequested,
         force: forceRequested,
         spoken: spokenRequested,

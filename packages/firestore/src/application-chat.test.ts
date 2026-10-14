@@ -9,6 +9,7 @@ import {
   chatAdmissionCancellationPayload,
   chatAdmissionPayload,
   composerChecklistCancellationRequestHash,
+  EMAIL_REVIEW_CHAT_BUDGET_PROFILE,
   finalChannelDelivery,
   newTaskRecord,
   OWNER_TASK_MEMORY_RETENTION,
@@ -214,6 +215,41 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       await expect(
         repository.queueAdmittedChatTurn({ agentId, task: lease, triagedActionable: true }),
       ).resolves.toBeNull();
+    });
+
+    it('stores the bounded email-review budget profile while ordinary chat stays at twelve steps', async () => {
+      const conversation = await repository.createConversation(agentId);
+      const reviewInput = {
+        agentId,
+        conversationId: conversation.id,
+        clientOperationId: randomUUID(),
+        requestHash: 'b'.repeat(64),
+        text: 'Review my emails from the last seven days. Find five requests that still need a reply. Do not send anything.',
+        autonomous: false,
+        force: false,
+        spoken: false,
+        budgetProfile: EMAIL_REVIEW_CHAT_BUDGET_PROFILE,
+      } as const;
+      const review = await repository.admitChatTurn(reviewInput);
+      if (review.kind !== 'admitted') throw new Error('expected email-review admission');
+      expect(review.task.maxSteps).toBe(14);
+      expect(chatAdmissionPayload(review.task)).toMatchObject({
+        budgetProfile: EMAIL_REVIEW_CHAT_BUDGET_PROFILE,
+      });
+      await expect(
+        repository.admitChatTurn({ ...reviewInput, budgetProfile: undefined }),
+      ).rejects.toThrow('already used for a different request');
+
+      const ordinary = await repository.admitChatTurn({
+        ...reviewInput,
+        clientOperationId: randomUUID(),
+        requestHash: 'c'.repeat(64),
+        text: 'What is on my calendar tomorrow?',
+        budgetProfile: undefined,
+      });
+      if (ordinary.kind !== 'admitted') throw new Error('expected ordinary chat admission');
+      expect(ordinary.task.maxSteps).toBe(12);
+      expect(chatAdmissionPayload(ordinary.task)?.budgetProfile).toBeUndefined();
     });
 
     it('marks fictional retention per owner task and inherits only an explicit same-chat reference', async () => {

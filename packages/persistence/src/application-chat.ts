@@ -1,3 +1,4 @@
+import type { ChatTurnBudgetProfile } from './chat-admission.js';
 import type { AppendMessageInput, TaskLease } from './contracts.js';
 import type { ExecutionEvidenceRecord } from './execution-evidence.js';
 import type { Records } from './records.js';
@@ -24,6 +25,8 @@ export interface ChatTurnAdmissionInput {
   clientId?: string;
   requestHash: string;
   text: string;
+  /** Server-derived from the owner text; never accepted from a client request. */
+  budgetProfile?: ChatTurnBudgetProfile;
   autonomous: boolean;
   force: boolean;
   spoken: boolean;
