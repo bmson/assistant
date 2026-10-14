@@ -2771,6 +2771,48 @@ describe('compound trip read projection', () => {
     expect(projection.text).toContain('No end or checkout date is inferred.');
   });
 
+  it('uses bounded description text only to classify a lodging observation', () => {
+    const read = request();
+    const evidence = [
+      row(
+        'calendar.list_events',
+        { timeMin: read.timeWindow?.timeMin, timeMax: read.timeWindow?.timeMax },
+        {
+          events: [
+            {
+              eventId: 'unbranded-stay',
+              summary: 'NH Collection Berlin',
+              location: 'Berlin city center',
+              description:
+                'Hotel reservation details: a two-night stay, with private notes that must not be shown.',
+              start: { date: '2026-10-17' },
+              end: { date: '2026-10-19' },
+              status: 'confirmed',
+              links: [
+                { type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=nh' },
+              ],
+            },
+          ],
+          complete: false,
+          calendarRosterComplete: true,
+          unavailable: [],
+          nextPageToken: 'more-calendar-pages',
+        },
+      ),
+    ];
+    const projection = compoundTripReadProjection(read, evidence);
+
+    expect(projection.hotel).toBeUndefined();
+    expect(compoundTripRoute(read, evidence)).toBeUndefined();
+    expect(projection.blocked).toBe(true);
+    expect(projection.text).toContain('Lodging calendar observation only');
+    expect(projection.text).toContain('NH Collection Berlin');
+    expect(projection.text).toContain('https://calendar.google.com/calendar/event?eid=nh');
+    expect(projection.text).not.toContain('Hotel reservation details');
+    expect(projection.text).not.toContain('two-night stay');
+    expect(projection.text).not.toContain('private notes that must not be shown');
+  });
+
   it('does not invent calendar observations when a complete range has no matching records', () => {
     const projection = compoundTripReadProjection(request(), [completeCalendarEvents([])]);
 

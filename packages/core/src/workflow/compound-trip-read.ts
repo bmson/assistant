@@ -1641,7 +1641,9 @@ function calendarObservationLines(
     ? undefined
     : [...unique.values()]
         .filter((event) => {
-          const details = `${text(event.summary, 240)}\n${text(event.location, 300)}`;
+          // Description text is consulted only to classify a calendar record
+          // as lodging; it is never rendered or used to link it to a flight.
+          const details = `${text(event.summary, 240)}\n${text(event.location, 300)}\n${text(event.description, 1200)}`;
           return (
             /\b(?:hotel|lodging|accommodation|stay|check[ -]in|check[ -]out)\b/i.test(details) &&
             Boolean(calendarSource(event))
