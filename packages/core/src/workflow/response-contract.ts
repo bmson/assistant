@@ -16,6 +16,7 @@ import { calendarRelationship, calendarRelationshipNote } from './calendar-relat
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
 import type { CompoundTripExtraction } from './compound-trip-extraction.js';
 import { compoundTripReadProjection, upcomingFlightReadProjection } from './compound-trip-read.js';
+import { createdDocumentVerification } from './document-verification.js';
 import { correctFlightWriteClaims } from './flight-write-contract.js';
 import { detectFutureWatchIntent, type FutureWatchIntent } from './future-watch-intent.js';
 import {
@@ -4259,6 +4260,14 @@ export function enforceResponseContract(
       qualityFallback: true,
     };
   }
+  const documentVerification = createdDocumentVerification(opts?.requestText ?? '', evidence, text);
+  if (documentVerification)
+    return {
+      text: documentVerification.text,
+      blocked: false,
+      unsupported: [],
+      ...(documentVerification.reason ? { groundingFallback: [documentVerification.reason] } : {}),
+    };
   const completedEvent =
     /^(?:the|my)\s+(interview|meeting|appointment|event)\s+(?:(?:has\s+)?already\s+happened|happened\s+already|is\s+over)[.!]?$/i.exec(
       opts?.requestText?.trim() ?? '',

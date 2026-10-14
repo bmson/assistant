@@ -4,7 +4,13 @@ import type { ToolRegistry } from '../registry.js';
 import { boundedTextPage, sourceReadReceipt } from '../source-read-receipt.js';
 import type { AssistantTool, ToolFlags } from '../types.js';
 import { contentDigest, type GoogleClient } from './client.js';
-import { buildContentRequests } from './docs-markdown.js';
+import {
+  type DocumentStructure,
+  documentContentPlan,
+  expectedDocumentStructure,
+  tableCellContentRequests,
+} from './docs-content.js';
+import { buildContentRequests, type DocsBatchRequest } from './docs-markdown.js';
 import {
   checkpointGoogleEffect,
   type GoogleEffectReceipt,
@@ -50,8 +56,13 @@ interface DocsBatchResponse {
 }
 
 interface DocsStructuralElement {
+  startIndex?: number;
   endIndex?: number;
-  paragraph?: { elements?: Array<Record<string, unknown> & { textRun?: { content?: string } }> };
+  paragraph?: {
+    paragraphStyle?: { namedStyleType?: string };
+    bullet?: { listId?: string; nestingLevel?: number };
+    elements?: Array<Record<string, unknown> & { textRun?: { content?: string } }>;
+  };
   table?: {
     tableRows?: Array<{
       tableCells?: Array<{ content?: DocsStructuralElement[] }>;
@@ -126,6 +137,123 @@ export function documentText(doc: DocsDocument): string {
   return documentContent(doc).text.replace(/\n+$/, '');
 }
 
+/** Native styles and table cells are evidence; literal Markdown text is not. */
+export function documentStructure(doc: DocsDocument): DocumentStructure {
+  const headings: DocumentStructure['headings'] = [];
+  const bullets: string[] = [];
+  const tables: DocumentStructure['tables'] = [];
+  const bodies = doc.tabs?.length
+    ? doc.tabs.map((tab) => tab.documentTab?.body?.content ?? [])
+    : [doc.body?.content ?? []];
+  let complete = !documentContent(doc).unsupported;
+  for (const elements of bodies) {
+    for (const element of elements) {
+      if (element.paragraph) {
+        const text = textForElements([element]).text.replace(/\n+$/, '');
+        const style = element.paragraph.paragraphStyle?.namedStyleType;
+        if (text && /^HEADING_[1-6]$|^TITLE$/.test(style ?? ''))
+          headings.push({ text, style: style ?? '' });
+        if (text && element.paragraph.bullet?.listId) bullets.push(text);
+      }
+      if (element.table?.tableRows) {
+        tables.push({
+          rows: element.table.tableRows.map((row) =>
+            (row.tableCells ?? []).map((cell) =>
+              textForElements(cell.content ?? []).text.replace(/\n+$/, ''),
+            ),
+          ),
+        });
+      }
+    }
+  }
+  if (
+    headings.length +
+      bullets.length +
+      tables.reduce((count, table) => count + table.rows.flat().length, 0) >
+    2_000
+  )
+    complete = false;
+  return complete
+    ? { complete, headings, bullets, tables }
+    : { complete: false, headings: [], bullets: [], tables: [] };
+}
+
+async function writeDocumentContent(
+  client: GoogleClient,
+  id: string,
+  content: string,
+  startIndex: number,
+  leadingNewline = false,
+): Promise<DocumentStructure> {
+  const parts = documentContentPlan(content);
+  let cursor = startIndex;
+  let needsNewline = leadingNewline;
+  const batch = async (requests: DocsBatchRequest[]) => {
+    if (requests.length)
+      await client.api(`${DOCS}/${encodeURIComponent(id)}:batchUpdate`, {
+        method: 'POST',
+        body: JSON.stringify({ requests }),
+      });
+  };
+  for (const [partIndex, part] of parts.entries()) {
+    if (part.kind === 'text') {
+      const { requests, insertedLength } = buildContentRequests(part.markdown, cursor, {
+        leadingNewline: needsNewline,
+      });
+      await batch(requests);
+      cursor += insertedLength;
+      needsNewline = false;
+      continue;
+    }
+    await batch([
+      {
+        insertTable: {
+          rows: part.rows.length,
+          columns: part.rows[0]?.length ?? 0,
+          location: { index: cursor },
+        },
+      },
+    ]);
+    // Docs assigns structural indices when the table is inserted. Read those
+    // indices rather than guessing offsets for cells or mixing insert phases.
+    const inserted = await client.api<DocsDocument>(`${DOCS}/${encodeURIComponent(id)}`);
+    const table = inserted.body?.content?.find(
+      (element) => element.startIndex === cursor + 1 && element.table,
+    )?.table;
+    if (!table?.tableRows || table.tableRows.length !== part.rows.length)
+      throw new Error('The inserted native table could not be located for cell population');
+    const cells: Array<{ text: string; index: number; header: boolean }> = [];
+    for (const [rowIndex, row] of table.tableRows.entries()) {
+      const expected = part.rows[rowIndex] ?? [];
+      if (row.tableCells?.length !== expected.length)
+        throw new Error('Inserted table columns did not match the content plan');
+      for (const [columnIndex, cell] of (row.tableCells ?? []).entries()) {
+        const paragraph = cell.content?.find((element) => element.paragraph);
+        const index = paragraph?.startIndex;
+        if (!Number.isSafeInteger(index) || (index ?? 0) < 1)
+          throw new Error('Inserted table cell did not expose a valid paragraph index');
+        cells.push({
+          text: expected[columnIndex] ?? '',
+          index: index as number,
+          header: rowIndex === 0,
+        });
+      }
+    }
+    // Reverse insertion keeps every fetched cell coordinate stable.
+    await batch(
+      cells
+        .sort((left, right) => right.index - left.index)
+        .flatMap((cell) => tableCellContentRequests(cell.text, cell.index, cell.header)),
+    );
+    if (partIndex < parts.length - 1) {
+      const populated = await client.api<DocsDocument>(`${DOCS}/${encodeURIComponent(id)}`);
+      cursor = endInsertIndex(populated);
+      needsNewline = true;
+    }
+  }
+  return expectedDocumentStructure(parts);
+}
+
 /** The index just before the document's trailing newline — where appends insert. */
 export function endInsertIndex(doc: DocsDocument): number {
   const content = doc.body?.content ?? [];
@@ -146,7 +274,7 @@ export function registerDocsTools(registry: ToolRegistry, deps: DocsToolDeps): T
       .max(100_000)
       .default('')
       .describe(
-        'Document body in Markdown — rendered as real rich text: `#`..`######` headings, `-`/`*` bullets, `1.` numbered lists, **bold**, *italic*, `code`, [links](https://…), > blockquotes, fenced ``` code blocks, and | tables |. Write natural Markdown; do not paste raw URLs when a [label](url) link reads better.',
+        'Document body in Markdown — rendered as real rich text: `#`..`######` headings, `-`/`*` bullets, `1.` numbered lists, **bold**, *italic*, `code`, [links](https://…), > blockquotes, fenced ``` code blocks, and | tables |. Preserve actual newline characters between headings, list items, and every table row; never collapse Markdown into a single space-separated line. Tables become native Google Docs grids. Write natural Markdown; do not paste raw URLs when a [label](url) link reads better.',
       ),
   });
 
@@ -168,6 +296,8 @@ export function registerDocsTools(registry: ToolRegistry, deps: DocsToolDeps): T
         return toolOperationKey('docs-create', ctx, `docs-create-${ctx.taskId}-${a.title}`);
       },
       execute: async (args, ctx) => {
+        // Validate structure before creating any remote artifact.
+        documentContentPlan(args.content);
         const created = await deps.client.api<DocsDocument>(DOCS, {
           method: 'POST',
           body: JSON.stringify({ title: args.title }),
@@ -183,15 +313,7 @@ export function registerDocsTools(registry: ToolRegistry, deps: DocsToolDeps): T
         try {
           await checkpointGoogleEffect(ctx, progress);
 
-          if (args.content.trim().length > 0) {
-            const { requests } = buildContentRequests(args.content, 1);
-            if (requests.length > 0) {
-              await deps.client.api(`${DOCS}/${encodeURIComponent(id)}:batchUpdate`, {
-                method: 'POST',
-                body: JSON.stringify({ requests }),
-              });
-            }
-          }
+          const contentStructure = await writeDocumentContent(deps.client, id, args.content, 1);
 
           progress.stage = 'filled';
           await checkpointGoogleEffect(ctx, progress);
@@ -214,6 +336,7 @@ export function registerDocsTools(registry: ToolRegistry, deps: DocsToolDeps): T
             title: args.title,
             url: docUrl(id),
             sharedWith: deps.ownerEmail,
+            contentStructure,
           };
         } catch (error) {
           throw new PartialGoogleArtifactError({ ...progress }, error);
@@ -250,16 +373,19 @@ export function registerDocsTools(registry: ToolRegistry, deps: DocsToolDeps): T
         const doc = await deps.client.api<DocsDocument>(
           `${DOCS}/${encodeURIComponent(args.documentId)}`,
         );
-        const { requests } = buildContentRequests(args.content, endInsertIndex(doc), {
-          leadingNewline: true,
-        });
-        if (requests.length > 0) {
-          await deps.client.api(`${DOCS}/${encodeURIComponent(args.documentId)}:batchUpdate`, {
-            method: 'POST',
-            body: JSON.stringify({ requests }),
-          });
-        }
-        return { documentId: args.documentId, url: docUrl(args.documentId), appended: true };
+        const contentStructure = await writeDocumentContent(
+          deps.client,
+          args.documentId,
+          args.content,
+          endInsertIndex(doc),
+          true,
+        );
+        return {
+          documentId: args.documentId,
+          url: docUrl(args.documentId),
+          appended: true,
+          contentStructure,
+        };
       },
     },
     { privateWrite: true, outwardFacing: true, networkEgress: true, blanketAllowIneligible: true },
@@ -397,6 +523,10 @@ export function registerDocsTools(registry: ToolRegistry, deps: DocsToolDeps): T
           text: page.text,
           complete,
           truncated: !complete,
+          structure:
+            startOffset === 0 && complete
+              ? documentStructure(doc)
+              : { complete: false, headings: [], bullets: [], tables: [] },
           receipt: sourceReadReceipt({
             version: 1,
             source: {

@@ -49,6 +49,7 @@ import {
   compoundTripThreadReadInputs,
   MAX_COMPOUND_TRIP_TOOL_CALLS,
 } from '../compound-trip-read.js';
+import { nextCreatedDocumentRead } from '../document-verification.js';
 import {
   boundEmailReviewThreads,
   EMAIL_REVIEW_MAX_CANDIDATES,
@@ -1323,6 +1324,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       : [];
     const mustRecordGoalProgress = needsGoalProgressUpdate(goalToolEvidence);
     const allReadToolEvidence: Array<ReadToolEvidence & { id: string }> =
+      artifactIntent?.toolName === 'docs.create' ||
       readRequest ||
       situationRequest ||
       liveLookup ||
@@ -2349,6 +2351,9 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         ? '\nThe owner wants information saved. Use memory.save for supplied facts/preferences or occasions.save for supplied dates. Save only owner-provided or verified details, never an earlier assistant guess. If the actual order or fact is missing, ask for it instead of inventing it. Multiple independent saves may share a tool turn; preserve blank dates and deceased markers instead of guessing. Report confirmed saves and unfinished work separately.'
         : '',
       readRequest ? readLookupDirective(readRequest) : '',
+      artifactIntent?.toolName === 'docs.create'
+        ? '\nFor docs.create.content, preserve actual newline characters between headings, each bullet, and every Markdown table row. Native formatting must be checked through docs.get structural evidence; literal Markdown markers in text are not proof of bullets or tables.'
+        : '',
       rc.checklistCorrection
         ? `\nThis is a task-bound owner correction. Use only the runtime-selected private read for the currently pending checklist item. Do not use the original stale plan, add targets, or perform writes. Keep unrelated active lookup siblings in the checklist and do not replay completed or cancelled items.`
         : rc.checklistCancellation
@@ -2412,6 +2417,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         { description: def.description, inputSchema: def.inputSchema },
       ]),
     );
+    const documentVerificationInput = nextCreatedDocumentRead(ownerText, readToolEvidence);
     const forcedArtifact = !mustRecordGoalProgress && state.step === 0 ? artifactIntent : undefined;
     if (forcedLiveLookup && !toolDefs.some((tool) => tool.name === forcedLiveLookup.toolName)) {
       const text = `I couldn't run the live lookup because ${forcedLiveLookup.toolName} is unavailable.`;
@@ -2595,6 +2601,21 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           toolName: boundedForcedReadTool,
           input: readInput,
         })),
+        finishReason: 'tool-calls',
+      };
+    } else if (documentVerificationInput && toolDefs.some((tool) => tool.name === 'docs.get')) {
+      stepResult = {
+        ok: true,
+        modelId: 'runtime/document-verification-router',
+        degraded: false,
+        text: '',
+        toolCalls: [
+          {
+            toolCallId: `runtime-document-readback-${task.id}-${state.step + 1}`,
+            toolName: 'docs.get',
+            input: documentVerificationInput,
+          },
+        ],
         finishReason: 'tool-calls',
       };
     } else {
