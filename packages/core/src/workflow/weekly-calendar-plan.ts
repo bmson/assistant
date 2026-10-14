@@ -6,6 +6,7 @@ const TRAVEL_MS = 30 * 60_000;
 const MAX_EVENT_PAGES = 3;
 
 type PlainRecord = Record<string, unknown>;
+type BusyInterval = { start: number; end: number; calendar?: string };
 
 function record(value: unknown): PlainRecord | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -188,6 +189,67 @@ function isExtendedLodging(event: PlainRecord, interval: { start: number; end: n
   );
 }
 
+/**
+ * A complete event listing can explain a free/busy interval that represents a
+ * multi-day lodging record. This is used only to generate conditional review
+ * candidates; the provider's busy result is retained and disclosed.
+ */
+function lodgingExplanationForBusy(
+  busy: BusyInterval,
+  events: PlainRecord[],
+  availabilityResult: PlainRecord | undefined,
+  eventComplete: boolean,
+): PlainRecord | undefined {
+  if (!eventComplete || !busy.calendar) return undefined;
+  const checked = Array.isArray(availabilityResult?.calendarsChecked)
+    ? availabilityResult.calendarsChecked.filter((value) => value === busy.calendar)
+    : [];
+  if (checked.length !== 1) return undefined;
+
+  const calendarEvents = events.filter(
+    (event) => event.calendar === busy.calendar || event.calendarId === busy.calendar,
+  );
+  if (calendarEvents.length === 0) return undefined;
+  const calendarIdentities = new Set(
+    calendarEvents
+      .map((event) =>
+        typeof event.calendarId === 'string'
+          ? event.calendarId
+          : typeof event.calendar === 'string'
+            ? event.calendar
+            : '',
+      )
+      .filter(Boolean),
+  );
+  if (calendarIdentities.size !== 1) return undefined;
+
+  const lodging = calendarEvents.filter((event) => {
+    const interval = parseEventInterval(event);
+    return (
+      interval !== undefined &&
+      attendance(event) !== 'not-attending' &&
+      interval.start <= busy.start &&
+      interval.end >= busy.end &&
+      isExtendedLodging(event, interval)
+    );
+  });
+  if (lodging.length === 0) return undefined;
+
+  // A separate event on the same calendar may be hidden inside the provider's
+  // merged busy interval. Keep that interval blocking unless all such events
+  // are themselves identified lodging records.
+  const blockingOthers = calendarEvents.filter((event) => {
+    const interval = parseEventInterval(event);
+    return (
+      !lodging.includes(event) &&
+      attendance(event) !== 'not-attending' &&
+      (event.allDay === true || (interval !== undefined && overlap(interval, busy)))
+    );
+  });
+  if (blockingOthers.length > 0) return undefined;
+  return lodging[0];
+}
+
 export interface WeeklyCalendarPlanResult {
   text: string;
   coverageComplete: boolean;
@@ -257,6 +319,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       `I can review ${windowLabel}, but your time zone setting is invalid, so I can’t safely suggest focus times.`,
     );
   }
+  const timeZone = input.timeZone;
 
   const availabilityRows = input.evidence.filter((row) => {
     const args = record(row.args);
@@ -280,11 +343,15 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         (dateMs(item?.end) as number) > (dateMs(item?.start) as number)
       );
     });
-  const busy = busyValid
+  const busy: BusyInterval[] = busyValid
     ? (busyRaw as unknown[]).flatMap((value) => {
         const item = record(value);
         const interval = item
-          ? { start: dateMs(item.start) as number, end: dateMs(item.end) as number }
+          ? {
+              start: dateMs(item.start) as number,
+              end: dateMs(item.end) as number,
+              ...(typeof item.calendar === 'string' ? { calendar: item.calendar } : {}),
+            }
           : undefined;
         return interval ? [interval] : [];
       })
@@ -398,11 +465,25 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       ),
     });
   }
-  const busyMerged = mergeIntervals([...busy, ...eventBusy]);
+  const explainedLodgingBusy = new Map<BusyInterval, PlainRecord>();
+  for (const interval of busy) {
+    const lodging = lodgingExplanationForBusy(
+      interval,
+      uniqueEvents,
+      availabilityResult,
+      eventComplete,
+    );
+    if (lodging) explainedLodgingBusy.set(interval, lodging);
+  }
+  const candidateBusy = busy.filter((interval) => !explainedLodgingBusy.has(interval));
+  const busyMerged = mergeIntervals([...candidateBusy, ...eventBusy]);
 
   const dayStats = new Map<
     string,
-    { busyMs: number; candidates: Array<{ start: number; end: number }> }
+    {
+      busyMs: number;
+      candidates: Array<{ start: number; end: number; lodgingConditions: string[] }>;
+    }
   >();
   for (let at = start; at + focusMs + breakMs <= end; at += SLOT_MS) {
     const parts = localParts(at, input.timeZone);
@@ -422,8 +503,21 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     )
       continue;
     const candidate = { start: at, end: occupiedEnd };
-    if (busyValid && !busyMerged.some((interval) => overlap(interval, candidate)))
-      day.candidates.push(candidate);
+    if (busyValid && !busyMerged.some((interval) => overlap(interval, candidate))) {
+      const lodgingConditions = [
+        ...new Set(
+          busy
+            .filter(
+              (interval) => explainedLodgingBusy.has(interval) && overlap(interval, candidate),
+            )
+            .flatMap((interval) => {
+              const lodging = explainedLodgingBusy.get(interval);
+              return lodging ? [eventTitle(lodging)] : [];
+            }),
+        ),
+      ];
+      day.candidates.push({ ...candidate, lodgingConditions });
+    }
   }
 
   for (let at = start; at < end; at += SLOT_MS) {
@@ -438,7 +532,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const rankedDays = [...dayStats.entries()]
     .filter(([, stats]) => stats.candidates.length > 0)
     .sort((a, b) => a[1].busyMs - b[1].busyMs || a[0].localeCompare(b[0]));
-  const chosen: Array<{ start: number; end: number }> = [];
+  const chosen: Array<{ start: number; end: number; lodgingConditions: string[] }> = [];
   for (const [, stats] of rankedDays) {
     if (chosen.length >= requestedSlots) break;
     const first = stats.candidates[0];
@@ -517,6 +611,31 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const lines = [
     `Here’s a review-only plan for ${windowLabel} in ${input.timeZone}. I haven’t changed your calendar.`,
   ];
+  const conditionalStayNames = [...new Set(chosen.flatMap((slot) => slot.lodgingConditions))];
+  if (conditionalStayNames.length > 0) {
+    const conditionalStayNameSet = new Set(conditionalStayNames);
+    const stayDetails = [
+      ...new Map(
+        [...explainedLodgingBusy.values()].flatMap((event) => {
+          const interval = parseEventInterval(event);
+          const title = eventTitle(event);
+          return interval
+            ? conditionalStayNameSet.has(title)
+              ? [
+                  [
+                    title,
+                    `${title} (${labelTime(interval.start, timeZone)}–${labelTime(interval.end, timeZone)})`,
+                  ] as const,
+                ]
+              : []
+            : [];
+        }),
+      ).values(),
+    ];
+    lines.push(
+      `The availability feed still marks time busy across this window because it overlaps ${stayDetails.join(', ') || conditionalStayNames.join(', ')}. Candidates marked conditional assume this stay is lodging context rather than an all-day work hold; the provider still reports busy, so those times are not confirmed free.`,
+    );
+  }
   if (!complete) {
     lines.push(
       'Coverage is incomplete, so any times below are tentative and not confirmed free. Confirm the missing calendars before relying on this review.',
@@ -571,11 +690,15 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         : 'I did not suggest focus times because usable free/busy intervals were unavailable. Please confirm coverage before choosing a time.',
     );
   } else {
-    lines.push('Tentative focus blocks:');
+    lines.push(
+      conditionalStayNames.length > 0 || !complete
+        ? 'Focus candidates for review (not availability-cleared):'
+        : 'Tentative focus blocks:',
+    );
     for (const slot of chosen) {
       const focusEnd = slot.start + focusMs;
       lines.push(
-        `- ${labelTime(slot.start, input.timeZone)}–${new Intl.DateTimeFormat('en-US', { timeZone: input.timeZone, hour: 'numeric', minute: '2-digit' }).format(new Date(focusEnd))} (${focusMs / 60_000} minutes), then a ${breakMs / 60_000}-minute break.`,
+        `- ${labelTime(slot.start, input.timeZone)}–${new Intl.DateTimeFormat('en-US', { timeZone: input.timeZone, hour: 'numeric', minute: '2-digit' }).format(new Date(focusEnd))} (${focusMs / 60_000} minutes), then a ${breakMs / 60_000}-minute break.${slot.lodgingConditions.length > 0 ? ` Conditional on treating ${slot.lodgingConditions.join(', ')} as lodging context; free/busy still reports busy.` : ''}`,
       );
     }
   }
