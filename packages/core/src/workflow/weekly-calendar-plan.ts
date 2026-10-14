@@ -7,7 +7,7 @@ const TRAVEL_MS = 30 * 60_000;
 const MAX_EVENT_PAGES = 3;
 
 type PlainRecord = Record<string, unknown>;
-type BusyInterval = { start: number; end: number; calendar?: string };
+type BusyInterval = { start: number; end: number; calendar?: string; calendarId?: string };
 
 function record(value: unknown): PlainRecord | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -222,13 +222,25 @@ function lodgingExplanationForBusy(
   eventComplete: boolean,
 ): PlainRecord | undefined {
   if (!eventComplete || !busy.calendar) return undefined;
-  const checked = Array.isArray(availabilityResult?.calendarsChecked)
-    ? availabilityResult.calendarsChecked.filter((value) => value === busy.calendar)
+  const identityCoverage = Array.isArray(availabilityResult?.calendarCoverage)
+    ? availabilityResult.calendarCoverage
     : [];
+  if (
+    busy.calendarId &&
+    identityCoverage.filter((value) => record(value)?.calendarId === busy.calendarId).length !== 1
+  )
+    return undefined;
+  const checked = busy.calendarId
+    ? [busy.calendarId]
+    : Array.isArray(availabilityResult?.calendarsChecked)
+      ? availabilityResult.calendarsChecked.filter((value) => value === busy.calendar)
+      : [];
   if (checked.length !== 1) return undefined;
 
-  const calendarEvents = events.filter(
-    (event) => event.calendar === busy.calendar || event.calendarId === busy.calendar,
+  const calendarEvents = events.filter((event) =>
+    busy.calendarId
+      ? event.calendarId === busy.calendarId
+      : event.calendar === busy.calendar || event.calendarId === busy.calendar,
   );
   if (calendarEvents.length === 0) return undefined;
   const calendarIdentities = new Set(
@@ -298,6 +310,103 @@ function lodgingExplanationForBusy(
   });
   if (declinedBusyEvent) return undefined;
   return lodging[0];
+}
+
+/** Recover only provider-unavailable IDs from a complete, exact-window event ledger.
+ * Missing identity/roster, malformed data and unknown transparency fail closed.
+ * Returned provider busy intervals remain authoritative and are never removed here.
+ */
+function recoverUnavailableCalendarBusy(
+  availability: PlainRecord | undefined,
+  eventRows: ActionEvidence[],
+  eventComplete: boolean,
+  events: PlainRecord[],
+  timeMin: string,
+  timeMax: string,
+): { names: string[]; busy: BusyInterval[] } | undefined {
+  const window = record(availability?.coverageWindow);
+  const requested = availability?.calendarIdsRequested;
+  const coverage = availability?.calendarCoverage;
+  if (
+    !eventComplete ||
+    availability?.complete !== false ||
+    availability.calendarRosterComplete !== true ||
+    availability.calendarRosterNextPageToken !== undefined ||
+    window?.timeMin !== timeMin ||
+    window.timeMax !== timeMax ||
+    !Array.isArray(requested) ||
+    requested.length === 0 ||
+    !requested.every((id) => typeof id === 'string' && id.length > 0) ||
+    new Set(requested).size !== requested.length ||
+    !Array.isArray(coverage) ||
+    coverage.length !== requested.length
+  )
+    return undefined;
+  const byId = new Map<string, PlainRecord>();
+  for (const value of coverage) {
+    const item = record(value);
+    if (
+      !item ||
+      typeof item.calendarId !== 'string' ||
+      !requested.includes(item.calendarId) ||
+      byId.has(item.calendarId) ||
+      typeof item.name !== 'string' ||
+      !item.name ||
+      !['checked', 'unavailable'].includes(String(item.status))
+    )
+      return undefined;
+    byId.set(item.calendarId, item);
+  }
+  const failed = [...byId.values()].filter((item) => item.status === 'unavailable');
+  if (failed.length === 0) return undefined;
+  for (const row of eventRows) {
+    const result = resultOf(row);
+    const ids = result?.calendarsSearchedIds;
+    const resolved = result?.calendarsResolved;
+    if (
+      result?.calendarRosterComplete !== true ||
+      !Array.isArray(result.unavailable) ||
+      result.unavailable.length !== 0 ||
+      result.paginationUnavailable === true ||
+      result.calendarRosterNextPageToken !== undefined ||
+      !Array.isArray(ids) ||
+      ids.length !== requested.length ||
+      new Set(ids).size !== ids.length ||
+      !requested.every((id) => ids.includes(id)) ||
+      !Array.isArray(resolved) ||
+      resolved.length !== requested.length ||
+      new Set(resolved.map((item) => record(item)?.id)).size !== requested.length ||
+      !requested.every((id) => resolved.some((item) => record(item)?.id === id))
+    )
+      return undefined;
+  }
+  const recovered: BusyInterval[] = [];
+  for (const event of events) {
+    const id = typeof event.calendarId === 'string' ? event.calendarId : '';
+    // Validate every row: a malformed or unidentified row cannot establish a
+    // complete source, even if it purports to be transparent or cancelled.
+    const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(String(event.start));
+    const instant = (value: unknown) =>
+      typeof value === 'string' && /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+    const interval = calendarSourceInterval(event);
+    if (
+      !byId.has(id) ||
+      typeof event.blocksTime !== 'boolean' ||
+      !interval ||
+      (event.allDay === true && !dateOnly) ||
+      (dateOnly && event.allDay !== true) ||
+      (!dateOnly && (!instant(event.start) || !instant(event.end)))
+    )
+      return undefined;
+    if (
+      byId.get(id)?.status !== 'unavailable' ||
+      event.blocksTime === false ||
+      event.status === 'cancelled'
+    )
+      continue;
+    recovered.push({ ...interval, calendar: String(byId.get(id)?.name), calendarId: id });
+  }
+  return { names: failed.map((item) => safeText(item.name, 100)), busy: recovered };
 }
 
 export interface WeeklyCalendarPlanResult {
@@ -398,7 +507,11 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const availability = availabilityRows.at(-1);
   const availabilityResult = availability ? resultOf(availability) : undefined;
   const busyRaw = availabilityResult?.busy;
+  const providerMalformed =
+    Array.isArray(availabilityResult?.calendarCoverage) &&
+    availabilityResult.calendarCoverage.some((value) => record(value)?.status === 'malformed');
   const busyValid =
+    !providerMalformed &&
     Array.isArray(busyRaw) &&
     busyRaw.every((value) => {
       const item = record(value);
@@ -416,6 +529,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
               start: dateMs(item.start) as number,
               end: dateMs(item.end) as number,
               ...(typeof item.calendar === 'string' ? { calendar: item.calendar } : {}),
+              ...(typeof item.calendarId === 'string' ? { calendarId: item.calendarId } : {}),
             }
           : undefined;
         return interval ? [interval] : [];
@@ -504,7 +618,18 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     .map((value) => safeText(value, 100))
     .filter(Boolean)
     .slice(0, 5);
-  const complete = availabilityComplete && eventComplete;
+  const recoveredCoverage = busyValid
+    ? recoverUnavailableCalendarBusy(
+        availabilityResult,
+        allPages,
+        eventComplete,
+        events,
+        input.timeMin,
+        input.timeMax,
+      )
+    : undefined;
+  if (recoveredCoverage) busy.push(...recoveredCoverage.busy);
+  const complete = (availabilityComplete || recoveredCoverage !== undefined) && eventComplete;
 
   const eventBusy: Array<{ start: number; end: number }> = [];
   const eventBusySources: Array<{
@@ -513,7 +638,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   }> = [];
   let travelBufferCount = 0;
   let potentialTravelBufferCount = 0;
-  for (const event of uniqueEvents) {
+  for (const event of events) {
     const interval = parseEventInterval(event);
     if (
       !interval ||
@@ -690,7 +815,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         if (right.presence === 'potential') potentialAttendanceEvents.push(eventTitle(right.event));
       }
       conflictPairs.push(
-        `${verified && !uncertainLongContext ? 'Scheduling conflict' : 'Possible overlap'}: ${pair} (${labelTime(Math.max(left.interval.start, right.interval.start), input.timeZone)}).`,
+        `${verified && !uncertainLongContext ? 'Scheduling conflict' : 'Possible overlap'}: ${pair} (${labelTime(Math.max(left.interval.start, right.interval.start), input.timeZone)}). Sources: ${calendarSourceReference(left.event)}; ${calendarSourceReference(right.event)}.`,
       );
     }
   }
@@ -790,13 +915,27 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       `The availability feed still marks time busy across this window because it overlaps ${stayDetails.join(', ') || conditionalStayNames.join(', ')}. Candidates marked conditional assume this stay is lodging context rather than an all-day work hold; the provider still reports busy, so those times are not confirmed free.`,
     );
   }
+  if (recoveredCoverage)
+    lines.push(
+      `Free/busy was unavailable for ${recoveredCoverage.names.join(', ')}. I reconstructed their blocking intervals from the complete event listing for this exact window; this is an event-list fallback, not an independent free/busy confirmation.`,
+    );
+  if (allDayBusySources.length > 0)
+    lines.push(
+      `All-day busy holds included in the load estimates: ${allDayBusySources
+        .slice(0, 3)
+        .map(
+          ({ event, interval }) =>
+            `${calendarSourceReference(event)} (${labelTime(interval.start, timeZone)}–${labelTime(interval.end, timeZone)})`,
+        )
+        .join('; ')}. These records block time but do not establish continuous meeting attendance.`,
+    );
   if (!complete) {
     lines.push(
       'Coverage is incomplete, so any times below are tentative and not confirmed free. Confirm the missing calendars before relying on this review.',
     );
     if (unavailableCalendars.length > 0)
       lines.push(
-        `Unavailable calendar coverage: ${[...new Set(unavailableCalendars)].join(', ')}.`,
+        `Unavailable free/busy or event coverage: ${[...new Set(unavailableCalendars)].join(', ')}.`,
       );
     else if (!availabilityComplete) lines.push('Free/busy coverage could not be fully verified.');
     else lines.push('The event list is incomplete or reached its bounded page limit.');

@@ -1595,7 +1595,28 @@ function calendarAllDayWindowLabel(
     startDay === endDay
       ? `${startDay} ${overlapClock(overlapStart, zone)}–${overlapClock(overlapEnd, zone)}`
       : `${startDay} ${overlapClock(overlapStart, zone)}–${endDay} ${overlapClock(overlapEnd, zone)}`;
-  return `${range} (${sourceNote})`;
+  const clipping =
+    overlapEnd < interval.end
+      ? `; continues until ${intervalDateTime(new Date(interval.end).toISOString(), zone)}`
+      : '';
+  return `All-day record · ${range} within requested window (${sourceNote}${clipping})`;
+}
+
+function calendarLodgingContext(event: Record<string, unknown>, complete: boolean): boolean {
+  const interval = calendarSourceInterval(event);
+  const description = stringField(event, 'description');
+  return (
+    complete &&
+    interval !== undefined &&
+    interval.end - interval.start >= 18 * 60 * 60_000 &&
+    /\b(?:hotel|lodging|accommodation|overnight)\b/i.test(
+      `${stringField(event, 'summary')} ${description}`,
+    ) &&
+    /\bcheck[ -]?in\b/i.test(description) &&
+    /\bcheck[ -]?out\b/i.test(description) &&
+    /(?:Z|[+-]\d{2}:?\d{2})$/i.test(stringField(event, 'start')) &&
+    /(?:Z|[+-]\d{2}:?\d{2})$/i.test(stringField(event, 'end'))
+  );
 }
 
 function calendarOverlapSummary(
@@ -1615,18 +1636,7 @@ function calendarOverlapSummary(
     const rawStart = stringField(event, 'start');
     const rawEnd = stringField(event, 'end');
     const interval = calendarSourceInterval(event);
-    const description = stringField(event, 'description');
-    const explicitStayContext =
-      complete &&
-      interval !== undefined &&
-      interval.end - interval.start >= 18 * 60 * 60_000 &&
-      /\b(?:hotel|lodging|accommodation|overnight)\b/i.test(
-        `${stringField(event, 'summary')} ${description}`,
-      ) &&
-      /\bcheck[ -]?in\b/i.test(description) &&
-      /\bcheck[ -]?out\b/i.test(description) &&
-      /(?:Z|[+-]\d{2}:?\d{2})$/i.test(rawStart) &&
-      /(?:Z|[+-]\d{2}:?\d{2})$/i.test(rawEnd);
+    const explicitStayContext = calendarLodgingContext(event, complete);
     // All-day records have no timed meeting interval. A multi-day stay is
     // treated as context only when complete event details explicitly supply
     // check-in/check-out and offset-aware boundaries; title alone is not proof.
@@ -3752,10 +3762,35 @@ export function verifiedReadResponse(
           );
         }
       }
+      if (request.includeCalendarBriefing) {
+        const stays = agendaEvents.filter((event) => calendarLodgingContext(event, complete));
+        for (const stay of stays)
+          lines.push(
+            `Lodging context: **${stringField(stay, 'summary')}** has explicit check-in/check-out details, so its multi-night span is excluded from timed appointment overlaps.${stay.blocksTime === true ? ' The calendar still marks this stay as busy; this does not establish free time.' : ''}`,
+          );
+      }
       if (request.includeCalendarOverlapSummary) {
         lines.push(...calendarOverlapSummary(agendaEvents, request, complete));
         if (sourceDateEvents.length > 0)
           lines.push('Source-date-only entries could not be compared for local-time overlaps.');
+      }
+      if (request.includeCalendarBriefing) {
+        const firstAppointment = agendaEvents.find(
+          (event) =>
+            event.allDay !== true &&
+            !/^\d{4}-\d{2}-\d{2}$/.test(stringField(event, 'start')) &&
+            event.blocksTime !== false &&
+            stringField(event, 'ownerResponse') !== 'declined' &&
+            !calendarLodgingContext(event, complete),
+        );
+        const next = firstAppointment
+          ? `Check whether you need to attend **${stringField(firstAppointment, 'summary')}**, then review its source details for preparation${stringField(firstAppointment, 'location') ? ' and travel' : ''}.`
+          : sourceDateEvents.length > 0 || !complete
+            ? 'Confirm the unresolved calendar dates or coverage before relying on this briefing.'
+            : agendaEvents.length > 0
+              ? 'Review the source details of the all-day records and confirm whether they require your attention.'
+              : 'Review your priorities for the day before choosing your next task.';
+        lines.push(`Next step: ${next}`);
       }
       if (!complete || unavailable.length > 0) {
         lines.push(
