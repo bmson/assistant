@@ -730,6 +730,30 @@ ${body}`;
         rows,
       ),
     ).toEqual([]);
+    expect(
+      publicWebClaimFindings(
+        'Not all options use the underground station; buses use street stops.',
+        rows,
+      ),
+    ).toEqual([]);
+  });
+
+  it('attaches coordinated destinations to their own explicit service subjects', () => {
+    const rows = [
+      {
+        toolName: 'web.fetch',
+        status: 'succeeded',
+        result: {
+          status: 200,
+          truncated: false,
+          text: 'R10\n- Route: Central - Airport\nR20\n- Route: West - Airport',
+        },
+      },
+    ];
+    expect(publicWebClaimFindings('R10 goes to Central and R20 goes to West.', rows)).toEqual([]);
+    expect(publicWebClaimFindings('R10 and R20 go to Central.', rows)).toEqual(
+      expect.arrayContaining([expect.stringContaining('R20: the shared origin/stop')]),
+    );
   });
 
   it('enforces a requested short overview with one shared bounded correction', async () => {

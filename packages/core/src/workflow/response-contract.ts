@@ -32,6 +32,7 @@ import {
 import { personCalendarResponse } from './person-calendar.js';
 import { matchesHistoricalMemorySearch, type PersonalReadRequest } from './read-intent.js';
 import { effectiveReminders } from './reminder-state.js';
+import { weatherLookupResponseCards } from './response-cards.js';
 import { isDurableSave, isMemoryWriteRequest, savedWorkSummary } from './saved-work.js';
 import {
   weeklyCalendarPlan as renderWeeklyCalendarPlan,
@@ -108,6 +109,8 @@ interface ResponseContractOptions {
   urlCorpus?: string;
   /** Deterministically detected from the latest owner turn. */
   readRequest?: PersonalReadRequest | null;
+  /** A companion weather lookup was explicitly requested in this owner turn. */
+  companionWeather?: boolean;
   /** Task-local, quote-validated facts extracted from complete booking messages. */
   compoundTripExtraction?: CompoundTripExtraction;
   /**
@@ -4545,6 +4548,28 @@ export function enforceResponseContract(
       : flightCorrection.text;
   const readGrounding = enforcePersonalReadGrounding(text, evidence, opts);
   if (readGrounding) {
+    if (opts?.readRequest?.includeCalendarBriefing && opts.companionWeather) {
+      // Reuse the same current-task weather projection as the card. Never let
+      // mixed prose weaken calendar attendance/identity gates or erase a
+      // successful companion answer when the agenda falls back to checked rows.
+      const weather = weatherLookupResponseCards(evidence)
+        .map((card) => {
+          const rows = Array.isArray(card.details) ? card.details.map(record).filter(Boolean) : [];
+          const day = rows.find((row) => row && stringField(row, 'label') === 'Day');
+          const label = card.current
+            ? 'Current weather'
+            : `Weather${day ? ` for ${stringField(day, 'value')}` : ''}`;
+          const location = stringField(card, 'location');
+          const values = [stringField(card, 'temperature'), stringField(card, 'condition')].filter(
+            Boolean,
+          );
+          return values.length
+            ? `${label}${location ? ` in ${compactEventTitleLink(location, '')}` : ''}: ${values.map((value) => compactEventTitleLink(value, '')).join(', ')}.`
+            : '';
+        })
+        .filter(Boolean);
+      if (weather.length) readGrounding.text = `${readGrounding.text}\n\n${weather.join('\n')}`;
+    }
     // A request-scoped successful flight update takes precedence over the
     // earlier read snapshot, including when the model already used its time.
     if (opts?.readRequest?.answerFocus === 'flight' && flightCorrection.flightUpdateReceipt)

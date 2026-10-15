@@ -128,7 +128,6 @@ import {
   type PersonalReadRequest,
   type ReadToolEvidence,
   readIntentText,
-  withCompanionLiveLookups,
 } from '../read-intent.js';
 import {
   bindReminderEventDependency,
@@ -572,7 +571,6 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           timeZone: requestTimeZone,
         })
       : null;
-  readRequest = withCompanionLiveLookups(readRequest, liveLookups.length > 0);
   if (readRequest?.emailReview) {
     const persisted = state.plannerState.emailReview;
     if (persisted && typeof persisted === 'object' && !Array.isArray(persisted)) {

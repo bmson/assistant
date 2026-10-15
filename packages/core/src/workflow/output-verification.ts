@@ -244,9 +244,17 @@ export function publicWebClaimFindings(
   const sources = successfulWebSources(evidence);
   // An introduction cannot give every transport mode the train station's
   // location when the same source explicitly puts buses at surface stops.
+  const universalStation = [
+    ...claims.matchAll(
+      /\b(?:all|every|each|both)\s+(?:(?:three|the|these|public|main)\s+){0,3}(?:serv(?:e|ing)|(?:options?|services?|modes?|routes?)\b)[^.!?\n]{0,90}\b(?:beneath|underground|below ground)\b/gi,
+    ),
+  ];
   if (
-    /\b(?:all|every|each|both)\s+(?:(?:three|the|these|public|main)\s+){0,3}(?:serv(?:e|ing)|(?:options?|services?|modes?|routes?)\b)[^.!?\n]{0,90}\b(?:beneath|underground|below ground)\b/i.test(
-      claims,
+    universalStation.some(
+      (match) =>
+        !/\b(?:not|never|aren['’]t|weren['’]t)\s*$/i.test(
+          claims.slice(Math.max(0, match.index - 30), match.index),
+        ),
     ) &&
     sources.some((source) =>
       /\bbus(?:es)?\s+stops?\b[^.!?\n]{0,100}\b(?:arrivals|street|surface|ground)\b/i.test(
@@ -325,11 +333,16 @@ export function publicWebClaimFindings(
       .replace(/[–—]/g, '-')
       .replace(/\s+/g, ' ');
   let comparedUnits = 0;
+  const subjects = [...new Set(passages.map((passage) => passage.label))]
+    .map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|');
+  const units = new RegExp(
+    `;\\s*|,\\s*(?:while|whereas|but)\\s+|(?<=[.!?])\\s+(?=[A-Z*])${subjects ? `|\\s+(?:and|while|whereas|but)\\s+(?=(?:the\\s+)?(?:${subjects})\\s+(?:go(?:es)?|runs?|serves?|connects?|departs?|stops?|travels?|leaves?|reaches?)\\b)` : ''}`,
+    'u',
+  );
   for (const topic of claims.split(/\n\s*-\s+|\n{2,}|\n\s*(?=#{1,6}\s)/).slice(0, 48)) {
     let previousNamed: string[] = [];
-    for (const unit of topic
-      .replace(/\be\.g\./gi, 'for example')
-      .split(/;\s*|,\s*(?:while|whereas|but)\s+|(?<=[.!?])\s+(?=[A-Z*])/u)) {
+    for (const unit of topic.replace(/\be\.g\./gi, 'for example').split(units)) {
       if (++comparedUnits > 48) break;
       let named = [
         ...new Set(

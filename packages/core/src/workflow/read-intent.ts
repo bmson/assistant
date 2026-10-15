@@ -2244,20 +2244,6 @@ function explicitSourceChild(
   return children.find((child) => nextRequiredReadTool(child, evidence));
 }
 
-/** Exclusive agenda projection cannot erase a separately requested live answer. */
-export function withCompanionLiveLookups(
-  request: PersonalReadRequest | null,
-  hasLiveLookups: boolean,
-): PersonalReadRequest | null {
-  if (!hasLiveLookups || !request?.includeCalendarBriefing) return request;
-  const {
-    includeCalendarBriefing: _briefing,
-    compactCalendarBriefing: _compact,
-    ...combined
-  } = request;
-  return combined;
-}
-
 export function detectPersonalReadRequest(
   messages: ReadonlyArray<ReadIntentMessage>,
   options: PersonalReadDetectionOptions = {},

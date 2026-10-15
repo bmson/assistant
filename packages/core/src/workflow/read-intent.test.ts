@@ -13,7 +13,6 @@ import {
   type ReadToolEvidence,
   resolveTemporalIntent,
   resolveTimeWindow,
-  withCompanionLiveLookups,
 } from './read-intent.js';
 
 const turn = (text: string, prior = '') => [
@@ -1069,18 +1068,13 @@ describe('detectPersonalReadRequest', () => {
     expect(excluded?.includeCalendarOverlapSummary).toBeUndefined();
   });
 
-  it('keeps companion live results outside an exclusive calendar-only projection', () => {
+  it('retains checked agenda grounding when a request also asks about weather', () => {
     const request = detectPersonalReadRequest(
       turn("What's on my calendar tomorrow and what's the weather?"),
     );
     expect(request?.includeCalendarBriefing).toBe(true);
-    const combined = withCompanionLiveLookups(request, true);
-    expect(combined?.includeCalendarBriefing).toBeUndefined();
-    expect(combined?.compactCalendarBriefing).toBeUndefined();
-    expect(combined?.includeCalendarOverlapSummary).toBe(true);
-    expect(combined?.firstToolName).toBe('calendar.list_events');
-    expect(withCompanionLiveLookups(request, false)).toBe(request);
-    expect(request?.includeCalendarBriefing).toBe(true);
+    expect(request?.compactCalendarBriefing).toBe(true);
+    expect(request?.includeCalendarOverlapSummary).toBe(true);
   });
 
   it('detects a concise practical calendar briefing without coupling to a named skill', () => {

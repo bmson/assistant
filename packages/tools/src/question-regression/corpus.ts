@@ -327,6 +327,26 @@ export const QUESTION_CASES: QuestionCase[] = [
     },
   },
   {
+    id: 'calendar-weather-does-not-invent-attendance',
+    records: [],
+    request: "What's on my calendar tomorrow and what's the weather?",
+    calendar: 'next-meeting',
+    weather: 'current',
+    script: [
+      { toolCalls: [{ toolName: 'weather.lookup', input: { place: 'San Francisco' } }] },
+      {
+        text: 'You are attending Design review tomorrow at Oracle Park. It is 18°C and cloudy in San Francisco.',
+      },
+    ],
+    expect: {
+      matches: ['Design review', '18°C', 'cloudy'],
+      excludes: ['You are attending'],
+      tools: ['calendar.list_events', 'weather.lookup'],
+      responseCardKinds: ['weather'],
+      forbiddenResponseCardKinds: ['calendar-event'],
+    },
+  },
+  {
     id: 'calendar-and-failed-weather',
     records: [],
     request: "What's on my calendar tomorrow and what's the weather?",
@@ -342,8 +362,7 @@ export const QUESTION_CASES: QuestionCase[] = [
       tools: ['calendar.list_events'],
       failedTools: ['weather.lookup'],
       statuses: ['needs_attention'],
-      responseCardKinds: ['calendar-event'],
-      forbiddenResponseCardKinds: ['weather'],
+      forbiddenResponseCardKinds: ['weather', 'calendar-event'],
     },
   },
   {
