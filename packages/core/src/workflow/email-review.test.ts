@@ -311,6 +311,8 @@ describe('bounded no-send email review', () => {
       ),
     );
     expect(formatted).toContain('**Possible deadlines to verify (1)**');
+    expect(formatted).toContain('Reviewed 1 of 1 selected threads');
+    expect(formatted).not.toContain('Completed verified reply checks');
     expect(formatted).toContain(
       '**Please confirm the renewal date** — No reply draft was prepared',
     );
@@ -947,7 +949,7 @@ describe('bounded no-send email review', () => {
     );
   });
 
-  it('counts completed source assessments separately from complete thread reads', () => {
+  it('reports reviewed assessments separately from complete source reads', () => {
     const threads = ['assessed-a', 'unassessed-b'].map((threadId) =>
       required(
         emailReviewCompleteThread(threadId, 'owner@example.com', [
@@ -970,10 +972,9 @@ describe('bounded no-send email review', () => {
         ]),
       ),
     );
-    expect(text).toContain('verified reply checks for 1 of 2 selected threads');
-    expect(text).not.toContain('complete thread');
-    expect(text).not.toContain('complete reads are not the same as completed assessments');
-    expect(text).not.toContain('2 of 2 selected threads');
+    expect(text).toContain('Reviewed 1 of 2 selected threads');
+    expect(text).not.toContain('Completed verified reply checks');
+    expect(text).toContain('complete source reads: 2 of 2 selected threads');
   });
 
   it('discloses mailbox mismatch and complete threads left unassessed without leaking addresses', () => {
@@ -1603,8 +1604,30 @@ describe('bounded no-send email review', () => {
       false,
       scope,
     );
-    expect(answer).toContain('newest-first order');
-    expect(answer).not.toContain('seven-day');
+    expect(answer).toContain('bounded newest-first inbox scan');
+    expect(answer).not.toMatch(/\b7[- ]day\b|\bseven[- ]day\b/i);
+    expect(answer).not.toContain('newest-first order');
+
+    const boundedAnswer = formatEmailReviewAnswer(
+      [],
+      {
+        searchPages: 1,
+        uniqueThreads: 2,
+        searchComplete: true,
+        unavailableMetadata: 0,
+        selectedThreads: 1,
+        completeThreads: 0,
+        contextLimitedThreads: 0,
+        ownerOrChronologyExcluded: 1,
+        alreadyAnsweredThreads: 0,
+        notEligibleThreads: 0,
+        obviousNewslettersExcluded: 0,
+      },
+      false,
+      { ...scope, startAt: '2026-10-15T00:00:00Z', endAt: '2026-10-16T00:00:00Z' },
+    );
+    expect(boundedAnswer).toContain('newest-first inbox scan within the requested time window');
+    expect(boundedAnswer).not.toMatch(/\b7[- ]day\b|\bseven[- ]day\b/i);
   });
 
   it('does not claim complete-thread verification in a bounded latest-mail summary', () => {

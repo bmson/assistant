@@ -230,11 +230,11 @@ describe('executor email review composition', () => {
     expect(result.finalText).toContain(
       'Please clarify what confirmation is required for this request.',
     );
-    expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(5);
+    expect(result.finalText.match(/\*\*Draft:\*\*/g)).toHaveLength(5);
+    expect(result.finalText).toContain('3 assessed threads did not clearly require a response');
     expect(result.finalText).toContain(
-      '3 fully assessed threads did not clearly require a response',
+      '1 selected thread could not be assessed reliably within the bounded checks',
     );
-    expect(result.finalText).toContain('1 complete thread could not be assessed reliably');
     expect(result.finalText).not.toContain('I can confirm that this works for me.');
     expect(result.finalText).not.toMatch(/\[(?:Choose|Add|Select)/i);
     expect(result.finalText).not.toContain('ranked all 80');

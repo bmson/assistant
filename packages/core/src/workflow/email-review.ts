@@ -1743,7 +1743,7 @@ export function formatEmailReviewAnswer(
   scope?: EmailReviewScope,
 ): string {
   const assessedThreads = items.length;
-  const fullyChecked =
+  const reviewedThreads =
     assessedThreads + coverage.alreadyAnsweredThreads + coverage.notEligibleThreads;
   const drafts = dedupeSameEventReplyDrafts(
     items.filter((item) => item.disposition === 'draft' && item.draftBody),
@@ -1769,10 +1769,10 @@ export function formatEmailReviewAnswer(
   );
   const reviewRange = scope?.startAt && scope.endAt ? 'local-calendar-day' : 'day';
   const scanDescription = scope?.latestUnanswered
-    ? `a bounded ${scope?.windowDays ?? 7}-day inbox scan in newest-first order`
+    ? `a bounded newest-first inbox scan${scope.startAt && scope.endAt ? ' within the requested time window' : ''}`
     : `a bounded ${scope?.windowDays ?? 7}-${reviewRange} mail scan`;
   const lines = [
-    `Completed verified reply checks for ${fullyChecked} of ${coverage.selectedThreads} selected threads from ${scanDescription}; prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'}.`,
+    `Reviewed ${reviewedThreads} of ${coverage.selectedThreads} selected threads from ${scanDescription}; prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'}.`,
   ];
   if (drafts.length > 0)
     lines.push(
@@ -1816,6 +1816,13 @@ export function formatEmailReviewAnswer(
   if (coverage.searchMailboxMismatch)
     coverageNotes.push(
       'the connected mailbox used for search differs from the configured owner mailbox; confirm it is the intended mailbox before relying on this review',
+    );
+  if (
+    coverage.completeThreads !== coverage.selectedThreads ||
+    coverage.completeThreads !== reviewedThreads
+  )
+    coverageNotes.push(
+      `complete source reads: ${coverage.completeThreads} of ${coverage.selectedThreads} selected threads`,
     );
   if (coverage.ownerOrChronologyExcluded > 0)
     coverageNotes.push(
