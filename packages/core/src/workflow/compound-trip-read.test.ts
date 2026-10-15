@@ -1347,7 +1347,12 @@ describe('compound trip read projection', () => {
       eventId: 'yearless-berlin-flight',
       summary: 'Flight to Berlin (United)',
       start: '2026-11-12T14:00:00Z',
-      links: [{ type: 'calendar', url: 'https://www.google.com/calendar/event?eid=yearless' }],
+      links: [
+        {
+          type: 'calendar',
+          url: 'https://www.google.com/calendar/event?eid=yearless&token=source-secret#code=fragment-secret',
+        },
+      ],
     };
     const evidence = [
       completeCalendarEvents([event], flightRequest),
@@ -1398,6 +1403,8 @@ describe('compound trip read projection', () => {
     expect(projection.text).toContain(
       '[Calendar source](https://www.google.com/calendar/event?eid=yearless)',
     );
+    expect(projection.text).not.toContain('source-secret');
+    expect(projection.text).not.toContain('fragment-secret');
     expect(projection.text).not.toContain('\\(United\\)');
     expect(projection.text).not.toContain('7:30 AM');
     expect(projection.text).not.toContain('2026-11-12 7:30');

@@ -1,4 +1,5 @@
 import { gmailSearchReceiptSourceId } from '@assistant/persistence/gmail-search-identity';
+import { safeCalendarSourceUrl } from './calendar-source-link.js';
 import type { CompoundTripExtraction, CompoundTripHotelFact } from './compound-trip-extraction.js';
 import type { PersonalReadRequest, ReadToolEvidence } from './read-intent.js';
 
@@ -2993,18 +2994,7 @@ function calendarSource(event: Record<string, unknown>): string {
   const links = Array.isArray(event.links) ? event.links.map(object).filter(Boolean) : [];
   const raw = links.find((link) => link?.type === 'calendar')?.url;
   if (typeof raw !== 'string') return '';
-  try {
-    const url = new URL(raw);
-    return url.protocol === 'https:' &&
-      !url.username &&
-      !url.password &&
-      ['calendar.google.com', 'www.google.com'].includes(url.hostname) &&
-      url.pathname === '/calendar/event'
-      ? url.toString()
-      : '';
-  } catch {
-    return '';
-  }
+  return safeCalendarSourceUrl(raw) ?? '';
 }
 
 function calendarField(event: Record<string, unknown>, edge: 'start' | 'end'): string {

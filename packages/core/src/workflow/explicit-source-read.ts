@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ModelRouter } from '../model-router/router.js';
 import { calendarSourceInterval } from './calendar-read-window.js';
+import { safeCalendarSourceUrl } from './calendar-source-link.js';
 import { compoundTripSourceMessages } from './compound-trip-extraction.js';
 import { boundedMailSearchPages, compoundTripCompleteSourceThreads } from './compound-trip-read.js';
 import { memoryReadSources } from './memory-read-answer.js';
@@ -389,19 +390,8 @@ function calendarLink(event: Record<string, unknown>): string | undefined {
   for (const raw of Array.isArray(event.links) ? event.links : []) {
     const link = object(raw);
     if (link?.type !== 'calendar') continue;
-    try {
-      const url = new URL(string(link.url));
-      if (
-        url.protocol === 'https:' &&
-        ['calendar.google.com', 'www.google.com'].includes(url.hostname) &&
-        /event/i.test(url.pathname) &&
-        !url.username &&
-        !url.password
-      )
-        return url.href;
-    } catch {
-      /* Missing provider links stay explicit. */
-    }
+    const safeUrl = safeCalendarSourceUrl(string(link.url));
+    if (safeUrl) return safeUrl;
   }
   return undefined;
 }

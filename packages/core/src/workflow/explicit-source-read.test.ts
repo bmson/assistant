@@ -504,7 +504,10 @@ describe('explicit private-source orchestration', () => {
               start: '2026-10-16T19:00:00Z',
               end: '2026-10-16T20:00:00Z',
               links: [
-                { type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=cedar' },
+                {
+                  type: 'calendar',
+                  url: 'https://calendar.google.com/calendar/event?eid=cedar&access_token=source-secret#code=fragment-secret',
+                },
               ],
             },
           ],
@@ -561,6 +564,8 @@ describe('explicit private-source orchestration', () => {
     expect(projection.text).toContain(
       '[Cedar review](https://calendar.google.com/calendar/event?eid=cedar)',
     );
+    expect(projection.text).not.toContain('source-secret');
+    expect(projection.text).not.toContain('fragment-secret');
     expect(projection.text).not.toContain('cedar-event');
     expect(projection.text).not.toContain('country');
     expect(projection.blocked).toBe(false);
