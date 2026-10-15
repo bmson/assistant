@@ -763,17 +763,29 @@ describe('ToolDispatcher (integration)', () => {
     api
       .mockResolvedValueOnce({ documentId: 'DOC-intended-second' })
       .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({});
-    const second = await dispatcher.dispatch({
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        permissions: [
+          { type: 'user', emailAddress: 'assistant@example.com' },
+          { type: 'user', emailAddress: 'owner@example.com' },
+        ],
+      });
+    const secondInput = {
       ...input,
       step: 1,
       modelToolCallId: 'artifact-call-2',
-    });
+    };
+    const second = await dispatcher.dispatch(secondInput);
     expect(second).toMatchObject({
       kind: 'executed',
-      result: { documentId: 'DOC-intended-second' },
+      result: {
+        documentId: 'DOC-intended-second',
+        sharingVerification: 'verified_owner_only',
+      },
     });
-    expect(api).toHaveBeenCalledTimes(5);
+    expect(api).toHaveBeenCalledTimes(6);
+    expect(await dispatcher.dispatch(secondInput)).toEqual(second);
+    expect(api).toHaveBeenCalledTimes(6);
   });
   it('reserves the rewritten SMS segment estimate and reconciles the provider receipt', async (ctx) => {
     if (!dbUp) return ctx.skip();

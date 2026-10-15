@@ -393,13 +393,10 @@ describe('bounded no-send email review', () => {
         },
       };
     });
-    expect(missingThreadAttempts).toEqual([['thread-a', 'thread-b']]);
-    expect(wrongCount.answer?.items.map((item) => item.thread.threadId)).toEqual([
-      'thread-a',
-      'thread-b',
-    ]);
-    expect(wrongCount.answer?.items[1]?.draftBody).toContain('Owner decision required:');
-    expect(wrongCount.sourceItems?.map((item) => item.threadId)).toEqual(['thread-a', 'thread-b']);
+    expect(missingThreadAttempts).toEqual([['thread-a', 'thread-b'], ['thread-b']]);
+    expect(wrongCount.attempts).toBe(2);
+    expect(wrongCount.answer?.items.map((item) => item.thread.threadId)).toEqual(['thread-a']);
+    expect(wrongCount.sourceItems?.map((item) => item.threadId)).toEqual(['thread-a']);
     const promptedThreadIds: string[][] = [];
     const completedPartial = await generateValidatedEmailReview(threads, async ({ prompt }) => {
       const jsonPrompt = prompt.split('\n\nThe previous assessment could not pass')[0];
@@ -413,11 +410,15 @@ describe('bounded no-send email review', () => {
             : { items: [required(validAnswer('thread-b').items[0], 'remaining assessment')] },
       };
     });
-    expect(promptedThreadIds).toEqual([['thread-a', 'thread-b']]);
+    expect(promptedThreadIds).toEqual([['thread-a', 'thread-b'], ['thread-b']]);
+    expect(completedPartial.attempts).toBe(2);
     expect(completedPartial.answer?.items.map((item) => item.thread.threadId)).toEqual([
       'thread-a',
       'thread-b',
     ]);
+    expect(completedPartial.answer?.items[1]?.draftBody).toBe(
+      'Could you clarify what confirmation you need about the renewal date?',
+    );
     const reversedGood = required(validAnswer('thread-b').items[0], 'reversed valid item');
     const wrongOrder = await generateValidatedEmailReview(threads, async () => ({
       ok: true,

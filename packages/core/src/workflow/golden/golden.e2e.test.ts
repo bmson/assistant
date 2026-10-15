@@ -3411,7 +3411,17 @@ describe('golden tasks', () => {
       start: secondStart.toISOString(),
       end: secondEnd.toISOString(),
     };
-    const thirdStart = new Date(firstStart.getTime() + 26 * 60 * 60 * 1000);
+    let thirdStart = new Date(firstStart.getTime() + 26 * 60 * 60 * 1000);
+    const ownerWeekday = new Intl.DateTimeFormat('en-US', {
+      timeZone: owner.timezone,
+      weekday: 'short',
+    });
+    // The next civil day may be Saturday. Keep this fixture on the next
+    // requested working day, as the actual weekday analysis now requires.
+    while (['Sat', 'Sun'].includes(ownerWeekday.format(thirdStart))) {
+      thirdStart = new Date(thirdStart.getTime() + 24 * 60 * 60 * 1000);
+    }
+    expect(thirdStart.getTime()).toBeLessThan(Date.parse(request.timeWindow.timeMax));
     const thirdEnd = new Date(thirdStart.getTime() + 45 * 60 * 1000);
     const thirdEvent = {
       eventId: 'weekday-followup',

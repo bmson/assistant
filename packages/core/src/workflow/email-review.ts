@@ -1311,25 +1311,9 @@ function completeDirectReplyAssessments(
       draftSourceMessageIds: [thread.latestMessageId],
     };
   });
-  const present = new Set(items.map((item) => item.threadId));
-  for (const thread of threads) {
-    if (present.has(thread.threadId) || !latestMessageNeedsReply(thread)) continue;
-    const whyQuote = directReplyRequestQuote(thread);
-    if (!whyQuote) continue;
-    const deadline = directReplyDeadlineQuote(thread);
-    items.push({
-      threadId: thread.threadId,
-      latestMessageId: thread.latestMessageId,
-      disposition: 'draft',
-      recipient: thread.recipient,
-      why: 'The latest message directly asks for a response.',
-      whyMessageId: thread.latestMessageId,
-      whyQuote,
-      deadline: deadline ? { messageId: thread.latestMessageId, quote: deadline } : null,
-      draftBody: directReplyFallbackDraft(thread) ?? '',
-      draftSourceMessageIds: [thread.latestMessageId],
-    });
-  }
+  // An omitted assessment is still pending. The bounded generator retries
+  // only those threads; a generic owner-decision template must not bypass
+  // their contextual assessment or count as a completed reply draft.
   items.sort(
     (left, right) =>
       threads.findIndex((thread) => thread.threadId === left.threadId) -
