@@ -36,6 +36,8 @@ describe('bounded billing mail audit', () => {
         args: { query, maxResults: 20 },
         result: {
           query,
+          mailboxSearched: 'assistant-alias@example.test',
+          configuredOwnerMailbox: 'owner@example.test',
           complete: true,
           hasMore: false,
           results: [{ threadId: 'thread-1', subject: 'Acme subscription receipt' }],
@@ -101,10 +103,15 @@ describe('bounded billing mail audit', () => {
     const valid = readEvidence(true, '2026-08-12T12:00:00Z');
     const projection = billingAuditProjection(valid.request, valid.evidence);
     expect(projection.coverage.complete).toBe(true);
+    expect(projection.mailbox).toEqual({
+      searched: 'assistant-alias@example.test',
+      configuredOwner: 'owner@example.test',
+      consistent: true,
+    });
     expect(projection.rows[0]).toMatchObject({
-      merchant: 'Acme Billing',
+      merchant: 'Acme',
       classification: 'charge',
-      amount: { value: '12.00', currency: 'USD' },
+      amount: { value: '12.00' },
       period: 'month',
     });
 
@@ -173,6 +180,30 @@ describe('bounded billing mail audit', () => {
     expect(requestedBillingAuditMonths('Audit billing emails over complete months.')).toBe(
       undefined,
     );
+    expect(
+      requestedBillingAuditMonths(
+        'Review recurring subscriptions in billing emails for the last three months.',
+      ),
+    ).toBeUndefined();
+    expect(
+      isBillingAuditIntent(
+        'Review recurring subscriptions in billing emails over the last three complete calendar months.',
+      ),
+    ).toBe(true);
+    expect(
+      detectPersonalReadRequest(
+        [
+          {
+            role: 'user',
+            content: 'Review recurring subscriptions in billing emails for the last three months.',
+          },
+        ],
+        { now: new Date('2026-10-15T12:00:00Z'), timeZone: 'UTC' },
+      ),
+    ).toMatchObject({
+      kind: 'email',
+      billingAuditIssue: expect.stringContaining('last 3 complete local calendar months'),
+    });
   });
 
   it.each([
@@ -279,7 +310,7 @@ describe('bounded billing mail audit', () => {
       'uncertain',
     ]);
     expect(extracted.rows[0]).toMatchObject({
-      merchant: 'Acme Billing',
+      merchant: 'Acme',
       amount: { value: '12.00', currency: 'USD' },
       period: 'month',
       recurringEvidence: true,
@@ -305,7 +336,7 @@ describe('bounded billing mail audit', () => {
           messageId: 'm2',
           subject: 'Plan charge',
           receivedAt: '2026-08-02T00:00:00Z',
-          text: 'Charged €8.00 for your subscription; renews monthly.',
+          text: 'Charged EUR 8.00 for your subscription; renews monthly.',
         },
         {
           threadId: 't3',
@@ -344,6 +375,203 @@ describe('bounded billing mail audit', () => {
     expect(text).toContain('Review decisions (chat only)');
     expect(text).toContain('https://mail.google.com/mail/u/0/#all/t2');
     expect(text).not.toContain('cancelled, so no later charge');
+  });
+
+  it('keeps unsupported currency and payment-state claims uncertain', () => {
+    const scope = resolvedScope(3, 'UTC');
+    const messages = [
+      {
+        threadId: 't-bare-dollar',
+        messageId: 'm-bare-dollar',
+        subject: 'Acme subscription receipt',
+        sender: 'Owner Forwarder <owner@example.test>',
+        receivedAt: '2026-08-02T00:00:00Z',
+        text: 'Your card was charged $15.00 monthly.',
+      },
+      {
+        threadId: 't-negated',
+        messageId: 'm-negated',
+        subject: 'Payment notice',
+        receivedAt: '2026-08-03T00:00:00Z',
+        text: 'You were not charged USD 15.00.',
+      },
+      {
+        threadId: 't-due',
+        messageId: 'm-due',
+        subject: 'Payment due',
+        receivedAt: '2026-08-04T00:00:00Z',
+        text: 'Payment of USD 16.00 is due next week.',
+      },
+      {
+        threadId: 't-requested',
+        messageId: 'm-requested',
+        subject: 'Refund request',
+        receivedAt: '2026-08-05T00:00:00Z',
+        text: 'Refund requested for USD 8.00 but not processed.',
+      },
+      {
+        threadId: 't-completed',
+        messageId: 'm-completed',
+        subject: 'Acme charge',
+        receivedAt: '2026-08-06T00:00:00Z',
+        text: 'Charged 17 US dollars monthly for the plan.',
+      },
+      {
+        threadId: 't-yen',
+        messageId: 'm-yen',
+        subject: 'Payment receipt',
+        receivedAt: '2026-08-07T00:00:00Z',
+        text: 'Your card was charged ¥900 monthly.',
+      },
+      {
+        threadId: 't-forwarded-owner',
+        messageId: 'm-forwarded-owner',
+        subject: 'Fwd: Subscription receipt',
+        sender: 'Owner Name <owner@example.test>',
+        receivedAt: '2026-08-08T00:00:00Z',
+        text: 'Your card was charged USD 18.00.',
+      },
+      {
+        threadId: 't-generic-dollar-word',
+        messageId: 'm-generic-dollar-word',
+        subject: 'Payment receipt',
+        receivedAt: '2026-08-09T00:00:00Z',
+        text: 'Charged 19 dollars.',
+      },
+      {
+        threadId: 't-no-refund',
+        messageId: 'm-no-refund',
+        subject: 'Refund update',
+        receivedAt: '2026-08-10T00:00:00Z',
+        text: 'No refund issued for USD 5.00.',
+      },
+    ];
+    const rows = extractBillingAuditRows(messages, scope).rows;
+    expect(rows.map((row) => row.classification)).toEqual([
+      'charge',
+      'uncertain',
+      'uncertain',
+      'uncertain',
+      'charge',
+      'charge',
+      'charge',
+      'charge',
+      'uncertain',
+    ]);
+    expect(rows[0]?.amount).toEqual({ value: '15.00' });
+    expect(rows[0]?.confidence).toBe('limited');
+    expect(rows[0]?.recurringEvidence).toBe(true);
+    expect(rows[0]?.merchant).toBe('Acme');
+    expect(rows[0]?.message.sender).toContain('Owner Forwarder');
+    expect(rows[4]?.amount).toEqual({ value: '17', currency: 'USD' });
+    expect(rows[5]?.amount).toEqual({ value: '900' });
+    expect(rows[6]?.merchant).toBe('Merchant not stated');
+    expect(rows[6]?.message.sender).toContain('Owner Name');
+    expect(rows[7]?.amount).toEqual({ value: '19' });
+    const rendered = renderBillingAudit({
+      scope,
+      rows,
+      coverage: { complete: true, assessedMessages: messages.length, omittedMessages: 0 },
+    });
+    expect(rendered).toContain('15.00 (currency unstated)');
+    const unknownCurrencyOnly = renderBillingAudit({
+      scope,
+      rows: [rows[0], rows[5]].filter((row): row is NonNullable<typeof row> => Boolean(row)),
+      coverage: { complete: true, assessedMessages: 2, omittedMessages: 0 },
+    });
+    expect(unknownCurrencyOnly).not.toContain('Supported recurring amounts');
+    expect(rendered).toContain('17 USD per month');
+    expect(rendered).toContain('Mail-stated merchant');
+    expect(rendered).toContain('Owner Forwarder');
+  });
+
+  it('requires complete page-chain evidence and consistent connected-mailbox receipts', () => {
+    const valid = readEvidence(true, '2026-08-12T12:00:00Z');
+    const first = valid.evidence[0];
+    if (!first) throw new Error('Expected first search page');
+    const query = valid.request.mailQuery;
+    if (!query) throw new Error('Expected bounded query');
+    const firstResult = first.result as Record<string, unknown>;
+    const firstReceipt = firstResult.receipt as Record<string, unknown>;
+    const second = structuredClone(first);
+    second.args = {
+      ...(first.args as Record<string, unknown>),
+      pageToken: 'next-page',
+    } as unknown as typeof second.args;
+    second.result = {
+      ...firstResult,
+      complete: true,
+      hasMore: false,
+      nextPageToken: undefined,
+      continuation: null,
+      results: [{ threadId: 'thread-2', subject: 'Other subscription receipt' }],
+      receipt: {
+        ...firstReceipt,
+        requested: { limit: 20, cursor: 'next-page', scope: 'query-page' },
+        covered: { count: 1, total: 2, unavailable: 0 },
+        complete: true,
+        losses: [],
+        continuation: null,
+      },
+    } as unknown as typeof second.result;
+    first.args = {
+      ...(first.args as Record<string, unknown>),
+      pageToken: undefined,
+    } as unknown as typeof first.args;
+    first.result = {
+      ...firstResult,
+      complete: false,
+      hasMore: true,
+      nextPageToken: 'next-page',
+      continuation: {
+        tool: 'gmail.search',
+        input: { query, maxResults: 20, pageToken: 'next-page' },
+      },
+      receipt: {
+        ...firstReceipt,
+        complete: false,
+        losses: ['provider-page'],
+        continuation: {
+          tool: 'gmail.search',
+          input: { query, maxResults: 20, pageToken: 'next-page' },
+        },
+      },
+    } as unknown as typeof first.result;
+    const paged = { ...valid, evidence: [...valid.evidence, second] };
+    const completeChainWithUnreadThread = billingAuditProjection(paged.request, paged.evidence);
+    expect(completeChainWithUnreadThread.coverage.issue).toContain('not fully read');
+    expect(completeChainWithUnreadThread.coverage.issue).not.toContain('pagination');
+
+    const inconsistentMailbox = structuredClone(paged);
+    const secondPage = inconsistentMailbox.evidence[2];
+    if (!secondPage) throw new Error('Expected second search page');
+    const secondResult = secondPage.result as Record<string, unknown>;
+    secondPage.result = {
+      ...secondResult,
+      mailboxSearched: 'different-mailbox@example.test',
+    } as unknown as typeof secondPage.result;
+    const inconsistent = billingAuditProjection(
+      inconsistentMailbox.request,
+      inconsistentMailbox.evidence,
+    );
+    expect(inconsistent.mailbox.consistent).toBe(false);
+    expect(inconsistent.coverage.issue).toContain('mailbox');
+
+    const uncertainTerminalPage = structuredClone(paged);
+    const terminal = uncertainTerminalPage.evidence[2];
+    if (!terminal) throw new Error('Expected terminal search page');
+    const terminalResult = terminal.result as Record<string, unknown>;
+    const terminalReceipt = terminalResult.receipt as Record<string, unknown>;
+    terminal.result = {
+      ...terminalResult,
+      complete: false,
+      receipt: { ...terminalReceipt, complete: false, losses: ['coverage-unknown'] },
+    } as typeof terminal.result;
+    const uncertain = billingAuditProjection(
+      uncertainTerminalPage.request,
+      uncertainTerminalPage.evidence,
+    );
+    expect(uncertain.coverage.issue).toContain('pagination');
   });
 
   it('keeps charge and refund facts clause-local and labels them as mail-reported', () => {
@@ -407,6 +635,37 @@ describe('bounded billing mail audit', () => {
       amount: { value: '25.00', currency: 'USD' },
       period: 'month',
     });
+  });
+
+  it('keeps displayed evidence compact, labels omitted clauses and removes quoted URLs', () => {
+    const scope = resolvedScope(3, 'UTC');
+    const messages = Array.from({ length: 12 }, (_, index) => ({
+      threadId: `thread-${index + 1}`,
+      messageId: `message-${index + 1}`,
+      subject: `Provider ${index + 1} subscription receipt`,
+      sender: `Forwarder ${index + 1} <forwarder${index + 1}@example.test>`,
+      receivedAt: '2026-08-12T12:00:00Z',
+      text:
+        index === 0
+          ? 'Your card was charged USD 12.00 monthly; manage billing at http://owner:secret@billing/manage?token=private. Refund processed USD 3.00.'
+          : 'Your card was charged USD 12.00 monthly. Refund processed USD 3.00.',
+    }));
+    const rows = extractBillingAuditRows(messages, scope).rows;
+    expect(rows).toHaveLength(24);
+    const rendered = renderBillingAudit({
+      scope,
+      rows,
+      coverage: { complete: true, assessedMessages: 12, omittedMessages: 0 },
+    });
+    expect(rendered).toContain('Evidence clauses: 12 shown of 24 assessed.');
+    expect(rendered).toContain('Additional assessed clauses not shown (12)');
+    expect(rendered).toContain('Mail-stated merchant');
+    expect(rendered).toContain('Sender');
+    expect(rendered).not.toContain('secret');
+    expect(rendered).not.toContain('token=private');
+    expect(rendered).toContain('manage billing at link omitted');
+    expect(rendered).toContain('thread-12');
+    expect(rows[0]?.quote.length).toBeLessThanOrEqual(141);
   });
 
   it('marks content and date omissions instead of claiming a complete assessment', () => {

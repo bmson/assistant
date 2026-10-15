@@ -98,7 +98,8 @@ describe('billing audit through allocated PostgreSQL executor', () => {
             toolName === 'gmail.search'
               ? {
                   query,
-                  mailboxSearched: 'authorized mailbox',
+                  mailboxSearched: 'assistant-alias@example.test',
+                  configuredOwnerMailbox: 'owner@example.test',
                   complete: true,
                   hasMore: false,
                   unavailable: [],
@@ -217,7 +218,10 @@ describe('billing audit through allocated PostgreSQL executor', () => {
     const assistantMessage = (
       await db.query.messages.findMany({ where: eq(messages.taskId, taskId) })
     ).find((row) => row.role === 'assistant');
-    expect(assistantMessage?.text).toContain('Acme Billing');
+    expect(assistantMessage?.text).toContain('Acme');
+    expect(assistantMessage?.text).toContain('Mailbox searched: assistant-alias@example.test');
+    expect(assistantMessage?.text).toContain('configured owner mailbox: owner@example.test');
+    expect(assistantMessage?.text).toContain('not every mailbox the owner may use');
     expect(assistantMessage?.text).toContain('12.00 USD per month');
     expect(assistantMessage?.text).toContain(
       'https://mail.google.com/mail/u/0/#all/billing-thread',

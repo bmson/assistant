@@ -9,6 +9,7 @@ import { requestedSavedSkillInventory } from '../memory/saved-skill-inventory.js
 import {
   type BillingAuditScope,
   isBillingAuditIntent,
+  requestedBillingAuditMonthCount,
   requestedBillingAuditMonths,
   resolveBillingAuditScope,
 } from './billing-audit.js';
@@ -2446,6 +2447,7 @@ function detectPersonalReadRequestInternal(
 
   if (isBillingAuditIntent(latest) && !emailReadProhibited) {
     const billingMonths = requestedBillingAuditMonths(latest);
+    const mentionedMonthCount = requestedBillingAuditMonthCount(latest);
     const scope =
       billingMonths && options.timeZone
         ? resolveBillingAuditScope(billingMonths, options.now ?? new Date(), options.timeZone)
@@ -2453,7 +2455,9 @@ function detectPersonalReadRequestInternal(
     const issue = scope
       ? undefined
       : !billingMonths
-        ? 'How many complete local months should I review?'
+        ? mentionedMonthCount
+          ? `Should I review the last ${mentionedMonthCount} complete local calendar months?`
+          : 'How many complete local calendar months should I review?'
         : !options.timeZone
           ? 'What time zone should I use for the complete local-month boundary?'
           : 'I could not resolve those complete local months in the owner time zone.';

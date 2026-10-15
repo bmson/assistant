@@ -26,7 +26,7 @@ export interface BillingAuditRow {
   receivedAt: string;
   merchant: string;
   classification: 'charge' | 'trial' | 'refund' | 'cancellation' | 'uncertain';
-  amount?: { value: string; currency: string };
+  amount?: { value: string; currency?: string };
   period?: string;
   recurringEvidence: boolean;
   confidence: 'high' | 'limited';
@@ -43,6 +43,7 @@ export interface BillingAuditCoverage {
 export interface BillingAuditProjection {
   rows: BillingAuditRow[];
   coverage: BillingAuditCoverage;
+  mailbox: { searched?: string; configuredOwner?: string; consistent: boolean };
 }
 
 const MONTH_WORDS: Record<string, number> = {
@@ -128,7 +129,7 @@ export function isBillingAuditIntent(text: string): boolean {
   const lower = text.toLowerCase();
   return !(
     !/\b(?:audit|review|identify|list|summari[sz]e|analy[sz]e|find)\b/.test(lower) ||
-    !/\b(?:subscription|recurring\s+(?:purchase|charge|spend|cost)|billing\s+messages?|billing\s+emails?)\b/.test(
+    !/\b(?:subscriptions?|recurring\s+(?:purchase|charge|spend|cost)|billing\s+messages?|billing\s+emails?)\b/.test(
       lower,
     ) ||
     !/\b(?:billing\s+messages?|billing\s+emails?|emails?|gmail|mail|messages?)\b/.test(lower)
@@ -138,13 +139,26 @@ export function isBillingAuditIntent(text: string): boolean {
 export function requestedBillingAuditMonths(text: string): number | undefined {
   if (!isBillingAuditIntent(text)) return undefined;
   const range =
-    /\b(?:last|past|over)\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:complete\s+)?(?:local\s+calendar\s+months?|calendar\s+months?|months?)\b/i.exec(
+    /\b(?:last|past|over)\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:(?:complete\s+(?:local\s+)?(?:calendar\s+)?months?)|(?:(?:local\s+)?calendar\s+months?))\b/i.exec(
       text,
     );
-  if (!range) return undefined;
-  const numeric = Number(range[1]);
+  return monthCountFromMatch(range?.[1]);
+}
+
+export function requestedBillingAuditMonthCount(text: string): number | undefined {
+  if (!isBillingAuditIntent(text)) return undefined;
+  const range =
+    /\b(?:last|past|over)\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:complete\s+)?(?:local\s+)?(?:calendar\s+)?months?\b/i.exec(
+      text,
+    );
+  return monthCountFromMatch(range?.[1]);
+}
+
+function monthCountFromMatch(value?: string): number | undefined {
+  if (!value) return undefined;
+  const numeric = Number(value);
   const count =
-    Number.isInteger(numeric) && numeric > 0 ? numeric : MONTH_WORDS[range[1]?.toLowerCase() ?? ''];
+    Number.isInteger(numeric) && numeric > 0 ? numeric : MONTH_WORDS[value.toLowerCase()];
   if (count === undefined) return undefined;
   return Number.isInteger(count) && count >= 1 && count <= 12 ? count : undefined;
 }
@@ -152,29 +166,75 @@ export function requestedBillingAuditMonths(text: string): number | undefined {
 function amountFrom(text: string): BillingAuditRow['amount'] {
   const codes = [
     ...text.matchAll(
-      /\b(USD|EUR|GBP|CAD|AUD|NZD|CHF|SEK|NOK|DKK|JPY|INR)\s*([0-9][0-9,]*(?:\.\d{1,2})?)\b/gi,
+      /\b(?:(USD|EUR|GBP|CAD|AUD|NZD|CHF|SEK|NOK|DKK|JPY|INR)\s*([0-9][0-9,]*(?:\.\d{1,2})?)|([0-9][0-9,]*(?:\.\d{1,2})?)\s*(USD|EUR|GBP|CAD|AUD|NZD|CHF|SEK|NOK|DKK|JPY|INR))\b/gi,
     ),
-  ];
-  const symbols = [...text.matchAll(/([$€£¥])\s*([0-9][0-9,]*(?:\.\d{1,2})?)/g)];
-  const candidates = [
-    ...codes.flatMap((match) => {
-      const currency = match[1];
-      const value = match[2];
-      return currency && value ? [{ currency: currency.toUpperCase(), value }] : [];
-    }),
-    ...symbols.flatMap((match) => {
-      const symbol = match[1];
-      const value = match[2];
-      const currency = symbol
-        ? ({ $: 'USD', '€': 'EUR', '£': 'GBP', '¥': 'JPY' } as Record<string, string>)[symbol]
-        : undefined;
-      return currency && value ? [{ currency, value }] : [];
-    }),
-  ];
-  const unique = new Map(
-    candidates.map((candidate) => [`${candidate.currency}:${candidate.value}`, candidate]),
+  ].flatMap((match) =>
+    (match[2] ?? match[3]) && (match[1] ?? match[4])
+      ? [
+          {
+            value: (match[2] ?? match[3]) as string,
+            currency: (match[1] ?? (match[4] as string)).toUpperCase(),
+          },
+        ]
+      : [],
   );
-  return unique.size === 1 ? [...unique.values()][0] : undefined;
+  const currencyWords: Array<[RegExp, string]> = [
+    [
+      /\b(?:US|United States) dollars?\s*([0-9][0-9,]*(?:\.\d{1,2})?)|([0-9][0-9,]*(?:\.\d{1,2})?)\s*(?:US|United States) dollars?\b/i,
+      'USD',
+    ],
+    [
+      /\bCanadian dollars?\s*([0-9][0-9,]*(?:\.\d{1,2})?)|([0-9][0-9,]*(?:\.\d{1,2})?)\s*Canadian dollars?\b/i,
+      'CAD',
+    ],
+    [
+      /\bAustralian dollars?\s*([0-9][0-9,]*(?:\.\d{1,2})?)|([0-9][0-9,]*(?:\.\d{1,2})?)\s*Australian dollars?\b/i,
+      'AUD',
+    ],
+    [
+      /\bNew Zealand dollars?\s*([0-9][0-9,]*(?:\.\d{1,2})?)|([0-9][0-9,]*(?:\.\d{1,2})?)\s*New Zealand dollars?\b/i,
+      'NZD',
+    ],
+    [/\beuros?\s*([0-9][0-9,]*(?:\.\d{1,2})?)|([0-9][0-9,]*(?:\.\d{1,2})?)\s*euros?\b/i, 'EUR'],
+    [
+      /\bpounds sterling\s*([0-9][0-9,]*(?:\.\d{1,2})?)|([0-9][0-9,]*(?:\.\d{1,2})?)\s*pounds sterling\b/i,
+      'GBP',
+    ],
+    [
+      /\bJapanese yen\s*([0-9][0-9,]*(?:\.\d{1,2})?)|([0-9][0-9,]*(?:\.\d{1,2})?)\s*Japanese yen\b/i,
+      'JPY',
+    ],
+  ];
+  const wordAmounts = currencyWords.flatMap(([pattern, currency]) => {
+    const match = pattern.exec(text);
+    const value = match?.[1] ?? match?.[2];
+    return value ? [{ value, currency }] : [];
+  });
+  const unspecifiedWordAmounts = [
+    ...text.matchAll(
+      /\b(?:dollars?|pounds?)\s*([0-9][0-9,]*(?:\.\d{1,2})?)|([0-9][0-9,]*(?:\.\d{1,2})?)\s*(?:dollars?|pounds?)\b/gi,
+    ),
+  ].flatMap((match) => {
+    const value = match[1] ?? match[2];
+    return value ? [{ value }] : [];
+  });
+  const symbols = [...text.matchAll(/[$€£¥]\s*([0-9][0-9,]*(?:\.\d{1,2})?)/g)].flatMap((match) =>
+    match[1] ? [{ value: match[1] }] : [],
+  );
+  const values = new Set([
+    ...codes.map((row) => row.value),
+    ...symbols.map((row) => row.value),
+    ...wordAmounts.map((row) => row.value),
+    ...unspecifiedWordAmounts.map((row) => row.value),
+  ]);
+  if (values.size !== 1) return undefined;
+  const value = [...values][0];
+  if (!value) return undefined;
+  const explicit = new Set([
+    ...codes.filter((row) => row.value === value).map((row) => row.currency),
+    ...wordAmounts.filter((row) => row.value === value).map((row) => row.currency),
+  ]);
+  return { value, ...(explicit.size === 1 ? { currency: [...explicit][0] } : {}) };
 }
 
 function periodFrom(text: string): string | undefined {
@@ -189,17 +249,25 @@ function periodFrom(text: string): string | undefined {
 }
 
 function merchantFrom(message: BillingAuditMessage): string {
-  const sender = message.sender
-    ?.trim()
-    .replace(/\s*<[^<>]+>.*/, '')
-    .trim();
-  if (sender && sender.length <= 120) return sender;
-  const subject = message.subject.trim();
+  const subject = message.subject.trim().replace(/^(?:fwd?|re):\s*/i, '');
   const fromSubject =
     /^(.{2,80}?)(?:\s+(?:receipt|invoice|payment|charge|subscription|renewal|trial|refund|cancellation)\b|\s*[-:|])/i.exec(
       subject,
     )?.[1];
-  return (fromSubject ?? '').trim();
+  const candidate = (fromSubject ?? '').trim();
+  return /^(?:your|my|subscription|billing|payment|charge|receipt|invoice|trial|renewal|refund|cancellation|statement|account)$/i.test(
+    candidate,
+  )
+    ? ''
+    : candidate;
+}
+
+function senderFrom(message: BillingAuditMessage): string {
+  const sender = message.sender
+    ?.trim()
+    .replace(/\s*<[^<>]+>.*/, '')
+    .trim();
+  return sender && sender.length <= 120 ? sender : 'not stated';
 }
 
 function classification(text: string): BillingAuditRow['classification'] {
@@ -211,14 +279,24 @@ function classification(text: string): BillingAuditRow['classification'] {
     )
   )
     return 'uncertain';
-  if (/\b(?:refund(?:ed)?|credited back|reversal|reversed payment|chargeback)\b/i.test(text))
+  if (
+    /\b(?:not|never|no)\s+(?:(?:been\s+)?(?:charged|paid|processed|refunded|credited)|refund|payment|charge)\b|\b(?:is|are|was|were|has|have|had)\s+not\s+(?:been\s+)?(?:charged|paid|processed|refunded|credited)\b|\b(?:wasn['’]t|weren['’]t|isn['’]t|aren['’]t|hasn['’]t|haven['’]t|hadn['’]t)\s+(?:been\s+)?(?:charged|paid|processed|refunded|credited)\b|\b(?:pending|processing|failed|declined|unsuccessful|due|outstanding|requested|awaiting)\b/i.test(
+      text,
+    )
+  )
+    return 'uncertain';
+  if (
+    /\b(?:refund(?: has been)?\s+(?:processed|issued|completed)|refunded|credited back|reversed payment|payment reversal)\b/i.test(
+      text,
+    )
+  )
     return 'refund';
   if (/\b(?:trial (?:started|begins|ends|ending)|free trial|trial period)\b/i.test(text))
     return 'trial';
   if (/\b(?:cancel(?:led|ed|lation)|subscription ended|will not renew)\b/i.test(text))
     return 'cancellation';
   if (
-    /\b(?:charged(?: your)?(?: card| account)?\s*(?:for\s*)?|(?:your )?(?:card|account) was charged|payment (?:was )?received|payment of|charge of|paid successfully|your payment was successful)\b/i.test(
+    /\b(?:charged(?: your)?(?: card| account)?\s*(?:for\s*)?|(?:your )?(?:card|account) was charged|(?:payment (?:was )?received|received payment(?: of)?|payment (?:was )?(?:completed|successful)|paid successfully|your payment was successful))\b/i.test(
       text,
     )
   )
@@ -251,8 +329,11 @@ function isBillingEvidenceClause(text: string): boolean {
 }
 
 function conciseQuote(text: string): string {
-  const clean = text.replace(/\s+/g, ' ').trim();
-  return clean.length > 420 ? `${clean.slice(0, 420)}…` : clean;
+  const clean = text
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+|\bwww\.\S+/gi, '[link omitted]')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return clean.length > 140 ? `${clean.slice(0, 140)}…` : clean;
 }
 
 export function extractBillingAuditRows(
@@ -304,7 +385,8 @@ export function extractBillingAuditRows(
         ...(amount ? { amount } : {}),
         ...(period ? { period } : {}),
         recurringEvidence,
-        confidence: kind !== 'uncertain' && amount && merchantFrom(message) ? 'high' : 'limited',
+        confidence:
+          kind !== 'uncertain' && amount?.currency && merchantFrom(message) ? 'high' : 'limited',
         quote: conciseQuote(clause),
       });
     }
@@ -351,6 +433,7 @@ export function billingAuditProjection(
   if (!scope || !request.mailQuery)
     return {
       rows: [],
+      mailbox: { consistent: false },
       coverage: {
         complete: false,
         issue: 'The bounded billing scope could not be established.',
@@ -370,6 +453,33 @@ export function billingAuditProjection(
   });
   const pages = boundedMailSearchPages(request, evidence);
   const last = record(pages.at(-1)?.result);
+  const mailboxFields = pages.map((row) => {
+    const result = record(row.result);
+    return {
+      searched:
+        typeof result?.mailboxSearched === 'string' ? result.mailboxSearched.trim() : undefined,
+      configuredOwner:
+        typeof result?.configuredOwnerMailbox === 'string'
+          ? result.configuredOwnerMailbox.trim()
+          : undefined,
+    };
+  });
+  const normalizedMailboxFields = mailboxFields.map((entry) => ({
+    searched: entry.searched?.toLowerCase(),
+    configuredOwner: entry.configuredOwner?.toLowerCase(),
+  }));
+  const mailbox = {
+    searched: mailboxFields[0]?.searched,
+    configuredOwner: mailboxFields[0]?.configuredOwner,
+    consistent:
+      mailboxFields.length > 0 &&
+      Boolean(mailboxFields[0]?.searched) &&
+      normalizedMailboxFields.every(
+        (entry) =>
+          entry.searched === normalizedMailboxFields[0]?.searched &&
+          entry.configuredOwner === normalizedMailboxFields[0]?.configuredOwner,
+      ),
+  };
   const rawHits = pages.flatMap((row) => {
     const results = record(row.result)?.results;
     return Array.isArray(results) ? results : [];
@@ -378,17 +488,31 @@ export function billingAuditProjection(
     const id = record(hit)?.threadId;
     return typeof id === 'string' && /^[A-Za-z0-9_-]{3,64}$/.test(id);
   });
-  const queryComplete =
+  const paginationComplete =
     pages.length > 0 &&
     pages.length === searches.length &&
     pages.length <= 3 &&
     last?.complete === true &&
     last.hasMore === false &&
     hitsHaveThreadIds &&
-    pages.every((row) => {
+    pages.every((row, index) => {
       const result = record(row.result);
-      return Array.isArray(result?.results) && result?.complete !== false;
+      const receipt = record(result?.receipt);
+      const losses = Array.isArray(receipt?.losses) ? receipt.losses : [];
+      const unavailable = Array.isArray(result?.unavailable) ? result.unavailable : [];
+      const isLast = index === pages.length - 1;
+      return (
+        Array.isArray(result?.results) &&
+        unavailable.length === 0 &&
+        (isLast
+          ? result?.complete === true && result?.hasMore === false && losses.length === 0
+          : result?.complete === false &&
+            result?.hasMore === true &&
+            losses.length === 1 &&
+            losses[0] === 'provider-page')
+      );
     });
+  const queryComplete = paginationComplete && mailbox.consistent;
   const expectedIds = [
     ...new Set(
       pages.flatMap((row) => {
@@ -432,8 +556,12 @@ export function billingAuditProjection(
   const extracted = extractBillingAuditRows(sourceMessages, scope);
   const missingDate = extracted.missingReceivedAt > 0;
   const omissions: string[] = [];
-  if (!queryComplete)
+  if (!paginationComplete)
     omissions.push('Gmail search pagination did not prove complete coverage of the bounded query.');
+  if (!mailbox.consistent)
+    omissions.push(
+      'The connected mailbox could not be identified consistently across the search receipts.',
+    );
   if (!hitsHaveThreadIds)
     omissions.push(
       'Some search hits lacked a valid Gmail thread identity and could not be assessed.',
@@ -458,6 +586,7 @@ export function billingAuditProjection(
     );
   return {
     rows: extracted.rows,
+    mailbox,
     coverage: {
       complete:
         queryComplete &&
@@ -477,11 +606,22 @@ export function renderBillingAudit(input: {
   scope: BillingAuditScope;
   rows: ReadonlyArray<BillingAuditRow>;
   coverage: BillingAuditCoverage;
+  mailbox?: BillingAuditProjection['mailbox'];
 }): string {
-  const { scope, rows, coverage } = input;
+  const { scope, rows, coverage, mailbox } = input;
+  const visibleRows = rows.slice(0, 12);
+  const formatAmount = (amount?: BillingAuditRow['amount']) =>
+    amount ? `${amount.value} ${amount.currency ?? '(currency unstated)'}` : 'not stated';
   const lines = [
     `Billing email review · ${scope.months} complete local months (${scope.startDate} to ${scope.endDateExclusive}, ${scope.timeZone})`,
   ];
+  if (mailbox) {
+    lines.push(
+      mailbox.consistent && mailbox.searched
+        ? `Mailbox searched: ${escapeCell(mailbox.searched)}; configured owner mailbox: ${escapeCell(mailbox.configuredOwner ?? 'not supplied')}. This covers the connected mailbox shown, not every mailbox the owner may use.`
+        : 'Mailbox scope could not be verified consistently from the Gmail search receipts.',
+    );
+  }
   if (!coverage.complete) {
     lines.push(
       `Coverage: partial. ${coverage.issue ?? 'Some matching mail was not fully assessed.'}`,
@@ -496,38 +636,57 @@ export function renderBillingAudit(input: {
   } else {
     lines.push(
       '',
-      '| Merchant | Received | Evidence | Amount | Period | Confidence | Source |',
-      '|---|---|---|---:|---|---|---|',
+      `Evidence clauses: ${visibleRows.length} shown of ${rows.length} assessed.`,
+      '| Mail-stated merchant | Sender | Received | Evidence | Amount / cadence | Source |',
+      '|---|---|---|---|---|---|',
     );
-    for (const row of rows) {
-      const amount = row.amount ? `${row.amount.value} ${row.amount.currency}` : 'not stated';
-      const period =
-        row.period ??
-        (row.recurringEvidence ? 'subscription stated; interval unclear' : 'not stated');
+    for (const row of visibleRows) {
+      const amount = formatAmount(row.amount);
+      const cadence = row.period ?? (row.recurringEvidence ? 'cadence unclear' : undefined);
       const url = `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(row.message.threadId)}`;
-      const label =
-        row.message.subject
-          .replaceAll('[', '')
-          .replaceAll(']', '')
-          .replaceAll('<', '')
-          .replaceAll('>', '')
-          .slice(0, 80) || 'Message';
+      const label = conciseQuote(row.message.subject) || 'Message';
       lines.push(
-        `| ${escapeCell(row.merchant)} | ${row.receivedAt.slice(0, 10)} | mail-reported ${row.classification}${row.recurringEvidence ? '; recurring language present' : ''} — “${escapeCell(row.quote)}” | ${amount} | ${period} | ${row.confidence} | [${escapeCell(label)}](${url}) |`,
+        `| ${escapeCell(row.merchant)} | ${escapeCell(senderFrom(row.message))} | ${row.receivedAt.slice(0, 10)} | mail-reported ${row.classification}: “${escapeCell(row.quote)}” | ${amount}${cadence ? ` / ${cadence}` : ''} | [${escapeCell(label)}](${url}) |`,
+      );
+    }
+    const displayedIds = new Set(visibleRows.map((row) => row.message.messageId));
+    const omittedSources = new Map<string, BillingAuditMessage>();
+    for (const row of rows) {
+      if (!displayedIds.has(row.message.messageId))
+        omittedSources.set(row.message.messageId, row.message);
+    }
+    if (omittedSources.size) {
+      const links = [...omittedSources.values()].map((message) => {
+        const url = `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(message.threadId)}`;
+        const label = conciseQuote(message.subject) || 'Message';
+        return `[${escapeCell(label)}](<${url}>)`;
+      });
+      lines.push(
+        '',
+        `Additional assessed clauses not shown (${rows.length - visibleRows.length}); source threads: ${links.join(', ')}.`,
       );
     }
   }
   const recurring = rows.filter(
-    (row) => row.classification === 'charge' && row.recurringEvidence && row.amount && row.period,
+    (row) =>
+      row.classification === 'charge' &&
+      row.recurringEvidence &&
+      row.amount?.currency &&
+      row.period,
   );
   if (recurring.length) {
-    lines.push('', 'Supported recurring amounts (kept separate by currency and period):');
-    for (const row of recurring) {
+    lines.push(
+      '',
+      `Supported recurring amounts (${recurring.length} mail-reported entries; currencies and periods kept separate):`,
+    );
+    for (const row of recurring.slice(0, 8)) {
       if (!row.amount || !row.period) continue;
       lines.push(
         `- ${row.merchant}: ${row.amount.value} ${row.amount.currency} per ${row.period}.`,
       );
     }
+    if (recurring.length > 8)
+      lines.push(`- ${recurring.length - 8} additional assessed entries are not expanded here.`);
   } else {
     lines.push(
       '',
@@ -549,7 +708,7 @@ export function renderBillingAudit(input: {
     const other = rows.find((row) => row !== first);
     if (charge?.amount)
       lines.push(
-        `- Decide whether to reconcile the stated ${charge.amount.value} ${charge.amount.currency} charge from ${charge.merchant} against your own records.`,
+        `- Decide whether to reconcile the stated ${formatAmount(charge.amount)} charge from ${charge.merchant} against your own records.`,
       );
     else if (other)
       lines.push(
