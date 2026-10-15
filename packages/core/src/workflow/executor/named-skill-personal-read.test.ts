@@ -37,6 +37,14 @@ async function runPersonalRead(
   request: string,
   foundSkill: LearnedSkill | null = skill,
   skillLibrary?: SkillLibraryRepository,
+  calendarEvents: Array<Record<string, unknown>> = [
+    {
+      id: 'design-review-1',
+      summary: 'Design review',
+      start: '2026-10-13T09:00:00-07:00',
+      end: '2026-10-13T09:30:00-07:00',
+    },
+  ],
 ) {
   const rows: Array<Record<string, unknown>> = [];
   const findByName = vi.fn(async () => foundSkill);
@@ -76,14 +84,7 @@ async function runPersonalRead(
     async ({ toolName, args }: { toolName: string; args: Record<string, unknown> }) => {
       if (toolName !== 'calendar.list_events') throw new Error(`Unexpected tool: ${toolName}`);
       const result = {
-        events: [
-          {
-            id: 'design-review-1',
-            summary: 'Design review',
-            start: '2026-10-13T09:00:00-07:00',
-            end: '2026-10-13T09:30:00-07:00',
-          },
-        ],
+        events: calendarEvents,
         complete: true,
         calendarRosterComplete: true,
         calendarsSearched: ['primary'],
@@ -255,6 +256,142 @@ describe('named saved skill use during a personal read', () => {
     expect(router.step).toHaveBeenCalledTimes(1);
     expect(state.skillRetrievalReceipts).toEqual([skillRetrievalReceipt(skill)]);
     expect(JSON.stringify(state.skillRetrievalReceipts)).not.toContain(skill.steps);
+  });
+
+  it.each(['valid advice', 'provider unavailable', 'rejected advice', 'truncated advice'])(
+    'adds a source-checked next action for a receipt-bound skill request (%s)',
+    async (condition) => {
+      const actionSkill = {
+        ...skill,
+        name: 'Action planning',
+        steps: 'End the briefing with the next useful action.',
+      };
+      const events = [
+        {
+          id: 'review',
+          eventId: 'review',
+          calendarId: 'work',
+          summary: 'Design review',
+          start: '2026-10-13T09:00:00-07:00',
+          end: '2026-10-13T09:30:00-07:00',
+          ownerResponse: 'accepted',
+          blocksTime: true,
+        },
+        {
+          id: 'planning',
+          eventId: 'planning',
+          calendarId: 'shared',
+          summary: 'Planning hold',
+          start: '2026-10-13T09:20:00-07:00',
+          end: '2026-10-13T10:00:00-07:00',
+          blocksTime: true,
+        },
+      ];
+      const f = await runPersonalRead('What is on my calendar today?', null, undefined, events);
+      f.window[0] = {
+        role: 'user',
+        content:
+          'What is on my calendar today? Give me a compact briefing. Apply my saved skill named "Action planning". End with one next useful action for the overlap.',
+      };
+      f.state.usedSkillIds = [actionSkill.id];
+      f.state.skillRetrievalReceipts = [skillRetrievalReceipt(actionSkill)];
+      f.skills.findByName.mockResolvedValue(actionSkill);
+      const readRequest: PersonalReadRequest = {
+        kind: 'calendar',
+        queryTerms: [],
+        requiresThreadRead: false,
+        firstToolName: 'calendar.list_events',
+        includeCalendarBriefing: true,
+        includeCalendarOverlapSummary: true,
+        compactCalendarBriefing: true,
+        timeZone: 'America/Los_Angeles',
+        timeWindow: {
+          label: 'today',
+          timeMin: '2026-10-13T07:00:00.000Z',
+          timeMax: '2026-10-14T07:00:00.000Z',
+        },
+      };
+      const projection = verifiedReadResponse(readRequest, f.rows as never);
+      expect(projection).toContain(
+        'Overlapping entries do not establish that you must attend both.',
+      );
+      expect(projection).not.toContain('Next step:');
+      f.router.object.mockClear();
+      f.router.object.mockImplementation(async () => {
+        if (condition === 'provider unavailable') throw new Error('Unavailable');
+        return {
+          ok: true,
+          object: {
+            nextStep:
+              condition === 'rejected advice'
+                ? 'I moved the Design review.'
+                : 'Check whether you need to attend both.',
+          },
+          finishReason: condition === 'truncated advice' ? 'length' : 'stop',
+        } as never;
+      });
+      await stageModelFinalResponse(
+        f.deps as unknown as import('./types.js').ExecutorDeps,
+        { ...f.task, type: 'scheduled_task', conversationId: null } as never,
+        f.state,
+        f.window as never,
+        {
+          text: projection,
+          progress: 'Calendar checked.',
+          terminalStatus: 'done',
+          outcome: 'done',
+        },
+        undefined,
+        { readRequest },
+      );
+
+      const final = f.state.pendingFinal?.text ?? '';
+      expect(final).toContain('Overlapping entries do not establish that you must attend both.');
+      expect(final).toContain('Next step:');
+      expect(final).toContain('attend both');
+      expect(final).not.toContain('I moved');
+      expect(final.match(/^Next step:/gm)).toHaveLength(1);
+      expect(f.router.object).toHaveBeenCalledOnce();
+      expect(f.router.object.mock.calls[0]?.[1]).toMatchObject({
+        prompt: expect.stringContaining(actionSkill.steps),
+      });
+    },
+  );
+
+  it('keeps an ordinary compact calendar briefing free of an added next step', async () => {
+    const f = await runPersonalRead('Give me a compact calendar briefing for today.');
+    const readRequest: PersonalReadRequest = {
+      kind: 'calendar',
+      queryTerms: [],
+      requiresThreadRead: false,
+      firstToolName: 'calendar.list_events',
+      includeCalendarBriefing: true,
+      compactCalendarBriefing: true,
+      timeZone: 'America/Los_Angeles',
+      timeWindow: {
+        label: 'today',
+        timeMin: '2026-10-13T07:00:00.000Z',
+        timeMax: '2026-10-14T07:00:00.000Z',
+      },
+    };
+    const projection = verifiedReadResponse(readRequest, f.rows as never);
+    await stageModelFinalResponse(
+      f.deps as unknown as import('./types.js').ExecutorDeps,
+      { ...f.task, type: 'scheduled_task', conversationId: null } as never,
+      f.state,
+      f.window as never,
+      {
+        text: projection,
+        progress: 'Calendar checked.',
+        terminalStatus: 'done',
+        outcome: 'done',
+      },
+      undefined,
+      { readRequest },
+    );
+
+    expect(f.state.pendingFinal?.text).not.toContain('Next step:');
+    expect(f.skills.findByName).not.toHaveBeenCalled();
   });
 
   it.each([

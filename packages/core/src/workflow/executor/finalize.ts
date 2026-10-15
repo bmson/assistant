@@ -98,6 +98,39 @@ import { authorizesSilentCompletion } from './silent-completion.js';
 import { type ExecuteResult, type ExecutorDeps, LOST_LEASE } from './types.js';
 import { compact, latestUserText } from './util.js';
 
+function savedSkillRequestsNextUsefulAction(advice: string): boolean {
+  return (
+    /\bnext useful action\b|\bnext useful step\b|\buseful next step\b|\bactionable next step\b/i.test(
+      advice,
+    ) ||
+    /\b(?:end|finish|conclude)\b[^.!?\n]{0,100}\b(?:next step|action|recommendation|suggestion)\b/i.test(
+      advice,
+    )
+  );
+}
+
+function savedSkillCalendarFallbackStep(
+  request: PersonalReadRequest,
+  evidence: ActionEvidence[],
+): string | undefined {
+  const projection = verifiedReadResponse(request, evidence);
+  if (/^\s*-\s*(?:Possible overlap|Scheduling conflict):/m.test(projection))
+    return 'Check whether you need to attend both.';
+
+  const completeProjection = verifiedReadResponse(
+    { ...request, compactCalendarBriefing: false },
+    evidence,
+  );
+  return /^Next step:\s*([^\r\n]+)$/m.exec(completeProjection)?.[1]?.trim();
+}
+
+function calendarSkillNextStepOutput(projection: string, nextStep: string): string {
+  const existingStep = /^Next step: [^\r\n]*$/m;
+  return existingStep.test(projection)
+    ? projection.replace(existingStep, `Next step: ${nextStep}`)
+    : `${projection}\n\nNext step: ${nextStep}`;
+}
+
 /**
  * Deferred work is only real once a durable row exists. Left to prose the
  * model answers "I'll keep updating it as I go" — a promise nothing in the
@@ -947,13 +980,26 @@ export async function stageModelFinalResponse(
     );
   }
 
+  const skillRequestsNextUsefulAction = Boolean(
+    calendarSkillAdvice &&
+      savedSkillRequestsNextUsefulAction(calendarSkillAdvice) &&
+      !/^Next step:/m.test(initialCheck.text),
+  );
+  const skillStepMayReplacePresentationFallback = Boolean(
+    initialCheck.groundingFallback?.length &&
+      initialCheck.groundingFallback.every(
+        (reason) => reason === 'calendar briefing is rendered from checked event rows',
+      ),
+  );
+  let calendarSkillAdviceAttempted = false;
   if (
     !missingRequestedPageReceipts.length &&
     calendarSkillAdvice &&
     classifiedRead?.includeCalendarBriefing &&
     !initialCheck.blocked &&
-    initialCheck.groundingFallback
+    (initialCheck.groundingFallback || skillRequestsNextUsefulAction)
   ) {
+    calendarSkillAdviceAttempted = true;
     try {
       const advice = await deps.router.object<{ nextStep: string }>('rewrite', {
         taskId: task.id,
@@ -977,7 +1023,8 @@ export async function stageModelFinalResponse(
           !/[\r\n]/.test(nextStep) &&
           !/\bNext step:/i.test(nextStep)
         ) {
-          const candidate = `${initialCheck.text}\n\nNext step: ${nextStep}`;
+          const projection = verifiedReadResponse(classifiedRead, evidence);
+          const candidate = `${projection}\n\nNext step: ${nextStep}`;
           // Procedure text supplies advice, never fresh personal facts. Keep
           // named places and times grounded only in calendar/owner evidence.
           const checkedAdvice = enforceResponseContract(candidate, evidence, contractOptions);
@@ -986,15 +1033,12 @@ export async function stageModelFinalResponse(
             !checkedAdvice.groundingFallback &&
             checkedAdvice.text === candidate
           ) {
-            // Validate the added advisory tail against the full canonical
-            // projection first. Only after validation replace its source-derived
-            // default step; event facts/links remain byte-for-byte unchanged.
-            const canonicalStep = /^Next step: [^\r\n]*$/m;
+            // Replace a presentation-only fallback with the accepted canonical
+            // ledger projection; a source/coverage fallback remains authoritative.
+            const { groundingFallback: _ignored, ...withoutPresentationFallback } = initialCheck;
             initialCheck = {
-              ...initialCheck,
-              text: canonicalStep.test(initialCheck.text)
-                ? initialCheck.text.replace(canonicalStep, () => `Next step: ${nextStep}`)
-                : candidate,
+              ...withoutPresentationFallback,
+              text: calendarSkillNextStepOutput(projection, nextStep),
             };
           }
         }
@@ -1003,8 +1047,36 @@ export async function stageModelFinalResponse(
       /* Keep the source projection if guidance cannot be safely applied. */
     }
   }
+  if (
+    !missingRequestedPageReceipts.length &&
+    calendarSkillAdvice &&
+    classifiedRead?.includeCalendarBriefing &&
+    skillRequestsNextUsefulAction &&
+    (!initialCheck.groundingFallback || skillStepMayReplacePresentationFallback) &&
+    !initialCheck.blocked &&
+    !/^Next step:/m.test(initialCheck.text)
+  ) {
+    const nextStep = savedSkillCalendarFallbackStep(classifiedRead, evidence);
+    if (nextStep) {
+      const projection = verifiedReadResponse(classifiedRead, evidence);
+      const candidate = `${projection}\n\nNext step: ${nextStep}`;
+      const checkedAdvice = enforceResponseContract(candidate, evidence, contractOptions);
+      if (
+        !checkedAdvice.blocked &&
+        !checkedAdvice.groundingFallback &&
+        checkedAdvice.text === candidate
+      ) {
+        const { groundingFallback: _ignored, ...withoutPresentationFallback } = initialCheck;
+        initialCheck = {
+          ...withoutPresentationFallback,
+          text: calendarSkillNextStepOutput(projection, nextStep),
+        };
+      }
+    }
+  }
   const canReflect =
     !missingRequestedPageReceipts.length &&
+    !calendarSkillAdviceAttempted &&
     !initialCheck.blocked &&
     initialCheck.text === pending.text &&
     initialCheck.groundingFallback === undefined;
