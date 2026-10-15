@@ -13,6 +13,32 @@ import {
 } from './live-lookup.js';
 
 describe('live lookup routing from home-screen regressions', () => {
+  it('keeps artifact privacy verification and readback out of public search', () => {
+    const request =
+      'Create one owner-private Google Doc titled "Fictional Workshop Brief", only if you can verify it will be accessible solely to my owner account. Use only these fictional facts: a workshop on 12 April 2030, budget US$120. Read it back and give the link. Do not share it.';
+    expect(detectLiveLookups([{ role: 'user', content: request }])).toEqual([]);
+  });
+  it.each([
+    'Create a private Google Doc titled "Budget notes" with my private draft. Look it up to verify access.',
+    'Create a private Google Doc titled "Budget notes" with my private draft. Search for that exact title first.',
+  ])('keeps ambiguous artifact lookup language authenticated: %s', (content) => {
+    expect(detectLiveLookups([{ role: 'user', content }])).toEqual([]);
+  });
+  it('preserves explicitly requested public research alongside artifact creation', () => {
+    expect(
+      detectLiveLookup([
+        {
+          role: 'user',
+          content: 'Search the web for official transit fares and create a Google Doc.',
+        },
+      ]),
+    ).toMatchObject({ kind: 'web' });
+  });
+  it('asks for a focused search query rather than repeatedly dispatching an over-limit request', () => {
+    const request = `Search the web for official transit fares. ${'Explain the current options and cite official sources. '.repeat(8)}`;
+    expect(request.length).toBeGreaterThan(256);
+    expect(nextLiveLookup({ kind: 'web', request }, [])).toEqual({ toolName: 'web.search' });
+  });
   it('leaves an explicit Google Doc read with the authenticated document reader', () => {
     expect(
       detectLiveLookup([
@@ -70,6 +96,33 @@ describe('live lookup routing from home-screen regressions', () => {
       toolName: 'sports.scores',
       input: { team: 'Giants', date: '2026-10-07' },
     });
+  });
+
+  it.each([
+    'What is the current score in the SF Giants game?',
+    'What was the Arsenal score yesterday?',
+    'Who won the Valur match last Saturday?',
+  ])('keeps team argument generation for an ordinary dated score question: %s', (request) => {
+    const lookup = detectLiveLookup([{ role: 'user', content: request }]);
+    expect(lookup?.kind).toBe('sports');
+    if (!lookup) throw new Error('Expected a sports lookup');
+    expect(
+      nextLiveLookup(lookup, [], {
+        now: new Date('2026-10-15T08:11:00Z'),
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toEqual({ toolName: 'sports.scores' });
+  });
+
+  it('retains a complete league identity with the owner-local date', () => {
+    const lookup = detectLiveLookup([{ role: 'user', content: 'Any MLB scores yesterday?' }]);
+    if (!lookup) throw new Error('Expected a sports lookup');
+    expect(
+      nextLiveLookup(lookup, [], {
+        now: new Date('2026-10-15T08:11:00Z'),
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toMatchObject({ toolName: 'sports.scores', input: { league: 'mlb', date: '2026-10-14' } });
   });
 
   it.each([
@@ -182,6 +235,24 @@ describe('live lookup routing from home-screen regressions', () => {
     expect(liveLookupFailure(lookup, [{ ...routed, result: { error: 'No route found' } }])).toMatch(
       /couldn't get a route/,
     );
+  });
+  it.each([
+    "What's the cheapest Muni option next weekend for three rides and one cable-car ride?",
+    'How much does a BART ticket to the airport cost?',
+    'Compare the best value train passes for a weekend in London.',
+    'Are bus fares cheaper with a day pass?',
+  ])('requires current operator evidence for public fare decisions: %s', (content) => {
+    const lookup = detectLiveLookup([{ role: 'user', content }]);
+    expect(lookup).toMatchObject({ kind: 'web', request: content });
+    expect(lookup && nextLiveLookup(lookup, [])?.toolName).toBe('web.search');
+  });
+  it.each([
+    'For a hypothetical bus, tickets cost $3 and a day pass costs $8. What is cheapest for four rides?',
+    'Given a $2 bus fare and a $7 day pass, which is cheaper for three rides?',
+    'Using only these supplied train prices, compare tickets at $4 and a pass at $12.',
+    'Do not search the web. Calculate the cheapest bus pass from these prices.',
+  ])('does not turn supplied pricing exercises into public research: %s', (content) => {
+    expect(detectLiveLookup([{ role: 'user', content }])).toBeUndefined();
   });
   it('resolves a typo follow-up without querying the previous assistant guess', () => {
     expect(

@@ -305,10 +305,20 @@ export const googleModule = defineModule<GoogleClient>({
     registerDriveTools(registry, {
       client,
       workspace,
+      botEmail: config.ASSISTANT_EMAIL,
+      ownerEmail: config.OWNER_EMAIL,
       catalog: persistence.documentCatalog ?? db,
     });
-    registerSheetsTools(registry, { client, ownerEmail: config.OWNER_EMAIL });
-    registerSlidesTools(registry, { client, ownerEmail: config.OWNER_EMAIL });
+    registerSheetsTools(registry, {
+      client,
+      botEmail: config.ASSISTANT_EMAIL,
+      ownerEmail: config.OWNER_EMAIL,
+    });
+    registerSlidesTools(registry, {
+      client,
+      botEmail: config.ASSISTANT_EMAIL,
+      ownerEmail: config.OWNER_EMAIL,
+    });
     registerApplicationTools(registry, {
       client,
       // Resolved per call so a bundle without the repository still installs.

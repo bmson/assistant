@@ -191,6 +191,10 @@ export class FirestoreHistoryRecallRepository implements HistoryRecallRepository
             .where('createdAt', '<=', upper)
             .orderBy('createdAt', 'desc')
             .orderBy('id', 'desc')
+            // This scan checks provenance only. Loading thousands of message
+            // bodies, rich tool results, and embeddings can exhaust the worker
+            // heap before planning starts; none are used by this validation.
+            .select('channelMessageId', 'createdAt')
             .limit(SEGMENT_SOURCE_SCAN_LIMIT + 1);
           const sourceRows = await tx.get(range);
           if (sourceRows.size > SEGMENT_SOURCE_SCAN_LIMIT)

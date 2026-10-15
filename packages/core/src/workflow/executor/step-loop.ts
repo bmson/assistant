@@ -33,7 +33,10 @@ import { deliveredChannels, markApprovalsNotified } from '../approvals.js';
 import {
   artifactRoutingFailure,
   artifactToolUnavailable,
+  conditionalArtifactExistingResponse,
+  conditionalArtifactPreflight,
   needsArtifactToolRetry,
+  requestedConditionalArtifactIntent,
 } from '../artifact-intent.js';
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
 import { requestedCardIntent } from '../card-intent.js';
@@ -99,6 +102,7 @@ import {
   sleepTask,
 } from '../machine.js';
 import {
+  isConversationLocalContext,
   isSelfContainedTextTransformation,
   latestOwnerIntent,
   type OwnerIntent,
@@ -769,6 +773,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     loadConfig().CHAT_RECALL_ENABLED &&
     state.plannerState.planningRecall === undefined &&
     !localTransformation &&
+    !isConversationLocalContext(ownerText) &&
     !restrictedChecklistResume &&
     !readRequest &&
     privilegedTask &&
@@ -1324,7 +1329,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       : [];
     const mustRecordGoalProgress = needsGoalProgressUpdate(goalToolEvidence);
     const allReadToolEvidence: Array<ReadToolEvidence & { id: string }> =
-      artifactIntent?.toolName === 'docs.create' ||
+      artifactIntent ||
       readRequest ||
       situationRequest ||
       liveLookup ||
@@ -2418,7 +2423,127 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       ]),
     );
     const documentVerificationInput = nextCreatedDocumentRead(ownerText, readToolEvidence);
-    const forcedArtifact = !mustRecordGoalProgress && state.step === 0 ? artifactIntent : undefined;
+    const conditionalArtifact = requestedConditionalArtifactIntent(
+      ownerText,
+      latestUserText(rc.window) ?? ownerText,
+    );
+    const conditionalArtifactCheck = conditionalArtifact
+      ? conditionalArtifactPreflight(conditionalArtifact, readToolEvidence)
+      : undefined;
+    const conditionalArtifactWriteOccurred = Boolean(
+      conditionalArtifact &&
+        readToolEvidence.some(
+          (row) =>
+            ['docs.create', 'sheets.create', 'slides.create'].includes(row.toolName) &&
+            row.status === 'succeeded' &&
+            row.fromCurrentTask !== false,
+        ),
+    );
+    const pendingExactTitleLookupReplay = Boolean(
+      conditionalArtifact &&
+        resumingBatch &&
+        state.pendingToolBatch?.calls.some((call) => {
+          if (
+            call.toolName !== 'drive.search' ||
+            (call.status !== 'queued' && call.status !== 'budget') ||
+            !call.input ||
+            typeof call.input !== 'object'
+          )
+            return false;
+          const input = call.input as Record<string, unknown>;
+          return (
+            input.query === conditionalArtifact.exactTitle &&
+            input.exactTitle === conditionalArtifact.exactTitle &&
+            input.verifyOwnerOnly === conditionalArtifact.ownerOnly
+          );
+        }),
+    );
+    if (
+      conditionalArtifact &&
+      conditionalArtifactCheck?.status === 'exists' &&
+      !conditionalArtifactWriteOccurred
+    ) {
+      const text = conditionalArtifactExistingResponse(
+        conditionalArtifact,
+        conditionalArtifactCheck,
+      );
+      rc.window.push({ role: 'assistant', content: text } as ModelMessage);
+      return stageFinalResponse(deps, lease, state, rc.window, {
+        text,
+        progress: 'existing exact-title artifact found; duplicate creation skipped',
+        terminalStatus: 'done',
+        outcome: 'done',
+      });
+    }
+    if (
+      conditionalArtifact &&
+      conditionalArtifactCheck?.status === 'blocked' &&
+      !conditionalArtifactWriteOccurred &&
+      (conditionalArtifactCheck.reason !== 'The exact title is unclear.' || state.step > 0)
+    ) {
+      const text = `I couldn't safely create the requested ${conditionalArtifact.label} because ${conditionalArtifactCheck.reason} No new artifact was created.`;
+      rc.window.push({ role: 'assistant', content: text } as ModelMessage);
+      return stageFinalResponse(deps, lease, state, rc.window, {
+        text,
+        progress: 'conditional artifact creation stopped before writing',
+        terminalStatus: 'needs_attention',
+        outcome: 'needs_attention',
+      });
+    }
+    if (
+      conditionalArtifact &&
+      !conditionalArtifact.exactTitle &&
+      !conditionalArtifactWriteOccurred
+    ) {
+      const text =
+        'I need the exact quoted title before I can check for duplicates. No new artifact was created.';
+      rc.window.push({ role: 'assistant', content: text } as ModelMessage);
+      return stageFinalResponse(deps, lease, state, rc.window, {
+        text,
+        progress: 'conditional artifact title needs clarification',
+        terminalStatus: 'needs_attention',
+        outcome: 'needs_attention',
+      });
+    }
+    if (
+      conditionalArtifact &&
+      conditionalArtifactCheck?.status === 'not_started' &&
+      state.step > 0 &&
+      !pendingExactTitleLookupReplay &&
+      !conditionalArtifactWriteOccurred
+    ) {
+      const text =
+        'I could not verify the required exact-title Drive check. No new artifact was created.';
+      rc.window.push({ role: 'assistant', content: text } as ModelMessage);
+      return stageFinalResponse(deps, lease, state, rc.window, {
+        text,
+        progress: 'conditional artifact lookup evidence unavailable',
+        terminalStatus: 'needs_attention',
+        outcome: 'needs_attention',
+      });
+    }
+    const forcedConditionalLookup =
+      state.step === 0 && conditionalArtifact && conditionalArtifactCheck?.status === 'not_started'
+        ? conditionalArtifact
+        : undefined;
+    const forcedArtifact =
+      !mustRecordGoalProgress &&
+      !conditionalArtifactWriteOccurred &&
+      artifactIntent &&
+      ((!conditionalArtifact && state.step === 0) || conditionalArtifactCheck?.status === 'absent')
+        ? artifactIntent
+        : undefined;
+    if (forcedConditionalLookup && !toolDefs.some((tool) => tool.name === 'drive.search')) {
+      const text =
+        'I could not check Drive for the exact title, so I did not create a new artifact.';
+      rc.window.push({ role: 'assistant', content: text } as ModelMessage);
+      return stageFinalResponse(deps, lease, state, rc.window, {
+        text,
+        progress: text,
+        terminalStatus: 'needs_attention',
+        outcome: 'needs_attention',
+      });
+    }
     if (forcedLiveLookup && !toolDefs.some((tool) => tool.name === forcedLiveLookup.toolName)) {
       const text = `I couldn't run the live lookup because ${forcedLiveLookup.toolName} is unavailable.`;
       return stageFinalResponse(deps, lease, state, rc.window, {
@@ -2492,6 +2617,26 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             toolName: call.toolName,
             input: call.input,
           })),
+        finishReason: 'tool-calls',
+      };
+    } else if (forcedConditionalLookup) {
+      stepResult = {
+        ok: true,
+        modelId: 'runtime/conditional-artifact-title-check',
+        degraded: false,
+        text: '',
+        toolCalls: [
+          {
+            toolCallId: `runtime-artifact-title-check-${task.id}-${state.step + 1}`,
+            toolName: 'drive.search',
+            input: {
+              query: forcedConditionalLookup.exactTitle,
+              exactTitle: forcedConditionalLookup.exactTitle,
+              verifyOwnerOnly: forcedConditionalLookup.ownerOnly,
+              maxResults: 20,
+            },
+          },
+        ],
         finishReason: 'tool-calls',
       };
     } else if (mustRecordGoalProgress) {
@@ -2633,15 +2778,17 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
                   type: 'tool',
                   toolName: futureWatchIntent.channel === 'email' ? 'watch.create' : 'watch.web',
                 }
-              : forcedArtifact
-                ? { type: 'tool', toolName: forcedArtifact.toolName }
-                : forcedLiveLookup
-                  ? { type: 'tool', toolName: forcedLiveLookup.toolName }
-                  : forceSituationRead && toolDefs.some((tool) => tool.name === 'situations.read')
-                    ? { type: 'tool', toolName: 'situations.read' }
-                    : mustAct
-                      ? 'required'
-                      : undefined,
+              : forcedConditionalLookup
+                ? { type: 'tool', toolName: 'drive.search' }
+                : forcedArtifact
+                  ? { type: 'tool', toolName: forcedArtifact.toolName }
+                  : forcedLiveLookup
+                    ? { type: 'tool', toolName: forcedLiveLookup.toolName }
+                    : forceSituationRead && toolDefs.some((tool) => tool.name === 'situations.read')
+                      ? { type: 'tool', toolName: 'situations.read' }
+                      : mustAct
+                        ? 'required'
+                        : undefined,
         // The primary chat model has intermittently timed out when a named
         // artifact tool is mandatory. Use the role's configured
         // tool-capable fallback where appropriate.
@@ -2906,6 +3053,28 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       const requiredCall = stepResult.toolCalls.find(
         (toolCall) => toolCall.toolName === forcedArtifact.toolName,
       );
+      if (conditionalArtifact && conditionalArtifactCheck?.status === 'absent' && requiredCall) {
+        const input =
+          requiredCall.input && typeof requiredCall.input === 'object'
+            ? (requiredCall.input as Record<string, unknown>)
+            : undefined;
+        if (input?.title !== conditionalArtifact.exactTitle) {
+          const text = 'The requested exact title was not used, so I did not create an artifact.';
+          rc.window.push({ role: 'assistant', content: text } as ModelMessage);
+          return stageFinalResponse(deps, lease, state, rc.window, {
+            text,
+            progress: text,
+            terminalStatus: 'failed',
+            outcome: 'failed',
+          });
+        }
+      }
+      if (requiredCall) stepResult = { ...stepResult, toolCalls: [requiredCall] };
+    }
+    if (!resumingBatch && forcedConditionalLookup) {
+      const requiredCall = stepResult.toolCalls.find(
+        (toolCall) => toolCall.toolName === 'drive.search',
+      );
       if (requiredCall) stepResult = { ...stepResult, toolCalls: [requiredCall] };
     }
     if (!resumingBatch && mustRecordGoalProgress) {
@@ -3091,6 +3260,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       }> = [];
       let requiredGoalProgressSaved = !mustRecordGoalProgress;
       let requiredGoalProgressFailure = 'the progress tool was not dispatched';
+      let artifactWriteOccurredInBatch = conditionalArtifactWriteOccurred;
       for (let toolIndex = 0; toolIndex < batch.calls.length; toolIndex += 1) {
         const journalCall = batch.calls[toolIndex] as PendingToolBatchCall;
         if (
@@ -3110,6 +3280,40 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return false;
           return true;
         };
+        if (
+          conditionalArtifact &&
+          ['docs.create', 'sheets.create', 'slides.create'].includes(tc.toolName)
+        ) {
+          const input =
+            tc.input && typeof tc.input === 'object'
+              ? (tc.input as Record<string, unknown>)
+              : undefined;
+          const matchingRequestedWrite =
+            tc.toolName === conditionalArtifact.toolName &&
+            input?.title === conditionalArtifact.exactTitle;
+          const sameSuccessfulCallReplay = readToolEvidence.some(
+            (row) =>
+              row.toolName === tc.toolName &&
+              row.status === 'succeeded' &&
+              row.fromCurrentTask !== false &&
+              row.decision !== undefined &&
+              evidenceModelToolCallId({ decision: row.decision }) === tc.toolCallId &&
+              stableJson(row.args) === stableJson(tc.input),
+          );
+          const gateFailure =
+            artifactWriteOccurredInBatch && !sameSuccessfulCallReplay
+              ? 'An artifact write already succeeded or is in progress for this task; this additional write was not dispatched.'
+              : !sameSuccessfulCallReplay && conditionalArtifactCheck?.status !== 'absent'
+                ? 'A complete exact-title Drive check did not clear the creation gate; this write was not dispatched.'
+                : !sameSuccessfulCallReplay && !matchingRequestedWrite
+                  ? 'The artifact type or exact title did not match the checked request; this write was not dispatched.'
+                  : undefined;
+          if (gateFailure) {
+            replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, { error: gateFailure });
+            if (!(await updateCall({ status: 'settled' }))) return LOST_LEASE;
+            continue;
+          }
+        }
         if (arrivalTask) {
           replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, {
             error: 'Arrival checks cannot access tools or private location details.',
@@ -3338,6 +3542,15 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               : {}),
           },
         });
+        if (
+          conditionalArtifact &&
+          ['docs.create', 'sheets.create', 'slides.create'].includes(tc.toolName) &&
+          (outcome.kind === 'executed' ||
+            outcome.kind === 'recorded' ||
+            outcome.kind === 'awaiting_approval')
+        ) {
+          artifactWriteOccurredInBatch = true;
+        }
         if (outcome.kind === 'executed') {
           if (isJobPending(outcome.result)) {
             // Leave this tool call unmatched while the task sleeps. The

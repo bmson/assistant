@@ -156,6 +156,8 @@ export interface PersonalReadRequest {
   includeCalendarOverlapSummary?: boolean;
   /** Use a concise agenda format for a requested calendar briefing. */
   includeCalendarBriefing?: boolean;
+  /** Omit optional lodging and default next-step commentary when brevity is explicit. */
+  compactCalendarBriefing?: boolean;
 }
 
 export interface PersonalReadDetectionOptions {
@@ -240,6 +242,26 @@ function explicitlyRequestsCalendarOverlapSummary(text: string): boolean {
   return text
     .split(/[;.!?\n]+|\b(?:but|instead|however)\b/i)
     .some((clause) => overlapPattern.test(clause) && !negation.test(clause));
+}
+
+function explicitlyExcludesCalendarOverlapSummary(text: string): boolean {
+  const overlap = `(?:overlaps?|conflicts?|double[ -]?booked|clashes?)`;
+  const negatedAction = String.raw`(?:do\s+not|don['’]?t|never)\s+(?:check|look\s+for|include|mention|point\s+out|identify|analy[sz]e|review|report)`;
+  const negatedNeed = String.raw`(?:skip|no\s+need\s+to\s+(?:check|look\s+for|include|mention|identify|analy[sz]e|review))`;
+  const negatedWithout = String.raw`without\s+(?:checking|looking\s+for|including|mentioning|identifying|analy[sz]ing|reviewing)`;
+  const negation = new RegExp(
+    `\\b(?:${negatedAction}|${negatedNeed}|${negatedWithout})\\b[^.!?\\n]{0,60}\\b${overlap}\\b`,
+    'i',
+  );
+  const overlapPattern = new RegExp(`\\b${overlap}\\b`, 'i');
+  const clauses = text.split(/[;.!?\n]+|\b(?:but|instead|however)\b/i);
+  const explicitlyNegated = clauses.some(
+    (clause) => overlapPattern.test(clause) && negation.test(clause),
+  );
+  const explicitlyRequested = clauses.some(
+    (clause) => overlapPattern.test(clause) && !negation.test(clause),
+  );
+  return explicitlyNegated && !explicitlyRequested;
 }
 
 /**
@@ -2194,6 +2216,14 @@ function detectPersonalReadRequestInternal(
     /\b(?:briefing|brief me|practical briefing|quick overview|short (?:summary|answer)|recap|compact|concise)\b/i.test(
       latest,
     );
+  const compactCalendarBriefing =
+    calendarBriefing &&
+    /\b(?:compact|concise|brief me|practical briefing|short (?:summary|answer|briefing)|quick overview)\b/i.test(
+      latest,
+    );
+  const includeCalendarOverlapSummary =
+    !explicitlyExcludesCalendarOverlapSummary(latest) &&
+    (explicitlyRequestsCalendarOverlapSummary(latest) || Boolean(calendarBriefing));
 
   const request: PersonalReadRequest = {
     kind,
@@ -2211,9 +2241,8 @@ function detectPersonalReadRequestInternal(
       (kind === 'email' &&
         (verification || /\b(?:when|where|what time|details?|what does|what did)\b/i.test(latest))),
     ...(calendarBriefing ? { includeCalendarBriefing: true } : {}),
-    ...(explicitlyRequestsCalendarOverlapSummary(latest)
-      ? { includeCalendarOverlapSummary: true }
-      : {}),
+    ...(compactCalendarBriefing ? { compactCalendarBriefing: true } : {}),
+    ...(includeCalendarOverlapSummary ? { includeCalendarOverlapSummary: true } : {}),
   };
   if (weeklyCalendarPlan && calendarPlanOptions) {
     request.timeWindow = calendarPlanWindow(options, calendarPlanOptions);

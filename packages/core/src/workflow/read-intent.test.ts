@@ -830,6 +830,7 @@ describe('detectPersonalReadRequest', () => {
       firstToolName: 'calendar.list_events',
       requiresThreadRead: false,
       includeCalendarOverlapSummary: true,
+      compactCalendarBriefing: true,
       timeWindow: {
         timeMin: '2026-10-14T07:00:00.000Z',
         timeMax: '2026-10-15T07:00:00.000Z',
@@ -857,12 +858,13 @@ describe('detectPersonalReadRequest', () => {
       kind: 'calendar',
       firstToolName: 'calendar.list_events',
       includeCalendarBriefing: true,
+      compactCalendarBriefing: true,
+      includeCalendarOverlapSummary: true,
       timeWindow: {
         timeMin: '2026-10-14T07:00:00.000Z',
         timeMax: '2026-10-15T07:00:00.000Z',
       },
     });
-    expect(request?.includeCalendarOverlapSummary).toBeUndefined();
     expect(request?.mailQuery).toBeUndefined();
   });
 

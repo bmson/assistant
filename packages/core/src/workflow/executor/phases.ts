@@ -44,6 +44,7 @@ import {
 import { startMissionWithReceipt, wakeMission } from '../missions.js';
 import {
   explicitlyOptsOutOfRecall,
+  isConversationLocalContext,
   isSelfContainedTextTransformation,
   latestOwnerIntent,
   ownerAuthoredWindow,
@@ -184,6 +185,7 @@ export async function preparePlanningRecall(rc: RunContext): Promise<boolean> {
     !noRead &&
     !privateRead &&
     !localTransformation &&
+    !isConversationLocalContext(text) &&
     !state.untrustedContext &&
     task.trust === 'owner' &&
     (task.type === 'chat_turn' || task.type === 'sms_turn' || task.type === 'email_triage') &&

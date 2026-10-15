@@ -207,18 +207,30 @@ describe('registerDocsTools', () => {
       .fn()
       .mockResolvedValueOnce({ documentId: 'DOC-123_abc' }) // create
       .mockResolvedValueOnce({}) // batchUpdate
-      .mockResolvedValueOnce({}); // share
+      .mockResolvedValueOnce({}) // share
+      .mockResolvedValueOnce({
+        permissions: [
+          { type: 'user', emailAddress: 'bot@example.com' },
+          { type: 'user', emailAddress: 'owner@example.com' },
+        ],
+      }); // verify ACL
     const tool = toolsWith(api).get('docs.create')?.tool;
     const result = (await tool?.execute(
       { title: 'Plan', content: '# Plan\n- one\n- two' },
       {} as never,
-    )) as { documentId: string; url: string; sharedWith: string };
+    )) as {
+      documentId: string;
+      url: string;
+      sharedWith: string;
+      sharingVerification: string;
+    };
 
     expect(result).toEqual({
       documentId: 'DOC-123_abc',
       title: 'Plan',
       url: 'https://docs.google.com/document/d/DOC-123_abc/edit',
       sharedWith: 'owner@example.com',
+      sharingVerification: 'verified_owner_only',
       contentStructure: {
         complete: true,
         headings: [{ text: 'Plan', style: 'HEADING_1' }],
@@ -364,8 +376,8 @@ describe('registerDocsTools', () => {
       .mockResolvedValueOnce({});
     const tool = toolsWith(api).get('docs.create')?.tool;
     await tool?.execute({ title: 'Empty', content: '' }, {} as never);
-    // create + share only — no batchUpdate call.
-    expect(api).toHaveBeenCalledTimes(2);
+    // create, share and permission verification — no batchUpdate call.
+    expect(api).toHaveBeenCalledTimes(3);
     expect((api.mock.calls[1] as [string])[0]).toContain('/permissions');
   });
 

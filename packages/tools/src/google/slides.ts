@@ -10,6 +10,7 @@ import {
   type GoogleEffectReceipt,
   PartialGoogleArtifactError,
 } from './effect-progress.js';
+import { verifyOwnerOnlyDriveSharing } from './sharing-verification.js';
 
 const CODE_FONT = 'Courier New';
 const LINK_COLOR = { red: 0.06, green: 0.45, blue: 0.8 };
@@ -35,6 +36,7 @@ export interface SlidesToolDeps {
   client: GoogleClient;
   /** The presentation is created in the bot's Drive then shared with the owner. */
   ownerEmail: string;
+  botEmail?: string;
 }
 
 interface Presentation {
@@ -232,12 +234,19 @@ export function registerSlidesTools(registry: ToolRegistry, deps: SlidesToolDeps
           await shareWithOwner(deps.client, id, deps.ownerEmail);
           progress.stage = 'shared';
           await checkpointGoogleEffect(ctx, progress);
+          const sharingVerification = await verifyOwnerOnlyDriveSharing(
+            deps.client,
+            id,
+            deps.botEmail ?? '',
+            deps.ownerEmail,
+          );
           return {
             presentationId: id,
             title: created.title ?? args.title,
             url: presentationUrl(id),
             slideCount: args.slides.length,
             sharedWith: deps.ownerEmail,
+            sharingVerification,
           };
         } catch (error) {
           throw new PartialGoogleArtifactError({ ...progress }, error);

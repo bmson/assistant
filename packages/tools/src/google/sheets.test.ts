@@ -3,7 +3,7 @@ import { ToolRegistry } from '../registry.js';
 import type { GoogleClient } from './client.js';
 import { a1Range, a1StartRange, registerSheetsTools } from './sheets.js';
 
-const DEPS = { ownerEmail: 'owner@example.com' };
+const DEPS = { botEmail: 'bot@example.com', ownerEmail: 'owner@example.com' };
 
 function toolsWith(api: ReturnType<typeof vi.fn>) {
   const registry = new ToolRegistry();
@@ -25,7 +25,13 @@ describe('Google Sheets tools', () => {
         spreadsheetUrl: 'https://sheets.example.test/SHEET-123_abc',
       })
       .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({});
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        permissions: [
+          { type: 'user', emailAddress: 'bot@example.com' },
+          { type: 'user', emailAddress: 'owner@example.com' },
+        ],
+      });
     const tool = toolsWith(api).get('sheets.create')?.tool;
 
     const result = (await tool?.execute(
@@ -45,6 +51,7 @@ describe('Google Sheets tools', () => {
       title: 'Budget',
       url: 'https://sheets.example.test/SHEET-123_abc',
       sharedWith: 'owner@example.com',
+      sharingVerification: 'verified_owner_only',
     });
     const [createUrl, createInit] = api.mock.calls[0] as [string, RequestInit];
     expect(createUrl).toBe('https://sheets.googleapis.com/v4/spreadsheets');

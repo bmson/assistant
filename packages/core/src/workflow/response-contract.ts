@@ -1621,6 +1621,81 @@ function calendarAllDayWindowLabel(
   return `All-day record · ${range} within requested window (${sourceNote}${clipping})`;
 }
 
+function compactLocalRange(start: number, end: number, timeZone: string): string {
+  const startIso = new Date(start).toISOString();
+  const endIso = new Date(end).toISOString();
+  const startDate = shortDate(startIso, timeZone);
+  const endDate = shortDate(endIso, timeZone);
+  return `${startDate} ${overlapClock(start, timeZone)}–${endDate === startDate ? '' : `${endDate} `}${overlapClock(end, timeZone)}`;
+}
+
+/** Preserve source civil dates and the actual local-day intersection compactly. */
+function compactAllDaySourceDetail(
+  event: Record<string, unknown>,
+  request: PersonalReadRequest,
+): string {
+  const sourceDate = calendarSourceDateLabel(event) || 'source date unavailable';
+  const window = request.timeWindow;
+  const interval = calendarSourceInterval(event);
+  const start = window ? Date.parse(window.timeMin) : NaN;
+  const end = window ? Date.parse(window.timeMax) : NaN;
+  if (!interval || !Number.isFinite(start) || !Number.isFinite(end) || end <= start)
+    return `${sourceDate}; local extent unresolved`;
+  const overlapStart = Math.max(interval.start, start);
+  const overlapEnd = Math.min(interval.end, end);
+  if (overlapStart >= overlapEnd) return `${sourceDate}; outside the requested local window`;
+  const zone = request.timeZone ?? 'UTC';
+  const startsAtMidnight = clockOnly(new Date(overlapStart).toISOString(), zone) === '00:00';
+  const endsAtMidnight = clockOnly(new Date(overlapEnd).toISOString(), zone) === '00:00';
+  const sameDay =
+    eventLocalDay(new Date(overlapStart).toISOString(), zone) ===
+    eventLocalDay(new Date(overlapEnd - 1).toISOString(), zone);
+  const localExtent =
+    sameDay && startsAtMidnight && endsAtMidnight
+      ? `all of ${shortDate(new Date(overlapStart).toISOString(), zone)}`
+      : compactLocalRange(overlapStart, overlapEnd, zone);
+  return `${sourceDate}; local window ${localExtent}`;
+}
+
+function compactEventStatus(event: Record<string, unknown>): string {
+  const attendance =
+    typeof event.ownerResponse === 'string' &&
+    /^(?:accepted|declined|tentative|needsAction)$/i.test(event.ownerResponse)
+      ? `attendance ${event.ownerResponse.toLowerCase()}`
+      : '';
+  const availability =
+    typeof event.blocksTime === 'boolean'
+      ? event.blocksTime
+        ? 'blocks time'
+        : 'does not block time'
+      : '';
+  return [availability, attendance].filter(Boolean).join('; ');
+}
+
+function compactEventTitleLink(title: string, url: string): string {
+  const safeTitle = title
+    .replace(/[\p{Cc}\u202a-\u202e\u2066-\u2069]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/([\\`*_{}[\]()#+.!|>~-])/g, '\\$1');
+  if (!url) return safeTitle;
+  try {
+    const parsed = new URL(url);
+    if (!['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password)
+      return safeTitle;
+    return `[${safeTitle}](${parsed.href.replaceAll('\\', '\\\\').replaceAll('(', '\\(').replaceAll(')', '\\)')})`;
+  } catch {
+    return safeTitle;
+  }
+}
+
+function compactEventSpan(start: string, end: string, timeZone: string): string {
+  const from = Date.parse(start);
+  const to = Date.parse(end);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return 'time span unresolved';
+  return compactLocalRange(from, to, timeZone);
+}
+
 function calendarLodgingContext(event: Record<string, unknown>, complete: boolean): boolean {
   const interval = calendarSourceInterval(event);
   const description = stringField(event, 'description');
@@ -3660,6 +3735,10 @@ export function verifiedReadResponse(
       const agendaEvents = activeEvents.filter(
         (event) => calendarWindowMembership(event, request) === 'confirmed',
       );
+      const compactAllDayItems: string[] = [];
+      const compactAllDayDetails: string[] = [];
+      const compactOngoingItems: string[] = [];
+      const compactTimedItems: string[] = [];
       if (
         request.timeWindow &&
         request.timeZone &&
@@ -3719,6 +3798,11 @@ export function verifiedReadResponse(
           const eventLinks = bestUrl
             ? `[${stringField(bestLink ?? {}, 'label') || 'Event link'}](${bestUrl})`
             : '';
+          const compactSourceLink =
+            linkList.find((link) => stringField(link, 'type') === 'calendar') ??
+            linkList.find((link) => stringField(link, 'type') !== 'video') ??
+            bestLink;
+          const compactUrl = compactSourceLink ? stringField(compactSourceLink, 'url') : '';
           // Time first, in the shape the agenda answer uses, so the fallback
           // still reads like an answer rather than a dump of record fields.
           const clockStart = clockOnly(rawStart, request.timeZone);
@@ -3762,26 +3846,82 @@ export function verifiedReadResponse(
                   ? ' (continues into the requested period)'
                   : ''
                 : '';
+          if (request.compactCalendarBriefing) {
+            const linkedTitle = compactEventTitleLink(summary, compactUrl);
+            const calendarLabel = calendar ? ` (${compactEventTitleLink(calendar, '')})` : '';
+            const status = compactEventStatus(event);
+            if (allDay) {
+              compactAllDayItems.push(
+                `${linkedTitle}${calendarLabel}${status ? ` (${status})` : ''}`,
+              );
+              compactAllDayDetails.push(
+                `${compactEventTitleLink(summary, '')}: ${compactEventTitleLink(compactAllDaySourceDetail(event, request), '')}`,
+              );
+            } else {
+              const eventStart = Date.parse(rawStart);
+              const eventEnd = Date.parse(rawEnd);
+              const windowStart = request.timeWindow ? Date.parse(request.timeWindow.timeMin) : NaN;
+              const ongoing =
+                Number.isFinite(eventStart) &&
+                Number.isFinite(eventEnd) &&
+                Number.isFinite(windowStart) &&
+                eventStart < windowStart &&
+                eventEnd > windowStart;
+              if (ongoing) {
+                compactOngoingItems.push(
+                  `${linkedTitle}${calendarLabel} — ${compactEventSpan(rawStart, rawEnd, request.timeZone ?? 'UTC')}${status ? ` (${status})` : ''}`,
+                );
+              } else {
+                const when = [
+                  datePrefix,
+                  clockStart ? `${clockStart}${clockEnd ? `–${clockEnd}` : ''}` : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ');
+                compactTimedItems.push(
+                  `- ${when || '(time unavailable)'} — ${linkedTitle}${calendarLabel}${status ? ` (${status})` : ''}`,
+                );
+              }
+            }
+            continue;
+          }
           lines.push(
             `- **${when || start || '(no time returned)'}** — ${summary}${spanNote}${dateOnly && request.timeWindow && !briefingAllDay ? ` (${calendarSourceDateLabel(event)})` : ''}${!request.includeCalendarBriefing && location ? ` — ${location}` : ''}${!request.includeCalendarBriefing && attendeeText ? ` — with ${attendeeText}` : ''}${eventLinks ? ` — ${eventLinks}` : ''}${calendar && (manyCalendars || request.includeCalendarBriefing) ? ` (${calendar})` : ''}`,
           );
         }
       }
+      if (request.compactCalendarBriefing) {
+        if (compactAllDayItems.length > 0) {
+          lines.push(`- All day: ${compactAllDayItems.join('; ')}.`);
+          lines.push(
+            `  Source dates and local-day intersections: ${compactAllDayDetails.join('; ')}.`,
+          );
+        }
+        if (compactOngoingItems.length > 0)
+          lines.push(`- Ongoing: ${compactOngoingItems.join('; ')}.`);
+        if (compactTimedItems.length > 0) lines.push('Timed appointments:', ...compactTimedItems);
+      }
       if (sourceDateEvents.length > 0) {
         lines.push(
-          'Source dates only — these entries are not confirmed for the requested local day:',
+          request.compactCalendarBriefing
+            ? 'Source-date-only entries (not confirmed for this local day):'
+            : 'Source dates only — these entries are not confirmed for the requested local day:',
         );
         for (const event of sourceDateEvents) {
           const links = Array.isArray(event.links) ? event.links.map(record).filter(Boolean) : [];
           const link =
             links.find((item) => item && stringField(item, 'type') === 'calendar') ?? links[0];
           const url = link ? stringField(link, 'url') : '';
+          const summary = stringField(event, 'summary') || '(untitled event)';
+          const compactLink = url ? `[${summary}](${url})` : summary;
           lines.push(
-            `- ${stringField(event, 'summary') || '(untitled event)'} — ${calendarSourceDateLabel(event) || 'date/time unresolved'}${stringField(event, 'calendar') ? ` (${stringField(event, 'calendar')})` : ''}${url ? ` — [Source event](${url})` : ''}`,
+            request.compactCalendarBriefing
+              ? `- ${compactLink}${stringField(event, 'calendar') ? ` (${stringField(event, 'calendar')})` : ''} — ${calendarSourceDateLabel(event) || 'date/time unresolved'}`
+              : `- ${summary} — ${calendarSourceDateLabel(event) || 'date/time unresolved'}${stringField(event, 'calendar') ? ` (${stringField(event, 'calendar')})` : ''}${url ? ` — [Source event](${url})` : ''}`,
           );
         }
       }
-      if (request.includeCalendarBriefing) {
+      if (request.includeCalendarBriefing && !request.compactCalendarBriefing) {
         const stays = agendaEvents.filter((event) => calendarLodgingContext(event, complete));
         for (const stay of stays)
           lines.push(
@@ -3793,7 +3933,7 @@ export function verifiedReadResponse(
         if (sourceDateEvents.length > 0)
           lines.push('Source-date-only entries could not be compared for local-time overlaps.');
       }
-      if (request.includeCalendarBriefing) {
+      if (request.includeCalendarBriefing && !request.compactCalendarBriefing) {
         const firstAppointment = agendaEvents.find(
           (event) =>
             event.allDay !== true &&

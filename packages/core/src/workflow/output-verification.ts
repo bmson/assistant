@@ -99,7 +99,7 @@ function exactIdentifier(label: string): RegExp {
   return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'u');
 }
 
-function namedSourcePassages(source: string, draft: string) {
+function allNamedSourcePassages(source: string) {
   const headings: { label?: string; offset: number }[] = [];
   const identifier = '(?:[A-Z]{1,8}\\d{0,4}[A-Z]?|\\d{2,4})';
   for (const match of source.matchAll(/^([^\r\n]+)$/gm)) {
@@ -119,12 +119,18 @@ function namedSourcePassages(source: string, draft: string) {
     if (label || boundary) headings.push({ ...(label ? { label } : {}), offset: match.index });
   }
   return headings.flatMap((heading, index) => {
-    if (!heading.label || !exactIdentifier(heading.label).test(draft)) return [];
+    if (!heading.label) return [];
     const end = headings[index + 1]?.offset ?? source.length;
     return [
       { label: heading.label, start: heading.offset, end, text: source.slice(heading.offset, end) },
     ];
   });
+}
+
+function namedSourcePassages(source: string, draft: string) {
+  return allNamedSourcePassages(source).filter((passage) =>
+    exactIdentifier(passage.label).test(draft),
+  );
 }
 
 /** Whitespace-only repair for an exact, explicit bullet count and bold labels.
@@ -477,8 +483,22 @@ function webFetchEvidenceForVerifier(
   // Prefix-only clipping used to hide transfer qualifiers late in a long
   // transport page. Include separately labelled, offset-bound source units
   // for named services; never present noncontiguous excerpts as one passage.
-  const lateNamedPassage = passages.some((passage) => passage.end > WEB_SOURCE_EXCERPT_LIMIT);
-  const selectedPassages = lateNamedPassage ? passages.slice(0, 24) : [];
+  const lateNamedPassage = allNamedSourcePassages(sourceText).some(
+    (passage) => passage.end > WEB_SOURCE_EXCERPT_LIMIT,
+  );
+  // A draft that names a service lets us send only its source passage. When
+  // the draft itself is a refusal or generic summary, that selection is empty
+  // and the verifier cannot recover the useful sections at the end of a long
+  // successful fetch. Include bounded late sections in that case so the
+  // verifier can distinguish a readable page from an actually missing detail.
+  const selectedPassages = lateNamedPassage
+    ? (passages.length > 0
+        ? passages
+        : allNamedSourcePassages(sourceText).filter(
+            (passage) => passage.end > WEB_SOURCE_EXCERPT_LIMIT,
+          )
+      ).slice(0, 24)
+    : [];
   let passageLimit = EVIDENCE_ITEM_LIMIT;
   let excerptLength = Math.min(
     lateNamedPassage ? 2_000 : WEB_SOURCE_EXCERPT_LIMIT,

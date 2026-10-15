@@ -38,7 +38,12 @@ import {
   requestedSavedSkillName,
 } from '../../memory/skills.js';
 import { truncateAtBoundary } from '../../owner-text.js';
-import { type ArtifactIntent, artifactExecutionFailure } from '../artifact-intent.js';
+import {
+  type ArtifactIntent,
+  artifactExecutionFailure,
+  artifactSharingVerificationFailure,
+  requestedConditionalArtifactIntent,
+} from '../artifact-intent.js';
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
 import { CARD_NOT_BUILT, requestedCardIntent } from '../card-intent.js';
 import { responseCardSteps } from '../card-steps.js';
@@ -62,7 +67,7 @@ import {
 } from '../machine.js';
 import { selectMemoryReadAnswer } from '../memory-read-answer.js';
 import { verifyFinalOutput } from '../output-verification.js';
-import { latestOwnerIntent } from '../owner-intent.js';
+import { isConversationLocalContext, latestOwnerIntent } from '../owner-intent.js';
 import { PLANNER_VERSION } from '../planner.js';
 import { detectPersonalReadRequest, type PersonalReadRequest } from '../read-intent.js';
 import { requestChecklistHasUnfinished, requestChecklistSummary } from '../request-checklist.js';
@@ -503,6 +508,12 @@ export async function stageFinalResponse(
       trigger: task.trigger,
       clarificationContinuation: state.clarificationContinuation,
     });
+    if (isConversationLocalContext(intent.ownerAuthoredText)) {
+      // A fictional or explicitly thread-local exercise must not imply that
+      // unrelated private history informed it, including on resumed turns.
+      state.recall = undefined;
+      pending.cues = pending.cues?.filter((cue) => cue.kind !== 'chips');
+    }
     const requestedSkill = requestedSavedSkillName(
       intent.ownerAuthoredText,
       latestUserText(window),
@@ -767,6 +778,20 @@ export async function stageModelFinalResponse(
       progress: explicitFailure.slice(0, 200),
       terminalStatus: 'failed',
       outcome: 'failed',
+    });
+  }
+  const conditionalArtifact = requestedConditionalArtifactIntent(latestUserText(window) ?? '');
+  const sharingFailure = conditionalArtifact
+    ? artifactSharingVerificationFailure(conditionalArtifact, rows)
+    : undefined;
+  if (sharingFailure) {
+    return stageFinalResponse(deps, task, state, window, {
+      ...pending,
+      text: sharingFailure,
+      progress: sharingFailure.slice(0, 200),
+      terminalStatus: 'needs_attention',
+      outcome: 'needs_attention',
+      contractNotice: true,
     });
   }
   // Corpus for the URL-provenance rule: every tool result (both scopes), the

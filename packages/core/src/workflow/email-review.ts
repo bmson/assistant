@@ -1010,6 +1010,7 @@ function latestMessageNeedsReply(thread: EmailReviewThread): boolean {
   )
     return false;
   const currentBody = latestUnquotedBody(thread) ?? '';
+  if (/\bdo not reply to (?:this|the) (?:email|message)\b/i.test(currentBody)) return false;
   const imperativeAvailabilityAsk =
     /\bplease\s+(?:send|share|provide)\s+(?:(?:me|us)\s+)?your\s+(?:availability|schedule)\b/i.test(
       currentBody,
@@ -1080,6 +1081,26 @@ function directReplyDeadlineQuote(thread: EmailReviewThread): string | undefined
     )?.[0];
   if (explicit) return explicit;
   return undefined;
+}
+
+/** Keep a complete, source-quoted action deadline visible even when no email reply is requested. */
+function directActionDeadlineQuote(thread: EmailReviewThread): string | undefined {
+  const body = latestUnquotedBody(thread) ?? '';
+  const sentence = body
+    .split(/(?<=[.!?])\s+/)
+    .find(
+      (part) =>
+        part.length <= 240 &&
+        /\b(?:submit|file|claim|apply|complete|upload|pay|register|renew|request|contact)\b/i.test(
+          part,
+        ) &&
+        /\b(?:by|before|no later than|deadline|due)\b/i.test(part) &&
+        /\b(?:20\d{2}|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i.test(
+          part,
+        ),
+    )
+    ?.trim();
+  return sentence && quoteExistsInLatestUnquotedBody(thread, sentence) ? sentence : undefined;
 }
 
 function directReplyFallbackDraft(thread: EmailReviewThread): string | undefined {
@@ -1182,6 +1203,24 @@ function sourceRsvpRoute(thread: EmailReviewThread): string | undefined {
   return undefined;
 }
 
+function sourceExplicitlyRequiresAlternateReplyRoute(
+  thread: EmailReviewThread,
+  whyQuote: string,
+): boolean {
+  const body = latestUnquotedBody(thread) ?? '';
+  if (/\bdo not reply to (?:this|the) (?:email|message)\b/i.test(body)) return true;
+  if (!sourceRsvpRoute(thread) || sourceAllowsEmailRsvp(thread)) return false;
+  return body.split(/(?<=[.!?])\s+/).some((sentence) => {
+    const containsQuote = sentence.includes(whyQuote) || whyQuote.includes(sentence.trim());
+    return (
+      containsQuote &&
+      /\brsvp\b/i.test(sentence) &&
+      /\b(?:link|button|form|parentsquare|platform|app)\b/i.test(sentence) &&
+      !/\b(?:send|share|provide|confirm|reply|respond)\b/i.test(sentence.replace(/\brsvp\b/gi, ''))
+    );
+  });
+}
+
 function isDirectReplyFallbackDraft(thread: EmailReviewThread, draft: string): boolean {
   return directReplyFallbackDraft(thread) === draft;
 }
@@ -1196,19 +1235,56 @@ function completeDirectReplyAssessments(
   const byThread = new Map(threads.map((thread) => [thread.threadId, thread]));
   const items = parsed.data.items.map((item) => {
     const thread = byThread.get(item.threadId);
+    if (!thread || item.latestMessageId !== thread.latestMessageId) return item;
+    if (!latestMessageNeedsReply(thread)) {
+      const actionDeadline = directActionDeadlineQuote(thread);
+      if (item.disposition !== 'draft')
+        return actionDeadline
+          ? { ...item, deadline: { messageId: thread.latestMessageId, quote: actionDeadline } }
+          : item;
+      if (!sourceExplicitlyRequiresAlternateReplyRoute(thread, item.whyQuote)) return item;
+      const firstSentence = (latestUnquotedBody(thread) ?? '').split(/(?<=[.!?])\s+/)[0]?.trim();
+      const whyQuote = quoteExistsInLatestUnquotedBody(thread, item.whyQuote)
+        ? item.whyQuote
+        : firstSentence && firstSentence.length <= 400
+          ? firstSentence
+          : undefined;
+      if (!whyQuote) return item;
+      return {
+        ...item,
+        disposition: 'no_reply' as const,
+        recipient: null,
+        why: 'The source asks for an action through its stated route, not an email reply.',
+        whyQuote,
+        deadline: actionDeadline
+          ? { messageId: thread.latestMessageId, quote: actionDeadline }
+          : null,
+        draftBody: null,
+        draftSourceMessageIds: [],
+      };
+    }
     if (
-      !thread ||
-      !latestMessageNeedsReply(thread) ||
-      item.latestMessageId !== thread.latestMessageId ||
-      (item.disposition === 'draft' &&
-        (!item.draftBody ||
-          draftAnswersLatestRequest(thread, item.draftBody) ||
-          item.whyMessageId !== thread.latestMessageId ||
-          !quoteExistsInLatestUnquotedBody(thread, item.whyQuote) ||
-          item.recipient?.toLowerCase() !== thread.recipient ||
-          !draftClaimsStayInsideThread(thread, item.draftBody, item.draftSourceMessageIds)))
-    )
+      item.disposition === 'draft' &&
+      (!item.draftBody ||
+        draftAnswersLatestRequest(thread, item.draftBody) ||
+        item.whyMessageId !== thread.latestMessageId ||
+        !quoteExistsInLatestUnquotedBody(thread, item.whyQuote) ||
+        item.recipient?.toLowerCase() !== thread.recipient ||
+        !draftClaimsStayInsideThread(thread, item.draftBody, item.draftSourceMessageIds))
+    ) {
+      const sourceDeadlineQuote = directReplyDeadlineQuote(thread);
+      if (
+        item.disposition === 'draft' &&
+        sourceDeadlineQuote &&
+        (!item.deadline ||
+          !isSourceBackedDeadlineQuote(thread, item.deadline.messageId, item.deadline.quote))
+      )
+        return {
+          ...item,
+          deadline: { messageId: thread.latestMessageId, quote: sourceDeadlineQuote },
+        };
       return item;
+    }
 
     const whyQuote = directReplyRequestQuote(thread);
     if (!whyQuote) return item;
@@ -1235,6 +1311,14 @@ function completeDirectReplyAssessments(
       draftSourceMessageIds: [thread.latestMessageId],
     };
   });
+  // An omitted assessment is still pending. The bounded generator retries
+  // only those threads; a generic owner-decision template must not bypass
+  // their contextual assessment or count as a completed reply draft.
+  items.sort(
+    (left, right) =>
+      threads.findIndex((thread) => thread.threadId === left.threadId) -
+      threads.findIndex((thread) => thread.threadId === right.threadId),
+  );
   return { items };
 }
 
@@ -1293,6 +1377,7 @@ function hasUnresolvedDraftPlaceholder(draft: string, sourceText: string): boole
 
 export interface ValidatedEmailReviewItem {
   thread: EmailReviewThread;
+  duplicateRequestDetails?: Array<{ threadId: string; whyQuote: string; deadlineQuote?: string }>;
   disposition: 'draft' | 'no_reply';
   why: string;
   whyQuote: string;
@@ -1586,7 +1671,9 @@ export function formatEmailReviewAnswer(
   const assessedThreads = items.length;
   const fullyChecked =
     assessedThreads + coverage.alreadyAnsweredThreads + coverage.notEligibleThreads;
-  const drafts = items.filter((item) => item.disposition === 'draft' && item.draftBody);
+  const drafts = dedupeSameEventReplyDrafts(
+    items.filter((item) => item.disposition === 'draft' && item.draftBody),
+  );
   const noReplies = items.filter(
     (item) => item.disposition === 'no_reply' && !item.deadlineNeedsReview,
   ).length;
@@ -1600,10 +1687,33 @@ export function formatEmailReviewAnswer(
     lines.push(
       'Drafts are review text only; the source sender address is shown for context, and reply routing was not verified.',
     );
+  if (drafts.length < items.filter((item) => item.disposition === 'draft' && item.draftBody).length)
+    lines.push(
+      'Duplicate reminders for the same dated event were grouped into one reply request; all source threads remain included in the coverage count.',
+    );
   if (noReplies > 0)
     lines.push(
       `${noReplies} fully assessed ${noReplies === 1 ? 'thread did' : 'threads did'} not clearly require a response, so ${noReplies === 1 ? 'it was' : 'they were'} not counted among the reply requests.`,
     );
+  const actionDeadlines = items.filter(
+    (item) =>
+      item.disposition === 'no_reply' &&
+      item.deadlineQuote &&
+      !item.deadlineNeedsReview &&
+      !latestMessageNeedsReply(item.thread),
+  );
+  for (const item of actionDeadlines) {
+    const subject = item.thread.subject
+      .replace(/[\r\n]+/g, ' ')
+      .slice(0, 160)
+      .replace(/[\\`*_{}[\]()<>#+\-=|!]/g, '\\$&');
+    lines.push(`**Action deadline — ${subject}**`);
+    lines.push(`No email reply is requested. Source action: “${item.deadlineQuote}”`);
+    if (/^[A-Za-z0-9_-]{3,128}$/.test(item.thread.threadId))
+      lines.push(
+        `[Open the source thread](https://mail.google.com/mail/u/0/#all/${item.thread.threadId})`,
+      );
+  }
   if (uncertainNoReplies.length > 0)
     lines.push(
       `${uncertainNoReplies.length} ${uncertainNoReplies.length === 1 ? 'thread had' : 'threads had'} an unresolved possible deadline, so ${uncertainNoReplies.length === 1 ? 'its no-reply assessment was' : 'their no-reply assessments were'} not used to authorize replacement threads. Please check the source before relying on ${uncertainNoReplies.length === 1 ? 'that assessment' : 'those assessments'}.`,
@@ -1705,6 +1815,17 @@ export function formatEmailReviewAnswer(
         : 'Why it matters: This thread was selected as a possible reply request; check the quoted text before sending.',
     );
     lines.push(`Request in the latest message: “${item.whyQuote}”`);
+    for (const duplicate of item.duplicateRequestDetails ?? []) {
+      lines.push(
+        `Additional request in a duplicate reminder: “${duplicate.whyQuote}”${
+          duplicate.deadlineQuote ? ` Deadline: “${duplicate.deadlineQuote}”.` : ''
+        }`,
+      );
+      if (/^[A-Za-z0-9_-]{3,128}$/.test(duplicate.threadId))
+        lines.push(
+          `[Open the duplicate reminder thread](https://mail.google.com/mail/u/0/#all/${duplicate.threadId})`,
+        );
+    }
     lines.push(
       item.deadlineNeedsReview
         ? item.unverifiedDeadlineQuote
@@ -1735,4 +1856,114 @@ export function formatEmailReviewAnswer(
       );
   }
   return lines.join('\n\n');
+}
+
+function dedupeSameEventReplyDrafts(
+  drafts: ReadonlyArray<ValidatedEmailReviewItem>,
+): ValidatedEmailReviewItem[] {
+  const unique = new Map<string, ValidatedEmailReviewItem>();
+  const datePattern =
+    /\b(?:20\d{2}-\d{2}-\d{2}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?[,]?\s+20\d{2})\b/gi;
+  const eventWords = /\b(?:meeting|event|party|program|gathering|session)\b/gi;
+  const eventDateIn = (body: string): string | undefined => {
+    const eventMatches = [...body.matchAll(eventWords)];
+    for (const date of body.matchAll(datePattern)) {
+      if (!date[0] || date.index === undefined) continue;
+      const before = body.slice(Math.max(0, date.index - 60), date.index);
+      const after = body.slice(date.index + date[0].length, date.index + date[0].length + 45);
+      const precedingEvent = eventMatches
+        .filter((match) => match.index !== undefined && match.index < date.index)
+        .at(-1);
+      const hasDeadlineCue = /\b(?:by|before|until|due|deadline|no later than)\b/i.test(before);
+      if (
+        precedingEvent &&
+        precedingEvent.index !== undefined &&
+        !/\b(?:by|before|until|due|deadline|no later than)\b/i.test(
+          body.slice(precedingEvent.index, date.index),
+        )
+      )
+        return date[0];
+      if (!hasDeadlineCue && /\b(?:meeting|event|party|program|gathering|session)\b/i.test(after))
+        return date[0];
+    }
+    return undefined;
+  };
+  for (const item of drafts) {
+    const body = latestUnquotedBody(item.thread) ?? '';
+    const latest = item.thread.messages.find(
+      (message) => message.messageId === item.thread.latestMessageId,
+    );
+    const subject = item.thread.subject
+      .replace(/^(?:(?:re|fw|fwd):\s*)+/i, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLocaleLowerCase();
+    const subjectIdentityWords = subject
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter(
+        (word) =>
+          word.length > 2 &&
+          !/^(?:please|rsvp|meeting|event|party|program|gathering|session|reminder|family)$/i.test(
+            word,
+          ),
+      );
+    const eventDate = eventDateIn(body);
+    const sender = latest ? singleEmail(latest.from) : '';
+    const eventTime =
+      /\b\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b/i.exec(body)?.[0]?.replace(/\s+/g, '').toUpperCase() ??
+      '';
+    const eventVenue =
+      /\b(?:venue|location)\s*[:=-]\s*([^.!?\n,]{2,60})/i
+        .exec(body)?.[1]
+        ?.trim()
+        .toLocaleLowerCase() ??
+      /\bat\s+((?:[A-Z][A-Za-z0-9'&.-]*\s*){1,4})/.exec(body)?.[1]?.trim().toLocaleLowerCase() ??
+      '';
+    const duplicateKey =
+      sender && subject && subjectIdentityWords.length > 0 && eventDate && /\brsvp\b/i.test(body)
+        ? `${sender}|${subject}|${eventDate.toLocaleLowerCase()}|${eventTime}|${eventVenue}`
+        : item.thread.threadId;
+    const previous = unique.get(duplicateKey);
+    const latestTimestamp = Date.parse(latest?.date ?? '');
+    const itemScore =
+      (Number.isFinite(latestTimestamp) ? latestTimestamp : 0) * 1_000 +
+      Number(Boolean(item.deadlineQuote && !item.deadlineNeedsReview)) * 100 +
+      Math.min(item.whyQuote.length, 400) / 400;
+    const previousScore = previous
+      ? (() => {
+          const previousLatest = previous.thread.messages.find(
+            (message) => message.messageId === previous.thread.latestMessageId,
+          );
+          const timestamp = Date.parse(previousLatest?.date ?? '');
+          return (
+            (Number.isFinite(timestamp) ? timestamp : 0) * 1_000 +
+            Number(Boolean(previous.deadlineQuote && !previous.deadlineNeedsReview)) * 100 +
+            Math.min(previous.whyQuote.length, 400) / 400
+          );
+        })()
+      : -1;
+    if (!previous) {
+      unique.set(duplicateKey, item);
+      continue;
+    }
+    const chosen = itemScore > previousScore ? item : previous;
+    const duplicateDetails = [
+      ...(previous.duplicateRequestDetails ?? []),
+      {
+        threadId: previous.thread.threadId,
+        whyQuote: previous.whyQuote,
+        ...(previous.deadlineQuote ? { deadlineQuote: previous.deadlineQuote } : {}),
+      },
+      {
+        threadId: item.thread.threadId,
+        whyQuote: item.whyQuote,
+        ...(item.deadlineQuote ? { deadlineQuote: item.deadlineQuote } : {}),
+      },
+    ].filter((detail) => detail.threadId !== chosen.thread.threadId);
+    unique.set(duplicateKey, {
+      ...chosen,
+      duplicateRequestDetails: duplicateDetails,
+    });
+  }
+  return [...unique.values()];
 }

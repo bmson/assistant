@@ -13,6 +13,162 @@ export interface ArtifactIntent {
   label: 'Google Doc' | 'Google Sheet' | 'Google Slides presentation';
 }
 
+export interface ConditionalArtifactIntent extends ArtifactIntent {
+  /** Exact provider title parsed from an explicit quoted title; absence fails closed. */
+  exactTitle?: string;
+  /** The owner explicitly limited access to themselves. */
+  ownerOnly: boolean;
+}
+
+const CONDITIONAL_CREATE =
+  /\b(?:if|unless)\b[^.!?;\n]{0,160}\b(?:exact[- ](?:title|name)|title|name|(?:google\s+)?doc(?:ument)?|spreadsheet|sheet|presentation|slide\s+deck|file)\b[^.!?;\n]{0,80}\b(?:already\s+exists|exists|is\s+found|was\s+found)|(?:do\s+not|don['’]?t|never)\s+(?:duplicate|overwrite)|avoid\s+duplicat(?:e|ing|ion)|do\s+not\s+replace\s+(?:an?\s+)?existing\b/i;
+
+/**
+ * Explicit no-duplicate clauses are a write precondition, not planner advice.
+ * Require a quoted title so the runtime can bind its authenticated lookup to
+ * the owner's requested name rather than a model-invented search query.
+ */
+export function requestedConditionalArtifactIntent(
+  text: string,
+  titleSource = text,
+): ConditionalArtifactIntent | undefined {
+  const unquoted = text.replace(/```[\s\S]*?```|`[^`]*`|"[^"]*"|“[^”]*”/g, '');
+  if (!CONDITIONAL_CREATE.test(unquoted)) return undefined;
+  const actionText = unquoted
+    .replace(
+      /\b(?:if|unless)\b[^.!?;\n]{0,240}\b(?:already\s+exists|exists|is\s+found|was\s+found)\b[^.!?;\n]*/gi,
+      ' ',
+    )
+    .replace(/\b(?:do\s+not|don['’]?t|never)\s+(?:duplicate|overwrite|replace)\b[^.!?;\n]*/gi, ' ')
+    .replace(/\bavoid\s+duplicat(?:e|ing|ion)\b[^.!?;\n]*/gi, ' ');
+  const artifact = requestedArtifactIntent(actionText);
+  if (!artifact) return undefined;
+  const titleMatch = titleSource.match(/\b(?:titled|named)\s+["“]([^"”\n]{1,200})["”]/i);
+  const exactTitle = titleMatch?.[1]?.trim();
+  return {
+    ...artifact,
+    ...(exactTitle ? { exactTitle } : {}),
+    ownerOnly:
+      /\b(?:private|only\s+(?:(?:accessible|available|shared|to|with|by)\s+)*(?:me|myself|my\s+account)|no\s+one\s+else|not\s+shared\s+with\s+anyone\s+else|(?:do\s+not|don['’]?t|never)\s+share\b[^.!?;\n]{0,50}\banyone\s+else)\b/i.test(
+        unquoted,
+      ),
+  };
+}
+
+export interface ConditionalArtifactEvidence {
+  toolName: string;
+  status: string;
+  args?: unknown;
+  result?: unknown;
+  error?: string | null;
+  fromCurrentTask?: boolean;
+}
+
+export type ConditionalArtifactPreflight =
+  | { status: 'not_started' }
+  | { status: 'absent' }
+  | { status: 'exists'; fileId: string; url?: string }
+  | { status: 'blocked'; reason: string };
+
+/** Only a complete, successful, current-task exact-name lookup can clear the write gate. */
+export function conditionalArtifactPreflight(
+  intent: ConditionalArtifactIntent,
+  evidence: ReadonlyArray<ConditionalArtifactEvidence>,
+): ConditionalArtifactPreflight {
+  if (!intent.exactTitle) return { status: 'blocked', reason: 'The exact title is unclear.' };
+  const rows = evidence.filter(
+    (row) => row.toolName === 'drive.search' && row.fromCurrentTask !== false,
+  );
+  const latest = rows.at(-1);
+  if (!latest) return { status: 'not_started' };
+  if (latest.status !== 'succeeded')
+    return {
+      status: 'blocked',
+      reason: 'The Drive exact-title check did not complete successfully.',
+    };
+  const args = asRecord(latest.args);
+  const result = asRecord(latest.result);
+  if (
+    args?.exactTitle !== intent.exactTitle ||
+    args.query !== intent.exactTitle ||
+    args.verifyOwnerOnly !== intent.ownerOnly ||
+    result?.lookupMode !== 'exact-title' ||
+    result.exactTitle !== intent.exactTitle ||
+    result.coverage !== 'complete' ||
+    !Array.isArray(result.files)
+  ) {
+    return {
+      status: 'blocked',
+      reason: 'Drive did not return complete evidence for the requested exact title.',
+    };
+  }
+  const files = result.files.map(asRecord);
+  if (
+    files.some(
+      (file) =>
+        !file ||
+        file.name !== intent.exactTitle ||
+        typeof file.fileId !== 'string' ||
+        !/^[A-Za-z0-9_-]{10,200}$/.test(file.fileId) ||
+        typeof file.mimeType !== 'string' ||
+        !file.mimeType,
+    )
+  ) {
+    return {
+      status: 'blocked',
+      reason: 'Drive returned ambiguous or incomplete exact-title matches.',
+    };
+  }
+  if (files.length > 1)
+    return { status: 'blocked', reason: 'More than one accessible file has that exact title.' };
+  if (files.length === 0) return { status: 'absent' };
+  const expectedMimeType =
+    intent.toolName === 'docs.create'
+      ? 'application/vnd.google-apps.document'
+      : intent.toolName === 'sheets.create'
+        ? 'application/vnd.google-apps.spreadsheet'
+        : 'application/vnd.google-apps.presentation';
+  if (files[0]?.mimeType !== expectedMimeType) {
+    return {
+      status: 'blocked',
+      reason: `A file has that exact title, but it is not the requested ${intent.label} type.`,
+    };
+  }
+  if (intent.ownerOnly && result.sharingVerification !== 'verified_owner_only') {
+    return {
+      status: 'blocked',
+      reason:
+        result.sharingVerification === 'not_owner_only'
+          ? 'The existing file is also accessible to another account or group.'
+          : 'The existing file sharing permissions could not be verified.',
+    };
+  }
+  const file = files[0];
+  if (!file) return { status: 'blocked', reason: 'The exact-title match was incomplete.' };
+  const url =
+    typeof file.url === 'string' && /^https:\/\/(?:docs|drive)\.google\.com\//i.test(file.url)
+      ? file.url
+      : undefined;
+  return { status: 'exists', fileId: file.fileId as string, ...(url ? { url } : {}) };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+export function conditionalArtifactExistingResponse(
+  intent: ConditionalArtifactIntent,
+  preflight: Extract<ConditionalArtifactPreflight, { status: 'exists' }>,
+): string {
+  const link = ` [Open the existing file](https://drive.google.com/open?id=${encodeURIComponent(preflight.fileId)})`;
+  const privacy = intent.ownerOnly
+    ? ' Sharing access is limited to your account and the assistant account.'
+    : '';
+  return `An accessible file already has the exact title you requested. I did not create a duplicate.${privacy}${link}`;
+}
+
 /** A Google Doc URL directly supplied by the owner is an explicit read request. */
 export interface DocumentReadIntent {
   toolName: 'docs.get';
@@ -163,6 +319,27 @@ export function artifactExecutionFailure(
     `${intent.toolName} did not complete: ${detail}.`,
     `I cannot confirm that a ${intent.label} was created.`,
   ].join(' ');
+}
+
+/** Do not claim an owner-only result unless the provider ACL read proved it. */
+export function artifactSharingVerificationFailure(
+  intent: ConditionalArtifactIntent,
+  evidence: ArtifactToolEvidence[],
+): string | undefined {
+  if (!intent.ownerOnly) return undefined;
+  const row = [...evidence].reverse().find((item) => item.toolName === intent.toolName);
+  if (!row || !completed(row)) return undefined;
+  const result = asRecord(row.result);
+  if (result?.sharingVerification === 'verified_owner_only') return undefined;
+  const detail =
+    result?.sharingVerification === 'not_owner_only'
+      ? 'Google reports at least one other active permission.'
+      : 'Google did not provide complete permission evidence.';
+  const link =
+    typeof result?.url === 'string' && /^https:\/\/(?:docs|drive)\.google\.com\//i.test(result.url)
+      ? ` ${result.url}`
+      : '';
+  return `The ${intent.label} was created and shared with your configured account, but I could not confirm that access is limited to you. ${detail}${link}`;
 }
 
 /** Whether a model result needs the single constrained retry. */

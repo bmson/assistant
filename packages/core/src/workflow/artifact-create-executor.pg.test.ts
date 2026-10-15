@@ -1,5 +1,5 @@
 import { createDb, type Db } from '@assistant/db';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { getAgent } from '../chat.js';
 import { runGoldenTask } from './golden/harness.js';
@@ -85,5 +85,284 @@ describe('new artifact request action boundaries in the real executor', () => {
     expect(result.finalText).toContain('3 native bullets');
     expect(result.finalText).toContain('native table with 2 data rows');
     expect(result.status).toBe('done');
+  });
+
+  it('reports an exact existing private title and never invokes create', async () => {
+    const title = 'Conditional duplicate QA';
+    const request = `Create a private Google Doc titled "${title}". If the exact title already exists, verify and report it instead of duplicating. Make it accessible only to me.`;
+    const create = vi.fn(async () => {
+      throw new Error('create must be blocked when the exact title exists');
+    });
+    const search = vi.fn(async (input: unknown) => {
+      expect(input).toEqual({
+        query: title,
+        exactTitle: title,
+        verifyOwnerOnly: true,
+        maxResults: 20,
+      });
+      return {
+        lookupMode: 'exact-title',
+        exactTitle: title,
+        coverage: 'complete',
+        files: [
+          {
+            fileId: 'ExistingDocId12345',
+            name: title,
+            mimeType: 'application/vnd.google-apps.document',
+            url: 'https://docs.google.com/document/d/ExistingDocId12345/edit',
+          },
+        ],
+        sharingVerification: 'verified_owner_only',
+      };
+    });
+    const result = await runGoldenTask(db, agentId, {
+      name: 'conditional-doc-duplicate-stops-before-write',
+      event: { source: 'chat', trust: 'owner', payload: { text: request } },
+      taskType: 'adhoc',
+      script: [{ text: 'The runtime must stop before this model response.' }],
+      tools: {
+        'drive.search': {
+          schema: z.object({
+            query: z.string(),
+            exactTitle: z.string().optional(),
+            verifyOwnerOnly: z.boolean().optional(),
+            maxResults: z.number().optional(),
+          }),
+          execute: search,
+        },
+        'docs.create': {
+          schema: z.object({ title: z.string(), content: z.string() }),
+          execute: create,
+        },
+      },
+    });
+    expect(result.toolNames).toEqual(['drive.search']);
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(create).not.toHaveBeenCalled();
+    expect(result.finalText).toContain('did not create a duplicate');
+    expect(result.finalText).toContain('drive.google.com/open?id=ExistingDocId12345');
+  });
+
+  it('creates only after complete exact-title absence evidence', async () => {
+    const title = 'Conditional new QA';
+    const request = `Create a Google Doc titled "${title}" if the exact title already exists, report it instead of creating a duplicate.`;
+    const sequence: string[] = [];
+    const content = '# Status\n\n- Ready';
+    const structure = {
+      complete: true,
+      headings: [{ text: 'Status', style: 'HEADING_1' }],
+      bullets: ['Ready'],
+      tables: [],
+    };
+    const result = await runGoldenTask(db, agentId, {
+      name: 'conditional-doc-creates-after-complete-absence',
+      event: { source: 'chat', trust: 'owner', payload: { text: request } },
+      taskType: 'adhoc',
+      script: [
+        { toolCalls: [{ toolName: 'docs.create', input: { title, content } }] },
+        { text: 'Created the requested document and read it back.' },
+      ],
+      tools: {
+        'drive.search': {
+          schema: z.object({
+            query: z.string(),
+            exactTitle: z.string().optional(),
+            verifyOwnerOnly: z.boolean().optional(),
+            maxResults: z.number().optional(),
+          }),
+          execute: async (args) => {
+            sequence.push('drive.search');
+            expect(args).toEqual({
+              query: title,
+              exactTitle: title,
+              verifyOwnerOnly: false,
+              maxResults: 20,
+            });
+            return {
+              lookupMode: 'exact-title',
+              exactTitle: title,
+              coverage: 'complete',
+              files: [],
+            };
+          },
+        },
+        'docs.create': {
+          schema: z.object({ title: z.string(), content: z.string() }),
+          execute: async (args) => {
+            sequence.push('docs.create');
+            expect(args).toEqual({ title, content });
+            return {
+              documentId: 'CreatedDocId12345',
+              title,
+              url: 'https://docs.google.com/document/d/CreatedDocId12345/edit',
+              sharingVerification: 'verified_owner_only',
+              contentStructure: structure,
+            };
+          },
+        },
+        'docs.get': {
+          schema: z.object({
+            documentId: z.string(),
+            startOffset: z.number(),
+            maxChars: z.number(),
+          }),
+          execute: async () => {
+            sequence.push('docs.get');
+            return {
+              documentId: 'CreatedDocId12345',
+              title,
+              text: content,
+              url: 'https://docs.google.com/document/d/CreatedDocId12345/edit',
+              complete: true,
+              structure,
+            };
+          },
+        },
+      },
+    });
+    expect(sequence).toEqual(['drive.search', 'docs.create', 'docs.get']);
+    expect(result.toolNames).toEqual(['drive.search', 'docs.create', 'docs.get']);
+    expect(result.status).toBe('done');
+  });
+
+  it('does not create if the exact-title search fails', async () => {
+    const title = 'Conditional blocked QA';
+    const request = `Create a Google Doc titled "${title}" if the exact title already exists, report it instead of creating a duplicate.`;
+    const create = vi.fn();
+    const result = await runGoldenTask(db, agentId, {
+      name: 'conditional-doc-failed-search-stops-before-write',
+      event: { source: 'chat', trust: 'owner', payload: { text: request } },
+      taskType: 'adhoc',
+      script: [{ text: 'The runtime must not create after a failed search.' }],
+      tools: {
+        'drive.search': {
+          schema: z.object({
+            query: z.string(),
+            exactTitle: z.string().optional(),
+            verifyOwnerOnly: z.boolean().optional(),
+            maxResults: z.number().optional(),
+          }),
+          execute: async () => {
+            throw new Error('Drive unavailable');
+          },
+        },
+        'docs.create': {
+          schema: z.object({ title: z.string(), content: z.string() }),
+          execute: create,
+        },
+      },
+    });
+    expect(result.toolNames).toEqual(['drive.search']);
+    expect(create).not.toHaveBeenCalled();
+    expect(result.status).toBe('needs_attention');
+    expect(result.finalText).toContain('did not complete successfully');
+  });
+
+  it('rejects a model title that differs from the exact title checked in Drive', async () => {
+    const title = 'Conditional exact title QA';
+    const create = vi.fn();
+    const result = await runGoldenTask(db, agentId, {
+      name: 'conditional-doc-title-must-match-preflight',
+      event: {
+        source: 'chat',
+        trust: 'owner',
+        payload: {
+          text: `Create a Google Doc titled "${title}" if the exact title already exists, report it instead of creating a duplicate.`,
+        },
+      },
+      taskType: 'adhoc',
+      script: [
+        {
+          toolCalls: [
+            { toolName: 'docs.create', input: { title: 'Different title', content: 'text' } },
+          ],
+        },
+      ],
+      tools: {
+        'drive.search': {
+          schema: z.object({
+            query: z.string(),
+            exactTitle: z.string().optional(),
+            verifyOwnerOnly: z.boolean().optional(),
+            maxResults: z.number().optional(),
+          }),
+          execute: async () => ({
+            lookupMode: 'exact-title',
+            exactTitle: title,
+            coverage: 'complete',
+            files: [],
+          }),
+        },
+        'docs.create': {
+          schema: z.object({ title: z.string(), content: z.string() }),
+          execute: create,
+        },
+      },
+    });
+    expect(result.toolNames).toEqual(['drive.search']);
+    expect(create).not.toHaveBeenCalled();
+    expect(result.status).toBe('failed');
+    expect(result.finalText).toContain('requested exact title was not used');
+  });
+
+  it('blocks later model-proposed artifact writes after the checked creation succeeded', async () => {
+    const title = 'Conditional once-only QA';
+    const request = `Create a Google Doc titled "${title}" only if no file with that exact title exists; if one exists, do not duplicate it.`;
+    const create = vi.fn(async (args: unknown) => {
+      expect(args).toMatchObject({ title });
+      return {
+        documentId: 'OnceOnlyDocId12345',
+        title,
+        url: 'https://docs.google.com/document/d/OnceOnlyDocId12345/edit',
+        sharingVerification: 'verified_owner_only',
+      };
+    });
+    const createSheet = vi.fn();
+    const result = await runGoldenTask(db, agentId, {
+      name: 'conditional-doc-only-one-artifact-write',
+      event: { source: 'chat', trust: 'owner', payload: { text: request } },
+      taskType: 'adhoc',
+      script: [
+        { toolCalls: [{ toolName: 'docs.create', input: { title, content: '# Notes' } }] },
+        {
+          toolCalls: [
+            { toolName: 'docs.create', input: { title, content: '# Duplicate' } },
+            { toolName: 'sheets.create', input: { title, rows: [['unexpected']] } },
+          ],
+        },
+        {
+          text: 'Created the requested document. [Open it](https://docs.google.com/document/d/OnceOnlyDocId12345/edit)',
+        },
+      ],
+      tools: {
+        'drive.search': {
+          schema: z.object({
+            query: z.string(),
+            exactTitle: z.string().optional(),
+            verifyOwnerOnly: z.boolean().optional(),
+            maxResults: z.number().optional(),
+          }),
+          execute: async () => ({
+            lookupMode: 'exact-title',
+            exactTitle: title,
+            coverage: 'complete',
+            files: [],
+          }),
+        },
+        'docs.create': {
+          schema: z.object({ title: z.string(), content: z.string() }),
+          execute: create,
+        },
+        'sheets.create': {
+          schema: z.object({ title: z.string(), rows: z.array(z.array(z.string())) }),
+          execute: createSheet,
+        },
+      },
+    });
+
+    expect(result.toolNames).toEqual(['drive.search', 'docs.create']);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(createSheet).not.toHaveBeenCalled();
+    expect(result.finalText).toContain('OnceOnlyDocId12345');
   });
 });
