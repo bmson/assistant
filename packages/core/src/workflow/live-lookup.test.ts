@@ -236,6 +236,24 @@ describe('live lookup routing from home-screen regressions', () => {
       /couldn't get a route/,
     );
   });
+  it.each([
+    "What's the cheapest Muni option next weekend for three rides and one cable-car ride?",
+    'How much does a BART ticket to the airport cost?',
+    'Compare the best value train passes for a weekend in London.',
+    'Are bus fares cheaper with a day pass?',
+  ])('requires current operator evidence for public fare decisions: %s', (content) => {
+    const lookup = detectLiveLookup([{ role: 'user', content }]);
+    expect(lookup).toMatchObject({ kind: 'web', request: content });
+    expect(lookup && nextLiveLookup(lookup, [])?.toolName).toBe('web.search');
+  });
+  it.each([
+    'For a hypothetical bus, tickets cost $3 and a day pass costs $8. What is cheapest for four rides?',
+    'Given a $2 bus fare and a $7 day pass, which is cheaper for three rides?',
+    'Using only these supplied train prices, compare tickets at $4 and a pass at $12.',
+    'Do not search the web. Calculate the cheapest bus pass from these prices.',
+  ])('does not turn supplied pricing exercises into public research: %s', (content) => {
+    expect(detectLiveLookup([{ role: 'user', content }])).toBeUndefined();
+  });
   it('resolves a typo follow-up without querying the previous assistant guess', () => {
     expect(
       detectLiveLookup([

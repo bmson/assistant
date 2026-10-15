@@ -34,6 +34,21 @@ const SEARCH =
 const CURRENT = /\b(?:current|currently|latest|live|right now|today|tonight|tomorrow)\b/i;
 const PUBLIC_FACT =
   /\b(?:president|prime minister|ceo|score|standings|weather|forecast|price|news|hiring|jobs?)\b/i;
+// A fare comparison depends on the operator's current rules even when the
+// owner does not explicitly say "look it up" or "current".
+const TRANSIT_PRICING =
+  /\b(?:fares?|tickets?|passes|passports?|transit|public transport|bus|buses|trains?|rail|subway|metro|muni|bart|clipper|cable[- ]?cars?)\b/i;
+const PRICE_DECISION =
+  /\b(?:cheapest|cheaper|costs?|prices?|pricing|fares?|how much|best value|compare)\b/i;
+
+function suppliedPricingExercise(request: string): boolean {
+  return (
+    /\b(?:fictional|hypothetical|use only|using only|based only on|do not (?:search|look)|don't (?:search|look))\b/i.test(
+      request,
+    ) ||
+    (/\b(?:given|assume|assuming)\b/i.test(request) && /[$€£]\s*\d/.test(request))
+  );
+}
 /** A result, fixture, or table question — about a sport, not a credit score. */
 const SPORTS_RESULT =
   /\b(?:scores?|scoreline|standings|fixtures?|who won|kick-?off|box score|league table)\b/i;
@@ -155,6 +170,13 @@ export function detectLiveLookup(
   // request (and its potentially private contents) on the public web.
   if (requestedArtifactIntent(request) && !/\bsearch\s+(?:the\s+web|online)\b/i.test(request))
     return undefined;
+  if (
+    (asks || /^(?:please\s+)?(?:compare|find|recommend)\b/i.test(request)) &&
+    TRANSIT_PRICING.test(request) &&
+    PRICE_DECISION.test(request) &&
+    !suppliedPricingExercise(request)
+  )
+    return { kind: 'web', request };
   if (SEARCH.test(request) || (asks && CURRENT.test(request) && PUBLIC_FACT.test(request))) {
     const previous = users.slice(-4, -1).findLast((text) => !CORRECTION.test(text));
     if (
@@ -641,7 +663,15 @@ export function liveLookupDirective(
 ): string {
   const [first] = lookups;
   if (!first) return '';
-  const rules = `Use a successful lookup from this task. Earlier assistant answers and recalled conversations are not current evidence. If a provider fails, report the gap; never invent measurements, scores, office holders, opening hours, player traits, or verified job openings. Search snippets locate sources; read the source before concluding. Resolve relative dates using the owner's request time ${context.requestAt.toISOString()} and timezone ${context.timeZone}.`;
+  const fareRules = lookups.some(
+    (lookup) =>
+      lookup.kind === 'web' &&
+      TRANSIT_PRICING.test(lookup.request) &&
+      PRICE_DECISION.test(lookup.request),
+  )
+    ? " For fares or passes, verify prices, validity, transfers and exclusions against the transport operator's official pages; distinguish sourced prices from your arithmetic and state assumptions that change the cheapest option."
+    : '';
+  const rules = `Use a successful lookup from this task. Earlier assistant answers and recalled conversations are not current evidence. If a provider fails, report the gap; never invent measurements, scores, office holders, opening hours, player traits, or verified job openings. Search snippets locate sources; read the source before concluding.${fareRules} Resolve relative dates using the owner's request time ${context.requestAt.toISOString()} and timezone ${context.timeZone}.`;
   const eventReminder = lookups.some((lookup) => lookup.kind === 'sports' && lookup.reminderTeam)
     ? '\nThis game is the dependency of a requested event-completion reminder. Use the exact event ID, league, start time and team IDs returned by this task. If the lookup has multiple or no matching games, ask which occurrence the owner means. The reminder will poll the exact fixture and fire only when the provider reports it finished; never substitute the scheduled start/end time.'
     : '';
