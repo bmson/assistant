@@ -214,7 +214,7 @@ describe('bounded no-send email review', () => {
     const coverage = emailReviewCoverage([], [], [search('thread-a'), search('thread-b')]);
     coverage.rankedMetadataThreads = 1;
     expect(formatEmailReviewAnswer([], coverage)).toContain(
-      'included 1 of 2 scanned non-newsletter threads; the others were not ranked',
+      'ranking context included 1 of 2 scanned non-newsletter threads; the others were not ranked',
     );
   });
 
@@ -310,12 +310,14 @@ describe('bounded no-send email review', () => {
         evidence,
       ),
     );
-    expect(formatted).toContain('unresolved possible deadline');
-    expect(formatted).toContain('**Deadline needs review — Please confirm the renewal date**');
+    expect(formatted).toContain('**Possible deadlines to verify (1)**');
+    expect(formatted).toContain(
+      '**Please confirm the renewal date** — No reply draft was prepared',
+    );
     expect(formatted).toContain(
       '[Open the source thread](https://mail.google.com/mail/u/0/#all/thread-a)',
     );
-    expect(formatted).toContain('No reply draft was prepared for it');
+    expect(formatted).toContain('No reply draft was prepared; check the source');
     expect(formatted).not.toContain('through Jun. 6th');
   });
 
@@ -457,8 +459,8 @@ describe('bounded no-send email review', () => {
       checked?.items ?? [],
       emailReviewCoverage([thread.threadId], [thread], [search(thread.threadId)]),
     );
-    expect(formatted).toContain('No deadline was identified in this review.');
-    expect(formatted).not.toContain('Deadline mentioned in the thread: “tomorrow”');
+    expect(formatted).toContain('Deadline: none identified.');
+    expect(formatted).not.toContain('Deadline: “tomorrow”');
 
     for (const quote of ['tomorrow', 'volunteer tomorrow', 'Could you volunteer tomorrow?']) {
       const falseDeadline = {
@@ -507,9 +509,77 @@ describe('bounded no-send email review', () => {
       review.answer?.items ?? [],
       emailReviewCoverage([thread.threadId], [thread], [search(thread.threadId)]),
     );
-    expect(rendered).toContain('No email reply is requested. Source action:');
+    expect(rendered).toContain('Actions with deadlines — no email reply requested');
+    expect(rendered).toContain('Source action:');
     expect(rendered).toContain('11:00 PM on October 31, 2026 (KST)');
     expect(rendered).not.toContain('prepared 1 reply draft');
+  });
+
+  it('leads with grounded actions and drafts, then gives compact coverage notes', () => {
+    const actionMessages = messages('action-first');
+    const actionLatest = required(actionMessages.at(-1), 'action message');
+    actionLatest.text =
+      'Please submit a retroactive claim by 11:00 PM on October 31, 2026 (KST). Do not reply to this email.';
+    actionLatest.sourceLength = actionLatest.text.length;
+    const actionThread = required(
+      emailReviewCompleteThread('action-first', 'owner@example.com', [
+        search('action-first'),
+        read('action-first', actionMessages),
+      ]),
+      'action thread',
+    );
+    const draftThread = required(
+      emailReviewCompleteThread('draft-second', 'owner@example.com', [
+        search('draft-second'),
+        read('draft-second', messages('draft-second')),
+      ]),
+      'draft thread',
+    );
+    const draft = required(
+      validateEmailReviewAnswer(validAnswer('draft-second'), [draftThread])?.items[0],
+      'validated draft',
+    );
+    const rendered = formatEmailReviewAnswer(
+      [
+        {
+          thread: actionThread,
+          disposition: 'no_reply',
+          why: 'The source provides a required account action.',
+          whyQuote: actionLatest.text,
+          deadlineQuote: 'by 11:00 PM on October 31, 2026 (KST)',
+        },
+        draft,
+      ],
+      {
+        ...emailReviewCoverage(
+          ['action-first', 'draft-second'],
+          [actionThread, draftThread],
+          [search('action-first'), search('draft-second')],
+        ),
+        searchComplete: false,
+        rankedMetadataThreads: 1,
+      },
+    );
+    const actionIndex = rendered.indexOf('**Actions with deadlines');
+    const draftIndex = rendered.indexOf('### Please confirm the renewal date');
+    const coverageIndex = rendered.indexOf('**Coverage:**');
+    expect(actionIndex).toBeGreaterThan(-1);
+    expect(draftIndex).toBeGreaterThan(actionIndex);
+    expect(coverageIndex).toBeGreaterThan(draftIndex);
+    expect(rendered).toContain('11:00 PM on October 31, 2026 (KST)');
+    expect(rendered).toContain('by Friday');
+    expect(rendered).toContain('Source request: “Could you confirm by Friday?”');
+    expect(rendered).toContain('Why it matters: A response is requested by the cited deadline.');
+    expect(rendered).toContain(
+      '[Open the source thread](https://mail.google.com/mail/u/0/#all/action-first)',
+    );
+    expect(rendered).toContain(
+      '[Open the source thread](https://mail.google.com/mail/u/0/#all/draft-second)',
+    );
+    expect(rendered).toContain('mail-search metadata coverage was incomplete');
+    expect(rendered).toContain('ranking context included 1 of 2 scanned non-newsletter threads');
+    expect(rendered).not.toContain('not a guarantee that these are the only');
+    expect(rendered).not.toContain('Each candidate was checked against its complete thread');
   });
 
   it('collapses only strongly identified duplicate RSVP reminders and preserves their source details', () => {
@@ -901,7 +971,8 @@ describe('bounded no-send email review', () => {
       ),
     );
     expect(text).toContain('verified reply checks for 1 of 2 selected threads');
-    expect(text).toContain('Complete reads are not the same as completed assessments.');
+    expect(text).not.toContain('complete thread');
+    expect(text).not.toContain('complete reads are not the same as completed assessments');
     expect(text).not.toContain('2 of 2 selected threads');
   });
 
@@ -926,7 +997,7 @@ describe('bounded no-send email review', () => {
     expect(coverage).toMatchObject({ searchMailboxMismatch: true, unassessedCompleteThreads: 1 });
     const formatted = formatEmailReviewAnswer([], coverage);
     expect(formatted).toContain('connected mailbox used for search differs');
-    expect(formatted).toContain('1 complete thread could not be assessed reliably');
+    expect(formatted).toContain('1 selected thread could not be assessed reliably');
     expect(formatted).not.toContain('connected-alias@example.net');
     expect(formatted).not.toContain('owner@example.com');
   });
@@ -2187,10 +2258,9 @@ describe('bounded no-send email review', () => {
       required(validated?.items, 'validated source-bound review'),
       emailReviewCoverage(['thread-a'], [thread], [search('thread-a')]),
     );
-    expect(formatted).toContain('Request in the latest message: “Could you confirm by Friday?”');
-    expect(formatted).toContain(
-      'Why it matters: A response is requested, with the stated deadline “by Friday”.',
-    );
+    expect(formatted).toContain('Source request: “Could you confirm by Friday?”');
+    expect(formatted).toContain('Why it matters: A response is requested by the cited deadline.');
+    expect(formatted).toContain('Deadline: “by Friday”');
     for (const unsupportedWhy of [
       'Your account will be closed tomorrow unless you pay.',
       'The sender asks for confirmation, so a delay will cancel your membership.',
@@ -2211,7 +2281,7 @@ describe('bounded no-send email review', () => {
       );
       expect(safeFormatted).not.toContain(unsupportedWhy);
       expect(safeFormatted).toContain(
-        'Why it matters: A response is requested, with the stated deadline “by Friday”.',
+        'Why it matters: A response is requested by the cited deadline.',
       );
     }
     expect(
@@ -2445,9 +2515,9 @@ describe('bounded no-send email review', () => {
       ownerOrChronologyExcluded: 1,
       backfillShortfall: 'step_budget',
     });
-    expect(text).toContain('fully checked but did not meet the criteria');
-    expect(text).toContain('complete, valid read did not establish whether it qualified');
-    expect(text).toContain('step limit before another replacement thread could be read');
+    expect(text).toContain('reviewed but did not meet the reply-draft criteria');
+    expect(text).toContain('not used because eligibility could not be established');
+    expect(text).toContain('step limit prevented another replacement-thread read');
     expect(text).not.toContain('no more threads to replace');
   });
 });

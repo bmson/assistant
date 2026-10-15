@@ -1748,30 +1748,9 @@ export function formatEmailReviewAnswer(
   const drafts = dedupeSameEventReplyDrafts(
     items.filter((item) => item.disposition === 'draft' && item.draftBody),
   );
-  const noReplies = items.filter(
-    (item) => item.disposition === 'no_reply' && !item.deadlineNeedsReview,
+  const rawDraftCount = items.filter(
+    (item) => item.disposition === 'draft' && item.draftBody,
   ).length;
-  const uncertainNoReplies = items.filter(
-    (item) => item.disposition === 'no_reply' && item.deadlineNeedsReview,
-  );
-  const reviewRange = scope?.startAt && scope.endAt ? 'local-calendar-day' : 'day';
-  const lines = [
-    scope?.latestUnanswered
-      ? `I checked ${fullyChecked} of ${coverage.selectedThreads} selected inbox threads in newest-first order and prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'} for review. This review is bounded by the available search pages and candidate pool, so it cannot establish that no newer request exists beyond that coverage.`
-      : `I completed verified reply checks for ${fullyChecked} of ${coverage.selectedThreads} selected threads from a bounded ${scope?.windowDays ?? 7}-${reviewRange} mail scan and prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'} for review. Complete reads are not the same as completed assessments. This is a provisional prioritization of the scanned results, not a guarantee that these are the only or globally most important requests.`,
-  ];
-  if (drafts.length > 0)
-    lines.push(
-      'Drafts are review text only; the source sender address is shown for context, and reply routing was not verified.',
-    );
-  if (drafts.length < items.filter((item) => item.disposition === 'draft' && item.draftBody).length)
-    lines.push(
-      'Duplicate reminders for the same dated event were grouped into one reply request; all source threads remain included in the coverage count.',
-    );
-  if (noReplies > 0)
-    lines.push(
-      `${noReplies} fully assessed ${noReplies === 1 ? 'thread did' : 'threads did'} not clearly require a response, so ${noReplies === 1 ? 'it was' : 'they were'} not counted among the reply requests.`,
-    );
   const actionDeadlines = items.filter(
     (item) =>
       item.disposition === 'no_reply' &&
@@ -1779,101 +1758,125 @@ export function formatEmailReviewAnswer(
       !item.deadlineNeedsReview &&
       !latestMessageNeedsReply(item.thread),
   );
+  const noReplies = items.filter(
+    (item) =>
+      item.disposition === 'no_reply' &&
+      !item.deadlineNeedsReview &&
+      !actionDeadlines.includes(item),
+  ).length;
+  const uncertainNoReplies = items.filter(
+    (item) => item.disposition === 'no_reply' && item.deadlineNeedsReview,
+  );
+  const reviewRange = scope?.startAt && scope.endAt ? 'local-calendar-day' : 'day';
+  const scanDescription = scope?.latestUnanswered
+    ? `a bounded ${scope?.windowDays ?? 7}-day inbox scan in newest-first order`
+    : `a bounded ${scope?.windowDays ?? 7}-${reviewRange} mail scan`;
+  const lines = [
+    `Completed verified reply checks for ${fullyChecked} of ${coverage.selectedThreads} selected threads from ${scanDescription}; prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'}.`,
+  ];
+  if (drafts.length > 0)
+    lines.push(
+      'Drafts below are unsent and not saved; sender addresses are from the source and reply routing is unverified. Review before sending.',
+    );
+  if (actionDeadlines.length > 0)
+    lines.push('**Actions with deadlines — no email reply requested**');
   for (const item of actionDeadlines) {
     const subject = item.thread.subject
       .replace(/[\r\n]+/g, ' ')
       .slice(0, 160)
       .replace(/[\\`*_{}[\]()<>#+\-=|!]/g, '\\$&');
-    lines.push(`**Action deadline — ${subject}**`);
-    lines.push(`No email reply is requested. Source action: “${item.deadlineQuote}”`);
+    lines.push(`**${subject}** — Source action: “${item.deadlineQuote}”`);
     if (/^[A-Za-z0-9_-]{3,128}$/.test(item.thread.threadId))
       lines.push(
         `[Open the source thread](https://mail.google.com/mail/u/0/#all/${item.thread.threadId})`,
       );
   }
   if (uncertainNoReplies.length > 0)
-    lines.push(
-      `${uncertainNoReplies.length} ${uncertainNoReplies.length === 1 ? 'thread had' : 'threads had'} an unresolved possible deadline, so ${uncertainNoReplies.length === 1 ? 'its no-reply assessment was' : 'their no-reply assessments were'} not used to authorize replacement threads. Please check the source before relying on ${uncertainNoReplies.length === 1 ? 'that assessment' : 'those assessments'}.`,
-    );
-  if (coverage.searchPages === 0)
-    lines.push('The mailbox search did not return a usable result, so I prepared no reply drafts.');
-  else if (coverage.searchPages >= EMAIL_REVIEW_MAX_SEARCH_PAGES && !coverage.searchComplete)
-    lines.push('Gmail reported additional or unavailable metadata beyond the bounded page limit.');
-  else if (!coverage.searchComplete)
-    lines.push('The mail search had incomplete metadata coverage.');
-  if (coverage.searchMailboxMismatch)
-    lines.push(
-      'The connected mailbox used for search differs from the configured owner mailbox. Confirm that it is the intended mailbox before relying on this review as complete.',
-    );
-  if (coverage.ownerOrChronologyExcluded > 0)
-    lines.push(
-      `${coverage.ownerOrChronologyExcluded} selected ${coverage.ownerOrChronologyExcluded === 1 ? 'thread was' : 'threads were'} not used because a complete, valid read did not establish whether it qualified.`,
-    );
-  if (coverage.alreadyAnsweredThreads > 0)
-    lines.push(
-      `${coverage.alreadyAnsweredThreads} selected ${coverage.alreadyAnsweredThreads === 1 ? 'thread had' : 'threads had'} a later reply from your mailbox and ${coverage.alreadyAnsweredThreads === 1 ? 'was' : 'were'} skipped as already answered.`,
-    );
-  if (coverage.notEligibleThreads > 0)
-    lines.push(
-      `${coverage.notEligibleThreads} selected ${coverage.notEligibleThreads === 1 ? 'thread was' : 'threads were'} fully checked but did not meet the criteria for a reply draft.`,
-    );
-  if (coverage.backfillShortfall === 'rank_pool_exhausted')
-    lines.push(
-      'The bounded ranked candidate pool had no more threads to replace those fully checked and excluded.',
-    );
-  else if (coverage.backfillShortfall === 'step_budget')
-    lines.push(
-      'The task reached its step limit before another replacement thread could be read while keeping a step for the final review.',
-    );
-  if (coverage.obviousNewslettersExcluded > 0)
-    lines.push(
-      `Excluded ${coverage.obviousNewslettersExcluded} obvious ${coverage.obviousNewslettersExcluded === 1 ? 'newsletter or digest' : 'newsletters or digests'} before ranking.`,
-    );
-  const rankableThreads = Math.max(0, coverage.uniqueThreads - coverage.obviousNewslettersExcluded);
-  if (
-    coverage.rankedMetadataThreads !== undefined &&
-    coverage.rankedMetadataThreads < rankableThreads
-  )
-    lines.push(
-      `The bounded ranking context included ${coverage.rankedMetadataThreads} of ${rankableThreads} scanned non-newsletter threads; the others were not ranked.`,
-    );
-  if (coverage.contextLimitedThreads > 0)
-    lines.push(
-      `${coverage.contextLimitedThreads} selected ${coverage.contextLimitedThreads === 1 ? 'thread was' : 'threads were'} left out because complete context could not fit the bounded review.`,
-    );
-  if (coverage.unassessedCompleteThreads && coverage.unassessedCompleteThreads > 0)
-    lines.push(
-      `${coverage.unassessedCompleteThreads} complete ${coverage.unassessedCompleteThreads === 1 ? 'thread could' : 'threads could'} not be assessed reliably within the bounded checks; no draft was prepared for ${coverage.unassessedCompleteThreads === 1 ? 'it' : 'them'}.`,
-    );
-  if (coverage.metadataFallback)
-    lines.push(
-      'Automated ranking was unavailable, so I prioritized explicit request cues ahead of automated notices in the scanned results. Each item below was checked against its complete thread; this fallback does not establish that the scan found every request.',
-    );
+    lines.push(`**Possible deadlines to verify (${uncertainNoReplies.length})**`);
   for (const item of uncertainNoReplies) {
     const subject = item.thread.subject
       .replace(/[\r\n]+/g, ' ')
       .slice(0, 160)
       .replace(/[\\`*_{}[\]()<>#+\-=|!]/g, '\\$&');
-    lines.push(`**Deadline needs review — ${subject}**`);
     lines.push(
-      'A possible deadline in this thread remains unresolved. No reply draft was prepared for it; check the source before deciding whether to respond.',
+      `**${subject}** — No reply draft was prepared; check the source before deciding whether to respond.`,
     );
     if (/^[A-Za-z0-9_-]{3,128}$/.test(item.thread.threadId))
       lines.push(
         `[Open the source thread](https://mail.google.com/mail/u/0/#all/${item.thread.threadId})`,
       );
   }
+  const coverageNotes: string[] = [];
+  if (coverage.searchPages === 0)
+    coverageNotes.push('the mailbox search returned no usable results');
+  else if (coverage.searchPages >= EMAIL_REVIEW_MAX_SEARCH_PAGES && !coverage.searchComplete)
+    coverageNotes.push('Gmail reported more or unavailable metadata beyond the page limit');
+  else if (!coverage.searchComplete)
+    coverageNotes.push('mail-search metadata coverage was incomplete');
+  if (coverage.searchMailboxMismatch)
+    coverageNotes.push(
+      'the connected mailbox used for search differs from the configured owner mailbox; confirm it is the intended mailbox before relying on this review',
+    );
+  if (coverage.ownerOrChronologyExcluded > 0)
+    coverageNotes.push(
+      `${coverage.ownerOrChronologyExcluded} selected ${coverage.ownerOrChronologyExcluded === 1 ? 'thread was' : 'threads were'} not used because eligibility could not be established`,
+    );
+  if (coverage.alreadyAnsweredThreads > 0)
+    coverageNotes.push(
+      `${coverage.alreadyAnsweredThreads} selected ${coverage.alreadyAnsweredThreads === 1 ? 'thread had' : 'threads had'} a later reply from your mailbox and was skipped as already answered`,
+    );
+  if (coverage.notEligibleThreads > 0)
+    coverageNotes.push(
+      `${coverage.notEligibleThreads} selected ${coverage.notEligibleThreads === 1 ? 'thread was' : 'threads were'} reviewed but did not meet the reply-draft criteria`,
+    );
+  if (noReplies > 0)
+    coverageNotes.push(
+      `${noReplies} assessed ${noReplies === 1 ? 'thread did' : 'threads did'} not clearly require a response`,
+    );
+  if (coverage.backfillShortfall === 'rank_pool_exhausted')
+    coverageNotes.push('the ranked candidate pool had no replacement threads');
+  else if (coverage.backfillShortfall === 'step_budget')
+    coverageNotes.push(
+      'the step limit prevented another replacement-thread read while preserving a step for final review',
+    );
+  if (coverage.obviousNewslettersExcluded > 0)
+    coverageNotes.push(
+      `${coverage.obviousNewslettersExcluded} obvious ${coverage.obviousNewslettersExcluded === 1 ? 'newsletter or digest was' : 'newsletters or digests were'} excluded before ranking`,
+    );
+  const rankableThreads = Math.max(0, coverage.uniqueThreads - coverage.obviousNewslettersExcluded);
+  if (
+    coverage.rankedMetadataThreads !== undefined &&
+    coverage.rankedMetadataThreads < rankableThreads
+  )
+    coverageNotes.push(
+      `the bounded ranking context included ${coverage.rankedMetadataThreads} of ${rankableThreads} scanned non-newsletter threads; the others were not ranked`,
+    );
+  if (coverage.contextLimitedThreads > 0)
+    coverageNotes.push(
+      `${coverage.contextLimitedThreads} selected ${coverage.contextLimitedThreads === 1 ? 'thread was' : 'threads were'} left out because its context did not fit`,
+    );
+  if (coverage.unassessedCompleteThreads && coverage.unassessedCompleteThreads > 0)
+    coverageNotes.push(
+      `${coverage.unassessedCompleteThreads} selected ${coverage.unassessedCompleteThreads === 1 ? 'thread could' : 'threads could'} not be assessed reliably within the bounded checks; no draft was prepared`,
+    );
+  if (coverage.metadataFallback)
+    coverageNotes.push(
+      'automated ranking was unavailable, so explicit request cues were prioritized ahead of automated notices',
+    );
+  if (drafts.length < rawDraftCount)
+    coverageNotes.push(
+      'duplicate reminders for the same dated event were grouped into one reply request; all source threads remain included in the coverage count',
+    );
   if (rankingFailed) {
     lines.push(
-      'I could not safely prioritize the returned thread metadata, so I prepared no reply drafts.',
+      'I could not safely prioritize the returned thread metadata; no reply drafts were prepared.',
     );
-    return lines.join('\n\n');
-  }
-  if (drafts.length === 0) {
+  } else if (drafts.length === 0 && coverage.searchPages > 0) {
     lines.push(
-      'I could not confirm a reply-worthy request in the threads reviewed, so I prepared no reply drafts.',
+      uncertainNoReplies.length > 0
+        ? 'No reply-worthy request was confirmed in the threads reviewed; check the possible deadlines above before relying on that result.'
+        : 'No reply-worthy request was confirmed in the threads reviewed.',
     );
-    return lines.join('\n\n');
   }
   for (const item of drafts) {
     const { thread } = item;
@@ -1888,14 +1891,14 @@ export function formatEmailReviewAnswer(
     lines.push(
       latestMessageNeedsReply(thread)
         ? item.deadlineQuote && !item.deadlineNeedsReview
-          ? `Why it matters: A response is requested, with the stated deadline “${item.deadlineQuote}”.`
+          ? 'Why it matters: A response is requested by the cited deadline.'
           : /\brsvp\b/i.test(latestUnquotedBody(thread) ?? '') &&
               /\b(?:food|headcount|count|catering)\b/i.test(latestUnquotedBody(thread) ?? '')
-            ? 'Why it matters: The RSVP is requested for the food or attendance count stated in the source.'
-            : 'Why it matters: The latest message directly asks for a response; the owner’s answer is still needed.'
-        : 'Why it matters: This thread was selected as a possible reply request; check the quoted text before sending.',
+            ? 'Why it matters: The RSVP is needed for the food or attendance count.'
+            : 'Why it matters: The latest message asks for a response; your answer is still needed.'
+        : 'Why it matters: This may be a reply request; confirm the quoted text before sending.',
     );
-    lines.push(`Request in the latest message: “${item.whyQuote}”`);
+    lines.push(`Source request: “${item.whyQuote}”`);
     for (const duplicate of item.duplicateRequestDetails ?? []) {
       lines.push(
         `Additional request in a duplicate reminder: “${duplicate.whyQuote}”${
@@ -1910,17 +1913,15 @@ export function formatEmailReviewAnswer(
     lines.push(
       item.deadlineNeedsReview
         ? item.unverifiedDeadlineQuote
-          ? 'Possible deadline needs checking against the thread: “' +
-            item.unverifiedDeadlineQuote +
-            '”'
+          ? `Possible deadline to verify: “${item.unverifiedDeadlineQuote}”`
           : 'A deadline could not be verified against the thread, so please check the source before relying on one.'
         : item.deadlineQuote
-          ? `Deadline mentioned in the thread: “${item.deadlineQuote}”${
+          ? `Deadline: “${item.deadlineQuote}”${
               /\b(?:today|tomorrow|tonight)\b/i.test(item.deadlineQuote) && item.deadlineSourceDate
                 ? ` (source message dated ${item.deadlineSourceDate}; wording is relative)`
                 : ''
             }`
-          : 'No deadline was identified in this review.',
+          : 'Deadline: none identified.',
     );
     const draftBody = item.draftBody as string;
     lines.push(
@@ -1928,7 +1929,7 @@ export function formatEmailReviewAnswer(
         ? draftBody.includes('If you can help:') || draftBody.includes('If you plan to attend:')
           ? '**Draft alternatives — choose one and remove the other before sending:**'
           : '**Draft incomplete — owner decision required before sending:**'
-        : '**Draft for review — not saved or sent:**',
+        : '**Draft:**',
     );
     lines.push(draftBody);
     if (/^[A-Za-z0-9_-]{3,128}$/.test(thread.threadId))
@@ -1936,6 +1937,7 @@ export function formatEmailReviewAnswer(
         `[Open the source thread](https://mail.google.com/mail/u/0/#all/${thread.threadId})`,
       );
   }
+  if (coverageNotes.length > 0) lines.push(`**Coverage:** ${coverageNotes.join('; ')}.`);
   return lines.join('\n\n');
 }
 
