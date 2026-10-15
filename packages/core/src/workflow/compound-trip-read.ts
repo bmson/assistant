@@ -4848,23 +4848,64 @@ function durationFromQuote(quote: string): string | undefined {
 }
 
 function fareFromQuote(quote: string): string | undefined {
-  const match =
-    /(?:€|EUR\s?)(\d{1,4}(?:[.,]\d{1,2})?)|(?:£|GBP\s?)(\d{1,4}(?:[.,]\d{1,2})?)|(?:\$|USD\s?)(\d{1,4}(?:[.,]\d{1,2})?)/i.exec(
-      quote,
-    );
-  if (!match) return undefined;
-  const currency =
-    match[0].startsWith('€') || /^EUR/i.test(match[0])
-      ? 'EUR'
-      : match[0].startsWith('£') || /^GBP/i.test(match[0])
-        ? 'GBP'
-        : 'USD';
-  const amount = match[1] ?? match[2] ?? match[3];
-  return amount
-    ? match[0].startsWith('$')
-      ? `$${amount.replace(',', '.')} (currency unspecified)`
-      : `${currency} ${amount.replace(',', '.')}`
-    : undefined;
+  const token = String.raw`(€|£|\$|\b(?:EUR|GBP|USD)\b)\s*(\d{1,4}(?:[.,]\d{1,2})?)(?!\d|[.,]\d)`;
+  const amounts = [...quote.matchAll(new RegExp(token, 'gi'))];
+  const first = amounts[0];
+  if (!first?.[1] || !first[2] || amounts.length > 2) return undefined;
+  const currency = (label: string) =>
+    label === '€' ? 'EUR' : label === '£' ? 'GBP' : label.toUpperCase();
+  const before = quote.slice(0, first.index);
+  // Negated, alternative and additive amounts cannot become one exact fare.
+  if (
+    /\b(?:no|not|never|rather than|instead of)\s*$/i.test(before) ||
+    /\b(?:not|never)\s+(?:around|about|approximately|approx\.?)\s*$/i.test(before)
+  )
+    return undefined;
+  const between = /\bbetween\s*$/i.test(before);
+  const after = quote.slice(first.index + first[0].length);
+  const range = new RegExp(
+    String.raw`^\s*(?:[-–—]|to${between ? '|and' : ''})\s*(?:(€|£|\$|EUR|GBP|USD)\s*)?(\d{1,4}(?:[.,]\d{1,2})?)(?!\d|[.,]\d)`,
+    'i',
+  ).exec(after);
+  if (/^\s*(?:[-–—~]|to\b|±|\+\/-)/.test(after) && !range) return undefined;
+  if (between && !range) return undefined;
+  if (
+    amounts.length === 2 &&
+    (!range?.[1] ||
+      amounts[1]?.index !==
+        first.index + first[0].length + (range.index ?? 0) + range[0].indexOf(range[1]))
+  )
+    return undefined;
+  if (range?.[1] && currency(range[1]) !== currency(first[1])) return undefined;
+  const value = first[2].replace(',', '.');
+  const end = range?.[2]?.replace(',', '.');
+  if (end && Number(end) < Number(value)) return undefined;
+  const prefix =
+    /\b(around|about|approximately|approx\.?|from|starting at|at least|up to|at most|minimum|maximum|no more than|not more than|no less than|not less than|less than|more than)\s*$/i
+      .exec(before)?.[1]
+      ?.toLowerCase() ?? (/~\s*$/.test(before) ? 'about' : undefined);
+  const remaining = after.slice(range?.[0].length ?? 0);
+  const trailingCurrency = /^\s*(EUR|GBP|USD)\b/i.exec(remaining)?.[1];
+  if (trailingCurrency && currency(trailingCurrency) !== currency(first[1])) return undefined;
+  const suffix = /^\s*(or less|or more|maximum|minimum|approximately|approx\.?|about)\b/i
+    .exec(remaining)?.[1]
+    ?.toLowerCase();
+  const qualifier = (label: string | undefined) =>
+    label === undefined
+      ? undefined
+      : /^(?:from|starting at|at least|minimum|or more|no less than|not less than)$/.test(label)
+        ? 'from'
+        : /^(?:up to|at most|maximum|or less|no more than|not more than)$/.test(label)
+          ? 'up to'
+          : /^(?:less than|more than)$/.test(label)
+            ? label
+            : 'about';
+  const leading = qualifier(prefix);
+  const trailing = qualifier(suffix);
+  if (leading && trailing && leading !== trailing) return undefined;
+  const caveat = leading ?? trailing;
+  const rendered = `${first[1] === '$' ? '$' : `${currency(first[1])} `}${value}${end ? `–${end}` : ''}${first[1] === '$' ? ' (currency unspecified)' : ''}`;
+  return `${caveat ? `${caveat} ` : ''}${rendered}`;
 }
 
 function sentenceNamesAirport(

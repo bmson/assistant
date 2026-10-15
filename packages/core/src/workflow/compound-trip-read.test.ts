@@ -5986,6 +5986,75 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(mixed.some((item) => item.fare || item.duration)).toBe(false);
   });
 
+  it.each([
+    ['€50', 'EUR 50'],
+    ['around €50', 'about EUR 50'],
+    ['approximately EUR 50', 'about EUR 50'],
+    ['from €50', 'from EUR 50'],
+    ['starting at EUR 50', 'from EUR 50'],
+    ['at least €50', 'from EUR 50'],
+    ['up to €50', 'up to EUR 50'],
+    ['at most €50', 'up to EUR 50'],
+    ['no more than €50', 'up to EUR 50'],
+    ['€50 or less', 'up to EUR 50'],
+    ['€50–60', 'EUR 50–60'],
+    ['€50 - €60', 'EUR 50–60'],
+    ['between EUR 50 and EUR 60', 'EUR 50–60'],
+    ['about €50 to 60', 'about EUR 50–60'],
+    ['around €50,50', 'about EUR 50.50'],
+    ['around $50–60', 'about $50–60 (currency unspecified)'],
+    ['up to USD 50', 'up to USD 50'],
+    ['less than GBP 50', 'less than GBP 50'],
+  ])('preserves the source-bound fare qualifier/range %s', (stated, expected) => {
+    const { read, rows } = withTransferSearch();
+    rows.push(
+      row(
+        'web.fetch',
+        { url: 'https://hotel.example/canal-house/map' },
+        {
+          finalUrl: 'https://hotel.example/canal-house/map',
+          text: `Taxi from CPH Airport to Canal House takes 30 minutes and costs ${stated}.`,
+        },
+      ),
+    );
+    const projection = compoundTripReadProjection(read, rows);
+    expect(projection.comparison.find((item) => item.mode === 'taxi')?.fare).toBe(expected);
+    expect(renderCompoundTripReadResponse(projection)).toContain(
+      `**Taxi:** ${expected}; 30 minutes.`,
+    );
+  });
+
+  it.each([
+    '€60–50',
+    '€50 or €60',
+    '€50 plus €5',
+    '€50–GBP 60',
+    '€50–',
+    '€50 ± 5',
+    '€50~60',
+    '€50–60 USD',
+    'not around €50',
+    'between €50',
+    'not €50',
+    'from €50 maximum',
+    '€1,200',
+  ])('leaves an ambiguous, negated or unsupported fare unverified: %s', (stated) => {
+    const { read, rows } = withTransferSearch();
+    rows.push(
+      row(
+        'web.fetch',
+        { url: 'https://hotel.example/canal-house/map' },
+        {
+          finalUrl: 'https://hotel.example/canal-house/map',
+          text: `Taxi from CPH Airport to Canal House costs ${stated} and takes 30 minutes.`,
+        },
+      ),
+    );
+    const projection = compoundTripReadProjection(read, rows);
+    expect(projection.comparison.find((item) => item.mode === 'taxi')?.fare).toBeUndefined();
+    expect(renderCompoundTripReadResponse(projection)).toContain('**Taxi:** fare unverified;');
+  });
+
   it('does not silently label an address geocode as the hotel entrance', () => {
     const { read, rows } = fixture();
     const initial = compoundTripReadProjection(read, rows);
