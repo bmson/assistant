@@ -621,13 +621,13 @@ describe('bounded no-send email review', () => {
     };
     const first = makeAssessed(
       'pta-one',
-      'PTA Family Night RSVP',
-      'Please RSVP for the PTA meeting on October 21, 2026 by October 18. A headcount is needed for food.',
+      'Reminder to RSVP for: October PTA Meeting In-Person - Wednesday, 10/21',
+      'Please RSVP for the October PTA meeting on October 21, 2026 by October 18. The meeting at Cafetorium starts at 6:00 PM. A headcount is needed for food.',
     );
     const duplicate = makeAssessed(
       'pta-two',
-      'Re: PTA Family Night RSVP',
-      'Please RSVP for the PTA meeting on October 21, 2026 by October 17.',
+      'RSVP Requested: October PTA Meeting In-Person - Wednesday, 10/21',
+      'Please RSVP for the October PTA meeting on October 21, 2026 by October 17. The meeting at Cafetorium runs from 6 - 7:30 PM. The school is hosting a separate event at Alamo next week.',
     );
     const differentDate = makeAssessed(
       'pta-three',
@@ -685,7 +685,13 @@ describe('bounded no-send email review', () => {
     expect(rendered).toContain(
       'duplicate reminder thread](https://mail.google.com/mail/u/0/#all/pta-two)',
     );
-    expect(rendered.match(/### PTA Family Night RSVP/g)).toHaveLength(5);
+    expect(
+      rendered.match(
+        /### Reminder to RSVP for: October PTA Meeting In-Person - Wednesday, 10\/21/g,
+      ),
+    ).toHaveLength(1);
+    expect(rendered).not.toContain('### RSVP Requested: October PTA Meeting In-Person');
+    expect(rendered.match(/### PTA Family Night RSVP/g)).toHaveLength(4);
     expect(rendered.match(/### Meeting RSVP/g)).toHaveLength(2);
   });
 
@@ -1736,6 +1742,17 @@ describe('bounded no-send email review', () => {
     expect(emailReviewCoverage([], [], evidence).obviousNewslettersExcluded).toBe(0);
   });
 
+  it('keeps a direct personal ask when promotional words appear in the same metadata', () => {
+    const availability = search('availability-request');
+    const result = availability.result.results as Array<Record<string, unknown>>;
+    required(result[0], 'availability metadata').subject = 'Fall sale and volunteer availability';
+    required(result[0], 'availability metadata').snippet =
+      'We would love to get your updated availability so we can schedule the volunteer shifts.';
+    const evidence: EmailReviewEvidenceRow[] = [availability];
+    expect(emailReviewRankContext(evidence).candidateIds).toEqual(['availability-request']);
+    expect(emailReviewCoverage([], [], evidence).obviousNewslettersExcluded).toBe(0);
+  });
+
   it('bounds metadata shown to ranking even when search fields are unusually large', () => {
     const evidence = Array.from({ length: 90 }, (_, index) => {
       const row = search(`request-${String(index).padStart(2, '0')}`);
@@ -1829,8 +1846,8 @@ describe('bounded no-send email review', () => {
     const ids = emailReviewCandidateIds(rows);
     expect(emailReviewRecentMetadataFallback(rows, ids).slice(0, 3)).toEqual([
       'approval-request',
-      'rsvp-request',
       'availability-request',
+      'rsvp-request',
     ]);
     const noise = Array.from({ length: EMAIL_REVIEW_MAX_RANK_CANDIDATES }, (_, index) =>
       search(`noise-${index}`, {
@@ -1846,9 +1863,93 @@ describe('bounded no-send email review', () => {
     );
     expect(emailReviewRankContext([...noise, ...rows]).candidateIds.slice(0, 3)).toEqual([
       'approval-request',
-      'rsvp-request',
       'availability-request',
+      'rsvp-request',
     ]);
+  });
+
+  it('ranks personal availability and volunteer requests above generic action notices and promotions', () => {
+    const rowFor = (threadId: string, subject: string, snippet: string, day: string) =>
+      search(threadId, {
+        results: [
+          {
+            threadId,
+            subject,
+            snippet,
+            date: `2026-10-${day}T12:00:00Z`,
+            from: 'sender@example.net',
+          },
+        ],
+      });
+    const rows = [
+      rowFor(
+        'personal-availability',
+        'Interview confirmation',
+        'We would love to get your updated availability here so we can set up these interviews.',
+        '15',
+      ),
+      rowFor(
+        'volunteer-request',
+        'Help needed for Saturday',
+        'The club needs parents to help. Could you volunteer for a shift?',
+        '15',
+      ),
+      rowFor(
+        'rsvp-reminder',
+        'Reminder to RSVP for October PTA Meeting - 10/21',
+        'Please RSVP so we can get a food headcount.',
+        '15',
+      ),
+      rowFor(
+        'admin-notice',
+        '[Action Required] Update workspace OAuth settings',
+        'Mark the OAuth clients as agentic before the policy date.',
+        '15',
+      ),
+      rowFor(
+        'product-promotion',
+        'The truffle burger has returned',
+        'Our new seasonal burger is back in stock.',
+        '15',
+      ),
+    ];
+    const ids = emailReviewCandidateIds(rows);
+    expect(emailReviewRecentMetadataFallback(rows, ids).slice(0, 3)).toEqual([
+      'personal-availability',
+      'volunteer-request',
+      'rsvp-reminder',
+    ]);
+  });
+
+  it('uses source-established conditional alternatives to fill an omitted direct yes/no assessment only on repair', async () => {
+    const sourceMessages = messages('omitted-availability-request');
+    const latest = required(sourceMessages.at(-1), 'latest message');
+    latest.text = 'Nobody has signed up for tomorrow. Are you able to? Thanks!';
+    latest.sourceLength = latest.text.length;
+    const thread = required(
+      emailReviewCompleteThread('omitted-availability-request', 'owner@example.com', [
+        search('omitted-availability-request'),
+        read('omitted-availability-request', sourceMessages),
+      ]),
+      'complete direct yes/no request',
+    );
+    let calls = 0;
+    const repaired = await generateValidatedEmailReview([thread], async (input) => {
+      calls += 1;
+      if (!input.repair) return { ok: true, value: { items: [] } };
+      return { ok: true, value: { items: [] } };
+    });
+    expect(calls).toBe(2);
+    expect(repaired.attempts).toBe(2);
+    expect(repaired.answer?.items[0]).toMatchObject({
+      disposition: 'draft',
+      whyQuote: 'Are you able to?',
+    });
+    expect(repaired.sourceItems?.[0]?.whyMessageId).toBe(thread.latestMessageId);
+    expect(repaired.answer?.items[0]?.draftBody).toContain('If you can help:');
+    expect(repaired.answer?.items[0]?.draftBody).toContain('If you cannot:');
+    expect(repaired.ownerDecisionThreadIds).toEqual([]);
+    expect(repaired.issues).toEqual([]);
   });
 
   it('replaces a valid-shape generic RSVP acknowledgement with owner alternatives and source routing', async () => {

@@ -208,11 +208,15 @@ function obviousNewsletter(candidate: EmailReviewCandidate): boolean {
   const announcement =
     /\b(?:newsletter|digest|round[- ]?up|weekly highlights|monthly highlights)\b/i.test(
       candidate.subject,
-    ) || /\b(?:newsletter|digest)\b/i.test(candidate.from);
+    ) ||
+    /\b(?:newsletter|digest)\b/i.test(candidate.from) ||
+    /\b(?:sale|special offer|coupon|discount|deal|limited[- ]time|new (?:product|flavor|menu item)|has returned|back in stock|buy now|shop now)\b/i.test(
+      `${candidate.subject} ${candidate.snippet}`,
+    );
   if (!announcement) return false;
   const metadata = `${candidate.subject} ${candidate.snippet}`;
   const explicitRequest =
-    /\b(?:please|could you|can you|would you|let me know|reply|respond|confirm|approve|approval|review|sign|submit|rsvp|need(?:s)? (?:your|a) response|deadline|due by|by (?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}[/-]\d{1,2}))\b/i.test(
+    /\b(?:please|could you|can you|would you|let me know|reply|respond|confirm|approve|approval|review|sign|submit|rsvp|need(?:s)? (?:your|a) response|deadline|due by|by (?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}[/-]\d{1,2}))\b|\b(?:we|i)(?:'|’)d like to (?:get|know|hear)\b[^.!?\n]{0,80}\byour (?:updated |current |latest |preferred )?availability\b|\bwould love to (?:get|know|hear)\b[^.!?\n]{0,80}\byour (?:updated |current |latest |preferred )?availability\b/i.test(
       metadata,
     );
   return !explicitRequest;
@@ -240,15 +244,13 @@ function metadataRequestScore(candidate: EmailReviewCandidate): number {
     )
   )
     return -4;
-  const direct =
-    /\b(?:could|would|can) you\b|\bare you\s+(?:able|available|willing|interested)\b|\bplease\s+(?:reply|respond|confirm|approve|review|send|share|provide|sign|submit|rsvp|volunteer)\b|\b(?:please )?let (?:me|us) know\b|\bneed(?:s)? your (?:response|approval|feedback)\b|\bif you (?:have not|haven't) (?:yet )?rsvp\b/i.test(
+  const explicitReply =
+    /\b(?:could|would|can) you\b|\bare you\s+(?:able|available|willing|interested)\b|\bplease\s+(?:reply|respond|confirm|approve|review|send|share|provide|volunteer)\b|\b(?:please )?let (?:me|us) know\b|\bneed(?:s)? your (?:response|approval|feedback|availability)\b|\b(?:we|i)(?:'|’)d like to (?:get|know|hear)\b[^.!?\n]{0,80}\byour (?:updated |current |latest |preferred )?(?:availability|answer|response|thoughts|decision)\b|\bwould love to (?:get|know|hear)\b[^.!?\n]{0,80}\byour (?:updated |current |latest |preferred )?(?:availability|answer|response|thoughts)\b|\b(?:help needed|need(?:s)? (?:parents|families|volunteers|someone) to help)\b|\bif you (?:have not|haven't) (?:yet )?rsvp\b/i.test(
       text,
     );
-  if (direct) return 4;
-  if (
-    /\b(?:rsvp|volunteer|sign up|approval needed|response required|action required)\b/i.test(text)
-  )
-    return 2;
+  if (explicitReply) return 5;
+  if (/\b(?:rsvp|volunteer|sign up|approval needed|response required)\b/i.test(text)) return 3;
+  if (/\baction required\b/i.test(text)) return 1;
   if (
     /\b(?:receipt|order confirmation|purchase|payment received|shipped|delivery update|tracking|thank you for (?:your|the) (?:order|purchase)|happy birthday|congratulations)\b/i.test(
       text,
@@ -256,7 +258,9 @@ function metadataRequestScore(candidate: EmailReviewCandidate): number {
   )
     return -3;
   if (
-    /\b(?:newsletter|digest|news|highlights|sale|promotion)\b/i.test(text) ||
+    /\b(?:newsletter|digest|news|highlights|sale|promotion|coupon|deal|limited[- ]time|has returned|back in stock|introducing)\b/i.test(
+      text,
+    ) ||
     /(?:no[-_]?reply|do[-_]?not[-_]?reply|notifications?)@/i.test(candidate.from)
   )
     return -2;
@@ -1305,16 +1309,25 @@ function draftRequiresOwnerDecision(thread: EmailReviewThread, draft: string): b
   const internalDecisionScaffolding =
     /\bowner decision required\b|\bif clarification is needed\b|\badd your (?:answer|availability|choice|decision)\b|\b(?:choose|select|decide)\b[^.!?\n]{0,120}\b(?:before sending|before i send|to send)\b/i;
   if (!internalDecisionScaffolding.test(draft)) return false;
-  const sourceEstablishedAlternatives =
-    isDirectReplyFallbackDraft(thread, draft) &&
-    draft.split(/\r?\n/).filter((line) => /^\s*if\s+[^:]{1,120}:/i.test(line)).length >= 2;
+  const sourceEstablishedAlternatives = sourceEstablishedConditionalAlternatives(thread, draft);
   return !sourceEstablishedAlternatives;
+}
+
+function sourceEstablishedConditionalAlternatives(
+  thread: EmailReviewThread,
+  draft: string,
+): boolean {
+  return (
+    isDirectReplyFallbackDraft(thread, draft) &&
+    draft.split(/\r?\n/).filter((line) => /^\s*if\s+[^:]{1,120}:/i.test(line)).length >= 2
+  );
 }
 
 /** Fill only a missing or rejected direct-request item from source-verified facts. */
 function completeDirectReplyAssessments(
   value: unknown,
   threads: ReadonlyArray<EmailReviewThread>,
+  completeOmittedAlternatives = false,
 ): unknown {
   const parsed = EmailReviewAnswerSchema.safeParse(value);
   if (!parsed.success) return value;
@@ -1397,9 +1410,33 @@ function completeDirectReplyAssessments(
       draftSourceMessageIds: [thread.latestMessageId],
     };
   });
-  // An omitted assessment is still pending. The bounded generator retries
-  // only those threads; a generic owner-decision template must not bypass
-  // their contextual assessment or count as a completed reply draft.
+  if (completeOmittedAlternatives) {
+    const assessedIds = new Set(items.map((item) => item.threadId));
+    for (const thread of threads) {
+      if (assessedIds.has(thread.threadId) || !latestMessageNeedsReply(thread)) continue;
+      const draftBody = directReplyFallbackDraft(thread);
+      const whyQuote = directReplyRequestQuote(thread);
+      if (!draftBody || !whyQuote || !sourceEstablishedConditionalAlternatives(thread, draftBody))
+        continue;
+      const deadlineQuote = directReplyDeadlineQuote(thread);
+      items.push({
+        threadId: thread.threadId,
+        latestMessageId: thread.latestMessageId,
+        disposition: 'draft',
+        recipient: thread.recipient,
+        why: 'The latest message directly asks for an answer; the alternatives preserve your choice.',
+        whyMessageId: thread.latestMessageId,
+        whyQuote,
+        deadline: deadlineQuote
+          ? { messageId: thread.latestMessageId, quote: deadlineQuote }
+          : null,
+        draftBody,
+        draftSourceMessageIds: [thread.latestMessageId],
+      });
+    }
+  }
+  // Other omissions stay pending; only source-established conditional choices
+  // can be completed without the model's contextual assessment.
   items.sort(
     (left, right) =>
       threads.findIndex((thread) => thread.threadId === left.threadId) -
@@ -1595,7 +1632,7 @@ export async function generateValidatedEmailReview(
       outcome = { ok: false };
     }
     const assessmentValue = outcome.ok
-      ? completeDirectReplyAssessments(outcome.value, pendingThreads)
+      ? completeDirectReplyAssessments(outcome.value, pendingThreads, attempt > 0)
       : undefined;
     issues = outcome.ok
       ? emailReviewValidationIssues(assessmentValue, pendingThreads)
@@ -2014,8 +2051,32 @@ function dedupeSameEventReplyDrafts(
 ): ValidatedEmailReviewItem[] {
   const unique = new Map<string, ValidatedEmailReviewItem>();
   const datePattern =
-    /\b(?:20\d{2}-\d{2}-\d{2}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?[,]?\s+20\d{2})\b/gi;
+    /\b(?:20\d{2}-\d{2}-\d{2}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:[,]?\s+20\d{2})?|(?:0?[1-9]|1[0-2])\/(?:0?[1-9]|[12]\d|3[01])(?:\/20\d{2})?)\b/gi;
   const eventWords = /\b(?:meeting|event|party|program|gathering|session)\b/gi;
+  const eventTimeIn = (body: string): string => {
+    const normalize = (hour: string, minute: string | undefined, period: string) =>
+      `${Number(hour) % 12 || 12}:${minute ?? '00'}${period.toUpperCase()}`;
+    const completeRange =
+      /\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\s*(?:-|–|to)\s*\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b/i.exec(
+        body,
+      );
+    if (completeRange?.[1] && completeRange[3])
+      return normalize(completeRange[1], completeRange[2], completeRange[3]);
+    const inheritedPeriodRange =
+      /\b(\d{1,2})(?::(\d{2}))?\s*(?:-|–|to)\s*\d{1,2}(?::\d{2})?\s*(AM|PM)\b/i.exec(body);
+    if (inheritedPeriodRange?.[1] && inheritedPeriodRange[3])
+      return normalize(inheritedPeriodRange[1], inheritedPeriodRange[2], inheritedPeriodRange[3]);
+    const single = /\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b/i.exec(body);
+    return single?.[1] && single[3] ? normalize(single[1], single[2], single[3]) : '';
+  };
+  const eventVenueIn = (body: string): string => {
+    const labeled = /\b(?:venue|location)\s*[:=-]\s*([^.!?\n,]{2,60})/i.exec(body)?.[1];
+    const contextual =
+      /\b(?:meeting|event|party|program|gathering|session)\s+(?:at|in)\s+([A-Z][A-Za-z0-9'&.-]*(?:\s+[A-Z][A-Za-z0-9'&.-]*){0,3})\b/.exec(
+        body,
+      )?.[1];
+    return (labeled ?? contextual ?? '').trim().toLocaleLowerCase();
+  };
   const eventDateIn = (body: string): string | undefined => {
     const eventMatches = [...body.matchAll(eventWords)];
     for (const date of body.matchAll(datePattern)) {
@@ -2033,9 +2094,9 @@ function dedupeSameEventReplyDrafts(
           body.slice(precedingEvent.index, date.index),
         )
       )
-        return date[0];
+        return date[0].toLocaleLowerCase().replace(/\s+/g, ' ').replace(/[,.]/g, '');
       if (!hasDeadlineCue && /\b(?:meeting|event|party|program|gathering|session)\b/i.test(after))
-        return date[0];
+        return date[0].toLocaleLowerCase().replace(/\s+/g, ' ').replace(/[,.]/g, '');
     }
     return undefined;
   };
@@ -2044,11 +2105,17 @@ function dedupeSameEventReplyDrafts(
     const latest = item.thread.messages.find(
       (message) => message.messageId === item.thread.latestMessageId,
     );
-    const subject = item.thread.subject
+    let subject = item.thread.subject
       .replace(/^(?:(?:re|fw|fwd):\s*)+/i, '')
       .replace(/\s+/g, ' ')
       .trim()
       .toLocaleLowerCase();
+    for (let prefix = 0; prefix < 2; prefix += 1) {
+      subject = subject
+        .replace(/^(?:reminder|follow[- ]?up|requested)\s+(?:to\s+)?/i, '')
+        .replace(/^rsvp\s+(?:for|requested|reminder)\s*[:,-]?\s*/i, '')
+        .replace(/^please\s+rsvp\s*[:,-]?\s*/i, '');
+    }
     const subjectIdentityWords = subject
       .split(/[^\p{L}\p{N}]+/u)
       .filter(
@@ -2058,22 +2125,32 @@ function dedupeSameEventReplyDrafts(
             word,
           ),
       );
-    const eventDate = eventDateIn(body);
+    const eventDate = eventDateIn(`${subject} ${body}`);
     const sender = latest ? singleEmail(latest.from) : '';
-    const eventTime =
-      /\b\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b/i.exec(body)?.[0]?.replace(/\s+/g, '').toUpperCase() ??
-      '';
-    const eventVenue =
-      /\b(?:venue|location)\s*[:=-]\s*([^.!?\n,]{2,60})/i
-        .exec(body)?.[1]
-        ?.trim()
-        .toLocaleLowerCase() ??
-      /\bat\s+((?:[A-Z][A-Za-z0-9'&.-]*\s*){1,4})/.exec(body)?.[1]?.trim().toLocaleLowerCase() ??
-      '';
-    const duplicateKey =
-      sender && subject && subjectIdentityWords.length > 0 && eventDate && /\brsvp\b/i.test(body)
-        ? `${sender}|${subject}|${eventDate.toLocaleLowerCase()}|${eventTime}|${eventVenue}`
+    const eventTime = eventTimeIn(body);
+    const eventVenue = eventVenueIn(body);
+    const duplicateBaseKey =
+      sender &&
+      subject &&
+      subjectIdentityWords.length > 0 &&
+      eventDate &&
+      /\brsvp\b/i.test(`${subject} ${body}`)
+        ? `${sender}|${subject}|${eventDate}`
         : item.thread.threadId;
+    const previousCandidate = unique.get(duplicateBaseKey);
+    const previousBody = previousCandidate
+      ? (latestUnquotedBody(previousCandidate.thread) ?? '')
+      : '';
+    const previousTime = eventTimeIn(previousBody);
+    const previousVenue = eventVenueIn(previousBody);
+    const detailsConflict = Boolean(
+      previousCandidate &&
+        ((eventTime && previousTime && eventTime !== previousTime) ||
+          (eventVenue && previousVenue && eventVenue !== previousVenue)),
+    );
+    const duplicateKey = detailsConflict
+      ? `${duplicateBaseKey}|${item.thread.threadId}`
+      : duplicateBaseKey;
     const previous = unique.get(duplicateKey);
     const latestTimestamp = Date.parse(latest?.date ?? '');
     const itemScore =
