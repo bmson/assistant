@@ -830,7 +830,9 @@ describe('bounded no-send email review', () => {
     expect(byFridayRepair.answer).toBeUndefined();
     expect(byFridayRepair.ownerDecisionThreadIds).toEqual([byFridayThread.threadId]);
     expect(byFridayRepair.attempts).toBe(2);
-    expect(byFridayRepair.issues).toContain('item_0:owner_decision_scaffolding_not_recipient_draft');
+    expect(byFridayRepair.issues).toContain(
+      'item_0:owner_decision_scaffolding_not_recipient_draft',
+    );
 
     const byTomorrowMessages = messages('please-reply-by-tomorrow');
     const byTomorrowLatest = required(byTomorrowMessages.at(-1), 'latest message');
