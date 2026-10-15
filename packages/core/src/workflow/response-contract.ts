@@ -1651,16 +1651,18 @@ function compactAllDaySourceDetail(
   event: Record<string, unknown>,
   request: PersonalReadRequest,
 ): string {
-  const sourceDate = calendarSourceDateLabel(event) || 'source date unavailable';
+  const sourceDate = (calendarSourceDateLabel(event) || 'source date unavailable')
+    .replace(/^source date /, '')
+    .replace('; calendar time zone unavailable', ' (calendar time zone unavailable)');
   const window = request.timeWindow;
   const interval = calendarSourceInterval(event);
   const start = window ? Date.parse(window.timeMin) : NaN;
   const end = window ? Date.parse(window.timeMax) : NaN;
   if (!interval || !Number.isFinite(start) || !Number.isFinite(end) || end <= start)
-    return `${sourceDate}; local extent unresolved`;
+    return `${sourceDate} · local extent unresolved`;
   const overlapStart = Math.max(interval.start, start);
   const overlapEnd = Math.min(interval.end, end);
-  if (overlapStart >= overlapEnd) return `${sourceDate}; outside the requested local window`;
+  if (overlapStart >= overlapEnd) return `${sourceDate} · outside local window`;
   const zone = request.timeZone ?? 'UTC';
   const startsAtMidnight = clockOnly(new Date(overlapStart).toISOString(), zone) === '00:00';
   const endsAtMidnight = clockOnly(new Date(overlapEnd).toISOString(), zone) === '00:00';
@@ -1671,7 +1673,7 @@ function compactAllDaySourceDetail(
     sameDay && startsAtMidnight && endsAtMidnight
       ? `all of ${shortDate(new Date(overlapStart).toISOString(), zone)}`
       : compactLocalRange(overlapStart, overlapEnd, zone);
-  return `${sourceDate}; local window ${localExtent}`;
+  return `${sourceDate} · local ${localExtent}`;
 }
 
 function compactEventStatus(event: Record<string, unknown>): string {
@@ -3752,7 +3754,6 @@ export function verifiedReadResponse(
         (event) => calendarWindowMembership(event, request) === 'confirmed',
       );
       const compactAllDayItems: string[] = [];
-      const compactAllDayDetails: string[] = [];
       const compactOngoingItems: string[] = [];
       const compactTimedItems: string[] = [];
       if (
@@ -3874,14 +3875,15 @@ export function verifiedReadResponse(
                 : '';
           if (request.compactCalendarBriefing) {
             const linkedTitle = compactEventTitleLink(summary, compactUrl);
-            const calendarLabel = calendar ? ` (${compactEventTitleLink(calendar, '')})` : '';
             const status = compactEventStatus(event);
+            const metadata = [calendar, status]
+              .filter(Boolean)
+              .map((value) => compactEventTitleLink(value, ''))
+              .join('; ');
+            const metadataLabel = metadata ? ` (${metadata})` : '';
             if (allDay) {
               compactAllDayItems.push(
-                `${linkedTitle}${calendarLabel}${status ? ` (${status})` : ''}`,
-              );
-              compactAllDayDetails.push(
-                `${compactEventTitleLink(summary, '')}: ${compactEventTitleLink(compactAllDaySourceDetail(event, request), '')}`,
+                `- ${linkedTitle}${metadataLabel} — ${compactEventTitleLink(compactAllDaySourceDetail(event, request), '')}`,
               );
             } else {
               const eventStart = Date.parse(rawStart);
@@ -3895,7 +3897,7 @@ export function verifiedReadResponse(
                 eventEnd > windowStart;
               if (ongoing) {
                 compactOngoingItems.push(
-                  `${linkedTitle}${calendarLabel} — ${compactEventSpan(rawStart, rawEnd, request.timeZone ?? 'UTC')}${status ? ` (${status})` : ''}`,
+                  `${linkedTitle}${metadataLabel} — ${compactEventSpan(rawStart, rawEnd, request.timeZone ?? 'UTC')}`,
                 );
               } else {
                 const when = spansDates
@@ -3908,7 +3910,7 @@ export function verifiedReadResponse(
                   ? ` — ${compactEventTitleLink(place.length > 100 ? `${place.slice(0, 99)}…` : place, '')}`
                   : '';
                 compactTimedItems.push(
-                  `- ${when || '(time unavailable)'} — ${linkedTitle}${calendarLabel}${compactPlace}${status ? ` (${status})` : ''}`,
+                  `- ${when || '(time unavailable)'} — ${linkedTitle}${metadataLabel}${compactPlace}`,
                 );
               }
             }
@@ -3921,9 +3923,9 @@ export function verifiedReadResponse(
       }
       if (request.compactCalendarBriefing) {
         if (compactAllDayItems.length > 0) {
-          lines.push(`- All day: ${compactAllDayItems.join('; ')}.`);
           lines.push(
-            `  Source dates and local-day intersections: ${compactAllDayDetails.join('; ')}.`,
+            'All-day records (source date and local intersection):',
+            ...compactAllDayItems,
           );
         }
         if (compactOngoingItems.length > 0)
@@ -3939,14 +3941,21 @@ export function verifiedReadResponse(
         for (const event of sourceDateEvents) {
           const links = Array.isArray(event.links) ? event.links.map(record).filter(Boolean) : [];
           const link =
-            links.find((item) => item && stringField(item, 'type') === 'calendar') ?? links[0];
-          const url = link ? stringField(link, 'url') : '';
+            links.find(
+              (item) =>
+                item &&
+                stringField(item, 'type') === 'calendar' &&
+                safeCalendarSourceUrl(stringField(item, 'url')) !== undefined,
+            ) ?? undefined;
+          const url = link ? (safeCalendarSourceUrl(stringField(link, 'url')) ?? '') : '';
           const summary = stringField(event, 'summary') || '(untitled event)';
-          const compactLink = url ? `[${summary}](${url})` : summary;
+          const compactLink = compactEventTitleLink(summary, url);
+          const safeSummary = compactEventTitleLink(summary, '');
+          const calendar = compactEventTitleLink(stringField(event, 'calendar'), '');
           lines.push(
             request.compactCalendarBriefing
-              ? `- ${compactLink}${stringField(event, 'calendar') ? ` (${stringField(event, 'calendar')})` : ''} — ${calendarSourceDateLabel(event) || 'date/time unresolved'}`
-              : `- ${summary} — ${calendarSourceDateLabel(event) || 'date/time unresolved'}${stringField(event, 'calendar') ? ` (${stringField(event, 'calendar')})` : ''}${url ? ` — [Source event](${url})` : ''}`,
+              ? `- ${compactLink}${calendar ? ` (${calendar})` : ''} — ${calendarSourceDateLabel(event) || 'date/time unresolved'}`
+              : `- ${safeSummary} — ${calendarSourceDateLabel(event) || 'date/time unresolved'}${calendar ? ` (${calendar})` : ''}${url ? ` — ${compactEventTitleLink('Source event', url)}` : ''}`,
           );
         }
       }
