@@ -3235,13 +3235,7 @@ describe('golden tasks', () => {
     expect(result.finalText).toContain('hunter2');
   });
 
-  /**
-   * The owner's most common question. What is pinned here is that the ANSWER is
-   * the model's — the executor used to render calendar replies from the ledger
-   * without ever asking for one, which is why no amount of prompt work ever
-   * changed how a schedule answer read.
-   */
-  it('lets the model write a day agenda once the calendar read is grounded', async (ctx) => {
+  it('renders a compact day overview without losing event times or locations', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const agenda = [
       'Two things today, and the afternoon is the tight one:',
@@ -3294,8 +3288,12 @@ describe('golden tasks', () => {
     createdTaskIds.push(result.taskId);
 
     expect(result.toolNames).toEqual(['calendar.list_events']);
-    // The agenda goes out as written, not restated as a field dump.
-    expect(result.finalText).toBe(agenda);
+    expect(result.finalText).toContain('09:30–10:15 — Linear interview prep');
+    expect(result.finalText).toContain('13:00–14:00 — Dentist');
+    expect(result.finalText).toContain('Zoom');
+    expect(result.finalText).toContain('Laugavegur 12');
+    expect(result.finalText).toContain('No unresolved overlaps between timed calendar entries');
+    expect(result.finalText).not.toContain('the afternoon is the tight one');
     expect(result.finalText).not.toContain("Here's what the calendar has");
     expect(result.finalText).not.toContain('organizer:');
 

@@ -62,6 +62,17 @@ const evidence = (
 ];
 
 describe('calendar day and practical briefing fidelity', () => {
+  it('keeps a useful source location beside the linked timed appointment in compact overviews', () => {
+    const compact = { ...request, compactCalendarBriefing: true };
+    const response = verifiedReadResponse(
+      compact,
+      evidence([{ ...timed, location: 'Studio B, 12 Main Street' }], true, compact),
+    );
+    expect(response).toContain('[Project review](https://calendar.google.com/event?eid=review)');
+    expect(response).toContain('09:00–10:00');
+    expect(response).toContain('Studio B, 12 Main Street');
+  });
+
   it('keeps unknown-zone floating records dated and outside the confirmed local agenda/cards', () => {
     const rows = evidence([timed, floating]);
     const response = verifiedReadResponse(request, rows);

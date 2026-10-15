@@ -3880,8 +3880,12 @@ export function verifiedReadResponse(
                 ]
                   .filter(Boolean)
                   .join(' ');
+                const place = location.replace(/\s+/g, ' ').trim();
+                const compactPlace = place
+                  ? ` — ${compactEventTitleLink(place.length > 100 ? `${place.slice(0, 99)}…` : place, '')}`
+                  : '';
                 compactTimedItems.push(
-                  `- ${when || '(time unavailable)'} — ${linkedTitle}${calendarLabel}${status ? ` (${status})` : ''}`,
+                  `- ${when || '(time unavailable)'} — ${linkedTitle}${calendarLabel}${compactPlace}${status ? ` (${status})` : ''}`,
                 );
               }
             }
