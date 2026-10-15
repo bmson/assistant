@@ -316,6 +316,7 @@ function hasCurrentNativeRead(resourceId: string, evidence: readonly ActionEvide
       return [];
     return [
       {
+        kind: source.kind,
         revision: source.revision,
         start: covered.start,
         end: covered.end,
@@ -325,25 +326,52 @@ function hasCurrentNativeRead(resourceId: string, evidence: readonly ActionEvide
       },
     ];
   });
+  // A single receipt covering the entire source is sufficient on its own.
+  // Older partial reads or duplicate first pages must not poison a later,
+  // independently complete current read.
+  if (
+    pages.some(
+      (page) =>
+        page.start === 0 &&
+        page.complete &&
+        page.end === page.total &&
+        Array.isArray(page.losses) &&
+        page.losses.length === 0,
+    )
+  )
+    return true;
+
   for (const revision of new Set(pages.map((page) => page.revision))) {
     const revisionPages = pages
       .filter((page) => page.revision === revision)
       .sort((left, right) => left.start - right.start);
     if (revisionPages.length > 1 && (typeof revision !== 'string' || !revision)) continue;
-    let cursor = 0;
-    let total: number | undefined;
-    for (const page of revisionPages) {
-      if (page.start !== cursor || (total !== undefined && page.total !== total)) break;
-      total = page.total;
-      cursor = page.end;
-      if (
-        page.complete &&
-        page.end === page.total &&
-        Array.isArray(page.losses) &&
-        page.losses.length === 0
-      )
-        return true;
-      if (page.complete) break;
+    for (const kind of new Set(revisionPages.map((page) => page.kind))) {
+      for (const total of new Set(
+        revisionPages.filter((page) => page.kind === kind).map((page) => page.total),
+      )) {
+        const candidates = revisionPages.filter(
+          (page) => page.kind === kind && page.total === total,
+        );
+        const reachable = new Set<number>([0]);
+        let advanced = true;
+        while (advanced) {
+          advanced = false;
+          for (const page of candidates) {
+            if (!reachable.has(page.start)) continue;
+            const losses = Array.isArray(page.losses) ? page.losses : undefined;
+            const supportedPartialLoss =
+              !page.complete && losses?.every((loss) => loss === 'character-budget') === true;
+            if (page.complete) {
+              if (page.end === total && Array.isArray(losses) && losses.length === 0) return true;
+              continue;
+            }
+            if (!supportedPartialLoss || reachable.has(page.end)) continue;
+            reachable.add(page.end);
+            advanced = true;
+          }
+        }
+      }
     }
   }
   return false;
@@ -362,13 +390,11 @@ function requestClause(text: string, start: number, end: number): string {
 }
 
 function requestedPageTargets(request: string): string[] {
-  const unquotedRequest = request
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/`[^`\n]*`|"[^"\n]*"|'[^'\n]*'|“[^”\n]*”|‘[^’\n]*’/g, ' ');
-  if (/\b(?:do not|don['’]t|never)\s+browse\b/i.test(unquotedRequest)) return [];
   const candidates = [...request.matchAll(/https?:\/\/[^\s<>]+/gi)].flatMap((match) => {
     const raw = match[0];
     const start = match.index ?? 0;
+    const trailingPunctuation = /[.,!?;:]+$/.exec(raw)?.[0] ?? '';
+    const target = trailingPunctuation ? raw.slice(0, -trailingPunctuation.length) : raw;
     const url = safePublicPageUrl(raw);
     if (!url) return [];
     const quotedSuffix = /(["'”’])([.,!?;:]*)$/.exec(raw);
@@ -382,7 +408,7 @@ function requestedPageTargets(request: string): string[] {
       openQuote && openQuoteIndex >= 0 && quotePrefix === ''
         ? `${openQuote}SOURCE_URL${closeQuote}${quotedSuffix?.[2] ?? ''}`
         : `${closeQuote ? `SOURCE_URL${closeQuote}${quotedSuffix?.[2] ?? ''}` : 'SOURCE_URL'}`;
-    let clause = requestClause(request, start, start + raw.length).replace(raw, token);
+    let clause = requestClause(request, start, start + target.length).replace(target, token);
     // A URL may itself be quoted as the target, while quoted instructions around
     // other URLs remain examples or untrusted text and cannot authorize a fetch.
     clause = clause
@@ -398,15 +424,34 @@ function requestedPageTargets(request: string): string[] {
           : ' ';
       });
     const noBrowse =
+      /\b(?:do not|don['’]t|never)\s+browse\s*(?=[;,]|$)/i.test(clause) ||
+      /\b(?:do not|don['’]t|never)\s+browse\b[^.!?;\n]{0,80}\b(?:page|article|site|website|webpage|url|link|source|contents?)\b/i.test(
+        clause,
+      ) ||
       /\b(?:do not|don['’]t|never)\s+(?:fetch|open|visit|read)\b[^.!?;\n]{0,80}\b(?:page|article|site|website|webpage|url|link|source|contents?)\b/i.test(
         clause,
-      );
-    const negatedReadOfPage =
-      /\b(?:do not|don['’]t|never)\s+read\b[^.!?;\n]{0,60}\b(?:page|article|site|website|webpage|url|link|source|contents?)\b/i.test(
+      ) ||
+      (() => {
+        const before = request.slice(0, start);
+        const precedingClauses = before.split(/;|\n|\.(?=\s)|[!?](?=\s)/);
+        const previousClause = precedingClauses.at(-2) ?? '';
+        return /^\s*(?:(?:please|just)\s+)?(?:do not|don['’]t|never)\s+browse\s*$/i.test(
+          previousClause,
+        );
+      })();
+    const negatedDirectPageRead =
+      /\b(?:do not|don['’]t|never)\s+(?:browse|read|fetch|open|visit|load)\s+(?:(?:the|this|that)\s+)?SOURCE_URL/i.test(
         clause,
-      ) || /\b(?:do not|don['’]t|never)\s+read\s+SOURCE_URL\b/i.test(clause);
-    if (noBrowse || negatedReadOfPage) return [];
-    const directPageRead = /\b(?:read|fetch|open|visit|load)\b/i.test(clause);
+      ) ||
+      /\b(?:do not|don['’]t|never)\s+(?:browse|read|fetch|open|visit|load)\b[^.!?;\n]{0,80}\b(?:page|article|site|website|webpage|url|link|source|contents?)\b/i.test(
+        clause,
+      );
+    if (noBrowse || negatedDirectPageRead) return [];
+    // The owner must have authorized this specific URL target. A neighboring
+    // URL's read verb cannot authorize a quoted/example URL in the same clause.
+    const directPageRead = /\b(?:read|fetch|open|visit|load)\b[^;!?\n]{0,500}\bSOURCE_URL/i.test(
+      clause,
+    );
     const pageSummary =
       /\b(?:summari[sz](?:e|ing|ation)|review|analy[sz]e|inspect|extract)\b[^.!?\n]{0,80}\b(?:page|article|site|website|webpage|url|link|contents?|text|source)\b/i.test(
         clause,
@@ -420,7 +465,8 @@ function requestedPageTargets(request: string): string[] {
     const searchResultsOnly =
       /\bsearch(?:\s+the\s+web)?\b[^.!?\n]{0,100}\bresults?\b/i.test(clause) &&
       !/\b(?:page|article|site|website|webpage|contents?|text|source)\b/i.test(clause);
-    if (!(directPageRead || (pageSummary && !searchResultsOnly))) return [];
+    if (!(directPageRead || (clause.includes('SOURCE_URL') && pageSummary && !searchResultsOnly)))
+      return [];
     return [url];
   });
   return [...new Set(candidates)];

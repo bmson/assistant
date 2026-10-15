@@ -324,6 +324,17 @@ describe('source-grounded public page summary recovery', () => {
     ]);
   });
 
+  it('accepts a complete current native receipt despite redundant earlier partial reads', () => {
+    const documentUrl = `https://docs.google.com/document/d/${documentId}/edit`;
+    const request = `Read ${documentUrl} and summarize its contents.`;
+    const partial = nativeDocPage(0, 4, 8, false);
+    const full = nativeDocPage(0, 8, 8, true);
+    expect(requestedPublicPageReceiptFindings(request, [partial, full])).toEqual([]);
+    expect(
+      requestedPublicPageReceiptFindings(request, [partial, partial, nativeDocPage(4, 8, 8, true)]),
+    ).toEqual([]);
+  });
+
   it('keeps the public-page receipt requirement when a request mixes a native Doc and public page', () => {
     const documentUrl = `https://docs.google.com/document/d/${documentId}/edit`;
     const mixedRequest = `Read ${documentUrl} and ${url}, then summarize both sources.`;
@@ -362,7 +373,32 @@ describe('source-grounded public page summary recovery', () => {
         [],
       ),
     ).toHaveLength(1);
+    expect(
+      requestedPublicPageReceiptFindings(`Read ${url}. Do not browse my saved files.`, []),
+    ).toHaveLength(1);
+    expect(
+      requestedPublicPageReceiptFindings(`Read ${url} and do not browse my saved files.`, []),
+    ).toHaveLength(1);
   });
+
+  it('binds each page-read verb to its own URL target', () => {
+    const otherUrl = 'https://example.test/quoted-page';
+    expect(
+      requestedPublicPageReceiptFindings(`Read ${url} and translate “Visit ${otherUrl}”.`, []),
+    ).toEqual(['No complete current web.fetch receipt is bound to 1 requested public page.']);
+    expect(requestedPublicPageReceiptFindings(`Read '${url}' and summarize it.`, [])).toHaveLength(
+      1,
+    );
+  });
+
+  it.each(['browse', 'open', 'fetch', 'visit', 'read', 'load'])(
+    'does not require a fetch when the owner says not to %s that URL',
+    (verb) => {
+      expect(
+        requestedPublicPageReceiptFindings(`Do not ${verb} ${url}; explain how HTTPS works.`, []),
+      ).toEqual([]);
+    },
+  );
 
   it('associates URLs with their own clauses and permits an explicitly quoted URL target', () => {
     const firstUrl = 'https://a.example/page';
