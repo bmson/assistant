@@ -19,7 +19,7 @@ import { retrieveOwnerContext } from '../../memory/recall-context.js';
 import { recordRecallMetric } from '../../memory/recall-metrics.js';
 import {
   renderRelevantSavedSkills,
-  requestedSavedSkillInventory,
+  savedSkillInventoryIntent,
 } from '../../memory/saved-skill-inventory.js';
 import {
   bumpSkillUse,
@@ -496,7 +496,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   const situationRequest =
     directOwner && !restrictedChecklistResume && isSituationRequest(ownerText);
   const skillInventoryRequest =
-    directOwner && !restrictedChecklistResume && requestedSavedSkillInventory(ownerText);
+    directOwner && !restrictedChecklistResume ? savedSkillInventoryIntent(ownerText) : null;
   if (skillInventoryRequest) {
     let response =
       'I could not access the saved-skill library for this request, so I cannot verify which skills are available.';
@@ -508,7 +508,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         : createPostgresSkillLibraryRepository(db));
     if (skillLibrary) {
       try {
-        response = renderRelevantSavedSkills(await skillLibrary.list(task.agentId));
+        response = renderRelevantSavedSkills(
+          await skillLibrary.list(task.agentId),
+          skillInventoryRequest,
+        );
         libraryRead = true;
       } catch {
         response =
