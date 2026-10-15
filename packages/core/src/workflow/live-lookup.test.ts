@@ -1123,8 +1123,14 @@ describe('a trip to a generic airport', () => {
 
   it('routes only with a unique explicit airport and the owner supplied origin and departure time', () => {
     for (const [content, origin] of [
-      ['How long to get to the airport tomorrow from home, leaving at 8am?', 'home'],
-      ["How long to get to the airport tomorrow? I'm at home, leaving at 8am.", 'home'],
+      [
+        'How long to get to the airport tomorrow from 123 Market Street, San Francisco, CA 94103, leaving at 8am?',
+        '123 Market Street, San Francisco, CA 94103',
+      ],
+      [
+        "How long to get to the airport tomorrow? I'm at 123 Market Street, San Francisco, CA 94103, leaving at 8am.",
+        '123 Market Street, San Francisco, CA 94103',
+      ],
     ]) {
       const lookup = detectLiveLookup([{ role: 'user', content }]);
       expect(lookup?.airportIntent).toBe(true);
@@ -1144,13 +1150,35 @@ describe('a trip to a generic airport', () => {
     }
   });
 
+  it.each([
+    'How long to get to the airport tomorrow from home, leaving at 8am?',
+    'How long to get to the airport tomorrow from my hotel, leaving at 8am?',
+    'How long to get to the airport tomorrow from my hotel in Berlin, leaving at 8am?',
+    'How long to get to the airport tomorrow from my home in Palo Alto, leaving at 8am?',
+    'How long to get to the airport tomorrow from my apartment at 123 Main Street, leaving at 8am?',
+    "How long to get to the airport tomorrow? I'm here, leaving at 8am.",
+    'How long to get to the airport tomorrow from my current location, leaving at 8am?',
+  ])('does not route from an unresolved deictic origin: %s', (content) => {
+    const lookup = detectLiveLookup([{ role: 'user', content }]);
+    if (!lookup) throw new Error('Expected airport lookup');
+    const page = calendar([
+      {
+        ...returnFlight,
+        location: 'San Francisco International Airport, San Francisco, CA 94128, USA',
+      },
+    ]);
+    expect(nextLiveLookup(lookup, [page], context)).toBeUndefined();
+    expect(liveLookupFailure(lookup, [page], context)).toBeUndefined();
+  });
+
   it.each(['succeeded', 'failed', 'denied', 'proposed'])(
     'consumes one exact route attempt without silently retrying: %s',
     (status) => {
       const lookup = detectLiveLookup([
         {
           role: 'user',
-          content: 'How long to get to the airport tomorrow from Home, leaving at 8am?',
+          content:
+            'How long to get to the airport tomorrow from 123 Market Street, leaving at 8am?',
         },
       ]);
       if (!lookup) throw new Error('Expected lookup');
@@ -1177,7 +1205,8 @@ describe('a trip to a generic airport', () => {
       const lookup = detectLiveLookup([
         {
           role: 'user',
-          content: 'How long to get to the airport tomorrow from Home, leaving at 8am?',
+          content:
+            'How long to get to the airport tomorrow from 123 Market Street, leaving at 8am?',
         },
       ]);
       if (!lookup) throw new Error('Expected lookup');
@@ -1209,7 +1238,7 @@ describe('a trip to a generic airport', () => {
       {
         role: 'user',
         content:
-          "What's the weather tomorrow and how long to get to the airport tomorrow from Home, leaving at 8am?",
+          "What's the weather tomorrow and how long to get to the airport tomorrow from 123 Market Street, leaving at 8am?",
       },
     ]);
     expect(lookups.map((lookup) => lookup.kind)).toEqual(['weather', 'directions']);
@@ -1274,7 +1303,7 @@ describe('a trip to a generic airport', () => {
       const lookup = detectLiveLookup([
         {
           role: 'user',
-          content: `How long to get to the airport tomorrow from Home, leaving at ${clock}?`,
+          content: `How long to get to the airport tomorrow from 123 Market Street, leaving at ${clock}?`,
         },
       ]);
       if (!lookup) throw new Error('Expected lookup');
@@ -1312,7 +1341,7 @@ describe('a trip to a generic airport', () => {
     const lookup = detectLiveLookup([
       {
         role: 'user',
-        content: 'How long to get to the airport tomorrow from Home, leaving at 8am?',
+        content: 'How long to get to the airport tomorrow from 123 Market Street, leaving at 8am?',
       },
     ]);
     if (!lookup) throw new Error('Expected lookup');
@@ -1331,17 +1360,21 @@ describe('a trip to a generic airport', () => {
         content:
           'Which airport are you going to, where will you start, and what time will you leave?',
       },
-      { role: 'user', content: 'Home, 8am.' },
+      { role: 'user', content: '123 Market Street, 8am.' },
     ]);
     expect(lookup?.airportIntent).toBe(true);
     if (!lookup) throw new Error('Expected continued airport lookup');
     const result = nextLiveLookup(lookup, [calendar([returnFlight])], context);
     expect(result?.toolName).toBe('maps.directions');
-    expect(result?.input).toMatchObject({ origin: 'Home', departAt: '2026-10-16T15:00:00.000Z' });
+    expect(result?.input).toMatchObject({
+      origin: '123 Market Street',
+      departAt: '2026-10-16T15:00:00.000Z',
+    });
   });
 
   it('waits for every page and rejects partial, stale, wrong-range, or restricted-calendar evidence', () => {
-    const content = 'How long to get to the airport tomorrow from home, leaving at 8am?';
+    const content =
+      'How long to get to the airport tomorrow from 123 Market Street, leaving at 8am?';
     const lookup = detectLiveLookup([{ role: 'user', content }]);
     if (!lookup) throw new Error('Expected airport lookup');
     const first = calendar([], { complete: false, nextPageToken: 'page-2' });

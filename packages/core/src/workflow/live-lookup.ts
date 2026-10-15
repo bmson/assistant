@@ -581,12 +581,31 @@ function airportCalendarCoverage(
 
 function airportOrigin(request: string): string | undefined {
   const match =
-    /\b(?:from|starting\s+(?:at|from)|origin\s*(?:is|:)|(?:i\s+am|i'm|we\s+are|we're|currently)\s+at)\s+([^,.;?!\n]+?)(?=\s+\b(?:leave|leaving|depart|departing|head\s+out|at|around|about)\b|[,.;?!\n]|$)/i.exec(
+    /\b(?:from|starting\s+(?:at|from)|origin\s*(?:is|:)|(?:i\s+am|i'm|we\s+are|we're|currently)\s+at)\s+([^.;?!\n]+?)(?=\s+\b(?:leave|leaving|depart|departing|head\s+out|at|around|about)\b|[.;?!\n]|$)/i.exec(
       request,
     );
-  const value = match?.[1]?.trim().replace(/\s+/g, ' ');
-  if (!value || /^(?:here|there|me|my current location|where i am)$/i.test(value)) return undefined;
+  const value = match?.[1]
+    ?.trim()
+    .replace(/[,;]+$/, '')
+    .replace(/\s+/g, ' ');
+  if (!value || isUnresolvedAirportOrigin(value)) return undefined;
   return value;
+}
+
+/** Deictic origins need a verified address before they can be sent to Maps. */
+function isUnresolvedAirportOrigin(value: string): boolean {
+  const normalized = value
+    .toLocaleLowerCase()
+    .replace(/[.,]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^(?:my|our|the)\s+/, '');
+  return (
+    /^(?:here|there|me|current location|where i am)$/i.test(normalized) ||
+    /^(?:home|house|place|apartment|flat|condo|residence|hotel|work|office|workplace)(?: address)?(?:\s+(?:in|at|near)\s+.+)?$/i.test(
+      normalized,
+    )
+  );
 }
 
 function airportDepartureInstant(request: string, context: LookupContext): string | undefined {

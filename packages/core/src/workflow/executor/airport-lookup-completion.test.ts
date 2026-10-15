@@ -36,16 +36,18 @@ describe('airport lookup completion through allocated PostgreSQL executor', () =
   });
 
   it.each([
-    { name: 'route success', mixed: false, fail: false },
-    { name: 'route failure', mixed: false, fail: true },
-    { name: 'weather plus two-page airport', mixed: true, fail: false },
-  ])('finishes once without repeating reads: $name', async ({ mixed, fail }) => {
+    { name: 'route success', mixed: false, fail: false, missingOrigin: false },
+    { name: 'route failure', mixed: false, fail: true, missingOrigin: false },
+    { name: 'weather plus two-page airport', mixed: true, fail: false, missingOrigin: false },
+    { name: 'clarifies an unresolved home origin', mixed: false, fail: false, missingOrigin: true },
+  ])('finishes once without repeating reads: $name', async ({ mixed, fail, missingOrigin }) => {
     const agent = await db.query.agents.findFirst();
     if (!agent) throw new Error('Allocator fixture agent missing');
     const agentId = agent.id;
     const conversationId = randomUUID();
     const taskId = randomUUID();
-    const routeRequest = 'How long to get to the airport tomorrow from Home, leaving at 8am?';
+    const origin = missingOrigin ? 'Home' : '123 Market Street, San Francisco, CA 94103';
+    const routeRequest = `How long to get to the airport tomorrow from ${origin}, leaving at 8am?`;
     const request = mixed ? `What's the weather tomorrow and ${routeRequest}` : routeRequest;
     await db.insert(conversations).values({
       id: conversationId,
@@ -122,7 +124,11 @@ describe('airport lookup completion through allocated PostgreSQL executor', () =
                 ? fail
                   ? { error: 'Synthetic route unavailable' }
                   : {
-                      origin: { label: 'Home', lat: 40, lng: -74 },
+                      origin: {
+                        label: '123 Market Street, San Francisco, CA 94103',
+                        lat: 40,
+                        lng: -74,
+                      },
                       destination: { label: 'Harbor International Airport', lat: 41, lng: -73 },
                       durationSeconds: 1800,
                       distanceMeters: 25000,
@@ -166,7 +172,9 @@ describe('airport lookup completion through allocated PostgreSQL executor', () =
         text:
           input.toolChoice?.toolName === 'weather.lookup'
             ? ''
-            : `${mixed ? 'The forecast was retrieved. ' : ''}The drive from Home to Harbor International Airport takes 30 minutes.`,
+            : missingOrigin
+              ? 'I found the airport on your calendar, but I need the street address where you will start.'
+              : `${mixed ? 'The forecast was retrieved. ' : ''}The drive from 123 Market Street, San Francisco, CA 94103 to Harbor International Airport takes 30 minutes.`,
         toolCalls:
           input.toolChoice?.toolName === 'weather.lookup'
             ? [
@@ -221,16 +229,19 @@ describe('airport lookup completion through allocated PostgreSQL executor', () =
       missingInfo: [],
     });
     expect(result.outcome).toBe(fail ? 'needs_attention' : 'done');
-    expect(calls.filter((call) => call.toolName === 'maps.directions')).toHaveLength(1);
+    expect(calls.filter((call) => call.toolName === 'maps.directions')).toHaveLength(
+      missingOrigin ? 0 : 1,
+    );
     expect(calls.filter((call) => call.toolName === 'calendar.list_events')).toHaveLength(
       mixed ? 2 : 1,
     );
     expect(calls.filter((call) => call.toolName === 'weather.lookup')).toHaveLength(mixed ? 1 : 0);
-    expect(calls.find((call) => call.toolName === 'maps.directions')?.args).toMatchObject({
-      origin: 'Home',
-      destination: 'Harbor International Airport',
-      departAt: '2030-11-16T13:00:00.000Z',
-    });
+    if (!missingOrigin)
+      expect(calls.find((call) => call.toolName === 'maps.directions')?.args).toMatchObject({
+        origin: '123 Market Street, San Francisco, CA 94103',
+        destination: 'Harbor International Airport',
+        departAt: '2030-11-16T13:00:00.000Z',
+      });
     const pages = calls.filter((call) => call.toolName === 'calendar.list_events');
     expect(pages[0]?.args).toMatchObject({
       timeMin: '2030-11-16T05:00:00.000Z',
@@ -241,7 +252,10 @@ describe('airport lookup completion through allocated PostgreSQL executor', () =
     const persisted = await db.query.messages.findMany({ where: eq(messages.taskId, taskId) });
     const final = persisted.find((row) => row.role === 'assistant');
     const answer = final?.text ?? '';
-    if (fail) {
+    if (missingOrigin) {
+      expect(answer).toMatch(/need the street address where you will start/i);
+      expect(answer).not.toContain('takes 30 minutes');
+    } else if (fail) {
       expect(answer).toContain("couldn't get a route");
       expect(answer).not.toContain('takes 30 minutes');
     } else {
