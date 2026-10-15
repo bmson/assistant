@@ -37,6 +37,13 @@ describe('owner intent provenance', () => {
     expect(isConversationLocalContext(text)).toBe(true);
   });
   it.each([
+    'Plan a hypothetical work morning. Check my actual calendar before proposing times.',
+    'For a fictional subscription audit, search my real inbox for receipts.',
+    'In this exercise, read my saved memories about budgeting preferences.',
+  ])('keeps an explicit private-source request routable: %s', (text) => {
+    expect(isConversationLocalContext(text)).toBe(false);
+  });
+  it.each([
     'Plan a hypothetical day using saved memories about my preferences.',
     'For a fictional scenario, consult previous conversations about how I work.',
     'What do I have on my calendar tomorrow?',

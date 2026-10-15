@@ -1,0 +1,33 @@
+/** Shared, dependency-free boundary for work scoped to this conversation. */
+export function isConversationLocalContext(text: string): boolean {
+  const withoutNegativeReadConstraints = text.replace(
+    /\b(?:do not|don't|don’t|never|without|avoid)\s+(?:search|read|look(?:\s+up)?|check|consult|use|retrieve|review|open|pull\s+up)\b[^.!?;,\n]{0,120}\b(?:memories?|history|past chats|old messages|older messages|previous conversations|old conversations|calendar|schedule|agenda|email|mail|inbox|messages?|threads?|drive)\b[^.!?;,\n]*/giu,
+    '',
+  );
+  const explicitHistoricalRead =
+    /\b(?:use|using|read|reading|search|searching|retrieve|retrieving|recall|recalling|consult|consulting|look back)\b[^.!?\n]{0,90}\b(?:saved memories|saved memory|earlier conversations|previous conversations|past conversations|old messages)\b/i.test(
+      withoutNegativeReadConstraints,
+    ) ||
+    /\b(?:earlier|previous|prior|past)\s+(?:(?:hypothetical|fictional)\s+)?(?:[\p{L}\p{N}_-]+\s+){0,3}(?:exercise|scenario|discussion)\b/iu.test(
+      withoutNegativeReadConstraints,
+    ) ||
+    /\bwhat\s+(?:did|have)\s+i\s+(?:tell|say|mention)\s+you\b|\bwhat\s+did\s+i\s+say\s+about\b/i.test(
+      withoutNegativeReadConstraints,
+    );
+  const explicitPrivateRead =
+    /\b(?:check|read|search|look(?:\s+up)?|consult|use|retrieve|recall|show|review|open|pull\s+up)\b[^.!?\n]{0,100}\b(?:my|our)\s+(?:calendar|schedule|agenda|email|mail|inbox|messages?|threads?|drive|memories|memory)\b/i.test(
+      withoutNegativeReadConstraints,
+    ) ||
+    /\b(?:my|our)\s+(?:real|actual|personal|saved|previous|earlier|past)\s+(?:calendar|schedule|agenda|email|mail|inbox|messages?|threads?|drive|memories|memory)\b/i.test(
+      withoutNegativeReadConstraints,
+    );
+  if (explicitHistoricalRead || explicitPrivateRead) return false;
+  return (
+    /\b(?:hypothetical|fictional)\b[^.!?\n]{0,80}\b(?:exercise|scenario|example|project|schedule|planning|plan|morning|afternoon|day|week|test)\b|\b(?:exercise|scenario)\s+only\b/i.test(
+      text,
+    ) ||
+    /\b(?:using|use|from|based on)\b[^.!?\n]{0,100}\b(?:just gave you|this conversation|this chat|the details above)\b/i.test(
+      text,
+    )
+  );
+}

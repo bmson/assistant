@@ -4,6 +4,8 @@ import { detectFutureWatchIntent } from './future-watch-intent.js';
 import { detectLiveLookup } from './live-lookup.js';
 import { detectPersonalReadRequest } from './read-intent.js';
 
+export { isConversationLocalContext } from './conversation-local-context.js';
+
 export type OwnerIntentScope =
   | 'external_read'
   | 'private_read'
@@ -43,23 +45,6 @@ export function explicitlyOptsOutOfRecall(text: string): boolean {
       text,
     ) ||
     /\b(?:do not|don't|never)\s+look\s+anything\s+up\b|\bwithout\s+(?:looking|checking|searching)\s+anything\s+up\b/i.test(
-      text,
-    )
-  );
-}
-
-/** A fictional exercise or explicit current-thread reference needs no ambient personal history. */
-export function isConversationLocalContext(text: string): boolean {
-  const explicitHistoricalRead =
-    /\b(?:use|using|read|reading|search|searching|retrieve|retrieving|recall|recalling|consult|consulting|look back)\b[^.!?\n]{0,90}\b(?:saved memories|saved memory|earlier conversations|previous conversations|past conversations|old messages)\b/i.test(
-      text,
-    );
-  if (explicitHistoricalRead) return false;
-  return (
-    /\b(?:hypothetical|fictional)\b[^.!?\n]{0,80}\b(?:exercise|scenario|example|project|schedule|planning|plan|morning|afternoon|day|week|test)\b|\b(?:exercise|scenario)\s+only\b/i.test(
-      text,
-    ) ||
-    /\b(?:using|use|from|based on)\b[^.!?\n]{0,100}\b(?:just gave you|this conversation|this chat|the details above)\b/i.test(
       text,
     )
   );

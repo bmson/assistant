@@ -22,6 +22,7 @@ import {
   MAX_COMPOUND_TRIP_THREADS_TO_READ,
   MAX_COMPOUND_TRIP_TOOL_CALLS,
 } from './compound-trip-read.js';
+import { isConversationLocalContext } from './conversation-local-context.js';
 import {
   EMAIL_REVIEW_MAX_SEARCH_PAGES,
   EMAIL_REVIEW_QUERY,
@@ -1479,10 +1480,19 @@ function namedHistoricalAnchor(text: string): string | undefined {
 
 function memoryLookupText(text: string): string {
   // A retention constraint does not request a saved-memory lookup.
-  return text.replace(
+  const withoutVerbFirstRetentionConstraints = text.replace(
     /\b(?:do not|don't|don’t|never)\s+(?:save|store|write|update|add|retain|record)\b[^.!?;,]*?\bmemor(?:y|ies)\b[^.!?;,]*/giu,
     '',
   );
+  return withoutVerbFirstRetentionConstraints
+    .replace(
+      /\b(?:no|zero|without|avoid(?:ing)?|disable(?:d)?|disallow(?:ed)?|prevent(?:ing)?)\b[^.!?;,]{0,50}\b(?:memor(?:y|ies)|remember(?:ed)?)\b[^.!?;,]{0,40}\b(?:writ(?:e|es|ing)|sav(?:e|es|ed|ing)|stor(?:e|es|ed|ing)|updat(?:e|s|ed|ing)|retain(?:ed|ing)?|record(?:ed|ing)?)\b[^.!?;,]*/giu,
+      '',
+    )
+    .replace(
+      /\b(?:no|zero|without|avoid(?:ing)?|disable(?:d)?|disallow(?:ed)?|prevent(?:ing)?)\b[^.!?;,]{0,50}\b(?:writes?|writing|saves?|saved|saving|stores?|stored|storing|updates?|updated|updating|retains?|retained|retaining|records?|recorded|recording)\b[^.!?;,]{0,40}\b(?:memor(?:y|ies)|remember(?:ed)?)\b[^.!?;,]*/giu,
+      '',
+    );
 }
 
 function requestsOwnerAssistantCorrectionComparison(text: string): boolean {
@@ -1860,6 +1870,7 @@ function detectPersonalReadRequestInternal(
   const calendarReadProhibited = explicitlyProhibitsPrivateRead(latest, 'calendar');
   const emailReadProhibited = explicitlyProhibitsPrivateRead(latest, 'email');
   const memoryReadProhibited = explicitlyProhibitsPrivateRead(latest, 'memory');
+  if (isConversationLocalContext(latest)) return null;
   const flightContinuation =
     clarificationDepth < 2 && !calendarReadProhibited && !emailReadProhibited
       ? flightScopeClarificationContinuation(
