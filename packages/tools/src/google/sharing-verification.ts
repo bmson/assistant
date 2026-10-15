@@ -190,7 +190,9 @@ export async function verifyOwnerOnlyDriveSharingWithDiagnostic(
       hasUnexpectedPrincipal = true;
       continue;
     }
-    if (!inherited) observed.add(email);
+    // permissionDetails describes the sources for this same grantee. An
+    // inherited role for an already-allowed user does not add another viewer.
+    observed.add(email);
   }
   if (malformedPermissionEntry) hasUnexpectedPrincipal = true;
 
@@ -217,14 +219,10 @@ export async function verifyOwnerOnlyDriveSharingWithDiagnostic(
   }
 
   const missingExpectedPrincipal = [...allowed].some((email) => !observed.has(email));
-  if (hasInheritedPermission || hasUnexpectedPrincipal) {
+  if (hasUnexpectedPrincipal) {
     return diagnostic(
       'not_owner_only',
-      hasInheritedPermission
-        ? 'inherited_permission'
-        : malformedPermissionEntry
-          ? 'malformed_permission_entry'
-          : 'unexpected_principal',
+      malformedPermissionEntry ? 'malformed_permission_entry' : 'unexpected_principal',
       permissions.length,
       pagesRead,
       true,
@@ -245,7 +243,7 @@ export async function verifyOwnerOnlyDriveSharingWithDiagnostic(
   }
   return diagnostic('verified_owner_only', 'verified', permissions.length, pagesRead, true, {
     unexpectedPrincipal: false,
-    inheritedPermission: false,
+    inheritedPermission: hasInheritedPermission,
     missingExpectedPrincipal: false,
   });
 }

@@ -48,21 +48,43 @@ describe('verifyOwnerOnlyDriveSharing', () => {
     ).resolves.toBe('not_owner_only');
   });
 
-  it('rejects permission inherited from a shared drive', async () => {
+  it('allows a known principal with inherited and direct grants', async () => {
     await expect(
       verifyOwnerOnlyDriveSharing(
         {
           api: vi.fn().mockResolvedValue({
             permissions: [
-              {
-                type: 'user',
-                emailAddress: 'bot@example.com',
-                permissionDetails: [{ inherited: false }],
-              },
+              { type: 'user', emailAddress: 'bot@example.com' },
               {
                 type: 'user',
                 emailAddress: 'owner@example.com',
-                permissionDetails: [{ inherited: true, inheritedFrom: 'drive-folder-id' }],
+                permissionDetails: [
+                  { permissionType: 'member', inherited: true, inheritedFrom: 'drive-id' },
+                  { permissionType: 'file', inherited: false },
+                ],
+              },
+            ],
+          }),
+        } as never,
+        'DocumentId12345',
+        'bot@example.com',
+        'owner@example.com',
+      ),
+    ).resolves.toBe('verified_owner_only');
+  });
+
+  it('still rejects an inherited grant to an unexpected principal', async () => {
+    await expect(
+      verifyOwnerOnlyDriveSharing(
+        {
+          api: vi.fn().mockResolvedValue({
+            permissions: [
+              { type: 'user', emailAddress: 'bot@example.com' },
+              { type: 'user', emailAddress: 'owner@example.com' },
+              {
+                type: 'user',
+                emailAddress: 'unexpected@example.com',
+                permissionDetails: [{ permissionType: 'member', inherited: true }],
               },
             ],
           }),
@@ -177,16 +199,22 @@ describe('privacy-safe owner-only diagnostics', () => {
     expect(JSON.stringify(result)).not.toContain('@');
   });
 
-  it('distinguishes inherited access from a direct unexpected principal', async () => {
+  it('preserves inherited-source diagnostics for an allowed principal without failing privacy', async () => {
     const result = await verifyOwnerOnlyDriveSharingWithDiagnostic(
       {
         api: vi.fn().mockResolvedValue({
           permissions: [
-            { type: 'user', emailAddress: 'bot@example.com' },
+            {
+              type: 'user',
+              emailAddress: 'bot@example.com',
+              permissionDetails: [
+                { permissionType: 'member', inherited: true, inheritedFrom: 'private-drive-id' },
+                { permissionType: 'file', inherited: false },
+              ],
+            },
             {
               type: 'user',
               emailAddress: 'owner@example.com',
-              permissionDetails: [{ inherited: true, inheritedFrom: 'private-drive-id' }],
             },
           ],
         }),
@@ -197,14 +225,14 @@ describe('privacy-safe owner-only diagnostics', () => {
     );
 
     expect(result).toMatchObject({
-      status: 'not_owner_only',
-      reason: 'inherited_permission',
+      status: 'verified_owner_only',
+      reason: 'verified',
       permissionCount: 2,
       pagesRead: 1,
       fullPageCompletion: true,
       unexpectedPrincipal: false,
       inheritedPermission: true,
-      missingExpectedPrincipal: true,
+      missingExpectedPrincipal: false,
     });
     expect(JSON.stringify(result)).not.toContain('private-drive-id');
   });
@@ -260,7 +288,7 @@ describe('privacy-safe owner-only diagnostics', () => {
     );
     expect(result).toMatchObject({
       status: 'not_owner_only',
-      reason: 'inherited_permission',
+      reason: 'malformed_permission_entry',
       fullPageCompletion: true,
       inheritedPermission: true,
       malformedPermissionEntry: true,
