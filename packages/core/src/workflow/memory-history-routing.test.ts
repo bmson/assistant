@@ -182,6 +182,52 @@ describe('named historical exercises and retention constraints', () => {
     });
   });
 
+  it('keeps separately stated lookup prohibitions scoped to their own clauses', () => {
+    expect(
+      detectPersonalReadRequest(
+        turn('What is on my calendar tomorrow? Do not use email and do not use calendar.'),
+      ),
+    ).toBeNull();
+
+    expect(
+      detectPersonalReadRequest(
+        turn('What is on my calendar tomorrow? Do not use email or calendar.'),
+      ),
+    ).toBeNull();
+
+    expect(
+      detectPersonalReadRequest(
+        turn('What is on my calendar tomorrow? Do not use email, but check the calendar.'),
+      ),
+    ).toMatchObject({ kind: 'calendar' });
+
+    expect(
+      detectPersonalReadRequest(
+        turn('What is on my calendar tomorrow? Without using my calendar.'),
+      ),
+    ).toBeNull();
+
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'What do my saved memories say about telescope preferences? Without reading my earlier chats, use saved memory.',
+        ),
+      ),
+    ).toMatchObject({ kind: 'memory', firstToolName: 'memory.recall', searchSavedMemory: true });
+
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'What do my saved memories say about telescope preferences? Without reading history, use saved memory.',
+        ),
+      ),
+    ).toMatchObject({
+      kind: 'memory',
+      firstToolName: 'memory.recall',
+      searchSavedMemory: true,
+    });
+  });
+
   it('preserves a saved-memory read after a same-sentence retention restriction', () => {
     const request = detectPersonalReadRequest(
       turn(

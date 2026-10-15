@@ -234,10 +234,36 @@ const SAME_SUBJECT_LOOKUP_OFFER =
 const MUTATING_OFFER =
   /\b(?:add|archive|book|cancel|create|delete|edit|forward|invite|move|reply|reschedule|save|schedule|send|submit|update)\b/i;
 const NEGATED_LOOKUP_VERB = String.raw`(?:look(?:\s+up)?|check|search|read|open|access|review|scan|inspect|consult|use|recall|retrieve)`;
+const NEGATED_LOOKUP_FORM = String.raw`(?:look(?:ing)?(?:\s+up)?|check(?:ing)?|search(?:ing)?|read(?:ing)?|open(?:ing)?|access(?:ing)?|review(?:ing)?|scan(?:ning)?|inspect(?:ing)?|consult(?:ing)?|us(?:e|ing)|recall(?:ing)?|retriev(?:e|ing)?)`;
+
+function privateReadProhibitionClauses(text: string): string[] {
+  const prefix = new RegExp(
+    String.raw`\b(?:(?:do\s+not|don['’]?t|never)\s+${NEGATED_LOOKUP_VERB}\b|without\s+${NEGATED_LOOKUP_FORM}\b)`,
+    'giu',
+  );
+  const matches = [...text.matchAll(prefix)];
+  const positiveRead =
+    /(?:,\s*|\b(?:but|however|instead|then|and)\s+)(?=(?:look(?:\s+up)?|check|search|read|open|access|review|scan|inspect|consult|use|recall|retrieve)\b)/iu;
+
+  return matches.map((match, index) => {
+    const start = (match.index ?? 0) + match[0].length;
+    const nextPrefix = matches[index + 1]?.index ?? text.length;
+    const maxEnd = Math.min(start + 180, nextPrefix, text.length);
+    const remaining = text.slice(start, maxEnd);
+    const sentenceEnd = remaining.search(/[.!?;\n]/u);
+    const positiveStart = remaining.search(positiveRead);
+    const end = Math.min(
+      maxEnd,
+      sentenceEnd < 0 ? maxEnd : start + sentenceEnd,
+      positiveStart < 0 ? maxEnd : start + positiveStart,
+    );
+    return text.slice(start, end);
+  });
+}
 
 function positivePrivateReadText(text: string): string {
   return text.replace(
-    /\b(?:do not|don't|don’t|never|without|avoid)\b[^.!?;\n]*?(?=\b(?:but|however|instead|then)\s+(?:read|search|check|use|consult|retrieve)\b|[.!?;\n]|$)/giu,
+    /\b(?:do not|don't|don’t|never|without|avoid)\b[^.!?;\n]*?(?=(?:,\s*|\b(?:but|however|instead|then|and)\s+)(?:read|search|check|use|consult|retrieve)\b|[.!?;\n]|$)/giu,
     '',
   );
 }
@@ -255,12 +281,7 @@ function explicitlyProhibitsPrivateRead(
           ? String.raw`(?:(?:(?:earlier|previous|prior|past)\s+)?(?:owner\s+)?(?:chats?|conversations?)|conversation\s+history|history)`
           : String.raw`(?:memories|memory|saved\s+(?:facts?|memories)|what\s+you\s+know)`;
   const sourceOwner = String.raw`(?:my|our)\s+(?:(?:real|actual|personal)\s+)?`;
-  const clause = String.raw`[^.!?;\n]{0,180}`;
-  const prefix = String.raw`\b(?:do\s+not|don['’]?t|never)\s+${NEGATED_LOOKUP_VERB}\b`;
-  const negatedClauses = [...text.matchAll(new RegExp(`${prefix}(${clause})`, 'giu'))].map(
-    (match) =>
-      (match[1] ?? '').split(/\b(?:and|but)\s+(?=(?:do\s+not|don['’]?t|never)\b)/iu)[0] ?? '',
-  );
+  const negatedClauses = privateReadProhibitionClauses(text);
   const direct = new RegExp(`\\b${sourceOwner}${accountSurface}\\b`, 'i');
   const allPrivateSurfaces = String.raw`(?:gmail|e-?mails?|mail|inboxes|mailboxes|messages?|threads?|(?:google\s+)?calendars?|schedules?|agendas?|memories|memory|saved\s+(?:facts?|memories)|what\s+you\s+know|(?:(?:(?:earlier|previous|prior|past)\s+)?(?:owner\s+)?(?:chats?|conversations?)|conversation\s+history|history))`;
   const ownedSource = new RegExp(`\\b${sourceOwner}${allPrivateSurfaces}\\b`, 'i');
@@ -276,24 +297,15 @@ function explicitlyProhibitsPrivateRead(
           )
       : false;
   });
-  const without = new RegExp(
-    String.raw`\bwithout\s+${NEGATED_LOOKUP_VERB}(?:ing)?\b${clause}\b${sourceOwner}${accountSurface}\b`,
-    'i',
-  );
   const memorySurface = String.raw`(?:(?:my|our|any|the|all)\s+)?(?:saved\s+)?(?:memor(?:y|ies))\b`;
   return (
     negatedClauses.some((negatedClause) => direct.test(negatedClause)) ||
     negatedClauses.some((negatedClause) => unownedSourceMention.test(negatedClause)) ||
     listed ||
-    without.test(text) ||
     (surface === 'memory' &&
-      (negatedClauses.some((negatedClause) =>
+      negatedClauses.some((negatedClause) =>
         new RegExp(`^\\s*${memorySurface}`, 'i').test(negatedClause),
-      ) ||
-        new RegExp(
-          `\\bwithout\\s+(?:${NEGATED_LOOKUP_VERB}(?:ing)?|using|retrieving)\\s+${memorySurface}`,
-          'i',
-        ).test(text))) ||
+      )) ||
     (surface === 'calendar' &&
       negatedClauses.some((negatedClause) =>
         /^\s*(?:(?:any|the|all)\s+)?calendars?\b/i.test(negatedClause),
