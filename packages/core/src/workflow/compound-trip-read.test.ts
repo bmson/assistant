@@ -1955,6 +1955,153 @@ describe('compound trip read projection', () => {
     expect(projection.text).not.toContain('no complete booking-email thread was read');
   });
 
+  it('falls back to strict source-local trip parsing when a completed extraction accepts no facts', () => {
+    const read = request();
+    const evidence = [completeCalendarEvents([calendarFlight()]), ...bookingEmailEvidence()];
+    const emptyCompletedExtraction: CompoundTripExtraction = {
+      status: 'complete',
+      segments: [],
+      hotels: [],
+      rejectedFacts: 9,
+      sourceMessageIds: ['flight-booking-message', 'hotel-booking-message'],
+    };
+
+    const projection = compoundTripReadProjection(read, evidence, emptyCompletedExtraction);
+
+    expect(projection.flight?.segment).toMatchObject({
+      flightNumber: 'LH777',
+      direction: 'outbound',
+      departureDate: '2026-10-17',
+      departureTimeZone: 'Europe/Berlin',
+    });
+    expect(projection.hotel).toMatchObject({
+      hotelName: 'Hotel Linden',
+      city: 'Berlin',
+      checkIn: '2026-10-17',
+      checkOut: '2026-10-19',
+      association: 'date_city_candidate',
+    });
+    expect(projection.routeOrigin).toBe('BER Airport');
+    expect(projection.routeDestination).toBe('Linienstraße 89, 10119 Berlin');
+    expect(projection.webQuery).toContain('Hotel Linden');
+    expect(projection.blocked).toBe(true);
+  });
+
+  it('does not source-parse incomplete extractions or resurrect explicitly cancelled bookings', () => {
+    const read = request();
+    const evidence = [completeCalendarEvents([calendarFlight()]), ...bookingEmailEvidence()];
+    const unavailableExtraction: CompoundTripExtraction = {
+      status: 'unavailable',
+      unavailableReason: 'extraction-error',
+      segments: [],
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: ['flight-booking-message', 'hotel-booking-message'],
+    };
+    const incomplete = compoundTripReadProjection(read, evidence, unavailableExtraction);
+    expect(incomplete.flight).toBeUndefined();
+    expect(incomplete.hotel).toBeUndefined();
+
+    const cancelledEvidence = [...evidence];
+    const flightRead = cancelledEvidence.find(
+      (row) =>
+        row.toolName === 'gmail.read_thread' &&
+        (row.args as Record<string, unknown> | undefined)?.threadId === 'flight-booking-thread',
+    );
+    const flightResult = flightRead?.result as Record<string, unknown> | undefined;
+    const messages = flightResult?.messages as Array<Record<string, unknown>> | undefined;
+    const firstMessage = messages?.[0];
+    if (!firstMessage || typeof firstMessage.text !== 'string')
+      throw new Error('Expected complete flight booking source');
+    firstMessage.text += '\nYour flight booking has been cancelled.';
+    const hotelRead = cancelledEvidence.find(
+      (row) =>
+        row.toolName === 'gmail.read_thread' &&
+        (row.args as Record<string, unknown> | undefined)?.threadId === 'hotel-reservation-thread',
+    );
+    const hotelResult = hotelRead?.result as Record<string, unknown> | undefined;
+    const hotelMessages = hotelResult?.messages as Array<Record<string, unknown>> | undefined;
+    const hotelMessage = hotelMessages?.[0];
+    if (!hotelMessage || typeof hotelMessage.text !== 'string')
+      throw new Error('Expected complete hotel reservation source');
+    hotelMessage.text += '\nYour hotel reservation request has been rejected.';
+    const emptyCompletedExtraction: CompoundTripExtraction = {
+      ...unavailableExtraction,
+      status: 'complete',
+      unavailableReason: undefined,
+      rejectedFacts: 9,
+    };
+    const cancelled = compoundTripReadProjection(read, cancelledEvidence, emptyCompletedExtraction);
+    expect(cancelled.flight).toBeUndefined();
+    expect(cancelled.hotel).toBeUndefined();
+    expect(cancelled.text).toContain('could not match a dated outbound leg');
+  });
+
+  it('identifies an explicitly labeled current-trip return while retaining a same-reference calendar direction conflict', () => {
+    const read = request();
+    const bookingText = [
+      'Return flight',
+      'Flight number: AB 204',
+      'Departure date: 2026-10-20',
+      'Departure time: 12:00 Europe/Berlin',
+      'Arrival date: 2026-10-20',
+      'Arrival time: 15:00 America/Los_Angeles',
+      'From: BER',
+      'To: SFO',
+      'Booking reference: SAME-TRIP-REF',
+    ].join('\n');
+    const evidence = [
+      completeCalendarEvents([
+        {
+          eventId: 'same-reference-calendar-leg',
+          summary: 'Outbound flight AB 204',
+          description: 'Booking reference: SAME-TRIP-REF',
+          start: '2026-10-20T12:00:00+02:00',
+          timeZone: 'Europe/Berlin',
+          status: 'confirmed',
+        },
+      ]),
+      row(
+        'gmail.search',
+        { query: read.mailQuery },
+        {
+          complete: true,
+          results: [{ threadId: 'current-trip', subject: 'Airline itinerary confirmation' }],
+        },
+      ),
+      row(
+        'gmail.read_thread',
+        { threadId: 'current-trip' },
+        {
+          complete: true,
+          messages: [
+            {
+              messageId: 'current-trip-message',
+              subject: 'Airline itinerary confirmation',
+              text: bookingText,
+            },
+          ],
+        },
+      ),
+    ];
+
+    const projection = compoundTripReadProjection(read, evidence);
+
+    expect(projection.flight).toBeUndefined();
+    expect(projection.currentTripReturn?.segment).toMatchObject({
+      direction: 'return',
+      originAirport: 'BER',
+      destinationAirport: 'SFO',
+    });
+    expect(projection.text).toContain(
+      'The checked sources identify a return leg from the current trip',
+    );
+    expect(projection.text).toContain(
+      'Calendar labels this leg outbound; the booking thread labels it return.',
+    );
+    expect(projection.text).toContain('calendar event direction label conflicts');
+  });
+
   it('matches an explicitly outbound booking to an ordinary sparse calendar flight only by exact route and time', () => {
     const read = request();
     const evidence = [

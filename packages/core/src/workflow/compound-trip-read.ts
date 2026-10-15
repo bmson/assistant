@@ -1218,7 +1218,6 @@ function nextOutboundFlight(
       const strongReferenceMatch =
         referenceMatchesStrongly &&
         dateMatches &&
-        (candidate.direction === 'unknown' || candidate.direction === expectedDirection) &&
         (!candidate.originAirport ||
           !segment.originAirport ||
           candidate.originAirport === segment.originAirport) &&
@@ -1942,6 +1941,12 @@ function flightBlocks(
           : 'unknown';
     return [{ direction, excerpt: block }];
   });
+}
+
+function explicitBookingInvalidation(body: string): boolean {
+  return /\b(?:flight|booking|reservation|itinerary|hotel stay|hotel reservation|room reservation)\b[^.!?\n]{0,60}\b(?:has been|was|is now)\s+(?:cancelled|canceled|voided|refunded|rejected|declined|denied)\b|\b(?:cancelled|canceled|voided|rejected|declined|denied)\s+(?:flight|booking|reservation|itinerary|hotel stay|room reservation)\b|\b(?:flight|booking|reservation|itinerary)\s+(?:cancellation|rejection|denial)\s+(?:is|was)\s+confirmed\b/i.test(
+    body,
+  );
 }
 
 function parseFlightSegments(
@@ -2847,14 +2852,28 @@ export function compoundTripReadProjection(
   );
   const sourceMessages = threadMessages(completeThreads);
   const tripExtraction = extractedFacts ?? compoundTripExtractionFromEvidence(evidence);
-  const extractedSegments = tripExtraction
-    ? tripExtraction.status === 'complete'
-      ? tripExtraction.segments
-      : []
-    : parseFlightSegments(sourceMessages);
+  const cancelledThreadIds = new Set(
+    sourceMessages
+      .filter((message) => explicitBookingInvalidation(message.text))
+      .map((message) => message.threadId),
+  );
+  const eligibleSourceMessages = sourceMessages.filter(
+    (message) => !cancelledThreadIds.has(message.threadId),
+  );
+  const allowSourceLocalFallback =
+    tripExtraction === undefined ||
+    (tripExtraction.status === 'complete' && tripExtraction.segments.length === 0);
+  const extractionSegments = tripExtraction?.status === 'complete' ? tripExtraction.segments : [];
+  // Use strict source-local facts only when there was no extractor or a
+  // completed extraction accepted none. An unavailable extraction retains
+  // its existing coverage gate. Explicit booking cancellations, rejections,
+  // and denials suppress facts from that thread instead of reviving them.
+  const extractedSegments = allowSourceLocalFallback
+    ? parseFlightSegments(eligibleSourceMessages)
+    : extractionSegments.filter((segment) => !cancelledThreadIds.has(segment.threadId));
   const flightSegments = mergeSourceTableSegments(
     extractedSegments,
-    sourceMessages.flatMap(parseEgenciaTableSegments),
+    eligibleSourceMessages.flatMap(parseEgenciaTableSegments),
   );
   const candidates = flightCandidates(request, calendarRows);
   const selectedFlight = nextOutboundFlight(request, candidates, flightSegments);
@@ -2869,6 +2888,7 @@ export function compoundTripReadProjection(
   const unmatchedBookingSegments =
     !flight && !selectedFlight.ambiguous && tripExtraction?.status === 'complete'
       ? tripExtraction.segments.filter((segment) => {
+          if (cancelledThreadIds.has(segment.threadId)) return false;
           if (segment.direction !== 'outbound') return false;
           const instant = sourceLocalInstant(segment);
           return (
@@ -2894,12 +2914,24 @@ export function compoundTripReadProjection(
       )
     : [];
   const hotelFlightContext = flight ?? currentTripReturn;
+  const extractedHotels =
+    tripExtraction?.status === 'complete'
+      ? extractedHotelCandidates(tripExtraction.hotels, hotelFlightContext).filter(
+          (candidate) => !cancelledThreadIds.has(candidate.threadId),
+        )
+      : [];
+  const allowHotelFallback =
+    tripExtraction === undefined ||
+    (tripExtraction.status === 'complete' && extractedHotels.length === 0);
   const hotels = dedupeHotels(
-    tripExtraction
-      ? tripExtraction.status === 'complete'
-        ? extractedHotelCandidates(tripExtraction.hotels, hotelFlightContext)
-        : []
-      : hotelCandidates(completeThreads, hotelFlightContext),
+    allowHotelFallback
+      ? hotelCandidates(
+          completeThreads.filter(
+            (thread) => !cancelledThreadIds.has(text(object(thread.args)?.threadId, 100)),
+          ),
+          hotelFlightContext,
+        )
+      : extractedHotels,
   );
   const tripHotelAnchorDate = flight
     ? destinationCivilDate(flight)
