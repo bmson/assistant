@@ -1144,6 +1144,185 @@ describe('a trip to a generic airport', () => {
     }
   });
 
+  it.each(['succeeded', 'failed', 'denied', 'proposed'])(
+    'consumes one exact route attempt without silently retrying: %s',
+    (status) => {
+      const lookup = detectLiveLookup([
+        {
+          role: 'user',
+          content: 'How long to get to the airport tomorrow from Home, leaving at 8am?',
+        },
+      ]);
+      if (!lookup) throw new Error('Expected lookup');
+      const pages = [calendar([returnFlight])];
+      const input = nextLiveLookup(lookup, pages, context)?.input;
+      if (!input) throw new Error('Expected grounded route input');
+      const route = {
+        toolName: 'maps.directions',
+        status,
+        args: { ...input, mode: 'driving' },
+        result:
+          status === 'succeeded' ? { durationSeconds: 1800 } : { error: 'Synthetic unavailable' },
+      };
+      expect(nextLiveLookup(lookup, [...pages, route], context)).toBeUndefined();
+      const failure = liveLookupFailure(lookup, [...pages, route], context);
+      if (status === 'succeeded') expect(failure).toBeUndefined();
+      else expect(failure).toContain('confirmed airport, origin, and departure time');
+    },
+  );
+
+  it.each(['origin', 'destination', 'departAt', 'arriveBy', 'mode', 'stale'])(
+    'does not consume another route as the requested airport trip: %s',
+    (mismatch) => {
+      const lookup = detectLiveLookup([
+        {
+          role: 'user',
+          content: 'How long to get to the airport tomorrow from Home, leaving at 8am?',
+        },
+      ]);
+      if (!lookup) throw new Error('Expected lookup');
+      const pages = [calendar([returnFlight])];
+      const input = nextLiveLookup(lookup, pages, context)?.input;
+      if (!input) throw new Error('Expected route');
+      const args = {
+        ...input,
+        ...(mismatch === 'stale'
+          ? {}
+          : { [mismatch]: mismatch === 'mode' ? 'walking' : 'another value' }),
+      };
+      const route = {
+        toolName: 'maps.directions',
+        status: 'succeeded',
+        args,
+        result: { durationSeconds: 1800 },
+        ...(mismatch === 'stale' ? { fromCurrentTask: false } : {}),
+      };
+      expect(nextLiveLookup(lookup, [...pages, route], context)).toMatchObject({
+        toolName: 'maps.directions',
+        input,
+      });
+    },
+  );
+
+  it('attributes every exact airport page fairly beside weather, retaining failure bounds and rejecting unrelated calendar scope', () => {
+    const lookups = detectLiveLookups([
+      {
+        role: 'user',
+        content:
+          "What's the weather tomorrow and how long to get to the airport tomorrow from Home, leaving at 8am?",
+      },
+    ]);
+    expect(lookups.map((lookup) => lookup.kind)).toEqual(['weather', 'directions']);
+    const weather = {
+      toolName: 'weather.lookup',
+      status: 'succeeded',
+      result: { place: 'Harbor', current: { tempC: 20 } },
+    };
+    const first = calendar([], { complete: false, nextPageToken: 'second' });
+    const second = calendar([returnFlight], { pageToken: 'second' });
+    expect(nextLiveLookups(lookups, [weather, first], context)?.input?.pageToken).toBe('second');
+    const next = nextLiveLookups(lookups, [weather, first, second], context);
+    expect(next?.toolName).toBe('maps.directions');
+    const route = {
+      toolName: 'maps.directions',
+      status: 'succeeded',
+      args: next?.input,
+      result: { durationSeconds: 1800 },
+    };
+    const unrelated = {
+      ...calendar([returnFlight]),
+      args: { ...range, timeMin: '2026-10-01T00:00:00Z' },
+    };
+    const shares = attributeLookupEvidence(
+      lookups,
+      [weather, first, unrelated, second, route],
+      context,
+    );
+    expect(shares).toEqual([[weather], [first, second, route]]);
+    expect(nextLiveLookups(lookups, [weather, first, second, route], context)).toBeUndefined();
+    expect(liveLookupFailures(lookups, [weather, first, second, route], context)).toEqual([]);
+    const failed = { ...first, status: 'failed', result: { error: 'Synthetic unavailable' } };
+    expect(nextLiveLookups(lookups, [weather, failed, failed], context)).toBeUndefined();
+    expect(liveLookupFailures(lookups, [weather, failed, failed], context)[0]?.failure).toContain(
+      "couldn't read",
+    );
+    const incomplete = calendar([returnFlight], { calendarRosterComplete: false });
+    expect(nextLiveLookups(lookups, [weather, incomplete, route], context)).toBeUndefined();
+    expect(
+      liveLookupFailures(lookups, [weather, incomplete, route], context)[0]?.failure,
+    ).toContain('coverage is incomplete');
+  });
+
+  it.each([
+    {
+      now: '2026-10-31T16:00:00Z',
+      start: '2026-11-01T07:00:00.000Z',
+      end: '2026-11-02T08:00:00.000Z',
+      event: '2026-11-01T18:00:00Z',
+      clock: '1:30am',
+    },
+    {
+      now: '2026-03-07T16:00:00Z',
+      start: '2026-03-08T08:00:00.000Z',
+      end: '2026-03-09T07:00:00.000Z',
+      event: '2026-03-08T18:00:00Z',
+      clock: '2:30am',
+    },
+  ])(
+    'does not replace an ambiguous or nonexistent owner departure clock with a guessed instant: $clock',
+    ({ now, start, end, event, clock }) => {
+      const lookup = detectLiveLookup([
+        {
+          role: 'user',
+          content: `How long to get to the airport tomorrow from Home, leaving at ${clock}?`,
+        },
+      ]);
+      if (!lookup) throw new Error('Expected lookup');
+      const row = {
+        ...calendar([{ ...returnFlight, start: event }]),
+        args: { timeMin: start, timeMax: end },
+      };
+      const time = { now: new Date(now), timeZone: 'America/Los_Angeles' };
+      expect(nextLiveLookup(lookup, [row], time)).toBeUndefined();
+      expect(liveLookupFailure(lookup, [row], time)).toBeUndefined();
+    },
+  );
+
+  it.each([
+    'How long to get to the airport tomorrow from Home?',
+    'How long to get to the airport tomorrow, leaving at 8am?',
+  ])('does not broaden missing owner route details using another route: %s', (content) => {
+    const lookup = detectLiveLookup([{ role: 'user', content }]);
+    if (!lookup) throw new Error('Expected lookup');
+    const other = {
+      toolName: 'maps.directions',
+      status: 'succeeded',
+      args: {
+        origin: 'Home',
+        destination: 'Berlin Brandenburg Airport',
+        departAt: '2026-10-16T15:00:00Z',
+      },
+      result: { durationSeconds: 1800 },
+    };
+    expect(nextLiveLookup(lookup, [calendar([returnFlight]), other], context)).toBeUndefined();
+    expect(liveLookupFailure(lookup, [calendar([returnFlight]), other], context)).toBeUndefined();
+  });
+
+  it('does not choose between two explicit flight airports even when owner route details are complete', () => {
+    const lookup = detectLiveLookup([
+      {
+        role: 'user',
+        content: 'How long to get to the airport tomorrow from Home, leaving at 8am?',
+      },
+    ]);
+    if (!lookup) throw new Error('Expected lookup');
+    const page = calendar([
+      returnFlight,
+      { ...returnFlight, location: 'Other International Airport' },
+    ]);
+    expect(nextLiveLookup(lookup, [page], context)).toBeUndefined();
+  });
+
   it('carries details supplied after a clarification into the route request', () => {
     const lookup = detectLiveLookup([
       { role: 'user', content: request },

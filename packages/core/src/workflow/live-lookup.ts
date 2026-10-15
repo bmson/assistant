@@ -514,15 +514,15 @@ type AirportCalendarCoverage = {
   nextPageToken?: string;
 };
 
-function airportCalendarCoverage(
+function airportCalendarRows(
   lookup: LiveLookup,
   rows: ActionEvidence[],
   context: LookupContext,
-): AirportCalendarCoverage {
+): ActionEvidence[] {
   const temporal = tripWindow(lookup, context);
-  if (temporal.kind !== 'resolved') return { complete: false, pages: [] };
+  if (temporal.kind !== 'resolved') return [];
   const { start, endExclusive } = temporal.intent.interval;
-  const matching = rows.filter((row) => {
+  return rows.filter((row) => {
     if (row.toolName !== 'calendar.list_events' || row.fromCurrentTask === false) return false;
     const args = row.args as Record<string, unknown> | null;
     return (
@@ -532,6 +532,14 @@ function airportCalendarCoverage(
         (Array.isArray(args.calendarIds) && args.calendarIds.length === 0))
     );
   });
+}
+
+function airportCalendarCoverage(
+  lookup: LiveLookup,
+  rows: ActionEvidence[],
+  context: LookupContext,
+): AirportCalendarCoverage {
+  const matching = airportCalendarRows(lookup, rows, context);
   const tokenOf = (row: ActionEvidence) => {
     const value = (row.args as Record<string, unknown> | null)?.pageToken;
     return typeof value === 'string' && value.length > 0 ? value : undefined;
@@ -795,15 +803,37 @@ function nextAirportStep(
       },
     };
   if (!coverage.complete) return undefined;
+  const input = airportRouteInput(lookup, coverage, context);
+  if (!input || rows.some((row) => matchingAirportRoute(row, input))) return undefined;
+  return { toolName: 'maps.directions', input };
+}
+
+function airportRouteInput(
+  lookup: LiveLookup,
+  coverage: AirportCalendarCoverage,
+  context: LookupContext,
+): Record<string, unknown> | undefined {
+  if (!coverage.complete) return undefined;
   const candidates = airportItineraryEvents(lookup, coverage.pages, context);
   const origin = airportOrigin(lookup.request);
   const departAt = airportDepartureInstant(lookup.request, context);
   const candidate = candidates.length === 1 ? candidates[0] : undefined;
-  if (!candidate || !origin || !departAt) return undefined;
-  return {
-    toolName: 'maps.directions',
-    input: { origin, destination: candidate.location, departAt },
-  };
+  return candidate && origin && departAt
+    ? { origin, destination: candidate.location, departAt }
+    : undefined;
+}
+
+function matchingAirportRoute(row: ActionEvidence, input: Record<string, unknown>): boolean {
+  const args = row.args as Record<string, unknown> | null;
+  return (
+    row.fromCurrentTask !== false &&
+    row.toolName === 'maps.directions' &&
+    args?.origin === input.origin &&
+    args?.destination === input.destination &&
+    args?.departAt === input.departAt &&
+    args?.arriveBy === undefined &&
+    (args?.mode === undefined || args.mode === 'driving')
+  );
 }
 
 function airportItineraryEvents(
@@ -931,6 +961,7 @@ export function nextLiveLookup(
 export function attributeLookupEvidence(
   lookups: readonly LiveLookup[],
   evidence: ActionEvidence[],
+  context: LookupContext = DEFAULT_CONTEXT,
 ): ActionEvidence[][] {
   const queues = new Map<string, ActionEvidence[]>();
   for (const row of evidence) {
@@ -944,6 +975,24 @@ export function attributeLookupEvidence(
   const webChain = () => [...take('web.search'), ...take('web.fetch')];
   return lookups.map((lookup) => {
     if (lookup.kind === 'weather') return take('weather.lookup');
+    if (lookup.airportIntent) {
+      const calendar = airportCalendarRows(lookup, evidence, context);
+      const input = airportRouteInput(
+        lookup,
+        airportCalendarCoverage(lookup, calendar, context),
+        context,
+      );
+      const routes = input
+        ? (queues.get('maps.directions') ?? []).filter((row) => matchingAirportRoute(row, input))
+        : [];
+      if (routes.length)
+        queues.set(
+          'maps.directions',
+          (queues.get('maps.directions') ?? []).filter((row) => !routes.includes(row)),
+        );
+      return [...calendar, ...routes];
+    }
+
     if (lookup.kind === 'directions')
       return lookup.destination === 'calendar'
         ? [...take('calendar.list_events'), ...take('maps.directions')]
@@ -965,7 +1014,7 @@ export function nextLiveLookups(
     const next = nextLiveLookup(first, evidence, context);
     return next && { ...next, lookup: first };
   }
-  const shares = attributeLookupEvidence(lookups, evidence);
+  const shares = attributeLookupEvidence(lookups, evidence, context);
   for (const [index, lookup] of lookups.entries()) {
     const next = nextLiveLookup(lookup, shares[index] ?? [], context);
     if (next) return { ...next, lookup };
@@ -979,7 +1028,8 @@ export function liveLookupFailures(
   evidence: ActionEvidence[],
   context?: LookupContext,
 ): Array<{ lookup: LiveLookup; failure: string }> {
-  const shares = lookups.length === 1 ? [evidence] : attributeLookupEvidence(lookups, evidence);
+  const shares =
+    lookups.length === 1 ? [evidence] : attributeLookupEvidence(lookups, evidence, context);
   return lookups.flatMap((lookup, index) => {
     const failure = liveLookupFailure(lookup, shares[index] ?? [], context);
     return failure ? [{ lookup, failure }] : [];
@@ -1185,8 +1235,10 @@ export function liveLookupFailure(
       return "I couldn't read the requested calendar window, so I haven't verified an airport or estimated the route.";
     if (!coverage.complete)
       return "Calendar coverage is incomplete, so I haven't verified an airport or estimated the route.";
-    if (rows.some((row) => row.toolName === 'maps.directions'))
-      return rows.some((row) => row.toolName === 'maps.directions' && successfulLookup(row))
+    const input = airportRouteInput(lookup, coverage, lookupContext);
+    const attempts = input ? rows.filter((row) => matchingAirportRoute(row, input)) : [];
+    if (attempts.length)
+      return attempts.some(successfulLookup)
         ? undefined
         : "I couldn't get a route from Apple Maps using the confirmed airport, origin, and departure time, so I haven't estimated travel time.";
     // A full read with missing or ambiguous route details is an ordinary
