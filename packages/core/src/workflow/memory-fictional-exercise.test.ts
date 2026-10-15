@@ -195,7 +195,7 @@ describe('source-backed fictional history', () => {
     expect(validMemoryReadSelection(result, evidence, request)).toBe(true);
     const rendered = renderMemoryReadAnswer(result, evidence, request);
     expect(rendered).toContain(
-      'The selected owner quote contains no literal “public transport” wording; the selected assistant quote contains a positive suggestion using related wording. These passages identify the suggestion’s source but do not establish broader owner intent.',
+      'That wording appears in the assistant’s suggestion. Your cited message doesn’t use it, so I can’t verify it as your instruction.',
     );
 
     const sourceEvidence = evidence[0];

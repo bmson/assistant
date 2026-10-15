@@ -120,7 +120,7 @@ function directSelectedContrastAnswer(
     !hasPositiveTargetSuggestion(assistants[0]?.quote ?? '')
   )
     return undefined;
-  return `The selected owner quote contains no literal “${target}” wording; the selected assistant quote contains a positive suggestion using related wording. These passages identify the suggestion’s source but do not establish broader owner intent.`;
+  return 'That wording appears in the assistant’s suggestion. Your cited message doesn’t use it, so I can’t verify it as your instruction.';
 }
 
 function memorySourcePriority(source: { speaker: string }): number {
