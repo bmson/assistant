@@ -495,6 +495,49 @@ ${body}`;
     expect(durable.length).toBeLessThanOrEqual(12_000);
   });
 
+  it('gives the verifier late source sections when the draft is an inability fallback', () => {
+    const source = [
+      'Airport transport overview',
+      'Overview text. '.repeat(900),
+      'R10',
+      '- Route: Central - Airport',
+      '- Frequency: every 15 minutes',
+      'R20',
+      '- Route: Town - Junction',
+      '- Frequency: hourly',
+      '- Continue to the airport with R10.',
+      'Other information',
+      'General page information.',
+    ].join('\n');
+    const prompt = buildOutputVerificationPrompt({
+      request: 'Summarize the public transport options in three short bullets with a source link.',
+      draft: 'I could not verify the route details from the retrieved page.',
+      evidence: [
+        {
+          toolName: 'web.fetch',
+          status: 'succeeded',
+          result: {
+            status: 200,
+            finalUrl: 'https://transit.example/airport',
+            text: source,
+            truncated: false,
+          },
+        },
+      ],
+    });
+    const durable = prompt.match(/<durable_evidence>\n([\s\S]*?)\n<\/durable_evidence>/)?.[1];
+    const projection = JSON.parse(durable ?? '{}') as {
+      source: { sourcePassages: Array<{ label: string; text: string }> };
+    };
+    expect(projection.source.sourcePassages.map((passage) => passage.label)).toEqual([
+      'R10',
+      'R20',
+    ]);
+    expect(projection.source.sourcePassages[0]?.text).toContain('every 15 minutes');
+    expect(projection.source.sourcePassages[1]?.text).toContain('Continue to the airport with R10');
+    expect(prompt.length).toBeLessThan(13_000);
+  });
+
   it('detects cross-service frequency, travel-time and origin borrowing plus omitted transfers', () => {
     const findings = publicWebClaimFindings(repairRequestedBullets(request, bad), evidence);
     expect(findings).toEqual(

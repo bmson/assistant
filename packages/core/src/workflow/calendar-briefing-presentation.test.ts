@@ -186,6 +186,43 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(output.text).toContain('event?eid=stay');
   });
 
+  it('keeps an explicitly compact day briefing complete while removing optional commentary', () => {
+    const compactRequest = {
+      ...request,
+      compactCalendarBriefing: true,
+      includeCalendarOverlapSummary: true,
+    };
+    const stay = {
+      ...timed,
+      eventId: 'stay',
+      summary: 'Hotel stay',
+      description: 'Check-in: Oct 10. Check-out: Oct 17.',
+      start: '2026-10-10T06:00:00-07:00',
+      end: '2026-10-17T02:00:00-07:00',
+      links: link('stay'),
+    };
+    const second = {
+      ...timed,
+      eventId: 'second',
+      summary: 'Planning hold',
+      start: '2026-10-15T09:50:00-07:00',
+      end: '2026-10-15T10:30:00-07:00',
+      links: link('second'),
+    };
+    const rows = evidence([stay, timed, second], true, compactRequest);
+    const response = verifiedReadResponse(compactRequest, rows);
+
+    expect(response).toContain('**09:00–10:00** — Project review');
+    expect(response).toContain('**09:50–10:30** — Planning hold');
+    expect(response).toContain('(Work)');
+    expect(response).toContain('event?eid=review');
+    expect(response).toContain('event?eid=second');
+    expect(response).toContain('event?eid=stay');
+    expect(response).toContain('Possible overlap: **Project review** and **Planning hold**');
+    expect(response).not.toContain('Lodging context:');
+    expect(response).not.toContain('Next step:');
+  });
+
   it('does not infer lodging context from an unverified title or incomplete source', () => {
     const stay = {
       ...timed,

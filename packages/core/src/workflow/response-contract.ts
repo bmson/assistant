@@ -3781,7 +3781,7 @@ export function verifiedReadResponse(
           );
         }
       }
-      if (request.includeCalendarBriefing) {
+      if (request.includeCalendarBriefing && !request.compactCalendarBriefing) {
         const stays = agendaEvents.filter((event) => calendarLodgingContext(event, complete));
         for (const stay of stays)
           lines.push(
@@ -3793,7 +3793,7 @@ export function verifiedReadResponse(
         if (sourceDateEvents.length > 0)
           lines.push('Source-date-only entries could not be compared for local-time overlaps.');
       }
-      if (request.includeCalendarBriefing) {
+      if (request.includeCalendarBriefing && !request.compactCalendarBriefing) {
         const firstAppointment = agendaEvents.find(
           (event) =>
             event.allDay !== true &&
