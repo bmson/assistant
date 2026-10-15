@@ -1009,6 +1009,65 @@ describe('detectPersonalReadRequest', () => {
     });
   });
 
+  it.each([
+    'What does my calendar look like tomorrow?',
+    "What's on my agenda tomorrow?",
+    'What do I have scheduled tomorrow?',
+  ])('defaults an ordinary day overview to compact agenda presentation: %s', (text) => {
+    const request = detectPersonalReadRequest(turn(text), {
+      now: new Date('2026-10-13T18:08:55.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    expect(request).toMatchObject({
+      kind: 'calendar',
+      firstToolName: 'calendar.list_events',
+      includeCalendarBriefing: true,
+      compactCalendarBriefing: true,
+      includeCalendarOverlapSummary: true,
+      timeWindow: {
+        timeMin: '2026-10-14T07:00:00.000Z',
+        timeMax: '2026-10-15T07:00:00.000Z',
+      },
+    });
+  });
+
+  it('keeps explicit detail, event-specific, statistics, weekly-plan, and overlap-exclusion intents distinct', () => {
+    const detail = detectPersonalReadRequest(
+      turn('Show my calendar tomorrow as a full detailed list of every event.'),
+      { now: new Date('2026-10-13T18:08:55.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    expect(detail).toMatchObject({ kind: 'calendar', firstToolName: 'calendar.list_events' });
+    expect(detail?.includeCalendarBriefing).toBeUndefined();
+    expect(detail?.compactCalendarBriefing).toBeUndefined();
+
+    const specific = detectPersonalReadRequest(turn('What time is my meeting tomorrow?'));
+    expect(specific?.kind).toBe('calendar_email');
+    expect(specific?.compactCalendarBriefing).toBeUndefined();
+
+    const statistics = detectPersonalReadRequest(
+      turn(
+        'For my calendar over the next 3 weekdays, how many days have an event lasting at least 45 minutes? Find gaps of at least 30 minutes between in-person events.',
+      ),
+    );
+    expect(statistics?.calendarEventAnalysis).toBeDefined();
+    expect(statistics?.compactCalendarBriefing).toBeUndefined();
+
+    const plan = detectPersonalReadRequest(
+      turn(
+        'Review my calendar for next week and find three focus blocks during working hours, allowing time for breaks.',
+      ),
+    );
+    expect(plan?.weeklyCalendarPlan).toBe(true);
+    expect(plan?.compactCalendarBriefing).toBeUndefined();
+
+    const excluded = detectPersonalReadRequest(
+      turn('What does my calendar look like tomorrow? Keep it short; do not check for overlaps.'),
+      { now: new Date('2026-10-13T18:08:55.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    expect(excluded?.compactCalendarBriefing).toBe(true);
+    expect(excluded?.includeCalendarOverlapSummary).toBeUndefined();
+  });
+
   it('detects a concise practical calendar briefing without coupling to a named skill', () => {
     const request = detectPersonalReadRequest(
       turn(

@@ -379,14 +379,16 @@ const AVAILABILITY_SURFACE =
 const CALENDAR_TIME_REFERENCE =
   /\b(?:today|tomorrow|weekends?|weeks?|months?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|20\d{2}-\d{2}-\d{2})\b/i;
 const CALENDAR_DAY_OVERVIEW =
-  /\bwhat(?:\s+is|['’]s)?\s+on\s+(?:(?:my|our|the)\s+)?(?:calendar|schedule|agenda)\b|\b(?:show|list|review|summari[sz]e)\s+(?:(?:my|our|the)\s+)?(?:calendar|schedule|agenda)\s+(?:for\s+)?(?:today|tomorrow|this week|next week)\b/i;
+  /\bwhat(?:\s+is|['’]s)?\s+on\s+(?:(?:my|our|the)\s+)?(?:calendar|schedule|agenda)\b|\bwhat\s+(?:does|do)\s+(?:(?:my|our|the)\s+)?(?:calendar|schedule|agenda)\s+(?:look|seem|appear)\s+like\b|\b(?:show|list|review|summari[sz]e)\s+(?:(?:my|our|the)\s+)?(?:calendar|schedule|agenda)\s+(?:for\s+)?(?:today|tomorrow|this week|next week)\b/i;
+const EXPLICIT_CALENDAR_DETAIL =
+  /\b(?:full(?:\s+(?:event\s+)?list)?|detailed?|in\s+detail|every\s+(?:event|appointment)|all\s+(?:events|appointments)|complete\s+(?:event\s+)?list)\b/i;
 const SCHEDULED_THING =
   /\b(interviews?|meetings?|appointments?|calls?|chats?|flights?|reservations?|bookings?|events?)\b/i;
 const READ_OR_QUESTION =
   /\b(?:what|when|where|which|who|do i|did i|is there|are there|check|checked|look|find|found|search|searched|show|tell|review|reviewed|read|scan|open|pull up|bring up|see)\b/i;
 const WHY_LOOKUP = /\bwhy\b/i;
 const DAY_SCHEDULE =
-  /\bwhat(?:(?:'|’)s| is)?\s+(?:happening|going on|coming up|planned|scheduled)\b|\bwhat\s+(?:am i|are we)\s+doing\b|\bwhat\s+do\s+i\s+have\s+(?:(?:on|this|next)\s+)?(?:today|tomorrow|week(?:end)?|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\bwhat(?:(?:'|’)s| is)\s+on\s+(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
+  /\bwhat(?:(?:'|’)s| is)?\s+(?:happening|going on|coming up|planned|scheduled)\b|\bwhat\s+(?:am i|are we)\s+doing\b|\bwhat\s+do\s+i\s+have\s+(?:(?:on|this|next)\s+)?(?:scheduled\s+)?(?:today|tomorrow|week(?:end)?|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\bwhat(?:(?:'|’)s| is)\s+on\s+(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
 const VERIFY =
   /\b(?:are you sure|are you certain|double[- ]check|verify|you checked|did you check|don(?:'|’)t see|do not see|not on my|why did you say|was that made up|made that up|is that real|actually there|nothing (?:from|in|there)|none from|not even|really\?)\b/i;
 // Mail *arrives*; it is not "looked at". A receipt question names no read verb
@@ -2440,17 +2442,23 @@ function detectPersonalReadRequestInternal(
         : kind === 'calendar_email' || terms.length > 0
           ? 'calendar.search_events'
           : 'calendar.list_events';
-  const calendarBriefing =
-    kind === 'calendar' &&
-    /\b(?:calendar|agenda|schedule)\b/i.test(latest) &&
+  const calendarBriefingRequested =
     /\b(?:briefing|brief me|practical briefing|quick overview|short (?:summary|answer)|recap|compact|concise)\b/i.test(
       latest,
     );
+  const ordinaryAgendaOverview = calendarDayList || daySchedule;
+  const calendarBriefing =
+    kind === 'calendar' &&
+    !weeklyCalendarPlan &&
+    !calendarEventAnalysis &&
+    !EXPLICIT_CALENDAR_DETAIL.test(latest) &&
+    (calendarBriefingRequested || ordinaryAgendaOverview);
   const compactCalendarBriefing =
     calendarBriefing &&
-    /\b(?:compact|concise|brief me|practical briefing|short (?:summary|answer|briefing)|quick overview)\b/i.test(
-      latest,
-    );
+    (ordinaryAgendaOverview ||
+      /\b(?:compact|concise|brief me|practical briefing|short (?:summary|answer|briefing)|quick overview)\b/i.test(
+        latest,
+      ));
   const includeCalendarOverlapSummary =
     !explicitlyExcludesCalendarOverlapSummary(latest) &&
     (explicitlyRequestsCalendarOverlapSummary(latest) || Boolean(calendarBriefing));
