@@ -62,7 +62,7 @@ import {
 } from '../machine.js';
 import { selectMemoryReadAnswer } from '../memory-read-answer.js';
 import { verifyFinalOutput } from '../output-verification.js';
-import { latestOwnerIntent } from '../owner-intent.js';
+import { isConversationLocalContext, latestOwnerIntent } from '../owner-intent.js';
 import { PLANNER_VERSION } from '../planner.js';
 import { detectPersonalReadRequest, type PersonalReadRequest } from '../read-intent.js';
 import { requestChecklistHasUnfinished, requestChecklistSummary } from '../request-checklist.js';
@@ -503,6 +503,12 @@ export async function stageFinalResponse(
       trigger: task.trigger,
       clarificationContinuation: state.clarificationContinuation,
     });
+    if (isConversationLocalContext(intent.ownerAuthoredText)) {
+      // A fictional or explicitly thread-local exercise must not imply that
+      // unrelated private history informed it, including on resumed turns.
+      state.recall = undefined;
+      pending.cues = pending.cues?.filter((cue) => cue.kind !== 'chips');
+    }
     const requestedSkill = requestedSavedSkillName(
       intent.ownerAuthoredText,
       latestUserText(window),

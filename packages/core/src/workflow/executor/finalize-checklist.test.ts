@@ -16,6 +16,53 @@ import { stageFinalResponse } from './finalize.js';
 
 describe('checklist finalization boundary', () => {
   beforeEach(() => checkpoint.mockClear());
+  it.each([
+    ['Plan a hypothetical work morning from 09:00 to 12:30.', true],
+    ['Using the details above in this chat, check the schedule.', true],
+    ['Plan tomorrow using saved memories about my preferences.', false],
+  ])('keeps local presentation separate from private context: %s', async (text, local) => {
+    const state = TaskStateSchema.parse({
+      recall: [
+        {
+          kind: 'commitment',
+          id: 'saved-commitment',
+          label: 'Saved commitment',
+          date: '2026-10-15',
+        },
+      ],
+    });
+    const recall = state.recall;
+    const window: ModelMessage[] = [{ role: 'user', content: text }];
+    await stageFinalResponse(
+      {} as ExecutorDeps,
+      {
+        trust: 'owner',
+        type: 'chat_turn',
+        trigger: { source: 'chat', payload: { text } },
+      } as TaskLease,
+      state,
+      window,
+      {
+        text: 'Here is the checked schedule.',
+        outcome: 'done',
+        terminalStatus: 'done',
+        progress: 'Schedule checked.',
+        cues: [
+          { kind: 'face', state: 'neutral' },
+          { kind: 'chips', labels: ['Move my meeting'] },
+        ],
+      },
+    );
+    expect(state.recall).toEqual(local ? undefined : recall);
+    expect(state.pendingFinal?.cues).toEqual(
+      local
+        ? [{ kind: 'face', state: 'neutral' }]
+        : [
+            { kind: 'face', state: 'neutral' },
+            { kind: 'chips', labels: ['Move my meeting'] },
+          ],
+    );
+  });
   it('preserves the checked completed answer alongside the unfinished sibling', async () => {
     const state = TaskStateSchema.parse({
       requestChecklist: buildRequestChecklist('Find my hotel and remind me'),

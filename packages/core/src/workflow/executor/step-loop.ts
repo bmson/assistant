@@ -99,6 +99,7 @@ import {
   sleepTask,
 } from '../machine.js';
 import {
+  isConversationLocalContext,
   isSelfContainedTextTransformation,
   latestOwnerIntent,
   type OwnerIntent,
@@ -769,6 +770,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     loadConfig().CHAT_RECALL_ENABLED &&
     state.plannerState.planningRecall === undefined &&
     !localTransformation &&
+    !isConversationLocalContext(ownerText) &&
     !restrictedChecklistResume &&
     !readRequest &&
     privilegedTask &&
