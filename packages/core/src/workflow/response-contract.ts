@@ -15,8 +15,17 @@ import {
 import { calendarRelationship, calendarRelationshipNote } from './calendar-relationship.js';
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
 import type { CompoundTripExtraction } from './compound-trip-extraction.js';
-import { compoundTripReadProjection, upcomingFlightReadProjection } from './compound-trip-read.js';
+import {
+  compoundTripReadProjection,
+  renderCompoundTripReadResponse,
+  upcomingFlightReadProjection,
+} from './compound-trip-read.js';
 import { createdDocumentVerification } from './document-verification.js';
+import {
+  type ExplicitSourceSelection,
+  explicitSourceCoverage,
+  explicitSourceResponse,
+} from './explicit-source-read.js';
 import { correctFlightWriteClaims } from './flight-write-contract.js';
 import { detectFutureWatchIntent, type FutureWatchIntent } from './future-watch-intent.js';
 import {
@@ -24,8 +33,10 @@ import {
   renderMemoryReadAnswer,
   validMemoryReadSelection,
 } from './memory-read-answer.js';
+import { personCalendarResponse } from './person-calendar.js';
 import { matchesHistoricalMemorySearch, type PersonalReadRequest } from './read-intent.js';
 import { effectiveReminders } from './reminder-state.js';
+import { weatherLookupResponseCards } from './response-cards.js';
 import { isDurableSave, isMemoryWriteRequest, savedWorkSummary } from './saved-work.js';
 import {
   weeklyCalendarPlan as renderWeeklyCalendarPlan,
@@ -97,10 +108,13 @@ export interface ResponseContractResult {
 interface ResponseContractOptions {
   /** Runtime-selected exact historical quotes; revalidated against the current ledger. */
   memoryReadSelection?: MemoryReadSelection;
+  explicitSourceSelection?: ExplicitSourceSelection;
   requestText?: string;
   urlCorpus?: string;
   /** Deterministically detected from the latest owner turn. */
   readRequest?: PersonalReadRequest | null;
+  /** A companion weather lookup was explicitly requested in this owner turn. */
+  companionWeather?: boolean;
   /** Task-local, quote-validated facts extracted from complete booking messages. */
   compoundTripExtraction?: CompoundTripExtraction;
   /**
@@ -3450,6 +3464,7 @@ export function verifiedReadResponse(
 ): string {
   if (request.temporalIssue || request.scopeIssue)
     return request.temporalIssue ?? request.scopeIssue ?? '';
+  if (request.personCalendar) return personCalendarResponse(request, evidence).text;
   if (request.calendarEventAnalysis) {
     const rows = matchingCalendarRows(request, currentSuccessfulEvidence(evidence));
     const events = uniqueRecords(
@@ -3474,7 +3489,9 @@ export function verifiedReadResponse(
   if (request.upcomingFlightDiscovery)
     return upcomingFlightReadProjection(request, evidence, compoundTripExtraction).text;
   if (request.compoundTripDiscovery)
-    return compoundTripReadProjection(request, evidence, compoundTripExtraction).text;
+    return renderCompoundTripReadResponse(
+      compoundTripReadProjection(request, evidence, compoundTripExtraction),
+    );
   const current = currentSuccessfulEvidence(evidence);
   if (request.weeklyCalendarPlan) {
     const interval =
@@ -3872,14 +3889,17 @@ export function verifiedReadResponse(
                   `${linkedTitle}${calendarLabel} — ${compactEventSpan(rawStart, rawEnd, request.timeZone ?? 'UTC')}${status ? ` (${status})` : ''}`,
                 );
               } else {
-                const when = [
-                  datePrefix,
-                  clockStart ? `${clockStart}${clockEnd ? `–${clockEnd}` : ''}` : '',
-                ]
-                  .filter(Boolean)
-                  .join(' ');
+                const when = spansDates
+                  ? compactEventSpan(rawStart, rawEnd, request.timeZone ?? 'UTC')
+                  : [datePrefix, clockStart ? `${clockStart}${clockEnd ? `–${clockEnd}` : ''}` : '']
+                      .filter(Boolean)
+                      .join(' ');
+                const place = location.replace(/\s+/g, ' ').trim();
+                const compactPlace = place
+                  ? ` — ${compactEventTitleLink(place.length > 100 ? `${place.slice(0, 99)}…` : place, '')}`
+                  : '';
                 compactTimedItems.push(
-                  `- ${when || '(time unavailable)'} — ${linkedTitle}${calendarLabel}${status ? ` (${status})` : ''}`,
+                  `- ${when || '(time unavailable)'} — ${linkedTitle}${calendarLabel}${compactPlace}${status ? ` (${status})` : ''}`,
                 );
               }
             }
@@ -4114,7 +4134,9 @@ function coverageGapResponse(
 ): ResponseContractResult {
   if (request.compoundTripDiscovery) {
     return {
-      text: compoundTripReadProjection(request, evidence, compoundTripExtraction).text,
+      text: renderCompoundTripReadResponse(
+        compoundTripReadProjection(request, evidence, compoundTripExtraction),
+      ),
       blocked: true,
       unsupported: gaps.unsupported,
     };
@@ -4148,10 +4170,35 @@ function coverageGapResponse(
   };
 }
 
+function explicitSourceGaps(
+  request: PersonalReadRequest,
+  evidence: ActionEvidence[],
+): ActionKind[] {
+  return explicitSourceCoverage(request, evidence)
+    .filter((row) => !row.complete)
+    .map(
+      (row): ActionKind =>
+        row.source === 'calendar'
+          ? 'calendar_read'
+          : row.source === 'mail'
+            ? 'inbox_read'
+            : 'memory',
+    );
+}
+
 export function enforcePersonalReadResponse(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
 ): ResponseContractResult {
+  if (request.sourceReads) {
+    const result = explicitSourceResponse(request, evidence);
+    const unsupported = explicitSourceGaps(request, evidence);
+    return { ...result, blocked: unsupported.length > 0, unsupported };
+  }
+  if (request.personCalendar && !request.temporalIssue) {
+    const result = personCalendarResponse(request, evidence);
+    return { ...result, unsupported: result.blocked ? ['calendar_read'] : [] };
+  }
   const weeklyInterval = request.weeklyCalendarPlan
     ? (request.temporalIntent?.interval ??
       (request.timeWindow
@@ -4238,6 +4285,30 @@ function enforcePersonalReadGrounding(
       blocked: true,
       unsupported: ['calendar_read'],
     };
+  if (request.personCalendar) {
+    const result = personCalendarResponse(request, evidence);
+    return {
+      ...result,
+      unsupported: result.blocked ? ['calendar_read'] : [],
+      groundingFallback: [
+        'named-person calendar scope rendered from current exact-window source evidence',
+      ],
+    };
+  }
+  if (request.sourceReads) {
+    const result = explicitSourceResponse(request, evidence, opts?.explicitSourceSelection);
+    return {
+      ...result,
+      unsupported: result.blocked
+        ? explicitSourceGaps(request, evidence).length
+          ? explicitSourceGaps(request, evidence)
+          : ['memory']
+        : [],
+      groundingFallback: [
+        'combined private-source answer rendered from exact current-task quotes and explicit source coverage',
+      ],
+    };
+  }
   const gaps = requiredReadGaps(request, evidence, opts?.compoundTripExtraction);
   if (gaps.labels.length > 0) {
     if (request.upcomingFlightDiscovery)
@@ -4485,6 +4556,28 @@ export function enforceResponseContract(
       : flightCorrection.text;
   const readGrounding = enforcePersonalReadGrounding(text, evidence, opts);
   if (readGrounding) {
+    if (opts?.readRequest?.includeCalendarBriefing && opts.companionWeather) {
+      // Reuse the same current-task weather projection as the card. Never let
+      // mixed prose weaken calendar attendance/identity gates or erase a
+      // successful companion answer when the agenda falls back to checked rows.
+      const weather = weatherLookupResponseCards(evidence)
+        .map((card) => {
+          const rows = Array.isArray(card.details) ? card.details.map(record).filter(Boolean) : [];
+          const day = rows.find((row) => row && stringField(row, 'label') === 'Day');
+          const label = card.current
+            ? 'Current weather'
+            : `Weather${day ? ` for ${stringField(day, 'value')}` : ''}`;
+          const location = stringField(card, 'location');
+          const values = [stringField(card, 'temperature'), stringField(card, 'condition')].filter(
+            Boolean,
+          );
+          return values.length
+            ? `${label}${location ? ` in ${compactEventTitleLink(location, '')}` : ''}: ${values.map((value) => compactEventTitleLink(value, '')).join(', ')}.`
+            : '';
+        })
+        .filter(Boolean);
+      if (weather.length) readGrounding.text = `${readGrounding.text}\n\n${weather.join('\n')}`;
+    }
     // A request-scoped successful flight update takes precedence over the
     // earlier read snapshot, including when the model already used its time.
     if (opts?.readRequest?.answerFocus === 'flight' && flightCorrection.flightUpdateReceipt)

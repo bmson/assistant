@@ -1358,10 +1358,12 @@ export function responseCardsForFinal(input: {
   // answer underneath the review. Explicit source-display requests retain the
   // normal cards below.
   const synthesizedRead = Boolean(
-    input.readRequest?.emailReview ||
+    input.readRequest?.sourceReads ||
+      input.readRequest?.emailReview ||
       input.readRequest?.includeCalendarBriefing ||
       input.readRequest?.weeklyCalendarPlan ||
       input.readRequest?.calendarEventAnalysis ||
+      input.readRequest?.personCalendar ||
       input.readRequest?.compoundTripDiscovery,
   );
   const explicitMailRead =

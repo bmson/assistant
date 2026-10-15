@@ -20,6 +20,21 @@ export interface ConditionalArtifactIntent extends ArtifactIntent {
   ownerOnly: boolean;
 }
 
+export interface PrivateArtifactIntent extends ArtifactIntent {
+  ownerOnly: true;
+}
+
+const OWNER_ONLY_REQUEST =
+  /\b(?:private|only\s+(?:(?:accessible|available|shared|to|with|by)\s+)*(?:me|myself|my\s+account)|no\s+one\s+(?:else|except\s+me)|not\s+shared\s+with\s+anyone\s+else|(?:do\s+not|don['’]?t|never)\s+share\b[^.!?;\n]{0,50}\banyone\s+else)\b/i;
+
+/** Explicit owner-only access applies to ordinary creation requests too. */
+export function requestedPrivateArtifactIntent(text: string): PrivateArtifactIntent | undefined {
+  const unquoted = text.replace(/```[\s\S]*?```|`[^`]*`|"[^"]*"|“[^”]*”/g, '');
+  if (!OWNER_ONLY_REQUEST.test(unquoted)) return undefined;
+  const artifact = requestedArtifactIntent(text);
+  return artifact ? { ...artifact, ownerOnly: true } : undefined;
+}
+
 const CONDITIONAL_CREATE =
   /\b(?:if|unless)\b[^.!?;\n]{0,160}\b(?:exact[- ](?:title|name)|title|name|(?:google\s+)?doc(?:ument)?|spreadsheet|sheet|presentation|slide\s+deck|file)\b[^.!?;\n]{0,80}\b(?:already\s+exists|exists|is\s+found|was\s+found)|(?:do\s+not|don['’]?t|never)\s+(?:duplicate|overwrite)|avoid\s+duplicat(?:e|ing|ion)|do\s+not\s+replace\s+(?:an?\s+)?existing\b/i;
 
@@ -48,10 +63,7 @@ export function requestedConditionalArtifactIntent(
   return {
     ...artifact,
     ...(exactTitle ? { exactTitle } : {}),
-    ownerOnly:
-      /\b(?:private|only\s+(?:(?:accessible|available|shared|to|with|by)\s+)*(?:me|myself|my\s+account)|no\s+one\s+else|not\s+shared\s+with\s+anyone\s+else|(?:do\s+not|don['’]?t|never)\s+share\b[^.!?;\n]{0,50}\banyone\s+else)\b/i.test(
-        unquoted,
-      ),
+    ownerOnly: OWNER_ONLY_REQUEST.test(unquoted),
   };
 }
 
@@ -323,7 +335,7 @@ export function artifactExecutionFailure(
 
 /** Do not claim an owner-only result unless the provider ACL read proved it. */
 export function artifactSharingVerificationFailure(
-  intent: ConditionalArtifactIntent,
+  intent: Pick<ConditionalArtifactIntent, 'toolName' | 'label' | 'ownerOnly'>,
   evidence: ArtifactToolEvidence[],
 ): string | undefined {
   if (!intent.ownerOnly) return undefined;
@@ -331,9 +343,16 @@ export function artifactSharingVerificationFailure(
   if (!row || !completed(row)) return undefined;
   const result = asRecord(row.result);
   if (result?.sharingVerification === 'verified_owner_only') return undefined;
+  const diagnostic = asRecord(result?.sharingVerificationDiagnostic);
   const detail =
     result?.sharingVerification === 'not_owner_only'
-      ? 'Google reports at least one other active permission.'
+      ? diagnostic?.reason === 'inherited_permission'
+        ? 'Google reported inherited Drive access, so owner-only visibility is not verified.'
+        : diagnostic?.reason === 'unexpected_principal'
+          ? 'Google reported an additional or unrecognized permission.'
+          : diagnostic?.reason === 'malformed_permission_entry'
+            ? 'Google returned a permission entry whose principal could not be recognized.'
+            : 'Google reported permission data that does not prove owner-only visibility.'
       : 'Google did not provide complete permission evidence.';
   const link =
     typeof result?.url === 'string' && /^https:\/\/(?:docs|drive)\.google\.com\//i.test(result.url)

@@ -6,11 +6,29 @@ import {
   explicitlyOptsOutOfRecall,
   extractOwnerIntent,
   isConversationLocalContext,
+  isSelfContainedCalculationRequest,
   isSelfContainedTextTransformation,
   latestOwnerIntent,
 } from './owner-intent.js';
 
 describe('owner intent provenance', () => {
+  it.each([
+    'What is 17 × 23? Give the result in one short sentence.',
+    'Calculate 1,250 divided by 5 and show the answer.',
+    'Compute 12.5 * 4.',
+  ])('does not retrieve unrelated history for a self-contained calculation: %s', (text) => {
+    expect(isSelfContainedCalculationRequest(text)).toBe(true);
+  });
+
+  it.each([
+    'What was the calculation we did earlier? What is 17 × 23?',
+    'Use the numbers from our earlier chat to calculate the total.',
+    'What is 17 × 23 in the example we discussed yesterday?',
+    'What is 17 × 23? Give the result using the method from our earlier chat.',
+  ])('keeps historical context available for a calculation that asks for it: %s', (text) => {
+    expect(isSelfContainedCalculationRequest(text)).toBe(false);
+  });
+
   it('distinguishes current-conversation exercises from explicitly requested historical facts', () => {
     expect(
       isConversationLocalContext('For this fictional project exercise, acknowledge the details.'),
@@ -35,6 +53,13 @@ describe('owner intent provenance', () => {
     'Using the details above in this chat, check that the schedule has no overlaps.',
   ])('keeps a local planning exercise scoped to its supplied context: %s', (text) => {
     expect(isConversationLocalContext(text)).toBe(true);
+  });
+  it.each([
+    'Plan a hypothetical work morning. Check my actual calendar before proposing times.',
+    'For a fictional subscription audit, search my real inbox for receipts.',
+    'In this exercise, read my saved memories about budgeting preferences.',
+  ])('keeps an explicit private-source request routable: %s', (text) => {
+    expect(isConversationLocalContext(text)).toBe(false);
   });
   it.each([
     'Plan a hypothetical day using saved memories about my preferences.',

@@ -38,7 +38,7 @@ function answerItem(threadId: string, kind: 'draft' | 'no_reply') {
     deadline: null,
     draftBody:
       kind === 'draft'
-        ? 'Owner decision required: choose whether to confirm this request before sending.\n\nIf clarification is needed: “Please clarify what confirmation is required for this request.”'
+        ? `Thanks for reaching out. Could you clarify what you need me to confirm about request ${threadId}?`
         : null,
     draftSourceMessageIds: kind === 'draft' ? [`latest-${threadId}`] : [],
   };
@@ -225,16 +225,14 @@ describe('executor email review composition', () => {
     expect(result.toolNames).toContain('gmail.read_thread');
     expect(result.toolNames).not.toContain('gmail.send');
     expect(result.finalText).toContain(
-      'Owner decision required: choose whether to confirm this request before sending.',
+      'Thanks for reaching out. Could you clarify what you need me to confirm about request',
     );
+    expect(result.finalText).not.toContain('Owner decision required');
+    expect(result.finalText.match(/\*\*Draft:\*\*/g)).toHaveLength(5);
+    expect(result.finalText).toContain('3 assessed threads did not clearly require a response');
     expect(result.finalText).toContain(
-      'Please clarify what confirmation is required for this request.',
+      '1 selected thread could not be assessed reliably within the bounded checks',
     );
-    expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(5);
-    expect(result.finalText).toContain(
-      '3 fully assessed threads did not clearly require a response',
-    );
-    expect(result.finalText).toContain('1 complete thread could not be assessed reliably');
     expect(result.finalText).not.toContain('I can confirm that this works for me.');
     expect(result.finalText).not.toMatch(/\[(?:Choose|Add|Select)/i);
     expect(result.finalText).not.toContain('ranked all 80');

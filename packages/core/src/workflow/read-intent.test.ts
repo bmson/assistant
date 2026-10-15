@@ -415,6 +415,171 @@ describe('detectPersonalReadRequest', () => {
     ).toMatchObject({ emailReview: { windowDays: 7, requestedCount: 5 } });
   });
 
+  it('routes paraphrased local-calendar email briefs with their exact period and requested count', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'From my connected inbox over the last 14 local calendar days, prepare an action brief of up to five outstanding reply requests. Read the full threads and include deadlines and draft replies, but do not send anything.',
+      ),
+      { now: new Date('2026-10-15T12:00:00.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    expect(request).toMatchObject({
+      kind: 'email',
+      mailQuery: 'after:2026/09/30 before:2026/10/18 -from:me',
+      emailReview: {
+        windowDays: 14,
+        requestedCount: 5,
+        startAt: '2026-10-02T07:00:00.000Z',
+        endAt: '2026-10-16T07:00:00.000Z',
+      },
+    });
+    if (!request) throw new Error('expected a typed inbox review request');
+    expect(buildReadToolInput(request, 'gmail.search', [])).toMatchObject({
+      query: 'after:2026/09/30 before:2026/10/18 -from:me',
+      maxResults: 100,
+    });
+    const searchPage: ReadToolEvidence = {
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      args: { query: request.mailQuery },
+      result: {
+        complete: false,
+        hasMore: true,
+        nextPageToken: 'local-days-next-page',
+      },
+    };
+    expect(nextRequiredReadTool(request, [searchPage])).toBe('gmail.search');
+    expect(buildReadToolInput(request, 'gmail.search', [searchPage])).toMatchObject({
+      query: request.mailQuery,
+      pageToken: 'local-days-next-page',
+    });
+  });
+
+  it('keeps exact local inbox boundaries across daylight-saving time', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'From my inbox over the past fourteen local calendar days, prepare an action brief of up to three outstanding reply requests and read the full threads.',
+      ),
+      { now: new Date('2026-11-03T12:00:00.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    expect(request).toMatchObject({
+      emailReview: {
+        windowDays: 14,
+        requestedCount: 3,
+        startAt: '2026-10-21T07:00:00.000Z',
+        endAt: '2026-11-04T08:00:00.000Z',
+      },
+    });
+  });
+
+  it('routes a latest unanswered inbox question to one newest-first full-thread check', () => {
+    const request = detectPersonalReadRequest(
+      turn("What's the latest message in my inbox that I still need to reply to?"),
+    );
+    expect(request).toMatchObject({
+      kind: 'email',
+      firstToolName: 'gmail.search',
+      requiresThreadRead: true,
+      mailQuery: 'in:inbox -from:me',
+      emailReview: { requestedCount: 1, latestUnanswered: true },
+    });
+    if (!request) throw new Error('expected a typed latest-reply lookup');
+    expect(nextRequiredReadTool(request, [])).toBe('gmail.search');
+    expect(buildReadToolInput(request, 'gmail.search', [])).toMatchObject({
+      query: 'in:inbox -from:me',
+      maxResults: 100,
+    });
+    const searchResult: ReadToolEvidence = {
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      args: { query: request.mailQuery },
+      result: {
+        complete: true,
+        hasMore: false,
+        mailboxSearched: 'assistant-bot@example.com',
+        configuredOwnerMailbox: 'owner@example.com',
+        results: [
+          {
+            threadId: 'newest-thread',
+            date: '2026-10-15T10:00:00Z',
+            subject: 'Quick question',
+            snippet: 'Could you let me know?',
+          },
+        ],
+      },
+    };
+    const review = request.emailReview;
+    if (!review) throw new Error('expected a typed latest-reply review');
+    const selectedRequest = {
+      ...request,
+      emailReview: { ...review, selectedThreadIds: ['newest-thread'] },
+    };
+    expect(nextRequiredReadTool(selectedRequest, [searchResult])).toBe('gmail.read_thread');
+    expect(buildReadToolInput(selectedRequest, 'gmail.read_thread', [searchResult])).toMatchObject({
+      threadId: 'newest-thread',
+    });
+  });
+
+  it('does not treat an explicitly non-required reply as an unanswered-message lookup', () => {
+    for (const text of [
+      "What's the latest message in my inbox that I don't need to reply to?",
+      'What is the latest email in my inbox that I do not need to reply to?',
+      'Show me the latest message in my inbox that needs no reply.',
+      "What's the latest message in my inbox that doesn't need my reply?",
+      'What is the newest email in my inbox that does not need my response?',
+      'Show the latest message in my inbox that is not awaiting my reply.',
+    ]) {
+      const request = detectPersonalReadRequest(turn(text));
+      expect(request?.emailReview?.latestUnanswered).not.toBe(true);
+    }
+
+    expect(
+      detectPersonalReadRequest(
+        turn("What's the latest message in my inbox that I still need to reply to?"),
+      )?.emailReview?.latestUnanswered,
+    ).toBe(true);
+  });
+
+  it('does not route hypothetical or mixed-send latest-message requests as read-only reviews', () => {
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'If I asked for the latest message in my inbox that I still need to reply to, what would you find?',
+        ),
+      ),
+    ).toBeNull();
+    expect(
+      detectPersonalReadRequest(
+        turn("What's the latest message in my inbox that I still need to reply to? Send it now."),
+      ),
+    ).toBeNull();
+  });
+
+  it('does not claim exact local-day or unsupported oversized review coverage', () => {
+    const missingZone = detectPersonalReadRequest(
+      turn(
+        'From my inbox over the last 14 local calendar days, prepare an action brief of up to five outstanding reply requests and read the full threads.',
+      ),
+    );
+    expect(missingZone?.scopeIssue).toMatch(/valid local time zone/i);
+    expect(missingZone && nextRequiredReadTool(missingZone, [])).toBeUndefined();
+
+    const tooManyDays = detectPersonalReadRequest(
+      turn(
+        'From my inbox over the last 45 days, prepare an action brief of up to five outstanding reply requests and read the full threads.',
+      ),
+    );
+    expect(tooManyDays?.scopeIssue).toMatch(/at most 30 days/i);
+    expect(tooManyDays && nextRequiredReadTool(tooManyDays, [])).toBeUndefined();
+
+    const tooManyItems = detectPersonalReadRequest(
+      turn(
+        'From my inbox over the last 14 days, prepare an action brief of up to eight outstanding reply requests and read the full threads.',
+      ),
+    );
+    expect(tooManyItems?.scopeIssue).toMatch(/at most five/i);
+    expect(tooManyItems && nextRequiredReadTool(tooManyItems, [])).toBeUndefined();
+  });
+
   it.each([
     'If I asked you to review my emails from the last seven days, find the five most important requests that still need my response, explain why each matters, identify deadlines, draft replies using the relevant thread context, and don’t send anything yet.',
     'Should I review my emails from the last seven days and draft replies to the five most important requests that need my response? Don’t send anything yet.',
@@ -443,6 +608,10 @@ describe('detectPersonalReadRequest', () => {
       timeWindow: {
         timeMin: '2026-10-12T07:00:00.000Z',
         timeMax: '2026-10-19T07:00:00.000Z',
+      },
+      calendarPlanOptions: {
+        includeWorkloadAssessment: true,
+        includeTravelBuffers: true,
       },
     });
     if (!request) throw new Error('expected a typed weekly plan request');
@@ -511,6 +680,8 @@ describe('detectPersonalReadRequest', () => {
         breakMinutes: 15,
         workingDays: 3,
         meetingBufferMinutes: 15,
+        includeWorkloadAssessment: false,
+        includeTravelBuffers: false,
       },
       firstToolName: 'calendar.availability',
       timeWindow: {
@@ -844,6 +1015,74 @@ describe('detectPersonalReadRequest', () => {
     });
   });
 
+  it.each([
+    'What does my calendar look like tomorrow?',
+    "What's on my agenda tomorrow?",
+    'What do I have scheduled tomorrow?',
+  ])('defaults an ordinary day overview to compact agenda presentation: %s', (text) => {
+    const request = detectPersonalReadRequest(turn(text), {
+      now: new Date('2026-10-13T18:08:55.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    expect(request).toMatchObject({
+      kind: 'calendar',
+      firstToolName: 'calendar.list_events',
+      includeCalendarBriefing: true,
+      compactCalendarBriefing: true,
+      includeCalendarOverlapSummary: true,
+      timeWindow: {
+        timeMin: '2026-10-14T07:00:00.000Z',
+        timeMax: '2026-10-15T07:00:00.000Z',
+      },
+    });
+  });
+
+  it('keeps explicit detail, event-specific, statistics, weekly-plan, and overlap-exclusion intents distinct', () => {
+    const detail = detectPersonalReadRequest(
+      turn('Show my calendar tomorrow as a full detailed list of every event.'),
+      { now: new Date('2026-10-13T18:08:55.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    expect(detail).toMatchObject({ kind: 'calendar', firstToolName: 'calendar.list_events' });
+    expect(detail?.includeCalendarBriefing).toBeUndefined();
+    expect(detail?.compactCalendarBriefing).toBeUndefined();
+
+    const specific = detectPersonalReadRequest(turn('What time is my meeting tomorrow?'));
+    expect(specific?.kind).toBe('calendar_email');
+    expect(specific?.compactCalendarBriefing).toBeUndefined();
+
+    const statistics = detectPersonalReadRequest(
+      turn(
+        'For my calendar over the next 3 weekdays, how many days have an event lasting at least 45 minutes? Find gaps of at least 30 minutes between in-person events.',
+      ),
+    );
+    expect(statistics?.calendarEventAnalysis).toBeDefined();
+    expect(statistics?.compactCalendarBriefing).toBeUndefined();
+
+    const plan = detectPersonalReadRequest(
+      turn(
+        'Review my calendar for next week and find three focus blocks during working hours, allowing time for breaks.',
+      ),
+    );
+    expect(plan?.weeklyCalendarPlan).toBe(true);
+    expect(plan?.compactCalendarBriefing).toBeUndefined();
+
+    const excluded = detectPersonalReadRequest(
+      turn('What does my calendar look like tomorrow? Keep it short; do not check for overlaps.'),
+      { now: new Date('2026-10-13T18:08:55.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    expect(excluded?.compactCalendarBriefing).toBe(true);
+    expect(excluded?.includeCalendarOverlapSummary).toBeUndefined();
+  });
+
+  it('retains checked agenda grounding when a request also asks about weather', () => {
+    const request = detectPersonalReadRequest(
+      turn("What's on my calendar tomorrow and what's the weather?"),
+    );
+    expect(request?.includeCalendarBriefing).toBe(true);
+    expect(request?.compactCalendarBriefing).toBe(true);
+    expect(request?.includeCalendarOverlapSummary).toBe(true);
+  });
+
   it('detects a concise practical calendar briefing without coupling to a named skill', () => {
     const request = detectPersonalReadRequest(
       turn(
@@ -894,6 +1133,21 @@ describe('detectPersonalReadRequest', () => {
       );
     },
   );
+
+  it('leaves saved-skill inventory questions out of the calendar read route', () => {
+    expect(
+      detectPersonalReadRequest(
+        turn('What saved skills do I have that could help plan a busy day?'),
+      ),
+    ).toBeNull();
+  });
+
+  it('still routes an ordinary busy-day availability request to the calendar', () => {
+    expect(
+      detectPersonalReadRequest(turn('Check my calendar availability for my busy day tomorrow.'))
+        ?.firstToolName,
+    ).toBe('calendar.availability');
+  });
 
   it('retains the original lookup on assent, but not when accepting a write or a different topic', () => {
     const history = [

@@ -70,6 +70,41 @@ function event(id: string, summary: string, start: string) {
 }
 
 describe('calendar.list_events', () => {
+  it('preserves explicit attendee identity and RSVP without deriving a name from an email', async () => {
+    const api = apiFor({
+      'owner@example.com': [
+        {
+          ...event('named-attendee', 'Planning', '2026-07-24T09:00:00Z'),
+          attendees: [
+            { email: 'alex@example.test', displayName: 'Alex Morgan', responseStatus: 'tentative' },
+            { email: 'sam@example.test', responseStatus: 'accepted' },
+          ],
+        },
+      ],
+    });
+    const result = await toolsWith(api)
+      .get('calendar.list_events')
+      ?.tool.execute(
+        {
+          timeMin: '2026-07-24T00:00:00Z',
+          timeMax: '2026-07-25T00:00:00Z',
+          maxResults: 20,
+        },
+        {} as never,
+      );
+    expect(result).toMatchObject({
+      events: [
+        {
+          attendees: ['alex@example.test (tentative)', 'sam@example.test (accepted)'],
+          attendeeDetails: [
+            { email: 'alex@example.test', displayName: 'Alex Morgan', responseStatus: 'tentative' },
+            { email: 'sam@example.test', responseStatus: 'accepted' },
+          ],
+        },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain('"displayName":"sam"');
+  });
   it('reads every shared calendar and merges them in chronological order', async () => {
     const api = apiFor({
       'bot@example.com': [event('b1', 'Bot task', '2026-07-24T15:00:00Z')],

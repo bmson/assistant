@@ -7,8 +7,10 @@ import {
   compoundTripRoute,
   compoundTripThreadIdsToRead,
   compoundTripThreadReadInputs,
+  renderCompoundTripReadResponse,
   upcomingFlightReadProjection,
 } from './compound-trip-read.js';
+import { tripPrompt, tripSourceResult } from './compound-trip-source.test-fixtures.js';
 import {
   buildReadToolInput,
   detectPersonalReadRequest,
@@ -665,6 +667,9 @@ describe('compound trip read projection', () => {
 
     const projection = compoundTripReadProjection(read, evidence);
     expect(projection.text).toContain('calendar record lists the route BER to SFO');
+    expect(renderCompoundTripReadResponse(projection)).toContain(
+      'calendar record lists the route BER to SFO',
+    );
     expect(projection.text).toContain('does not explicitly label the flight outbound or return');
     expect(projection.text).not.toContain('The calendar does not state its direction.');
   });
@@ -4957,6 +4962,76 @@ describe('compound trip read projection', () => {
     expect(compoundTripReadProjection(read, evidence).flight).toBeUndefined();
   });
 
+  it('keeps agreeing calendar sources linked without promoting clock agreement into independent flight identity', () => {
+    const read = request();
+    const projection = compoundTripReadProjection(
+      read,
+      addEmptyCompletedMailQueries([
+        completeCalendarEvents([calendarFlight()]),
+        ...bookingEmailEvidence(),
+      ]),
+    );
+    const answer = renderCompoundTripReadResponse(projection);
+    expect(answer).toContain('[Calendar](https://www.google.com/calendar/event?eid=abc)');
+    expect(answer).toContain('Departure clocks agree after time-zone conversion');
+    expect(answer).toContain(
+      'Itinerary association; independent flight identity remains unverified',
+    );
+    expect(answer).not.toContain('You are attending');
+    expect(answer).not.toContain('Clocks differ');
+  });
+
+  it('does not present matching clock values as agreement when flight metadata conflicts', () => {
+    const read = request();
+    const event = { ...calendarFlight(), summary: 'Outbound flight LH 888 to Berlin' };
+    const projection = compoundTripReadProjection(read, [
+      completeCalendarEvents([event]),
+      ...bookingEmailEvidence(),
+    ]);
+    const answer = renderCompoundTripReadResponse(projection);
+    expect(answer).toContain('flight LH888 vs LH777');
+    expect(answer).toContain('Clock comparison does not resolve conflicting itinerary metadata');
+    expect(answer).not.toContain('clocks agree');
+    expect(answer).toContain('[Calendar](');
+    expect(projection.blocked).toBe(true);
+  });
+
+  it('does not call a small departure-clock discrepancy exact agreement', () => {
+    const read = request();
+    const event = { ...calendarFlight(), start: '2026-10-17T10:14:00+02:00' };
+    const projection = compoundTripReadProjection(read, [
+      completeCalendarEvents([event]),
+      ...bookingEmailEvidence(),
+    ]);
+    const answer = renderCompoundTripReadResponse(projection);
+    expect(answer).toContain(
+      'Departure clocks differ within the five-minute itinerary matching tolerance',
+    );
+    expect(answer).not.toContain('clocks agree');
+    expect(answer).toContain('10:14:00+02:00');
+  });
+
+  it('labels only mail coverage incomplete when the full calendar is checked', () => {
+    const read = request();
+    const mail = bookingEmailEvidence();
+    const result = mail[0]?.result as Record<string, unknown>;
+    const receipt = result.receipt as Record<string, unknown>;
+    result.complete = false;
+    receipt.complete = false;
+    receipt.losses = ['provider-page'];
+    const projection = compoundTripReadProjection(read, [
+      completeCalendarEvents([calendarFlight()]),
+      ...mail,
+    ]);
+    expect(projection.calendarComplete).toBe(true);
+    expect(projection.gmailSearchComplete).toBe(false);
+    const answer = renderCompoundTripReadResponse(projection);
+    expect(answer).toContain('Booking-email search or thread coverage is incomplete');
+    expect(answer).not.toContain('Calendar coverage is incomplete');
+    expect(answer).not.toContain('Calendar/email coverage');
+    expect(projection.blocked).toBe(true);
+  });
+
   it('reports an actual calendar-versus-booking time conflict only after both zones normalize', () => {
     const read = request();
     const calendar = completeCalendarEvents([
@@ -4964,6 +5039,12 @@ describe('compound trip read projection', () => {
     ]);
     const projection = compoundTripReadProjection(read, [calendar, ...bookingEmailEvidence()]);
     expect(projection.text).toContain('clocks conflict after time-zone conversion');
+    const concise = renderCompoundTripReadResponse(projection);
+    expect(concise).toContain('Clocks differ after time-zone conversion');
+    expect(concise).not.toContain('clocks agree');
+    expect(concise).toContain('11:10:00+02:00');
+    expect(concise).toContain('10:10');
+    expect(concise).toContain('[Calendar](');
   });
 
   it('shows bounded calendar-only observations when coverage is partial without promoting them', () => {
@@ -5537,5 +5618,331 @@ San Francisco (SFO-San Francisco Intl.)`;
     expect(compoundTripThreadIdsToRead(evidence, read)).not.toContain('shower');
     expect(compoundTripThreadIdsToRead(evidence, read)).not.toContain('spa');
     expect(compoundTripThreadIdsToRead(evidence, read)).not.toContain('newsletter');
+  });
+});
+
+describe('forwarded booked itinerary and rendered hotel source', () => {
+  function fixture() {
+    const read = detectPersonalReadRequest([{ role: 'user', content: tripPrompt }], {
+      now: new Date('2030-11-15T15:00:00Z'),
+      timeZone: 'America/New_York',
+    });
+    if (!read?.compoundTripDiscovery) throw new Error('Missing trip request');
+    const rows: ReadToolEvidence[] = [];
+    const add = (toolName: string, args: Record<string, unknown>) => {
+      const result = tripSourceResult(toolName, args);
+      rows.push({ toolName, args, result, status: 'succeeded', fromCurrentTask: true });
+    };
+    add('calendar.list_events', {
+      timeMin: read.timeWindow?.timeMin,
+      timeMax: read.timeWindow?.timeMax,
+      maxResults: 50,
+    });
+    for (const query of read.mailQueries?.map((entry) => entry.query) ?? [read.mailQuery])
+      add('gmail.search', { query, maxResults: 20 });
+    for (const threadId of ['flight-thread', 'hotel-thread'])
+      add('gmail.read_thread', {
+        threadId,
+        startMessageIndex: 0,
+        startMessageOffset: 0,
+        maxMessages: 20,
+        maxChars: 20000,
+      });
+    return { read, rows, add };
+  }
+
+  it('retains an actual booked stay and compares the inferred arrival route without inventing zones or next-flight identity', () => {
+    const { read, rows, add } = fixture();
+    const initial = compoundTripReadProjection(read, rows);
+    expect(initial.hotel).toMatchObject({
+      hotelName: 'Canal House',
+      address: 'Canal Street 42, Copenhagen',
+      city: 'Copenhagen',
+      checkIn: '2030-11-10',
+      checkOut: '2030-11-17',
+    });
+    expect(initial.routeOrigin).toBe('CPH Airport');
+    expect(initial.routeDestination).toBe('Canal Street 42, Copenhagen');
+    expect(initial.flight).toBeUndefined();
+    expect(initial.webQuery).toContain('Canal House');
+    add('maps.directions', { origin: initial.routeOrigin, destination: initial.routeDestination });
+    add('web.search', { query: initial.webQuery });
+    for (const url of ['https://transit.example/route', 'https://taxi.example/route'])
+      add('web.fetch', { url });
+    const final = compoundTripReadProjection(read, rows);
+    expect(final.comparison).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          mode: 'public transport',
+          fare: 'EUR 5',
+          duration: '40 minutes',
+          endpointMatched: true,
+        }),
+        expect.objectContaining({
+          mode: 'taxi',
+          fare: 'EUR 45',
+          duration: '30 minutes',
+          endpointMatched: true,
+        }),
+      ]),
+    );
+    expect(final.text).toContain('current-trip booking, not a newly departing trip');
+    expect(final.text).toContain('direction inferred from the reversed route groups');
+    expect(final.text).toContain('KL700 BOS→AMS');
+    expect(final.text).toContain('KL703 AMS→BOS');
+    expect(final.text).toContain('source-stated clocks');
+    expect(final.text).not.toContain('source-stated local clocks');
+    expect(final.text).toContain('Same-itinerary calendar comparison for CPH→BOS');
+    expect(final.text).toContain('Calendar names Example Air');
+    expect(final.text).toContain('cannot establish an instant-level clock conflict');
+    expect(final.text).toContain(
+      'Their time zones and exact connection durations remain unverified',
+    );
+    expect(final.text).toContain(
+      '[Booking email](https://mail.google.com/mail/u/0/#all/hotel-thread)',
+    );
+    expect(final.text).not.toContain('did not identify a hotel');
+    expect(final.text).not.toContain('Europe/Copenhagen');
+    expect(final.blocked).toBe(true);
+    const answer = renderCompoundTripReadResponse(final);
+    const visible = answer.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+    expect(visible.split(/\s+/).length).toBeLessThanOrEqual(330);
+    expect(answer.length).toBeLessThanOrEqual(3800);
+    expect(answer.startsWith('The booking is for a current trip')).toBe(true);
+    expect(answer).toContain('A new outbound trip is not verified');
+    expect(answer).toContain('| Leg | Departure | Arrival | Source |\n|---|---|---|---|\n|');
+    expect(answer).toContain('| Option | Fare | Duration | Source |\n|---|---|---|---|\n|');
+    for (const number of ['KL700', 'KL701', 'KL702', 'KL703']) expect(answer).toContain(number);
+    expect(answer).toContain('2030-11-10');
+    expect(answer).toContain('2030-11-17');
+    expect(answer).toContain('Canal House');
+    expect(answer).toContain('Canal Street 42');
+    expect(answer).toContain('zone unknown');
+    expect(answer).toContain('Direction inferred');
+    expect(answer).toContain('operated by KLM instead of Example Air');
+    expect(answer).toContain('clock difference cannot be verified');
+    expect(answer).toContain('| Public transport | EUR 5 | 40 minutes |');
+    expect(answer).toContain('| Taxi | EUR 45 | 30 minutes |');
+    for (const url of [
+      'https://transit.example/route',
+      'https://taxi.example/route',
+      'https://mail.google.com/mail/u/0/#all/hotel-thread',
+      'https://calendar.google.com/calendar/event?eid=fixture-return',
+    ])
+      expect(answer).toContain(url);
+    expect(answer).not.toContain('source-stated local');
+    expect(answer).not.toContain('Needs confirmation:');
+    expect(final.presentation.gaps.length).toBeGreaterThan(0);
+    expect(final.text.length).toBeGreaterThan(answer.length);
+  });
+
+  it('labels a separately sourced, unlinked stay as a hotel candidate', () => {
+    const { read, rows } = fixture();
+    const hotelRow = rows.find(
+      (row) =>
+        row.toolName === 'gmail.read_thread' &&
+        (row.args as Record<string, unknown> | undefined)?.threadId === 'hotel-thread',
+    );
+    const result = hotelRow?.result as { messages?: Array<Record<string, unknown>> } | undefined;
+    const message = result?.messages?.[0];
+    if (!message || typeof message.text !== 'string') throw new Error('Missing hotel source');
+    const updatedText = message.text
+      .replace('Check-in: November 10, 2030', 'Check-in: November 11, 2030')
+      .replace('Check-out: November 17, 2030', 'Check-out: November 18, 2030');
+    message.text = updatedText;
+    message.sourceLength = updatedText.length;
+
+    const projection = compoundTripReadProjection(read, rows);
+    const answer = renderCompoundTripReadResponse(projection);
+
+    expect(projection.hotel).toBeUndefined();
+    expect(projection.presentation.hotels).toEqual([
+      expect.objectContaining({ association: 'unlinked', hotelName: 'Canal House' }),
+    ]);
+    expect(answer).toContain('Unlinked hotel candidate: **Canal House**');
+    expect(answer).toContain('2030-11-11 to 2030-11-18');
+    expect(answer).toContain('[Booking](https://mail.google.com/mail/u/0/#all/hotel-thread)');
+    expect(answer).not.toContain('\nHotel: **Canal House**');
+  });
+
+  it('retains all calendar comparison records internally and counts those omitted from the brief', () => {
+    const { read, rows } = fixture();
+    const calendarRow = rows.find((row) => row.toolName === 'calendar.list_events');
+    const result = calendarRow?.result as { events?: Array<Record<string, unknown>> } | undefined;
+    const original = result?.events?.[0];
+    if (!result || !original) throw new Error('Missing calendar flight');
+    result.events = Array.from({ length: 6 }, (_, index) => ({
+      ...original,
+      eventId: `fixture-return-${index}`,
+      summary: `CPH → BOS calendar copy ${index + 1} (Example Air)`,
+      links: [
+        {
+          type: 'calendar',
+          url: `https://calendar.google.com/calendar/event?eid=fixture-return-${index}`,
+        },
+      ],
+    }));
+
+    const projection = compoundTripReadProjection(read, rows);
+    const answer = renderCompoundTripReadResponse(projection);
+
+    expect(projection.presentation.calendarNotes).toHaveLength(6);
+    expect(projection.text.match(/Same-itinerary calendar comparison/g)).toHaveLength(6);
+    expect(answer).toContain(
+      '2 additional calendar comparisons omitted from this brief; all were reviewed.',
+    );
+    expect(answer).toContain('fixture-return-0');
+    expect(answer).not.toContain('fixture-return-5');
+  });
+
+  it('keeps a source-linked itinerary association without claiming agreement for unlabeled booking zones', () => {
+    const { read, rows } = fixture();
+    const calendar = rows[0];
+    if (!calendar) throw new Error('Missing fixture calendar source');
+    const event = (calendar.result as { events: Array<Record<string, unknown>> }).events[0];
+    if (!event) throw new Error('Missing fixture calendar');
+    event.summary = 'CPH → BOS flight';
+    event.description = 'Egencia 123456789012';
+    const projection = compoundTripReadProjection(read, rows);
+    const answer = renderCompoundTripReadResponse(projection);
+    expect(answer).toContain(
+      '[Calendar](https://calendar.google.com/calendar/event?eid=fixture-return)',
+    );
+    expect(answer).toContain('Same itinerary reference');
+    expect(answer).toContain('clock difference cannot be verified without the booking time zone');
+    expect(answer).not.toContain('clocks agree');
+    expect(answer).not.toContain('Clocks differ after');
+    expect(projection.flight).toBeUndefined();
+    expect(projection.blocked).toBe(true);
+  });
+
+  it.each([true, false])(
+    'describes clocks as local only when their own booking explicitly states that: %s',
+    (local) => {
+      const { read, rows } = fixture();
+      const threadId = local ? 'flight-thread' : 'hotel-thread';
+      const source = rows.find(
+        (item) =>
+          item.toolName === 'gmail.read_thread' &&
+          (item.args as Record<string, unknown>).threadId === threadId,
+      );
+      if (!source) throw new Error('Missing fixture source');
+      const message = (source.result as { messages: Array<{ text: string; sourceLength: number }> })
+        .messages[0];
+      if (!message) throw new Error('Missing fixture');
+      message.text += '\r\nAll times are local.';
+      message.sourceLength = message.text.length;
+      const result = compoundTripReadProjection(read, rows);
+      expect(result.text.includes('source-stated local clocks')).toBe(local);
+      expect(
+        renderCompoundTripReadResponse(result).includes('explicitly labels its clocks local'),
+      ).toBe(local);
+      expect(result.text).toContain(
+        'Their time zones and exact connection durations remain unverified',
+      );
+      expect(result.flight).toBeUndefined();
+    },
+  );
+
+  it('enriches a thin validated hotel extraction only from the same source message', () => {
+    const { read, rows } = fixture();
+    const extraction: CompoundTripExtraction = {
+      status: 'complete',
+      sourceMessageIds: ['flight-message', 'hotel-message'],
+      rejectedFacts: 0,
+      segments: [],
+      hotels: [
+        {
+          threadId: 'hotel-thread',
+          messageId: 'hotel-message',
+          sourceSubject: 'Hotel booked — Canal House',
+          checkIn: '2030-11-10',
+          checkOut: '2030-11-17',
+          quote: 'Check-in: November 10, 2030\nCheck-out: November 17, 2030',
+        },
+      ],
+    };
+    expect(compoundTripReadProjection(read, rows, extraction).hotel).toMatchObject({
+      hotelName: 'Canal House',
+      address: 'Canal Street 42, Copenhagen',
+    });
+    const hotel = extraction.hotels[0];
+    if (!hotel) throw new Error('Missing fixture hotel');
+    hotel.messageId = 'different-message';
+    // The independent source record may still stand on its own; it must not inherit the wrong message identity.
+    expect(compoundTripReadProjection(read, rows, extraction).hotel?.messageId).toBe(
+      'hotel-message',
+    );
+  });
+
+  it.each([
+    'second hotel',
+    'different city',
+    'wrong address repetition',
+    'broken connection',
+    'reversed dates',
+    'cancelled flight',
+    'incomplete hotel',
+  ])('does not enable a transfer from ambiguous or unsupported sources: %s', (failure) => {
+    const { read, rows } = fixture();
+    const hotel = rows.find(
+      (item) =>
+        item.toolName === 'gmail.read_thread' &&
+        (item.args as Record<string, unknown>)?.threadId === 'hotel-thread',
+    );
+    const flight = rows.find(
+      (item) =>
+        item.toolName === 'gmail.read_thread' &&
+        (item.args as Record<string, unknown>)?.threadId === 'flight-thread',
+    );
+    if (!hotel || !flight) throw new Error('Missing fixture');
+    const update = (source: ReadToolEvidence, replace: (body: string) => string) => {
+      const result = source.result as { messages: Array<{ text: string; sourceLength: number }> };
+      for (const message of result.messages) {
+        message.text = replace(message.text);
+        message.sourceLength = message.text.length;
+      }
+    };
+    if (failure === 'second hotel') {
+      const result = hotel.result as {
+        messages: Array<Record<string, unknown>>;
+        receipt: Record<string, unknown>;
+      };
+      const duplicate: Record<string, unknown> = {
+        ...result.messages[0],
+        messageId: 'another-hotel',
+      };
+      duplicate.text = String(duplicate.text).replaceAll('Canal House', 'Other House');
+      duplicate.sourceLength = String(duplicate.text).length;
+      result.messages.push(duplicate);
+      result.receipt.covered = { start: 0, offset: 0, end: 2, count: 2, total: 2, unavailable: 0 };
+    } else if (failure === 'different city')
+      update(hotel, (body) => body.replaceAll('Copenhagen', 'Elsewhere'));
+    else if (failure === 'wrong address repetition')
+      update(hotel, (body) => body.replace('Canal+Street+42', 'Other+Street+42'));
+    else if (failure === 'broken connection')
+      update(flight, (body) =>
+        body.replace(
+          'Amsterdam, Netherlands (AMS-Schiphol)\r\nARRIVAL\r\nNov 10',
+          'Elsewhere (XXX-Airport)\r\nARRIVAL\r\nNov 10',
+        ),
+      );
+    else if (failure === 'cancelled flight')
+      update(flight, (body) => `${body}\r\nThe flight is cancelled.`);
+    else if (failure === 'incomplete hotel') {
+      const result = hotel.result as Record<string, unknown>;
+      result.complete = false;
+      result.hasMore = true;
+      const receipt = result.receipt as Record<string, unknown>;
+      receipt.complete = false;
+      receipt.losses = ['coverage-unknown'];
+    } else
+      update(hotel, (body) =>
+        body.replace('Check-out: November 17, 2030', 'Check-out: November 9, 2030'),
+      );
+    const result = compoundTripReadProjection(read, rows);
+    expect(result.routeOrigin).toBeUndefined();
+    expect(result.webQuery).toBeUndefined();
+    expect(result.blocked).toBe(true);
   });
 });

@@ -44,6 +44,12 @@ describe('application effect worker interrupted replay', () => {
     await db.$client.end();
   });
 
+  it('composes the read-only skill library with executor persistence', () => {
+    expect(createPostgresExecutionPersistence(db).skillLibrary?.kind).toBe(
+      'skill-library-repository',
+    );
+  });
+
   it('retains the receipt across setActionOutcome and does not repeat a Doc write after lease reclaim', async () => {
     const producerPrivacyGeneration = await postgresPrivacyObservationFence(db, agentId);
     const applicationId = randomUUID();

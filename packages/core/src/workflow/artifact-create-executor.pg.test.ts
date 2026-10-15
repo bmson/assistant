@@ -6,6 +6,17 @@ import { runGoldenTask } from './golden/harness.js';
 
 let db: Db;
 let agentId: string;
+const verifiedOwnerOnlyDiagnostic = {
+  status: 'verified_owner_only',
+  reason: 'verified',
+  permissionCount: 2,
+  pagesRead: 1,
+  fullPageCompletion: true,
+  unexpectedPrincipal: false,
+  inheritedPermission: false,
+  missingExpectedPrincipal: false,
+  malformedPermissionEntry: false,
+};
 beforeAll(async () => {
   db = createDb(process.env.DATABASE_URL ?? '');
   agentId = (await getAgent(db)).id;
@@ -51,7 +62,14 @@ describe('new artifact request action boundaries in the real executor', () => {
           schema: z.object({ title: z.string(), content: z.string() }),
           execute: async (args) => {
             expect(args).toEqual({ title, content });
-            return { documentId: 'DocumentQA12345', url, title, contentStructure: structure };
+            return {
+              documentId: 'DocumentQA12345',
+              url,
+              title,
+              sharingVerification: 'verified_owner_only',
+              sharingVerificationDiagnostic: verifiedOwnerOnlyDiagnostic,
+              contentStructure: structure,
+            };
           },
         },
         'docs.get': {
@@ -113,6 +131,7 @@ describe('new artifact request action boundaries in the real executor', () => {
           },
         ],
         sharingVerification: 'verified_owner_only',
+        sharingVerificationDiagnostic: verifiedOwnerOnlyDiagnostic,
       };
     });
     const result = await runGoldenTask(db, agentId, {
@@ -196,6 +215,7 @@ describe('new artifact request action boundaries in the real executor', () => {
               title,
               url: 'https://docs.google.com/document/d/CreatedDocId12345/edit',
               sharingVerification: 'verified_owner_only',
+              sharingVerificationDiagnostic: verifiedOwnerOnlyDiagnostic,
               contentStructure: structure,
             };
           },
@@ -315,6 +335,7 @@ describe('new artifact request action boundaries in the real executor', () => {
         title,
         url: 'https://docs.google.com/document/d/OnceOnlyDocId12345/edit',
         sharingVerification: 'verified_owner_only',
+        sharingVerificationDiagnostic: verifiedOwnerOnlyDiagnostic,
       };
     });
     const createSheet = vi.fn();
@@ -364,5 +385,46 @@ describe('new artifact request action boundaries in the real executor', () => {
     expect(create).toHaveBeenCalledTimes(1);
     expect(createSheet).not.toHaveBeenCalled();
     expect(result.finalText).toContain('OnceOnlyDocId12345');
+  });
+
+  it('parks a private create when no complete owner-only ACL receipt is returned', async () => {
+    const title = 'ACL verification QA';
+    const request = `Create a new private Google Doc titled "${title}".`;
+    const result = await runGoldenTask(db, agentId, {
+      name: 'private-doc-unverified-acl-needs-attention',
+      event: { source: 'chat', trust: 'owner', payload: { text: request } },
+      taskType: 'adhoc',
+      script: [
+        { toolCalls: [{ toolName: 'docs.create', input: { title, content: '# Notes' } }] },
+        { text: `Created the private document ${title}.` },
+      ],
+      tools: {
+        'docs.create': {
+          schema: z.object({ title: z.string(), content: z.string() }),
+          execute: async () => ({
+            documentId: 'UnverifiedDocId12345',
+            title,
+            url: 'https://docs.google.com/document/d/UnverifiedDocId12345/edit',
+            sharingVerification: 'unverified',
+            sharingVerificationDiagnostic: {
+              status: 'unverified',
+              reason: 'provider_error',
+              permissionCount: 2,
+              pagesRead: 1,
+              fullPageCompletion: false,
+              unexpectedPrincipal: null,
+              inheritedPermission: null,
+              missingExpectedPrincipal: null,
+              malformedPermissionEntry: false,
+            },
+          }),
+        },
+      },
+    });
+
+    expect(result.toolNames).toEqual(['docs.create']);
+    expect(result.status).toBe('needs_attention');
+    expect(result.finalText).toContain('could not confirm that access is limited to you');
+    expect(result.finalText).not.toContain('Created the private document');
   });
 });

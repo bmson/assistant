@@ -62,6 +62,7 @@ import type { SelfImprovementRepository } from './self-improvement.js';
 import type { SelfMaintenanceRepository } from './self-maintenance.js';
 import type { SelfRepairRepository } from './self-repair.js';
 import type { SkillContextRepository } from './skill-context.js';
+import type { SkillLibraryRepository } from './skill-library.js';
 import type { SkillReflectionRepository } from './skill-reflection.js';
 import type { SmsChannelRepository } from './sms-channel.js';
 import type { SuggestionRepository } from './suggestions.js';
@@ -89,6 +90,8 @@ export interface ExecutionPersistence {
   readonly conversationSearch?: ConversationSearchRepository;
   readonly ownerCardCompilation: OwnerCardCompilationRepository;
   readonly skills: SkillContextRepository;
+  /** Read-only skill-library metadata for owner inventory requests. */
+  readonly skillLibrary?: SkillLibraryRepository;
   readonly history: HistoryRecallRepository;
   readonly memory: MemoryToolRepository;
   readonly memorySupersede: MemorySupersedeRepository;

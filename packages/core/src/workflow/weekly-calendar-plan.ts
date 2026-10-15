@@ -722,6 +722,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   }> = [];
   let travelBufferCount = 0;
   let potentialTravelBufferCount = 0;
+  const reserveTravelBuffers = input.plan?.includeTravelBuffers ?? true;
   for (const event of events) {
     const interval = parseEventInterval(event);
     if (
@@ -740,10 +741,11 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         event.location,
       );
     const inPerson = location && !hasVideo && !remoteLocation;
-    if (inPerson) travelBufferCount += 1;
-    if (inPerson && attendance(event) === 'potential') potentialTravelBufferCount += 1;
+    const reserveTravel = inPerson && reserveTravelBuffers;
+    if (reserveTravel) travelBufferCount += 1;
+    if (reserveTravel && attendance(event) === 'potential') potentialTravelBufferCount += 1;
     const meetingBufferMs = (input.plan?.meetingBufferMinutes ?? 0) * 60_000;
-    const surroundingBufferMs = meetingBufferMs + (inPerson ? TRAVEL_MS : 0);
+    const surroundingBufferMs = meetingBufferMs + (reserveTravel ? TRAVEL_MS : 0);
     const blockingInterval = {
       start: Math.max(start, interval.start - surroundingBufferMs),
       end: Math.min(end, interval.end + surroundingBufferMs),
@@ -938,7 +940,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         if (!probableDuplicatePairs.has(pairKey)) {
           probableDuplicatePairs.add(pairKey);
           duplicateListingPairs.push(
-            `Possible duplicate listing: ${pair} at ${labelTime(overlappingInterval.start, input.timeZone)}; both source records are retained because matching occurrence identity is unverified. Sources: ${calendarSourceReference(left.event)}; ${calendarSourceReference(right.event)}.`,
+            `Possible duplicate listing: ${pair} (${labelTime(overlappingInterval.start, input.timeZone)}); occurrence identity unverified. Sources: ${calendarSourceReference(left.event)}; ${calendarSourceReference(right.event)}.`,
           );
         }
         continue;
@@ -961,10 +963,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
 
   const overloads = [...dayStats.entries()]
     .filter(([, stats]) => stats.busyMs >= 6 * 60 * 60_000)
-    .map(
-      ([day]) =>
-        `Overloaded-day estimate: ${labelDay(day)} has at least 6 merged busy hours inside 9–5. This is a planning heuristic.`,
-    );
+    .map(([day]) => `${labelDay(day)}: at least 6 merged busy hours (9–5 heuristic)`);
   const eveningStats = new Map<string, { busyMs: number; events: Map<string, PlainRecord> }>();
   for (let at = start; at + SLOT_MS <= end; at += SLOT_MS) {
     const parts = localParts(at, timeZone);
@@ -996,15 +995,15 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     if (evenings.length === 0) {
       eveningAssessments.push(
         complete
-          ? 'Evening assessment: no checked weekday has busy time after 5 PM.'
-          : 'Evening assessment: no after-5 PM busy time appeared in the checked subset; incomplete coverage could change this.',
+          ? 'No checked weekday has busy time after 5 PM.'
+          : 'No after-5 PM busy time in the checked subset.',
       );
     }
     for (const [day, stats] of evenings) {
       const hours = Math.round(stats.busyMs / 60_000 / 15) / 4;
       if (hours >= 3)
         eveningAssessments.push(
-          `Evening-heavy estimate: ${labelDay(day)} has ${hours} checked busy hours after 5 PM (a 3-hour planning heuristic).${complete ? '' : ' Coverage is incomplete, so this estimate may change.'}`,
+          `Evening-heavy estimate: ${labelDay(day)}, ${hours} checked busy hours after 5 PM (3-hour heuristic)`,
         );
       const scheduled = [...stats.events.values()]
         .map((event) => ({ event, interval: parseEventInterval(event) }))
@@ -1020,23 +1019,41 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         const gap = next.interval.start - previous.interval.end;
         if (gap >= 0 && gap <= 30 * 60_000)
           eveningAssessments.push(
-            `Tight evening turnaround: ${eventTitle(previous.event)} ends ${labelTime(previous.interval.end, timeZone)}; ${eventTitle(next.event)} starts ${labelTime(next.interval.start, timeZone)} (${Math.round(gap / 60_000)} minutes between). Attendance and travel needs are not established by the calendar alone.`,
+            `Tight turnaround: ${eventTitle(previous.event)} ends ${labelTime(previous.interval.end, timeZone)}; ${eventTitle(next.event)} starts ${labelTime(next.interval.start, timeZone)} (${Math.round(gap / 60_000)} min; attendance/travel unverified)`,
           );
       }
     }
-    if (!complete && evenings.length > 0)
-      eveningAssessments.push(
-        'Evening findings use checked records only; missing calendar coverage could change them.',
-      );
   }
   const attendanceTargets = [...new Set(potentialAttendanceEvents)].slice(0, 3);
   const attendanceCheck = attendanceTargets.length
     ? attendanceTargets.join(', ')
     : `whether both overlapping items are commitments (${possibleOverlapPairs.slice(0, 3).join('; ')})`;
-  const lines = [
-    `Here’s a review-only plan for ${windowLabel} in ${input.timeZone}. I haven’t changed your calendar.`,
-  ];
   const conditionalStayNames = [...new Set(chosen.flatMap((slot) => slot.lodgingConditions))];
+  const lines = [
+    `Here’s a review-only plan for ${windowLabel} (${input.timeZone}); I haven’t changed your calendar.`,
+  ];
+  const formatClock = (at: number) =>
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: input.timeZone,
+      hour: 'numeric',
+      minute: '2-digit',
+    }).format(new Date(at));
+  if (chosen.length > 0) {
+    lines.push(
+      conditionalStayNames.length > 0 || !complete
+        ? 'Focus candidates for review (not availability-cleared):'
+        : 'Focus candidates:',
+      '| Focus slot | Break |',
+      '| --- | --- |',
+      ...chosen.map((slot) => {
+        const focusEnd = slot.start + focusMs;
+        const qualifier = slot.lodgingConditions.length
+          ? '; conditional lodging context; provider still reports busy'
+          : '';
+        return `| ${labelTime(slot.start, timeZone)}–${formatClock(focusEnd)} (${focusMs / 60_000} minutes) | ${breakMs / 60_000}-minute break${qualifier} |`;
+      }),
+    );
+  }
   if (conditionalStayNames.length > 0) {
     const conditionalStayNameSet = new Set(conditionalStayNames);
     const stayDetails = [
@@ -1058,80 +1075,103 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       ).values(),
     ];
     lines.push(
-      `The availability feed still marks time busy across this window because it overlaps ${stayDetails.join(', ') || conditionalStayNames.join(', ')}. Candidates marked conditional assume this stay is lodging context rather than an all-day work hold; the provider still reports busy, so those times are not confirmed free.`,
+      `Availability caveat: the feed still reports busy across this window where it overlaps ${stayDetails.join(', ') || conditionalStayNames.join(', ')}; conditional slots assume lodging context, not a work hold.`,
     );
   }
+  const coverageNotes: string[] = [];
   if (recoveredCoverage)
-    lines.push(
-      `Free/busy was unavailable for ${recoveredCoverage.names.join(', ')}. I reconstructed their blocking intervals from the complete event listing for this exact window; this is an event-list fallback, not an independent free/busy confirmation.`,
+    coverageNotes.push(
+      `free/busy unavailable for ${recoveredCoverage.names.join(', ')}; blocking intervals came from the complete event list for this exact window (event-list fallback, not independent free/busy confirmation)`,
     );
-  if (allDayBusySources.length > 0)
+  else if (complete && availabilityComplete && busyValid)
+    coverageNotes.push('free/busy and event listing report complete for this exact window');
+  else if (complete && !busyValid)
+    coverageNotes.push(
+      'reported window coverage is complete, but usable free/busy intervals are unavailable',
+    );
+  if (allDayBusySources.length > 0) {
+    const shownAllDay = allDayBusySources.slice(0, 3);
+    const omittedAllDay = allDayBusySources.length - shownAllDay.length;
     lines.push(
-      `All-day holds that still block focus time (not counted as meeting workload): ${allDayBusySources
-        .slice(0, 3)
+      `All-day holds that still block focus time (not counted as meeting workload): ${shownAllDay
         .map(
           ({ event, interval }) =>
             `${calendarSourceReference(event)} (${labelTime(interval.start, timeZone)}–${labelTime(interval.end, timeZone)})`,
         )
-        .join('; ')}. These records do not establish continuous meeting attendance.`,
+        .join(
+          '; ',
+        )}; they do not establish continuous meeting attendance.${omittedAllDay > 0 ? ` ${omittedAllDay} additional all-day holds omitted.` : ''}`,
     );
+  }
   if (explainedLodgingBusy.size > 0)
     lines.push(
-      'Identified multi-day lodging is excluded from meeting workload estimates; any conditional focus candidate still depends on the provider’s busy interval being lodging context.',
+      'Multi-day lodging is excluded from meeting workload; conditional slots still rely on the feed’s busy interval being lodging context.',
     );
   if (!complete) {
-    lines.push(
-      'Coverage is incomplete, so any times below are tentative and not confirmed free. Confirm the missing calendars before relying on this review.',
+    const missing =
+      unavailableCalendars.length > 0
+        ? `Unavailable free/busy or event coverage: ${[...new Set(unavailableCalendars)].join(', ')}`
+        : !availabilityComplete
+          ? 'Free/busy coverage could not be fully verified'
+          : 'Event listing is incomplete or reached its bounded page limit';
+    coverageNotes.push(
+      `${missing}; proposed times are tentative, not confirmed free. Confirm the missing calendars before relying on this review`,
     );
-    if (unavailableCalendars.length > 0)
-      lines.push(
-        `Unavailable free/busy or event coverage: ${[...new Set(unavailableCalendars)].join(', ')}.`,
-      );
-    else if (!availabilityComplete) lines.push('Free/busy coverage could not be fully verified.');
-    else lines.push('The event list is incomplete or reached its bounded page limit.');
   }
-  lines.push(
-    `Working hours are assumed to be 9 AM–5 PM because no configured hours were available. Each focus block is followed by a ${breakMs / 60_000}-minute break.`,
-  );
+  if (coverageNotes.length > 0) lines.push(`Coverage: ${coverageNotes.join('; ')}.`);
+  const assumptions = [
+    `Working hours are assumed to be 9 AM–5 PM (no configured hours); each focus block is followed by a ${breakMs / 60_000}-minute break`,
+  ];
   if (input.plan?.meetingBufferMinutes)
-    lines.push(
-      `I reserved ${input.plan.meetingBufferMinutes}-minute breaks on both sides of meetings.`,
-    );
+    assumptions.push(`${input.plan.meetingBufferMinutes}-minute breaks on both sides of meetings`);
   if (travelBufferCount > 0)
-    lines.push(
-      'I reserved an estimated 30-minute travel buffer on each side of events with a physical location and no video link; this is not a route estimate.',
+    assumptions.push(
+      'estimated 30-minute travel buffer on each side of events with a physical location and no video link; this is not a route estimate',
     );
   if (potentialTravelBufferCount > 0)
-    lines.push(
-      'I included those location-based buffers conservatively where shared-calendar attendance is unconfirmed. Confirm attendance and actual travel time before relying on the plan.',
+    assumptions.push(
+      'included those location-based buffers where shared-calendar attendance is unconfirmed; confirm attendance and actual travel time',
     );
-  if (duplicateListingPairs.length > 0) lines.push(...duplicateListingPairs.slice(0, 5));
-  if (conflictPairs.length > 0) lines.push(...conflictPairs.slice(0, 5));
+  if (conditionalStayNames.length > 0)
+    assumptions.push(
+      'conditional lodging slots still rely on the provider busy interval being lodging context',
+    );
+  if (assumptions.length > 0) lines.push(`Assumptions: ${assumptions.join('; ')}.`);
+  const visibleConflictLimit = 5;
+  const allConflictDetails = [...duplicateListingPairs, ...conflictPairs];
+  lines.push(...allConflictDetails.slice(0, visibleConflictLimit));
+  if (allConflictDetails.length > visibleConflictLimit)
+    lines.push(
+      `${allConflictDetails.length - visibleConflictLimit} additional overlaps or possible duplicate listings omitted from this brief; all were included in the planning check.`,
+    );
   if (conflictPairs.some((line) => line.startsWith('Scheduling conflict:')))
     lines.push(
       `Recommended change: choose which accepted event to reschedule after checking priorities (${confirmedConflictPairs.slice(0, 3).join('; ')}).`,
     );
   if (conflictPairs.some((line) => line.startsWith('Possible overlap:')))
     lines.push(
-      `Recommended next step: confirm attendance for ${attendanceCheck}. If both events are required in an overlap, choose one to reschedule; leave the calendar unchanged until attendance is clear.`,
+      `Next step: confirm attendance for ${attendanceCheck}. If both are required, choose one to reschedule; leave the calendar unchanged until attendance is clear.`,
     );
   if (conflictPairs.length === 0 && duplicateListingPairs.length === 0 && complete)
-    lines.push('I found no overlapping attended events in the checked calendar data.');
+    lines.push('Conflicts: none found in checked calendar data.');
   if (conflictPairs.length === 0 && duplicateListingPairs.length > 0)
-    lines.push(
-      'Recommended next step: check whether the duplicate source records describe one occurrence before treating them as separate commitments.',
-    );
-  if (overloads.length > 0) lines.push(...overloads.slice(0, 5));
-  else if (!busyValid) lines.push('I could not assess overloaded days from usable free/busy data.');
-  else
-    lines.push(
-      `Overloaded-day assessment: No checked working day reaches the 6-hour busy-time threshold inside the assumed 9–5 day.${complete ? ' This is a planning heuristic.' : ' This applies only to the checked data; missing coverage could change this assessment.'}`,
-    );
-  lines.push(...eveningAssessments.slice(0, 8));
-  if (overloads.length > 0)
-    lines.push(
-      'Recommended change: consider moving flexible work from an overloaded day to a lighter day after checking your priorities.',
-    );
+    lines.push('Next step: verify whether duplicate source records are one occurrence.');
+  const includeWorkloadAssessment = input.plan?.includeWorkloadAssessment ?? true;
+  if (includeWorkloadAssessment) {
+    if (overloads.length > 0) lines.push(`Overloaded-day estimate: ${overloads.join('; ')}.`);
+    else if (!busyValid)
+      lines.push('I could not assess overloaded days from usable free/busy data.');
+    else
+      lines.push(
+        `Overloaded-day assessment: No checked working day reaches the 6-hour busy-time threshold inside the assumed 9–5 day.${complete ? ' This is a planning heuristic.' : ' This applies only to the checked data; missing coverage could change this assessment.'}`,
+      );
+    if (eveningAssessments.length > 0)
+      lines.push(`Evening review: ${eveningAssessments.join(' · ')}`);
+    if (overloads.length > 0)
+      lines.push(
+        'Recommended change: consider moving flexible work from an overloaded day to a lighter day after checking your priorities.',
+      );
+  }
   if (chosen.length === 0) {
     const constrainingEvents = [
       ...new Map(
@@ -1152,18 +1192,6 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         ? `I couldn’t identify suitable ${focusMs / 60_000}-minute blocks from the available data. Please confirm coverage or working hours before I suggest more.`
         : 'I did not suggest focus times because usable free/busy intervals were unavailable. Please confirm coverage before choosing a time.',
     );
-  } else {
-    lines.push(
-      conditionalStayNames.length > 0 || !complete
-        ? 'Focus candidates for review (not availability-cleared):'
-        : 'Tentative focus blocks:',
-    );
-    for (const slot of chosen) {
-      const focusEnd = slot.start + focusMs;
-      lines.push(
-        `- ${labelTime(slot.start, input.timeZone)}–${new Intl.DateTimeFormat('en-US', { timeZone: input.timeZone, hour: 'numeric', minute: '2-digit' }).format(new Date(focusEnd))} (${focusMs / 60_000} minutes), then a ${breakMs / 60_000}-minute break.${slot.lodgingConditions.length > 0 ? ` Conditional on treating ${slot.lodgingConditions.join(', ')} as lodging context; free/busy still reports busy.` : ''}`,
-      );
-    }
   }
   if (chosen.length < requestedSlots)
     lines.push(
@@ -1177,8 +1205,13 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       }),
     ).values(),
   ];
-  if (sourceLinks.length > 0)
-    lines.push(`Calendar sources: ${sourceLinks.slice(0, 5).join(' · ')}`);
+  if (sourceLinks.length > 0) {
+    const visibleSources = sourceLinks.slice(0, 5);
+    const omittedSources = sourceLinks.length - visibleSources.length;
+    lines.push(
+      `Calendar sources: ${visibleSources.join(' · ')}${omittedSources > 0 ? ` · ${omittedSources} additional source links omitted from this brief` : ''}`,
+    );
+  }
   return result(lines.join('\n'), complete, chosen.length);
 }
 

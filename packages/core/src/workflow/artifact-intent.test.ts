@@ -11,6 +11,7 @@ import {
   requestedArtifactIntent,
   requestedConditionalArtifactIntent,
   requestedDocumentReadIntent,
+  requestedPrivateArtifactIntent,
 } from './artifact-intent.js';
 
 describe('requestedArtifactIntent', () => {
@@ -110,6 +111,59 @@ describe('requestedArtifactIntent', () => {
         { toolName: 'docs.create', status: 'succeeded', result: { documentId: 'doc-1' } },
       ]),
     ).toBeUndefined();
+  });
+});
+
+describe('private artifact requests', () => {
+  it('tracks owner-only requests without requiring an exact-title duplicate clause', () => {
+    expect(
+      requestedPrivateArtifactIntent(
+        'Create a new private Google Doc titled "Briefing" and read it back.',
+      ),
+    ).toMatchObject({ toolName: 'docs.create', ownerOnly: true });
+    expect(
+      requestedPrivateArtifactIntent('Create a Google Doc and share it with no one except me.'),
+    ).toMatchObject({ toolName: 'docs.create', ownerOnly: true });
+    expect(
+      requestedPrivateArtifactIntent('Create a Google Doc containing the phrase "private".'),
+    ).toBeUndefined();
+    expect(requestedPrivateArtifactIntent('How do I create a private Google Doc?')).toBeUndefined();
+  });
+
+  it('surfaces failed ACL proof for a direct private create request', () => {
+    const intent = requestedPrivateArtifactIntent(
+      'Create a new private Google Doc titled "Briefing" and read it back.',
+    );
+    expect(intent).toBeDefined();
+    if (!intent) return;
+    const unexpected = artifactSharingVerificationFailure(intent, [
+      {
+        toolName: 'docs.create',
+        status: 'succeeded',
+        result: {
+          documentId: 'BriefingDocId12345',
+          url: 'https://docs.google.com/document/d/BriefingDocId12345/edit',
+          sharedWith: 'owner@example.com',
+          sharingVerification: 'not_owner_only',
+        },
+      },
+    ]);
+    expect(unexpected).toContain('could not confirm that access is limited to you');
+    expect(unexpected).not.toContain('other active permission');
+    expect(
+      artifactSharingVerificationFailure(intent, [
+        {
+          toolName: 'docs.create',
+          status: 'succeeded',
+          result: {
+            sharingVerification: 'not_owner_only',
+            sharingVerificationDiagnostic: {
+              reason: 'inherited_permission',
+            },
+          },
+        },
+      ]),
+    ).toContain('inherited Drive access');
   });
 });
 

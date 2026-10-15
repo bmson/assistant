@@ -5,6 +5,7 @@ import {
   type OutputVerification,
   publicWebClaimFindings,
   repairRequestedBullets,
+  shortBulletFindings,
   verifyFinalOutput,
 } from './output-verification.js';
 
@@ -538,6 +539,30 @@ ${body}`;
     expect(prompt.length).toBeLessThan(13_000);
   });
 
+  it('retains the nearby mode overview with exact offsets beside late service excerpts', () => {
+    const overview = 'The train station is underground. Bus stops are on the street level.\n';
+    const source = `${'Navigation. '.repeat(1000)}${overview}R10\n- Route: Central - Airport\n- Frequency: hourly`;
+    const prompt = buildOutputVerificationPrompt({
+      request,
+      draft: 'R10 runs hourly. All options use the underground station.',
+      evidence: [
+        {
+          toolName: 'web.fetch',
+          status: 'succeeded',
+          result: { status: 200, text: source, truncated: false },
+        },
+      ],
+    });
+    const durable = prompt.match(/<durable_evidence>\n([\s\S]*?)\n<\/durable_evidence>/)?.[1] ?? '';
+    const projected = JSON.parse(durable).source;
+    expect(projected.sourceOverview.text).toContain(overview.trim());
+    expect(
+      source.slice(projected.sourceOverview.startOffset, projected.sourceOverview.endOffset),
+    ).toBe(projected.sourceOverview.text);
+    expect(projected.sourcePassagesOmittedCount).toBeGreaterThanOrEqual(0);
+    expect(durable.length).toBeLessThanOrEqual(12_000);
+  });
+
   it('detects cross-service frequency, travel-time and origin borrowing plus omitted transfers', () => {
     const findings = publicWebClaimFindings(repairRequestedBullets(request, bad), evidence);
     expect(findings).toEqual(
@@ -658,6 +683,112 @@ ${body}`;
     expect(
       repairRequestedBullets(request, 'Costs: - **one** and - **two**, plus - **three**.'),
     ).toBe('Costs: - **one** and - **two**, plus - **three**.');
+    expect(
+      repairRequestedBullets(
+        request,
+        '- **Rail** — Direct.\n- **Metro** — Frequent.\n- **Bus** — Change here.[Source: Transit](https://transit.example/services)',
+      ),
+    ).toContain('Change here.\n\n[Source: Transit]');
+  });
+
+  it('checks shared destinations even when examples follow an abbreviation', () => {
+    expect(
+      publicWebClaimFindings(
+        'S9 and S85 connect to Berlin (e.g., Spandau, Charlottenburg, Alexanderplatz) every 20 minutes.',
+        evidence,
+      ),
+    ).toEqual(expect.arrayContaining([expect.stringContaining('S85: the shared origin/stop')]));
+    expect(
+      publicWebClaimFindings(
+        'S9 serves Spandau. S85 serves Frohnau. Both run every 20 minutes.',
+        evidence,
+      ),
+    ).toEqual([]);
+  });
+
+  it('keeps surface bus stops separate from an underground rail station', () => {
+    const rows = [
+      {
+        toolName: 'web.fetch',
+        status: 'succeeded',
+        result: {
+          status: 200,
+          truncated: false,
+          text: 'Rail and bus options. The train station is underground. Local bus stops are on the street level.\nR10\n- Route: Central - Airport\nB20\n- Route: Market - Airport',
+        },
+      },
+    ];
+    expect(
+      publicWebClaimFindings(
+        'Rail and buses are available, all serving the station underground.',
+        rows,
+      ),
+    ).toEqual(expect.arrayContaining([expect.stringContaining('separate surface bus stops')]));
+    expect(
+      publicWebClaimFindings(
+        'All trains use the underground station. Buses use street-level stops.',
+        rows,
+      ),
+    ).toEqual([]);
+    expect(
+      publicWebClaimFindings(
+        'Not all options use the underground station; buses use street stops.',
+        rows,
+      ),
+    ).toEqual([]);
+  });
+
+  it('attaches coordinated destinations to their own explicit service subjects', () => {
+    const rows = [
+      {
+        toolName: 'web.fetch',
+        status: 'succeeded',
+        result: {
+          status: 200,
+          truncated: false,
+          text: 'R10\n- Route: Central - Airport\nR20\n- Route: West - Airport',
+        },
+      },
+    ];
+    expect(publicWebClaimFindings('R10 goes to Central and R20 goes to West.', rows)).toEqual([]);
+    expect(publicWebClaimFindings('R10 and R20 go to Central.', rows)).toEqual(
+      expect.arrayContaining([expect.stringContaining('R20: the shared origin/stop')]),
+    );
+  });
+
+  it('enforces a requested short overview with one shared bounded correction', async () => {
+    const verbose = ['Rail', 'Metro', 'Buses']
+      .map((name) => `- **${name}** — ${'Supported transport details '.repeat(24)}.`)
+      .join('\n');
+    const concise =
+      '- **Rail** — Direct services.\n- **Metro** — Frequent services.\n- **Buses** — Check the transfer.\n\n[Source](https://transit.example/services)';
+    expect(shortBulletFindings(request, verbose)).toHaveLength(3);
+    expect(shortBulletFindings(request, concise)).toEqual([]);
+    expect(shortBulletFindings('Give a detailed overview.', verbose)).toEqual([]);
+    const prompts: string[] = [];
+    const router = {
+      object: async (_role: string, input: { prompt: string }) => {
+        prompts.push(input.prompt);
+        return {
+          ok: true,
+          finishReason: 'stop',
+          object:
+            prompts.length === 1
+              ? { decision: 'publish', reasons: [] }
+              : { decision: 'revise', revisedText: concise, reasons: ['clarity_or_format'] },
+        };
+      },
+    };
+    const result = await verifyFinalOutput(router as never, {
+      taskId: 'short-overview',
+      request,
+      draft: verbose,
+      evidence: [],
+      critical: true,
+    });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain('<format_findings>');
+    expect(result.text).toBe(concise);
   });
 
   it('performs one targeted correction when a reviewer publishes the same conflation', async () => {
@@ -716,6 +847,158 @@ ${body}`;
       expect(result.text).toContain('couldn’t verify');
       expect(result.text).toContain('[Source](https://transit.example/services)');
       expect(result.text).not.toMatch(/RB22|Spandau|163/);
+    }
+  });
+
+  it('completes a visibly unfinished grounding revision without restoring unsupported claims', async () => {
+    const calls: { prompt: string }[] = [];
+    const original =
+      'The records confirm several family dates, including unsupported names and dates.';
+    const safe =
+      'The available records confirm one date. They do not confirm the other requested dates.';
+    const router = {
+      object: async (_role: string, input: { prompt: string }) => {
+        calls.push(input);
+        return {
+          ok: true,
+          finishReason: 'stop',
+          object:
+            calls.length === 1
+              ? {
+                  decision: 'revise',
+                  revisedText:
+                    'The available records confirm one date, but the others remain uncertain:',
+                  reasons: ['unsupported_claim'],
+                }
+              : { decision: 'revise', revisedText: safe, reasons: [] },
+        };
+      },
+    };
+
+    const result = await verifyFinalOutput(router as never, {
+      taskId: 'private-facts',
+      request: 'Give the requested dates.',
+      draft: original,
+      evidence: [],
+      critical: true,
+    });
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.prompt).toContain('completion_findings');
+    expect(calls[1]?.prompt).toContain('Do not restore unsupported details');
+    expect(result).toMatchObject({ text: safe, revised: true, unavailable: false });
+    expect(result.text).not.toContain('unsupported names');
+  });
+
+  it('repairs a short grounding revision rejected by the collapse guard without exposing the original', async () => {
+    const calls: string[] = [];
+    const original = `UNSUPPORTED_PRIVATE_DETAIL ${'unverified material. '.repeat(40)}`;
+    const revision =
+      'The available evidence confirms one result. The other requested details are not supported.';
+    const safe = 'One result is confirmed; the remaining requested details are not supported.';
+    const router = {
+      object: async (_role: string, input: { prompt: string }) => {
+        calls.push(input.prompt);
+        return {
+          ok: true,
+          finishReason: 'stop',
+          object:
+            calls.length === 1
+              ? { decision: 'revise', revisedText: revision, reasons: ['ungrounded_fact'] }
+              : { decision: 'revise', revisedText: safe, reasons: [] },
+        };
+      },
+    };
+
+    const result = await verifyFinalOutput(router as never, {
+      taskId: 'long-private-facts',
+      request: 'Give a complete answer using the available evidence.',
+      draft: original,
+      evidence: [],
+      critical: true,
+    });
+
+    expect(revision.length).toBeLessThan(original.length / 3);
+    expect(revision.trimEnd()).not.toMatch(/:\s*$/);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toContain(revision);
+    expect(calls[1]).not.toContain('UNSUPPORTED_PRIVATE_DETAIL');
+    expect(result).toMatchObject({ text: safe, revised: true, unavailable: false });
+    expect(result.text).not.toContain('UNSUPPORTED_PRIVATE_DETAIL');
+  });
+
+  it('fails closed when the one completion correction is unavailable or still unfinished', async () => {
+    for (const failure of ['unavailable', 'unfinished', 'throw']) {
+      let calls = 0;
+      const original = 'The original draft contains details that the reviewer found unsupported.';
+      const router = {
+        object: async () => {
+          calls++;
+          if (calls === 1)
+            return {
+              ok: true,
+              finishReason: 'stop',
+              object: {
+                decision: 'revise',
+                revisedText: 'The supported evidence is limited, and the rest remains uncertain:',
+                reasons: ['ungrounded_fact'],
+              },
+            };
+          if (failure === 'throw') throw new Error('Correction unavailable');
+          return failure === 'unavailable'
+            ? { ok: false }
+            : {
+                ok: true,
+                finishReason: 'stop',
+                object: {
+                  decision: 'revise',
+                  revisedText: 'Only one supported result:',
+                  reasons: [],
+                },
+              };
+        },
+      };
+
+      const result = await verifyFinalOutput(router as never, {
+        taskId: 'private-facts',
+        request: 'Give the requested facts.',
+        draft: original,
+        evidence: [],
+        critical: true,
+      });
+
+      expect(calls).toBe(2);
+      expect(result.text).toContain('complete answer');
+      expect(result.text).not.toBe(original);
+    }
+  });
+
+  it('does not add a correction for a complete concise or heading-only revision', async () => {
+    for (const revision of ['# Findings', 'The verified result is one.']) {
+      let calls = 0;
+      const router = {
+        object: async () => {
+          calls++;
+          return {
+            ok: true,
+            finishReason: 'stop',
+            object: {
+              decision: 'revise',
+              revisedText: revision,
+              reasons: ['unsupported_claim'],
+            },
+          };
+        },
+      };
+      const result = await verifyFinalOutput(router as never, {
+        taskId: 'concise-output',
+        request: 'Return a concise result.',
+        draft: '# Findings\nThe original response included an unsupported detail.',
+        evidence: [],
+        critical: true,
+      });
+      expect(calls).toBe(1);
+      expect(result.text).toBe(revision);
     }
   });
 });

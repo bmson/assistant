@@ -62,6 +62,17 @@ const evidence = (
 ];
 
 describe('calendar day and practical briefing fidelity', () => {
+  it('keeps a useful source location beside the linked timed appointment in compact overviews', () => {
+    const compact = { ...request, compactCalendarBriefing: true };
+    const response = verifiedReadResponse(
+      compact,
+      evidence([{ ...timed, location: 'Studio B, 12 Main Street' }], true, compact),
+    );
+    expect(response).toContain('[Project review](https://calendar.google.com/event?eid=review)');
+    expect(response).toContain('09:00–10:00');
+    expect(response).toContain('Studio B, 12 Main Street');
+  });
+
   it('keeps unknown-zone floating records dated and outside the confirmed local agenda/cards', () => {
     const rows = evidence([timed, floating]);
     const response = verifiedReadResponse(request, rows);
@@ -344,6 +355,20 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain('source date 2026\\-11\\-01 \\(Europe/Berlin\\)');
     expect(response).toContain('local window Sun 1 Nov 12:00 AM–3:00 PM');
     expect(response).toContain('event?eid=dst-berlin-day');
+  });
+
+  it('dates both ends of an overnight appointment in a compact single-day agenda', () => {
+    const compactRequest = { ...request, compactCalendarBriefing: true };
+    const flight = {
+      ...timed,
+      summary: 'Overnight flight',
+      start: '2026-10-15T21:10:00-07:00',
+      end: '2026-10-16T08:15:00-07:00',
+    };
+    const response = verifiedReadResponse(compactRequest, evidence([flight], true, compactRequest));
+    expect(response).toContain('Thu 15 Oct 9:10 PM–Fri 16 Oct 8:15 AM');
+    expect(response).not.toContain('21:10–08:15');
+    expect(response).toContain('[Overnight flight]');
   });
 
   it('keeps an ongoing multi-day record distinct and preserves busy and attendance state', () => {

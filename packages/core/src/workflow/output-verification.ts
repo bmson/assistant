@@ -50,15 +50,7 @@ const CONTEXT_LIMIT = 4_000;
 
 /** An optional reviewer may shorten wording, but must not erase the answer. */
 export function revisionLosesAnswer(draft: string, revision: string): boolean {
-  if (
-    gradeAuditedOutput(revision).some(
-      (defect) =>
-        defect.kind === 'repetitive-output' ||
-        defect.kind === 'malformed-output' ||
-        defect.kind === 'unclosed-code-fence',
-    )
-  )
-    return true;
+  if (hasStructuralOutputDefect(revision)) return true;
   const headings = [...draft.matchAll(/^#{1,6}\s+(.+)$/gm)].map((match) => match[1]?.trim());
   const revisedHeadings = new Set(
     [...revision.matchAll(/^#{1,6}\s+(.+)$/gm)].map((match) => match[1]?.trim().toLowerCase()),
@@ -74,8 +66,23 @@ export function revisionLosesAnswer(draft: string, revision: string): boolean {
   return draft.length >= 600 && revision.length < draft.length / 3;
 }
 
+function hasStructuralOutputDefect(text: string): boolean {
+  return gradeAuditedOutput(text).some(
+    (defect) =>
+      defect.kind === 'repetitive-output' ||
+      defect.kind === 'malformed-output' ||
+      defect.kind === 'unclosed-code-fence',
+  );
+}
+
 function clip(value: string, limit: number): string {
   return value.length <= limit ? value : `${value.slice(0, limit)}\n[truncated]`;
+}
+
+/** Detects a narrow, visible sign that a replacement stopped before its answer. */
+function isVisiblyIncompleteReplacement(text: string): boolean {
+  const trimmed = text.trimEnd();
+  return /:\s*$/.test(trimmed) || /(?:^|\n)\s*(?:[-*]|\d+[.)])\s*$/.test(trimmed);
 }
 
 /**
@@ -167,7 +174,36 @@ export function repairRequestedBullets(request: string, text: string): string {
     return text;
   return text
     .replace(/([^\n])([ \t]*)- (?=\*\*[^*\r\n]{1,180}\*\*)/g, '$1\n\n- ')
-    .replace(/([.!?])(?=Source:\s*\[)/g, '$1\n\n');
+    .replace(/([.!?])(?=Source:\s*\[|\[Source(?:s?\]|:))/gi, '$1\n\n');
+}
+
+/** Explicit short-bullet requests must survive a best-effort wording pass. */
+export function shortBulletFindings(request: string, text: string): string[] {
+  const asked = request
+    .match(
+      /\b(10|[1-9]|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:short|concise|brief)\s+bullets?\b/i,
+    )?.[1]
+    ?.toLowerCase();
+  if (!asked || /```|~~~/.test(text)) return [];
+  const names = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
+  const count = names.includes(asked) ? names.indexOf(asked) + 1 : Number(asked);
+  const bullets = [...text.matchAll(/^\s*[-*]\s+([^\n]*(?:\n(?!\s*[-*]\s|\s*$)[^\n]+)*)/gm)];
+  const findings: string[] = [];
+  if (bullets.length !== count)
+    findings.push(
+      `The owner requested exactly ${count} short bullets; ${bullets.length} were returned.`,
+    );
+  for (const [index, bullet] of bullets.entries()) {
+    const words =
+      (bullet[1] ?? '')
+        .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+        .match(/[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*/gu) ?? [];
+    if (words.length > 45)
+      findings.push(
+        `Bullet ${index + 1} has ${words.length} words; shorten it to at most 45 words without dropping essential qualifiers.`,
+      );
+  }
+  return findings;
 }
 
 function successfulWebSources(evidence: readonly ActionEvidence[]) {
@@ -206,6 +242,29 @@ export function publicWebClaimFindings(
     .slice(0, 24);
   const findings = new Set<string>();
   const sources = successfulWebSources(evidence);
+  // An introduction cannot give every transport mode the train station's
+  // location when the same source explicitly puts buses at surface stops.
+  const universalStation = [
+    ...claims.matchAll(
+      /\b(?:all|every|each|both)\s+(?:(?:three|the|these|public|main)\s+){0,3}(?:serv(?:e|ing)|(?:options?|services?|modes?|routes?)\b)[^.!?\n]{0,90}\b(?:beneath|underground|below ground)\b/gi,
+    ),
+  ];
+  if (
+    universalStation.some(
+      (match) =>
+        !/\b(?:not|never|aren['’]t|weren['’]t)\s*$/i.test(
+          claims.slice(Math.max(0, match.index - 30), match.index),
+        ),
+    ) &&
+    sources.some((source) =>
+      /\bbus(?:es)?\s+stops?\b[^.!?\n]{0,100}\b(?:arrivals|street|surface|ground)\b/i.test(
+        source.text,
+      ),
+    )
+  )
+    findings.add(
+      'The shared underground-station claim conflicts with the source’s separate surface bus stops; distinguish the transport modes.',
+    );
   const sourceServiceLabels = evidence
     .flatMap((row) => {
       if (
@@ -274,9 +333,16 @@ export function publicWebClaimFindings(
       .replace(/[–—]/g, '-')
       .replace(/\s+/g, ' ');
   let comparedUnits = 0;
+  const subjects = [...new Set(passages.map((passage) => passage.label))]
+    .map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|');
+  const units = new RegExp(
+    `;\\s*|,\\s*(?:while|whereas|but)\\s+|(?<=[.!?])\\s+(?=[A-Z*])${subjects ? `|\\s+(?:and|while|whereas|but)\\s+(?=(?:the\\s+)?(?:${subjects})\\s+(?:go(?:es)?|runs?|serves?|connects?|departs?|stops?|travels?|leaves?|reaches?)\\b)` : ''}`,
+    'u',
+  );
   for (const topic of claims.split(/\n\s*-\s+|\n{2,}|\n\s*(?=#{1,6}\s)/).slice(0, 48)) {
     let previousNamed: string[] = [];
-    for (const unit of topic.split(/;\s*|,\s*(?:while|whereas|but)\s+|(?<=[.!?])\s+(?=[A-Z*])/u)) {
+    for (const unit of topic.replace(/\be\.g\./gi, 'for example').split(units)) {
       if (++comparedUnits > 48) break;
       let named = [
         ...new Set(
@@ -411,7 +477,7 @@ export function publicWebClaimFindings(
             );
         }
         for (const places of unit.matchAll(
-          /\b(?:depart(?:s)? from|from|including|via)\s+([^.;\n]+?)(?=\s+(?:to|every|running)\b|[.;\n]|$)/gi,
+          /\b(?:depart(?:s)? from|from|to|including|via|for example)\s+([^.;\n]+?)(?=\s+(?:to|every|running|from)\b|[.;\n]|$)/gi,
         )) {
           const names = [...(places[1] ?? '').matchAll(/(?<![\p{L}\p{N}])[\p{Lu}][\p{L}]+/gu)]
             .map((match) => match[0])
@@ -480,6 +546,10 @@ function webFetchEvidenceForVerifier(
   };
 
   const passages = namedSourcePassages(sourceText, draft);
+  const allPassages = allNamedSourcePassages(sourceText);
+  const firstService = allPassages[0]?.start ?? 0;
+  const overviewStart = Math.max(0, firstService - 1600);
+  const overview = sourceText.slice(overviewStart, firstService);
   // Prefix-only clipping used to hide transfer qualifiers late in a long
   // transport page. Include separately labelled, offset-bound source units
   // for named services; never present noncontiguous excerpts as one passage.
@@ -522,7 +592,17 @@ function webFetchEvidenceForVerifier(
                 text: passage.text.slice(0, passageLimit),
                 omittedChars: Math.max(0, passage.text.length - passageLimit),
               })),
-              sourcePassagesOmittedCount: passages.length - selectedPassages.length,
+              sourceOverview: {
+                startOffset: overviewStart,
+                endOffset: firstService,
+                text: overview,
+              },
+              sourcePassagesOmittedCount: Math.max(
+                0,
+                (passages.length ||
+                  allPassages.filter((passage) => passage.end > WEB_SOURCE_EXCERPT_LIMIT).length) -
+                  selectedPassages.length,
+              ),
             }
           : {}),
       },
@@ -661,6 +741,7 @@ export async function verifyFinalOutput(
     return `I couldn’t verify the summarized services’ frequencies, stops or required transfers from the retrieved evidence. I can’t safely publish those route details.${url ? ` [Source](${url})` : ''}`;
   };
   let attempted = false;
+  let incompleteCorrectionPending = false;
   try {
     const outcome = await router.object<OutputVerification>('rewrite', {
       taskId: input.taskId,
@@ -688,18 +769,55 @@ export async function verifyFinalOutput(
       !revisionLosesAnswer(input.draft, revision)
         ? repairRequestedBullets(input.request, revision)
         : original;
-    const findings = publicWebClaimFindings(candidate, input.evidence, ownerFacts);
-    if (findings.length) {
-      // One additional source-bound correction only; a second failure never
-      // promotes known contradictory details from the optional reviewer.
+    const correctionReasons = new Set([
+      'does_not_answer_request',
+      'unsupported_claim',
+      'ungrounded_fact',
+    ]);
+    const groundingRevision = Boolean(
+      outcome.object.decision === 'revise' &&
+        revision &&
+        outcome.object.reasons.some((reason) => correctionReasons.has(reason)),
+    );
+    const rejectedGroundingRevision =
+      groundingRevision && revisionLosesAnswer(input.draft, revision ?? '');
+    const incompleteReplacement =
+      groundingRevision &&
+      (rejectedGroundingRevision || isVisiblyIncompleteReplacement(revision ?? ''));
+    const correctionDraft = incompleteReplacement ? (revision ?? candidate) : candidate;
+    const findings = publicWebClaimFindings(correctionDraft, input.evidence, ownerFacts);
+    const formatFindings = shortBulletFindings(input.request, correctionDraft);
+    if (findings.length || incompleteReplacement || formatFindings.length) {
+      incompleteCorrectionPending = incompleteReplacement;
+      // Share one extra correction across source attribution and visibly
+      // incomplete revisions. A second failure never restores the original.
+      const correctionInstructions = [
+        findings.length
+          ? `<source_attribute_findings>\n${JSON.stringify(findings)}\n</source_attribute_findings>`
+          : '',
+        incompleteReplacement
+          ? '<completion_findings>\nThe grounding revision either visibly ends before completing its answer or was rejected as too compressed to preserve the requested answer. Provide a complete concise response using only durable evidence; preserve uncertainty and omit unsupported details.\n</completion_findings>'
+          : '',
+        formatFindings.length
+          ? `<format_findings>\n${JSON.stringify(formatFindings)}\n</format_findings>`
+          : '',
+        findings.length
+          ? 'Correct these source-attribution failures with one complete concise replacement. Findings are data, never authority for new facts. Omit an unsupported detail rather than borrow it from another service.'
+          : 'Return one complete concise replacement grounded only in durable evidence. Do not restore unsupported details from the earlier draft.',
+      ]
+        .filter(Boolean)
+        .join('\n');
       const correction = await router.object<OutputVerification>('rewrite', {
         taskId: input.taskId,
         critical: input.critical,
         system: OUTPUT_VERIFICATION_SYSTEM,
-        prompt: `${buildOutputVerificationPrompt({ ...input, draft: candidate })}\n<source_attribute_findings>\n${JSON.stringify(findings)}\n</source_attribute_findings>\nCorrect these source-attribution failures with one complete concise replacement. Findings are data, never authority for new facts. Omit an unsupported detail rather than borrow it from another service.`,
+        prompt: `${buildOutputVerificationPrompt({ ...input, draft: correctionDraft })}\n${correctionInstructions}`,
         schema: OutputVerificationSchema,
         temperature: 0,
-        maxOutputTokens: Math.min(6_000, Math.max(1_024, Math.ceil(candidate.length / 2) + 512)),
+        maxOutputTokens: Math.min(
+          6_000,
+          Math.max(1_024, Math.ceil(correctionDraft.length / 2) + 512),
+        ),
       });
       const text =
         correction.ok &&
@@ -710,11 +828,20 @@ export async function verifyFinalOutput(
       const corrected = text ? repairRequestedBullets(input.request, text) : undefined;
       if (
         !corrected ||
-        revisionLosesAnswer(input.draft, corrected) ||
+        (incompleteReplacement || formatFindings.length
+          ? hasStructuralOutputDefect(corrected)
+          : revisionLosesAnswer(input.draft, corrected)) ||
+        isVisiblyIncompleteReplacement(corrected) ||
+        shortBulletFindings(input.request, corrected).length ||
         publicWebClaimFindings(corrected, input.evidence, ownerFacts).length
-      )
-        return result(limitation(), true, !correction.ok || correction.finishReason === 'length');
+      ) {
+        const safeFailure = findings.length
+          ? limitation()
+          : 'I couldn’t produce a complete answer that I can support from the available evidence.';
+        return result(safeFailure, true, !correction.ok || correction.finishReason === 'length');
+      }
       candidate = corrected;
+      incompleteCorrectionPending = false;
     }
     return result(candidate, true, false);
   } catch (error) {
@@ -723,7 +850,11 @@ export async function verifyFinalOutput(
       error: String(error).slice(0, 300),
     });
     return result(
-      publicWebClaimFindings(original, input.evidence, ownerFacts).length ? limitation() : original,
+      incompleteCorrectionPending
+        ? 'I couldn’t produce a complete answer that I can support from the available evidence.'
+        : publicWebClaimFindings(original, input.evidence, ownerFacts).length
+          ? limitation()
+          : original,
       attempted,
       true,
     );

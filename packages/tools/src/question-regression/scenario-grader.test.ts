@@ -91,7 +91,7 @@ describe('scenario assertions reject plausible but incorrect outcomes without a 
     expect(failures).toContain('approvals: 2, expected 1');
     expect(failures).toContain('lifecycle: done, expected waiting_approval → done');
   });
-  it('checks the owner timezone window and typed card independently of fluent prose', () => {
+  it('checks the owner timezone window and rejects duplicate raw cards beneath a compact agenda', () => {
     const failures = grade('calendar-tomorrow-crosses-autumn-clock-change', {
       answer: 'Design review at 1:00 AM tomorrow.',
       toolCalls: [
@@ -102,10 +102,10 @@ describe('scenario assertions reject plausible but incorrect outcomes without a 
           result: { events: [] },
         },
       ],
-      parts: [{ data: { kind: 'calendar-event' } }],
+      parts: [{ type: 'data-card', data: { kind: 'calendar-event' } }],
     });
     expect(failures).toContain('ledger: calendar.list_events missing requested arguments');
-    expect(failures).toContain('formatting: missing calendar-event card');
+    expect(failures).toContain('formatting: unexpected calendar-event card');
   });
   it('rejects fabricated or mismatched source cards despite an honest-looking reply', () => {
     const weatherFailures = grade('calendar-and-failed-weather', {

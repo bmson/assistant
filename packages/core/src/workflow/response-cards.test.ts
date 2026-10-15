@@ -24,6 +24,8 @@ const request = {
 
 describe('response cards', () => {
   it.each([
+    'When did I go to Germany last time? Check my booking emails/calendar and point out any conflicting records.',
+    'Review the next seven local calendar days and relevant authorized messages.',
     'Review my emails from the last seven days. Find the five most important requests that still need my response. Explain why each matters, identify any deadlines, and draft replies using the relevant thread context. Don’t send anything yet.',
     'Review my calendar for next week and identify scheduling conflicts and overloaded days. Find three realistic 90-minute focus blocks during working hours, allowing time for travel and breaks. Recommend changes, but show me the plan before editing my calendar.',
     'For my calendar, over the next 3 weekdays, how many days have an event lasting at least 45 minutes? Also find gaps of at least 30 minutes between events explicitly marked in person.',
@@ -80,7 +82,8 @@ describe('response cards', () => {
       expect(readRequest).not.toBeNull();
       expect(
         Boolean(
-          readRequest?.emailReview ||
+          readRequest?.sourceReads ||
+            readRequest?.emailReview ||
             readRequest?.weeklyCalendarPlan ||
             readRequest?.calendarEventAnalysis ||
             readRequest?.compoundTripDiscovery,

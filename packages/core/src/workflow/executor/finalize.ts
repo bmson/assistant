@@ -43,11 +43,13 @@ import {
   artifactExecutionFailure,
   artifactSharingVerificationFailure,
   requestedConditionalArtifactIntent,
+  requestedPrivateArtifactIntent,
 } from '../artifact-intent.js';
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
 import { CARD_NOT_BUILT, requestedCardIntent } from '../card-intent.js';
 import { responseCardSteps } from '../card-steps.js';
 import type { CompoundTripExtraction } from '../compound-trip-extraction.js';
+import { selectExplicitSourceAnswer } from '../explicit-source-read.js';
 import { isGoalWorkEvidence } from '../goal-evidence.js';
 import {
   detectLiveLookups,
@@ -233,7 +235,10 @@ export async function finalizePendingResponse(
     ).catch((error) => console.error('quality signal record failed', error));
     return { outcome: 'done', detail: pending.progress.slice(0, 200) };
   }
-  const recallSources = (checkpointState ?? taskState(task)).recall ?? undefined;
+  const recallSources = finalRecallSources(
+    pending,
+    (checkpointState ?? taskState(task)).recall ?? undefined,
+  );
   const evidence = executionEvidence(deps);
   const conversationDelivered = await persistFinalConversationOnce(
     evidence,
@@ -442,6 +447,31 @@ export async function finalizePendingResponse(
     await notifyOwnerOfDeliveredAnswer(deps, task, pending.text);
   }
   return { outcome: pending.outcome, detail: pending.progress.slice(0, 200) };
+}
+
+/**
+ * A clarification question should not claim ambient recall informed it merely
+ * because earlier retrieval populated task state. Keep attribution when the
+ * clarification explicitly references a retrieved source label.
+ */
+export function finalRecallSources(
+  pending: Pick<PendingFinal, 'outcome' | 'text'>,
+  sources: RecallSource[] | undefined,
+): RecallSource[] | undefined {
+  if (!sources?.length || pending.outcome !== 'clarify') return sources;
+  const normalizedAnswer = normalizeRecallLabel(pending.text);
+  const referencedSources = sources.filter((source) => {
+    const label = normalizeRecallLabel(source.label);
+    return label.length >= 8 && normalizedAnswer.includes(label);
+  });
+  return referencedSources.length > 0 ? referencedSources : undefined;
+}
+
+function normalizeRecallLabel(value: string): string {
+  return value
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
 }
 
 /** Persist-before-send turns the task checkpoint into a small durable outbox. */
@@ -780,9 +810,12 @@ export async function stageModelFinalResponse(
       outcome: 'failed',
     });
   }
-  const conditionalArtifact = requestedConditionalArtifactIntent(latestUserText(window) ?? '');
-  const sharingFailure = conditionalArtifact
-    ? artifactSharingVerificationFailure(conditionalArtifact, rows)
+  const artifactRequest = latestUserText(window) ?? '';
+  const privacyIntent =
+    requestedPrivateArtifactIntent(artifactRequest) ??
+    requestedConditionalArtifactIntent(artifactRequest);
+  const sharingFailure = privacyIntent
+    ? artifactSharingVerificationFailure(privacyIntent, rows)
     : undefined;
   if (sharingFailure) {
     return stageFinalResponse(deps, task, state, window, {
@@ -806,8 +839,16 @@ export async function stageModelFinalResponse(
       .join('\n'),
   ].join('\n');
   const classifiedRead = readContext ? readContext.readRequest : detectPersonalReadRequest(window);
+  const explicitSourceSelection = classifiedRead?.sourceReads
+    ? await selectExplicitSourceAnswer({
+        router: deps.router,
+        taskId: task.id,
+        request: classifiedRead,
+        evidence,
+      })
+    : undefined;
   const memoryReadSelection =
-    classifiedRead?.kind === 'memory'
+    !classifiedRead?.sourceReads && classifiedRead?.kind === 'memory'
       ? await selectMemoryReadAnswer({
           router: deps.router,
           taskId: task.id,
@@ -816,11 +857,13 @@ export async function stageModelFinalResponse(
         })
       : undefined;
   const contractOptions = {
+    ...(explicitSourceSelection ? { explicitSourceSelection } : {}),
     ...(memoryReadSelection ? { memoryReadSelection } : {}),
     requestText:
       task.trust === 'owner' && !isForwardedIngest(task) ? latestUserText(window) : undefined,
     urlCorpus: sourceCorpus,
     readRequest: classifiedRead,
+    companionWeather: liveLookups.some((lookup) => lookup.kind === 'weather'),
     ...(readContext?.compoundTripExtraction
       ? { compoundTripExtraction: readContext.compoundTripExtraction }
       : {}),
@@ -988,7 +1031,9 @@ export async function stageModelFinalResponse(
   // is deliberately not parsed here, so a fluent answer cannot invent a card.
   // A trip to "my 3pm" read a day and a half of calendar to find one event.
   // That read is the trip's first step, not an agenda the owner asked to see.
-  const tripOwnsCalendar = liveLookups.some((lookup) => lookup.destination === 'calendar');
+  const tripOwnsCalendar = liveLookups.some(
+    (lookup) => lookup.destination === 'calendar' || lookup.airportIntent,
+  );
   const specializedCards = responseCardsForFinal({
     evidence: tripOwnsCalendar
       ? evidence.filter((row) => row.toolName !== 'calendar.list_events')
@@ -1063,6 +1108,8 @@ export async function stageModelFinalResponse(
     }
   }
   if (
+    !classifiedRead?.personCalendar &&
+    !classifiedRead?.sourceReads &&
     (!contractOptions.readRequest?.includeCalendarBriefing ||
       cardRequested ||
       Boolean(refreshCardId)) &&

@@ -214,7 +214,7 @@ describe('bounded no-send email review', () => {
     const coverage = emailReviewCoverage([], [], [search('thread-a'), search('thread-b')]);
     coverage.rankedMetadataThreads = 1;
     expect(formatEmailReviewAnswer([], coverage)).toContain(
-      'included 1 of 2 scanned non-newsletter threads; the others were not ranked',
+      'ranking context included 1 of 2 scanned non-newsletter threads; the others were not ranked',
     );
   });
 
@@ -310,12 +310,16 @@ describe('bounded no-send email review', () => {
         evidence,
       ),
     );
-    expect(formatted).toContain('unresolved possible deadline');
-    expect(formatted).toContain('**Deadline needs review — Please confirm the renewal date**');
+    expect(formatted).toContain('**Possible deadlines to verify (1)**');
+    expect(formatted).toContain('Reviewed 1 of 1 selected threads');
+    expect(formatted).not.toContain('Completed verified reply checks');
+    expect(formatted).toContain(
+      '**Please confirm the renewal date** — No reply draft was prepared',
+    );
     expect(formatted).toContain(
       '[Open the source thread](https://mail.google.com/mail/u/0/#all/thread-a)',
     );
-    expect(formatted).toContain('No reply draft was prepared for it');
+    expect(formatted).toContain('No reply draft was prepared; check the source');
     expect(formatted).not.toContain('through Jun. 6th');
   });
 
@@ -457,8 +461,8 @@ describe('bounded no-send email review', () => {
       checked?.items ?? [],
       emailReviewCoverage([thread.threadId], [thread], [search(thread.threadId)]),
     );
-    expect(formatted).toContain('No deadline was identified in this review.');
-    expect(formatted).not.toContain('Deadline mentioned in the thread: “tomorrow”');
+    expect(formatted).toContain('Deadline: none identified.');
+    expect(formatted).not.toContain('Deadline: “tomorrow”');
 
     for (const quote of ['tomorrow', 'volunteer tomorrow', 'Could you volunteer tomorrow?']) {
       const falseDeadline = {
@@ -507,9 +511,77 @@ describe('bounded no-send email review', () => {
       review.answer?.items ?? [],
       emailReviewCoverage([thread.threadId], [thread], [search(thread.threadId)]),
     );
-    expect(rendered).toContain('No email reply is requested. Source action:');
+    expect(rendered).toContain('Actions with deadlines — no email reply requested');
+    expect(rendered).toContain('Source action:');
     expect(rendered).toContain('11:00 PM on October 31, 2026 (KST)');
     expect(rendered).not.toContain('prepared 1 reply draft');
+  });
+
+  it('leads with grounded actions and drafts, then gives compact coverage notes', () => {
+    const actionMessages = messages('action-first');
+    const actionLatest = required(actionMessages.at(-1), 'action message');
+    actionLatest.text =
+      'Please submit a retroactive claim by 11:00 PM on October 31, 2026 (KST). Do not reply to this email.';
+    actionLatest.sourceLength = actionLatest.text.length;
+    const actionThread = required(
+      emailReviewCompleteThread('action-first', 'owner@example.com', [
+        search('action-first'),
+        read('action-first', actionMessages),
+      ]),
+      'action thread',
+    );
+    const draftThread = required(
+      emailReviewCompleteThread('draft-second', 'owner@example.com', [
+        search('draft-second'),
+        read('draft-second', messages('draft-second')),
+      ]),
+      'draft thread',
+    );
+    const draft = required(
+      validateEmailReviewAnswer(validAnswer('draft-second'), [draftThread])?.items[0],
+      'validated draft',
+    );
+    const rendered = formatEmailReviewAnswer(
+      [
+        {
+          thread: actionThread,
+          disposition: 'no_reply',
+          why: 'The source provides a required account action.',
+          whyQuote: actionLatest.text,
+          deadlineQuote: 'by 11:00 PM on October 31, 2026 (KST)',
+        },
+        draft,
+      ],
+      {
+        ...emailReviewCoverage(
+          ['action-first', 'draft-second'],
+          [actionThread, draftThread],
+          [search('action-first'), search('draft-second')],
+        ),
+        searchComplete: false,
+        rankedMetadataThreads: 1,
+      },
+    );
+    const actionIndex = rendered.indexOf('**Actions with deadlines');
+    const draftIndex = rendered.indexOf('### Please confirm the renewal date');
+    const coverageIndex = rendered.indexOf('**Coverage:**');
+    expect(actionIndex).toBeGreaterThan(-1);
+    expect(draftIndex).toBeGreaterThan(actionIndex);
+    expect(coverageIndex).toBeGreaterThan(draftIndex);
+    expect(rendered).toContain('11:00 PM on October 31, 2026 (KST)');
+    expect(rendered).toContain('by Friday');
+    expect(rendered).toContain('Source request: “Could you confirm by Friday?”');
+    expect(rendered).toContain('Why it matters: A response is requested by the cited deadline.');
+    expect(rendered).toContain(
+      '[Open the source thread](https://mail.google.com/mail/u/0/#all/action-first)',
+    );
+    expect(rendered).toContain(
+      '[Open the source thread](https://mail.google.com/mail/u/0/#all/draft-second)',
+    );
+    expect(rendered).toContain('mail-search metadata coverage was incomplete');
+    expect(rendered).toContain('ranking context included 1 of 2 scanned non-newsletter threads');
+    expect(rendered).not.toContain('not a guarantee that these are the only');
+    expect(rendered).not.toContain('Each candidate was checked against its complete thread');
   });
 
   it('collapses only strongly identified duplicate RSVP reminders and preserves their source details', () => {
@@ -540,7 +612,7 @@ describe('bounded no-send email review', () => {
         deadline: deadlineQuote
           ? { messageId: thread.latestMessageId, quote: deadlineQuote }
           : null,
-        draftBody: 'Owner decision required: choose whether you plan to attend before sending.',
+        draftBody: 'Thanks for the reminder. Could you clarify the RSVP details for this event?',
       };
       return required(
         validateEmailReviewAnswer({ items: [item] }, [thread])?.items[0],
@@ -549,13 +621,13 @@ describe('bounded no-send email review', () => {
     };
     const first = makeAssessed(
       'pta-one',
-      'PTA Family Night RSVP',
-      'Please RSVP for the PTA meeting on October 21, 2026 by October 18. A headcount is needed for food.',
+      'Reminder to RSVP for: October PTA Meeting In-Person - Wednesday, 10/21',
+      'Please RSVP for the October PTA meeting on October 21, 2026 by October 18. The meeting at Cafetorium starts at 6:00 PM. A headcount is needed for food.',
     );
     const duplicate = makeAssessed(
       'pta-two',
-      'Re: PTA Family Night RSVP',
-      'Please RSVP for the PTA meeting on October 21, 2026 by October 17.',
+      'RSVP Requested: October PTA Meeting In-Person - Wednesday, 10/21',
+      'Please RSVP for the October PTA meeting on October 21, 2026 by October 17. The meeting at Cafetorium runs from 6 - 7:30 PM. The school is hosting a separate event at Alamo next week.',
     );
     const differentDate = makeAssessed(
       'pta-three',
@@ -613,8 +685,154 @@ describe('bounded no-send email review', () => {
     expect(rendered).toContain(
       'duplicate reminder thread](https://mail.google.com/mail/u/0/#all/pta-two)',
     );
-    expect(rendered.match(/### PTA Family Night RSVP/g)).toHaveLength(5);
+    expect(
+      rendered.match(
+        /### Reminder to RSVP for: October PTA Meeting In-Person - Wednesday, 10\/21/g,
+      ),
+    ).toHaveLength(1);
+    expect(rendered).not.toContain('### RSVP Requested: October PTA Meeting In-Person');
+    expect(rendered.match(/### PTA Family Night RSVP/g)).toHaveLength(4);
     expect(rendered.match(/### Meeting RSVP/g)).toHaveLength(2);
+  });
+
+  it('keeps conflicting RSVP times separate when a detail-free reminder intervenes', () => {
+    const makeAssessed = (threadId: string, body: string) => {
+      const source = messages(threadId);
+      const latest = required(source.at(-1), 'latest message');
+      latest.subject = 'Reminder to RSVP for: PTA Meeting - October 21, 2026';
+      latest.text = body;
+      latest.sourceLength = body.length;
+      const thread = required(
+        emailReviewCompleteThread(threadId, 'owner@example.com', [
+          search(threadId),
+          read(threadId, source),
+        ]),
+        'complete thread',
+      );
+      const item = {
+        ...required(validAnswer(threadId).items[0], 'assessment'),
+        recipient: thread.recipient,
+        whyQuote: body,
+        deadline: { messageId: thread.latestMessageId, quote: 'by October 18' },
+        draftBody: 'Thanks for the reminder. Could you clarify the RSVP details for this event?',
+      };
+      return required(
+        validateEmailReviewAnswer({ items: [item] }, [thread])?.items[0],
+        'validated',
+      );
+    };
+    const sixPm = makeAssessed(
+      'pta-six-pm',
+      'Please RSVP for the PTA meeting on October 21, 2026 by October 18. The meeting at Cafetorium starts at 6:00 PM. A headcount is needed for food.',
+    );
+    const noTime = makeAssessed(
+      'pta-no-time',
+      'Please RSVP for the PTA meeting on October 21, 2026 by October 18. A headcount is needed for food. Please send your attendance choice so the event team can prepare. Families are welcome to share this request with anyone who may attend.',
+    );
+    const sevenPm = makeAssessed(
+      'pta-seven-pm',
+      'Please RSVP for the PTA meeting on October 21, 2026 by October 18. The meeting at Cafetorium starts at 7:00 PM. A headcount is needed for food.',
+    );
+    const selected = [sixPm, noTime, sevenPm];
+    const rendered = formatEmailReviewAnswer(selected, {
+      ...emailReviewCoverage(
+        selected.map((item) => item.thread.threadId),
+        selected.map((item) => item.thread),
+        selected.map((item) => search(item.thread.threadId)),
+      ),
+      searchComplete: true,
+    });
+
+    expect(
+      rendered.match(/### Reminder to RSVP for: PTA Meeting - October 21, 2026/g),
+    ).toHaveLength(2);
+    expect(rendered).toContain('starts at 6:00 PM');
+    expect(rendered).toContain('starts at 7:00 PM');
+    expect(rendered).toContain('Additional request in a duplicate reminder:');
+    expect(rendered).toContain('Reviewed 3 of 3 selected threads');
+    expect(rendered).toContain('prepared 2 reply drafts');
+  });
+
+  it('deduplicates by the event clock rather than RSVP deadline clocks', () => {
+    const makeAssessed = (threadId: string, body: string) => {
+      const source = messages(threadId);
+      const latest = required(source.at(-1), 'latest message');
+      latest.subject = 'Reminder to RSVP for: PTA Meeting - October 21, 2026';
+      latest.text = body;
+      latest.sourceLength = body.length;
+      const thread = required(
+        emailReviewCompleteThread(threadId, 'owner@example.com', [
+          search(threadId),
+          read(threadId, source),
+        ]),
+        'complete thread',
+      );
+      const item = {
+        ...required(validAnswer(threadId).items[0], 'assessment'),
+        recipient: thread.recipient,
+        whyQuote: body,
+        deadline: {
+          messageId: thread.latestMessageId,
+          quote: body.match(/RSVP by [^.]+/)?.[0] ?? 'RSVP requested',
+        },
+        draftBody: 'Thanks for the reminder. Could you clarify the RSVP details for this event?',
+      };
+      return required(
+        validateEmailReviewAnswer({ items: [item] }, [thread])?.items[0],
+        'validated',
+      );
+    };
+    const rangeAndDeadlineFive = makeAssessed(
+      'pta-range-deadline-five',
+      'Please RSVP by 5:00 PM for the PTA meeting on October 21, 2026. The meeting at Cafetorium runs from 6:00–7:30 PM.',
+    );
+    const sameStartDeadlineSix = makeAssessed(
+      'pta-start-deadline-six',
+      'Please RSVP by 6:00 PM for the PTA meeting on October 21, 2026. The meeting at Cafetorium starts at 6:00 PM.',
+    );
+    const conflictingStart = makeAssessed(
+      'pta-start-seven',
+      'Please RSVP by 5:00 PM for the PTA meeting on October 21, 2026. The meeting at Cafetorium starts at 7:00 PM.',
+    );
+    const selected = [rangeAndDeadlineFive, sameStartDeadlineSix, conflictingStart];
+    const rendered = formatEmailReviewAnswer(selected, {
+      ...emailReviewCoverage(
+        selected.map((item) => item.thread.threadId),
+        selected.map((item) => item.thread),
+        selected.map((item) => search(item.thread.threadId)),
+      ),
+      searchComplete: true,
+    });
+
+    expect(
+      rendered.match(/### Reminder to RSVP for: PTA Meeting - October 21, 2026/g),
+    ).toHaveLength(2);
+    expect(rendered).toContain('runs from 6:00–7:30 PM');
+    expect(rendered).toContain('starts at 7:00 PM');
+    expect(rendered).toContain('Additional request in a duplicate reminder:');
+    expect(rendered).toContain('prepared 2 reply drafts');
+
+    const ambiguousSelected = [
+      makeAssessed(
+        'pta-ambiguous-five-six',
+        'Please RSVP by 5:00 PM for the PTA meeting on October 21, 2026. We will also discuss the 6:00 PM volunteer briefing and 7:00 PM fundraiser.',
+      ),
+      makeAssessed(
+        'pta-ambiguous-five-seven',
+        'Please RSVP by 5:00 PM for the PTA meeting on October 21, 2026. We will also discuss the 6:00 PM volunteer briefing and 8:00 PM fundraiser.',
+      ),
+    ];
+    const ambiguousRendered = formatEmailReviewAnswer(ambiguousSelected, {
+      ...emailReviewCoverage(
+        ambiguousSelected.map((item) => item.thread.threadId),
+        ambiguousSelected.map((item) => item.thread),
+        ambiguousSelected.map((item) => search(item.thread.threadId)),
+      ),
+      searchComplete: true,
+    });
+    expect(
+      ambiguousRendered.match(/### Reminder to RSVP for: PTA Meeting - October 21, 2026/g),
+    ).toHaveLength(2);
   });
 
   it('recognizes a dated removal outcome as an explicit deadline', () => {
@@ -755,12 +973,12 @@ describe('bounded no-send email review', () => {
       ok: true,
       value: { items: [byFridayNoReply] },
     }));
-    expect(byFridayRepair.answer?.items[0]).toMatchObject({
-      disposition: 'draft',
-      deadlineQuote: 'by Friday',
-      draftBody: expect.stringMatching(/Owner decision required: add your answer/),
-    });
-    expect(byFridayRepair.answer?.items[0]?.draftBody).toContain('your preferred option by Friday');
+    expect(byFridayRepair.answer).toBeUndefined();
+    expect(byFridayRepair.ownerDecisionThreadIds).toEqual([byFridayThread.threadId]);
+    expect(byFridayRepair.attempts).toBe(2);
+    expect(byFridayRepair.issues).toContain(
+      'item_0:owner_decision_scaffolding_not_recipient_draft',
+    );
 
     const byTomorrowMessages = messages('please-reply-by-tomorrow');
     const byTomorrowLatest = required(byTomorrowMessages.at(-1), 'latest message');
@@ -786,7 +1004,8 @@ describe('bounded no-send email review', () => {
       ok: true,
       value: { items: [byTomorrowNoReply] },
     }));
-    expect(byTomorrowRepair.answer?.items[0]?.deadlineQuote).toBe('by tomorrow');
+    expect(byTomorrowRepair.answer).toBeUndefined();
+    expect(byTomorrowRepair.ownerDecisionThreadIds).toEqual([byTomorrowThread.threadId]);
 
     const promotionalMessages = messages('promotional-reply-by-friday');
     const promotionalLatest = required(promotionalMessages.at(-1), 'latest message');
@@ -877,7 +1096,7 @@ describe('bounded no-send email review', () => {
     );
   });
 
-  it('counts completed source assessments separately from complete thread reads', () => {
+  it('reports reviewed assessments separately from complete source reads', () => {
     const threads = ['assessed-a', 'unassessed-b'].map((threadId) =>
       required(
         emailReviewCompleteThread(threadId, 'owner@example.com', [
@@ -900,9 +1119,9 @@ describe('bounded no-send email review', () => {
         ]),
       ),
     );
-    expect(text).toContain('verified reply checks for 1 of 2 selected threads');
-    expect(text).toContain('Complete reads are not the same as completed assessments.');
-    expect(text).not.toContain('2 of 2 selected threads');
+    expect(text).toContain('Reviewed 1 of 2 selected threads');
+    expect(text).not.toContain('Completed verified reply checks');
+    expect(text).toContain('complete source reads: 2 of 2 selected threads');
   });
 
   it('discloses mailbox mismatch and complete threads left unassessed without leaking addresses', () => {
@@ -926,7 +1145,7 @@ describe('bounded no-send email review', () => {
     expect(coverage).toMatchObject({ searchMailboxMismatch: true, unassessedCompleteThreads: 1 });
     const formatted = formatEmailReviewAnswer([], coverage);
     expect(formatted).toContain('connected mailbox used for search differs');
-    expect(formatted).toContain('1 complete thread could not be assessed reliably');
+    expect(formatted).toContain('1 selected thread could not be assessed reliably');
     expect(formatted).not.toContain('connected-alias@example.net');
     expect(formatted).not.toContain('owner@example.com');
   });
@@ -1411,6 +1630,179 @@ describe('bounded no-send email review', () => {
     expect(validEmailReviewSelection(['invented'], evidence)).toBe(false);
   });
 
+  it('filters local-calendar review metadata to the exact interval before ranking', () => {
+    const query = 'after:2026/09/30 before:2026/10/18 -from:me';
+    const scope = {
+      query,
+      requestedCount: 2,
+      startAt: '2026-10-02T07:00:00.000Z',
+      endAt: '2026-10-16T07:00:00.000Z',
+    };
+    const rowFor = (threadId: string, date: string): EmailReviewEvidenceRow => ({
+      ...search(threadId),
+      args: { query, maxResults: 100 },
+      result: {
+        ...((search(threadId).result as Record<string, unknown>) ?? {}),
+        results: [
+          {
+            threadId,
+            date,
+            from: 'sender@example.net',
+            subject: 'Could you confirm this?',
+            snippet: 'Please reply by Friday.',
+          },
+        ],
+      },
+    });
+    const evidence = [
+      rowFor('inside-start', '2026-10-02T07:00:00.000Z'),
+      rowFor('inside-end', '2026-10-16T06:59:59.999Z'),
+      rowFor('before-window', '2026-10-02T06:59:59.999Z'),
+      rowFor('at-exclusive-end', '2026-10-16T07:00:00.000Z'),
+      rowFor('unknown-date', 'not-a-date'),
+    ];
+
+    expect(emailReviewCandidateIds(evidence, scope)).toEqual(['inside-start', 'inside-end']);
+    expect(validEmailReviewSelection(['before-window'], evidence, undefined, scope)).toBe(false);
+    expect(emailReviewRankContext(evidence, scope).prompt).toContain(
+      'first 2 are the initial review set',
+    );
+  });
+
+  it('preserves latest-first ordering instead of importance ranking for reply lookup', () => {
+    const query = 'in:inbox -from:me';
+    const scope = { query, requestedCount: 1, latestUnanswered: true };
+    const rowFor = (
+      threadId: string,
+      date: string,
+      subject: string,
+      snippet: string,
+    ): EmailReviewEvidenceRow => ({
+      ...search(threadId),
+      args: { query, maxResults: 100 },
+      result: {
+        ...((search(threadId).result as Record<string, unknown>) ?? {}),
+        results: [
+          {
+            threadId,
+            date,
+            from: 'sender@example.net',
+            subject,
+            snippet,
+          },
+        ],
+      },
+    });
+    const evidence = [
+      rowFor(
+        'older-important',
+        '2026-10-14T10:00:00Z',
+        'Please approve the proposal by tomorrow',
+        'This approval is important and needed today.',
+      ),
+      rowFor(
+        'newest-message',
+        '2026-10-15T10:00:00Z',
+        'Quick question',
+        'Could you let me know when you have a chance?',
+      ),
+    ];
+    const context = emailReviewRankContext(evidence, scope);
+    expect(context.candidateIds).toEqual(['newest-message', 'older-important']);
+    expect(emailReviewRecentMetadataFallback(evidence, context.candidateIds, scope)).toEqual([
+      'newest-message',
+      'older-important',
+    ]);
+    expect(
+      emailReviewSelectionWithinAuthorizedPool(
+        ['newest-message'],
+        context.candidateIds,
+        [],
+        ['newest-message'],
+        1,
+        true,
+      ),
+    ).toBe(true);
+    expect(
+      emailReviewSelectionWithinAuthorizedPool(
+        ['newest-message', 'older-important'],
+        context.candidateIds,
+        [],
+        ['newest-message'],
+        1,
+        true,
+      ),
+    ).toBe(false);
+    const answer = formatEmailReviewAnswer(
+      [],
+      {
+        searchPages: 1,
+        uniqueThreads: 2,
+        searchComplete: true,
+        unavailableMetadata: 0,
+        selectedThreads: 1,
+        completeThreads: 0,
+        contextLimitedThreads: 0,
+        ownerOrChronologyExcluded: 1,
+        alreadyAnsweredThreads: 0,
+        notEligibleThreads: 0,
+        obviousNewslettersExcluded: 0,
+      },
+      false,
+      scope,
+    );
+    expect(answer).toContain('bounded newest-first inbox scan');
+    expect(answer).not.toMatch(/\b7[- ]day\b|\bseven[- ]day\b/i);
+    expect(answer).not.toContain('newest-first order');
+
+    const boundedAnswer = formatEmailReviewAnswer(
+      [],
+      {
+        searchPages: 1,
+        uniqueThreads: 2,
+        searchComplete: true,
+        unavailableMetadata: 0,
+        selectedThreads: 1,
+        completeThreads: 0,
+        contextLimitedThreads: 0,
+        ownerOrChronologyExcluded: 1,
+        alreadyAnsweredThreads: 0,
+        notEligibleThreads: 0,
+        obviousNewslettersExcluded: 0,
+      },
+      false,
+      { ...scope, startAt: '2026-10-15T00:00:00Z', endAt: '2026-10-16T00:00:00Z' },
+    );
+    expect(boundedAnswer).toContain('newest-first inbox scan within the requested time window');
+    expect(boundedAnswer).not.toMatch(/\b7[- ]day\b|\bseven[- ]day\b/i);
+  });
+
+  it('does not claim complete-thread verification in a bounded latest-mail summary', () => {
+    const answer = formatEmailReviewAnswer(
+      [],
+      {
+        searchPages: 1,
+        uniqueThreads: 2,
+        searchComplete: true,
+        unavailableMetadata: 0,
+        selectedThreads: 1,
+        completeThreads: 0,
+        contextLimitedThreads: 1,
+        ownerOrChronologyExcluded: 0,
+        alreadyAnsweredThreads: 0,
+        notEligibleThreads: 0,
+        obviousNewslettersExcluded: 0,
+      },
+      false,
+      { query: 'in:inbox -from:me', requestedCount: 1, latestUnanswered: true },
+    );
+
+    expect(answer).toContain('Reviewed 0 of 1 selected threads');
+    expect(answer).toContain('bounded newest-first inbox scan');
+    expect(answer).toContain('complete source reads: 0 of 1 selected threads');
+    expect(answer).not.toContain('checked against its complete thread');
+  });
+
   it('allows a bounded ten-ID reserve pool while keeping final answers capped at five', () => {
     const evidence = Array.from({ length: EMAIL_REVIEW_MAX_RANK_POOL }, (_, index) =>
       search(`request-${index}`),
@@ -1487,6 +1879,17 @@ describe('bounded no-send email review', () => {
       'Please approve the attached renewal by Friday.';
     const evidence: EmailReviewEvidenceRow[] = [approval];
     expect(emailReviewRankContext(evidence).candidateIds).toEqual(['approval-request']);
+    expect(emailReviewCoverage([], [], evidence).obviousNewslettersExcluded).toBe(0);
+  });
+
+  it('keeps a direct personal ask when promotional words appear in the same metadata', () => {
+    const availability = search('availability-request');
+    const result = availability.result.results as Array<Record<string, unknown>>;
+    required(result[0], 'availability metadata').subject = 'Fall sale and volunteer availability';
+    required(result[0], 'availability metadata').snippet =
+      'We would love to get your updated availability so we can schedule the volunteer shifts.';
+    const evidence: EmailReviewEvidenceRow[] = [availability];
+    expect(emailReviewRankContext(evidence).candidateIds).toEqual(['availability-request']);
     expect(emailReviewCoverage([], [], evidence).obviousNewslettersExcluded).toBe(0);
   });
 
@@ -1583,8 +1986,8 @@ describe('bounded no-send email review', () => {
     const ids = emailReviewCandidateIds(rows);
     expect(emailReviewRecentMetadataFallback(rows, ids).slice(0, 3)).toEqual([
       'approval-request',
-      'rsvp-request',
       'availability-request',
+      'rsvp-request',
     ]);
     const noise = Array.from({ length: EMAIL_REVIEW_MAX_RANK_CANDIDATES }, (_, index) =>
       search(`noise-${index}`, {
@@ -1600,9 +2003,93 @@ describe('bounded no-send email review', () => {
     );
     expect(emailReviewRankContext([...noise, ...rows]).candidateIds.slice(0, 3)).toEqual([
       'approval-request',
-      'rsvp-request',
       'availability-request',
+      'rsvp-request',
     ]);
+  });
+
+  it('ranks personal availability and volunteer requests above generic action notices and promotions', () => {
+    const rowFor = (threadId: string, subject: string, snippet: string, day: string) =>
+      search(threadId, {
+        results: [
+          {
+            threadId,
+            subject,
+            snippet,
+            date: `2026-10-${day}T12:00:00Z`,
+            from: 'sender@example.net',
+          },
+        ],
+      });
+    const rows = [
+      rowFor(
+        'personal-availability',
+        'Interview confirmation',
+        'We would love to get your updated availability here so we can set up these interviews.',
+        '15',
+      ),
+      rowFor(
+        'volunteer-request',
+        'Help needed for Saturday',
+        'The club needs parents to help. Could you volunteer for a shift?',
+        '15',
+      ),
+      rowFor(
+        'rsvp-reminder',
+        'Reminder to RSVP for October PTA Meeting - 10/21',
+        'Please RSVP so we can get a food headcount.',
+        '15',
+      ),
+      rowFor(
+        'admin-notice',
+        '[Action Required] Update workspace OAuth settings',
+        'Mark the OAuth clients as agentic before the policy date.',
+        '15',
+      ),
+      rowFor(
+        'product-promotion',
+        'The truffle burger has returned',
+        'Our new seasonal burger is back in stock.',
+        '15',
+      ),
+    ];
+    const ids = emailReviewCandidateIds(rows);
+    expect(emailReviewRecentMetadataFallback(rows, ids).slice(0, 3)).toEqual([
+      'personal-availability',
+      'volunteer-request',
+      'rsvp-reminder',
+    ]);
+  });
+
+  it('uses source-established conditional alternatives to fill an omitted direct yes/no assessment only on repair', async () => {
+    const sourceMessages = messages('omitted-availability-request');
+    const latest = required(sourceMessages.at(-1), 'latest message');
+    latest.text = 'Nobody has signed up for tomorrow. Are you able to? Thanks!';
+    latest.sourceLength = latest.text.length;
+    const thread = required(
+      emailReviewCompleteThread('omitted-availability-request', 'owner@example.com', [
+        search('omitted-availability-request'),
+        read('omitted-availability-request', sourceMessages),
+      ]),
+      'complete direct yes/no request',
+    );
+    let calls = 0;
+    const repaired = await generateValidatedEmailReview([thread], async (input) => {
+      calls += 1;
+      if (!input.repair) return { ok: true, value: { items: [] } };
+      return { ok: true, value: { items: [] } };
+    });
+    expect(calls).toBe(2);
+    expect(repaired.attempts).toBe(2);
+    expect(repaired.answer?.items[0]).toMatchObject({
+      disposition: 'draft',
+      whyQuote: 'Are you able to?',
+    });
+    expect(repaired.sourceItems?.[0]?.whyMessageId).toBe(thread.latestMessageId);
+    expect(repaired.answer?.items[0]?.draftBody).toContain('If you can help:');
+    expect(repaired.answer?.items[0]?.draftBody).toContain('If you cannot:');
+    expect(repaired.ownerDecisionThreadIds).toEqual([]);
+    expect(repaired.issues).toEqual([]);
   });
 
   it('replaces a valid-shape generic RSVP acknowledgement with owner alternatives and source routing', async () => {
@@ -2037,10 +2524,9 @@ describe('bounded no-send email review', () => {
       required(validated?.items, 'validated source-bound review'),
       emailReviewCoverage(['thread-a'], [thread], [search('thread-a')]),
     );
-    expect(formatted).toContain('Request in the latest message: “Could you confirm by Friday?”');
-    expect(formatted).toContain(
-      'Why it matters: A response is requested, with the stated deadline “by Friday”.',
-    );
+    expect(formatted).toContain('Source request: “Could you confirm by Friday?”');
+    expect(formatted).toContain('Why it matters: A response is requested by the cited deadline.');
+    expect(formatted).toContain('Deadline: “by Friday”');
     for (const unsupportedWhy of [
       'Your account will be closed tomorrow unless you pay.',
       'The sender asks for confirmation, so a delay will cancel your membership.',
@@ -2061,7 +2547,7 @@ describe('bounded no-send email review', () => {
       );
       expect(safeFormatted).not.toContain(unsupportedWhy);
       expect(safeFormatted).toContain(
-        'Why it matters: A response is requested, with the stated deadline “by Friday”.',
+        'Why it matters: A response is requested by the cited deadline.',
       );
     }
     expect(
@@ -2295,9 +2781,9 @@ describe('bounded no-send email review', () => {
       ownerOrChronologyExcluded: 1,
       backfillShortfall: 'step_budget',
     });
-    expect(text).toContain('fully checked but did not meet the criteria');
-    expect(text).toContain('complete, valid read did not establish whether it qualified');
-    expect(text).toContain('step limit before another replacement thread could be read');
+    expect(text).toContain('reviewed but did not meet the reply-draft criteria');
+    expect(text).toContain('not used because eligibility could not be established');
+    expect(text).toContain('step limit prevented another replacement-thread read');
     expect(text).not.toContain('no more threads to replace');
   });
 });

@@ -178,7 +178,7 @@ export const ASSISTANT_SCENARIOS: QuestionCase[] = [
     expect: {
       matches: ['Design review', '1:00|01:00'],
       tools: ['calendar.list_events'],
-      responseCardKinds: ['calendar-event'],
+      forbiddenResponseCardKinds: ['calendar-event'],
       calls: [
         {
           name: 'calendar.list_events',
@@ -223,7 +223,7 @@ export const ASSISTANT_SCENARIOS: QuestionCase[] = [
     expect: {
       matches: ['Family day', 'all.day'],
       excludes: ['October 31', '11:00 PM'],
-      responseCardKinds: ['calendar-event'],
+      forbiddenResponseCardKinds: ['calendar-event'],
       tools: ['calendar.list_events'],
     },
   },

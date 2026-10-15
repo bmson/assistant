@@ -447,7 +447,9 @@ describe('exact historical source projection', () => {
     const answer = renderMemoryReadAnswer(result, evidence, request);
     expect(answer).toContain('Recorded owner message');
     expect(answer).toContain('Earlier assistant claim (not verified fact)');
-    expect(answer).toContain('not a fresh check');
+    expect(answer).toContain('not evidence of owner intent');
+    expect(answer).toContain('“My Berlin flight is actually at 13:45, not 09:15.”');
+    expect(answer).toContain('“Your flight departs at 09:15.”');
   });
   it('reserves bounded evidence for both speakers when a long history search has many owner messages', () => {
     const matches = [
