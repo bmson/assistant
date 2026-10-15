@@ -990,7 +990,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
           .filter((item) => item.presence === 'attending')
           .map((item) => eventTitle(item.event));
         conflictRecommendations.push(
-          `Next: confirm attendance for ${uncertainEvents.join(' and ')}${confirmed.length ? `; if attending, compare with ${confirmed.join(' and ')} and ask the organizer for the lower-priority event whether a move is possible` : '; if attending both, choose which to keep and ask the other organizer whether a move is possible'}.`,
+          `Next: confirm attendance for ${uncertainEvents.join(' and ')}${confirmed.length ? `; if attending, compare with ${confirmed.join(' and ')}, choose which event you would like to move, and ask its organizer whether a move is possible` : '; if attending both, choose which to keep and ask the other organizer whether a move is possible'}.`,
         );
       }
     }

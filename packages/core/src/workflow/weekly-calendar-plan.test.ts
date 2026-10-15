@@ -504,8 +504,9 @@ describe('weeklyCalendarPlan', () => {
     expect(text).toContain('Attendance is unconfirmed for Shared hold.');
     expect(text).toContain('Next: confirm attendance for Shared hold');
     expect(text).toContain(
-      'ask the organizer for the lower-priority event whether a move is possible',
+      'if attending, compare with Review, choose which event you would like to move, and ask its organizer whether a move is possible',
     );
+    expect(text).not.toContain('lower-priority');
   });
 
   it('offers concrete conditional choices for verified conflicts without choosing what to move', () => {
