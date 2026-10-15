@@ -10,6 +10,10 @@ import {
   toolCalls,
 } from '@assistant/db';
 import { assertAllocatedTestTarget } from '@assistant/db/test-target';
+import {
+  conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
+} from '@assistant/persistence';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { countries, germany, resultFor } from '../explicit-source-read.test-fixtures.js';
@@ -49,6 +53,9 @@ describe('explicit source bundle through allocated PostgreSQL executor', () => {
       const agentId = agent.id;
       const conversationId = randomUUID();
       const taskId = randomUUID();
+      const priorTaskId = randomUUID();
+      const historyMessageId = randomUUID();
+      const historyText = 'I visited Germany in 2024.';
       const request = prompt;
       await db.insert(conversations).values({
         id: conversationId,
@@ -56,6 +63,27 @@ describe('explicit source bundle through allocated PostgreSQL executor', () => {
         channel: 'chat',
         trust: 'owner',
         title: 'Synthetic explicit source bundle',
+      });
+      await db.insert(tasks).values({
+        id: priorTaskId,
+        agentId,
+        conversationId,
+        type: 'chat_turn',
+        status: 'done',
+        trust: 'owner',
+        createdAt: new Date('2024-10-20T12:00:00Z'),
+        trigger: {},
+        state: {},
+      });
+      await db.insert(messages).values({
+        id: historyMessageId,
+        conversationId,
+        taskId: priorTaskId,
+        role: 'user',
+        origin: 'owner',
+        text: historyText,
+        parts: [],
+        createdAt: new Date('2024-10-20T12:00:00Z'),
       });
       await db.insert(tasks).values({
         id: taskId,
@@ -104,7 +132,31 @@ describe('explicit source bundle through allocated PostgreSQL executor', () => {
             const failed = failCalendar && toolName === 'calendar.search_events';
             const result = failed
               ? { error: 'Synthetic calendar unavailable' }
-              : resultFor(toolName, args);
+              : toolName === 'conversations.search'
+                ? {
+                    mode: 'semantic',
+                    matches: [
+                      {
+                        messageId: historyMessageId,
+                        conversationId,
+                        text: historyText,
+                        role: 'user',
+                        origin: 'owner',
+                        createdAt: '2024-10-20T12:00:00.000Z',
+                        sourceRevision: conversationMessageSourceRevision(
+                          historyMessageId,
+                          historyText,
+                        ),
+                        speakerRevision: conversationMessageSpeakerRevision(
+                          historyMessageId,
+                          historyText,
+                          'user',
+                          'owner',
+                        ),
+                      },
+                    ],
+                  }
+                : resultFor(toolName, args);
             const [stored] = await db
               .insert(toolCalls)
               .values({
@@ -131,19 +183,40 @@ describe('explicit source bundle through allocated PostgreSQL executor', () => {
           toolCalls: [],
           finishReason: 'stop' as const,
         })),
-        object: vi.fn(async () => ({
-          ok: true,
-          object: {
-            selections: [
-              {
-                sourceKey: 'mail:thread-1:mail-1',
-                quote: 'Germany booking for 2025-10-10. Confirmation ABC-123.',
-                country: 'Germany',
-                classification: 'booking',
-              },
-            ],
-          },
-        })),
+        object: vi.fn(async (..._arguments: unknown[]) => {
+          const owner =
+            prompt === countries
+              ? [
+                  {
+                    sourceKey: `message:${historyMessageId}`,
+                    quote: 'I visited Germany in 2024.',
+                    country: 'Germany',
+                    classification: 'completed_visit',
+                    date: '2024',
+                  },
+                ]
+              : [];
+          return {
+            ok: true,
+            object: {
+              selections: [
+                ...owner,
+                {
+                  sourceKey: 'mail:thread-1:mail-1',
+                  quote: 'Germany booking for 2025-10-10. Confirmation ABC-123.',
+                  country: 'Germany',
+                  classification: 'booking',
+                  date: '2025-10-10',
+                },
+              ],
+              claims: [
+                { text: 'Your Germany booking is for 2025-10-10.', evidence: [owner.length] },
+              ],
+              addressed:
+                prompt === countries ? ['country_count', 'conflicts'] : ['chronology', 'conflicts'],
+            },
+          };
+        }),
         embed: vi.fn(async () => {
           throw new Error('No ambient personal retrieval');
         }),
@@ -184,7 +257,20 @@ describe('explicit source bundle through allocated PostgreSQL executor', () => {
         steps: [],
         missingInfo: [],
       });
-      const incomplete = failCalendar || name === 'step-bound gap';
+      const incomplete = failCalendar || name === 'step-bound gap' || prompt === germany;
+      if (prompt === countries && !failCalendar && name !== 'step-bound gap') {
+        const synthesis = router.object.mock.calls[0]?.[1] as { prompt: string } | undefined;
+        const payload = JSON.parse(synthesis?.prompt ?? '{}');
+        expect(payload.sources).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              key: `message:${historyMessageId}`,
+              owner: true,
+              body: 'I visited Germany in 2024.',
+            }),
+          ]),
+        );
+      }
       expect(result.outcome).toBe(incomplete ? 'needs_attention' : 'done');
       const firstReads =
         prompt === germany
@@ -203,11 +289,26 @@ describe('explicit source bundle through allocated PostgreSQL executor', () => {
         incomplete ? 'needs_attention' : 'done',
       );
       const persisted = await db.query.messages.findMany({ where: eq(messages.taskId, taskId) });
-      const answer = persisted.find((row) => row.role === 'assistant')?.text ?? '';
+      const assistantMessage = persisted.find((row) => row.role === 'assistant');
+      const answer = assistantMessage?.text ?? '';
+      expect(
+        (assistantMessage?.parts as Array<{ type: string }> | undefined)?.some(
+          (part) => part.type === 'data-card',
+        ),
+      ).toBe(false);
       expect(answer).toContain('mail:');
       expect(answer).toContain('calendar:');
-      if (incomplete) expect(answer).toContain('coverage incomplete');
-      else expect(answer).toContain('booking — Germany');
+      if (failCalendar || name === 'step-bound gap')
+        expect(answer).toContain('coverage incomplete');
+      if (prompt === germany) {
+        expect(answer).toContain('I cannot confirm when you last completed this trip');
+        expect(answer).not.toContain('country/territory');
+      } else if (name !== 'step-bound gap')
+        expect(answer).toContain('At least **1 supported country/territory name**');
+      else {
+        expect(answer).toContain('could not reliably complete');
+        expect(answer).not.toContain('At least **0');
+      }
       expect(answer).not.toContain('Unsupported old answer');
       expect(answer).not.toContain('Synthetic calendar unavailable');
       expect(router.object.mock.calls.length).toBeLessThanOrEqual(1);

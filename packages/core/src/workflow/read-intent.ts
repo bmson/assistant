@@ -75,6 +75,11 @@ export interface PersonalReadRequest {
   explicitSource?: 'history' | 'mail' | 'calendar';
   sourceReadText?: string;
   travelHistory?: boolean;
+  travelCountryCount?: boolean;
+  travelChronology?: boolean;
+  requestedConflicts?: boolean;
+  sourcePlanRequested?: boolean;
+  sourceOutputFormat?: 'table' | 'checklist';
   /** Broad historical search boundary is the actual task's owner-clock instant. */
   sourceReadBefore?: string;
   /** Literal named-person scope; calendar membership alone never proves attendance. */
@@ -2014,8 +2019,9 @@ function explicitPrivateSourceRequest(
   if (!history && (isCompoundTripDiscovery(text) || isUpcomingFlightDiscovery(text)))
     return undefined;
   const mail =
-    /\b(?:emails?|gmail|mailbox|inbox|travel mail)\b/i.test(positive) &&
-    !explicitlyProhibitsPrivateRead(text, 'email');
+    /\b(?:emails?|gmail|mailbox|inbox|travel mail|(?:authorized|my|our) messages)\b/i.test(
+      positive,
+    ) && !explicitlyProhibitsPrivateRead(text, 'email');
   const calendar =
     /\bcalendars?\b/i.test(positive) && !explicitlyProhibitsPrivateRead(text, 'calendar');
   if (Number(history) + Number(mail) + Number(calendar) < 2) return undefined;
@@ -2024,33 +2030,34 @@ function explicitPrivateSourceRequest(
       positive,
     );
   const question = positive.split(/[?.!\n]/u)[0]?.trim() || positive;
-  const names =
-    question
-      .match(/\b[A-Z][\p{L}-]{2,}\b/gu)
-      ?.filter(
-        (word) =>
-          ![
-            'When',
-            'Where',
-            'What',
-            'Which',
-            'How',
-            'Check',
-            'Read',
-            'Search',
-            'Compare',
-            'Build',
-            'Use',
-            'Assistant',
-          ].includes(word),
-      ) ?? [];
-  // Names are literal owner terms. Broad travel requests search travel records,
-  // never a guessed country list or an inbox received-date proxy for travel.
-  const topic = names.length
-    ? names.slice(0, 3).join(' ')
-    : travel
-      ? 'travel'
-      : focusedMemoryTopic(question);
+  // Reuse literal topic extraction. Sentence-leading verbs and source/window
+  // instructions are not proper names. A broad review has no keyword scope.
+  const topicText = question
+    .replace(/\b(?:review|compare|summari[sz]e|examine|check|read|search|find|show|build)\b/giu, '')
+    .replace(
+      /\b(?:next|last|past)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:(?:local|calendar)\s+)*days?\b/giu,
+      '',
+    )
+    .replace(
+      /\b(?:relevant|authorized|local|calendar|days?|messages?|emails?|history|assistant|earlier|conversations?|booking)\b/giu,
+      '',
+    );
+  const topicHead =
+    /^\s*(?:please\s+)?(?:review|compare|summari[sz]e|examine|check|read|search|find|show)\s+([\s\S]*?)(?=\b(?:next|last|past|using|from|with|across|over|during)\b|$)/iu.exec(
+      question,
+    )?.[1];
+  const terms = privateQueryTerms(
+    (topicHead ?? topicText).replace(
+      /\b(?:emails?|messages?|calendars?|history|assistant|authorized|relevant|all|local|private|personal)\b/giu,
+      '',
+    ),
+  );
+  const broadTravel = travel && /\b(?:how many|countries|count|ledger)\b/i.test(question);
+  const topic = broadTravel ? 'travel' : terms.join(' ');
+  const temporalText = text.replace(
+    /\bnext\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:(?:local|calendar)\s+)*days?\b/giu,
+    (_, count: string) => `next ${emailReviewNumber(count) ?? count} days`,
+  );
   const children: PersonalReadRequest[] = [];
   if (history)
     children.push({
@@ -2072,14 +2079,9 @@ function explicitPrivateSourceRequest(
       kind: 'email',
       explicitSource: 'mail',
       queryTerms: [topic],
-      mailQuery: names.length
-        ? names
-            .slice(0, 3)
-            .map((name) => `"${name}"`)
-            .join(' ')
-        : travel
-          ? '{travel flight hotel booking itinerary trip}'
-          : topic,
+      mailQuery: broadTravel
+        ? '{travel flight hotel booking itinerary trip}'
+        : topic || '-in:spam -in:trash',
       firstToolName: 'gmail.search',
       requiresThreadRead: true,
     });
@@ -2098,11 +2100,13 @@ function explicitPrivateSourceRequest(
         options.now ?? new Date(),
       );
       child.timeZone = options.timeZone;
-      if (hasExplicitTemporalPhrase(text)) {
-        const temporal = resolveTemporalIntent(text, 'calendar', false, options);
+      if (hasExplicitTemporalPhrase(temporalText)) {
+        const temporal = resolveTemporalIntent(temporalText, 'calendar', false, options);
         if (temporal.kind === 'resolved') {
           child.timeWindow = temporal.intent.window;
           child.temporalIntent = temporal.intent;
+          child.firstToolName = 'calendar.list_events';
+          child.queryTerms = [];
         } else
           child.temporalIssue =
             temporal.kind === 'unsupported'
@@ -2115,11 +2119,28 @@ function explicitPrivateSourceRequest(
     }
     children.push(child);
   }
+  if (!topic && children.some((child) => child.firstToolName === 'calendar.list_events'))
+    children.sort(
+      (left, right) =>
+        Number(right.explicitSource === 'calendar') - Number(left.explicitSource === 'calendar'),
+    );
   return {
     kind: 'memory',
     sourceReads: children,
     sourceReadText: text,
     travelHistory: travel,
+    travelCountryCount:
+      travel && /\b(?:how many|count|number of)\b[^.!?]{0,100}\bcountries\b/i.test(text),
+    travelChronology: travel && /\b(?:last|latest|most recent|when did i)\b/i.test(question),
+    requestedConflicts: /\b(?:conflicts?|conflicting|contradict\w*|disputed)\b/i.test(positive),
+    sourcePlanRequested:
+      /\b(?:plan|checklist|preparation|prepare|prioriti[sz]\w*|next steps?)\b/i.test(positive),
+    ...(/\bchecklist\b/i.test(positive)
+      ? { sourceOutputFormat: 'checklist' as const }
+      : /\btable\b/i.test(positive)
+        ? { sourceOutputFormat: 'table' as const }
+        : {}),
+    sourceReadBefore: (options.now ?? new Date()).toISOString(),
     queryTerms: [],
     firstToolName: children[0]?.firstToolName ?? 'conversations.search',
     requiresThreadRead: false,
@@ -2133,6 +2154,9 @@ export function explicitSourceEvidence(
 ): ReadToolEvidence[] {
   return evidence.filter((row) => {
     if (row.fromCurrentTask === false) return false;
+    const result = objectRecord(row.result);
+    if (result?.mode === 'unavailable' || result?.status === 'unavailable' || result?.error)
+      return false;
     const args = argsRecord(row);
     if (request.explicitSource === 'history')
       return (
@@ -2145,9 +2169,11 @@ export function explicitSourceEvidence(
       );
     if (request.explicitSource === 'mail') return matchingGmailSearch(row, request);
     return (
-      row.toolName === 'calendar.search_events' &&
+      row.toolName === request.firstToolName &&
       succeeded(row) &&
-      args?.query === request.queryTerms.join(' ') &&
+      (request.firstToolName === 'calendar.list_events'
+        ? args?.query === undefined
+        : args?.query === request.queryTerms.join(' ')) &&
       !args?.calendarIds &&
       args?.timeMin === request.timeWindow?.timeMin &&
       args?.timeMax === (request.timeWindow?.timeMax ?? request.sourceReadBefore) &&
@@ -2176,6 +2202,29 @@ function explicitSourceChild(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): PersonalReadRequest | undefined {
   const children = request.sourceReads ?? [];
+  const mail = children.find((child) => child.explicitSource === 'mail');
+  const calendar = children.find(
+    (child) =>
+      child.explicitSource === 'calendar' && child.firstToolName === 'calendar.list_events',
+  );
+  if (mail?.mailQuery === '-in:spam -in:trash' && calendar) {
+    const topics = explicitCalendarPages(calendar, evidence)
+      .flatMap((row) => {
+        const events = objectRecord(row.result)?.events;
+        return Array.isArray(events)
+          ? events
+              .map((event) =>
+                String(objectRecord(event)?.summary ?? '')
+                  .replace(/[^\p{L}\p{N} ]/gu, ' ')
+                  .trim()
+                  .slice(0, 100),
+              )
+              .filter(Boolean)
+          : [];
+      })
+      .slice(0, 3);
+    if (topics.length) mail.mailQuery = `{${topics.map((topic) => `"${topic}"`).join(' ')}}`;
+  }
   // No continuation or retry may starve another requested source's first read.
   const unread = children.find((child) => {
     if (child.temporalIssue || child.scopeIssue) return false;
@@ -3404,7 +3453,8 @@ export function nextRequiredReadTool(
         (row) =>
           row.fromCurrentTask !== false &&
           row.toolName === request.firstToolName &&
-          argsRecord(row)?.query === request.queryTerms.join(' ') &&
+          (request.firstToolName === 'calendar.list_events' ||
+            argsRecord(row)?.query === request.queryTerms.join(' ')) &&
           argsRecord(row)?.timeMin === request.timeWindow?.timeMin &&
           argsRecord(row)?.timeMax === (request.timeWindow?.timeMax ?? request.sourceReadBefore) &&
           (argsRecord(row)?.pageToken ?? undefined) === (pages.length ? token : undefined),
@@ -3638,7 +3688,9 @@ export function groundReadToolInput(
     const pages = explicitCalendarPages(request, evidence);
     const token = objectRecord(pages.at(-1)?.result)?.nextPageToken;
     return {
-      query: request.queryTerms.join(' '),
+      ...(request.firstToolName === 'calendar.search_events'
+        ? { query: request.queryTerms.join(' ') }
+        : {}),
       maxResults: 50,
       ...(request.timeWindow
         ? { timeMin: request.timeWindow.timeMin, timeMax: request.timeWindow.timeMax }

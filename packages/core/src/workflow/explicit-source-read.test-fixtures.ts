@@ -85,6 +85,12 @@ export function resultFor(toolName: string, args: Record<string, unknown>) {
         eventId: 'event-1',
         calendarId: 'owner',
         summary: 'Germany booking',
+        links: [
+          {
+            type: 'calendar',
+            url: 'https://calendar.google.com/calendar/event?eid=synthetic-event',
+          },
+        ],
         start: '2025-10-11T07:00:00Z',
         end: '2025-10-12T07:00:00Z',
       },
