@@ -1131,6 +1131,14 @@ describe('a trip to a generic airport', () => {
         "How long to get to the airport tomorrow? I'm at 123 Market Street, San Francisco, CA 94103, leaving at 8am.",
         '123 Market Street, San Francisco, CA 94103',
       ],
+      [
+        'How long to get to the airport tomorrow from my apartment at 123 Main Street, San Francisco, CA 94103, leaving at 8am?',
+        '123 Main Street, San Francisco, CA 94103',
+      ],
+      [
+        'How long to get to the airport tomorrow from my home at 123 Main Street, San Francisco, CA 94103, leaving at 8am?',
+        '123 Main Street, San Francisco, CA 94103',
+      ],
     ]) {
       const lookup = detectLiveLookup([{ role: 'user', content }]);
       expect(lookup?.airportIntent).toBe(true);
@@ -1155,7 +1163,6 @@ describe('a trip to a generic airport', () => {
     'How long to get to the airport tomorrow from my hotel, leaving at 8am?',
     'How long to get to the airport tomorrow from my hotel in Berlin, leaving at 8am?',
     'How long to get to the airport tomorrow from my home in Palo Alto, leaving at 8am?',
-    'How long to get to the airport tomorrow from my apartment at 123 Main Street, leaving at 8am?',
     "How long to get to the airport tomorrow? I'm here, leaving at 8am.",
     'How long to get to the airport tomorrow from my current location, leaving at 8am?',
   ])('does not route from an unresolved deictic origin: %s', (content) => {

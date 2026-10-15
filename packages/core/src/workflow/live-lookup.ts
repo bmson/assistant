@@ -581,13 +581,18 @@ function airportCalendarCoverage(
 
 function airportOrigin(request: string): string | undefined {
   const match =
-    /\b(?:from|starting\s+(?:at|from)|origin\s*(?:is|:)|(?:i\s+am|i'm|we\s+are|we're|currently)\s+at)\s+([^.;?!\n]+?)(?=\s+\b(?:leave|leaving|depart|departing|head\s+out|at|around|about)\b|[.;?!\n]|$)/i.exec(
+    /\b(?:from|starting\s+(?:at|from)|origin\s*(?:is|:)|(?:i\s+am|i'm|we\s+are|we're|currently)\s+at)\s+([^.;?!\n]+?)(?=\s+\b(?:leave|leaving|depart|departing|head\s+out)\b|[.;?!\n]|$)/i.exec(
       request,
     );
-  const value = match?.[1]
+  const capturedValue = match?.[1]
     ?.trim()
+    .replace(/\s+(?:at|around|about)\s+\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)$/i, '')
     .replace(/[,;]+$/, '')
     .replace(/\s+/g, ' ');
+  const explicitAddressAfterDeictic = capturedValue?.match(
+    /^(?:my|our|the)\s+(?:home|house|place|apartment|flat|condo|residence|hotel|work|office|workplace)\s+at\s+(\d{1,6}\s+.+)$/i,
+  )?.[1];
+  const value = explicitAddressAfterDeictic ?? capturedValue;
   if (!value || isUnresolvedAirportOrigin(value)) return undefined;
   return value;
 }
