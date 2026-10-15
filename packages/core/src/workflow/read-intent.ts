@@ -318,6 +318,29 @@ function explicitlyProhibitsPrivateRead(
   );
 }
 
+export interface FamilyBirthdaySourceScope {
+  conversationHistory: boolean;
+  savedMemory: boolean;
+}
+
+/** Preserve default family-recall coverage, while honoring explicit source boundaries. */
+export function familyBirthdaySourceScope(text: string): FamilyBirthdaySourceScope {
+  const positiveText = positivePrivateReadText(text);
+  const historyRequested = CONVERSATION_HISTORY_REQUEST.test(positiveText);
+  const savedMemoryRequested =
+    /\b(?:saved|long[- ]term|personal)\s+memor(?:y|ies)\b/i.test(positiveText) &&
+    READ_OR_QUESTION.test(positiveText);
+  const historyProhibited = explicitlyProhibitsPrivateRead(text, 'history');
+  const savedMemoryProhibited = explicitlyProhibitsPrivateRead(text, 'memory');
+  const explicitlyScoped =
+    historyRequested || savedMemoryRequested || historyProhibited || savedMemoryProhibited;
+
+  return {
+    conversationHistory: !historyProhibited && (historyRequested || !explicitlyScoped),
+    savedMemory: !savedMemoryProhibited && (savedMemoryRequested || !explicitlyScoped),
+  };
+}
+
 function explicitlyRequestsCalendarOverlapSummary(text: string): boolean {
   const overlap = `(?:overlaps?|conflicts?|double[ -]?booked|clashes?)`;
   const overlapPattern = new RegExp(`\\b${overlap}\\b`, 'i');
@@ -2630,14 +2653,19 @@ function detectPersonalReadRequestInternal(
   if (graphRead || driveRead || memoryRead) {
     const kind: PersonalReadKind = graphRead ? 'knowledge_graph' : driveRead ? 'drive' : 'memory';
     const familyBirthday = kind === 'memory' ? requestedFamilyBirthdays(latest) : undefined;
+    const familySourceScope = familyBirthday
+      ? familyBirthdaySourceScope(originalLatest)
+      : undefined;
     const conversationHistoryRequested =
-      kind === 'memory' && (historyReadAllowed || familyBirthday !== undefined);
+      kind === 'memory' && (familySourceScope?.conversationHistory ?? historyReadAllowed);
     const savedMemoryRequested =
       kind === 'memory' &&
-      !savedMemoryReadProhibited &&
-      (!conversationHistoryRequested ||
-        familyBirthday !== undefined ||
-        /\b(?:saved|long[- ]term|personal)\s+memor(?:y|ies)\b/i.test(memoryLookupText(latest)));
+      (familySourceScope?.savedMemory ??
+        (!savedMemoryReadProhibited &&
+          (!conversationHistoryRequested ||
+            /\b(?:saved|long[- ]term|personal)\s+memor(?:y|ies)\b/i.test(
+              memoryLookupText(latest),
+            ))));
     const focusedQuery = kind === 'memory' ? focusedMemoryTopic(latest) : undefined;
     const historyAnchor = conversationHistoryRequested ? namedHistoricalAnchor(latest) : undefined;
     return {

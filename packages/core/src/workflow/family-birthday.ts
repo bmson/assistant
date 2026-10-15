@@ -185,6 +185,7 @@ const safe = (value: string) => value.replace(/[[\]<>*_`|\\]/gu, '').replace(/[\
 /** All model fields are proposals; quotes, speaker, identity and dates are rechecked here. */
 export function familyBirthdayProjection(input: {
   request: FamilyBirthdayRequest;
+  sourceScope?: { conversationHistory: boolean; savedMemory: boolean };
   selections: Quote[];
   facts?: FamilyBirthdayFact[];
   sources: FamilyBirthdaySource[];
@@ -421,6 +422,16 @@ export function familyBirthdayProjection(input: {
       gaps.add('I could not establish that these records cover everyone you mean.');
   }
   const blocked = gaps.size > 0 || !verified;
+  const historyChecked = input.sourceScope?.conversationHistory !== false;
+  const memoriesChecked = input.sourceScope?.savedMemory !== false;
+  const coverageDescription =
+    historyChecked && memoriesChecked
+      ? 'checked bounded chat history and saved memories'
+      : memoriesChecked
+        ? 'checked saved memories only'
+        : historyChecked
+          ? 'checked chat history only'
+          : 'checked no personal sources';
   const question = !rows.length
     ? 'Which family members should I look for?'
     : blocked
@@ -431,7 +442,7 @@ export function familyBirthdayProjection(input: {
       ...(verified ? ['Confirmed in the returned records:'] : []),
       ...lines,
       ...correctionLinks,
-      'Coverage: bounded Assistant history and saved-memory records; no mail, calendar or accounts were changed.',
+      `Coverage: ${coverageDescription}; no mail, calendar or accounts were changed.`,
       ...[...gaps].map((gap) => `- ${gap}`),
       ...(question ? [question] : []),
     ].join('\n\n'),

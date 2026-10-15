@@ -7,6 +7,7 @@ import {
   familyBirthdayProjection,
   requestedFamilyBirthdays,
 } from './family-birthday.js';
+import { familyBirthdaySourceScope } from './read-intent.js';
 import type { ActionEvidence } from './response-contract.js';
 
 const SelectionSchema = z.object({
@@ -1051,15 +1052,19 @@ export function familyBirthdayReadProjection(
 ) {
   const request = requestedFamilyBirthdays(requestText);
   if (!request) return { text: '', blocked: true };
+  const sourceScope = familyBirthdaySourceScope(requestText);
   let omitted = false;
-  const allSources = memoryReadSources(evidence, requestText, () => {
+  const permittedTools = new Set<string>([
+    ...(sourceScope.conversationHistory ? ['conversations.search'] : []),
+    ...(sourceScope.savedMemory ? ['memory.recall'] : []),
+  ]);
+  const scopedEvidence = evidence.filter((row) => permittedTools.has(row.toolName));
+  const allSources = memoryReadSources(scopedEvidence, requestText, () => {
     omitted = true;
   });
   const sources = selectorVisibleSources(allSources);
-  const reads = evidence.filter(
-    (row) =>
-      row.fromCurrentTask !== false &&
-      ['conversations.search', 'memory.recall'].includes(row.toolName),
+  const reads = scopedEvidence.filter(
+    (row) => row.fromCurrentTask !== false && permittedTools.has(row.toolName),
   );
   const success = (row: ActionEvidence) => {
     const result = record(row.result);
@@ -1081,8 +1086,10 @@ export function familyBirthdayReadProjection(
   const incompleteCoverage =
     omitted ||
     sources.length < allSources.length ||
-    !reads.some((row) => row.toolName === 'conversations.search' && success(row)) ||
-    !reads.some((row) => row.toolName === 'memory.recall' && success(row)) ||
+    permittedTools.size === 0 ||
+    [...permittedTools].some(
+      (toolName) => !reads.some((row) => row.toolName === toolName && success(row)),
+    ) ||
     [...attempts.values()].some((rows) => !rows.some(success));
   const validEnvelope =
     selection.version === 1 &&
@@ -1091,6 +1098,7 @@ export function familyBirthdayReadProjection(
     (selection.familyBirthdays?.length ?? 0) <= 8;
   return familyBirthdayProjection({
     request,
+    sourceScope,
     selections: validEnvelope ? selection.selections : [],
     facts: validEnvelope ? selection.familyBirthdays : [],
     sources: sources.map((source) => ({

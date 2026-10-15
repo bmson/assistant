@@ -65,6 +65,99 @@ function saved(id: string, content: string, subjectContactId?: string) {
 }
 
 describe('grounded family birthday recall', () => {
+  it('routes a family read only to sources the owner authorized', () => {
+    const memoryOnlyText =
+      'When is my sister’s birthday? Do not read my previous chats; use my saved memories.';
+    const memoryOnly = detectPersonalReadRequest([{ role: 'user', content: memoryOnlyText }]);
+    expect(memoryOnly).toMatchObject({
+      kind: 'memory',
+      familyBirthday: expect.any(Object),
+      firstToolName: 'memory.recall',
+      searchSavedMemory: true,
+    });
+    if (!memoryOnly) throw new Error('Missing memory-only family read');
+    expect(memoryOnly).not.toHaveProperty('conversationQuery');
+    expect(nextRequiredReadTool(memoryOnly, [])).toBe('memory.recall');
+    const memoryRead = {
+      toolName: 'memory.recall',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: buildReadToolInput(memoryOnly, 'memory.recall', []),
+      result: { memories: [] },
+    };
+    expect(nextRequiredReadTool(memoryOnly, [memoryRead as never])).toBeUndefined();
+
+    const historyOnlyText =
+      'When is my sister Alex’s birthday? Do not read my saved memories; use previous conversations.';
+    const historyOnly = detectPersonalReadRequest([{ role: 'user', content: historyOnlyText }]);
+    expect(historyOnly).toMatchObject({
+      kind: 'memory',
+      familyBirthday: expect.any(Object),
+      firstToolName: 'conversations.search',
+      searchSavedMemory: false,
+    });
+    if (!historyOnly) throw new Error('Missing history-only family read');
+    expect(historyOnly).toHaveProperty('conversationQuery');
+    expect(nextRequiredReadTool(historyOnly, [])).toBe('conversations.search');
+    const conversationRead = {
+      toolName: 'conversations.search',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: buildReadToolInput(historyOnly, 'conversations.search', []),
+      result: { matches: [] },
+    };
+    expect(nextRequiredReadTool(historyOnly, [conversationRead as never])).toBeUndefined();
+  });
+
+  it('reports family source coverage only for authorized and checked sources', () => {
+    const memoryOnlyText =
+      'When is my sister’s birthday? Do not read my previous chats; use my saved memories.';
+    const memoryOnly = detectPersonalReadRequest([{ role: 'user', content: memoryOnlyText }]);
+    if (!memoryOnly) throw new Error('Missing memory-only family read');
+    const relation = 'Alex is my sister.';
+    const birthday = "Alex's birthday is March 4.";
+    const memoryEvidence = evidence(
+      [],
+      [
+        saved('family-relation', relation, 'contact-a'),
+        saved('family-birthday', birthday, 'contact-a'),
+      ],
+    );
+    const memorySelection = selection(
+      [{ ...fact, birthdaySelection: 1 }],
+      [
+        { sourceKey: 'memory:family-relation', quote: relation },
+        { sourceKey: 'memory:family-birthday', quote: birthday },
+      ],
+    );
+    const memoryResponse = enforceResponseContract('Alex’s birthday is March 4.', memoryEvidence, {
+      readRequest: memoryOnly,
+      requestText: memoryOnlyText,
+      memoryReadSelection: memorySelection,
+    });
+    expect(memoryResponse.blocked).toBe(false);
+    expect(memoryResponse.text).toContain('Coverage: checked saved memories only;');
+    expect(memoryResponse.text).not.toContain('Assistant history');
+
+    const historyOnlyText =
+      'When is my sister’s birthday? Do not read my saved memories; use previous conversations.';
+    const historyOnly = detectPersonalReadRequest([{ role: 'user', content: historyOnlyText }]);
+    if (!historyOnly) throw new Error('Missing history-only family read');
+    const historyRows = evidence([owner()]);
+    const historySelection = selection(
+      [fact],
+      [{ sourceKey: 'message:owner-1', quote: statement }],
+    );
+    const historyResponse = enforceResponseContract('Alex’s birthday is March 4.', historyRows, {
+      readRequest: historyOnly,
+      requestText: historyOnlyText,
+      memoryReadSelection: historySelection,
+    });
+    expect(historyResponse.blocked).toBe(false);
+    expect(historyResponse.text).toContain('Coverage: checked chat history only;');
+    expect(historyResponse.text).not.toContain('saved memories');
+  });
+
   it.each([
     question,
     'What are my brothers’ dates of birth?',
@@ -129,6 +222,7 @@ describe('grounded family birthday recall', () => {
     const result = project();
     expect(result.blocked).toBe(false);
     expect(result.text).toContain('**Alex** (sister): March 4. [Source](/chat/family-history)');
+    expect(result.text).toContain('Coverage: checked bounded chat history and saved memories;');
     expect(result.text).not.toContain('owner-1');
   });
   it('keeps a no-retention constraint separate from permission to read', () => {
