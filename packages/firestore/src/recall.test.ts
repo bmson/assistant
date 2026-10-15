@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { EmbeddingSpace, Records } from '@assistant/persistence';
-import { FieldValue } from '@google-cloud/firestore';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { FieldValue, Query } from '@google-cloud/firestore';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FirestoreGraphRecallRepository } from './graph-recall.js';
 import { FirestoreHistoryRecallRepository } from './history-recall.js';
 import { embeddingSpaceKey, FirestoreMemoryRepository } from './memory.js';
@@ -133,6 +133,60 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       const repo = new FirestoreHistoryRecallRepository(store, space);
       expect((await repo.messages(input())).map((row) => row.id)).toEqual(['real-history']);
       expect(await repo.segments(input())).toEqual([]);
+    });
+
+    it('validates segment provenance without loading message bodies, tool payloads or embeddings', async () => {
+      await conversation('current');
+      const start = new Date(before.getTime() - 2_000);
+      const end = before;
+      await message('projection-start', 'current', start);
+      await message('projection-end', 'current', end);
+      await store.doc('messages', 'projection-large-interior').set({
+        id: 'projection-large-interior',
+        conversationId: 'current',
+        createdAt: new Date(start.getTime() + 1_000),
+        channelMessageId: 'chat-reply:ordinary-source',
+        role: 'assistant',
+        text: 'A large tool-backed answer.',
+        toolPayload: 'private payload '.repeat(10_000),
+        embedding: FieldValue.vector(vector),
+      });
+      await store.doc('conversationSegments', 'projection-segment').set({
+        id: 'projection-segment',
+        agentId: 'owner',
+        conversationId: 'current',
+        startMessageId: 'projection-start',
+        endMessageId: 'projection-end',
+        summary: 'A clean segment with a large interior message.',
+        messageCount: 3,
+        startedAt: start,
+        endedAt: end,
+        embedding: FieldValue.vector(vector),
+        embeddingSpace: embeddingSpaceKey(space),
+      });
+      const projection = vi.spyOn(Query.prototype, 'select');
+      try {
+        const rows = await new FirestoreHistoryRecallRepository(store, space).segments(input());
+        expect(rows).toHaveLength(1);
+        const query = projection.mock.results.find((result) => result.type === 'return')?.value;
+        expect(query).toBeDefined();
+        if (!query) throw new Error('Expected the bounded source-validation query');
+        const fetched = await query.get();
+        expect(fetched.size).toBe(3);
+        const bodies = fetched.docs.map((snapshot) => snapshot.data());
+        expect(JSON.stringify(bodies).length).toBeLessThan(1_000);
+        expect(bodies.some((body) => body.channelMessageId === 'chat-reply:ordinary-source')).toBe(
+          true,
+        );
+        expect(bodies.every((body) => body.createdAt !== undefined)).toBe(true);
+        for (const body of bodies) {
+          expect(body).not.toHaveProperty('text');
+          expect(body).not.toHaveProperty('toolPayload');
+          expect(body).not.toHaveProperty('embedding');
+        }
+      } finally {
+        projection.mockRestore();
+      }
     });
 
     it('returns empty when every stored segment contains a fixture-only interior row', async () => {
