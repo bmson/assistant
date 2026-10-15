@@ -36,13 +36,22 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
     await (db as unknown as { $client: { end(): Promise<void> } }).$client.end();
   });
 
-  it('retains booked hotel/route facts and executes a checked comparison within existing caps', async () => {
+  it.each([
+    'separate pages',
+    'hotel directions',
+    'blocked hotel fallback',
+    'all sources blocked',
+    'focused flight',
+  ] as const)('retains source facts and bounded completion for %s', async (scenario) => {
     const agent = await db.query.agents.findFirst();
     if (!agent) throw new Error('Allocator fixture agent missing');
     const agentId = agent.id;
     const conversationId = randomUUID();
     const taskId = randomUUID();
-    const request = tripPrompt;
+    const focused = scenario === 'focused flight';
+    const request = focused
+      ? 'Find my next future flight using booking emails and calendar. State date, departure time with its time zone, route and flight number, and whether outbound or return. Keep it short, cite source links, and mark uncertainty. Do not book, send, or change anything.'
+      : tripPrompt;
     await db.insert(conversations).values({
       id: conversationId,
       agentId,
@@ -93,7 +102,72 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
       dispatch: vi.fn(
         async ({ toolName, args }: { toolName: string; args: Record<string, unknown> }) => {
           calls.push({ toolName, args });
-          const result = tripSourceResult(toolName, args);
+          let result = tripSourceResult(toolName, args);
+          if (focused && toolName === 'gmail.search') {
+            const search = result as {
+              results: Array<Record<string, unknown>>;
+              receipt: { covered: Record<string, unknown> };
+            };
+            search.results.push({
+              threadId: 'clock-thread',
+              subject:
+                'Passenger - KLM 702 - departs 6:00 AM local time - Confirmation code: ZXCV12',
+            });
+            search.receipt.covered = { count: 2, total: 2, unavailable: 0 };
+          }
+          if (focused && toolName === 'gmail.read_thread' && args.threadId === 'clock-thread') {
+            const body =
+              'Itinerary number: 123456789012\nKLM 702\nScheduled Departure\nNov 17, 2030, 6:00 am, Copenhagen (CPH-Airport)\nArrives\nNov 17, 2030, 7:25 am, Amsterdam (AMS-Schiphol)';
+            const page = result as Record<string, unknown>;
+            page.messages = [
+              {
+                messageId: 'clock-message',
+                subject:
+                  'Passenger - KLM 702 - departs 6:00 AM local time - Confirmation code: ZXCV12',
+                text: body,
+                sourceLength: body.length,
+                truncated: false,
+              },
+            ];
+          }
+          if (!focused && scenario !== 'separate pages' && toolName === 'web.search')
+            result = {
+              results: [
+                {
+                  url: 'https://hotel.example/canal-house/map',
+                  title: 'Location: Canal House',
+                  snippet: 'Taxi and public transport directions.',
+                },
+                {
+                  url: 'https://fallback.example/airport-transfer',
+                  title: 'Airport taxi and public transport',
+                  snippet: 'Taxi and public transport from CPH Airport to Canal House.',
+                },
+              ],
+            };
+          if (!focused && scenario !== 'separate pages' && toolName === 'web.fetch') {
+            const fail =
+              scenario === 'all sources blocked' ||
+              (scenario === 'blocked hotel fallback' && String(args.url).includes('hotel.example'));
+            if (fail) {
+              await db.insert(toolCalls).values({
+                taskId,
+                step: calls.length,
+                toolName,
+                args,
+                risk: 'autonomous',
+                status: 'failed',
+                error: 'HTTP403 challenge',
+              });
+              return { kind: 'rejected' as const, reason: 'execution failed: HTTP403 challenge' };
+            }
+            result = {
+              status: 200,
+              truncated: false,
+              finalUrl: args.url,
+              text: 'Public transport from CPH Airport to Canal House costs EUR 5 and takes 40 minutes.\n\nTaxi from CPH Airport to Canal House costs EUR 45 and takes 30–40 minutes.',
+            };
+          }
           const [stored] = await db
             .insert(toolCalls)
             .values({
@@ -162,40 +236,71 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
       missingInfo: [],
     });
     expect(result.outcome).toBe('needs_attention');
+    const expectedFetches = focused ? 0 : scenario === 'hotel directions' ? 1 : 2;
     expect(calls.map((call) => call.toolName)).toEqual([
       'calendar.list_events',
       'gmail.search',
-      'gmail.search',
+      ...(!focused ? ['gmail.search'] : []),
       'gmail.read_thread',
       'gmail.read_thread',
-      'maps.directions',
-      'web.search',
-      'web.fetch',
-      'web.fetch',
+      ...(!focused ? ['maps.directions', 'web.search'] : []),
+      ...Array.from({ length: expectedFetches }, () => 'web.fetch'),
     ]);
-    expect(calls.find((call) => call.toolName === 'maps.directions')?.args).toMatchObject({
-      origin: 'CPH Airport',
-      destination: 'Canal Street 42, Copenhagen',
-    });
-    expect(calls.filter((call) => call.toolName === 'web.fetch')).toHaveLength(2);
+    if (!focused)
+      expect(calls.find((call) => call.toolName === 'maps.directions')?.args).toMatchObject({
+        origin: 'CPH Airport',
+        destination: 'Canal Street 42, Copenhagen',
+      });
+    expect(calls.filter((call) => call.toolName === 'web.fetch')).toHaveLength(expectedFetches);
+    expect(
+      new Set(calls.filter((call) => call.toolName === 'web.fetch').map((call) => call.args.url))
+        .size,
+    ).toBe(expectedFetches);
     expect(calls.length).toBeLessThanOrEqual(16);
     expect(state.step).toBeLessThanOrEqual(lease.maxSteps);
     const persisted = await db.query.messages.findMany({ where: eq(messages.taskId, taskId) });
     const answer = persisted.find((row) => row.role === 'assistant')?.text ?? '';
-    expect(answer).toContain('Canal House');
-    expect(answer).toContain('2030-11-10 to 2030-11-17');
     expect(answer).toContain('KL702 CPH→AMS');
-    expect(answer).toContain('Direction inferred from the reversed itinerary route groups');
-    expect(answer).toContain('EUR 5');
-    expect(answer).toContain('EUR 45');
-    expect(answer).toContain('https://transit.example/route');
-    expect(answer).toContain('https://taxi.example/route');
-    expect(answer).toContain('https://mail.google.com/mail/u/0/#all/hotel-thread');
-    expect(answer).toContain('zone unknown');
-    expect(answer.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').split(/\s+/).length).toBeLessThanOrEqual(
-      330,
-    );
-    expect(answer).toContain('| Public transport | EUR 5 | 40 minutes |');
+    expect(answer).toContain('2030-11-17');
+    expect(answer).toContain('zone');
+    expect(answer).not.toContain('|---|');
+    if (focused) {
+      expect(answer).toContain('likely return (inferred from reversed itinerary route groups)');
+      expect(answer).toContain('local; zone unspecified');
+      expect(answer).toContain(
+        '[Local-clock confirmation](https://mail.google.com/mail/u/0/#all/clock-thread)',
+      );
+      expect(answer).toContain('CPH→AMS→BOS');
+      expect(answer).toContain('Example Air');
+      expect(answer).toContain('KLM');
+      expect(answer).not.toContain('nonstop');
+      expect(answer).not.toContain('Europe/Copenhagen');
+      expect(
+        answer.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').split(/\s+/).length,
+      ).toBeLessThanOrEqual(240);
+    } else {
+      expect(answer).toContain('Canal House');
+      expect(answer).toContain('2030-11-10 to 2030-11-17');
+      expect(answer).toContain('Direction inferred from the reversed itinerary route groups');
+      if (scenario === 'all sources blocked') {
+        expect(answer).not.toContain('EUR 5');
+        expect(answer).not.toContain('EUR 45');
+        expect(answer).toContain('complete endpoint-matched page is still needed');
+      } else {
+        expect(answer).toContain('- **Public transport:** EUR 5; 40 minutes.');
+        expect(answer).toContain('EUR 45');
+        expect(answer).toContain(
+          scenario === 'separate pages'
+            ? 'https://transit.example/route'
+            : scenario === 'hotel directions'
+              ? 'https://hotel.example/canal-house/map'
+              : 'https://fallback.example/airport-transfer',
+        );
+      }
+      expect(
+        answer.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').split(/\s+/).length,
+      ).toBeLessThanOrEqual(360);
+    }
     expect(answer).not.toContain('No hotel booking was found');
     expect(answer).not.toContain('flights and zones are confirmed');
     expect(router.embed).not.toHaveBeenCalled();

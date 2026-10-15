@@ -155,7 +155,11 @@ export function tripSourceResult(tool: string, args: Record<string, unknown>) {
     };
   }
   if (tool === 'maps.directions')
-    return { durationSeconds: 1800, mapsUrl: 'https://maps.google.com/?q=fixture' };
+    return {
+      destination: { label: 'Canal House' },
+      durationSeconds: 1800,
+      mapsUrl: 'https://maps.google.com/?q=fixture',
+    };
   if (tool === 'web.search')
     return {
       results: [
@@ -174,6 +178,8 @@ export function tripSourceResult(tool: string, args: Record<string, unknown>) {
   if (tool === 'web.fetch') {
     const taxi = String(args.url).includes('taxi');
     return {
+      status: 200,
+      truncated: false,
       finalUrl: args.url,
       text: `${taxi ? 'Taxi' : 'Public transport'} from CPH Airport to Canal House at Canal Street 42, Copenhagen costs EUR ${taxi ? '45' : '5'} and takes ${taxi ? '30' : '40'} minutes.`,
     };
