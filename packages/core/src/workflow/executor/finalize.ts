@@ -43,6 +43,7 @@ import {
   artifactExecutionFailure,
   artifactSharingVerificationFailure,
   requestedConditionalArtifactIntent,
+  requestedPrivateArtifactIntent,
 } from '../artifact-intent.js';
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
 import { CARD_NOT_BUILT, requestedCardIntent } from '../card-intent.js';
@@ -809,9 +810,12 @@ export async function stageModelFinalResponse(
       outcome: 'failed',
     });
   }
-  const conditionalArtifact = requestedConditionalArtifactIntent(latestUserText(window) ?? '');
-  const sharingFailure = conditionalArtifact
-    ? artifactSharingVerificationFailure(conditionalArtifact, rows)
+  const artifactRequest = latestUserText(window) ?? '';
+  const privacyIntent =
+    requestedPrivateArtifactIntent(artifactRequest) ??
+    requestedConditionalArtifactIntent(artifactRequest);
+  const sharingFailure = privacyIntent
+    ? artifactSharingVerificationFailure(privacyIntent, rows)
     : undefined;
   if (sharingFailure) {
     return stageFinalResponse(deps, task, state, window, {
