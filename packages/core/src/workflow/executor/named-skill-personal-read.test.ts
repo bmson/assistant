@@ -258,7 +258,13 @@ describe('named saved skill use during a personal read', () => {
     expect(JSON.stringify(state.skillRetrievalReceipts)).not.toContain(skill.steps);
   });
 
-  it.each(['valid advice', 'provider unavailable', 'rejected advice', 'truncated advice'])(
+  it.each([
+    'valid advice',
+    'literal replacement token advice',
+    'provider unavailable',
+    'rejected advice',
+    'truncated advice',
+  ])(
     'adds a source-checked next action for a receipt-bound skill request (%s)',
     async (condition) => {
       const actionSkill = {
@@ -325,7 +331,9 @@ describe('named saved skill use during a personal read', () => {
             nextStep:
               condition === 'rejected advice'
                 ? 'I moved the Design review.'
-                : 'Check whether you need to attend both.',
+                : condition === 'literal replacement token advice'
+                  ? 'Check whether you need to attend both $&.'
+                  : 'Check whether you need to attend both.',
           },
           finishReason: condition === 'truncated advice' ? 'length' : 'stop',
         } as never;
@@ -350,6 +358,8 @@ describe('named saved skill use during a personal read', () => {
       expect(final).toContain('Next step:');
       expect(final).toContain('attend both');
       expect(final).not.toContain('I moved');
+      if (condition === 'literal replacement token advice')
+        expect(final).toContain('Next step: Check whether you need to attend both $&.');
       expect(final.match(/^Next step:/gm)).toHaveLength(1);
       expect(f.router.object).toHaveBeenCalledOnce();
       expect(f.router.object.mock.calls[0]?.[1]).toMatchObject({

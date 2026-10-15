@@ -127,7 +127,7 @@ function savedSkillCalendarFallbackStep(
 function calendarSkillNextStepOutput(projection: string, nextStep: string): string {
   const existingStep = /^Next step: [^\r\n]*$/m;
   return existingStep.test(projection)
-    ? projection.replace(existingStep, `Next step: ${nextStep}`)
+    ? projection.replace(existingStep, () => `Next step: ${nextStep}`)
     : `${projection}\n\nNext step: ${nextStep}`;
 }
 
@@ -1031,6 +1031,7 @@ export async function stageModelFinalResponse(
           if (
             !checkedAdvice.blocked &&
             !checkedAdvice.groundingFallback &&
+            (!initialCheck.groundingFallback || skillStepMayReplacePresentationFallback) &&
             checkedAdvice.text === candidate
           ) {
             // Replace a presentation-only fallback with the accepted canonical
