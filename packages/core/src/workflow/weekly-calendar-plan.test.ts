@@ -183,6 +183,41 @@ describe('weeklyCalendarPlan', () => {
     expect(result.text).not.toContain('calendar changed');
   });
 
+  it('keeps estimated travel buffers out of workload hours and merges overlapping source events', () => {
+    const events = [
+      { eventId: 'council', start: '2026-10-14T17:00:00-07:00', end: '2026-10-14T18:00:00-07:00' },
+      { eventId: 'lesson', start: '2026-10-14T17:15:00-07:00', end: '2026-10-14T17:45:00-07:00' },
+      { eventId: 'meeting', start: '2026-10-14T18:00:00-07:00', end: '2026-10-14T19:30:00-07:00' },
+    ].map((event) => ({
+      ...event,
+      summary: event.eventId,
+      calendarId: 'shared',
+      blocksTime: true,
+      location: '120 Example Street',
+    }));
+    const text = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        busy: events.map(({ start, end }) => ({ start, end })),
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin, timeMax },
+            result: { events, complete: true, calendarRosterComplete: true, unavailable: [] },
+          },
+        ],
+      }) as never,
+    });
+    expect(text).toContain('estimated 30-minute travel buffer');
+    // 17:00–19:30 is 2.5 unique source hours, below the 3-hour evening heuristic.
+    // The overlap and 19:30–20:00 estimated return buffer must not inflate it.
+    expect(text).not.toContain('Evening-heavy estimate');
+    expect(text).toContain('attendance/travel unverified');
+  });
+
   it('reserves estimated travel time for a physical shared event while keeping attendance uncertain', () => {
     const shared = {
       eventId: 'shared-physical',

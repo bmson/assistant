@@ -716,6 +716,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const complete = (availabilityComplete || recoveredCoverage !== undefined) && eventComplete;
 
   const eventBusy: Array<{ start: number; end: number }> = [];
+  const workloadEventBusy: Array<{ start: number; end: number }> = [];
   const eventBusySources: Array<{
     event: PlainRecord;
     interval: { start: number; end: number };
@@ -751,6 +752,11 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       end: Math.min(end, interval.end + surroundingBufferMs),
     };
     eventBusy.push(blockingInterval);
+    const sourceInterval = {
+      start: Math.max(start, interval.start),
+      end: Math.min(end, interval.end),
+    };
+    if (sourceInterval.end > sourceInterval.start) workloadEventBusy.push(sourceInterval);
     eventBusySources.push({ event, interval: blockingInterval });
   }
   const explainedLodgingBusy = new Map<BusyInterval, PlainRecord>();
@@ -791,7 +797,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       candidateBusy,
       allDayBusySources.map(({ interval }) => interval),
     ),
-    ...eventBusy,
+    ...workloadEventBusy,
   ]);
   const potentialFocusIntervals: Array<{ start: number; end: number }> = [];
 
