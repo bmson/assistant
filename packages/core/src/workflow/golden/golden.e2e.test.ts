@@ -91,7 +91,7 @@ const workflowPlan = {
 };
 
 const EMAIL_REVIEW_CONFIRMATION_DRAFT =
-  'Owner decision required: choose whether to confirm this request before sending.\n\nIf clarification is needed: “Please clarify what confirmation is required for this request.”';
+  'Thanks for reaching out. Could you clarify what you need me to confirm about this request?';
 
 function emailReviewDraft(threadId: string) {
   return {
@@ -1096,6 +1096,74 @@ describe('golden tasks', () => {
       assessmentGaps: 1,
       unassessedThreadIds: ['request-a'],
     });
+
+    const ownerChoiceScaffold =
+      'Owner decision required: choose whether to confirm this request before sending.\n\nIf clarification is needed: “Please clarify what confirmation is required for this request.”';
+    const assessment = (draftBody: string) => ({
+      role: 'reason' as const,
+      value: {
+        items: [
+          {
+            threadId: 'request-a',
+            latestMessageId: 'request-a-latest',
+            disposition: 'draft',
+            recipient: 'vendor@example.net',
+            why: 'The sender asks for confirmation by Friday.',
+            whyMessageId: 'request-a-latest',
+            whyQuote: 'Could you confirm by Friday?',
+            deadline: { messageId: 'request-a-latest', quote: 'by Friday' },
+            draftBody,
+            draftSourceMessageIds: ['request-a-old', 'request-a-latest'],
+          },
+        ],
+      },
+    });
+    const scaffoldOnly = await runGoldenTask(db, agentId, {
+      ...fixture,
+      name: 'email-review-owner-choice-scaffold-remains-incomplete-after-repair',
+      objects: [
+        fixture.objects?.[0] ?? { role: 'reason', value: { threadIds: ['request-a'] } },
+        assessment(ownerChoiceScaffold),
+        assessment(ownerChoiceScaffold),
+      ],
+    });
+    createdTaskIds.push(scaffoldOnly.taskId);
+    expect(scaffoldOnly.status).toBe('needs_attention');
+    expect(scaffoldOnly.finalText).toContain('**Reply drafts not ready (1)**');
+    expect(scaffoldOnly.finalText).toContain('needs your answer before a reply can be drafted');
+    expect(scaffoldOnly.finalText).toContain(
+      '[Open the source thread](https://mail.google.com/mail/u/0/#all/request-a)',
+    );
+    expect(scaffoldOnly.finalText).not.toContain('**Draft:**');
+    expect(scaffoldOnly.finalText).not.toContain('Owner decision required');
+    expect(scaffoldOnly.finalText).not.toContain('No reply-worthy request was confirmed');
+    const [scaffoldTask] = await db.select().from(tasks).where(eq(tasks.id, scaffoldOnly.taskId));
+    expect(
+      TaskStateSchema.parse(scaffoldTask?.state).plannerState.emailReviewGeneration,
+    ).toMatchObject({
+      status: 'partial',
+      assessmentGaps: 1,
+      unassessedThreadIds: ['request-a'],
+      ownerDecisionThreadIds: ['request-a'],
+    });
+
+    const contextualCorrection = await runGoldenTask(db, agentId, {
+      ...fixture,
+      name: 'email-review-contextual-retry-corrects-owner-choice-scaffold',
+      objects: [
+        fixture.objects?.[0] ?? { role: 'reason', value: { threadIds: ['request-a'] } },
+        assessment(ownerChoiceScaffold),
+        assessment('Thanks for reaching out. Could you clarify what you need me to confirm?'),
+      ],
+    });
+    createdTaskIds.push(contextualCorrection.taskId);
+    expect(contextualCorrection.status).toBe('done');
+    expect(contextualCorrection.finalText).toContain('**Draft:**');
+    expect(contextualCorrection.finalText).toContain(
+      'Thanks for reaching out. Could you clarify what you need me to confirm?',
+    );
+    expect(contextualCorrection.finalText).not.toContain('Owner decision required');
+    expect(contextualCorrection.finalText).not.toContain('**Reply drafts not ready');
   });
 
   it('backfills a fully verified owner-replied thread from the bounded reserve pool', async (ctx) => {

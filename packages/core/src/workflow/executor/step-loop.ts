@@ -2102,6 +2102,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               )
             : [],
         );
+        const priorOwnerDecisionIds =
+          priorGeneration && typeof priorGeneration === 'object' && !Array.isArray(priorGeneration)
+            ? (priorGeneration as Record<string, unknown>).ownerDecisionThreadIds
+            : undefined;
         const alreadyAssessedIds = new Set(
           checkedAssessments.items.map((item) => item.thread.threadId),
         );
@@ -2155,6 +2159,16 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           previouslyUnassessed.size,
           reviewScope,
         );
+        const priorOwnerDecisionSet = new Set(
+          Array.isArray(priorOwnerDecisionIds)
+            ? priorOwnerDecisionIds.filter(
+                (id): id is string => typeof id === 'string' && selectedIds.includes(id),
+              )
+            : [],
+        );
+        coverage.ownerDecisionRequiredThreads = bounded.threads
+          .filter((thread) => priorOwnerDecisionSet.has(thread.threadId))
+          .map((thread) => ({ threadId: thread.threadId, subject: thread.subject }));
         const rankedCandidateIds = readRequest.emailReview.rankedCandidateIds;
         coverage.rankedMetadataThreads = rankedCandidateIds?.length;
         const nonNewsletterCandidates = Math.max(
@@ -2248,11 +2262,21 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         ];
         state.plannerState.emailReviewGeneration = {
           attempts: generation.attempts,
-          status: validated ? (assessmentGaps > 0 ? 'partial' : 'validated') : 'unavailable',
+          status: validated
+            ? assessmentGaps > 0
+              ? 'partial'
+              : 'validated'
+            : generation.ownerDecisionThreadIds.length > 0
+              ? 'partial'
+              : 'unavailable',
           assessmentGaps,
           issues: generation.issues,
           unassessedThreadIds,
+          ownerDecisionThreadIds: generation.ownerDecisionThreadIds,
         };
+        coverage.ownerDecisionRequiredThreads = bounded.threads
+          .filter((thread) => generation.ownerDecisionThreadIds.includes(thread.threadId))
+          .map((thread) => ({ threadId: thread.threadId, subject: thread.subject }));
         coverage.unassessedCompleteThreads = assessmentGaps;
         if (generation.sourceItems?.length) {
           const existing = state.plannerState.emailReviewAssessmentBatches;

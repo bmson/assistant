@@ -612,7 +612,7 @@ describe('bounded no-send email review', () => {
         deadline: deadlineQuote
           ? { messageId: thread.latestMessageId, quote: deadlineQuote }
           : null,
-        draftBody: 'Owner decision required: choose whether you plan to attend before sending.',
+        draftBody: 'Thanks for the reminder. Could you clarify the RSVP details for this event?',
       };
       return required(
         validateEmailReviewAnswer({ items: [item] }, [thread])?.items[0],
@@ -827,12 +827,10 @@ describe('bounded no-send email review', () => {
       ok: true,
       value: { items: [byFridayNoReply] },
     }));
-    expect(byFridayRepair.answer?.items[0]).toMatchObject({
-      disposition: 'draft',
-      deadlineQuote: 'by Friday',
-      draftBody: expect.stringMatching(/Owner decision required: add your answer/),
-    });
-    expect(byFridayRepair.answer?.items[0]?.draftBody).toContain('your preferred option by Friday');
+    expect(byFridayRepair.answer).toBeUndefined();
+    expect(byFridayRepair.ownerDecisionThreadIds).toEqual([byFridayThread.threadId]);
+    expect(byFridayRepair.attempts).toBe(2);
+    expect(byFridayRepair.issues).toContain('item_0:owner_decision_scaffolding_not_recipient_draft');
 
     const byTomorrowMessages = messages('please-reply-by-tomorrow');
     const byTomorrowLatest = required(byTomorrowMessages.at(-1), 'latest message');
@@ -858,7 +856,8 @@ describe('bounded no-send email review', () => {
       ok: true,
       value: { items: [byTomorrowNoReply] },
     }));
-    expect(byTomorrowRepair.answer?.items[0]?.deadlineQuote).toBe('by tomorrow');
+    expect(byTomorrowRepair.answer).toBeUndefined();
+    expect(byTomorrowRepair.ownerDecisionThreadIds).toEqual([byTomorrowThread.threadId]);
 
     const promotionalMessages = messages('promotional-reply-by-friday');
     const promotionalLatest = required(promotionalMessages.at(-1), 'latest message');
