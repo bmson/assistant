@@ -30,6 +30,7 @@ import {
 import { correctFlightWriteClaims } from './flight-write-contract.js';
 import { detectFutureWatchIntent, type FutureWatchIntent } from './future-watch-intent.js';
 import {
+  familyBirthdayReadProjection,
   type MemoryReadSelection,
   renderMemoryReadAnswer,
   validMemoryReadSelection,
@@ -4313,6 +4314,20 @@ function enforcePersonalReadGrounding(
         : [],
       groundingFallback: [
         'combined private-source answer rendered from exact current-task quotes and explicit source coverage',
+      ],
+    };
+  }
+  if (request.familyBirthday) {
+    const result = familyBirthdayReadProjection(
+      opts?.memoryReadSelection ?? { version: 1, status: 'unavailable', selections: [] },
+      evidence,
+      opts?.requestText ?? request.memoryQuery ?? '',
+    );
+    return {
+      ...result,
+      unsupported: result.blocked ? ['memory'] : [],
+      groundingFallback: [
+        'family relationships and birthday dates checked against owner source evidence',
       ],
     };
   }

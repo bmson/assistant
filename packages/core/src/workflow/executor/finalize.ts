@@ -1110,6 +1110,7 @@ export async function stageModelFinalResponse(
   if (
     !classifiedRead?.personCalendar &&
     !classifiedRead?.sourceReads &&
+    !classifiedRead?.familyBirthday &&
     (!contractOptions.readRequest?.includeCalendarBriefing ||
       cardRequested ||
       Boolean(refreshCardId)) &&

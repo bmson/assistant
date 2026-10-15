@@ -33,6 +33,7 @@ import {
   emailReviewNextThreadRead,
 } from './email-review.js';
 import { DEFAULT_TOOL_RESULT_CHAR_LIMIT, toolResultCharacterLimit } from './executor/util.js';
+import { type FamilyBirthdayRequest, requestedFamilyBirthdays } from './family-birthday.js';
 import { detectFutureWatchIntent } from './future-watch-intent.js';
 import { requestedCalendarPerson } from './person-calendar.js';
 
@@ -70,6 +71,7 @@ export type TemporalIntentResolution =
 
 export interface PersonalReadRequest {
   kind: PersonalReadKind;
+  familyBirthday?: FamilyBirthdayRequest;
   /** Explicit owner-requested private sources, scheduled fairly within the existing task cap. */
   sourceReads?: PersonalReadRequest[];
   explicitSource?: 'history' | 'mail' | 'calendar';
@@ -219,7 +221,7 @@ const SAME_SUBJECT_LOOKUP_OFFER =
   /\b(?:would you like me to|shall i|should i|i can)\s+(?:check|verify|look up|read|search for)\s+(?:that|it|the (?:details|confirmation)|(?:your|the|our) hotel(?: confirmation| reservation)?)\b/i;
 const MUTATING_OFFER =
   /\b(?:add|archive|book|cancel|create|delete|edit|forward|invite|move|reply|reschedule|save|schedule|send|submit|update)\b/i;
-const NEGATED_LOOKUP_VERB = String.raw`(?:look(?:\s+up)?|check|search|read|open|access|review|scan|inspect|consult|use)`;
+const NEGATED_LOOKUP_VERB = String.raw`(?:look(?:\s+up)?|check|search|read|open|access|review|scan|inspect|consult|use|recall|retrieve)`;
 
 function explicitlyProhibitsPrivateRead(
   text: string,
@@ -250,10 +252,17 @@ function explicitlyProhibitsPrivateRead(
     String.raw`\bwithout\s+${NEGATED_LOOKUP_VERB}(?:ing)?\b${clause}\b${sourceOwner}${accountSurface}\b`,
     'i',
   );
+  const memorySurface = String.raw`(?:(?:my|our|any|the|all)\s+)?(?:saved\s+)?(?:memor(?:y|ies)|(?:earlier|previous|prior|past)\s+(?:chats?|conversations?)|(?:conversation\s+)?history)\b`;
   return (
     direct.test(negatedClause) ||
     listed ||
     without.test(text) ||
+    (surface === 'memory' &&
+      (new RegExp(`^\\s*${memorySurface}`, 'i').test(negatedClause) ||
+        new RegExp(
+          `\\bwithout\\s+(?:${NEGATED_LOOKUP_VERB}(?:ing)?|using|retrieving)\\s+${memorySurface}`,
+          'i',
+        ).test(text))) ||
     (surface === 'calendar' && /^\s*(?:(?:any|the|all)\s+)?calendars?\b/i.test(negatedClause))
   );
 }
@@ -2495,19 +2504,24 @@ function detectPersonalReadRequestInternal(
     ((MEMORY_SURFACE.test(memoryLookupText(latest)) &&
       (READ_OR_QUESTION.test(latest) || verification)) ||
       (CONVERSATION_HISTORY_REQUEST.test(latest) && READ_OR_QUESTION.test(latest)) ||
-      AUTOBIOGRAPHICAL_READ.test(latest));
+      AUTOBIOGRAPHICAL_READ.test(latest) ||
+      requestedFamilyBirthdays(latest) !== undefined);
   if (graphRead || driveRead || memoryRead) {
     const kind: PersonalReadKind = graphRead ? 'knowledge_graph' : driveRead ? 'drive' : 'memory';
+    const familyBirthday = kind === 'memory' ? requestedFamilyBirthdays(latest) : undefined;
     const conversationHistoryRequested =
-      kind === 'memory' && CONVERSATION_HISTORY_REQUEST.test(latest);
+      kind === 'memory' &&
+      (CONVERSATION_HISTORY_REQUEST.test(latest) || familyBirthday !== undefined);
     const savedMemoryRequested =
       kind === 'memory' &&
       (!conversationHistoryRequested ||
+        familyBirthday !== undefined ||
         /\b(?:saved|long[- ]term|personal)\s+memor(?:y|ies)\b/i.test(memoryLookupText(latest)));
     const focusedQuery = kind === 'memory' ? focusedMemoryTopic(latest) : undefined;
     const historyAnchor = conversationHistoryRequested ? namedHistoricalAnchor(latest) : undefined;
     return {
       kind,
+      ...(familyBirthday ? { familyBirthday } : {}),
       queryTerms: conversationHistoryRequested
         ? privateQueryTerms(focusedQuery ?? latest)
         : contextualPrivateTerms(),
@@ -2517,11 +2531,15 @@ function detectPersonalReadRequestInternal(
         ? {
             conversationQuery: focusedQuery,
             ...(historyAnchor ? { conversationAnchorQuery: historyAnchor } : {}),
-            conversationFollowupQuery:
-              `Owner-authored statements and corrections about ${focusedQuery}`.slice(
-                0,
-                MAX_CONVERSATION_SEARCH_QUERY_CHARS,
-              ),
+            ...(!familyBirthday
+              ? {
+                  conversationFollowupQuery:
+                    `Owner-authored statements and corrections about ${focusedQuery}`.slice(
+                      0,
+                      MAX_CONVERSATION_SEARCH_QUERY_CHARS,
+                    ),
+                }
+              : {}),
             ...(requestsOwnerAssistantCorrectionComparison(latest)
               ? {
                   conversationCorrectionQuery: `Owner correction ${focusedQuery}`.slice(

@@ -1370,6 +1370,7 @@ export function responseCardsForFinal(input: {
   // normal cards below.
   const synthesizedRead = Boolean(
     input.readRequest?.sourceReads ||
+      input.readRequest?.familyBirthday ||
       input.readRequest?.emailReview ||
       input.readRequest?.includeCalendarBriefing ||
       input.readRequest?.weeklyCalendarPlan ||

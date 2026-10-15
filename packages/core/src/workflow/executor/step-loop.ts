@@ -111,6 +111,7 @@ import {
   renewTaskLease,
   sleepTask,
 } from '../machine.js';
+import { type MemoryReadSelection, selectMemoryReadAnswer } from '../memory-read-answer.js';
 import {
   isConversationLocalContext,
   isSelfContainedTextTransformation,
@@ -351,7 +352,8 @@ function personalReadNeedsAttention(
     weeklyPlanAssessment?: { coverageComplete: boolean; slotCount: number };
   },
 ): boolean {
-  if (request.personCalendar || request.sourceReads) return checked.blocked;
+  if (request.personCalendar || request.sourceReads || request.familyBirthday)
+    return checked.blocked;
   if (request.upcomingFlightDiscovery && checked.blocked) return true;
   if (!request.weeklyCalendarPlan) return false;
   return (
@@ -2322,7 +2324,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         readRequest,
         readToolEvidence.map((row) => ({ ...row, result: row.result })),
       );
-      if (restrictedChecklistResume && readRequest.sourceReads) {
+      if (restrictedChecklistResume && (readRequest.sourceReads || readRequest.familyBirthday)) {
         // A correction/cancellation cannot enter the general finalizer, which
         // also handles the original request's live reads and external effects.
         // Synthesize only this revision-bound lookup, using the same history
@@ -2353,7 +2355,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             : undefined;
         let selection =
           cached?.binding === binding && cached.completed === true
-            ? (cached.selection as ExplicitSourceSelection)
+            ? (cached.selection as ExplicitSourceSelection | MemoryReadSelection)
             : undefined;
         if (cached?.binding !== binding && state.step < task.maxSteps) {
           // Consume an existing step and record intent before a paid model call.
@@ -2362,20 +2364,31 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           state.plannerState.restrictedSourceRead = { binding, completed: false };
           if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state)))
             return LOST_LEASE;
-          selection = await selectExplicitSourceAnswer({
-            router,
-            taskId: task.id,
-            request: readRequest,
-            evidence: refreshed.rows,
-          });
+          selection = readRequest.sourceReads
+            ? await selectExplicitSourceAnswer({
+                router,
+                taskId: task.id,
+                request: readRequest,
+                evidence: refreshed.rows,
+              })
+            : await selectMemoryReadAnswer({
+                router,
+                taskId: task.id,
+                request: readRequest.memoryQuery ?? '',
+                evidence: refreshed.rows,
+              });
           state.plannerState.restrictedSourceRead = { binding, completed: true, selection };
           if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state)))
             return LOST_LEASE;
         }
         checked = enforceResponseContract(checked.text, refreshed.rows, {
           readRequest,
-          requestText: readRequest.sourceReadText,
-          ...(selection ? { explicitSourceSelection: selection } : {}),
+          requestText: readRequest.sourceReadText ?? readRequest.memoryQuery,
+          ...(selection
+            ? readRequest.sourceReads
+              ? { explicitSourceSelection: selection as ExplicitSourceSelection }
+              : { memoryReadSelection: selection as MemoryReadSelection }
+            : {}),
         });
       }
       if (rc.checklistCancellation) {
@@ -4281,7 +4294,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         compoundTripExtractionEvidence(compoundTripExtraction) as (typeof readToolEvidence)[number],
       ];
     const checked =
-      restrictedChecklistResume && readRequest.sourceReads
+      restrictedChecklistResume && (readRequest.sourceReads || readRequest.familyBirthday)
         ? enforceResponseContract(
             '',
             readToolEvidence.map((row) => ({ ...row, result: row.result })),
