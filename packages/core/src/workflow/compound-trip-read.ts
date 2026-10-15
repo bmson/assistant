@@ -59,6 +59,7 @@ export interface CompoundTripFlightCandidate {
 
 export interface CompoundTripHotelCandidate {
   threadId: string;
+  messageId?: string;
   subject: string;
   hotelName?: string;
   address?: string;
@@ -1514,6 +1515,7 @@ function formatFlightSegment(leg: CompoundTripFlightSegment): string {
 interface SourceThreadMessage {
   threadId: string;
   messageId: string;
+  order: number;
   subject: string;
   text: string;
 }
@@ -1524,6 +1526,7 @@ function threadMessages(rows: ReadonlyArray<ReadToolEvidence>): SourceThreadMess
     {
       threadId: string;
       messageId: string;
+      order: number;
       subject: string;
       pages: Array<{ start: number; offset: number; text: string }>;
     }
@@ -1537,7 +1540,7 @@ function threadMessages(rows: ReadonlyArray<ReadToolEvidence>): SourceThreadMess
       : 0;
     const messages = object(row.result)?.messages;
     if (!threadId || !Array.isArray(messages)) continue;
-    for (const raw of messages) {
+    for (const [messageIndex, raw] of messages.entries()) {
       const message = object(raw);
       const messageId = text(message?.messageId, 100);
       if (!message || !messageId) continue;
@@ -1545,9 +1548,11 @@ function threadMessages(rows: ReadonlyArray<ReadToolEvidence>): SourceThreadMess
       const groupedMessage = grouped.get(key) ?? {
         threadId,
         messageId,
+        order: start + messageIndex,
         subject: text(message.subject, 240),
         pages: [],
       };
+      groupedMessage.order = Math.min(groupedMessage.order, start + messageIndex);
       groupedMessage.pages.push({ start, offset, text: text(message.text, 8_000) });
       grouped.set(key, groupedMessage);
     }
@@ -1555,6 +1560,7 @@ function threadMessages(rows: ReadonlyArray<ReadToolEvidence>): SourceThreadMess
   return [...grouped.values()].map((message) => ({
     threadId: message.threadId,
     messageId: message.messageId,
+    order: message.order,
     subject: message.subject,
     text: message.pages
       .sort((a, b) => a.start - b.start || a.offset - b.offset)
@@ -1784,6 +1790,7 @@ function extractedHotelCandidates(
     );
     return {
       threadId: hotel.threadId,
+      messageId: hotel.messageId,
       subject: hotel.sourceSubject,
       ...(hotel.name ? { hotelName: hotel.name } : {}),
       ...(hotel.address ? { address: hotel.address } : {}),
@@ -1943,10 +1950,105 @@ function flightBlocks(
   });
 }
 
-function explicitBookingInvalidation(body: string): boolean {
-  return /\b(?:flight|booking|reservation|itinerary|hotel stay|hotel reservation|room reservation)\b[^.!?\n]{0,60}\b(?:has been|was|is now)\s+(?:cancelled|canceled|voided|refunded|rejected|declined|denied)\b|\b(?:cancelled|canceled|voided|rejected|declined|denied)\s+(?:flight|booking|reservation|itinerary|hotel stay|room reservation)\b|\b(?:flight|booking|reservation|itinerary)\s+(?:cancellation|rejection|denial)\s+(?:is|was)\s+confirmed\b/i.test(
-    body,
-  );
+interface SourceBookingInvalidation {
+  threadId: string;
+  messageId: string;
+  order: number;
+  kind: 'flight' | 'hotel';
+  bookingReference?: string;
+  flightNumber?: string;
+  dates: string[];
+  hotelName?: string;
+}
+
+function explicitBookingInvalidation(
+  message: SourceThreadMessage,
+): SourceBookingInvalidation | undefined {
+  const body = message.text;
+  const action =
+    '(?:has been|was|is now)\\s+(?:cancelled|canceled|voided|refunded|rejected|declined|denied)';
+  const reverseAction = '(?:cancelled|canceled|voided|rejected|declined|denied)\\s+';
+  let kind: 'flight' | 'hotel' | undefined;
+  if (
+    new RegExp(
+      `\\b(?:flight|airline itinerary)\\b[^.!?\\n]{0,60}\\b${action}\\b|\\b${reverseAction}(?:flight|airline itinerary)\\b|\\bflight\\s+(?:cancellation|rejection|denial)\\s+(?:is|was)\\s+confirmed\\b`,
+      'i',
+    ).test(body)
+  )
+    kind = 'flight';
+  else if (
+    new RegExp(
+      `\\b(?:hotel|room|lodging|accommodation)\\b[^.!?\\n]{0,60}\\b${action}\\b|\\b${reverseAction}(?:hotel|room|lodging|accommodation)\\b|\\b(?:hotel|room)\\s+(?:cancellation|rejection|denial)\\s+(?:is|was)\\s+confirmed\\b`,
+      'i',
+    ).test(body)
+  )
+    kind = 'hotel';
+  if (!kind) return undefined;
+  const hotelDetails =
+    kind === 'hotel' ? hotelNameAndCity(`${message.subject}\n${body}`) : undefined;
+  return {
+    threadId: message.threadId,
+    messageId: message.messageId,
+    order: message.order,
+    kind,
+    ...(bookingReference(`${message.subject}\n${body}`)
+      ? { bookingReference: bookingReference(`${message.subject}\n${body}`) }
+      : {}),
+    ...(explicitFlightNumber(body) ? { flightNumber: explicitFlightNumber(body) } : {}),
+    dates: [...body.matchAll(/\b20\d{2}-\d{2}-\d{2}\b/g)].map((match) => match[0]),
+    ...(hotelDetails?.name ? { hotelName: normalizePlace(hotelDetails.name) } : {}),
+  };
+}
+
+function sourceFactInvalidated(
+  threadId: string,
+  messageId: string | undefined,
+  kind: 'flight' | 'hotel',
+  fact: { bookingReference?: string; flightNumber?: string; dates?: string[]; hotelName?: string },
+  invalidations: ReadonlyArray<SourceBookingInvalidation>,
+  sourceMessages: ReadonlyArray<SourceThreadMessage>,
+  allowAmbiguousFallback = false,
+): boolean {
+  const sourceOrder = sourceMessages.find(
+    (message) => message.threadId === threadId && message.messageId === messageId,
+  )?.order;
+  if (sourceOrder === undefined) return false;
+  return invalidations.some((invalidation) => {
+    if (invalidation.threadId !== threadId || invalidation.kind !== kind) return false;
+    if (invalidation.messageId === messageId) return true;
+    if (invalidation.order < sourceOrder) return false;
+    if (
+      fact.bookingReference &&
+      invalidation.bookingReference &&
+      fact.bookingReference === invalidation.bookingReference
+    )
+      return true;
+    if (
+      kind === 'flight' &&
+      fact.flightNumber &&
+      invalidation.flightNumber &&
+      fact.flightNumber === invalidation.flightNumber &&
+      invalidation.dates.length > 0 &&
+      (fact.dates ?? []).some((date) => invalidation.dates.includes(date))
+    )
+      return true;
+    if (
+      kind === 'hotel' &&
+      fact.hotelName &&
+      invalidation.hotelName &&
+      normalizePlace(fact.hotelName) === invalidation.hotelName &&
+      invalidation.dates.length > 0 &&
+      (fact.dates ?? []).some((date) => invalidation.dates.includes(date))
+    )
+      return true;
+    const hasIdentity = Boolean(
+      invalidation.bookingReference ||
+        invalidation.flightNumber ||
+        invalidation.hotelName ||
+        invalidation.dates.length,
+    );
+    return allowAmbiguousFallback && !hasIdentity;
+  });
 }
 
 function parseFlightSegments(
@@ -2291,6 +2393,7 @@ function hotelCandidates(
     );
     candidates.push({
       threadId,
+      messageId: message.messageId,
       subject,
       ...(hotelName ? { hotelName: hotelName.slice(0, 160) } : {}),
       ...(address ? { address: address.slice(0, 240) } : {}),
@@ -2852,28 +2955,73 @@ export function compoundTripReadProjection(
   );
   const sourceMessages = threadMessages(completeThreads);
   const tripExtraction = extractedFacts ?? compoundTripExtractionFromEvidence(evidence);
-  const cancelledThreadIds = new Set(
-    sourceMessages
-      .filter((message) => explicitBookingInvalidation(message.text))
-      .map((message) => message.threadId),
-  );
-  const eligibleSourceMessages = sourceMessages.filter(
-    (message) => !cancelledThreadIds.has(message.threadId),
-  );
+  const sourceInvalidations = sourceMessages
+    .map(explicitBookingInvalidation)
+    .filter((invalidation): invalidation is SourceBookingInvalidation => Boolean(invalidation));
   const allowSourceLocalFallback =
     tripExtraction === undefined ||
     (tripExtraction.status === 'complete' && tripExtraction.segments.length === 0);
   const extractionSegments = tripExtraction?.status === 'complete' ? tripExtraction.segments : [];
   // Use strict source-local facts only when there was no extractor or a
   // completed extraction accepted none. An unavailable extraction retains
-  // its existing coverage gate. Explicit booking cancellations, rejections,
-  // and denials suppress facts from that thread instead of reviving them.
+  // its existing coverage gate. Explicit cancellations suppress only same-
+  // message facts of the matching type, preserving later or unrelated bookings.
   const extractedSegments = allowSourceLocalFallback
-    ? parseFlightSegments(eligibleSourceMessages)
-    : extractionSegments.filter((segment) => !cancelledThreadIds.has(segment.threadId));
+    ? parseFlightSegments(sourceMessages).filter(
+        (segment) =>
+          !sourceFactInvalidated(
+            segment.threadId,
+            segment.messageId,
+            'flight',
+            {
+              bookingReference: segment.bookingReference,
+              flightNumber: segment.flightNumber,
+              dates: [segment.departureDate, segment.arrivalDate].filter((date): date is string =>
+                Boolean(date),
+              ),
+            },
+            sourceInvalidations,
+            sourceMessages,
+            true,
+          ),
+      )
+    : extractionSegments.filter(
+        (segment) =>
+          !sourceFactInvalidated(
+            segment.threadId,
+            segment.messageId,
+            'flight',
+            {
+              bookingReference: segment.bookingReference,
+              flightNumber: segment.flightNumber,
+              dates: [segment.departureDate, segment.arrivalDate].filter((date): date is string =>
+                Boolean(date),
+              ),
+            },
+            sourceInvalidations,
+            sourceMessages,
+          ),
+      );
   const flightSegments = mergeSourceTableSegments(
     extractedSegments,
-    eligibleSourceMessages.flatMap(parseEgenciaTableSegments),
+    sourceMessages.flatMap(parseEgenciaTableSegments).filter(
+      (segment) =>
+        !sourceFactInvalidated(
+          segment.threadId,
+          segment.messageId,
+          'flight',
+          {
+            bookingReference: segment.bookingReference,
+            flightNumber: segment.flightNumber,
+            dates: [segment.departureDate, segment.arrivalDate].filter((date): date is string =>
+              Boolean(date),
+            ),
+          },
+          sourceInvalidations,
+          sourceMessages,
+          allowSourceLocalFallback,
+        ),
+    ),
   );
   const candidates = flightCandidates(request, calendarRows);
   const selectedFlight = nextOutboundFlight(request, candidates, flightSegments);
@@ -2888,7 +3036,23 @@ export function compoundTripReadProjection(
   const unmatchedBookingSegments =
     !flight && !selectedFlight.ambiguous && tripExtraction?.status === 'complete'
       ? tripExtraction.segments.filter((segment) => {
-          if (cancelledThreadIds.has(segment.threadId)) return false;
+          if (
+            sourceFactInvalidated(
+              segment.threadId,
+              segment.messageId,
+              'flight',
+              {
+                bookingReference: segment.bookingReference,
+                flightNumber: segment.flightNumber,
+                dates: [segment.departureDate, segment.arrivalDate].filter((date): date is string =>
+                  Boolean(date),
+                ),
+              },
+              sourceInvalidations,
+              sourceMessages,
+            )
+          )
+            return false;
           if (segment.direction !== 'outbound') return false;
           const instant = sourceLocalInstant(segment);
           return (
@@ -2917,7 +3081,21 @@ export function compoundTripReadProjection(
   const extractedHotels =
     tripExtraction?.status === 'complete'
       ? extractedHotelCandidates(tripExtraction.hotels, hotelFlightContext).filter(
-          (candidate) => !cancelledThreadIds.has(candidate.threadId),
+          (candidate) =>
+            !sourceFactInvalidated(
+              candidate.threadId,
+              candidate.messageId,
+              'hotel',
+              {
+                bookingReference: candidate.bookingReference,
+                hotelName: candidate.hotelName,
+                dates: [candidate.checkIn, candidate.checkOut].filter((date): date is string =>
+                  Boolean(date),
+                ),
+              },
+              sourceInvalidations,
+              sourceMessages,
+            ),
         )
       : [];
   const allowHotelFallback =
@@ -2925,11 +3103,23 @@ export function compoundTripReadProjection(
     (tripExtraction.status === 'complete' && extractedHotels.length === 0);
   const hotels = dedupeHotels(
     allowHotelFallback
-      ? hotelCandidates(
-          completeThreads.filter(
-            (thread) => !cancelledThreadIds.has(text(object(thread.args)?.threadId, 100)),
-          ),
-          hotelFlightContext,
+      ? hotelCandidates(completeThreads, hotelFlightContext).filter(
+          (candidate) =>
+            !sourceFactInvalidated(
+              candidate.threadId,
+              candidate.messageId,
+              'hotel',
+              {
+                bookingReference: candidate.bookingReference,
+                hotelName: candidate.hotelName,
+                dates: [candidate.checkIn, candidate.checkOut].filter((date): date is string =>
+                  Boolean(date),
+                ),
+              },
+              sourceInvalidations,
+              sourceMessages,
+              true,
+            ),
         )
       : extractedHotels,
   );

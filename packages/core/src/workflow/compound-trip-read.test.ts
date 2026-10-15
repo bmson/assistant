@@ -2014,6 +2014,7 @@ describe('compound trip read projection', () => {
     if (!firstMessage || typeof firstMessage.text !== 'string')
       throw new Error('Expected complete flight booking source');
     firstMessage.text += '\nYour flight booking has been cancelled.';
+    firstMessage.sourceLength = firstMessage.text.length;
     const hotelRead = cancelledEvidence.find(
       (row) =>
         row.toolName === 'gmail.read_thread' &&
@@ -2025,6 +2026,7 @@ describe('compound trip read projection', () => {
     if (!hotelMessage || typeof hotelMessage.text !== 'string')
       throw new Error('Expected complete hotel reservation source');
     hotelMessage.text += '\nYour hotel reservation request has been rejected.';
+    hotelMessage.sourceLength = hotelMessage.text.length;
     const emptyCompletedExtraction: CompoundTripExtraction = {
       ...unavailableExtraction,
       status: 'complete',
@@ -2035,6 +2037,150 @@ describe('compound trip read projection', () => {
     expect(cancelled.flight).toBeUndefined();
     expect(cancelled.hotel).toBeUndefined();
     expect(cancelled.text).toContain('could not match a dated outbound leg');
+  });
+
+  it('keeps a later confirmed flight after an older cancellation in the same thread', () => {
+    const read = request();
+    const evidence = [completeCalendarEvents([calendarFlight()]), ...bookingEmailEvidence()];
+    const flightRead = evidence.find(
+      (row) =>
+        row.toolName === 'gmail.read_thread' &&
+        (row.args as Record<string, unknown> | undefined)?.threadId === 'flight-booking-thread',
+    );
+    const flightResult = flightRead?.result as Record<string, unknown> | undefined;
+    const sourceMessages = flightResult?.messages as Array<Record<string, unknown>> | undefined;
+    const original = sourceMessages?.[0];
+    if (!original || typeof original.text !== 'string' || !sourceMessages)
+      throw new Error('Expected complete flight booking source');
+    original.text += '\nYour flight booking has been cancelled.';
+    original.sourceLength = original.text.length;
+    sourceMessages.push({
+      ...original,
+      messageId: 'flight-rebooked-message',
+      text: 'Outbound\nFlight number: LH 777\nDeparture date: 2026-10-17\nDeparture time: 10:10 Europe/Berlin\nArrival date: 2026-10-17\nArrival time: 13:10 Europe/Berlin\nFrom: SFO\nTo: BER\nArrival airport: BER\nBooking reference: FLIGHT-728\nYour replacement flight is confirmed.',
+      sourceLength:
+        'Outbound\nFlight number: LH 777\nDeparture date: 2026-10-17\nDeparture time: 10:10 Europe/Berlin\nArrival date: 2026-10-17\nArrival time: 13:10 Europe/Berlin\nFrom: SFO\nTo: BER\nArrival airport: BER\nBooking reference: FLIGHT-728\nYour replacement flight is confirmed.'
+          .length,
+    });
+    const receipt = flightResult?.receipt as Record<string, unknown> | undefined;
+    const covered = receipt?.covered as Record<string, unknown> | undefined;
+    if (covered) Object.assign(covered, { count: 2, end: 2, total: 2 });
+    const coverage = flightResult?.coverage as Record<string, unknown> | undefined;
+    if (coverage) Object.assign(coverage, { discovered: 2, returned: 2 });
+    const extraction: CompoundTripExtraction = {
+      status: 'complete',
+      segments: [],
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: ['flight-booking-message', 'flight-rebooked-message'],
+    };
+
+    const projection = compoundTripReadProjection(read, evidence, extraction);
+    expect(projection.flight?.segment).toMatchObject({
+      messageId: 'flight-rebooked-message',
+      flightNumber: 'LH777',
+      departureDate: '2026-10-17',
+    });
+  });
+
+  it('does not revive an earlier source-local booking after a later same-kind cancellation', () => {
+    const read = request();
+    const evidence = [completeCalendarEvents([calendarFlight()]), ...bookingEmailEvidence()];
+    const flightRead = evidence.find(
+      (row) =>
+        row.toolName === 'gmail.read_thread' &&
+        (row.args as Record<string, unknown> | undefined)?.threadId === 'flight-booking-thread',
+    );
+    const result = flightRead?.result as Record<string, unknown> | undefined;
+    const sourceMessages = result?.messages as Array<Record<string, unknown>> | undefined;
+    if (!sourceMessages) throw new Error('Expected complete flight booking source');
+    sourceMessages.push({
+      messageId: 'flight-cancellation-message',
+      subject: 'Flight booking update',
+      text: 'Your flight booking has been cancelled.',
+      sourceLength: 'Your flight booking has been cancelled.'.length,
+      truncated: false,
+    });
+    const receipt = result?.receipt as Record<string, unknown> | undefined;
+    const covered = receipt?.covered as Record<string, unknown> | undefined;
+    if (covered) Object.assign(covered, { count: 2, end: 2, total: 2 });
+    const coverage = result?.coverage as Record<string, unknown> | undefined;
+    if (coverage) Object.assign(coverage, { discovered: 2, returned: 2 });
+    const extraction: CompoundTripExtraction = {
+      status: 'complete',
+      segments: [],
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: ['flight-booking-message', 'flight-cancellation-message'],
+    };
+
+    const projection = compoundTripReadProjection(read, evidence, extraction);
+
+    expect(projection.flight).toBeUndefined();
+    expect(projection.text).toContain('could not match a dated outbound leg');
+  });
+
+  it('does not let a hotel cancellation suppress a separate confirmed flight', () => {
+    const read = request();
+    const evidence = [completeCalendarEvents([calendarFlight()]), ...bookingEmailEvidence()];
+    const hotelRead = evidence.find(
+      (row) =>
+        row.toolName === 'gmail.read_thread' &&
+        (row.args as Record<string, unknown> | undefined)?.threadId === 'hotel-reservation-thread',
+    );
+    const hotelResult = hotelRead?.result as Record<string, unknown> | undefined;
+    const messages = hotelResult?.messages as Array<Record<string, unknown>> | undefined;
+    const hotelMessage = messages?.[0];
+    if (!hotelMessage || typeof hotelMessage.text !== 'string')
+      throw new Error('Expected complete hotel reservation source');
+    hotelMessage.text += '\nYour hotel reservation request has been rejected.';
+    const extraction: CompoundTripExtraction = {
+      status: 'complete',
+      segments: [],
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: ['flight-booking-message', 'hotel-booking-message'],
+    };
+
+    const projection = compoundTripReadProjection(read, evidence, extraction);
+
+    expect(projection.flight?.segment).toMatchObject({
+      flightNumber: 'LH777',
+      departureDate: '2026-10-17',
+    });
+    expect(projection.hotel).toBeUndefined();
+  });
+
+  it('does not treat a cancellation warning or insurance notice as an invalidation', () => {
+    const read = request();
+    const evidence = [completeCalendarEvents([calendarFlight()]), ...bookingEmailEvidence()];
+    const flightRead = evidence.find(
+      (row) =>
+        row.toolName === 'gmail.read_thread' &&
+        (row.args as Record<string, unknown> | undefined)?.threadId === 'flight-booking-thread',
+    );
+    const flightResult = flightRead?.result as Record<string, unknown> | undefined;
+    const messages = flightResult?.messages as Array<Record<string, unknown>> | undefined;
+    const flightMessage = messages?.[0];
+    if (!flightMessage || typeof flightMessage.text !== 'string')
+      throw new Error('Expected complete flight booking source');
+    flightMessage.text +=
+      '\nYou cannot cancel this flight online; cancellation insurance is confirmed.';
+    flightMessage.sourceLength = flightMessage.text.length;
+    const extraction: CompoundTripExtraction = {
+      status: 'complete',
+      segments: [],
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: ['flight-booking-message'],
+    };
+
+    const projection = compoundTripReadProjection(read, evidence, extraction);
+
+    expect(projection.flight?.segment).toMatchObject({
+      flightNumber: 'LH777',
+      departureDate: '2026-10-17',
+    });
   });
 
   it('identifies an explicitly labeled current-trip return while retaining a same-reference calendar direction conflict', () => {

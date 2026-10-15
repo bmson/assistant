@@ -164,6 +164,40 @@ function required<T>(value: T | undefined, label: string): T {
 }
 
 describe('bounded no-send email review', () => {
+  it('preserves a valid model-assessed nuanced reply request outside the positive ask heuristic', async () => {
+    const sourceMessages = messages('nuanced-ask');
+    const latest = required(sourceMessages.at(-1), 'latest message');
+    latest.text =
+      'It would be helpful if you could send me the revised estimate when you get a chance.';
+    latest.sourceLength = latest.text.length;
+    const thread = required(
+      emailReviewCompleteThread('nuanced-ask', 'owner@example.com', [
+        search('nuanced-ask'),
+        read('nuanced-ask', sourceMessages),
+      ]),
+      'complete thread',
+    );
+    const answer = validAnswer('nuanced-ask');
+    const item = required(answer.items[0], 'assessment');
+    item.why = 'The sender would benefit from receiving the revised estimate.';
+    item.whyQuote = latest.text;
+    Object.assign(item, { deadline: null });
+    item.draftBody =
+      'Could you share any details you would like reflected in the revised estimate?';
+
+    const result = await generateValidatedEmailReview([thread], async () => ({
+      ok: true,
+      value: answer,
+    }));
+
+    expect(result.answer?.items[0]).toMatchObject({
+      disposition: 'draft',
+      whyQuote: latest.text,
+      draftBody: item.draftBody,
+    });
+    expect(result.attempts).toBe(1);
+  });
+
   it('preserves validated assessments and does not repeatedly assess a rejected complete thread', () => {
     const threads = [
       { threadId: 'already-validated', marker: 'keep' },

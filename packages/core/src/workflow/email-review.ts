@@ -1203,6 +1203,14 @@ function sourceRsvpRoute(thread: EmailReviewThread): string | undefined {
   return undefined;
 }
 
+function sourceExplicitlyRequiresAlternateReplyRoute(thread: EmailReviewThread): boolean {
+  const body = latestUnquotedBody(thread) ?? '';
+  return (
+    /\bdo not reply to (?:this|the) (?:email|message)\b/i.test(body) ||
+    (Boolean(sourceRsvpRoute(thread)) && !sourceAllowsEmailRsvp(thread))
+  );
+}
+
 function isDirectReplyFallbackDraft(thread: EmailReviewThread, draft: string): boolean {
   return directReplyFallbackDraft(thread) === draft;
 }
@@ -1224,6 +1232,7 @@ function completeDirectReplyAssessments(
         return actionDeadline
           ? { ...item, deadline: { messageId: thread.latestMessageId, quote: actionDeadline } }
           : item;
+      if (!sourceExplicitlyRequiresAlternateReplyRoute(thread)) return item;
       const firstSentence = (latestUnquotedBody(thread) ?? '').split(/(?<=[.!?])\s+/)[0]?.trim();
       const whyQuote = quoteExistsInLatestUnquotedBody(thread, item.whyQuote)
         ? item.whyQuote
