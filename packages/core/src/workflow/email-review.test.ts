@@ -1650,8 +1650,9 @@ describe('bounded no-send email review', () => {
       { query: 'in:inbox -from:me', requestedCount: 1, latestUnanswered: true },
     );
 
-    expect(answer).toContain('I checked 0 of 1 selected inbox threads');
-    expect(answer).toContain('bounded by the available search pages and candidate pool');
+    expect(answer).toContain('Reviewed 0 of 1 selected threads');
+    expect(answer).toContain('bounded newest-first inbox scan');
+    expect(answer).toContain('complete source reads: 0 of 1 selected threads');
     expect(answer).not.toContain('checked against its complete thread');
   });
 

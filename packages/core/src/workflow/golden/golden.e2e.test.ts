@@ -931,7 +931,8 @@ describe('golden tasks', () => {
     expect(result.toolNames).toEqual(['gmail.search', 'gmail.read_thread']);
     expect(result.objectRoles).toEqual(['reason', 'reason']);
     expect(result.status).toBe('done');
-    expect(result.finalText).toContain('Draft for review — not saved or sent');
+    expect(result.finalText).toContain('**Draft:**');
+    expect(result.finalText).toContain('Drafts below are unsent and not saved');
     expect(result.finalText).toContain(EMAIL_REVIEW_CONFIRMATION_DRAFT);
     expect(result.finalText).not.toContain('Weekly product newsletter');
     expect(result.finalText).not.toContain('sent the reply');
@@ -944,13 +945,13 @@ describe('golden tasks', () => {
     createdTaskIds.push(mailboxMismatch.taskId);
     expect(mailboxMismatch.status).toBe('needs_attention');
     expect(mailboxMismatch.toolNames).toEqual(['gmail.search', 'gmail.read_thread']);
-    expect(mailboxMismatch.finalText).toContain('Draft for review — not saved or sent');
+    expect(mailboxMismatch.finalText).toContain('**Draft:**');
     expect(mailboxMismatch.finalText).toContain(EMAIL_REVIEW_CONFIRMATION_DRAFT);
     expect(mailboxMismatch.finalText).toContain(
-      'The connected mailbox used for search differs from the configured owner mailbox.',
+      'the connected mailbox used for search differs from the configured owner mailbox',
     );
     expect(mailboxMismatch.finalText).toContain(
-      'Confirm that it is the intended mailbox before relying on this review as complete.',
+      'confirm it is the intended mailbox before relying on this review',
     );
     expect(mailboxMismatch.finalText).not.toContain('assistant-bot@example.com');
     expect(mailboxMismatch.finalText).not.toContain('owner@example.com');
@@ -967,8 +968,8 @@ describe('golden tasks', () => {
     createdTaskIds.push(metadataFallback.taskId);
     expect(metadataFallback.status).toBe('done');
     expect(metadataFallback.toolNames).toEqual(['gmail.search', 'gmail.read_thread']);
-    expect(metadataFallback.finalText).toContain('Automated ranking was unavailable');
-    expect(metadataFallback.finalText).toContain('Draft for review — not saved or sent');
+    expect(metadataFallback.finalText).toContain('automated ranking was unavailable');
+    expect(metadataFallback.finalText).toContain('**Draft:**');
     expect(metadataFallback.finalText).toContain(EMAIL_REVIEW_CONFIRMATION_DRAFT);
     expect(metadataFallback.finalText).not.toContain('Weekly product newsletter');
     const [fallbackTask] = await db
@@ -1004,7 +1005,7 @@ describe('golden tasks', () => {
 
     expect(checklistReview.toolNames).toEqual(['gmail.search', 'gmail.read_thread']);
     expect(checklistReview.status).toBe('needs_attention');
-    expect(checklistReview.finalText).toContain('Draft for review — not saved or sent');
+    expect(checklistReview.finalText).toContain('**Draft:**');
     expect(checklistReview.finalText).toContain(EMAIL_REVIEW_CONFIRMATION_DRAFT);
     expect(checklistReview.finalText).not.toContain('This request is not fully completed.');
     expect(checklistReview.finalText).not.toContain('sent the reply');
@@ -1051,12 +1052,10 @@ describe('golden tasks', () => {
 
     expect(deadlineNeedsReview.status).toBe('needs_attention');
     expect(deadlineNeedsReview.finalText).toContain(EMAIL_REVIEW_CONFIRMATION_DRAFT);
-    expect(deadlineNeedsReview.finalText).toContain(
-      'Possible deadline needs checking against the thread',
-    );
+    expect(deadlineNeedsReview.finalText).toContain('Possible deadline to verify');
     expect(deadlineNeedsReview.finalText).toContain('The new program takes effect November 3.');
     expect(deadlineNeedsReview.finalText).not.toContain(
-      'Deadline mentioned in the thread: “The new program takes effect November 3.',
+      'Deadline: “The new program takes effect November 3.',
     );
     const [deadlineTask] = await db
       .select({ state: tasks.state })
@@ -1081,9 +1080,9 @@ describe('golden tasks', () => {
     expect(failedGeneration.status).toBe('needs_attention');
     expect(failedGeneration.finalText).toContain('0 of 1 selected threads');
     expect(failedGeneration.finalText).toContain(
-      '1 complete thread could not be assessed reliably',
+      '1 selected thread could not be assessed reliably',
     );
-    expect(failedGeneration.finalText).not.toContain('Draft for review — not saved or sent');
+    expect(failedGeneration.finalText).not.toContain('**Draft:**');
     expect(failedGeneration.finalText).not.toContain(EMAIL_REVIEW_CONFIRMATION_DRAFT);
 
     const [failedGenerationTask] = await db
@@ -1215,7 +1214,7 @@ describe('golden tasks', () => {
     expect(readThreadIds).toEqual(rankedIds);
     expect(result.toolNames.filter((name) => name === 'gmail.read_thread')).toHaveLength(6);
     expect(result.objectRoles).toEqual(['reason', 'reason']);
-    expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(5);
+    expect(result.finalText.match(/^\*\*Draft:\*\*$/gm)).toHaveLength(5);
     expect(result.finalText).not.toContain('I confirmed this request.');
     expect(result.finalText).toContain('Could you confirm request request-f?');
     const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
@@ -1328,9 +1327,9 @@ describe('golden tasks', () => {
     expect(
       result.toolNames.every((name) => ['gmail.search', 'gmail.read_thread'].includes(name)),
     ).toBe(true);
-    expect(result.finalText).toContain('Automated ranking was unavailable');
-    expect(result.finalText).toContain('beyond the bounded page limit');
-    expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(5);
+    expect(result.finalText).toContain('automated ranking was unavailable');
+    expect(result.finalText).toContain('beyond the page limit');
+    expect(result.finalText.match(/^\*\*Draft:\*\*$/gm)).toHaveLength(5);
     const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
     expect(task?.maxSteps).toBe(12);
     expect(TaskStateSchema.parse(task?.state).plannerState.emailReview).toMatchObject({
@@ -1453,8 +1452,8 @@ describe('golden tasks', () => {
     expect(result.toolNames.filter((name) => name === 'gmail.search')).toHaveLength(3);
     expect(result.toolNames.filter((name) => name === 'gmail.read_thread')).toHaveLength(7);
     expect(result.toolNames).not.toContain('gmail.send');
-    expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(5);
-    expect(result.finalText).toContain('2 selected threads were fully checked but did not meet');
+    expect(result.finalText.match(/^\*\*Draft:\*\*$/gm)).toHaveLength(5);
+    expect(result.finalText).toContain('2 selected threads were reviewed but did not meet');
     expect(result.finalText).not.toContain('request-h');
     const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
     expect(task?.maxSteps).toBe(14);
@@ -1582,10 +1581,8 @@ describe('golden tasks', () => {
     expect(result.stepCount).toBeLessThanOrEqual(14);
     expect(result.status).toBe('done');
     expect(result.toolNames).not.toContain('gmail.send');
-    expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(5);
-    expect(result.finalText).toContain(
-      '2 fully assessed threads did not clearly require a response',
-    );
+    expect(result.finalText.match(/^\*\*Draft:\*\*$/gm)).toHaveLength(5);
+    expect(result.finalText).toContain('2 assessed threads did not clearly require a response');
     expect(result.finalText).not.toContain('### Request review-1');
     const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
     expect(
@@ -1685,14 +1682,14 @@ describe('golden tasks', () => {
     createdTaskIds.push(result.taskId);
     expect(readIds).toEqual(rankedIds.slice(0, 5));
     expect(result.status).toBe('needs_attention');
-    expect(result.finalText).toContain('unresolved possible deadline');
-    expect(result.finalText).toContain('**Deadline needs review — Request review\\-1**');
+    expect(result.finalText).toContain('**Possible deadlines to verify (1)**');
+    expect(result.finalText).toContain('**Request review\\-1** — No reply draft was prepared');
     expect(result.finalText).toContain(
       '[Open the source thread](https://mail.google.com/mail/u/0/#all/review-1)',
     );
-    expect(result.finalText).toContain('No reply draft was prepared for it');
+    expect(result.finalText).toContain('No reply draft was prepared; check the source');
     expect(result.finalText).not.toContain('through Jun. 6th');
-    expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(4);
+    expect(result.finalText.match(/^\*\*Draft:\*\*$/gm)).toHaveLength(4);
     const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
     expect(
       TaskStateSchema.parse(task?.state).plannerState.emailReviewAssessmentBatches,
@@ -1871,11 +1868,9 @@ describe('golden tasks', () => {
     ]);
     expect(result.objectRoles).toEqual(['reason', 'reason']);
     expect(result.status).toBe('needs_attention');
-    expect(result.finalText.match(/Draft for review — not saved or sent/g)).toHaveLength(4);
+    expect(result.finalText.match(/^\*\*Draft:\*\*$/gm)).toHaveLength(4);
     expect(result.finalText).toContain('1 selected thread had a later reply from your mailbox');
-    expect(result.finalText).toContain(
-      'step limit before another replacement thread could be read',
-    );
+    expect(result.finalText).toContain('step limit prevented another replacement-thread read');
     expect(result.toolNames.filter((name) => name === 'gmail.read_thread')).toHaveLength(7);
     expect(readThreadIds).not.toContain('request-f');
     expect(result.finalText).not.toContain('Weekly newsletter');
