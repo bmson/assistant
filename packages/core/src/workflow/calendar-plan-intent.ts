@@ -5,6 +5,8 @@ export interface CalendarPlanOptions {
   windowLabel: string;
   workingDays?: number;
   meetingBufferMinutes?: number;
+  includeWorkloadAssessment?: boolean;
+  includeTravelBuffers?: boolean;
 }
 const numbers: Record<string, number> = {
   one: 1,
@@ -64,12 +66,20 @@ export function requestedCalendarPlanOptions(text: string): CalendarPlanOptions 
   const breaks = /\b(\d{1,2})[ -]minute\s+breaks?\b/i.exec(positive);
   const breakMinutes = breaks ? Number(breaks[1]) : 15;
   if (!Number.isInteger(breakMinutes) || breakMinutes < 0 || breakMinutes > 60) return undefined;
+  const includeWorkloadAssessment =
+    /\b(?:overload(?:ed)?|workload|busy days?|evening load|after[- ]hours load)\b/i.test(positive);
+  const includeTravelBuffers =
+    /\b(?:travel|commut(?:e|ing))\s+buffers?\b|\bbuffers?\s+(?:for|around|before|after)\s+(?:travel|commut(?:e|ing))\b|\ballow(?:ing)?\s+time\s+for\s+(?:travel|commut(?:e|ing))\b/i.test(
+      positive,
+    );
   return {
     focusMinutes,
     slotCount,
     breakMinutes,
     windowLabel: workingDays ? `the next ${workingDays} working days` : 'next week',
     ...(workingDays ? { workingDays } : {}),
+    includeWorkloadAssessment,
+    includeTravelBuffers,
     ...(breaks && /\bbreaks?\s+around\s+(?:meetings?|appointments?|events?)\b/i.test(positive)
       ? { meetingBufferMinutes: breakMinutes }
       : {}),

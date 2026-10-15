@@ -609,6 +609,10 @@ describe('detectPersonalReadRequest', () => {
         timeMin: '2026-10-12T07:00:00.000Z',
         timeMax: '2026-10-19T07:00:00.000Z',
       },
+      calendarPlanOptions: {
+        includeWorkloadAssessment: true,
+        includeTravelBuffers: true,
+      },
     });
     if (!request) throw new Error('expected a typed weekly plan request');
     expect(nextRequiredReadTool(request, [])).toBe('calendar.availability');
@@ -676,6 +680,8 @@ describe('detectPersonalReadRequest', () => {
         breakMinutes: 15,
         workingDays: 3,
         meetingBufferMinutes: 15,
+        includeWorkloadAssessment: false,
+        includeTravelBuffers: false,
       },
       firstToolName: 'calendar.availability',
       timeWindow: {

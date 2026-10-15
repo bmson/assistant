@@ -266,6 +266,8 @@ describe('weeklyCalendarPlan', () => {
         slotCount: 1,
         breakMinutes: 15,
         meetingBufferMinutes: 15,
+        includeWorkloadAssessment: true,
+        includeTravelBuffers: true,
         workingDays: 1,
         windowLabel: 'Monday',
       },
@@ -1163,6 +1165,8 @@ describe('requested focus-plan variations', () => {
     slotCount: 2,
     breakMinutes: 15,
     meetingBufferMinutes: 15,
+    includeWorkloadAssessment: false,
+    includeTravelBuffers: false,
     windowLabel: 'the next 3 working days',
     workingDays: 3,
   };
@@ -1792,6 +1796,8 @@ describe('requested focus-plan variations', () => {
       meetingBufferMinutes: 15,
       workingDays: 3,
       windowLabel: 'the next 3 working days',
+      includeWorkloadAssessment: false,
+      includeTravelBuffers: false,
     });
     const end = '2026-10-15T07:00:00.000Z';
     const meeting = {
@@ -1801,7 +1807,7 @@ describe('requested focus-plan variations', () => {
       start: '2026-10-12T16:00:00Z',
       end: '2026-10-12T17:00:00Z',
       ownerResponse: 'accepted',
-      location: 'Online',
+      location: '120 Example Street',
       blocksTime: true,
     };
     const rows = evidence({
@@ -1834,9 +1840,72 @@ describe('requested focus-plan variations', () => {
     expect(answer.text).toContain('the next 3 working days');
     expect(answer.text).toContain('both sides of meetings');
     expect(answer.text).not.toContain('30-minute travel');
+    expect(answer.text).not.toContain('Overloaded-day assessment');
+    expect(answer.text).not.toContain('Overloaded-day estimate');
+    expect(answer.text).not.toContain('Evening review');
     expect(answer.text).not.toContain('90 minutes');
     expect(answer.text).not.toMatch(/- Mon, Oct 12, (9|10):00 AM/);
     expect(answer.text).toContain('I haven’t changed your calendar');
+  });
+
+  it('bounds a dense conflict and source list while stating how many details were omitted', () => {
+    const end = '2026-10-13T07:00:00.000Z';
+    const events = Array.from({ length: 50 }, (_, index) => ({
+      eventId: `meeting-${index + 1}`,
+      calendarId: `calendar-${index + 1}`,
+      calendar: `Calendar ${index + 1}`,
+      summary: `Meeting ${index + 1}`,
+      start: '2026-10-12T16:00:00Z',
+      end: '2026-10-12T17:00:00Z',
+      ownerResponse: 'accepted',
+      blocksTime: true,
+      links: [
+        {
+          type: 'calendar',
+          url: `https://calendar.google.com/calendar/event?eid=event-${index + 1}`,
+        },
+      ],
+    }));
+    const rows = evidence({
+      timeMin,
+      timeMax: end,
+      busy: [{ start: events[0]?.start, end: events[0]?.end }],
+      pages: [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          args: { timeMin, timeMax: end },
+          result: {
+            events,
+            complete: true,
+            calendarRosterComplete: true,
+            unavailable: [],
+          },
+        },
+      ],
+    });
+    const result = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax: end,
+      timeZone: 'America/Los_Angeles',
+      evidence: rows as never,
+      plan: {
+        focusMinutes: 60,
+        slotCount: 2,
+        breakMinutes: 15,
+        meetingBufferMinutes: 15,
+        windowLabel: 'the next working day',
+        includeWorkloadAssessment: false,
+        includeTravelBuffers: false,
+      },
+    });
+
+    expect(result.text.length).toBeLessThan(6_000);
+    expect(result.text).toContain('additional overlaps or possible duplicate listings omitted');
+    expect(result.text).toContain('all were included in the planning check');
+    expect(result.text).toContain('additional source links omitted from this brief');
+    expect(result.text).toContain('calendar.google.com/calendar/event?eid=event-1');
+    expect(result.text).not.toContain('event-50');
   });
 
   it('limits a working-day plan to its selected weekdays and separates all-day load from meetings', () => {

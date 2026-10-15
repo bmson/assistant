@@ -722,6 +722,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   }> = [];
   let travelBufferCount = 0;
   let potentialTravelBufferCount = 0;
+  const reserveTravelBuffers = input.plan?.includeTravelBuffers ?? true;
   for (const event of events) {
     const interval = parseEventInterval(event);
     if (
@@ -740,10 +741,11 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         event.location,
       );
     const inPerson = location && !hasVideo && !remoteLocation;
-    if (inPerson) travelBufferCount += 1;
-    if (inPerson && attendance(event) === 'potential') potentialTravelBufferCount += 1;
+    const reserveTravel = inPerson && reserveTravelBuffers;
+    if (reserveTravel) travelBufferCount += 1;
+    if (reserveTravel && attendance(event) === 'potential') potentialTravelBufferCount += 1;
     const meetingBufferMs = (input.plan?.meetingBufferMinutes ?? 0) * 60_000;
-    const surroundingBufferMs = meetingBufferMs + (inPerson ? TRAVEL_MS : 0);
+    const surroundingBufferMs = meetingBufferMs + (reserveTravel ? TRAVEL_MS : 0);
     const blockingInterval = {
       start: Math.max(start, interval.start - surroundingBufferMs),
       end: Math.min(end, interval.end + surroundingBufferMs),
@@ -1087,16 +1089,20 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     coverageNotes.push(
       'reported window coverage is complete, but usable free/busy intervals are unavailable',
     );
-  if (allDayBusySources.length > 0)
+  if (allDayBusySources.length > 0) {
+    const shownAllDay = allDayBusySources.slice(0, 3);
+    const omittedAllDay = allDayBusySources.length - shownAllDay.length;
     lines.push(
-      `All-day holds that still block focus time (not counted as meeting workload): ${allDayBusySources
-        .slice(0, 3)
+      `All-day holds that still block focus time (not counted as meeting workload): ${shownAllDay
         .map(
           ({ event, interval }) =>
             `${calendarSourceReference(event)} (${labelTime(interval.start, timeZone)}–${labelTime(interval.end, timeZone)})`,
         )
-        .join('; ')}; they do not establish continuous meeting attendance.`,
+        .join(
+          '; ',
+        )}; they do not establish continuous meeting attendance.${omittedAllDay > 0 ? ` ${omittedAllDay} additional all-day holds omitted.` : ''}`,
     );
+  }
   if (explainedLodgingBusy.size > 0)
     lines.push(
       'Multi-day lodging is excluded from meeting workload; conditional slots still rely on the feed’s busy interval being lodging context.',
@@ -1131,8 +1137,13 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       'conditional lodging slots still rely on the provider busy interval being lodging context',
     );
   if (assumptions.length > 0) lines.push(`Assumptions: ${assumptions.join('; ')}.`);
-  if (duplicateListingPairs.length > 0) lines.push(...duplicateListingPairs);
-  if (conflictPairs.length > 0) lines.push(...conflictPairs);
+  const visibleConflictLimit = 5;
+  const allConflictDetails = [...duplicateListingPairs, ...conflictPairs];
+  lines.push(...allConflictDetails.slice(0, visibleConflictLimit));
+  if (allConflictDetails.length > visibleConflictLimit)
+    lines.push(
+      `${allConflictDetails.length - visibleConflictLimit} additional overlaps or possible duplicate listings omitted from this brief; all were included in the planning check.`,
+    );
   if (conflictPairs.some((line) => line.startsWith('Scheduling conflict:')))
     lines.push(
       `Recommended change: choose which accepted event to reschedule after checking priorities (${confirmedConflictPairs.slice(0, 3).join('; ')}).`,
@@ -1145,18 +1156,22 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     lines.push('Conflicts: none found in checked calendar data.');
   if (conflictPairs.length === 0 && duplicateListingPairs.length > 0)
     lines.push('Next step: verify whether duplicate source records are one occurrence.');
-  if (overloads.length > 0) lines.push(`Overloaded-day estimate: ${overloads.join('; ')}.`);
-  else if (!busyValid) lines.push('I could not assess overloaded days from usable free/busy data.');
-  else
-    lines.push(
-      `Overloaded-day assessment: No checked working day reaches the 6-hour busy-time threshold inside the assumed 9–5 day.${complete ? ' This is a planning heuristic.' : ' This applies only to the checked data; missing coverage could change this assessment.'}`,
-    );
-  if (eveningAssessments.length > 0)
-    lines.push(`Evening review: ${eveningAssessments.join(' · ')}`);
-  if (overloads.length > 0)
-    lines.push(
-      'Recommended change: consider moving flexible work from an overloaded day to a lighter day after checking your priorities.',
-    );
+  const includeWorkloadAssessment = input.plan?.includeWorkloadAssessment ?? true;
+  if (includeWorkloadAssessment) {
+    if (overloads.length > 0) lines.push(`Overloaded-day estimate: ${overloads.join('; ')}.`);
+    else if (!busyValid)
+      lines.push('I could not assess overloaded days from usable free/busy data.');
+    else
+      lines.push(
+        `Overloaded-day assessment: No checked working day reaches the 6-hour busy-time threshold inside the assumed 9–5 day.${complete ? ' This is a planning heuristic.' : ' This applies only to the checked data; missing coverage could change this assessment.'}`,
+      );
+    if (eveningAssessments.length > 0)
+      lines.push(`Evening review: ${eveningAssessments.join(' · ')}`);
+    if (overloads.length > 0)
+      lines.push(
+        'Recommended change: consider moving flexible work from an overloaded day to a lighter day after checking your priorities.',
+      );
+  }
   if (chosen.length === 0) {
     const constrainingEvents = [
       ...new Map(
@@ -1177,7 +1192,6 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         ? `I couldn’t identify suitable ${focusMs / 60_000}-minute blocks from the available data. Please confirm coverage or working hours before I suggest more.`
         : 'I did not suggest focus times because usable free/busy intervals were unavailable. Please confirm coverage before choosing a time.',
     );
-  } else {
   }
   if (chosen.length < requestedSlots)
     lines.push(
@@ -1191,7 +1205,13 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       }),
     ).values(),
   ];
-  if (sourceLinks.length > 0) lines.push(`Calendar sources: ${sourceLinks.join(' · ')}`);
+  if (sourceLinks.length > 0) {
+    const visibleSources = sourceLinks.slice(0, 5);
+    const omittedSources = sourceLinks.length - visibleSources.length;
+    lines.push(
+      `Calendar sources: ${visibleSources.join(' · ')}${omittedSources > 0 ? ` · ${omittedSources} additional source links omitted from this brief` : ''}`,
+    );
+  }
   return result(lines.join('\n'), complete, chosen.length);
 }
 
