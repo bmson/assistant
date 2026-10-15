@@ -373,6 +373,24 @@ describe('source-grounded public page summary recovery', () => {
     );
   });
 
+  it('requires a native read receipt for a quoted document summary target', () => {
+    const id = 'QuotedSummaryDoc123456';
+    const documentUrl = `https://docs.google.com/document/d/${id}/edit`;
+    const request = `Summarize this document: '${documentUrl}'`;
+    expect(requestedPublicPageReceiptFindings(request, [])).toEqual([
+      'No complete current native read receipt is bound to 1 requested Workspace document.',
+    ]);
+    expect(requestedPublicPageReceiptFindings(request, [nativeDocPage(0, 5, 5, true, id)])).toEqual(
+      [],
+    );
+    expect(
+      requestedPublicPageReceiptFindings(
+        `Search the web for this document and summarize the search results: ${documentUrl}`,
+        [],
+      ),
+    ).toEqual([]);
+  });
+
   it.each([
     [
       'quoted rewrite text',

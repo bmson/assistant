@@ -419,7 +419,7 @@ function requestedPageTargets(request: string): string[] {
         const content = String(args[0] ?? args[1] ?? args[2] ?? args[3] ?? '').trim();
         const prefix = clauseText.slice(0, offset);
         const quotedTargetIntent =
-          /\b(?:summari[sz]e|review|analy[sz]e|inspect|extract)\s+(?:(?:the|this|that)\s+)?(?:(?:page|article|site|website|webpage|url|link|source|contents?|text)(?:\s+of)?\s*:?\s*)?$/i.test(
+          /\b(?:summari[sz]e|review|analy[sz]e|inspect|extract)\s+(?:(?:the|this|that)\s+)?(?:(?:page|article|site|website|webpage|document|doc|url|link|source|contents?|text)(?:\s+of)?\s*:?\s*)?$/i.test(
             prefix,
           );
         return content === 'SOURCE_URL' &&
@@ -458,13 +458,13 @@ function requestedPageTargets(request: string): string[] {
       clause,
     );
     const pageSummary =
-      /\b(?:summari[sz](?:e|ing|ation)|review|analy[sz]e|inspect|extract)\b[^.!?\n]{0,80}\b(?:page|article|site|website|webpage|url|link|contents?|text|source)\b/i.test(
+      /\b(?:summari[sz](?:e|ing|ation)|review|analy[sz]e|inspect|extract)\b[^.!?\n]{0,80}\b(?:page|article|site|website|webpage|document|doc|url|link|contents?|text|source)\b/i.test(
         clause,
       ) ||
       /\b(?:summari[sz]e|review|analy[sz]e|inspect|extract)\b[^.!?\n]{0,40}SOURCE_URL\b/i.test(
         clause,
       ) ||
-      /\bwhat\s+does\b[^?\n]{0,100}\b(?:page|article|site|website|link|url)\b[^?\n]{0,60}\b(?:say|contain|cover|mean)\b/i.test(
+      /\bwhat\s+does\b[^?\n]{0,100}\b(?:page|article|site|website|document|doc|link|url)\b[^?\n]{0,60}\b(?:say|contain|cover|mean)\b/i.test(
         clause,
       );
     const searchResultsOnly =
